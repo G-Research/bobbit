@@ -474,45 +474,11 @@ async function initApp() {
 	// KEYBOARD SHORTCUT REGISTRY
 	// ========================================================================
 
-	// Helper: build ordered session list and navigate up/down
-	function navigateSession(direction: "up" | "down"): void {
-		const allSessions = state.gatewaySessions;
-		const nonDelegate = allSessions.filter((s) => !s.delegateOf);
-		const staffSessionIds = new Set(state.staffList.map((s) => s.currentSessionId).filter(Boolean));
-		const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
-		const sortedGoals = [...state.goals].sort((a, b) => a.createdAt - b.createdAt);
-
-		const ordered: string[] = [];
-		for (const goal of sortedGoals) {
-			const goalSessions = nonDelegate
-				.filter((s) => s.goalId === goal.id || s.teamGoalId === goal.id)
-				.sort(byAge);
-			for (const s of goalSessions) ordered.push(s.id);
-		}
-		const ungrouped = nonDelegate
-			.filter((s) => !s.goalId && !s.teamGoalId && !staffSessionIds.has(s.id))
-			.sort(byAge);
-		for (const s of ungrouped) ordered.push(s.id);
-		const staffSessions = nonDelegate
-			.filter((s) => staffSessionIds.has(s.id))
-			.sort(byAge);
-		for (const s of staffSessions) ordered.push(s.id);
-
-		if (ordered.length > 1) {
-			const currentId = state.selectedSessionId ?? activeSessionId();
-			const currentIndex = currentId ? ordered.indexOf(currentId) : -1;
-			let nextIndex: number;
-			if (direction === "up") {
-				nextIndex = currentIndex <= 0 ? ordered.length - 1 : currentIndex - 1;
-			} else {
-				nextIndex = currentIndex >= ordered.length - 1 ? 0 : currentIndex + 1;
-			}
-			const nextId = ordered[nextIndex];
-			if (nextId && nextId !== currentId) {
-				connectToSession(nextId, true);
-			}
-		}
-	}
+	// Sidebar keyboard navigation. Source of truth for the row order is the
+	// rendered DOM (so search filters, collapsed sections, and archived view
+	// are honoured automatically). See src/app/sidebar-nav.ts.
+	const { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } = await import("./sidebar-nav.js");
+	installKeyboardNavOverrideClearListener();
 
 	// MIGRATED shortcuts (all allowInInput: true to preserve existing behavior)
 	registerShortcut({
@@ -565,17 +531,34 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "prev-session", label: "Previous session", category: "Sessions",
+		id: "prev-session", label: "Previous sidebar row", category: "Sessions",
 		defaultBindings: [{ key: "ArrowUp", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
-		handler: () => navigateSession("up"),
+		handler: () => { navigateSidebar("up"); },
 	});
 
 	registerShortcut({
-		id: "next-session", label: "Next session", category: "Sessions",
+		id: "next-session", label: "Next sidebar row", category: "Sessions",
 		defaultBindings: [{ key: "ArrowDown", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
-		handler: () => navigateSession("down"),
+		handler: () => { navigateSidebar("down"); },
+	});
+
+	// Ctrl+→ / Ctrl+←: allowInInput is FALSE so native word-jump wins inside
+	// the prompt editor and other text inputs. The sidebar only captures these
+	// keys when focus is outside any input (e.g. on the sidebar itself).
+	registerShortcut({
+		id: "sidebar-expand", label: "Expand sidebar group", category: "Sessions",
+		defaultBindings: [{ key: "ArrowRight", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: false,
+		handler: () => { expandActiveSidebarItem(true); },
+	});
+
+	registerShortcut({
+		id: "sidebar-collapse", label: "Collapse sidebar group", category: "Sessions",
+		defaultBindings: [{ key: "ArrowLeft", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: false,
+		handler: () => { expandActiveSidebarItem(false); },
 	});
 
 	registerShortcut({

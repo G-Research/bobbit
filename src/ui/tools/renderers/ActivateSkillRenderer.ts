@@ -9,7 +9,7 @@
  * user message bubbles so autonomous activation is visually
  * indistinguishable from a user-typed `/skill` invocation.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { Sparkles } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";

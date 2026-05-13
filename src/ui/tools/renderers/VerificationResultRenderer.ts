@@ -3,7 +3,7 @@
  * Shows verdict badge, markdown summary, and optional HTML report.
  */
 import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ClipboardCheck } from "lucide";

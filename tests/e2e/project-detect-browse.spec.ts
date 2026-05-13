@@ -22,9 +22,16 @@ test.describe("POST /api/projects/detect", () => {
 		rmSync(testRoot, { recursive: true, force: true });
 	});
 
-	test("directory with .bobbit/ returns hasBobbit true", async () => {
-		const dir = join(testRoot, "with-bobbit");
-		mkdirSync(join(dir, ".bobbit"), { recursive: true });
+	// hasBobbit is the "this is a configured Bobbit project" marker used by the
+	// add-project flow to decide between auto-import and the project-assistant.
+	// Source of truth: .bobbit/config/project.yaml. Mere presence of .bobbit/
+	// (empty, or the post-archive shape with empty config/ + state/) must NOT
+	// flip hasBobbit — otherwise the user gets routed to auto-import after
+	// explicitly archiving aside.
+	test("directory with .bobbit/config/project.yaml returns hasBobbit true", async () => {
+		const dir = join(testRoot, "with-bobbit-configured");
+		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "name: demo\n");
 
 		const res = await apiFetch("/api/projects/detect", {
 			method: "POST",
@@ -35,6 +42,37 @@ test.describe("POST /api/projects/detect", () => {
 		expect(data.exists).toBe(true);
 		expect(data.hasBobbit).toBe(true);
 		expect(data.isEmpty).toBe(false);
+	});
+
+	test("directory with empty .bobbit/ returns hasBobbit false", async () => {
+		const dir = join(testRoot, "with-empty-bobbit");
+		mkdirSync(join(dir, ".bobbit"), { recursive: true });
+
+		const res = await apiFetch("/api/projects/detect", {
+			method: "POST",
+			body: JSON.stringify({ path: dir }),
+		});
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.exists).toBe(true);
+		expect(data.hasBobbit).toBe(false);
+	});
+
+	test("post-archive shape (empty .bobbit/config and .bobbit/state) returns hasBobbit false", async () => {
+		// This is the exact shape left on disk by /api/projects/archive-bobbit:
+		// content moved aside, and empty .bobbit/config + .bobbit/state re-scaffolded.
+		const dir = join(testRoot, "post-archive-shape");
+		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+
+		const res = await apiFetch("/api/projects/detect", {
+			method: "POST",
+			body: JSON.stringify({ path: dir }),
+		});
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.exists).toBe(true);
+		expect(data.hasBobbit).toBe(false);
 	});
 
 	test("directory without .bobbit/ returns hasBobbit false", async () => {

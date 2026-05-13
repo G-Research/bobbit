@@ -6,7 +6,7 @@
  * for the client to parse and act on.
  */
 
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";

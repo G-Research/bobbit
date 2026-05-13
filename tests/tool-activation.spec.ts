@@ -11,10 +11,13 @@ function yamlTools(...names: string[]): EffectiveTool[] {
  * Unit tests for computeToolActivationArgs — the logic that maps role tool
  * lists to pi-coding-agent CLI flags.
  *
- * Uses a mock ToolManager to avoid filesystem dependency on tools/*.yaml.
+ * After the pi 0.70+ migration: bobbit no longer uses `--tools <list>`
+ * (which became a unified allowlist over builtins+extensions, stripping our
+ * own bash/web/etc. tools). Instead we always pass `--no-builtin-tools` and
+ * re-register the desired pi file builtins via _builtins/extension.ts, which
+ * reads the BOBBIT_BUILTIN_TOOLS env var to know what to register.
  *
- * Run with:
- *   npx playwright test tests/tool-activation.spec.ts --config tests/playwright.config.ts
+ * Uses a mock ToolManager to avoid filesystem dependency on tools/*.yaml.
  */
 
 import path from "node:path";
@@ -54,40 +57,40 @@ function standardProviders(): Map<string, ProviderWithGroup> {
 	]);
 }
 
+function extensionPaths(args: string[]): string[] {
+	return args
+		.filter((_a, i) => i > 0 && args[i - 1] === "--extension")
+		.map(p => p.replace(/\\/g, "/"));
+}
+
 test.describe("computeToolActivationArgs", () => {
-	test("no toolManager — fallback with all base tools and --no-extensions", () => {
+	test("no toolManager — fallback registers all file builtins via env, no extensions", () => {
 		const result = computeToolActivationArgs(undefined, undefined);
-		expect(result.args).toContain("--tools");
+		expect(result.args).toContain("--no-builtin-tools");
 		expect(result.args).toContain("--no-extensions");
-		const toolsIdx = result.args.indexOf("--tools");
-		const toolsCsv = result.args[toolsIdx + 1];
-		expect(toolsCsv).toContain("read");
-		expect(toolsCsv).toContain("bash");
-		expect(toolsCsv).toContain("edit");
-		expect(toolsCsv).not.toContain("web_search"); // no extensions in fallback
+		expect(result.args).not.toContain("--tools");
+		expect(result.args).not.toContain("--no-tools");
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("edit,find,grep,ls,read,write");
+		// No --extension flags at all in the fallback (no toolManager → no resolved paths)
+		expect(result.args.filter(a => a === "--extension").length).toBe(0);
 	});
 
-	test("no allowedTools — enables all builtins and all bobbit extensions", () => {
+	test("no allowedTools — registers all file builtins and loads all bobbit extensions", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(undefined, tm);
 
-		// Should have --tools with builtins (minus bash which is loaded separately)
-		const toolsIdx = result.args.indexOf("--tools");
-		expect(toolsIdx).toBeGreaterThanOrEqual(0);
-		const toolsCsv = result.args[toolsIdx + 1];
-		expect(toolsCsv).toContain("read");
-		expect(toolsCsv).toContain("write");
-		expect(toolsCsv).toContain("edit");
-		expect(toolsCsv).not.toContain("bash"); // bash excluded — loaded by rpc-bridge
-
-		// Should have --no-extensions (Bobbit controls loading)
+		expect(result.args).toContain("--no-builtin-tools");
 		expect(result.args).toContain("--no-extensions");
+		expect(result.args).not.toContain("--tools");
 
-		// Bobbit extensions should appear as --extension flags
-		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
-			.map(p => p.replace(/\\/g, "/"));
-		// All bobbit-extension groups: web, agent, browser, tasks, team
+		// All six file builtins re-registered via the env var
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("edit,find,grep,ls,read,write");
+
+		const extPaths = extensionPaths(result.args);
+		// _builtins extension is always loaded
+		expect(extPaths.some(p => p.includes("/_builtins/extension.ts"))).toBe(true);
+		// All bobbit-extension groups: shell, web, agent, browser, tasks, team
+		expect(extPaths.some(p => p.includes("/shell/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/agent/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(true);
@@ -100,36 +103,36 @@ test.describe("computeToolActivationArgs", () => {
 		const withUndefined = computeToolActivationArgs(undefined, tm);
 		const withEmpty = computeToolActivationArgs([] as EffectiveTool[], tm);
 		expect(withEmpty.args).toEqual(withUndefined.args);
+		expect(withEmpty.env).toEqual(withUndefined.env);
 	});
 
-	test("restricted to builtins only — no extension flags", () => {
+	test("restricted to file builtins only — env lists them, no bobbit-extension paths", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("read", "write", "edit"), tm);
 
-		const toolsIdx = result.args.indexOf("--tools");
-		expect(toolsIdx).toBeGreaterThanOrEqual(0);
-		const toolsCsv = result.args[toolsIdx + 1];
-		expect(toolsCsv).toBe("read,write,edit");
+		expect(result.args).toContain("--no-builtin-tools");
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("edit,read,write");
 
-		expect(result.args).toContain("--no-extensions");
-		// No --extension flags at all
-		expect(result.args.filter(a => a === "--extension").length).toBe(0);
+		const extPaths = extensionPaths(result.args);
+		// Only the _builtins extension; no bobbit feature extensions
+		expect(extPaths.some(p => p.includes("/_builtins/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/web/"))).toBe(false);
+		expect(extPaths.some(p => p.includes("/agent/"))).toBe(false);
+		expect(extPaths.some(p => p.includes("/browser/"))).toBe(false);
 	});
 
-	test("restricted to bobbit extensions only — uses --no-tools", () => {
+	test("restricted to bobbit extensions only — empty BOBBIT_BUILTIN_TOOLS, extensions loaded", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("web_search", "delegate"), tm);
 
-		// No builtins requested → --no-tools
-		expect(result.args).toContain("--no-tools");
-		expect(result.args).not.toContain("--tools");
+		expect(result.args).toContain("--no-builtin-tools");
+		// No file builtins requested → empty env
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("");
 
-		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
-			.map(p => p.replace(/\\/g, "/"));
+		const extPaths = extensionPaths(result.args);
+		expect(extPaths.some(p => p.includes("/_builtins/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/agent/extension.ts"))).toBe(true);
-		// browser not requested
 		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(false);
 	});
 
@@ -137,15 +140,12 @@ test.describe("computeToolActivationArgs", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("read", "bash", "web_fetch", "browser_navigate"), tm);
 
-		const toolsIdx = result.args.indexOf("--tools");
-		expect(toolsIdx).toBeGreaterThanOrEqual(0);
-		const toolsCsv = result.args[toolsIdx + 1];
-		// bash is excluded (loaded by rpc-bridge), only read
-		expect(toolsCsv).toBe("read");
+		// `read` registered via _builtins; `bash` flows from shell/extension.ts (not the file-builtins set)
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("read");
 
-		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
-			.map(p => p.replace(/\\/g, "/"));
+		const extPaths = extensionPaths(result.args);
+		expect(extPaths.some(p => p.includes("/_builtins/extension.ts"))).toBe(true);
+		expect(extPaths.some(p => p.includes("/shell/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/browser/extension.ts"))).toBe(true);
 	});
@@ -154,9 +154,7 @@ test.describe("computeToolActivationArgs", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("web_search", "web_fetch"), tm);
 
-		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
-			.map(p => p.replace(/\\/g, "/"));
+		const extPaths = extensionPaths(result.args);
 		const webExt = extPaths.filter(p => p.includes("/web/extension.ts"));
 		expect(webExt.length).toBe(1); // deduplicated
 	});
@@ -165,57 +163,46 @@ test.describe("computeToolActivationArgs", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("read", "nonexistent_tool"), tm);
 
-		const toolsIdx = result.args.indexOf("--tools");
-		const toolsCsv = result.args[toolsIdx + 1];
-		expect(toolsCsv).toBe("read");
-		// No extension for nonexistent tool
-		expect(result.args.filter(a => a === "--extension").length).toBe(0);
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("read");
+		// Only _builtins extension — no extension for the unknown tool
+		const extPaths = extensionPaths(result.args);
+		const nonBuiltins = extPaths.filter(p => !p.includes("/_builtins/"));
+		expect(nonBuiltins.length).toBe(0);
 	});
 
 	test("bobbit-extension tools are included as --extension flags", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("read", "task_create", "team_spawn"), tm);
 
-		const toolsIdx = result.args.indexOf("--tools");
-		const toolsCsv = result.args[toolsIdx + 1];
-		expect(toolsCsv).toBe("read");
-		// Bobbit extensions are added as --extension flags
-		const extPaths = result.args
-			.filter((_a, i) => i > 0 && result.args[i - 1] === "--extension")
-			.map(p => p.replace(/\\/g, "/"));
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("read");
+		const extPaths = extensionPaths(result.args);
 		expect(extPaths.some(p => p.includes("/tasks/extension.ts"))).toBe(true);
 		expect(extPaths.some(p => p.includes("/team/extension.ts"))).toBe(true);
 	});
 
-	test("shared extensions register all their tools — bash_bg includes bash via shell/extension.ts", () => {
+	test("shared extensions register all their tools — bash_bg pulls in shell/extension.ts (which provides bash)", () => {
 		const tm = mockToolManager(standardProviders());
-		// Allow bash_bg — both bash and bash_bg share shell/extension.ts
 		const result = computeToolActivationArgs(yamlTools("read", "bash_bg"), tm);
 
-		// Guard extension handles access control, no leaked tool detection needed
-		const extPaths = result.args
-			.filter((_a: string, i: number) => i > 0 && result.args[i - 1] === "--extension")
-			.map((p: string) => p.replace(/\\/g, "/"));
-		expect(extPaths.some((p: string) => p.includes("/shell/extension.ts"))).toBe(true);
+		const extPaths = extensionPaths(result.args);
+		expect(extPaths.some(p => p.includes("/shell/extension.ts"))).toBe(true);
 	});
 
 	test("shared extensions register all their tools — web_search includes web_fetch", () => {
 		const tm = mockToolManager(standardProviders());
-		// Allow web_search — both share web/extension.ts
 		const result = computeToolActivationArgs(yamlTools("read", "web_search"), tm);
 
-		const extPaths = result.args
-			.filter((_a: string, i: number) => i > 0 && result.args[i - 1] === "--extension")
-			.map((p: string) => p.replace(/\\/g, "/"));
-		expect(extPaths.some((p: string) => p.includes("/web/extension.ts"))).toBe(true);
+		const extPaths = extensionPaths(result.args);
+		expect(extPaths.some(p => p.includes("/web/extension.ts"))).toBe(true);
 	});
 
-	test("bash-only role — bash excluded from --tools, gets --no-tools", () => {
+	test("bash-only role — empty BOBBIT_BUILTIN_TOOLS, shell/extension.ts loaded", () => {
 		const tm = mockToolManager(standardProviders());
 		const result = computeToolActivationArgs(yamlTools("bash"), tm);
 
-		// bash is excluded (loaded by rpc-bridge), no other builtins → --no-tools
-		expect(result.args).toContain("--no-tools");
-		expect(result.args).not.toContain("--tools");
+		// bash isn't a file builtin (it comes from shell/extension.ts), so the env var is empty
+		expect(result.env.BOBBIT_BUILTIN_TOOLS).toBe("");
+		const extPaths = extensionPaths(result.args);
+		expect(extPaths.some(p => p.includes("/shell/extension.ts"))).toBe(true);
 	});
 });

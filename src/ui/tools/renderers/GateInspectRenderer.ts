@@ -2,7 +2,7 @@
  * Renderer for the gate_inspect tool.
  * Handles three section types: content, verification, signals.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { createRef, ref } from "lit/directives/ref.js";

@@ -45,6 +45,14 @@ export interface VerboseMessage {
 	role: string;
 	ts: string | null;
 	content: unknown;
+	/** Full pi-coding-agent message object (`entry.message`). Carries
+	 *  toolCallId/toolName/details/isError for toolResult rows and any
+	 *  other fields the renderer-side `<message-list>` component expects.
+	 *  Only populated for the orphan-history (`before-compaction`) path
+	 *  where the client renders these rows via the same Lit components
+	 *  that render the live transcript. `readTranscript` callers (read_session
+	 *  tool) still get just `content`. */
+	message?: Record<string, unknown>;
 }
 
 export type TranscriptMessage = CompactMessage | VerboseMessage;
@@ -61,7 +69,8 @@ export interface ReadTranscriptEnvelope {
 export type ReadTranscriptError =
 	| "transcript_unavailable"
 	| "invalid_regex"
-	| "invalid_params";
+	| "invalid_params"
+	| "compaction_not_found";
 
 export class TranscriptReaderError extends Error {
 	code: ReadTranscriptError;
@@ -78,6 +87,17 @@ interface RawMessage {
 	role: string;
 	ts: string | null;
 	content: unknown;
+	/** Pi-coding-agent session-entry id (`SessionEntryBase.id`). May be
+	 *  null for legacy files whose entries lacked an explicit `id`. */
+	entryId: string | null;
+	/** Pi-coding-agent's entry `type` field (e.g. "message", "compaction").
+	 *  Used by `readOrphanedBeforeCompaction` to spot the legacy in-jsonl
+	 *  compaction marker when the sidecar doesn't carry firstKeptEntryId. */
+	entryType: string;
+	/** Full `entry.message` object — captured for the verbose orphan path
+	 *  which needs toolCallId/toolName/etc. for `<message-list>` rendering.
+	 *  Other paths read `content` directly. */
+	fullMessage: Record<string, unknown>;
 }
 
 const TEXT_LIMIT = 800;
@@ -132,11 +152,15 @@ export function parseJsonl(content: string): RawMessage[] {
 		const ts = typeof entry.ts === "string" ? entry.ts
 			: typeof entry.timestamp === "string" ? entry.timestamp
 			: null;
+		const entryId = typeof entry.id === "string" ? entry.id : null;
 		messages.push({
 			index: idx++,
 			role,
 			ts,
 			content: entry.message.content,
+			entryId,
+			entryType: entry.type,
+			fullMessage: entry.message as Record<string, unknown>,
 		});
 	}
 	return messages;
@@ -184,8 +208,10 @@ function toCompact(m: RawMessage): CompactMessage {
 	return out;
 }
 
-function toVerbose(m: RawMessage): VerboseMessage {
-	return { index: m.index, role: m.role, ts: m.ts, content: m.content };
+function toVerbose(m: RawMessage, includeFullMessage = false): VerboseMessage {
+	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: m.content };
+	if (includeFullMessage) out.message = m.fullMessage;
+	return out;
 }
 
 // ── Filter + window ──
@@ -237,6 +263,150 @@ function buildMatchList(
 export interface ReadTranscriptOptions {
 	/** Async loader returning the raw JSONL contents. */
 	readContent: () => Promise<string | null>;
+}
+
+/**
+ * Parse the full JSONL into a flat list of ALL entries (not just `message`).
+ * Returns the raw entries plus the original index in the file. Used by
+ * `readOrphanedBeforeCompaction` to walk past non-message entries (the
+ * `compaction` marker in particular) without skipping them.
+ */
+function parseJsonlAllEntries(content: string): Array<{ entry: any; lineIdx: number }> {
+	if (!content) return [];
+	const out: Array<{ entry: any; lineIdx: number }> = [];
+	const lines = content.split(/\r?\n/);
+	let i = 0;
+	for (const raw of lines) {
+		const line = raw.trim();
+		if (!line) continue;
+		let entry: any;
+		try { entry = JSON.parse(line); } catch { continue; }
+		if (!entry || typeof entry !== "object") continue;
+		out.push({ entry, lineIdx: i++ });
+	}
+	return out;
+}
+
+// ── Pre-compaction (orphaned) reader ──
+
+export interface ReadOrphanedParams {
+	/** Required. Sidecar entry id whose firstKeptEntryId defines the split. */
+	compactionId: string;
+	/** Optional pagination cursor — entry index within the orphaned slice
+	 *  of the last item returned by the previous page. Pass back
+	 *  `envelope.nextCursor`. */
+	cursor?: number;
+	/** Default 50, range 1..200. */
+	limit?: number;
+	/** When true, return full `entry.message` objects (with toolCallId,
+	 *  toolName, details, etc.) so the client can render rows via the
+	 *  same `<message-list>` Lit component as the live transcript.
+	 *  Default false — returns the compact preview shape. */
+	verbose?: boolean;
+}
+
+export interface ReadOrphanedEnvelope {
+	/** Total orphaned entries for this compaction (independent of pagination). */
+	total: number;
+	returned: number;
+	/** Pass back as `cursor` for the next page. Null when no more pages. */
+	nextCursor: number | null;
+	messages: CompactMessage[] | VerboseMessage[];
+}
+
+export interface ReadOrphanedOptions {
+	readContent: () => Promise<string | null>;
+	/** First-kept entry id from the sidecar. When null, fall back to
+	 *  scanning the jsonl for an in-file `type:"compaction"` marker. */
+	firstKeptEntryId: string | null;
+}
+
+/**
+ * Return the orphaned (pre-compaction) entries for the named compaction.
+ *
+ * Branch-split rules (see docs/design/persist-compaction-history.md §4.1):
+ *
+ *  - If `firstKeptEntryId` is non-null: scan parsed entries for the entry
+ *    whose `id` matches. Everything strictly before that index is
+ *    orphaned.
+ *  - If `firstKeptEntryId` is null (legacy sidecar entries written before
+ *    the field was plumbed through, or hard failures): fall back to
+ *    finding the FIRST `type:"compaction"` entry in the jsonl. Pi-coding-
+ *    agent appends that compaction entry to mark the boundary; everything
+ *    BEFORE it on the active branch is what was rolled into the summary.
+ *  - If neither resolves: return total=0 (no fabricated history).
+ */
+export async function readOrphanedBeforeCompaction(
+	params: ReadOrphanedParams,
+	opts: ReadOrphanedOptions,
+): Promise<ReadOrphanedEnvelope> {
+	if (!params.compactionId || typeof params.compactionId !== "string") {
+		throw new TranscriptReaderError("invalid_params", "compactionId required");
+	}
+
+	let limit = params.limit ?? 50;
+	if (typeof limit !== "number" || !Number.isFinite(limit) || Math.floor(limit) !== limit) {
+		throw new TranscriptReaderError("invalid_params", "limit must be an integer");
+	}
+	if (limit < 1 || limit > MAX_LIMIT) {
+		throw new TranscriptReaderError("invalid_params", `limit must be in [1, ${MAX_LIMIT}]`);
+	}
+
+	const cursor = params.cursor ?? 0;
+	if (typeof cursor !== "number" || !Number.isFinite(cursor) || Math.floor(cursor) !== cursor || cursor < 0) {
+		throw new TranscriptReaderError("invalid_params", "cursor must be a non-negative integer");
+	}
+
+	const content = await opts.readContent();
+	if (content === null || content === undefined || content === "") {
+		throw new TranscriptReaderError("transcript_unavailable", "transcript file missing or empty");
+	}
+
+	const allEntries = parseJsonlAllEntries(content);
+
+	// Resolve the split index in `allEntries`.
+	let splitIdx = -1;
+	if (opts.firstKeptEntryId) {
+		splitIdx = allEntries.findIndex((e) => e.entry?.id === opts.firstKeptEntryId);
+	}
+	if (splitIdx < 0) {
+		// Legacy fallback: first `type:"compaction"` entry marks the boundary.
+		splitIdx = allEntries.findIndex((e) => e.entry?.type === "compaction");
+	}
+	if (splitIdx <= 0) {
+		return { total: 0, returned: 0, nextCursor: null, messages: [] };
+	}
+
+	// Build the orphaned message list (entries before splitIdx, message-only).
+	const orphaned: RawMessage[] = [];
+	let idx = 0;
+	for (let i = 0; i < splitIdx; i++) {
+		const { entry } = allEntries[i];
+		if (entry.type !== "message" || !entry.message) continue;
+		const role = typeof entry.message.role === "string" ? entry.message.role : "?";
+		const ts = typeof entry.ts === "string" ? entry.ts
+			: typeof entry.timestamp === "string" ? entry.timestamp
+			: null;
+		orphaned.push({
+			index: idx++,
+			role,
+			ts,
+			content: entry.message.content,
+			entryId: typeof entry.id === "string" ? entry.id : null,
+			entryType: entry.type,
+			fullMessage: entry.message as Record<string, unknown>,
+		});
+	}
+
+	const total = orphaned.length;
+	const start = Math.min(cursor, total);
+	const end = Math.min(total, start + limit);
+	const window = orphaned.slice(start, end);
+	const messages = params.verbose
+		? window.map((m) => toVerbose(m, /* includeFullMessage */ true))
+		: window.map(toCompact);
+	const nextCursor = end < total ? end : null;
+	return { total, returned: messages.length, nextCursor, messages };
 }
 
 export async function readTranscript(

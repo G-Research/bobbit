@@ -6,7 +6,7 @@
  * Loaded lazily via `registerLazyToolRenderer` from `src/ui/tools/index.ts`.
  */
 import { icon } from "@mariozechner/mini-lit";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { History, ExternalLink } from "lucide";

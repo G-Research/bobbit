@@ -11,7 +11,7 @@
  * managing long-running background processes via the gateway API.
  */
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";

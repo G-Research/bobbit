@@ -56,6 +56,8 @@ tests/fixtures/bash-renderer-bundle.js
 tests/fixtures/bash-renderer-bundle.css
 tests/fixtures/find-renderer-bundle.js
 tests/fixtures/find-renderer-bundle.css
+tests/fixtures/compaction-widget-bundle.js
+tests/fixtures/compaction-widget-bundle.css
 tests/fixtures/ask-user-choices-renderer-bundle.js
 tests/fixtures/ask-user-choices-renderer-bundle.css
 tests/fixtures/settings-models-tab-bundle.js

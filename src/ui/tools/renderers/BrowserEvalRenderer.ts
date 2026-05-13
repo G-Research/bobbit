@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Code } from "lucide";

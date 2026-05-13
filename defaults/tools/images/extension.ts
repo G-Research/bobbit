@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import type { ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";

@@ -146,6 +146,16 @@ export const IDLE_EYE_SEQUENCE: EyeFrame[] = [
   { pct: 95, gaze: 'center',   blink: false },
 ];
 
+/**
+ * Eye animation for the sleeping state — used when the chat blob has been
+ * idle for a while. Eyes stay shut continuously (centred gaze, permanent
+ * blink) so it reads as "asleep, waiting" rather than "looking around".
+ * A single frame is enough since every phase resolves to the same closed pose.
+ */
+export const SLEEP_EYE_SEQUENCE: EyeFrame[] = [
+  { pct: 0, gaze: 'center', blink: true },
+];
+
 // ============================================================================
 // ACCESSORIES
 // ============================================================================

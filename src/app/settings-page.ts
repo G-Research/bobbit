@@ -37,6 +37,7 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { applyProjectPalette } from "./session-manager.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
 import { openOAuthDialog } from "./dialogs.js";
@@ -2661,7 +2662,6 @@ function renderProjectScopeTab(projectId: string) {
 
 function renderProjectGeneralTab(projectId: string) {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
-	const isDefault = state.projects?.[0]?.id === projectId;
 
 	// Reuse the per-project pending changes map for rootPath edits + sandbox config
 	if (!_projectScopePending.has(projectId)) _projectScopePending.set(projectId, {});
@@ -2736,29 +2736,27 @@ function renderProjectGeneralTab(projectId: string) {
 				</div>
 			` : ""}
 
-			${!isDefault ? html`
-				<hr class="border-border" />
-				<div class="flex flex-col gap-1">
-					<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Danger Zone</div>
-				</div>
-				<div class="flex items-center gap-3">
-					<button
-						class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
-							hover:bg-destructive hover:text-destructive-foreground hover:border-destructive transition-colors"
-						@click=${async () => {
-							const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
-							if (!ok) return;
-							const success = await removeProject(projectId);
-							if (success) {
-								setProjects(await fetchProjects());
-								setHashRoute("settings", "system/general", true);
-								renderApp();
-							}
-						}}
-					>Remove Project</button>
-					<span class="text-xs text-muted-foreground">Unregister this project. No files will be deleted.</span>
-				</div>
-			` : ""}
+			<hr class="border-border" />
+			<div class="flex flex-col gap-1">
+				<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Danger Zone</div>
+			</div>
+			<div class="flex items-center gap-3">
+				<button
+					class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
+						hover:bg-destructive hover:text-destructive-foreground hover:border-destructive transition-colors"
+					@click=${async () => {
+						const ok = confirm("Remove project '" + (project?.name || "") + "' from this server? This won't delete any files on disk.");
+						if (!ok) return;
+						const success = await removeProject(projectId);
+						if (success) {
+							setProjects(await fetchProjects());
+							setHashRoute("settings", "system/general", true);
+							renderApp();
+						}
+					}}
+				>Remove Project</button>
+				<span class="text-xs text-muted-foreground">Unregister this project. No files will be deleted.</span>
+			</div>
 		</div>
 	`;
 }
@@ -3091,7 +3089,8 @@ function renderAppearanceTab(projectId: string) {
 			if (res.ok) {
 				const updated = await res.json();
 				const idx = state.projects.findIndex((p: any) => p.id === projectId);
-				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				if (idx >= 0) state.projects[idx] = updated;
+				applyProjectPalette(projectId);
 				renderApp();
 			}
 		} catch { /* ignore */ }
@@ -3106,7 +3105,8 @@ function renderAppearanceTab(projectId: string) {
 			if (res.ok) {
 				const updated = await res.json();
 				const idx = state.projects.findIndex((p: any) => p.id === projectId);
-				if (idx >= 0) state.projects[idx] = { ...state.projects[idx], ...updated };
+				if (idx >= 0) state.projects[idx] = updated;
+				applyProjectPalette(projectId);
 				renderApp();
 			}
 		} catch { /* ignore */ }

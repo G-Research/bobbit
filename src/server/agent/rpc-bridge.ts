@@ -160,22 +160,34 @@ export class RpcBridge {
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = buildAgentArgs(this.options);
 
-		// Enable all built-in tools EXCEPT bash (which is provided by our custom extension)
-		// unless --tools was explicitly passed (e.g. by role-based tool activation).
-		if (!args.includes("--tools") && !args.includes("--no-tools")) {
-			args.push("--tools", "read,edit,write,grep,find,ls");
+		// Disable pi's internal builtin tools and re-register the file-tool subset
+		// via _builtins/extension.ts. After pi 0.70, `--tools <list>` became a
+		// unified allowlist over builtins AND extension-registered tools, so the
+		// previous "--tools read,edit,…" pattern stripped our own bash, web,
+		// browser, propose_*, etc. extension tools. With --no-builtin-tools every
+		// tool comes from an extension; pi's `includeAllExtensionTools: true` at
+		// session construction activates all of them by default.
+		if (!args.includes("--tools") && !args.includes("--no-tools") && !args.includes("--no-builtin-tools")) {
+			args.push("--no-builtin-tools");
 		}
 
 		// When computeToolActivationArgs runs, it adds --no-extensions and explicitly
-		// loads needed extensions (including shell/extension.ts for bash/bash_bg).
-		// For sessions that don't go through tool activation (no role, fallback path),
-		// force-load shell/extension.ts so bash/bash_bg remain available.
+		// loads needed extensions (shell + _builtins + others). For sessions that
+		// don't go through tool activation (no role, fallback path), force-load
+		// shell/extension.ts (bash + bash_bg) and _builtins/extension.ts (file
+		// tools) so the agent has its baseline toolset.
 		if (!args.includes("--no-extensions")) {
 			const bashExtPath = this.options.toolManager
 				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
 				: path.join(TOOLS_DIR, "shell", "extension.ts");
 			if (!args.includes(bashExtPath)) {
 				args.push("--extension", bashExtPath);
+			}
+			const builtinsExtPath = this.options.toolManager
+				? this.options.toolManager.getExtensionPath("_builtins", "extension.ts")
+				: path.join(TOOLS_DIR, "_builtins", "extension.ts");
+			if (!args.includes(builtinsExtPath)) {
+				args.push("--extension", builtinsExtPath);
 			}
 		}
 
@@ -493,7 +505,7 @@ export class RpcBridge {
 
 		execArgs.push(
 			containerId,
-			"node", "--disable-warning=DEP0123", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+			"node", "--disable-warning=DEP0123", "/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 			...this.remapArgsForContainer(agentArgs),
 		);
 
@@ -699,18 +711,18 @@ export function hostPathToContainer(hostPath: string): string {
 }
 
 /**
- * Resolve the parent directory of @mariozechner/pi-coding-agent package.
+ * Resolve the parent directory of @earendil-works/pi-coding-agent package.
  * This is the directory that will be mounted as /node_modules in Docker,
- * so that /node_modules/@mariozechner/pi-coding-agent/dist/cli.js works.
+ * so that /node_modules/@earendil-works/pi-coding-agent/dist/cli.js works.
  */
 export function resolveAgentModulesDir(): string {
-	const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
+	const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
 	const mainPath = fileURLToPath(mainUrl);
-	// mainPath = .../node_modules/@mariozechner/pi-coding-agent/dist/index.js
-	// Package root = .../node_modules/@mariozechner/pi-coding-agent
+	// mainPath = .../node_modules/@earendil-works/pi-coding-agent/dist/index.js
+	// Package root = .../node_modules/@earendil-works/pi-coding-agent
 	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
 	// We need the parent of @mariozechner (= node_modules dir)
-	// so that /node_modules/@mariozechner/pi-coding-agent/... works
+	// so that /node_modules/@earendil-works/pi-coding-agent/... works
 	return path.resolve(pkgRoot, "..", "..");
 }
 
@@ -718,14 +730,14 @@ export function resolveAgentModulesDir(): string {
 function findAgentCli(): string {
 	try {
 		// import.meta.resolve returns the URL of the package's main entry
-		const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
+		const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
 		const mainPath = fileURLToPath(mainUrl);
 		// Main entry is dist/index.js; cli.js is in the same directory
 		return path.join(path.dirname(mainPath), "cli.js");
 	} catch {
 		throw new Error(
 			"Could not find pi-coding-agent CLI. " +
-				"Either install @mariozechner/pi-coding-agent or pass --agent-cli /path/to/cli.js",
+				"Either install @earendil-works/pi-coding-agent or pass --agent-cli /path/to/cli.js",
 		);
 	}
 }

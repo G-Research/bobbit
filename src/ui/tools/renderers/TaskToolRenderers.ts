@@ -2,7 +2,7 @@
  * Renderers for task_list, task_create, task_update tools.
  * Compact task cards with state badges and assignment info.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ListTodo, SquarePlus, SquarePen } from "lucide";

@@ -581,6 +581,74 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	}
 }
 
+/* Unread/unseen activity indicator — pulsing dot in sidebar rows */
+.unseen-dot {
+	display: inline-block;
+	width: calc(5px * var(--sidebar-font-scale, 1));
+	height: calc(5px * var(--sidebar-font-scale, 1));
+	border-radius: 50%;
+	background: var(--primary);
+	flex-shrink: 0;
+	vertical-align: middle;
+	margin-left: 2px;
+	margin-top: 1px;
+	box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 50%, transparent);
+	animation: unseen-dot-pulse 1.8s ease-in-out infinite;
+	transform-origin: center;
+}
+
+@keyframes unseen-dot-pulse {
+	0%, 100% {
+		transform: scale(1);
+		box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 45%, transparent);
+	}
+	50% {
+		transform: scale(1.3);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 0%, transparent);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.unseen-dot { animation: none; }
+}
+
+/* Bobbit sprite unread indicator — rhythmic tap.
+ * Sprite sits still most of the time, then performs a brief squish-tap once
+ * per ~3s cycle, like a gentle knock. Discrete rhythm distinguishes it from
+ * the continuous bob/shimmer used for active/streaming sessions. */
+.bobbit-unread-pulse {
+	animation: bobbit-unread-tap 1.6s ease-in-out infinite;
+	transform-origin: 50% 100%;
+	will-change: transform;
+}
+@keyframes bobbit-unread-tap {
+	0%, 88%, 100% { transform: translateY(0) scale(1, 1); }
+	92%           { transform: translateY(1px) scale(1.06, 0.94); }
+	96%           { transform: translateY(0) scale(1, 1); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-unread-pulse { animation: none; }
+}
+
+/* Unread sidebar bobbit periodic blink overlay.
+ * Two stacked body images: open-eyed underneath, blinked on top. This class
+ * sits on the blinked image and flicks it visible for ~120ms every ~3s. */
+.bobbit-sidebar-unread-blink {
+	opacity: 0;
+	animation: bobbit-sidebar-unread-blink 3.4s steps(1) infinite;
+}
+@keyframes bobbit-sidebar-unread-blink {
+	0%, 95% { opacity: 0; }
+	96%, 98% { opacity: 1; }
+	99%, 100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-sidebar-unread-blink { animation: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.bobbit-unread-pulse::after { animation: none; opacity: 0.7; }
+}
+
 /* Sidebar active indicator — heartbeat with double ripple */
 .sidebar-active-dot {
 	display: inline-block;

@@ -9,7 +9,7 @@
  * Loaded automatically via --extension for sessions with an assistantType.
  */
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getGatewayUrl, getGatewayToken } from "../_shared/gateway.ts";
 
 type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";

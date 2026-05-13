@@ -277,17 +277,23 @@ review-pane review-document {
   border-radius: 2px;
 }
 
-/* Recogito annotator highlight styles. Stronger fill than the default
-   15% so highlights remain visible against dense markdown. Title
-   attribute on the span advertises the edit affordance. */
-.r6o-annotation {
-  background: color-mix(in oklch, var(--primary, #6366f1) 30%, transparent) !important;
-  border-bottom: 2px solid var(--primary, #6366f1) !important;
-  cursor: pointer;
-}
+/* Recogito annotator highlight styles.
 
-.r6o-annotation:hover {
-  background: color-mix(in oklch, var(--primary, #6366f1) 45%, transparent) !important;
+   Fill colour, opacity, and underline are driven by the `style` option
+   we pass to `createTextAnnotator` in ReviewDocument.ts — the library
+   sets `background-color` and `border-width` as INLINE styles on each
+   span, so stylesheet rules (even with `!important`) can't override
+   them. The API is the only correct surface for colour/thickness.
+
+   We do override one library CSS rule: the span-highlight layer is
+   hard-coded to `mix-blend-mode: multiply`, which on dark themes
+   multiplies our tint into near-black. Forcing `normal` lets the
+   alpha-baked fill render at the intended opacity on every theme. */
+.r6o-span-highlight-layer {
+  mix-blend-mode: normal !important;
+}
+.r6o-annotation {
+  cursor: pointer;
 }
 
 /* --- Hover chip (Edit / Delete affordance) --- */

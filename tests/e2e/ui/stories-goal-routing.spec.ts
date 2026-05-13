@@ -56,18 +56,18 @@ async function registerProject(name: string, rootPath: string): Promise<TestProj
 	return { id: body.id, name: body.name, rootPath };
 }
 
-async function deleteProject(id: string, opts: { force?: boolean } = {}): Promise<void> {
-	const qs = opts.force ? "?force=1" : "";
-	await apiFetch(`/api/projects/${id}${qs}`, { method: "DELETE" }).catch(() => {});
+async function deleteProject(id: string, _opts: { force?: boolean } = {}): Promise<void> {
+	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
 }
 
 /**
- * Force-delete every registered project. Uses the BOBBIT_E2E=1 ?force=1 bypass
- * so it can also remove the last remaining project (needed for GR-09).
+ * Delete every registered project, including the last one. Plain DELETE
+ * works unconditionally; the GR-09 zero-project first-run UX is reached by
+ * simply removing all projects.
  */
 async function forceDeleteAllProjects(): Promise<void> {
 	const projects = await listProjects();
-	for (const p of projects) await deleteProject(p.id, { force: true });
+	for (const p of projects) await deleteProject(p.id);
 }
 
 async function listProjects(): Promise<Array<{ id: string; name: string; rootPath: string }>> {
@@ -468,8 +468,7 @@ test.describe("CT-19: First-run and single-project UX @quarantine", () => {
 	test("GR-09: First-run zero-project UX disables New Goal", async () => {
 		s.begin(STORY_GR09);
 
-		// Force-delete every project (uses BOBBIT_E2E=1 ?force=1 bypass) so we
-		// can exercise the literal zero-project state.
+		// Delete every project so we can exercise the literal zero-project state.
 		await forceDeleteAllProjects();
 
 		s.act();

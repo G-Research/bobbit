@@ -5,7 +5,7 @@
  * On success, an "Open proposal" button restores the panel to that snapshot.
  * On failure, surfaces the structured error code without a restore button.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";

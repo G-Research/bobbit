@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { getToolRenderer, registerToolRenderer, registerLazyToolRenderer } from "./renderer-registry.js";
 import { BashRenderer } from "./renderers/BashRenderer.js";
 import { BrowserClickRenderer } from "./renderers/BrowserClickRenderer.js";
@@ -26,6 +26,7 @@ import { ProposalRenderer } from "./renderers/ProposalRenderer.js";
 import { EditProposalRenderer } from "./renderers/EditProposalRenderer.js";
 import { AskUserChoicesRenderer } from "./renderers/AskUserChoicesRenderer.js";
 import { ActivateSkillRenderer } from "./renderers/ActivateSkillRenderer.js";
+import { CompactionSummaryRenderer } from "./renderers/CompactionSummaryRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -45,6 +46,9 @@ registerToolRenderer("browser_wait", new BrowserWaitRenderer());
 registerToolRenderer("web_search", new WebSearchRenderer());
 registerToolRenderer("web_fetch", new WebFetchRenderer());
 registerToolRenderer("delegate", new DelegateRenderer());
+// Synthetic UI-only tool — emitted by the client on compaction_end. Never
+// registered as an LLM-facing tool, so no tool-description-budget impact.
+registerToolRenderer("__compaction_summary", new CompactionSummaryRenderer());
 
 // Team lead coordination tools
 registerToolRenderer("team_spawn", new TeamSpawnRenderer());
