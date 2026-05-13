@@ -565,6 +565,19 @@ export function createGateway(config: GatewayConfig) {
 	const projectContextManager = new ProjectContextManager(projectRegistry);
 	projectContextManager.initAll();
 
+	// One-shot backfill — stamp `goalId` onto legacy cost-tracker entries
+	// from their session record (if it still exists in the sessionStore).
+	// Lets archived/purged-session tree-cost rollups survive: cost is
+	// addressable by goalId without consulting the session store.
+	// Idempotent — second boot stamps 0. See cost-tracker.ts.
+	for (const ctx of projectContextManager.all()) {
+		const n = ctx.costTracker.backfillGoalIds((sid) => {
+			const ps = ctx.sessionStore.get(sid);
+			return ps?.goalId ?? ps?.teamGoalId;
+		});
+		if (n > 0) console.log(`[cost-tracker] backfilled ${n} goalId entries (project ${ctx.project.id})`);
+	}
+
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
 	for (const p of projectRegistry.list()) {
 		const ctx = projectContextManager.getOrCreate(p.id);

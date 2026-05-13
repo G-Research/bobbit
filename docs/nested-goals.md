@@ -990,6 +990,98 @@ every cost mutation, so cache invalidation is free. The dashboard
 renders `Tree cost: $X.XX` above the per-goal cost; click expands a
 per-child breakdown table.
 
+### Purge-survival: goalId stamping
+
+The natural way to roll up cost per goal is to look up each goal's
+sessions in `sessionStore`, then sum `costTracker.costs[sessionId]` for
+those ids. That mapping breaks the moment a session is purged: the
+7-day archive sweep (and the post-merge cleanup paths) deletes the
+session record from `sessionStore`, but cost entries on disk persist.
+The dollars are still there, just unreachable by goal lookup —
+archived goals end up showing `$0.0000` in the tree-cost breakdown
+even though they accumulated real cost.
+
+Fix: stamp `goalId` directly onto each cost entry at record time, so
+cost is addressable by goalId without ever consulting `sessionStore`.
+
+- `SessionCost.goalId?: string` (in `src/server/agent/cost-tracker.ts`)
+  — optional, additive, forward-compatible on disk.
+- `recordUsage(sessionId, usage, goalId?)` is the only writer. `goalId`
+  is **write-once**: stamped on the first call that supplies one, never
+  overwritten by subsequent calls (guards against pathological
+  re-association across goals). Non-goal sessions (assistants, staff)
+  omit it and keep aggregating via `getSessionCost`.
+- The single call site is `SessionManager.trackCostFromEvent` (in
+  `src/server/agent/session-manager.ts`), which already has the live
+  `SessionInfo` and passes `session.goalId ?? session.teamGoalId`.
+- `getGoalCost(goalId)` (one-arg) scans `costTracker.costs` by stamped
+  `goalId`. Primary path — does not touch `sessionStore`. The legacy
+  two-arg form `getGoalCost(goalId, sessionIds)` is retained as an
+  explicit-scope overload for tests and any caller that wants to scope
+  by a specific session set.
+- `computeTreeCost` uses the one-arg form for every member of the tree.
+  Its `sessionIdsForGoal` resolver is now an **optional fallback** —
+  consulted only when the stamped-by-goalId aggregate for a given goal
+  is empty, so legacy data that predates the stamp (and any test
+  scaffolding that records cost without a goalId) still rolls up.
+
+Backed by `tests/cost-tracker-goal-stamp.test.ts` (write-once,
+one-arg/two-arg overloads), `tests/cost-tracker-backfill.test.ts`
+(boot-time backfill), and `tests/tree-cost-purge-survival.test.ts`
+(end-to-end: cost survives session purge).
+
+### Boot-time backfill
+
+Cost entries written before this fix landed have `goalId === undefined`.
+`CostTracker.backfillGoalIds(resolver)` is a one-shot lazy migration
+that walks the in-memory cost map and, for each unstamped entry, calls
+`resolver(sessionId)` to recover the goalId from any source the caller
+knows about. If the resolver returns a string, it's stamped; otherwise
+the entry is left alone (its session has already been purged and the
+mapping is gone — those dollars are unrecoverable, but no new entry
+will ever lose its mapping again).
+
+Server boot wires this up in `src/server/server.ts`, per project
+context, using the still-populated `sessionStore` as the resolver:
+
+```ts
+for (const ctx of projectContextManager.all()) {
+    const n = ctx.costTracker.backfillGoalIds((sid) => {
+        const ps = ctx.sessionStore.get(sid);
+        return ps?.goalId ?? ps?.teamGoalId;
+    });
+    if (n > 0) console.log(`[cost-tracker] backfilled ${n} goalId entries …`);
+}
+```
+
+Idempotent — entries already carrying a `goalId` are skipped, so a
+second boot stamps zero. The generation tick is bumped if any entries
+were stamped, invalidating cached tree-cost rollups.
+
+### On-disk schema
+
+`<projectStateDir>/session-costs.json` is a flat object keyed by
+sessionId. Each value is a `SessionCost` record; `goalId` is omitted
+when unset:
+
+```json
+{
+  "sid-abc": {
+    "inputTokens": 1234,
+    "outputTokens": 567,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "totalCost": 0.0123,
+    "goalId": "goal-xyz"
+  }
+}
+```
+
+The field is purely additive — older servers reading a stamped file
+ignore the key, and newer servers reading an un-stamped file leave
+`goalId` undefined (and the backfill picks it up if the session is
+still in `sessionStore`).
+
 Row visibility is data-driven — gated on `treeCost.breakdown.length > 1`
 or `currentGoal.parentGoalId`, not on the client's `state.goals` list.
 This matters because `state.goals` excludes archived goals when "See

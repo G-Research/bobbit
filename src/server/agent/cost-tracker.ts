@@ -7,6 +7,17 @@ export interface SessionCost {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	totalCost: number;
+	/**
+	 * Goal this session's cost belongs to. Stamped once at record time so
+	 * tree-cost rollups survive session purge — `sessionStore` is wiped on
+	 * cleanup but cost entries persist. Optional: non-goal sessions
+	 * (assistants, staff, etc.) record cost without a goalId.
+	 *
+	 * Write-once: set on the first `recordUsage` call that supplies a
+	 * goalId, never overwritten thereafter (guards against pathological
+	 * re-association).
+	 */
+	goalId?: string;
 }
 
 export interface UsageData {
@@ -91,13 +102,17 @@ export class CostTracker {
 					for (const [id, cost] of Object.entries(data)) {
 						if (id && cost && typeof cost === "object") {
 							const c = cost as Record<string, unknown>;
-							this.costs.set(id, {
+							const entry: SessionCost = {
 								inputTokens: typeof c.inputTokens === "number" ? c.inputTokens : 0,
 								outputTokens: typeof c.outputTokens === "number" ? c.outputTokens : 0,
 								cacheReadTokens: typeof c.cacheReadTokens === "number" ? c.cacheReadTokens : 0,
 								cacheWriteTokens: typeof c.cacheWriteTokens === "number" ? c.cacheWriteTokens : 0,
 								totalCost: typeof c.totalCost === "number" ? c.totalCost : 0,
-							});
+							};
+							if (typeof c.goalId === "string" && c.goalId.length > 0) {
+								entry.goalId = c.goalId;
+							}
+							this.costs.set(id, entry);
 						}
 					}
 				}
@@ -125,8 +140,13 @@ export class CostTracker {
 	/**
 	 * Add usage data to the cumulative totals for a session.
 	 * Handles partial usage objects — undefined fields are treated as 0.
+	 *
+	 * `goalId` is stamped onto the entry at record time so tree-cost rollups
+	 * survive session purge. Write-once semantics: only stamped if currently
+	 * unset; subsequent calls with the same or different goalId never
+	 * overwrite. Passing `undefined` for an already-stamped entry is a no-op.
 	 */
-	recordUsage(sessionId: string, usage: UsageData): SessionCost {
+	recordUsage(sessionId: string, usage: UsageData, goalId?: string): SessionCost {
 		const existing = this.costs.get(sessionId) ?? emptyCost();
 		existing.inputTokens += usage.inputTokens ?? 0;
 		existing.outputTokens += usage.outputTokens ?? 0;
@@ -134,6 +154,9 @@ export class CostTracker {
 		existing.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
 		existing.totalCost += usage.cost ?? 0;
 		existing.totalCost = Math.round(existing.totalCost * 1_000_000) / 1_000_000;
+		if (goalId && !existing.goalId) {
+			existing.goalId = goalId;
+		}
 		this.costs.set(sessionId, existing);
 		this.generation++;
 		this.save();
@@ -151,11 +174,32 @@ export class CostTracker {
 	}
 
 	/**
-	 * Aggregate cost across multiple sessions (caller provides session IDs).
-	 * Returns a combined SessionCost. Sessions without cost data are skipped.
+	 * Aggregate cost for a goal.
+	 *
+	 * One-arg form: scans all entries by stamped `goalId`. This is the
+	 * primary path — survives session purge because cost entries are
+	 * addressed by goalId, not by sessionId lookup through `sessionStore`.
+	 *
+	 * Two-arg form: legacy explicit-scope path. Aggregates exactly the
+	 * given sessionIds. Kept for tests and callers that want to scope
+	 * by an explicit session set.
 	 */
-	getGoalCost(_goalId: string, sessionIds: string[]): SessionCost {
+	getGoalCost(goalId: string): SessionCost;
+	getGoalCost(goalId: string, sessionIds: string[]): SessionCost;
+	getGoalCost(goalId: string, sessionIds?: string[]): SessionCost {
 		const total = emptyCost();
+		if (sessionIds === undefined) {
+			for (const c of this.costs.values()) {
+				if (c.goalId === goalId) {
+					total.inputTokens += c.inputTokens;
+					total.outputTokens += c.outputTokens;
+					total.cacheReadTokens += c.cacheReadTokens;
+					total.cacheWriteTokens += c.cacheWriteTokens;
+					total.totalCost += c.totalCost;
+				}
+			}
+			return total;
+		}
 		for (const sid of sessionIds) {
 			const c = this.costs.get(sid);
 			if (c) {
@@ -178,6 +222,35 @@ export class CostTracker {
 			this.generation++;
 			this.save();
 		}
+	}
+
+	/**
+	 * One-shot lazy migration — stamp `goalId` on legacy entries that lack
+	 * one. For each unstamped entry, calls `resolver(sessionId)`; if it
+	 * returns a goalId, stamps it onto the entry. Saves once at end if
+	 * any entries were updated. Idempotent: a second invocation with the
+	 * same data stamps zero entries.
+	 *
+	 * Returns the count of entries that were stamped.
+	 *
+	 * Bumps the generation tick if any entries were updated so cached
+	 * tree-cost rollups recompute.
+	 */
+	backfillGoalIds(resolver: (sessionId: string) => string | undefined): number {
+		let stamped = 0;
+		for (const [sid, entry] of this.costs) {
+			if (entry.goalId) continue;
+			const goalId = resolver(sid);
+			if (goalId) {
+				entry.goalId = goalId;
+				stamped++;
+			}
+		}
+		if (stamped > 0) {
+			this.generation++;
+			this.save();
+		}
+		return stamped;
 	}
 }
 
@@ -214,12 +287,20 @@ function getCache(tracker: CostTracker): Map<string, TreeCostCacheEntry> {
  *
  * Goals not part of this tree (different rootGoalId chain) are excluded.
  * Archived goals are still counted — their cost survives archival.
+ *
+ * Per-goal cost is looked up via the one-arg `costTracker.getGoalCost(gid)`,
+ * which scans entries by stamped `goalId`. Survives session purge.
+ * `sessionIdsForGoal` is accepted for backward compatibility but, when
+ * supplied, only acts as an additional fallback for any goal whose
+ * stamped-by-goalId aggregate would be zero (e.g. legacy data that
+ * predates the backfill, or test scaffolding that records cost without a
+ * goalId).
  */
 export function computeTreeCost(
 	rootGoalId: string,
 	allGoals: TreeCostGoal[],
 	costTracker: CostTracker,
-	sessionIdsForGoal: SessionIdsForGoalFn,
+	sessionIdsForGoal?: SessionIdsForGoalFn,
 ): TreeCostBreakdown {
 	const cache = getCache(costTracker);
 	const generation = costTracker.getGeneration();
@@ -274,8 +355,17 @@ export function computeTreeCost(
 	let totalTokensOut = 0;
 
 	for (const g of treeMembers) {
-		const sids = sessionIdsForGoal(g.id);
-		const cost = costTracker.getGoalCost(g.id, sids);
+		// Primary path: scan by stamped goalId (survives session purge).
+		let cost = costTracker.getGoalCost(g.id);
+		// Fallback: if a sessionIds resolver was supplied and the stamped
+		// aggregate is empty, try the explicit-scope path. Lets older
+		// callers that recorded cost without a goalId still roll up.
+		if (cost.totalCost === 0 && cost.inputTokens === 0 && cost.outputTokens === 0 && sessionIdsForGoal) {
+			const sids = sessionIdsForGoal(g.id);
+			if (sids.length > 0) {
+				cost = costTracker.getGoalCost(g.id, sids);
+			}
+		}
 		entries.push({
 			goalId: g.id,
 			depth: depthOf(g),

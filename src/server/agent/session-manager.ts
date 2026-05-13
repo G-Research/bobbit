@@ -2476,13 +2476,14 @@ export class SessionManager {
 		if (costValue === undefined) return;
 
 		const sessionCostTracker = this.resolveCostTracker(session);
+		const stampGoalId = session.goalId ?? session.teamGoalId;
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
 			cost: costValue,
-		});
+		}, stampGoalId);
 
 		// Look up taskId from assigned tasks for this session
 		let taskId: string | undefined;
