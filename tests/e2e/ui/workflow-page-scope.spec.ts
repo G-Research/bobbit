@@ -42,7 +42,7 @@ test.describe("Workflows page (project-scoped)", () => {
 		tmpDir = createProjectDir();
 		const res = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "Workflow Scope Project", rootPath: tmpDir, __e2e_seed_skip__: true, acceptCanonical: true }),
+			body: JSON.stringify({ name: "Workflow Scope Project", rootPath: tmpDir, __e2e_seed_skip__: true }),
 		});
 		expect(res.status).toBe(201);
 		projectId = (await res.json()).id;

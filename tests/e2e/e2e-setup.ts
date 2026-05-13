@@ -225,8 +225,29 @@ export async function injectDefaultProjectId(body: unknown): Promise<unknown> {
 	return JSON.stringify({ ...parsed, projectId: pid });
 }
 
+/** POST /api/projects with a tmpdir rootPath may fail on macOS where os.tmpdir()
+ * returns a symlinked /var/folders/... path. Automatically inject acceptCanonical:true
+ * so tests that create projects from OS temp directories don't need to know about
+ * this macOS-specific quirk. Tests that explicitly exercise the symlink-rejection
+ * UX (add-project-symlink.spec.ts) use rawApiFetch / fetch directly and bypass this.
+ */
+const PROJECTS_POST = /^\/api\/projects(\?|$)/;
+
 async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<RequestInit> {
 	const method = (opts.method || "GET").toUpperCase();
+	if (method === "POST" && PROJECTS_POST.test(path)) {
+		// Inject acceptCanonical so tmpdir-based rootPaths work on macOS.
+		let body = opts.body;
+		if (typeof body === "string") {
+			try {
+				const parsed = JSON.parse(body) as Record<string, unknown>;
+				if (parsed && typeof parsed === "object" && !parsed.acceptCanonical) {
+					body = JSON.stringify({ ...parsed, acceptCanonical: true });
+				}
+			} catch { /* not JSON — leave unchanged */ }
+		}
+		if (body !== opts.body) return { ...opts, body: body as BodyInit };
+	}
 	if (method === "POST" && (PROJECT_INJECT_ROUTES.test(path) || WORKFLOWS_BODY_INJECT.test(path))) {
 		const newBody = await injectDefaultProjectId(opts.body as unknown);
 		if (newBody === opts.body) return opts;
