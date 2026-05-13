@@ -393,9 +393,21 @@ export function computeEffectiveAllowedTools(
 }
 
 export interface ToolActivationResult {
-	/** CLI args to add (e.g. ["--tools", "read,bash", "--no-extensions", "--extension", "/path/to/ext"]) */
+	/** CLI args to add (e.g. ["--no-builtin-tools", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
+	/**
+	 * Env vars to set on the spawned agent process. Currently used only for
+	 * `BOBBIT_BUILTIN_TOOLS`, which the `_builtins` extension reads to decide
+	 * which pi file-tool builtins to re-register for this session.
+	 *
+	 * Always present (even when empty): for sessions with no builtin tools the
+	 * value is `""` so the extension registers nothing.
+	 */
+	env: Record<string, string>;
 }
+
+/** Pi file-tool builtins re-registered via defaults/tools/_builtins/extension.ts. */
+const FILE_TOOL_BUILTIN_NAMES = new Set(["read", "edit", "write", "grep", "find", "ls"]);
 
 /**
  * Resolve the absolute path for a bobbit-extension provider.
@@ -965,116 +977,78 @@ export function writeMcpProxyExtensions(
  * No leaked tool detection — the tool_call guard extension handles access control.
  */
 export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolManager?: ToolManager, _cwd?: string, mcpExtensionPaths?: string[]): ToolActivationResult {
-	const args: string[] = [];
+	// pi 0.70+ unified `--tools <list>` into an allowlist over BOTH builtins and
+	// extension-registered tools, which broke our old "--tools <only-builtins>
+	// + --extension shell" pattern (every extension tool got stripped). We now
+	// always pass --no-builtin-tools to disable pi's internal builtins entirely
+	// and re-register the desired file-tool subset via _builtins/extension.ts.
+	// BOBBIT_BUILTIN_TOOLS tells that extension which names to register.
+	const args: string[] = ["--no-builtin-tools", "--no-extensions"];
+	const env: Record<string, string> = {};
+
+	const builtinsToRegister = new Set<string>();
+	const extensionPaths = new Set<string>();
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
-		// Enable all base tools and disable extension auto-discovery for safety.
+		// Register all six file builtins, no bobbit extensions.
 		console.warn("[tool-activation] No ToolManager provided — using fallback (all base tools, no extensions)");
-		args.push("--tools", "read,bash,edit,write,grep,find,ls");
-		args.push("--no-extensions");
+		for (const name of FILE_TOOL_BUILTIN_NAMES) builtinsToRegister.add(name);
+		env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");
 		if (mcpExtensionPaths) {
-			for (const extPath of mcpExtensionPaths) {
-				args.push("--extension", extPath);
-			}
+			for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 		}
-		return { args };
+		return { args, env };
 	}
 
-	// Load all providers in a single YAML scan
+	// Always load the _builtins extension; it reads BOBBIT_BUILTIN_TOOLS to
+	// decide which pi file-tool builtins to re-register for this session.
+	const builtinsExtPath = toolManager.getExtensionPath("_builtins", "extension.ts");
+	args.push("--extension", builtinsExtPath);
+
 	const providers = toolManager.getToolProviders();
 
-	// No restrictions — enable all builtins and all bobbit extensions
-	if (!allowedTools || allowedTools.length === 0) {
-		const builtins: string[] = [];
-		const extensionPaths = new Set<string>();
-
-		for (const [, provider] of providers) {
+	// `kind:"mcp"` entries are satisfied externally via `mcpExtensionPaths` and
+	// MUST NOT be looked up in the YAML provider registry — doing so would
+	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
+	// every session spawn. The `"has no provider"` branch below fires only for
+	// genuinely unknown YAML tool names (typos in role allowedTools, etc.).
+	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp"; name: string }>) => {
+		for (const entry of entries) {
+			if (entry.kind === "mcp") continue;
+			const provider = providers.get(entry.name);
+			if (!provider) {
+				console.warn(`[tool-activation] Tool "${entry.name}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
+				continue;
+			}
 			if (provider.type === "builtin" && provider.tool) {
-				// Skip bash from --tools — it's provided by shell/extension.ts
-				// (which is loaded via bash_bg's provider entry or explicitly below)
 				if (provider.tool === "bash") {
-					// Ensure shell/extension.ts is loaded for bash
-					const bashProvider = providers.get("bash_bg");
-					if (bashProvider?.type === "bobbit-extension" && bashProvider.extension) {
-						extensionPaths.add(resolveExtensionPath(bashProvider));
-					} else if (toolManager) {
-						// Fallback: load shell/extension.ts via cascade resolution
-						extensionPaths.add(toolManager.getExtensionPath("shell", "extension.ts"));
-					}
+					// bash comes from shell/extension.ts, not from the file-builtins set.
+					extensionPaths.add(toolManager.getExtensionPath("shell", "extension.ts"));
 					continue;
 				}
-				builtins.push(provider.tool);
+				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {
+					builtinsToRegister.add(provider.tool);
+				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
 				extensionPaths.add(resolveExtensionPath(provider));
 			}
 		}
+	};
 
-		if (builtins.length > 0) {
-			args.push("--tools", builtins.join(","));
-		}
-		args.push("--no-extensions");
-		for (const extPath of extensionPaths) {
-			args.push("--extension", extPath);
-		}
-		if (mcpExtensionPaths) {
-			for (const extPath of mcpExtensionPaths) {
-				args.push("--extension", extPath);
-			}
-		}
-		return { args };
-	}
-
-	// Restricted set — resolve each allowed tool via its provider.
-	// `kind:"mcp"` entries are satisfied externally via `mcpExtensionPaths` and
-	// MUST NOT be looked up in the YAML provider registry — doing so would
-	// trigger a spurious `"has no provider"` warn for every MCP meta-tool on
-	// every session spawn. The `"has no provider"` branch below now fires only
-	// for genuinely unknown YAML tool names (typos in role allowedTools, etc.).
-	const activeBaseTools: string[] = [];
-	const neededExtensions = new Set<string>();
-
-	for (const entry of allowedTools) {
-		if (entry.kind === "mcp") continue; // served via mcpExtensionPaths below
-		const toolName = entry.name;
-		const provider = providers.get(toolName);
-		if (!provider) {
-			// Unknown YAML tool — log warning and skip
-			console.warn(`[tool-activation] Tool "${toolName}" has no provider in .bobbit/config/tools/<group>/*.yaml — skipping`);
-			continue;
-		}
-		if (provider.type === "builtin" && provider.tool) {
-			// Skip bash from --tools — it's provided by shell/extension.ts
-			if (provider.tool === "bash") {
-				// bash is allowed: ensure shell/extension.ts is loaded
-				if (toolManager) {
-					neededExtensions.add(toolManager.getExtensionPath("shell", "extension.ts"));
-				}
-				continue;
-			}
-			activeBaseTools.push(provider.tool);
-		} else if (provider.type === "bobbit-extension" && provider.extension) {
-			neededExtensions.add(resolveExtensionPath(provider));
-		}
-	}
-
-	if (activeBaseTools.length > 0) {
-		args.push("--tools", activeBaseTools.join(","));
+	if (!allowedTools || allowedTools.length === 0) {
+		// No restrictions — enable all builtins (sans bash) and all bobbit extensions.
+		const allEntries: { kind: "yaml"; name: string }[] = [];
+		for (const [name] of providers) allEntries.push({ kind: "yaml", name });
+		collect(allEntries);
 	} else {
-		args.push("--no-tools");
+		collect(allowedTools);
 	}
 
-	// Always use --no-extensions so Bobbit controls all extension loading
-	args.push("--no-extensions");
-	for (const extPath of neededExtensions) {
-		args.push("--extension", extPath);
-	}
-
+	env.BOBBIT_BUILTIN_TOOLS = [...builtinsToRegister].sort().join(",");
+	for (const extPath of extensionPaths) args.push("--extension", extPath);
 	if (mcpExtensionPaths) {
-		for (const extPath of mcpExtensionPaths) {
-			args.push("--extension", extPath);
-		}
+		for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 	}
-
-	return { args };
+	return { args, env };
 }
