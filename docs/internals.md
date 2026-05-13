@@ -1389,6 +1389,64 @@ Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-br
 
 ---
 
+## Idle-stream timeout preload (remote LLM HTTP)
+
+Agent subprocesses speak to LLM providers through Node's global `fetch`, which routes via undici's global dispatcher. `@earendil-works/pi-coding-agent`'s `cli.js` installs an `EnvHttpProxyAgent` with `bodyTimeout: 0` and `headersTimeout: 0` at startup — disabling undici's idle-gap timeout for *every* outbound request so that buffered local-vLLM responses (which can produce minutes of silence before a tool call streams back) don't get killed. The side-effect: a silent remote SSE stream hangs the session forever, with the status pinned to `streaming` and no error to surface in the UI.
+
+Fix: bobbit injects a CommonJS preload (`defaults/agent-preload/undici-idle-timeouts.cjs`) into every agent subprocess via `node --require=…`. The preload monkey-patches `undici.setGlobalDispatcher` so whatever dispatcher pi-coding-agent installs is wrapped in an `IdleTimeoutDispatcher`. The wrapper inspects each request's `opts.origin` and injects per-request `bodyTimeout` / `headersTimeout` only when the origin is **remote**. Local origins still get `bodyTimeout: 0`, preserving the buffered-vLLM use case the original disabling was protecting.
+
+Why classification happens at HTTP-dispatch time by origin hostname rather than by provider name in config: it's robust against provider-name drift and applies uniformly to Anthropic, OpenAI, Google, Bedrock, Vercel AI Gateway, Cloudflare AI Gateway, and any self-hosted gateway exposed on a public hostname.
+
+### Origin classification
+
+An origin is **local** (and therefore exempt from the idle timeout) if it matches any of:
+
+- `localhost`, `0.0.0.0`, `::`
+- IPv4 loopback (`127.0.0.0/8`) or IPv6 loopback (`::1`)
+- RFC1918 private ranges: `10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`
+- IPv6 ULA: `fc00::/7`
+- Tailscale CGNAT: `100.64.0.0/10`
+- Hostnames ending in `.local` or `.localhost` (mDNS / dev TLDs)
+
+Everything else — public DNS, including bobbit-hosted AI gateways like `ai-gateway.c3.zone` — is **remote** and gets the idle-gap timeout.
+
+### Public AI gateways are remote on purpose
+
+The user's configured `aigw.url` from prefs is **not** automatically exempted. A public-DNS AI gateway is exactly the kind of origin where idle hangs have been observed; auto-exempting it would defeat the fix. Operators who front a deliberately-slow on-prem backend behind a public hostname must opt in explicitly via `BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS` (see below).
+
+When the idle timeout does fire, the Anthropic / OpenAI SDK surfaces a normal request error and pi-coding-agent's built-in retry (`retry.enabled` default `true`, `maxRetries: 3`) kicks in — no gateway-side abort plumbing required.
+
+### Env vars (public contract)
+
+Exported on every agent spawn (direct and Docker) by `buildPreloadEnv()` in `src/server/agent/rpc-bridge.ts`, so the preload sees consistent values across paths:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `BOBBIT_REMOTE_BODY_TIMEOUT_MS` | `120000` | Per-request body-idle timeout for remote origins. undici resets the timer on every received byte, so this is a gap — not a deadline. |
+| `BOBBIT_REMOTE_HEADERS_TIMEOUT_MS` | `60000` | Time allowed for response headers to arrive before the request errors. |
+| `BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS` | `""` | Comma-separated URL origins (e.g. `https://aigw.example.com,https://other.example.com`) that should keep `bodyTimeout: 0` even though they look remote. Compared via `new URL(...).origin`, case-insensitive. |
+
+Defaults were chosen for two assumptions: (1) a healthy provider produces *some* byte within ~2 minutes even on long thinking turns; (2) headers should arrive within a minute even on contended gateways. Tune via env if your traffic pattern says otherwise.
+
+### Container coordination — `CONTAINER_FEATURE_VERSION`
+
+The Docker path bind-mounts the preload at `/bobbit-preload/undici-idle-timeouts.cjs` and references it from `NODE_OPTIONS=--require=…`. Pre-upgrade containers don't have that bind mount, so `docker exec` against them would either fail (missing path) or silently skip the preload.
+
+To force a clean recreate on first use after upgrade, project-sandbox containers are tagged with `bobbit-project-version=<CONTAINER_FEATURE_VERSION>` (currently `preload-1`, defined in `src/server/agent/docker-args.ts`). Discovery matches **both** the project label and the version label, so a stale container without the version label (or with an older value) is treated as not-found and a fresh container is created with the new mount surface. Bump `CONTAINER_FEATURE_VERSION` whenever the agent CLI bind-mount surface changes in a way that breaks `docker exec` against older containers.
+
+For extra safety against partial upgrades, `rpc-bridge.ts` also runs a per-container probe (`probePreloadMounted`) before injecting `--require=…` into the Docker exec env: if the preload file isn't actually present inside the container, the flag is omitted rather than tripping `node: cannot find module`.
+
+### Key files
+
+- `defaults/agent-preload/undici-idle-timeouts.cjs` — the preload itself; pure CommonJS, no dependencies beyond `node:net`.
+- `src/server/agent/rpc-bridge.ts` — `PRELOAD_PATH`, `CONTAINER_PRELOAD_PATH`, `buildPreloadEnv()`, direct + Docker spawn wiring.
+- `src/server/agent/docker-args.ts` — `CONTAINER_FEATURE_VERSION`, bind-mount + label wiring.
+- `src/server/agent/project-sandbox.ts` — version-aware container reuse / recreate.
+- `tests/undici-idle-timeouts.test.ts` — table-driven origin classification and dispatch injection.
+- `tests/container-feature-version.test.ts` — pins the version-label discovery semantics.
+
+---
+
 ## Semantic search
 
 Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
