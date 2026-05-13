@@ -134,10 +134,18 @@ function sha256(file) {
 	return hash.digest("hex");
 }
 
+// On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
+// GNU tar interprets `C:\\...` as a remote host even with --force-local applied
+// inconsistently. bsdtar handles native Windows paths cleanly.
+const TAR_BIN =
+	process.platform === "win32" && fs.existsSync("C:\\Windows\\System32\\tar.exe")
+		? "C:\\Windows\\System32\\tar.exe"
+		: "tar";
+
 function extract(archive, destDir) {
 	fs.mkdirSync(destDir, { recursive: true });
 	if (archive.endsWith(".tar.gz")) {
-		const r = spawnSync("tar", ["xzf", archive, "-C", destDir], { stdio: "inherit" });
+		const r = spawnSync(TAR_BIN, ["-xzf", archive, "-C", destDir], { stdio: "inherit" });
 		if (r.status !== 0) throw new Error(`tar failed for ${archive}`);
 	} else if (archive.endsWith(".zip")) {
 		// Use system unzip; on Windows fall back to PowerShell Expand-Archive.

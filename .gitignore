@@ -35,7 +35,6 @@ binaries/binaries-*/bin/fd
 binaries/binaries-*/bin/fd.exe
 binaries/binaries-*/bin/rg
 binaries/binaries-*/bin/rg.exe
-binaries.checksums.json
 .e2e-real-pi
 .e2e-real-bobbit
 .e2e-ui-pi
