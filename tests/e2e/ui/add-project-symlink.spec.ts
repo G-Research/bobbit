@@ -37,9 +37,12 @@ function uniqueDir(label: string): string {
  *  symlinks requires elevated privileges (Windows non-admin). */
 function makeSymlinkPair(label: string): { canonical: string; link: string } | null {
 	const root = uniqueDir(label);
-	const canonical = join(root, "canonical");
+	let canonical = join(root, "canonical");
 	const link = join(root, "link");
 	mkdirSync(canonical, { recursive: true });
+	// Canonicalize via realpath so the value we compare against matches what
+	// the server stores (the server resolves symlinks during register).
+	canonical = realpathSync(canonical);
 	// Write a sentinel file so directory has content.
 	writeFileSync(join(canonical, "marker.txt"), "x");
 	try {
@@ -83,9 +86,9 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
 		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
-		// Without it, /api/projects/detect returns hasBobbit=false and doContinue takes
-		// Path B (project assistant), so the symlink check in registerProject never runs.
-		// project.yaml is the source of truth for hasBobbit since commit 54d5b710.
+		// Without it, /api/projects/detect returns hasBobbit=false (since commit 54d5b710
+		// project.yaml is the source of truth) and doContinue takes Path B (project assistant),
+		// so the symlink check in registerProject never runs.
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
 		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
@@ -139,8 +142,7 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Add .bobbit/config/project.yaml so Path A (auto-import) is taken.
-		// See: hasBobbit requires project.yaml, not just .bobbit/ presence (commit 54d5b710).
+		// Add .bobbit/config/project.yaml so Path A is taken (hasBobbit=true).
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
 		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
