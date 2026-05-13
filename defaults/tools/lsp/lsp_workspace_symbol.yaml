@@ -1,0 +1,20 @@
+name: lsp_workspace_symbol
+description: "Search symbols across the worktree by name; returns up to 100 hits."
+summary: "Workspace symbol search (LSP)"
+params: [query]
+provider:
+  type: builtin
+  tool: lsp_workspace_symbol
+group: LSP
+docs: |-
+  Substring/fuzzy symbol search across the worktree. Up to 100 results.
+detail_docs: >-
+  ## Purpose
+
+
+  Search every indexed symbol in the worktree by `query`. Returns
+  `SymbolInformation[]` (max 100) with `{ name, kind, path, range,
+  containerName? }`.
+
+
+  Far cheaper than `grep` when you know roughly what symbol you're after.

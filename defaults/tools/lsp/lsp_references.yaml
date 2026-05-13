@@ -1,0 +1,32 @@
+name: lsp_references
+description: "Find all references to a symbol; returns Location[]. 0-indexed line/char."
+summary: "Find references (LSP)"
+params: [path, line, character, includeDeclaration?]
+provider:
+  type: builtin
+  tool: lsp_references
+group: LSP
+docs: |-
+  100× cheaper than grep when you need every caller of a symbol. line/character are 0-indexed.
+detail_docs: >-
+  ## Purpose
+
+
+  List every reference to the symbol at `(path, line, character)`.
+  Includes the declaration itself by default; pass `includeDeclaration: false`
+  to omit it.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `path` | string | Yes | File path relative to session cwd. |
+  | `line` | number | Yes | **0-indexed** line. |
+  | `character` | number | Yes | **0-indexed** column. |
+  | `includeDeclaration` | boolean | No | Default `true`. |
+
+
+  Each result is `{ path, range: { start: {line, character}, end: {line, character} } }`,
+  with `path` relative to session cwd.

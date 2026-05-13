@@ -14,6 +14,10 @@ import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
+import { LspSupervisor } from "./lsp/supervisor.js";
+import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
+import { PyrightLspFactory } from "./lsp/clients/pyright.js";
+import { registerWorktreePreCleanupHook } from "./lsp/cleanup-hook.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -618,6 +622,21 @@ export function createGateway(config: GatewayConfig) {
 		prStatusStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+
+	// LSP supervisor — singleton, lazy-spawning. Adapters registered eagerly
+	// but no LSP child processes are spawned until first `ensure()`.
+	const lspSupervisor = new LspSupervisor({
+		factories: [new TypescriptLspFactory(), new PyrightLspFactory()],
+	});
+	sessionManager.setLspSupervisor(lspSupervisor);
+	registerWorktreePreCleanupHook(async (wp) => { await lspSupervisor.shutdownForWorktree(wp); });
+	sessionManager.addTerminationListener((sessionId) => {
+		const session = sessionManager.getSession(sessionId);
+		if (!session) return;
+		if (session.cwd) lspSupervisor.release(session.cwd);
+		if (session.worktreePath) lspSupervisor.release(session.worktreePath);
+		for (const r of session.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
+	});
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
@@ -1349,6 +1368,7 @@ export function createGateway(config: GatewayConfig) {
 			if (sandboxManager) {
 				await sandboxManager.shutdownAll();
 			}
+			await lspSupervisor.shutdownAll();
 			await sessionManager.cleanupSandboxNetwork();
 			server.close();
 		},
@@ -1805,6 +1825,31 @@ async function handleApiRoute(
 	if (url.pathname === "/api/sandbox/host-tokens" && req.method === "GET") {
 		const tokens = detectHostTokens(preferencesStore);
 		json(tokens);
+		return;
+	}
+
+	// ── LSP routes — agent-side tool surface ────────────────────────
+	const lspMatch = url.pathname.match(/^\/api\/lsp\/([a-z_]+)$/);
+	if (lspMatch && req.method === "POST") {
+		const method = lspMatch[1];
+		const body = await readBody(req).catch(() => ({}));
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		try {
+			const result = await supervisor.dispatch(method, body || {});
+			json(result);
+		} catch (err: any) {
+			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
+				json({ error: err.code, message: err.message });
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
+		const supervisor = sessionManager.getLspSupervisor();
+		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
 		return;
 	}
 

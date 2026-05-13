@@ -34,6 +34,7 @@ const EXTENSION_FILES = [
 	"browser",
 	"html",
 	"images",
+	"lsp",
 	"mcp",
 	"proposals",
 	"review",

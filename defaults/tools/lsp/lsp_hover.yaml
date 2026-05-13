@@ -1,0 +1,19 @@
+name: lsp_hover
+description: "Hover info (type, signature, doc) for a symbol. 0-indexed line/char."
+summary: "Hover info (LSP)"
+params: [path, line, character]
+provider:
+  type: builtin
+  tool: lsp_hover
+group: LSP
+docs: |-
+  Returns markdown hover content at the cursor position. line/character are 0-indexed.
+detail_docs: >-
+  ## Purpose
+
+
+  Return the language-server hover string at `(path, line, character)`:
+  type info, function signature, JSDoc, etc. Result is markdown text.
+
+
+  Returns `null` if no hover info is available.

@@ -29,7 +29,7 @@ LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
-RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
+RUN npm install -g typescript typescript-language-server --no-audit --no-fund 2>/dev/null
 
 # Run as non-root user. node:20-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000

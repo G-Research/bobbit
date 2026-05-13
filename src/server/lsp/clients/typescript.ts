@@ -1,0 +1,300 @@
+/**
+ * typescript-language-server adapter.
+ *
+ * Spawns the server, drives JSON-RPC initialize, exposes the typed methods
+ * the supervisor surfaces. Diagnostics are accumulated from
+ * `textDocument/publishDiagnostics` notifications; callers `diagnostics()`
+ * triggers a brief settle window before returning the latest snapshot.
+ */
+import fs from "node:fs/promises";
+import { pathToFileURL, fileURLToPath } from "node:url";
+
+import {
+	resolveTypescriptLanguageServer,
+	spawnLspChild,
+	type LspProcess,
+} from "../server-process.js";
+import type { LspClient, LspClientFactory, SpawnOpts, ClientState } from "../client.js";
+import type {
+	Diagnostic, DocumentSymbol, HoverResult, Language, Location,
+	Range, SymbolInformation, WorkspaceEdit,
+} from "../types.js";
+
+function uriToPath(uri: string): string {
+	if (uri.startsWith("file://")) return fileURLToPath(uri);
+	return uri;
+}
+function pathToUri(p: string): string {
+	return pathToFileURL(p).href;
+}
+
+function lspSeverity(n?: number): Diagnostic["severity"] {
+	switch (n) {
+		case 1: return "error";
+		case 2: return "warning";
+		case 3: return "info";
+		case 4: return "hint";
+		default: return "info";
+	}
+}
+
+interface DocState { version: number; }
+
+class TypescriptLspClient implements LspClient {
+	readonly language: Language = "typescript";
+	readonly worktreePath: string;
+	state: ClientState = "starting";
+	private proc!: LspProcess;
+	private openDocs = new Map<string, DocState>(); // absPath → state
+	private diagnosticsByUri = new Map<string, Diagnostic[]>();
+	private diagVersionByUri = new Map<string, number>();
+	private diagListeners = new Map<string, Set<() => void>>();
+
+	constructor(worktreePath: string) {
+		this.worktreePath = worktreePath;
+	}
+
+	async start(sandbox: SpawnOpts["sandbox"]): Promise<void> {
+		const resolved = resolveTypescriptLanguageServer();
+		if (!resolved) throw new Error("typescript-language-server not installed");
+		this.proc = await spawnLspChild({
+			worktreePath: this.worktreePath,
+			command: resolved.node,
+			args: [resolved.cliMjs, "--stdio"],
+			sandbox,
+		});
+
+		this.proc.child.on("exit", (code) => {
+			this.state = "stopped";
+			if (code !== 0 && code !== null) {
+				console.warn(`[lsp:ts] child exited code=${code}\n${this.proc.stderrTail().slice(-2048)}`);
+			}
+		});
+
+		this.proc.connection.onNotification("textDocument/publishDiagnostics", (p: any) => {
+			const uri = p?.uri as string;
+			if (!uri) return;
+			const list: Diagnostic[] = (p.diagnostics as any[]).map(d => ({
+				path: uriToPath(uri),
+				range: d.range as Range,
+				severity: lspSeverity(d.severity),
+				message: String(d.message ?? ""),
+				source: d.source,
+				code: d.code,
+			}));
+			this.diagnosticsByUri.set(uri, list);
+			this.diagVersionByUri.set(uri, (this.diagVersionByUri.get(uri) ?? 0) + 1);
+			const listeners = this.diagListeners.get(uri);
+			if (listeners) for (const fn of listeners) fn();
+		});
+
+		// initialize
+		const rootUri = pathToUri(this.worktreePath);
+		await this.proc.connection.sendRequest("initialize", {
+			processId: process.pid,
+			rootUri,
+			workspaceFolders: [{ uri: rootUri, name: "workspace" }],
+			capabilities: {
+				textDocument: {
+					synchronization: { dynamicRegistration: false, didSave: false },
+					definition: {},
+					references: {},
+					hover: { contentFormat: ["markdown", "plaintext"] },
+					documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+					rename: { prepareSupport: false },
+					publishDiagnostics: {},
+				},
+				workspace: {
+					symbol: {},
+					workspaceFolders: true,
+				},
+			},
+			initializationOptions: {},
+		});
+		this.proc.connection.sendNotification("initialized", {});
+		this.state = "warm";
+	}
+
+	private async readText(absPath: string): Promise<string> {
+		try { return await fs.readFile(absPath, "utf-8"); }
+		catch { return ""; }
+	}
+
+	async ensureDocOpen(absPath: string): Promise<void> {
+		if (this.openDocs.has(absPath)) {
+			// refresh on disk → didChange (full sync)
+			const text = await this.readText(absPath);
+			const state = this.openDocs.get(absPath)!;
+			state.version++;
+			this.proc.connection.sendNotification("textDocument/didChange", {
+				textDocument: { uri: pathToUri(absPath), version: state.version },
+				contentChanges: [{ text }],
+			});
+			return;
+		}
+		const text = await this.readText(absPath);
+		this.openDocs.set(absPath, { version: 1 });
+		this.proc.connection.sendNotification("textDocument/didOpen", {
+			textDocument: {
+				uri: pathToUri(absPath),
+				languageId: absPath.endsWith(".tsx") || absPath.endsWith(".jsx") ? "typescriptreact" : "typescript",
+				version: 1,
+				text,
+			},
+		});
+	}
+
+	async definition(absPath: string, line: number, character: number): Promise<Location | null> {
+		await this.ensureDocOpen(absPath);
+		const res: any = await this.proc.connection.sendRequest("textDocument/definition", {
+			textDocument: { uri: pathToUri(absPath) },
+			position: { line, character },
+		});
+		const first = Array.isArray(res) ? res[0] : res;
+		if (!first) return null;
+		const uri = first.uri ?? first.targetUri;
+		const range = first.range ?? first.targetSelectionRange ?? first.targetRange;
+		if (!uri || !range) return null;
+		return { path: uriToPath(uri), range };
+	}
+
+	async references(absPath: string, line: number, character: number, includeDecl: boolean): Promise<Location[]> {
+		await this.ensureDocOpen(absPath);
+		const res: any[] = await this.proc.connection.sendRequest("textDocument/references", {
+			textDocument: { uri: pathToUri(absPath) },
+			position: { line, character },
+			context: { includeDeclaration: includeDecl },
+		}) ?? [];
+		return res.map(r => ({ path: uriToPath(r.uri), range: r.range }));
+	}
+
+	async hover(absPath: string, line: number, character: number): Promise<HoverResult | null> {
+		await this.ensureDocOpen(absPath);
+		const res: any = await this.proc.connection.sendRequest("textDocument/hover", {
+			textDocument: { uri: pathToUri(absPath) },
+			position: { line, character },
+		});
+		if (!res?.contents) return null;
+		let text = "";
+		const c = res.contents;
+		if (typeof c === "string") text = c;
+		else if (Array.isArray(c)) text = c.map((x: any) => typeof x === "string" ? x : x.value).join("\n");
+		else if (c.value) text = String(c.value);
+		return { contents: text, range: res.range };
+	}
+
+	async diagnostics(absPath?: string): Promise<Diagnostic[]> {
+		if (absPath) {
+			const uri = pathToUri(absPath);
+			const before = this.diagVersionByUri.get(uri) ?? 0;
+			await this.ensureDocOpen(absPath);
+			await this.waitForDiagnostics(uri, before, 1500, 200);
+			return this.diagnosticsByUri.get(uri) ?? [];
+		}
+		// workspace-wide aggregate
+		const out: Diagnostic[] = [];
+		for (const list of this.diagnosticsByUri.values()) out.push(...list);
+		return out;
+	}
+
+	/**
+	 * Wait for at least one publishDiagnostics newer than `beforeVersion`, then
+	 * for an additional `settleMs` of quiet (no further publishes). Bails out
+	 * after `maxWait` ms regardless.
+	 */
+	private waitForDiagnostics(uri: string, beforeVersion: number, maxWait: number, settleMs: number): Promise<void> {
+		return new Promise<void>(resolve => {
+			let settled = false;
+			let lastReceiveAt = 0;
+			let listeners = this.diagListeners.get(uri);
+			if (!listeners) { listeners = new Set(); this.diagListeners.set(uri, listeners); }
+			const listener = () => { lastReceiveAt = Date.now(); };
+			listeners.add(listener);
+
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				listeners!.delete(listener);
+				clearInterval(poll);
+				clearTimeout(hardTimeout);
+				resolve();
+			};
+			const poll = setInterval(() => {
+				if (settled) return;
+				const cur = this.diagVersionByUri.get(uri) ?? 0;
+				if (cur > beforeVersion && lastReceiveAt && Date.now() - lastReceiveAt >= settleMs) finish();
+			}, 30);
+			(poll as any).unref?.();
+			const hardTimeout = setTimeout(finish, maxWait);
+			(hardTimeout as any).unref?.();
+		});
+	}
+
+	async documentSymbols(absPath: string): Promise<DocumentSymbol[]> {
+		await this.ensureDocOpen(absPath);
+		const res: any[] = await this.proc.connection.sendRequest("textDocument/documentSymbol", {
+			textDocument: { uri: pathToUri(absPath) },
+		}) ?? [];
+		// Could be DocumentSymbol[] (hierarchical) or SymbolInformation[] (flat). Pass through.
+		return res as DocumentSymbol[];
+	}
+
+	async workspaceSymbol(query: string): Promise<SymbolInformation[]> {
+		const res: any[] = await this.proc.connection.sendRequest("workspace/symbol", { query }) ?? [];
+		return res.slice(0, 100).map(s => ({
+			name: s.name,
+			kind: s.kind,
+			path: uriToPath(s.location?.uri ?? s.location),
+			range: s.location?.range ?? s.range,
+			containerName: s.containerName,
+		}));
+	}
+
+	async rename(absPath: string, line: number, character: number, newName: string): Promise<WorkspaceEdit> {
+		await this.ensureDocOpen(absPath);
+		const res: any = await this.proc.connection.sendRequest("textDocument/rename", {
+			textDocument: { uri: pathToUri(absPath) },
+			position: { line, character },
+			newName,
+		});
+		const out: WorkspaceEdit = { changes: {} };
+		const changes = res?.changes;
+		if (changes) {
+			for (const [uri, edits] of Object.entries(changes)) {
+				out.changes[uriToPath(uri)] = edits as any;
+			}
+		}
+		// documentChanges variant
+		const docChanges = res?.documentChanges as any[] | undefined;
+		if (docChanges) {
+			for (const dc of docChanges) {
+				if (dc.textDocument && Array.isArray(dc.edits)) {
+					const p = uriToPath(dc.textDocument.uri);
+					out.changes[p] = (out.changes[p] ?? []).concat(dc.edits);
+				}
+			}
+		}
+		return out;
+	}
+
+	async shutdown(graceful: boolean): Promise<void> {
+		this.state = "stopping";
+		try {
+			if (this.proc) await this.proc.stop(graceful);
+		} finally {
+			this.state = "stopped";
+		}
+	}
+}
+
+export class TypescriptLspFactory implements LspClientFactory {
+	readonly language: Language = "typescript";
+	isInstalled(): boolean {
+		return resolveTypescriptLanguageServer() !== null;
+	}
+	async spawn(opts: SpawnOpts): Promise<LspClient> {
+		const client = new TypescriptLspClient(opts.worktreePath);
+		await client.start(opts.sandbox);
+		return client;
+	}
+}

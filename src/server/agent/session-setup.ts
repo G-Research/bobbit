@@ -142,6 +142,7 @@ export interface PipelineContext {
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
+	lspSupervisor?: import("../lsp/supervisor.js").LspSupervisor | null;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
@@ -568,6 +569,17 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 10: post-spawn setup (model, thinking level)
 	await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
 
+	// Step 11: LSP pre-warm (best-effort, never throws). Skip in sandboxed
+	// sessions — the gateway-side supervisor cannot bind to a container path
+	// without a sandbox bridge configured per session.
+	try {
+		if (!plan.sandboxed && ctx.lspSupervisor && session.cwd) {
+			ctx.lspSupervisor.preWarm(session.cwd, plan.projectId);
+		}
+	} catch (err) {
+		console.warn(`[session-setup] LSP pre-warm failed for ${session.id}:`, err);
+	}
+
 	return session;
 }
 
@@ -677,6 +689,16 @@ export async function executeWorktreeAsync(
 	}
 	ctx.store.update(session.id, persistFields);
 	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
+
+	// LSP pre-warm against the freshly-built worktree (host-side only).
+	try {
+		if (!plan.sandboxed && ctx.lspSupervisor) {
+			ctx.lspSupervisor.preWarm(worktreeCwd, plan.projectId);
+			for (const r of session.repoWorktrees ?? []) ctx.lspSupervisor.preWarm(r.worktreePath, plan.projectId);
+		}
+	} catch (err) {
+		console.warn(`[session-setup] LSP pre-warm (worktree) failed for ${session.id}:`, err);
+	}
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
@@ -1027,6 +1049,10 @@ export function handleSetupFailure(
 
 	// 4. Background worktree cleanup (slow, non-blocking)
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
+		// Release LSP supervisor before tearing down the worktree.
+		if (ctx.lspSupervisor) {
+			ctx.lspSupervisor.shutdownForWorktree(plan.worktreePath).catch(() => {});
+		}
 		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
 	}
 

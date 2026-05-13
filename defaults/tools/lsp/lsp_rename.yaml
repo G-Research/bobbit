@@ -1,0 +1,22 @@
+name: lsp_rename
+description: "Compute a safe rename across files; returns a WorkspaceEdit to apply."
+summary: "Rename symbol (LSP)"
+params: [path, line, character, newName]
+provider:
+  type: builtin
+  tool: lsp_rename
+group: LSP
+docs: |-
+  Computes edits only; agent applies them with `edit`/`write`. 0-indexed line/char.
+detail_docs: >-
+  ## Purpose
+
+
+  Compute a safe rename of the symbol at `(path, line, character)` to
+  `newName`. Returns a `WorkspaceEdit` whose `changes` map is keyed by
+  relative path, each value an array of `{ range, newText }`.
+
+
+  The tool **does not** apply the edits — the agent should iterate and
+  call `edit` for each change. This keeps the rename auditable and
+  reversible.
