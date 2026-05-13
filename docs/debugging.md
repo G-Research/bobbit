@@ -876,6 +876,14 @@ The HTML video-capture report is only emitted when `RECORDSCREEN=1`. If ffmpeg i
 
 If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-status?flowId=&provider=` directly to see whether the server received the callback. Files: `src/server/auth/oauth.ts`; REST: `/api/oauth/*`.
 
+## 60+ TSchema errors / typebox flavor mismatch after pi upgrade
+
+- **Symptom**: after bumping `@mariozechner/pi-ai` (or any `@mariozechner/pi-*` package that re-exports schema helpers), `npm run check` floods with structurally-incompatible-type errors against `TSchema`, `TObject`, `TProperties`, `Static<...>`, etc. Errors typically point at a file that mixes `Type.Object(...)` / `Static<typeof X>` with a pi-ai-returning helper like `StringEnum` or a tool whose `parameters` schema is consumed by pi-ai.
+- **Root cause**: pi-ai 0.73+ re-exports `Type` and `Static` from typebox **v1**. Bobbit also has a direct dependency on `@sinclair/typebox` v0.34. The two packages publish structurally-different `TSchema` types, so a value built with `@sinclair/typebox`'s `Type.Object(...)` is no longer assignable to a slot that pi-ai expects to be a v1 `TObject`, even though the runtime JSON shape is identical.
+- **Rule**: in any file that combines pi-ai schema helpers (or hands a schema to a pi-ai-typed slot) with `Type.Object(...)` / `Static<typeof X>`, import `Type` and `Static` from `@mariozechner/pi-ai` — not from `@sinclair/typebox`. Mixing flavors in the same file is the bug; picking one and using it consistently is the fix.
+- **Reference**: `src/ui/tools/artifacts/artifacts.ts` is the canonical example — it imports `StringEnum, Static, ToolCall, Type` together from `@mariozechner/pi-ai`. Files that have no pi-ai schema interop can keep importing from `@sinclair/typebox` as before.
+- **Diagnosis tip**: if the error count is large (dozens to hundreds) and all variants of `TSchema is not assignable to TSchema` originate from the same module, you're looking at a flavor mismatch, not a real type bug. Switch the `Type` / `Static` import in that file and re-run `npm run check` before changing any schema definitions.
+
 ## Bundle-size assertion fails
 
 `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and asserts ≤ 600 kB gzipped, plus ≤ 500 kB gzipped for any non-worker chunk. Check `dist/ui/.vite/manifest.j
