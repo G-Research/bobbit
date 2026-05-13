@@ -1201,6 +1201,7 @@ export class AgentInterface extends LitElement {
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
+					.sessionId=${this.session?.sessionId ?? ""}
 					.tools=${state.tools}
 					.pendingToolCalls=${this.session ? this.session.state.pendingToolCalls : new Set<string>()}
 					.isStreaming=${state.isStreaming}

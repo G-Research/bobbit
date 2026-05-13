@@ -1,6 +1,7 @@
 import { LitElement, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import "./MessageList.js";
 
 /**
  * Inline expansion above a compaction card showing the orphaned
@@ -21,20 +22,23 @@ import { gatewayFetch } from "../../app/gateway-fetch.js";
  * See docs/design/persist-compaction-history.md \u00a75.3.
  */
 
-interface OrphanRow {
+/** Verbose orphan row — the full agent message object plus index/ts decoration.
+ *  Server returns this when `verbose=1`; we feed `row.message` into
+ *  `<message-list>` which already knows how to render every agent message
+ *  shape (user, assistant, toolResult, attachments, tool groups, …). */
+interface VerboseOrphanRow {
 	index: number;
 	role: string;
 	ts: string | null;
-	text: string;
-	toolUses?: Array<{ name: string; inputPreview: string }>;
-	toolResults?: Array<{ name?: string; preview: string }>;
+	content: unknown;
+	message?: Record<string, unknown>;
 }
 
 interface OrphanEnvelope {
 	total: number;
 	returned: number;
 	nextCursor: number | null;
-	messages: OrphanRow[];
+	messages: VerboseOrphanRow[];
 }
 
 @customElement("bobbit-pre-compaction-history")
@@ -46,8 +50,12 @@ export class PreCompactionHistory extends LitElement {
 	@state() private _loading = false;
 	@state() private _error: string | null = null;
 	@state() private _expanded = false;
-	@state() private _rows: OrphanRow[] = [];
-	@state() private _nextCursor: number | null = null;
+	@state() private _rows: VerboseOrphanRow[] = [];
+	/** Lowest orphan index currently loaded. The window we hold is
+	 *  `[_firstLoadedIndex, _firstLoadedIndex + _rows.length)`. Pagination
+	 *  extends UPWARD — "Load older" at the top fetches
+	 *  `[max(0, _firstLoadedIndex - 50), _firstLoadedIndex)` and prepends. */
+	@state() private _firstLoadedIndex: number = 0;
 
 	private _observer: IntersectionObserver | null = null;
 	private _countLoaded = false;
@@ -125,13 +133,20 @@ export class PreCompactionHistory extends LitElement {
 		}
 	}
 
+	/** Load the LAST 50 orphan messages first — the ones immediately
+	 *  preceding the compaction. Reading backward through history matches
+	 *  the natural "scroll up to see older" mental model. */
 	private async _loadFirstPage(): Promise<void> {
 		if (this._loading) return;
 		this._loading = true;
 		this._error = null;
+		const PAGE = 50;
+		const total = this._total ?? 0;
+		const start = Math.max(0, total - PAGE);
+		const limit = total - start;
 		try {
 			const res = await gatewayFetch(
-				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&limit=50`,
+				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${start}&limit=${limit}&verbose=1`,
 			);
 			if (!res.ok) {
 				this._error = `Failed to load (HTTP ${res.status})`;
@@ -139,7 +154,7 @@ export class PreCompactionHistory extends LitElement {
 			}
 			const env = (await res.json()) as OrphanEnvelope;
 			this._rows = env.messages || [];
-			this._nextCursor = env.nextCursor ?? null;
+			this._firstLoadedIndex = start;
 			if (typeof env.total === "number") this._total = env.total;
 		} catch (err) {
 			this._error = err instanceof Error ? err.message : String(err);
@@ -148,21 +163,25 @@ export class PreCompactionHistory extends LitElement {
 		}
 	}
 
-	private async _loadMore(): Promise<void> {
-		if (this._loading || this._nextCursor == null) return;
+	/** Extend the loaded window UPWARD by another page (toward index 0). */
+	private async _loadOlder(): Promise<void> {
+		if (this._loading || this._firstLoadedIndex <= 0) return;
 		this._loading = true;
 		this._error = null;
+		const PAGE = 50;
+		const newStart = Math.max(0, this._firstLoadedIndex - PAGE);
+		const limit = this._firstLoadedIndex - newStart;
 		try {
 			const res = await gatewayFetch(
-				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${this._nextCursor}&limit=50`,
+				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${newStart}&limit=${limit}&verbose=1`,
 			);
 			if (!res.ok) {
 				this._error = `Failed to load (HTTP ${res.status})`;
 				return;
 			}
 			const env = (await res.json()) as OrphanEnvelope;
-			this._rows = [...this._rows, ...(env.messages || [])];
-			this._nextCursor = env.nextCursor ?? null;
+			this._rows = [...(env.messages || []), ...this._rows];
+			this._firstLoadedIndex = newStart;
 		} catch (err) {
 			this._error = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -192,7 +211,31 @@ export class PreCompactionHistory extends LitElement {
 		}
 		const stateAttr = this._expanded ? "expanded" : "collapsed";
 		const chevron = this._expanded ? "\u25be" : "\u25b8";
-		const remaining = this._nextCursor != null ? Math.max(0, this._total - this._rows.length) : 0;
+		const olderRemaining = this._firstLoadedIndex;
+		const hasOlder = olderRemaining > 0;
+		// Hydrate verbose orphan rows into the same AgentMessage shape
+		// `<message-list>` consumes for the live transcript. `row.message`
+		// is the full `entry.message` object from the JSONL — typically already
+		// in the right shape (role, content blocks, toolCallId for toolResult
+		// rows, etc.). Normalise string-content (some fixtures and legacy
+		// agent rows write `content: "hi"` directly) to the canonical
+		// `[{ type: "text", text: ... }]` shape `<assistant-message>` expects.
+		// Stamp a synthetic id so `<message-list>`'s diff key is stable.
+		const hydratedMessages = this._rows
+			.map((r) => r.message)
+			.filter((m): m is Record<string, unknown> => !!m)
+			.map((m, i) => {
+				const content = typeof m.content === "string"
+					? [{ type: "text", text: m.content }]
+					: m.content;
+				return {
+					...m,
+					content,
+					id: typeof m.id === "string" && m.id.length > 0
+						? `orphan:${this.compactionId}:${m.id}`
+						: `orphan:${this.compactionId}:${i}`,
+				};
+			});
 		return html`
 			<div
 				data-testid="pre-compaction-history"
@@ -217,54 +260,30 @@ export class PreCompactionHistory extends LitElement {
 					? html`
 						<div
 							data-testid="pre-compaction-rows"
-							style="border-left: 2px solid var(--border); padding-left: 0.75rem; margin-top: 0.5rem; opacity: 0.65; user-select: text; pointer-events: none;"
+							style="border-left: 2px solid var(--border); padding-left: 0.75rem; margin-top: 0.5rem; opacity: 0.7;"
 						>
 							${this._error
-								? html`<div class="text-xs text-destructive" style="pointer-events: auto;">${this._error}</div>`
+								? html`<div class="text-xs text-destructive">${this._error}</div>`
 								: nothing}
-							${this._rows.map((r) => this._renderRow(r))}
+							${hasOlder && !this._loading
+								? html`<button
+									type="button"
+									@click=${this._loadOlder}
+									data-testid="pre-compaction-load-more"
+									class="text-xs text-muted-foreground hover:text-foreground"
+									style="background: none; border: none; padding: 0.25rem 0; cursor: pointer; margin-bottom: 0.5rem;"
+								>\u25b2 Load ${Math.min(50, olderRemaining)} older</button>`
+								: nothing}
 							${this._loading
 								? html`<div class="text-xs text-muted-foreground">Loading\u2026</div>`
 								: nothing}
-							${this._nextCursor != null && !this._loading
-								? html`<button
-									type="button"
-									@click=${this._loadMore}
-									data-testid="pre-compaction-load-more"
-									class="text-xs text-muted-foreground hover:text-foreground"
-									style="background: none; border: none; padding: 0.25rem 0; cursor: pointer; pointer-events: auto; margin-top: 0.5rem;"
-								>\u25bc Load ${Math.min(50, remaining)} more</button>`
-								: nothing}
+							<message-list
+								.messages=${hydratedMessages as any}
+								.isStreaming=${false}
+								.hasStreamMessage=${false}
+							></message-list>
 						</div>
 					`
-					: nothing}
-			</div>
-		`;
-	}
-
-	private _renderRow(r: OrphanRow) {
-		const roleLabel = r.role === "assistant" ? "Assistant" : r.role === "user" ? "You" : r.role;
-		return html`
-			<div
-				data-testid="pre-compaction-row"
-				data-role=${r.role}
-				style="margin: 0.5rem 0; font-size: 0.875rem;"
-			>
-				<div style="font-weight: 600; font-size: 0.75rem; color: var(--muted-foreground); margin-bottom: 0.25rem;">
-					${roleLabel}${r.ts ? html` \u00b7 <span>${r.ts}</span>` : nothing}
-				</div>
-				${r.text
-					? html`<div style="white-space: pre-wrap; overflow-wrap: anywhere;">${r.text}</div>`
-					: nothing}
-				${r.toolUses && r.toolUses.length > 0
-					? html`<div style="font-size: 0.75rem; color: var(--muted-foreground); margin-top: 0.25rem;">
-						${r.toolUses.map((t) => html`<div>\u2192 ${t.name}</div>`)}
-					</div>`
-					: nothing}
-				${r.toolResults && r.toolResults.length > 0
-					? html`<div style="font-size: 0.75rem; color: var(--muted-foreground); margin-top: 0.25rem;">
-						${r.toolResults.map((t) => html`<div>\u2190 ${t.name || "result"}</div>`)}
-					</div>`
 					: nothing}
 			</div>
 		`;
