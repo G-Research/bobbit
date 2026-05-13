@@ -84,7 +84,10 @@ test.describe("Auto-start team", () => {
 	});
 
 	test("false skips team start, manual start works", async () => {
-		const goal = await createGoalForAutoStart({ autoStartTeam: false });
+		const goal = await createGoalForAutoStart({
+			autoStartTeam: false,
+			spec: "# Manual start test\nThis spec is long enough to pass the SPEC_REQUIRED guard.",
+		});
 		try {
 			expect(goal.autoStartTeam).toBe(false);
 
@@ -108,6 +111,22 @@ test.describe("Auto-start team", () => {
 			expect(teamRes2.status).toBe(200);
 			const team2 = await teamRes2.json();
 			expect(team2.teamLeadSessionId).toBeTruthy();
+		} finally {
+			await apiFetch(`/api/goals/${goal.id}/team/teardown`, { method: "POST" }).catch(() => {});
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("manual /team/start rejects empty/placeholder spec with SPEC_REQUIRED", async () => {
+		const goal = await createGoalForAutoStart({ autoStartTeam: false, spec: "placeholder" });
+		try {
+			await pollGoal(goal.id, g => g.setupStatus === "ready");
+
+			const res = await apiFetch(`/api/goals/${goal.id}/team/start`, { method: "POST" });
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(body.code).toBe("SPEC_REQUIRED");
+			expect(typeof body.error).toBe("string");
 		} finally {
 			await apiFetch(`/api/goals/${goal.id}/team/teardown`, { method: "POST" }).catch(() => {});
 			await deleteGoal(goal.id);

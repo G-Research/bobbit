@@ -5365,6 +5365,15 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
+		const startGoal = getGoalAcrossProjects(goalId);
+		const trimmedSpec = (startGoal?.spec ?? "").trim();
+		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec === "placeholder") {
+			json({
+				error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.",
+				code: "SPEC_REQUIRED",
+			}, 400);
+			return;
+		}
 		try {
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
