@@ -1250,7 +1250,7 @@ Two optional fields on the `Role` interface in `role-store.ts`:
 | Field | Type | Meaning |
 |---|---|---|
 | `model` | `"<provider>/<modelId>"` | Same shape as `default.sessionModel` (e.g. `anthropic/claude-opus-4-1`). Empty/missing = inherit. |
-| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` | Same value space as the global thinking selector. Empty/missing = inherit. |
+| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | Same value space as the global thinking selector. `xhigh` is only honoured on models that support it (Opus 4.6+, gpt-5.1-codex-max, gpt-5.2*) — unsupported levels are clamped down at use-time. Empty/missing = inherit. See [Per-model thinking-level capabilities](thinking-levels.md). |
 
 `parseRole` and `serializeRole` round-trip both fields and omit them from YAML when unset ("absent" and "empty string" are equivalent on the wire). Malformed values (e.g. `model: "no-slash"`, `thinkingLevel: "weird"`) are silently dropped at parse time so a typo never breaks role loading; the API layer rejects them with 400 so the UI surfaces the error.
 
@@ -1295,7 +1295,7 @@ Agent processes are now spawned with the desired model and reasoning level passe
 `RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
 
 - `initialModel?: string` - literal `<provider>/<modelId>`.
-- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high`.
+- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
 
 `buildAgentArgs(options)` in the same file translates them to `--model <provider>/<modelId>` and `--thinking <level>` and prepends them to the agent argv. Malformed values (no `/`, unknown level) are silently dropped - the post-spawn helpers will still bind correctly.
 
