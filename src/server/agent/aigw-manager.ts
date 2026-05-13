@@ -382,6 +382,37 @@ export function removeAigwModelsJson(): void {
 // ── Startup internet check ─────────────────────────────────────────
 
 /**
+ * Apply `PI_OFFLINE=1` to the gateway process env when no internet was
+ * detected at startup. Spawned pi-coding-agent subprocesses inherit
+ * `process.env` (see `rpc-bridge.ts`) and pi 0.74.0+ honours this var by
+ * skipping the GitHub fd/rg download path in `ensureTool()` — returning
+ * `undefined` cleanly instead of timing out (~10s) on each first call.
+ *
+ * Rules:
+ *   • If the user has already set `PI_OFFLINE` (any non-empty value), it is
+ *     preserved verbatim — never overridden.
+ *   • Otherwise, when `hasInternet === false`, set `PI_OFFLINE=1` and log a
+ *     single explanatory line.
+ *   • When `hasInternet === true`, do NOT set `PI_OFFLINE`. Leave existing
+ *     state alone — don't introduce an unset that would change behaviour
+ *     for online users who currently rely on pi's download fallback.
+ *
+ * Exported for unit testing. Idempotent.
+ */
+export function applyPiOfflineEnv(hasInternet: boolean): void {
+	const userValue = process.env.PI_OFFLINE;
+	if (userValue !== undefined && userValue !== "") {
+		// Respect any pre-existing user-supplied value.
+		return;
+	}
+	if (hasInternet) return;
+	process.env.PI_OFFLINE = "1";
+	console.log(
+		"[pi-offline] Internet unavailable; setting PI_OFFLINE=1 — pi will skip GitHub fd/rg downloads. Use bundled binaries or pre-install fd/rg on PATH.",
+	);
+}
+
+/**
  * One-shot internet check at gateway startup. Tries HEAD requests to
  * well-known LLM API endpoints. Returns true if any responds.
  * Called once — not repeated after startup.
@@ -414,6 +445,17 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		// Users with a local aigw are typically offline; probe the public
+		// internet once and wire PI_OFFLINE accordingly. The probe is short
+		// (≤4s) and runs in parallel with no other startup work below.
+		if (!process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
+			try {
+				const hasInternet = await checkInternetAvailable();
+				applyPiOfflineEnv(hasInternet);
+			} catch {
+				applyPiOfflineEnv(false);
+			}
+		}
 		if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
 			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
 			return true;
@@ -436,6 +478,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 
 	// Check internet
 	const hasInternet = await checkInternetAvailable();
+	applyPiOfflineEnv(hasInternet);
 	if (hasInternet) {
 		console.log("[aigw] Internet available — using standard providers");
 		return false;
