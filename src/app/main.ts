@@ -53,6 +53,11 @@ setRenderApp(doRenderApp);
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
+// Also expose `refreshSessions` and `openForNavItem` for the manual perf
+// harness. These are pure data-fetching / navigation entry points; exposing
+// them adds no new attack surface beyond what `__bobbitState` already does.
+import("./api.js").then((m) => { (window as any).__bobbitRefreshSessions = m.refreshSessions; }).catch(() => {});
+import("./sidebar-nav.js").then((m) => { (window as any).__bobbitOpenForNavItem = m.openForNavItem; }).catch(() => {});
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
