@@ -480,35 +480,67 @@ describe("message-reducer", () => {
 		assert.strictEqual(payload.tokensBefore, PARSED);
 	});
 
-	it("(12c) snapshot with only server text marker is upgraded to a rich synthetic", () => {
-		const serverText = {
-			id: "asst_compact_server_3",
-			role: "assistant",
-			content: [{ type: "text", text: "Context compacted from 9.4k tokens." }],
-			timestamp: 0,
+	it("(12c-replacement) sidecar synthetic in snapshot is rendered as rich card", () => {
+		// With the compaction sidecar (docs/design/persist-compaction-history.md
+		// §A), the server splices the rich synthetic into snapshots directly.
+		// The reducer must NOT touch the existing `__compaction_summary`
+		// toolCall row — it flows through the snapshot pipeline like any other
+		// server row. This replaces the legacy (12c) text-marker-upgrade test.
+		const sidecarId = "c_1731602400000_a1b2c3";
+		const toolCallId = `compaction-summary:${sidecarId}`;
+		const payload = {
+			schemaVersion: 1,
+			trigger: "manual",
+			state: "complete",
+			success: true,
+			timestamp: "2026-05-12T14:00:00.000Z",
+			startedAt: "2026-05-12T13:59:59.000Z",
+			durationMs: 1000,
+			tokensBefore: 9_400,
+			tokensAfter: null,
+			reductionPct: null,
+			compactionId: sidecarId,
 		};
-		const s = applyAll([
-			{ type: "snapshot", messages: [userMsg("u1", "x"), serverText] },
-		]);
+		const syntheticMsg = {
+			id: sidecarId,
+			role: "assistant",
+			timestamp: 1_731_602_500_000,
+			content: [{
+				type: "toolCall",
+				id: toolCallId,
+				name: "__compaction_summary",
+				arguments: payload,
+			}],
+		};
+		const syntheticResult = {
+			role: "toolResult",
+			toolCallId,
+			toolName: "__compaction_summary",
+			isError: false,
+			content: [{ type: "text", text: "ok" }],
+			details: payload,
+			timestamp: 1_731_602_500_000,
+		};
+		const s = applyAll([{
+			type: "snapshot",
+			messages: [userMsg("u1", "x"), syntheticMsg, syntheticResult],
+		}]);
 		const compaction = s.messages.find((m: any) =>
 			Array.isArray(m.content)
 				&& m.content.some((c: any) => c?.name === "__compaction_summary"),
 		);
-		assert.ok(compaction, "upgrade should produce a rich synthetic");
+		assert.ok(compaction, "sidecar-spliced rich synthetic must survive snapshot");
 		const call = (compaction as any).content[0];
 		assert.equal(call.name, "__compaction_summary");
+		assert.equal(call.id, toolCallId);
+		assert.equal(call.arguments.compactionId, sidecarId, "compactionId must be preserved for Part C");
 		assert.equal(call.arguments.tokensBefore, 9_400);
-		assert.equal(call.arguments.tokensAfter, null);
-		assert.equal(call.arguments.reductionPct, null);
-		// And no plain-text marker survives — it has been replaced in place.
-		assert.ok(
-			!s.messages.some((m: any) => {
-				if (m.role !== "assistant" || !Array.isArray(m.content)) return false;
-				const t = m.content.filter((c: any) => c?.type === "text").map((c: any) => c.text || "").join("");
-				return t.startsWith("Context compacted");
-			}),
-			"server plain-text marker must be replaced in place, not duplicated",
+		// Paired toolResult must also be present (renderer needs both).
+		const tr = s.messages.find((m: any) =>
+			m.role === "toolResult" && (m as any).toolCallId === toolCallId,
 		);
+		assert.ok(tr, "paired toolResult must survive snapshot");
+		assert.equal((tr as any).details?.compactionId, sidecarId);
 	});
 
 	it("RE-07-style — preferences snapshot ordering preserved (stable by tick)", () => {

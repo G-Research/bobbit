@@ -7,7 +7,7 @@ import { AlertTriangle, Check, PackageOpen, X } from "lucide";
 import { renderCollapsibleHeader, renderHeader, type ToolHeaderState } from "../renderer-registry.js";
 import { formatDuration } from "./delegate-cards.js";
 import "../../components/LiveTimer.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import type { ToolRenderer, ToolRenderResult, ToolRenderContext } from "../types.js";
 import type {
 	CompactionState,
 	CompactionSummaryPayload,
@@ -60,6 +60,7 @@ export class CompactionSummaryRenderer
 		params: CompactionSummaryPayload | undefined,
 		result: ToolResultMessage<CompactionSummaryPayload> | undefined,
 		_isStreaming?: boolean,
+		_ctx?: ToolRenderContext,
 	): ToolRenderResult {
 		const payload: CompactionSummaryPayload | undefined =
 			(result?.details as CompactionSummaryPayload | undefined) ?? params;
@@ -136,6 +137,12 @@ export class CompactionSummaryRenderer
 			<span>${headerLabel}</span>
 			${verdictPill}
 		`;
+
+		// Pre-compaction history affordance is rendered by <message-list> as
+		// a sibling row immediately ABOVE this card, so the orphaned messages
+		// appear inline in the transcript at full visual fidelity. Keeping
+		// it inside the card would put the rows inside a nested rounded box
+		// and force them through this renderer's layout.
 
 		const errorLine = (() => {
 			const msg = friendlyError(payload);

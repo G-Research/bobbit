@@ -166,9 +166,12 @@ function handleKeydown(e) {
 	if (["Control", "Meta", "Shift", "Alt"].includes(e.key)) return;
 	const inputFocused = isInputFocused();
 	for (const entry of shortcuts.values()) {
-		if (inputFocused && !entry.allowInInput) continue;
 		for (const binding of entry.currentBindings) {
 			if (matchesBinding(e, binding)) {
+				if (inputFocused) {
+					if (entry.allowInInput === false) continue;
+					if (entry.allowInInput === undefined && !binding.ctrlOrMeta && !binding.alt) continue;
+				}
 				e.preventDefault();
 				entry.handler();
 				return;
