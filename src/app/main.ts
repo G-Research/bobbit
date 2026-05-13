@@ -1,8 +1,15 @@
 // Perf trace primitive must initialize before anything else so the boot
 // mark records the earliest possible timestamp on cold load. See
 // `src/app/perf-trace.ts` and the Phase 1 design doc.
-import { mark as perfMark } from "./perf-trace.js";
+import { mark as perfMark, record as perfRecord, isEnabled as perfIsEnabled } from "./perf-trace.js";
 perfMark("app.boot");
+// Capture the boot timestamp immediately after the mark so cold-load nav
+// spans (`nav.session.cold` / `nav.goal.cold`) can be measured from the
+// earliest possible point. Reading the mark back via
+// `performance.getEntriesByName("bobbit:app.boot")` would be marginally more
+// accurate, but the mark is itself a no-op when perf is disabled — and we
+// only use BOOT_T0 when perf is enabled (see installColdNavObserver).
+const BOOT_T0 = (typeof performance !== "undefined" ? performance.now() : 0);
 import "./app.css";
 // Eagerly load CSS that is also used by proposal preview panes
 // ([data-panel="project-proposal"], [data-panel="role-proposal"],
@@ -691,6 +698,70 @@ async function initApp() {
 		} catch {}
 	});
 }
+
+// ============================================================================
+// COLD-LOAD NAV SPAN OBSERVER
+//
+// Watches `#app[data-perf-ready]` for the first transition to "session" or
+// "goal" after boot. On that first transition, records a `nav.session.cold`
+// or `nav.goal.cold` perf span from BOOT_T0 to now, then disconnects (the
+// span is only meaningful on cold load — subsequent transitions are warm
+// navs covered by `nav.session.ready` / `nav.goal.ready`).
+//
+// Cheap when disabled: returns early before installing the MutationObserver.
+// Pinned by `tests/perf-trace-cold-spans.spec.ts`.
+// ============================================================================
+export function installColdNavObserver(
+	target: Element | null | undefined,
+	bootT0: number,
+): () => void {
+	const noop = () => { /* no-op */ };
+	if (!perfIsEnabled()) return noop;
+	if (!target || typeof MutationObserver === "undefined") return noop;
+
+	let fired = false;
+	let observer: MutationObserver | null = null;
+	const disconnect = () => {
+		if (observer) {
+			observer.disconnect();
+			observer = null;
+		}
+	};
+
+	const tryEmit = (): boolean => {
+		if (fired) return true;
+		const v = target.getAttribute("data-perf-ready");
+		if (v !== "session" && v !== "goal") return false;
+		fired = true;
+		const dur = (typeof performance !== "undefined" ? performance.now() : 0) - bootT0;
+		const detail: Record<string, unknown> = {};
+		try {
+			const hash = (typeof location !== "undefined" ? location.hash : "") || "";
+			const stripped = hash.replace(/^#\/?/, "");
+			const parts = stripped.split("/");
+			if (v === "session" && parts[0] === "session" && parts[1]) {
+				detail.sessionId = parts[1];
+			} else if (v === "goal" && (parts[0] === "goal" || parts[0] === "goal-dashboard") && parts[1]) {
+				detail.goalId = parts[1];
+			}
+		} catch { /* hash unavailable */ }
+		perfRecord(`nav.${v}.cold`, dur, Object.keys(detail).length ? detail : undefined);
+		disconnect();
+		return true;
+	};
+
+	// If the attribute is already set before we attach (e.g. very fast first
+	// render), emit immediately and skip the observer entirely.
+	if (tryEmit()) return disconnect;
+
+	observer = new MutationObserver(() => { tryEmit(); });
+	observer.observe(target, { attributes: true, attributeFilter: ["data-perf-ready"] });
+	return disconnect;
+}
+
+// Install at module load. `#app` is a static element in index.html, so it
+// already exists when this script runs.
+installColdNavObserver(typeof document !== "undefined" ? document.getElementById("app") : null, BOOT_T0);
 
 initApp();
 
