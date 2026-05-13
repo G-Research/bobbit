@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -1127,6 +1128,22 @@ export class VerificationHarness {
 	/** Monotonic counter used to stamp `seq` on every broadcast event. */
 	private _verifSeqCounter = 0;
 
+	/**
+	 * Tracked subprocess for each live command-step, keyed by
+	 * `${signalId}:${stepIndex}`. Used by `cancelVerification` /
+	 * `cancelStaleVerifications` to tree-kill the running shell on cancel,
+	 * and by `shutdown()` for graceful gateway exit.
+	 */
+	private _trackedCommandChildren = new Map<string, TrackedChild>();
+
+	/**
+	 * Tracked-child keys that were killed by an explicit cancellation rather
+	 * than a timeout or natural exit. Read in `runCommandStep`'s close
+	 * handler so the resolved output carries the cancellation marker even
+	 * after the parent `ActiveVerification` entry has been purged.
+	 */
+	private _cancelledTrackedKeys = new Set<string>();
+
 	private readonly broadcastFn: (goalId: string, event: any) => void;
 
 	constructor(
@@ -1235,6 +1252,30 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Tree-kill any tracked command-step subprocess registered under the given
+	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
+	 * observable within ~1s (single-timer path, no setInterval poll).
+	 */
+	private _killTrackedForSignal(signalId: string): void {
+		for (const key of Array.from(this._trackedCommandChildren.keys())) {
+			if (key.startsWith(signalId + ":")) {
+				const t = this._trackedCommandChildren.get(key);
+				this._trackedCommandChildren.delete(key);
+				this._cancelledTrackedKeys.add(key);
+				try { t?.killTree("SIGTERM", 1000); } catch { /* best-effort */ }
+			}
+		}
+	}
+
+	/**
+	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
+	 * orphan chromium / playwright descendants don't survive the gateway exit.
+	 */
+	shutdown(): void {
+		try { killAllTracked("SIGKILL"); } catch { /* best-effort */ }
+	}
+
+	/**
 	 * Cancel ALL in-flight verifications for a goal (all gates).
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
@@ -1243,6 +1284,8 @@ export class VerificationHarness {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+
+			this._killTrackedForSignal(signalId);
 
 			for (const step of active.steps) {
 				if (step.sessionId && step.status === "running") {
@@ -1276,6 +1319,8 @@ export class VerificationHarness {
 				// Mark as cancelled
 				active.cancelled = true;
 				active.overallStatus = "cancelled";
+
+				this._killTrackedForSignal(signalId);
 
 				// Terminate all running reviewer sessions
 				for (const step of active.steps) {
@@ -2866,28 +2911,56 @@ export class VerificationHarness {
 				return { passed: expectFailure, output: err.message };
 			};
 
-			let child;
+			// IMPORTANT: do NOT re-introduce `spawn(..., { timeout })` here.
+			// Node's `timeout` option only kills the immediate child (the
+			// shell), leaving descendants (npm, playwright, chromium) running.
+			// The same is true for any direct `process.kill(child.pid, sig)`.
+			// We use `spawnTracked` which spawns the child in its own process
+			// group (POSIX `detached:true`) so the helper can kill the whole
+			// tree via `process.kill(-pgid, sig)` (or `taskkill /T /F` on
+			// Windows). The helper owns the timeout timer. See spawn-tree.ts.
+			// This primitive is reusable; any caller that spawns a shell which
+			// may itself spawn descendants should prefer it over raw spawn.
+			let tracked: TrackedChild | undefined;
+			let child: any;
 			let spawnError: Error | undefined;
 			try {
-				child = containerId
-					? spawn("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
+				if (containerId) {
+					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
 						stdio: ["ignore", "pipe", "pipe"],
-						timeout: timeoutSec * 1000,
+						timeoutMs: timeoutSec * 1000,
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-					})
-					: useDetached
-						? spawn(shellBin, [...shellArgs, cmdToRun], {
-							cwd: normalizedCwd,
-							detached: true,
-							stdio: ["ignore", outFd!, errFd!],
-							...(process.platform === "win32" ? { windowsHide: true } : {}),
-						})
-						: spawn(shellBin, [...shellArgs, cmdToRun], {
-							cwd: normalizedCwd,
-							timeout: timeoutSec * 1000,
-							stdio: ["ignore", "pipe", "pipe"],
-							...(process.platform === "win32" ? { windowsHide: true } : {}),
-						});
+						onTimeout: () => {
+							// Belt-and-braces: host-side tree-kill of `docker exec`
+							// does not reliably reach in-container descendants.
+							// Fire an in-container kill of pgid 1 (and everything
+							// it leads) as a fire-and-forget child before the host
+							// tree-kill runs.
+							try {
+								const killer = spawn("docker", [
+									"exec", containerId, "/bin/sh", "-c",
+									"kill -TERM -1 2>/dev/null || true; sleep 0.2; kill -KILL -1 2>/dev/null || true",
+								], { stdio: "ignore" });
+								killer.on("error", () => { /* docker missing — best-effort */ });
+							} catch { /* ignore */ }
+						},
+					});
+				} else if (useDetached) {
+					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+						cwd: normalizedCwd,
+						stdio: ["ignore", outFd!, errFd!],
+						timeoutMs: timeoutSec * 1000,
+						windowsHide: process.platform === "win32",
+					});
+				} else {
+					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+						cwd: normalizedCwd,
+						stdio: ["ignore", "pipe", "pipe"],
+						timeoutMs: timeoutSec * 1000,
+						windowsHide: process.platform === "win32",
+					});
+				}
+				child = tracked.child;
 			} catch (err) {
 				spawnError = err as Error;
 			} finally {
@@ -2898,10 +2971,14 @@ export class VerificationHarness {
 				if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
 			}
 
-			if (spawnError || !child) {
+			if (spawnError || !child || !tracked) {
 				resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
 				return;
 			}
+
+			// Register so cancellation / shutdown can tree-kill the live child.
+			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
+			this._trackedCommandChildren.set(trackedKey, tracked);
 
 			// Stamp the persisted step with everything needed for cross-restart
 			// recovery before doing anything else — if the gateway dies right
@@ -2966,21 +3043,8 @@ export class VerificationHarness {
 				child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
 			}
 
-			// Manual timeout for the detached path — spawn's `timeout` option
-			// kills only the immediate child; the detached subshell may outlive
-			// it on some platforms. Doing it ourselves keeps the semantics
-			// uniform across modes.
-			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			if (useDetached) {
-				timeoutHandle = setTimeout(() => {
-					timedOut = true;
-					try { if (child.pid) process.kill(child.pid, "SIGKILL"); } catch { /* already dead */ }
-				}, timeoutSec * 1000);
-			}
-
-			child.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
+			child.on("close", (code: number | null) => {
+				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
 				let outText = stdout;
@@ -2989,20 +3053,35 @@ export class VerificationHarness {
 					try { outText = fs.readFileSync(outFile, "utf8"); } catch { outText = stdout; }
 					try { errText = fs.readFileSync(errFile, "utf8"); } catch { errText = stderr; }
 				}
-				const output = (outText + "\n" + errText).trim().slice(-5000);
-				const effectiveCode: number | null = timedOut ? null : code;
+				const tail = (outText + "\n" + errText).trim().slice(-5000);
+				const didTimeOut = tracked!.timedOut();
+				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
+
+				if (didTimeOut) {
+					const marker = `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`;
+					const combined = tail ? `${tail}\n${marker}` : marker;
+					if (expectFailure) {
+						// Honour expectFailure + errorPattern against the accumulated output.
+						resolve(matchExpectFailure(null, combined, errorPattern));
+						return;
+					}
+					resolve({ passed: false, output: combined });
+					return;
+				}
+				if (didCancel) {
+					const marker = `[step cancelled \u2014 killed subprocess tree]`;
+					const combined = tail ? `${tail}\n${marker}` : marker;
+					resolve({ passed: false, output: combined });
+					return;
+				}
 				if (expectFailure) {
-					resolve(matchExpectFailure(effectiveCode, output, errorPattern));
+					resolve(matchExpectFailure(code, tail, errorPattern));
 					return;
 				}
-				if (timedOut) {
-					resolve({ passed: false, output: output || `command timed out after ${timeoutSec}s` });
-					return;
-				}
-				resolve({ passed: code === 0, output: output || `exit code ${code}` });
+				resolve({ passed: code === 0, output: tail || `exit code ${code}` });
 			});
-			child.on("error", (err) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
+			child.on("error", (err: Error) => {
+				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
 			});
@@ -3192,7 +3271,10 @@ export class VerificationHarness {
 					return finalize(readExitFile());
 				}
 				// Timed out or process died without writing the exit file
-				try { if (step.pid) process.kill(step.pid, "SIGKILL"); } catch { /* already dead */ }
+				// The original spawn used detached:true, so the persisted pid is
+				// also the pgid. killTreeByPid handles negative-pid kill (POSIX)
+				// and taskkill /T /F (Windows) so we reap descendants too.
+				if (step.pid) try { killTreeByPid(step.pid, "SIGKILL"); } catch { /* already dead */ }
 				return {
 					name: step.name,
 					type: step.type,

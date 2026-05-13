@@ -2,6 +2,14 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Verification step stuck in `running`
+
+- **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
+- **Cause**: Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pid, sig)` only target the immediate child shell, not its descendants. The shell dies; everything it spawned keeps running. The harness's `child.on("close")` races against orphans holding stdio open.
+- **Fix**: all command-step spawns go through `src/server/agent/spawn-tree.ts::spawnTracked`, which puts the child in its own process group (POSIX `detached:true`) and reaps the whole tree via `process.kill(-pgid, sig)` / `taskkill /T /F /PID`. Helper owns the timeout timer. Cancellation and recovery paths route through the same helper (`killTreeByPid`). Harness shutdown calls `killAllTracked("SIGKILL")`.
+- **Confirm a kill**: `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty within ~3s of step settle. Output of the failed step ends with `— killed subprocess tree`.
+- **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.
