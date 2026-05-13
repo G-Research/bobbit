@@ -61,9 +61,13 @@ export function resolvePyrightLangserver(): { node: string; cliMjs: string } | n
 
 export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	let child: ChildProcess;
-	if (opts.sandbox) {
-		const cid = opts.sandbox.containerIdForWorktree(opts.worktreePath);
-		if (!cid) throw new Error(`sandbox has no container for worktree ${opts.worktreePath}`);
+	// Sandbox bridge is best-effort: when no container exists for this
+	// worktree (host-only sessions, fixture tests, sandbox not yet started),
+	// fall back to a host-side spawn rather than throwing. This keeps the
+	// supervisor working uniformly across sandboxed and non-sandboxed
+	// worktrees within the same gateway.
+	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
+	if (opts.sandbox && cid) {
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
 		child = opts.sandbox.spawn({
 			containerId: cid,
