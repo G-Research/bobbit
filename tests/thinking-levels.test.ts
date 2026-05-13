@@ -73,6 +73,17 @@ test("isKnownThinkingLevel: accepts valid, rejects unknown / empty / non-string"
 	assert.equal(isKnownThinkingLevel(7), undefined);
 });
 
+test("supportsXHigh: cross-provider id collision fails closed", () => {
+	// claude-opus-4-7 served by openai (a misconfigured id) must NOT light up xhigh.
+	assert.equal(supportsXHigh({ id: "claude-opus-4-7", provider: "openai" }), false);
+	// gpt-5.2 served by anthropic likewise.
+	assert.equal(supportsXHigh({ id: "gpt-5.2", provider: "anthropic" }), false);
+	// gpt-5.2 served by google likewise.
+	assert.equal(supportsXHigh({ id: "gpt-5.2", provider: "google" }), false);
+	// claude-opus-4-7 served by google likewise.
+	assert.equal(supportsXHigh({ id: "claude-opus-4-7", provider: "google" }), false);
+});
+
 test("supportsXHigh: returns true only for Opus 4.6+ and gpt-5.1-codex-max / gpt-5.2*", () => {
 	assert.equal(supportsXHigh({ id: "claude-opus-4-7-x", provider: "anthropic" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-6-x", provider: "anthropic" }), true);

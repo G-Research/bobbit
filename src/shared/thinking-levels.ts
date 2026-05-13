@@ -64,12 +64,32 @@ export function isKnownThinkingLevel(value: unknown): ThinkingLevel | undefined 
 }
 
 /**
+ * Provider guards for xhigh capability. We fail CLOSED on cross-provider id
+ * collisions: a model whose id resembles an Anthropic family but is served
+ * via OpenAI (or vice versa) does not light up xhigh.
+ *
+ * Rules:
+ *   - If `provider` is the canonical owner string for the family
+ *     (`anthropic` / `openai`) → accept.
+ *   - If `provider` is `aigw` (or empty) → accept, then rely on the id check.
+ *     aigw routes models from many upstreams but preserves the canonical id.
+ *   - Any other provider (`openai` for a `claude-*` id, `google`, etc.) →
+ *     reject regardless of id.
+ */
+function providerMatches(provider: string, canonical: "anthropic" | "openai"): boolean {
+	if (!provider) return true; // legacy / client state with unset provider
+	if (provider === canonical) return true;
+	if (provider === "aigw") return true;
+	return false;
+}
+
+/**
  * Does the given model's id/provider indicate Anthropic Opus 4.6 or later?
  * Matches `claude-opus-4-N` where N is 6..9 or any 2+ digit number, so
  * future 4.10+ revisions work without a code change.
  */
 function isOpusXHigh(id: string, provider: string): boolean {
-	if (provider && provider !== "anthropic" && !id.startsWith("claude-")) return false;
+	if (!providerMatches(provider, "anthropic")) return false;
 	return /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id);
 }
 
@@ -78,7 +98,7 @@ function isOpusXHigh(id: string, provider: string): boolean {
  * supports xhigh? Currently gpt-5.1-codex-max and any gpt-5.2*.
  */
 function isOpenAiXHigh(id: string, provider: string): boolean {
-	if (provider && provider !== "openai" && !id.startsWith("gpt-")) return false;
+	if (!providerMatches(provider, "openai")) return false;
 	if (/^gpt-5\.1-codex-max\b/i.test(id)) return true;
 	if (/^gpt-5\.2/i.test(id)) return true;
 	return false;

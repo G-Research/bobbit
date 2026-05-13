@@ -46,7 +46,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
-import { THINKING_LEVELS, clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
@@ -3434,12 +3434,14 @@ export class SessionManager {
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
 				const t = resolved.find(r => r.item.name === role)?.item.thinkingLevel;
-				if (isKnownThinkingLevel(t)) candidate = t;
+				const known = isKnownThinkingLevel(t);
+				if (known) candidate = known;
 			} catch { /* fall through */ }
 		}
 		if (!candidate) {
 			const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
-			if (isKnownThinkingLevel(pref)) candidate = pref;
+			const known = isKnownThinkingLevel(pref);
+			if (known) candidate = known;
 		}
 		if (!candidate) candidate = "medium";
 		// Defensive clamp against the resolved spawn model (if known). For
@@ -3614,7 +3616,9 @@ export class SessionManager {
 		// display default and ensures team/delegate agents get an explicit level
 		// instead of relying on the agent's built-in default.
 		if (!level) level = "medium";
-		if (!(THINKING_LEVELS as readonly string[]).includes(level)) return;
+		const knownLevel = isKnownThinkingLevel(level);
+		if (!knownLevel) return;
+		level = knownLevel;
 		// Clamp against the session's current model when known so xhigh on a
 		// non-supporting model degrades to high (etc.) at apply time.
 		try {
