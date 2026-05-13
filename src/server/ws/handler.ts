@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
-import { spliceInFlightMessage } from "../agent/splice-inflight-message.js";
+import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
@@ -680,11 +680,17 @@ export function handleWebSocketConnection(
 						let data: any = raw;
 						if (Array.isArray(raw)) {
 							// H3: splice in-flight message_update before truncation/sidecar/stamp.
-							const spliced = spliceInFlightMessage(raw, (session as any).latestMessageUpdate);
+							const spliced = spliceInFlightSteers(
+								spliceInFlightMessage(raw, (session as any).latestMessageUpdate),
+								(session as any).inFlightSteerTexts,
+							);
 							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
 							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
 						} else if (raw && Array.isArray(raw.messages)) {
-							const spliced = spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate);
+							const spliced = spliceInFlightSteers(
+								spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate),
+								(session as any).inFlightSteerTexts,
+							);
 							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
 							const truncated = truncateLargeToolContentInMessages(withCompaction);
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);

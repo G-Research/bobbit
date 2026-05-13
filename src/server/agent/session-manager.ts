@@ -278,8 +278,8 @@ export interface SessionInfo {
 // it without dragging in the full session-manager module graph (which
 // transitively pulls flexsearch, pi-coding-agent, etc.). Re-exported here
 // for backwards compat with existing call sites.
-export { spliceInFlightMessage } from "./splice-inflight-message.js";
-import { spliceInFlightMessage } from "./splice-inflight-message.js";
+export { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
+import { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
 
 /** Helper: extract the text body of a user message (string or block array). */
 function extractUserMessageText(message: any): string {
@@ -3328,11 +3328,17 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					const spliced = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
 					data = truncateLargeToolContentInMessages(withCompaction);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
 					const truncated = truncateLargeToolContentInMessages(withCompaction);
 					data = spliced === raw.messages && truncated === raw.messages && withCompaction === raw.messages
@@ -4154,9 +4160,15 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					data = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					data = spliceInFlightSteers(
+						spliceInFlightMessage(raw, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					data = spliced === raw.messages ? raw : { ...raw, messages: spliced };
 				}
 				broadcast(session.clients, { type: "messages", data });
