@@ -100,6 +100,11 @@ export class StaffManager {
 			}
 			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
+				// Pass roleName so session-setup can apply role-keyed model/thinking-level
+				// overrides at spawn time. Without this, `plan.role ?? plan.roleName` falls
+				// through to undefined and the resolvers return defaults — staff roles with
+				// `model`/`thinkingLevel` overrides would be silently ignored.
+				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: id },
 				sandboxed: effectiveSandboxed,
 				sandboxBranch: effectiveSandboxed ? branchName : undefined,
@@ -309,6 +314,9 @@ export class StaffManager {
 			const sessionCwd = staff.worktreePath ?? staff.cwd;
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
+				// See companion call site in createStaff — roleName must flow so role-keyed
+				// model/thinking-level overrides apply at spawn.
+				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: staffId },
 				sandboxed: sessionManager.isSandboxEnabled,
 				sandboxBranch: sessionManager.isSandboxEnabled ? staff.branch : undefined,
