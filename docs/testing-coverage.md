@@ -49,6 +49,15 @@ User-facing contract: "if I am at the bottom when content arrives, I stay at the
 - **Production invariant** — `agent-interface .overflow-y-auto` ships with inline `overflow-anchor: none` so Chromium and Safari/iOS PWA execute the same JS pin path; CI on Chromium catches what Safari users would otherwise see in production. Contract in [docs/internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant).
 - **Lower-tier scroll specs** — unit-level coverage of the scroll lock primitives lives in `tests/agent-interface-scroll.spec.ts` (zero-delta vibration), `tests/agent-interface-scroll-hardening.spec.ts` (echo ring, sub-pixel rounding), `tests/scroll-anchor-shrink.spec.ts`, `tests/collapse-scroll-bugs.spec.ts`, `tests/mobile-scroll-keyboard.spec.ts`, `tests/e2e/ui/jump-to-bottom.spec.ts`.
 
+## Agent tool-use canary (manual integration)
+
+- **File**: `tests/manual-integration/agent-tool-use.spec.ts`. Runs under `npm run test:manual` only (real LLM + Docker sandbox).
+- **Why it exists**: an earlier upgrade of the upstream `@mariozechner/pi-*` packages silently broke all agent tool use; no test in the unit / API / browser layers exercised a real LLM-driven agent calling tools end-to-end, so the regression escaped the whole suite. This spec is the canary that fails fast on the next pi bump if the tool-call wiring breaks again.
+- **What it covers**: five scenarios, each in its own fresh sandboxed session — builtin `bash`, the `defaults/tools/filesystem/edit` MCP tool, the `defaults/tools/filesystem/find` MCP tool, mid-tool steer/interrupt (long-running bash, then pivot), and a tool error path (`edit` on a missing file). Together they exercise builtin shell, file-editing, MCP-backed tools, the steer/interrupt path, and tool-error surfacing.
+- **Sentinel-based assertions, not log scraping**: each scenario instructs the agent to emit a unique sentinel — `HELLO_<nonce>`, `DONE`, `COUNT=3`, `PIVOT_ACK`, `EDIT_FAILED:` — and the test asserts the sentinel appears in the rendered transcript (UI DOM) or in the filesystem state of the worktree. Assertions are deliberately on observable user-facing behavior rather than on internal session logs or pi-ai event shapes, so the test stays valid across pi-internal refactors.
+- **Runtime budget**: stays inside the existing `npm run test:manual` ~5-minute budget; scenarios run serially in fresh sessions to keep each one independent and the failure signal narrow.
+- **Gate on pi upgrades**: this spec must be green on the currently pinned pi line **before** any `@mariozechner/pi-*` version bump, and must stay green after. If it regresses after a bump, the bump is the bug — adapt Bobbit to pi's new API rather than relaxing the spec.
+
 ## Sidebar child auto-loading
 
 Ensures visible sidebar entries always have their children loaded.

@@ -516,6 +516,10 @@ This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`
 
 **When to run**: After changes to session lifecycle, restore logic, sandbox wiring, worktree management, git status polling, or any server restart behavior. Not needed for UI-only or prompt-only changes.
 
+### Agent tool-use canary
+
+`tests/manual-integration/agent-tool-use.spec.ts` is the regression net for upstream `@mariozechner/pi-*` upgrades. A previous pi bump silently broke all agent tool use because nothing in the unit / API / browser layers exercised a real LLM-driven agent actually calling tools end-to-end. The spec spawns a real agent in a sandboxed session and drives five scenarios (builtin bash, MCP-backed edit and find, mid-tool steer/interrupt, tool error) that each assert on a unique sentinel string in the UI transcript or on filesystem state — never on internal session logs — so it stays valid across pi-internal refactors. Run before and after any `@mariozechner/pi-*` version bump; see [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-manual-integration) for the scenario list and rationale.
+
 ## Target State
 
 | Layer | Tests | Runtime | Confidence |
