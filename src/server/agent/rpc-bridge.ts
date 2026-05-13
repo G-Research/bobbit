@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,91 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
 const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
+
+/**
+ * Host path to the undici idle-stream timeout preload, copied into
+ * dist/server/defaults/agent-preload/ by scripts/copy-defaults.mjs.
+ *
+ * Injected into every agent subprocess via NODE_OPTIONS=--require=... — see
+ * design doc "Idle-stream timeout for remote LLM calls" and the preload
+ * source for rationale.
+ */
+export const PRELOAD_PATH = path.join(__dirname, "..", "defaults", "agent-preload", "undici-idle-timeouts.cjs");
+/** Container path the preload is bind-mounted to for Docker sessions. */
+export const CONTAINER_PRELOAD_PATH = "/bobbit-preload/undici-idle-timeouts.cjs";
+
+/**
+ * Per-container cache of whether the preload file is actually mounted inside
+ * the container. Probed once on first exec via `docker exec <id> test -f ...`.
+ *
+ * Required because (a) older containers created before the preload-mount
+ * feature won't have the bind mount, and (b) the host-side `fs.statSync`
+ * guard in docker-args.ts means a missing host file produces a container
+ * without the mount. Without this check, `node --require=<missing>` exits
+ * immediately and breaks the session.
+ */
+const _preloadMountCache = new Map<string, boolean>();
+
+/** For tests — reset the per-container preload-mount probe cache. */
+export function _resetPreloadMountCacheForTests(): void {
+	_preloadMountCache.clear();
+}
+
+/**
+ * Probe whether the undici idle-timeout preload is mounted at
+ * {@link CONTAINER_PRELOAD_PATH} inside the given container. Result is
+ * cached per containerId for the lifetime of the gateway process.
+ *
+ * Short-circuits to `false` (without shelling out) if the host preload
+ * file is missing — mirroring the guard in docker-args.ts and avoiding
+ * needless `docker exec` calls in dev trees.
+ */
+function probePreloadMounted(containerId: string): boolean {
+	const cached = _preloadMountCache.get(containerId);
+	if (cached !== undefined) return cached;
+
+	let present = false;
+	try {
+		if (!fs.existsSync(PRELOAD_PATH)) {
+			_preloadMountCache.set(containerId, false);
+			return false;
+		}
+		execFileSync("docker", ["exec", containerId, "test", "-f", CONTAINER_PRELOAD_PATH], {
+			timeout: 5_000,
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		present = true;
+	} catch {
+		present = false;
+	}
+	_preloadMountCache.set(containerId, present);
+	return present;
+}
+
+/**
+ * Env vars for the idle-stream timeout preload — exported on every agent
+ * spawn so the preload sees consistent values across direct and Docker
+ * branches. Host operators can override defaults via process.env.
+ */
+export function buildPreloadEnv(): Record<string, string> {
+	return {
+		BOBBIT_REMOTE_BODY_TIMEOUT_MS: process.env.BOBBIT_REMOTE_BODY_TIMEOUT_MS ?? "120000",
+		BOBBIT_REMOTE_HEADERS_TIMEOUT_MS: process.env.BOBBIT_REMOTE_HEADERS_TIMEOUT_MS ?? "60000",
+		BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS: process.env.BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS ?? "",
+	};
+}
+
+/**
+ * Compose a NODE_OPTIONS string for the direct-spawn agent, preserving any
+ * caller-provided NODE_OPTIONS and appending --no-warnings + --require=<preload>.
+ * The preload path is JSON-quoted so paths with spaces survive on Windows
+ * (Node's NODE_OPTIONS parser accepts double-quoted arg values).
+ */
+function buildDirectNodeOptions(): string {
+	const existing = (process.env.NODE_OPTIONS ?? "").trim();
+	const requireArg = `--require=${JSON.stringify(PRELOAD_PATH)}`;
+	return [existing, "--no-warnings", requireArg].filter(Boolean).join(" ");
+}
 
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
@@ -282,6 +367,9 @@ export class RpcBridge {
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
 					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
 					PI_CODING_AGENT_DIR: globalAgentDir(),
+					// Idle-stream timeout preload — see PRELOAD_PATH/buildPreloadEnv.
+					NODE_OPTIONS: buildDirectNodeOptions(),
+					...buildPreloadEnv(),
 					...tlsEnv,
 					...this.options.env,
 				},
@@ -487,7 +575,25 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
+		// Idle-stream timeout preload — only inject the --require flag when the
+		// preload file is actually present inside the container. Older containers
+		// created before the bind-mount existed (or when the host preload was
+		// missing at `docker run` time) would otherwise fail with "Cannot find
+		// module" and break the session. The timeout env vars are still exported
+		// unconditionally — harmless when the preload isn't loaded.
+		const preloadMounted = probePreloadMounted(containerId);
+		if (preloadMounted) {
+			execArgs.push("-e", `NODE_OPTIONS=--no-warnings --require=${CONTAINER_PRELOAD_PATH}`);
+		} else {
+			execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
+			console.warn(
+				`[rpc-bridge] preload not mounted in container ${containerId.substring(0, 12)}; ` +
+				`idle-stream timeouts disabled for this session`,
+			);
+		}
+		for (const [k, v] of Object.entries(buildPreloadEnv())) {
+			execArgs.push("-e", `${k}=${v}`);
+		}
 
 		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
 		if (this.options.sandboxCredentials) {
@@ -663,6 +769,10 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
+		// Single-file bind mount (read-only) for the undici idle-timeout preload.
+		// hostPath is the parent dir so prefix→hostPath joining stays well-defined
+		// even though only one file lives under it.
+		{ containerPrefix: "/bobbit-preload", hostPath: path.dirname(PRELOAD_PATH) },
 	];
 
 	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
