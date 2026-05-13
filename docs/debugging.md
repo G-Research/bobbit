@@ -176,8 +176,9 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 
 ## Compaction
 
-- Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is now a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
-- `compacting_placeholder` must be filtered and re-added correctly across server refreshes — the reducer drops the synthetic when a snapshot row carries the server-persisted compaction marker (id-match, with `"Context compacted"` text fallback).
+- Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
+- `compacting_placeholder` must be filtered and re-added correctly across server refreshes — the reducer drops the synthetic when a snapshot row carries the server-persisted compaction marker (id-match, with `"Context compacted"` text fallback for legacy snapshots).
+- **Card disappears after navigate-away or reload** — the server-side sidecar splice did not run. Check that `mergeCompactionSidecarIntoMessages` is wired into both the `get_messages` WS handler and `refreshAfterCompaction`. Sidecar file: `<stateDir>/compaction-sidecar/<sessionId>.jsonl`. See [docs/compaction-history.md](compaction-history.md).
 
 ## Goal creation fails with `Workflow not found: general`
 
