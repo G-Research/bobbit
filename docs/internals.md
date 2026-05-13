@@ -1518,7 +1518,7 @@ Indexes are a rebuildable cache; the source-of-truth stores repopulate automatic
 
 ## Thinking level configuration
 
-Configurable via `default_thinking_level` in `project.yaml`. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `""` (empty = agent default `"medium"`).
+Configurable via `default_thinking_level` in `project.yaml`. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `""` (empty = agent default `"medium"`). `xhigh` is only honoured on models that advertise it (Anthropic Opus 4.6+, OpenAI `gpt-5.1-codex-max`, `gpt-5.2*`); on other models it clamps down at session-start. See [docs/thinking-levels.md](thinking-levels.md) for the capability matrix and clamping semantics.
 
 Token budgets (hardcoded in `remote-agent.ts`): minimal=1024, low=4096, medium=10240, high=32768.
 

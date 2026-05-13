@@ -143,7 +143,7 @@ bypass the UI. The server clamps at every entry point:
 |---|---|---|
 | WS `set_thinking_level` | `src/server/ws/handler.ts` | The level the client sent, against the session's currently-bound model. |
 | REST role create/update | `clampRoleThinking` in `src/server/server.ts` | The role's `thinkingLevel` field, against the role's `model` if set (or returned as-is if the role inherits, since the per-session clamp will run at spawn). |
-| REST project/system prefs PUT | same | `default.sessionThinkingLevel`, `default.reviewThinkingLevel`, `default.namingThinkingLevel` against the matching model preference if set. |
+| REST project/system prefs PUT | `/api/preferences` | Stored as-is (no write-time clamp): the defaults apply to many models and the resolved model may not be known yet. Clamping happens at use-time — see `resolveInitialThinkingLevel` / `tryApplyDefaultThinkingLevel` for sessions and `clampReviewThinking` for verification reviewers. |
 | Session start | `resolveInitialThinkingLevel` + `tryApplyDefaultThinkingLevel` in `src/server/agent/session-manager.ts` | The role-or-default level, against the model resolved for that session (role override → global default → aigw fallback). |
 | Verification harness | `clampReviewThinking` in `src/server/agent/verification-harness.ts` | Reviewer/QA/sub-session levels at six call sites, against the resolved reviewer or role model. |
 
@@ -214,7 +214,7 @@ Three layers pin the behaviour:
 
 | Test | What it pins |
 |---|---|
-| `tests/thinking-levels.test.ts` | 29 unit cases — capability matrix for Opus 4.5/4.6/4.7, Sonnet 4.6, gpt-5/5.1/5.1-codex-max/5.2, non-reasoning models, clamping behaviour, and the cross-provider-collision pin (an `openai`-provider model with a `claude-*` id does not light up xhigh). |
+| `tests/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7, Sonnet 4.6, gpt-5/5.1/5.1-codex-max/5.2, non-reasoning models, clamping behaviour, and the cross-provider-collision pin (an `openai`-provider model with a `claude-*` id does not light up xhigh). |
 | `tests/thinking-levels-per-model.{html,spec.ts}` | Ten fixture-based browser tests that exercise a minimal HTML page mirroring the selector logic. The HTML mirror is annotated to stay in sync with the canonical module. |
 | `tests/e2e/ui/thinking-levels.spec.ts` | Three gateway-connected E2E specs that switch model in the footer, assert dropdown options change, persist `xhigh` across reload on Opus 4.7, and verify the clamp-on-model-switch flow end to end. |
 
