@@ -52,10 +52,12 @@ const RANK = { off:0, minimal:1, low:2, medium:3, high:4, xhigh:5 };
 function supportsXHigh(m) {
   const id = m.id || "";
   const provider = (m.provider || "").toLowerCase();
-  const isAnthropic = !provider || provider === "anthropic" || id.startsWith("claude-");
-  if (isAnthropic && /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id)) return true;
-  const isOpenAI = !provider || provider === "openai" || id.startsWith("gpt-");
-  if (isOpenAI && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.2/i.test(id))) return true;
+  // Provider guard must fail closed on cross-provider id collisions —
+  // mirrors the canonical `providerMatches` helper in src/shared/thinking-levels.ts.
+  const anthropicProviderOk = !provider || provider === "anthropic" || provider === "aigw";
+  if (anthropicProviderOk && /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id)) return true;
+  const openaiProviderOk = !provider || provider === "openai" || provider === "aigw";
+  if (openaiProviderOk && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.2/i.test(id))) return true;
   return false;
 }
 

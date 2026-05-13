@@ -99,6 +99,11 @@ const INFER_RULES: InferRule[] = [
 	// ── OpenAI GPT-5.x (pro first so it doesn't match the bare 5.5) ─
 	{ test: /gpt-5\.5-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.5/, meta: { contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
+	// gpt-5.1-codex-max and gpt-5.2* are reasoning models (and xhigh-capable per
+	// src/shared/thinking-levels.ts). They must be classified as reasoning so
+	// server-side clamping does not collapse xhigh to off for aigw-routed users.
+	{ test: /gpt-5\.2/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
+	{ test: /gpt-5\.1-codex-max/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5/, meta: { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"] } },
 
 	// ── OpenAI o-series reasoning models (mini variants first) ──────

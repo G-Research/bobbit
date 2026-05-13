@@ -83,7 +83,7 @@ export interface Role {
 	toolPolicies?: Record<string, GrantPolicy>;
 	/** "<provider>/<modelId>" — overrides default.sessionModel / default.reviewModel for sessions of this role */
 	model?: string;
-	/** "off" | "minimal" | "low" | "medium" | "high" — overrides default thinking level for sessions of this role */
+	/** "off" | "minimal" | "low" | "medium" | "high" | "xhigh" — overrides default thinking level for sessions of this role. Clamped to the role's model capability at write time when a model is set. */
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
