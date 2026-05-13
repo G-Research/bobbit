@@ -10,6 +10,13 @@ import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSu
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
+import {
+	buildCompactionSummaryMessages,
+	buildInProgressCompactionPayload,
+	parseOverflowTokenCount,
+	type CompactionSummaryPayload,
+	type CompactionTrigger,
+} from "./compaction-types.js";
 
 // ───────────────────────────────────────────────────────────────────────
 // Goal-state subscription fanout — additive bridge so renderer-level
@@ -129,7 +136,49 @@ export class RemoteAgent {
 	// Compaction tracking — persists across message refreshes.
 	// Exposed on state so the UI can queue messages during compact.
 	private _isCompacting = false;
+	/** True from `compaction_end` (success path) until the next clean
+	 *  assistant turn lands carrying fresh `usage`. Read by the context-bar
+	 *  renderer in `AgentInterface` to display "Updating after compaction…"
+	 *  instead of the stale pre-compaction percentage (the snapshot's
+	 *  last-assistant-usage is still pre-compaction; pi-coding-agent doesn't
+	 *  emit a fresh per-message usage row for the synthetic summary entry).
+	 *  Public so the renderer can read it via `session._usageStaleAfterCompaction`. */
+	_usageStaleAfterCompaction = false;
+	/** Best-effort cache of the most recently seen context-token count; used
+	 *  as the final fallback when resolving `tokensBefore` for a compaction
+	 *  end event. See `docs/design/compaction-e2e-rich-summary.md` §7.3. */
+	private _lastKnownContextTokens: number | null = null;
 	private _isAborting = false;
+
+	/** Overflow-recovery tracking. When the upstream agent hits a context-limit
+	 *  error mid-turn it emits `auto_compaction_start { reason: "overflow" }`,
+	 *  compacts, and retries the prompt. If the retry ALSO fails (compaction
+	 *  didn't reclaim enough), the retry surfaces as an assistant `message_end`
+	 *  with `stopReason: "error"` and an Anthropic-style overflow `errorMessage`.
+	 *  Showing that as a standalone red banner is jarring — the user already
+	 *  has a compaction card describing what happened. Instead we attach the
+	 *  real error to the compaction card and suppress the trailing red block.
+	 *  Window opens on `auto_compaction_start { reason: "overflow" }` and stays
+	 *  open until either the next assistant `message_end` lands or 60 s passes. */
+	private _overflowRecoveryDeadline: number | null = null;
+
+	/** Payload of the most recent compaction whose `tokensAfter` we haven't
+	 *  amended yet. The server emits `compaction_end` BEFORE the post-compaction
+	 *  state refresh lands, so reading `_state.contextTokens` (or scanning back
+	 *  for the latest assistant usage row) at that instant returns a stale
+	 *  value from an earlier turn — NOT the real post-compaction size. Instead
+	 *  we leave `tokensAfter`/`reductionPct` null on the initial card and amend
+	 *  it when the next successful assistant `message_end` lands carrying
+	 *  authoritative `usage`. Cleared either on amend or on a subsequent failed
+	 *  retry (the overflow-recovery fold path takes precedence). */
+	private _pendingCompactionAmend: import("./compaction-types.js").CompactionSummaryPayload | null = null;
+
+	/** Wall-clock start of the active compaction. Captured on
+	 *  `compaction_start` / `auto_compaction_start` so the terminal payload
+	 *  can carry an authoritative `durationMs` (renderer displays it on the
+	 *  complete/error card; in-progress card uses the same start to power
+	 *  the live <live-timer> ticker). */
+	private _compactionStartedAt: number | null = null;
 
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
@@ -756,17 +805,97 @@ export class RemoteAgent {
 		this.send({ type: "compact" });
 	}
 
-	/** Add or re-add the "Compacting context…" placeholder to the message list. */
-	private _addCompactingPlaceholder(): void {
+	/**
+	 * Best-effort sample of current context-token usage. Walks the transcript
+	 * backwards for the latest assistant message carrying `usage`, mirroring
+	 * the calculation in `AgentInterface.ts::contextHtml`. Returns null when
+	 * no usage row is available.
+	 */
+	private _readContextTokens(): number | null {
+		try {
+			const msgs = this._state?.messages;
+			if (!Array.isArray(msgs)) return null;
+			for (let i = msgs.length - 1; i >= 0; i--) {
+				const m = msgs[i] as any;
+				if (
+					m?.role === "assistant"
+					&& m.usage
+					&& m.stopReason !== "aborted"
+					&& m.stopReason !== "error"
+				) {
+					const u = m.usage;
+					const total = u.totalTokens
+						|| ((u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0));
+					if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+						this._lastKnownContextTokens = total;
+						return total;
+					}
+					return null;
+				}
+			}
+		} catch {
+			/* swallow — best effort */
+		}
+		return null;
+	}
+
+	/**
+	 * Inject a RICH in-progress compaction synthetic into the message list.
+	 * Replaces the legacy plaintext "Compacting context…" row — the renderer
+	 * now drives the in-progress state itself. Used by both the live
+	 * `compaction_start` path and the reconnect-path (~line 1109) when the
+	 * server tells us compaction is still in progress on resume.
+	 */
+	private _addCompactingPlaceholder(trigger: CompactionTrigger = "manual"): void {
+		const tokensBefore = this._readContextTokens() ?? this._lastKnownContextTokens;
+		if (tokensBefore != null) this._lastKnownContextTokens = tokensBefore;
+		const payload = buildInProgressCompactionPayload(trigger, tokensBefore);
+		const { message } = buildCompactionSummaryMessages(payload);
+		this.apply({ type: "compaction-placeholder", message });
+	}
+
+	/**
+	 * Try to amend the most recent compaction card with an authoritative
+	 * `tokensAfter` read from the latest clean assistant `usage` in the
+	 * transcript. Fires from both the live `message_end` path and after a
+	 * `messages` snapshot apply (the post-compaction state refresh from the
+	 * server reaches us as a snapshot, not as live events). No-op when no
+	 * amend is pending. Clears the pending state on success so we don't
+	 * thrash.
+	 */
+	private _tryAmendPendingCompaction(): void {
+		const prev = this._pendingCompactionAmend;
+		if (!prev) return;
+		const totalAfter = this._readContextTokens();
+		if (totalAfter == null || !Number.isFinite(totalAfter) || totalAfter <= 0) return;
+		const tb = prev.tokensBefore;
+		const reductionPct =
+			tb && tb > 0 ? Math.round(((tb - totalAfter) / tb) * 1000) / 10 : null;
+		const amended: CompactionSummaryPayload = {
+			...prev,
+			tokensAfter: totalAfter,
+			reductionPct,
+		};
+		const { message: am, toolResult: atr } = buildCompactionSummaryMessages(amended);
 		this.apply({
-			type: "compaction-placeholder",
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "Compacting context…" }],
-				timestamp: Date.now(),
-				id: "compacting_placeholder",
-			},
+			type: "compaction-result",
+			message: am,
+			success: amended.success,
+			toolResult: atr,
 		});
+		this._lastKnownContextTokens = totalAfter;
+		this._pendingCompactionAmend = null;
+	}
+
+	/** Map upstream event `reason` (or legacy event-type) to a trigger. */
+	private _triggerFromEvent(event: any): CompactionTrigger {
+		const reason = event?.reason;
+		if (reason === "overflow") return "overflow";
+		if (reason === "threshold") return "auto";
+		if (reason === "manual") return "manual";
+		if (event?.type === "auto_compaction_start" || event?.type === "auto_compaction_end")
+			return "auto";
+		return "manual";
 	}
 
 	requestMessages(): void {
@@ -1061,6 +1190,10 @@ export class RemoteAgent {
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
 					this.apply({ type: "snapshot", messages: msgs });
+					// Post-compaction refreshAfterCompaction lands here. Amend the
+					// in-flight compaction card with authoritative tokensAfter if
+					// the new transcript carries usable usage.
+					this._tryAmendPendingCompaction();
 					// Successful snapshot apply — cached state is now in sync with
 					// the server, so future visibility ticks can short-circuit
 					// `requestMessages()` until the WS drops again.
@@ -1840,6 +1973,52 @@ export class RemoteAgent {
 				if (event.message) {
 					let msg = event.message;
 					if (msg.role === "assistant") {
+						// Overflow-recovery suppression: when pi-coding-agent auto-compacts
+						// on overflow, it sometimes fires a retry from the still-in-flight
+						// pre-compaction transcript right as the compaction is committed.
+						// That retry gets rejected by the API (`prompt is too long`,
+						// `usage.totalTokens === 0`, content is empty) before the agent
+						// then runs the next turn cleanly against the compacted state.
+						// Hide the spurious red banner — the compaction card itself is
+						// already rendered as "complete" (forced for overflow trigger),
+						// so showing a standalone overflow error after it is doubly
+						// misleading.
+						let suppressedOverflowRetry = false;
+						if (
+							this._overflowRecoveryDeadline !== null
+							&& Date.now() <= this._overflowRecoveryDeadline
+							&& msg.stopReason === "error"
+							&& typeof msg.errorMessage === "string"
+							&& /prompt is too long|tokens?\s*>\s*\d/i.test(msg.errorMessage)
+						) {
+							msg = { ...msg, _suppressedByOverflowRecovery: true };
+							suppressedOverflowRetry = true;
+							// Failed retry — the next clean turn will provide fresh usage.
+						}
+						this._overflowRecoveryDeadline = null;
+
+						// Tokens-after amendment: the first clean assistant turn after
+						// compaction has authoritative `usage` reflecting the real
+						// post-compaction context size. Skip when this very turn IS the
+						// suppressed spurious retry — the next turn will carry real usage.
+						if (!suppressedOverflowRetry) {
+							this._tryAmendPendingCompaction();
+						}
+
+						// Fresh assistant turn with usable usage → clear the
+						// post-compaction stale flag so the context bar resumes showing
+						// real percentages. Guard on usage-presence and non-error
+						// stopReason — a failed retry shouldn't be treated as a fresh
+						// usage signal.
+						if (
+							this._usageStaleAfterCompaction
+							&& msg.usage
+							&& msg.stopReason !== "aborted"
+							&& msg.stopReason !== "error"
+						) {
+							this._usageStaleAfterCompaction = false;
+						}
+
 						// Check for proposals in assistant message
 						this._checkToolProposals(msg);
 						this._checkProposals(msg);
@@ -1951,8 +2130,20 @@ export class RemoteAgent {
 				// Don't set isStreaming — compaction uses its own blob animation
 				this._isCompacting = true;
 				this.onCompactionChange?.(true);
-				// Add a placeholder message so compaction is visible in chat history
-				this._addCompactingPlaceholder();
+				this._compactionStartedAt = Date.now();
+				// Mark context-bar usage stale until the next clean assistant
+				// turn arrives — the snapshot's last-assistant-usage post-compaction
+				// is still the pre-compaction value, so we'd otherwise show a wrong
+				// percentage on the bar until the next turn happens.
+				this._usageStaleAfterCompaction = true;
+				// Open the overflow-recovery window so a trailing "prompt is too long"
+				// retry error gets folded into the compaction card instead of
+				// surfacing as a standalone red banner.
+				if (this._triggerFromEvent(event) === "overflow") {
+					this._overflowRecoveryDeadline = Date.now() + 60_000;
+				}
+				// Add a rich in-progress synthetic so compaction is visible in chat history
+				this._addCompactingPlaceholder(this._triggerFromEvent(event));
 				// Normalize to compaction_start for UI subscribers
 				if (event.type === "auto_compaction_start") {
 					this.emit({ type: "compaction_start" } as any);
@@ -1962,9 +2153,15 @@ export class RemoteAgent {
 
 			// The agent subprocess may send error responses with id:undefined
 			// (upstream bug). These arrive as events rather than RPC responses.
-			// Treat compact-related errors as compaction_end so the UI recovers.
+			// Treat compact-related errors as compaction_end so the UI recovers —
+			// but ONLY while a compaction is actually in flight. Without this guard
+			// a stray failed `response` arriving AFTER a successful compaction
+			// (e.g. an unrelated tool error or the well-known upstream id:undefined
+			// frame) would synthesize a bogus `compaction_end { success: false }`
+			// and overwrite the already-completed card (same stable `compact_active`
+			// id) with a failure state.
 			case "response":
-				if (!event.success && event.error) {
+				if (!event.success && event.error && this._isCompacting) {
 					// Synthesize a compaction_end event so the blob animation ends
 					this.emit({ type: "compaction_end", success: false, error: event.error });
 				}
@@ -1975,26 +2172,66 @@ export class RemoteAgent {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
 				const success = event.type === "compaction_end" ? event.success : !event.aborted;
-				const tokensBefore = (event as any).tokensBefore;
-				let resultText = "Context compacted.";
-				if (tokensBefore) {
-					const fmt = tokensBefore < 1000 ? `${tokensBefore}` : tokensBefore < 1_000_000 ? `${(tokensBefore / 1000).toFixed(1)}k` : `${(tokensBefore / 1_000_000).toFixed(1)}M`;
-					resultText = `Context compacted from ${fmt} tokens.`;
+				const trigger = this._triggerFromEvent(event);
+				const errMsg: string | undefined =
+					(event as any).errorMessage || (event as any).error;
+				// tokensBefore resolution chain (see design doc §2.4):
+				//   1. event.result.tokensBefore  — agent-emitted auto/overflow end
+				//   2. event.tokensBefore         — server-emitted manual path
+				//   3. parseOverflowTokenCount(errMsg) when overflow error path
+				//   4. this._lastKnownContextTokens
+				let tokensBefore: number | null =
+					(event as any).result?.tokensBefore
+					?? (event as any).tokensBefore
+					?? null;
+				if (tokensBefore == null && errMsg) {
+					tokensBefore = parseOverflowTokenCount(errMsg);
 				}
-				const resultMsg = success
-					? {
-						role: "assistant" as const,
-						content: [{ type: "text", text: resultText }],
-						timestamp: Date.now(),
-						id: `compact_done_${Date.now()}`,
-					}
-					: {
-						role: "assistant" as const,
-						content: [{ type: "text", text: `Compaction failed: ${(event as any).error || ((event as any).aborted ? "Compaction aborted" : "Unknown error")}` }],
-						timestamp: Date.now(),
-						id: `compact_err_${Date.now()}`,
-					};
-				this.apply({ type: "compaction-result", message: resultMsg, success });
+				if (tokensBefore == null) {
+					tokensBefore = this._lastKnownContextTokens;
+				}
+				// tokensAfter is INTENTIONALLY null here. The server emits
+				// `compaction_end` BEFORE broadcasting the post-compaction state
+				// refresh, so reading context tokens now returns a stale value
+				// from an earlier turn (manifests as a misleading "30% reduction"
+				// when real reduction is 90%+). Instead we set null and amend
+				// from the next successful assistant message_end's `usage`.
+				// Overflow-trigger compactions ALWAYS get rendered as complete.
+				// By the time upstream sends `auto_compaction_end { reason: "overflow" }`
+				// the compaction operation itself has already run — even if the
+				// subsequent retry fails. Whether the user's request ultimately
+				// succeeds is a separate concern (surfaced via the normal assistant
+				// `message_end` error path if the retry fails). Conflating the two
+				// led to a card that looked like compaction had failed when it
+				// hadn't.
+				const displaySuccess = trigger === "overflow" ? true : success;
+				const nowMs = Date.now();
+				const startedAtMs = this._compactionStartedAt;
+				const payload: CompactionSummaryPayload = {
+					schemaVersion: 1,
+					trigger,
+					state: displaySuccess ? "complete" : "error",
+					success: displaySuccess,
+					timestamp: new Date(nowMs).toISOString(),
+					startedAt: startedAtMs != null ? new Date(startedAtMs).toISOString() : undefined,
+					durationMs: startedAtMs != null ? Math.max(0, nowMs - startedAtMs) : undefined,
+					tokensBefore,
+					tokensAfter: null,
+					reductionPct: null,
+					error: displaySuccess ? undefined : (errMsg || undefined),
+				};
+				this._compactionStartedAt = null;
+				// On hard compaction failure clear the stale flag immediately — no
+				// post-compaction state is coming, the bar should resume normal
+				// display from the existing transcript usage.
+				if (!displaySuccess) {
+					this._usageStaleAfterCompaction = false;
+				}
+				const { message, toolResult } = buildCompactionSummaryMessages(payload);
+				this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
+				// Queue this card for tokens-after amendment on the next clean
+				// assistant `message_end` carrying usage.
+				this._pendingCompactionAmend = payload;
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);
@@ -2022,3 +2259,5 @@ function extractText(message: any): string {
 	}
 	return "";
 }
+
+

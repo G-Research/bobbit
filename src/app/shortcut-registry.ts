@@ -219,8 +219,19 @@ function handleKeydown(e: KeyboardEvent): void {
 	for (const entry of shortcuts.values()) {
 		for (const binding of entry.currentBindings) {
 			if (matchesBinding(e, binding)) {
-				// Allow in input if: explicitly flagged, or the binding uses a modifier key
-				if (inputFocused && !entry.allowInInput && !binding.ctrlOrMeta && !binding.alt) continue;
+				// Input guard:
+				//   allowInInput === true   → always fire, even in inputs
+				//   allowInInput === false  → never fire in inputs (even with modifiers).
+				//                             Use this for shortcuts whose keystroke
+				//                             has a meaningful native input behaviour
+				//                             (e.g. Ctrl+ArrowLeft = word-jump).
+				//   allowInInput === undefined → fire only if the binding uses a
+				//                             ctrl/alt modifier (the modifier-escape
+				//                             hatch used by most shortcuts).
+				if (inputFocused) {
+					if (entry.allowInInput === false) continue;
+					if (entry.allowInInput === undefined && !binding.ctrlOrMeta && !binding.alt) continue;
+				}
 				e.preventDefault();
 				entry.handler();
 				return;

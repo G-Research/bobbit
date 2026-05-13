@@ -35,7 +35,7 @@ async function registerTmpProject(name: string): Promise<{ id: string; rootPath:
 		id: proj.id,
 		rootPath: dir,
 		cleanup: () => {
-			apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 		},
 	};
@@ -159,7 +159,7 @@ test.describe("Native-YAML project.yaml fields", () => {
 				const text = readFileSync(join(cfgDir, "project.yaml"), "utf-8");
 				expect(text).not.toMatch(/\[\{\\"/);
 			} finally {
-				await apiFetch(`/api/projects/${proj.id}?force=1`, { method: "DELETE" }).catch(() => {});
+				await apiFetch(`/api/projects/${proj.id}`, { method: "DELETE" }).catch(() => {});
 			}
 		} finally {
 			try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }

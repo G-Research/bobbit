@@ -160,11 +160,71 @@ export class ReviewDocument extends LitElement {
     this._attachAnnotator(container);
   }
 
+  /**
+   * Annotation highlight style. text-annotator sets `background-color`
+   * and `border-*` as INLINE styles on each `.r6o-annotation` span, so
+   * stylesheet overrides (even with `!important`) lose. The library
+   * also runs a colour parser on `fill` whenever `fillOpacity` is set;
+   * the parser only understands rgb/hex/hsl and silently falls back to
+   * its default blue for `oklch()` — which is why `--primary` was being
+   * thrown away.
+   *
+   * To produce a value the parser (and our pre-baked rgba string) can
+   * use, we resolve `var(--primary)` via a 1×1 canvas: modern Chromium
+   * preserves the declared colour space in `getComputedStyle().color`
+   * (so probing returns `oklch(…)` verbatim), but the canvas pipeline
+   * always converts to sRGB on `fillRect`. Reading back the pixel
+   * gives us a guaranteed `[r, g, b]` tuple in 0–255.
+   */
+  private _resolvePrimaryRgb(): [number, number, number] {
+    try {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--primary)";
+      probe.style.display = "none";
+      (this._contentEl ?? document.body).appendChild(probe);
+      const computed = getComputedStyle(probe).color;
+      probe.remove();
+
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const ctx = canvas.getContext("2d");
+      if (ctx && computed) {
+        ctx.fillStyle = computed;
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        return [r, g, b];
+      }
+    } catch {
+      // fall through to default
+    }
+    return [99, 102, 241]; // indigo-500 fallback
+  }
+
+  private _highlightStyle = (_ann: unknown, state?: { selected?: boolean }) => {
+    const [r, g, b] = this._resolvePrimaryRgb();
+    const alpha = state?.selected ? 0.55 : 0.45;
+    return {
+      fill: `rgba(${r}, ${g}, ${b}, ${alpha})` as
+        `rgba(${number}, ${number}, ${number}, ${number})`,
+      // Omit fillOpacity so `fill` passes through to backgroundColor verbatim.
+      underlineStyle: "solid",
+      underlineColor: `rgb(${r}, ${g}, ${b})` as
+        `rgb(${number}, ${number}, ${number})`,
+      underlineThickness: 2,
+      underlineOffset: 0,
+    };
+  };
+
   private _attachAnnotator(container: HTMLElement): void {
     try {
       this._annotator = createTextAnnotator(container, {
         renderer: "SPANS",
+        style: this._highlightStyle,
       });
+      // Re-apply on every attach so HMR edits to _highlightStyle take
+      // effect without recreating the annotator.
+      this._annotator.setStyle?.(this._highlightStyle);
 
       // Re-add annotations that were successfully re-anchored
       for (const ann of this._annotations) {

@@ -60,7 +60,7 @@ test.describe("Preparing UX (worktree-backed session)", () => {
 	test.afterAll(async () => {
 		delete process.env.BOBBIT_TEST_PREPARING_DELAY_MS;
 		if (projectId) {
-			await apiFetch(`/api/projects/${projectId}?force=1`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 

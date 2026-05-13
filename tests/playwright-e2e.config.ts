@@ -19,11 +19,7 @@ const E2E_REAL_BOBBIT_DIR = path.join(projectRoot, ".e2e-real-bobbit");
 export default defineConfig({
 	testDir: ".",
 	testMatch: [
-		"session-rename.spec.ts",
-		"image-attachment.spec.ts",
 		"compaction.spec.ts",
-		"goals.spec.ts",
-		"team-lifecycle.spec.ts",
 	],
 	timeout: 180_000,
 	expect: { timeout: 30_000 },

@@ -24,6 +24,7 @@ import {
 	isProposalStreaming,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
+import { errorDetails } from "./error-helpers.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
@@ -1272,7 +1273,8 @@ function goalPreviewPanel() {
 				maxNestingDepth,
 			});
 		} catch (err) {
-			showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to create goal", message, { code, stack });
 			return;
 		}
 		if (!goal) {
@@ -2807,7 +2809,8 @@ function goalProposalPanel() {
 					maxNestingDepth,
 				});
 			} catch (err) {
-				showConnectionError("Failed to create goal", String((err as Error)?.message || err));
+				const { message, code, stack } = errorDetails(err);
+				showConnectionError("Failed to create goal", message, { code, stack });
 				return;
 			}
 			if (!goal) return;
@@ -3118,7 +3121,6 @@ export function doRenderApp(): void {
 	const activeProject = state.projects.find(p => p.id === state.activeProjectId);
 	document.title = activeProject ? `${activeProject.name} · Bobbit` : "Bobbit";
 
-	document.documentElement.style.setProperty("--bobbit-shimmer-delay", `${-(Date.now() % 8000)}ms`);
 
 	// Disconnected state
 	if (state.appView === "disconnected") {

@@ -36,6 +36,7 @@ import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
 import { buildNestedGoalForest, type NestedGoalNode } from "./sidebar-nesting.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
+import { getActiveNavId } from "./sidebar-nav.js";
 
 // ============================================================================
 // PROJECT EXPANSION STATE
@@ -561,10 +562,14 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 	const staffExpanded = isStaffExpanded(projectId || "");
 	// Always show the Staff section so users can create their first staff agent
 
+	const staffNavId = `staff-header:${projectId || ""}`;
+	const staffNavActive = getActiveNavId() === staffNavId;
 	return html`
 		<div class="border-t border-border/30 my-1 mx-2"></div>
 		<div class="flex flex-col gap-0.5">
-			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30"} transition-colors"
+			<div class="relative flex items-center ${mobile ? "gap-1.5 pl-0 pr-2 py-1.5" : "gap-1 pr-1 py-0.5"} rounded-md cursor-pointer ${staffNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/30")} transition-colors"
+				data-nav-id=${staffNavId}
+				data-nav-active=${staffNavActive ? "true" : "false"}
 				style="${mobile ? "" : `padding-left:${HEADER_CHEVRON_W}px;`}"
 				@click=${() => { setStaffSectionExpanded(projectId || "", !staffExpanded); renderApp(); }}>
 				<span class="${mobile ? "" : "absolute left-0 top-0 bottom-0 flex items-center justify-center"} text-muted-foreground shrink-0 select-none" style="${mobile ? "width:14px;text-align:center;" : `width:${HEADER_CHEVRON_W}px;`}font-size: 1.1667em;">${staffExpanded ? "▾" : "▸"}</span>
@@ -606,19 +611,22 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
 					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
 					title="Edit">${icon(Pencil, "xs")}</button>`;
+				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					data-nav-id=${staffSessionNavId}
+					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:${CHEVRON_W}px;"
 					@click=${() => handleStaffClick(agent)}>
-					${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
+					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
 					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : ""} font-normal"><span class="truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
 							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
 							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
 							const time = terseRelativeTime(session.lastActivity);
 							if (!time) return "";
 							const unseen = hasUnseenActivity(session);
-							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
+							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
 						})() : ""}</div>
 					${mobile
 						? editBtn
@@ -627,7 +635,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 								const time = terseRelativeTime(session.lastActivity);
 								if (!time) return "";
 								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="text-primary" style="font-size: calc(0.375rem * var(--sidebar-font-scale, 1));line-height:1;">●</span>` : ""}</span>`;
+								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
 							})() : ""}</span>
 							<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
 								${editBtn}
@@ -708,8 +716,12 @@ function _handleFullSearchClick(query: string): void {
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = getProjectAccentColor(project);
 	const isProvisional = !!project.provisional;
+	const navId = `project:${project.id}`;
+	const navActive = getActiveNavId() === navId;
 	return html`
-		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+			data-nav-id=${navId}
+			data-nav-active=${navActive ? "true" : "false"}
 			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
 			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
@@ -879,7 +891,10 @@ function renderProjectContent(
 		})}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
-			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer hover:bg-secondary/30 transition-colors"
+			${(() => { const ungNavId = `ungrouped-header:${project.id}`; const ungActive = getActiveNavId() === ungNavId; return html`
+			<div class="relative flex items-center gap-1 pr-1 py-0.5 rounded-md cursor-pointer ${ungActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+				data-nav-id=${ungNavId}
+				data-nav-active=${ungActive ? "true" : "false"}
 				style="padding-left:${HEADER_CHEVRON_W}px;"
 				@click=${() => { setUngroupedExpanded(project.id, !ungroupedExp); renderApp(); }}>
 				<span class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none" style="width:${HEADER_CHEVRON_W}px;font-size: 1.1667em;">${ungroupedExp ? "▾" : "▸"}</span>
@@ -907,6 +922,7 @@ function renderProjectContent(
 					${sessions.map(renderSessionRow)}
 				</div>
 			` : ""}
+			`; })()}
 		</div>
 		${!isProvisional && staff ? renderStaffSidebarSection(staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(
@@ -1198,7 +1214,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
-				${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory)}
+				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s))}</span>
 				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
 			</button>
 		`;
@@ -1222,7 +1238,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				<span class="text-muted-foreground shrink-0 select-none" style="width:8px;text-align:center;cursor:pointer;font-size: 0.75em;"
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
 				>${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span>
-				${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory)}
+				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead))}</span>
 				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
 			${tlExpanded ? children.map(s => html`<div style="padding-left:6px;">${renderCollapsedSession(s)}</div>`) : ""}
@@ -1274,7 +1290,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 							title=${agent.name}
 							@click=${() => handleStaffClick(agent)}
 						>
-							${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory)}
+							<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
 							<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(agent.name)}</span>
 						</button>
 					`;

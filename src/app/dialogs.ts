@@ -19,6 +19,7 @@ import {
 	type Project,
 } from "./state.js";
 import { gatewayFetch, updateGoal, SymlinkRootError } from "./api.js";
+import { errorDetails } from "./error-helpers.js";
 import "../ui/components/ErrorDetails.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
@@ -1323,8 +1324,8 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to create goal assistant", msg);
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create goal assistant", message, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();
@@ -1594,10 +1595,15 @@ export function showProjectDialog(): void {
 			});
 			if (!res.ok) {
 				const data = await res.json().catch(() => ({} as any));
-				showConnectionError("Failed to archive .bobbit/", data?.error || `Failed: ${res.status}`);
+				showConnectionError(
+					"Failed to archive .bobbit/",
+					data?.error || `Failed: ${res.status}`,
+					{ code: data?.code, stack: data?.stack },
+				);
 			}
 		} catch (err) {
-			showConnectionError("Failed to archive .bobbit/", err instanceof Error ? err.message : String(err));
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to archive .bobbit/", message, { code, stack });
 		} finally {
 			archiving = false;
 			// Re-run preflight + detection to reflect the new on-disk state.
@@ -1641,10 +1647,8 @@ export function showProjectDialog(): void {
 									renderDialog();
 								}
 							} catch (err2) {
-								showConnectionError(
-									"Failed to register project",
-									err2 instanceof Error ? err2.message : String(err2),
-								);
+								const { message, code, stack } = errorDetails(err2);
+								showConnectionError("Failed to register project", message, { code, stack });
 								loading = false;
 								renderDialog();
 							}
@@ -1977,8 +1981,8 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 			: undefined;
 		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath, projectEditContext });
 	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		showConnectionError("Failed to create project assistant", msg);
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create project assistant", message, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();

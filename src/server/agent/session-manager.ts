@@ -17,6 +17,11 @@ import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import { appendSkillSidecarEntry } from "../skills/skill-sidecar.js";
+import {
+	appendCompactionSidecarEntry,
+	makeCompactionId,
+	mergeCompactionSidecarIntoMessages,
+} from "./compaction-sidecar.js";
 import { SessionStore, type PersistedSession } from "./session-store.js";
 import { shouldKeepDespiteOrphan, scanOrphanedTranscripts } from "./orphan-cleanup.js";
 import { getAssistantDef } from "./assistant-registry.js";
@@ -1185,7 +1190,7 @@ export class SessionManager {
 		allowedTools: EffectiveTool[] | undefined,
 		role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 		cwd: string,
-	): string[] {
+	): { args: string[]; env: Record<string, string> } {
 		const flatNames = allowedTools?.map(e => e.name);
 
 		// MCP proxy extensions
@@ -1213,7 +1218,7 @@ export class SessionManager {
 			args.push("--extension", guardPath);
 		}
 
-		return args;
+		return { args, env: activation.env };
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string): import("./role-store.js").Role | undefined {
@@ -1961,11 +1966,56 @@ export class SessionManager {
 					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
 				});
 			}
-		} else if (event.type === "auto_compaction_start") {
+		} else if (event.type === "auto_compaction_start" || event.type === "compaction_start") {
 			session.isCompacting = true;
-		} else if (event.type === "auto_compaction_end") {
+			// Stash start state for the sidecar append on _end. The bobbit
+			// manual path owns its own append in ws/handler.ts and signals via
+			// `_sidecarOwnedByHandler` so we don't double-write here. Pi-coding-
+			// agent itself ALSO emits a compaction_start for the manual path —
+			// match the handler's stash, don't replace it.
+			const reason = (event as any).reason;
+			if (reason !== "manual" && !(session as any)._pendingCompactionStart) {
+				(session as any)._pendingCompactionStart = {
+					startedAtMs: Date.now(),
+					trigger: reason === "overflow" ? "overflow" as const : "auto" as const,
+				};
+			}
+		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
 			session.isCompacting = false;
-			if (!event.aborted) this.refreshAfterCompaction(session);
+			const pending = (session as any)._pendingCompactionStart as
+				| { startedAtMs: number; trigger: "auto" | "overflow" }
+				| undefined;
+			const reason = (event as any).reason;
+			// Manual path is handled in ws/handler.ts. Auto/overflow path writes
+			// the sidecar here from the upstream CompactionResult.
+			if (reason !== "manual" && pending) {
+				const endedAtMs = Date.now();
+				const result = (event as any).result as
+					| { tokensBefore?: number; firstKeptEntryId?: string }
+					| undefined;
+				const aborted = !!(event as any).aborted;
+				const errorMessage = (event as any).errorMessage as string | undefined;
+				const success = !!result && !aborted && !errorMessage;
+				try {
+					appendCompactionSidecarEntry(session.id, {
+						schemaVersion: 1,
+						id: makeCompactionId(pending.startedAtMs),
+						trigger: pending.trigger,
+						tokensBefore: result?.tokensBefore ?? null,
+						tokensAfter: null,
+						durationMs: endedAtMs - pending.startedAtMs,
+						startedAt: new Date(pending.startedAtMs).toISOString(),
+						endedAt: new Date(endedAtMs).toISOString(),
+						success,
+						error: success ? undefined : (errorMessage || (aborted ? "aborted" : "compaction failed")),
+						firstKeptEntryId: result?.firstKeptEntryId ?? null,
+					});
+				} catch (err) {
+					console.warn(`[session-manager] Failed to append compaction sidecar for ${session.id}:`, err);
+				}
+			}
+			(session as any)._pendingCompactionStart = undefined;
+			if (!(event as any).aborted) this.refreshAfterCompaction(session);
 		} else if (event.type === "process_exit") {
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
@@ -2785,8 +2835,9 @@ export class SessionManager {
 			: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
-		const toolArgs = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
-		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
+		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -3348,11 +3399,15 @@ export class SessionManager {
 				let data: any = raw;
 				if (Array.isArray(raw)) {
 					const spliced = spliceInFlightMessage(raw, session.latestMessageUpdate);
-					data = truncateLargeToolContentInMessages(spliced);
+					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
+					data = truncateLargeToolContentInMessages(withCompaction);
 				} else if (raw && Array.isArray(raw.messages)) {
 					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
-					const truncated = truncateLargeToolContentInMessages(spliced);
-					data = spliced === raw.messages && truncated === raw.messages ? raw : { ...raw, messages: truncated };
+					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
+					const truncated = truncateLargeToolContentInMessages(withCompaction);
+					data = spliced === raw.messages && truncated === raw.messages && withCompaction === raw.messages
+						? raw
+						: { ...raw, messages: truncated };
 				}
 				broadcast(session.clients, { type: "messages", data });
 			}
@@ -4107,8 +4162,9 @@ export class SessionManager {
 		}
 
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
-		const toolArgs = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
-		bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
+		const respawnActivation = this.buildToolActivationArgs(id, effectiveAllowed.length > 0 ? effectiveAllowed : undefined, fullRole, session.cwd);
+		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
@@ -5218,8 +5274,9 @@ export class SessionManager {
 			// Restore tool activation, including Bobbit extension tools and MCP policy filtering.
 			const role = this.resolveSessionRole(session.role, session.assistantType);
 			const effective = this.resolveEffectiveAllowedTools(role);
-			const toolArgs = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
-			bridgeOptions.args = [...toolArgs, ...(bridgeOptions.args || [])];
+			const forceActivation = this.buildToolActivationArgs(id, effective.length > 0 ? effective : undefined, role, session.cwd);
+			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);

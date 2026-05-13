@@ -247,6 +247,13 @@ export class AssistantMessage extends LitElement {
 	}
 
 	override render() {
+		// Hide the spurious overflow-retry error that pi-coding-agent emits
+		// from its in-flight pre-compaction transcript right as compaction
+		// commits — see remote-agent.ts overflow-recovery suppression. The
+		// next clean turn will surface real state.
+		if ((this.message as any)._suppressedByOverflowRecovery) {
+			return html``;
+		}
 		// Reset throttle state when streaming stops so final content renders immediately
 		if (!this.isStreaming && this._contentThrottleTimer) {
 			clearTimeout(this._contentThrottleTimer);

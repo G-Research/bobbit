@@ -44,7 +44,7 @@ async function registerProject(name: string): Promise<{ id: string; rootPath: st
 		id: project.id,
 		rootPath,
 		cleanup: () => {
-			apiFetch(`/api/projects/${project.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			try { rmSync(rootPath, { recursive: true, force: true }); } catch { /* ignore */ }
 		},
 	};

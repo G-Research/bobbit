@@ -16,7 +16,7 @@ test.describe("Splash screen — 0 projects", () => {
 		// Remove the harness-registered "default" project so the splash sees zero projects.
 		const list = await apiFetch("/api/projects").then(r => r.json()) as Array<{ id: string }>;
 		for (const p of list) {
-			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" });
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" });
 		}
 
 		// Reload so the client picks up the empty project list.
@@ -55,7 +55,7 @@ test.describe("Splash screen — 0 projects", () => {
 		await openApp(page);
 		const list = await apiFetch("/api/projects").then(r => r.json()) as Array<{ id: string }>;
 		for (const p of list) {
-			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" });
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" });
 		}
 		await page.reload();
 

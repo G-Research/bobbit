@@ -477,6 +477,16 @@ npm run test:manual                 # Headless, API assertions only (~5 min)
 SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 ```
 
+### Real-LLM e2e lane (`npm run test:e2e:real`)
+
+A separate Playwright config — `tests/playwright-e2e.config.ts` — spawns an isolated gateway on port 3097 with `BOBBIT_DIR=.e2e-real-bobbit` for tests that need a real LLM. Currently exercised by `tests/compaction.spec.ts`; the manual-integration counterpart for the same feature is `tests/manual-integration/compaction-pressure.spec.ts`. See [compaction.md](compaction.md) for the feature-level walkthrough.
+
+```bash
+npm run test:e2e:real
+```
+
+This lane is opt-in (needs an API key) and is **not** part of `npm run test:e2e`.
+
 **Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
 
 **What it tests**: Creates 6 session variations on a single gateway, sends messages through the browser, hard-kills the gateway (simulating a crash), restarts on a fresh port, and verifies each session survives:
@@ -505,6 +515,10 @@ SCREENSHOTS=1 npm run test:manual   # + browser screenshots + HTML report
 **Architecture**: The test creates an isolated git repo in a temp directory, pre-configures `project.yaml` (sandbox + worktree pool size), starts a gateway process, and manages its lifecycle. Sessions are created via API (worktree/sandbox flags aren't in the UI), but all agent messages go through the Playwright browser.
 
 **When to run**: After changes to session lifecycle, restore logic, sandbox wiring, worktree management, git status polling, or any server restart behavior. Not needed for UI-only or prompt-only changes.
+
+### Agent tool-use canary
+
+`tests/manual-integration/agent-tool-use.spec.ts` is the regression net for upstream `@mariozechner/pi-*` upgrades. A previous pi bump silently broke all agent tool use because nothing in the unit / API / browser layers exercised a real LLM-driven agent actually calling tools end-to-end. The spec spawns a real agent in a sandboxed session and drives five scenarios (builtin bash, MCP-backed edit and find, mid-tool steer/interrupt, tool error) that each assert on a unique sentinel string in the UI transcript or on filesystem state — never on internal session logs — so it stays valid across pi-internal refactors. Run before and after any `@mariozechner/pi-*` version bump; see [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-manual-integration) for the scenario list and rationale.
 
 ## Target State
 

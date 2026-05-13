@@ -1,5 +1,16 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+
+/** Check whether a process is still running (Layer 1 liveness check). */
+function isPidAlive(pid: number): boolean {
+	if (!Number.isFinite(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code === "EPERM";
+	}
+}
 import fs from "node:fs";
 import path from "node:path";
 import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
@@ -232,15 +243,26 @@ export interface ActiveVerification {
 		output?: string;
 		startedAt: number;
 		sessionId?: string;
-		/**
-		 * Subgoal-step cache — populated by `runSubgoalStep` after the child is
-		 * spawned (stamp `spawnedFromPlanId` IMMEDIATELY after createGoal — no awaits between). Tier-1.5 lookup reads `childGoalId` to short-
-		 * circuit tier resolution; staleness invalidation wipes it (stale archived non-complete cached pointer must be wiped).
-		 */
-		subgoal?: {
-			childGoalId?: string;
-			planId?: string;
-		};
+		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
+		subgoal?: { childGoalId?: string; planId?: string; };
+		/** OS process id of the spawned command (Layer 1). */
+		pid?: number;
+		/** Date.now() at spawn — tie-breaker against pid reuse. */
+		startTimeMs?: number;
+		/** Absolute path to detached child's stdout file (Layer 1). */
+		outFile?: string;
+		/** Absolute path to detached child's stderr file (Layer 1). */
+		errFile?: string;
+		/** Absolute path to detached child's exit-code file (Layer 1). */
+		exitFile?: string;
+		/** bootEpoch of the harness that started this step (Layer 2). */
+		bootEpoch?: string;
+		/** Step timeout in seconds. */
+		timeoutSec?: number;
+		/** Whether the step expects a non-zero exit. */
+		expectFailure?: boolean;
+		/** Optional error-pattern regex for expectFailure matching. */
+		errorPattern?: string;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
@@ -421,6 +443,8 @@ export async function buildReviewPrompt(
 export class VerificationHarness {
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
+	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
+	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
 	private projectContextManager: ProjectContextManager | null;
 
@@ -467,12 +491,18 @@ export class VerificationHarness {
 		// If any step is still waiting to start, the verification is not a zombie
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
-			if (step.status === "running") {
-				// Command steps have no sessionId — if status is running, the process is alive
-				if (!step.sessionId) return true;
+			if (step.status !== "running") continue;
+			if (step.sessionId) {
 				// LLM/agent steps — check if session is still alive
 				const session = this.sessionManager?.getSession(step.sessionId);
 				if (session) return true;
+				continue;
+			}
+			// Command step: only alive when THIS process started it AND pid is still running.
+			// Persisted-running steps from a previous server lifetime have no bootEpoch match
+			// and are treated as dead so duplicate-detection can reclaim the gate.
+			if (step.bootEpoch === this.bootEpoch && typeof step.pid === "number") {
+				if (isPidAlive(step.pid)) return true;
 			}
 		}
 		return false;
@@ -555,23 +585,35 @@ export class VerificationHarness {
 				await this._resumeOneVerification(v);
 			} catch (err) {
 				console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
-				// Mark as failed and update gate
-				const resumeErrorStep = { name: "Resume Error", type: "command" as const, passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 };
-				this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-					status: "failed",
-					steps: [resumeErrorStep],
-				});
-				this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
-				this.broadcastFn(v.goalId, {
-					type: "gate_verification_complete",
-					goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
-				});
-				this.broadcastFn(v.goalId, {
-					type: "gate_status_changed",
-					goalId: v.goalId, gateId: v.gateId, status: "failed",
-				});
-				const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
-				this.notifyTeamLead(v.goalId, v.gateId, "failed", { steps: [resumeErrorStep], goalBranch });
+				// Best-effort: mark as failed. Wrap each external store call in
+				// try/catch so a missing goal/gate doesn't stop us from cleaning
+				// up the in-memory entry below (HTTP 409 lock-after-restart bug).
+				try {
+					this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+						status: "failed",
+						steps: [{ name: "Resume Error", type: "command", passed: false, output: `Failed to resume after restart: ${(err as Error).message}`, duration_ms: 0 }],
+					});
+					this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
+				} catch (storeErr) {
+					console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
+				}
+				try {
+					this.broadcastFn(v.goalId, {
+						type: "gate_verification_complete",
+						goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
+					});
+					this.broadcastFn(v.goalId, {
+						type: "gate_status_changed",
+						goalId: v.goalId, gateId: v.gateId, status: "failed",
+					});
+					this.notifyTeamLead(v.goalId, v.gateId, "failed");
+				} catch (bcastErr) {
+					console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
+				}
+			} finally {
+				// Drop the in-memory entry so subsequent gate_signal calls aren't
+				// rejected by a leftover "running" step from a previous lifetime.
+				this.activeVerifications.delete(v.signalId);
 			}
 		}
 

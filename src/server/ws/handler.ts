@@ -14,6 +14,11 @@ import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
 import { inferMeta } from "../agent/aigw-manager.js";
 import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
 import { readSkillSidecarEntries } from "../skills/skill-sidecar.js";
+import {
+	appendCompactionSidecarEntry,
+	makeCompactionId,
+	mergeCompactionSidecarIntoMessages,
+} from "../agent/compaction-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
@@ -547,34 +552,66 @@ export function handleWebSocketConnection(
 				case "set_thinking_level":
 					await session.rpcClient.setThinkingLevel(msg.level);
 					break;
-				case "compact":
+				case "compact": {
 					// Fire-and-forget: don't block the WS message loop.
 					// The async IIFE handles the full lifecycle.
+					const startedAtMs = Date.now();
+					const compactionId = makeCompactionId(startedAtMs);
 					session.isCompacting = true;
-					broadcast(session.clients, { type: "event", data: { type: "compaction_start" } });
+					broadcast(session.clients, { type: "event", data: { type: "compaction_start", reason: "manual" } });
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
 							const compactResult = await session.rpcClient.compact(120_000);
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
+							const endedAtMs = Date.now();
 							session.isCompacting = false;
+							// Include tokensBefore so the UI can show how much was saved.
+							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
+							const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
+							// Persist the sidecar row so the card survives reload.
+							appendCompactionSidecarEntry(sessionId, {
+								schemaVersion: 1,
+								id: compactionId,
+								trigger: "manual",
+								tokensBefore,
+								tokensAfter: null,
+								durationMs: endedAtMs - startedAtMs,
+								startedAt: new Date(startedAtMs).toISOString(),
+								endedAt: new Date(endedAtMs).toISOString(),
+								success: true,
+								firstKeptEntryId,
+							});
 							// Send compaction_end BEFORE refreshing messages/state so
 							// the client clears _isCompacting first and won't re-add
 							// the placeholder when processing the refreshed messages.
-							// Include tokensBefore so the UI can show how much was saved.
-							const tokensBefore = compactResult?.data?.tokensBefore ?? null;
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: true, tokensBefore } });
+							broadcast(session.clients, { type: "event", data: { type: "compaction_end", reason: "manual", success: true, tokensBefore } });
 							// Refresh messages and state (updated context tokens)
 							await sessionManager.refreshAfterCompaction(session);
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
+							const endedAtMs = Date.now();
 							session.isCompacting = false;
-							broadcast(session.clients, { type: "event", data: { type: "compaction_end", success: false, error: err.message } });
+							appendCompactionSidecarEntry(sessionId, {
+								schemaVersion: 1,
+								id: compactionId,
+								trigger: "manual",
+								tokensBefore: null,
+								tokensAfter: null,
+								durationMs: endedAtMs - startedAtMs,
+								startedAt: new Date(startedAtMs).toISOString(),
+								endedAt: new Date(endedAtMs).toISOString(),
+								success: false,
+								error: err.message,
+								firstKeptEntryId: null,
+							});
+							broadcast(session.clients, { type: "event", data: { type: "compaction_end", reason: "manual", success: false, error: err.message } });
 						}
 					})().catch((err) => {
 						console.error(`[ws-handler] Unexpected compact error for session ${sessionId}:`, err);
 					});
 					break;
+				}
 				case "get_state": {
 					try {
 						const stateResp = await session.rpcClient.getState();
@@ -619,10 +656,12 @@ export function handleWebSocketConnection(
 						if (Array.isArray(raw)) {
 							// H3: splice in-flight message_update before truncation/sidecar/stamp.
 							const spliced = spliceInFlightMessage(raw, (session as any).latestMessageUpdate);
-							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(spliced));
+							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
+							data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
 						} else if (raw && Array.isArray(raw.messages)) {
 							const spliced = spliceInFlightMessage(raw.messages, (session as any).latestMessageUpdate);
-							const truncated = truncateLargeToolContentInMessages(spliced);
+							const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, spliced);
+							const truncated = truncateLargeToolContentInMessages(withCompaction);
 							const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 							data = merged === raw.messages ? raw : { ...raw, messages: merged };
 						}
@@ -704,9 +743,11 @@ export function handleWebSocketConnection(
 									const raw = msgs.data ?? msgs;
 									let data: any = raw;
 									if (Array.isArray(raw)) {
-										data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(raw));
+										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw);
+										data = mergeSkillSidecarIntoMessages(sessionId, truncateLargeToolContentInMessages(withCompaction));
 									} else if (raw && Array.isArray(raw.messages)) {
-										const truncated = truncateLargeToolContentInMessages(raw.messages);
+										const withCompaction = mergeCompactionSidecarIntoMessages(sessionId, raw.messages);
+										const truncated = truncateLargeToolContentInMessages(withCompaction);
 										const merged = mergeSkillSidecarIntoMessages(sessionId, truncated);
 										data = merged === raw.messages ? raw : { ...raw, messages: merged };
 									}

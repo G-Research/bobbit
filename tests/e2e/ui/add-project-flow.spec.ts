@@ -34,9 +34,9 @@ test.describe("Add Project flow (UI)", () => {
 		for (const p of projects) {
 			if (p.name === "default") continue;
 			// Some leaked projects are provisional (assistant sessions); some
-			// are promoted. force=1 bypasses the "can't remove last project"
-			// guard and is gated on BOBBIT_E2E=1 (set by the harness).
-			await apiFetch(`/api/projects/${p.id}?force=1`, { method: "DELETE" }).catch(() => {});
+			// are promoted. Plain DELETE works for any project, including the
+			// last visible one.
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 

@@ -38,6 +38,11 @@ import { recordElapsed } from "./agent/profiling.js";
 import { resolveGrantPolicy } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	initCompactionSidecarDir,
+	findCompactionSidecarEntry,
+} from "./agent/compaction-sidecar.js";
+import { readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -86,7 +91,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -513,6 +518,7 @@ export function createGateway(config: GatewayConfig) {
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
+	initCompactionSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level.
@@ -2281,19 +2287,13 @@ async function handleApiRoute(
 	}
 
 	// DELETE /api/projects/:id
+	//
+	// Any project may be removed, including the last visible one. When zero
+	// non-hidden projects remain the UI falls back to the existing
+	// zero-project first-run state (see GR-09 / splash-no-projects spec).
 	if (projectGetMatch && req.method === "DELETE") {
 		const projectId = projectGetMatch[1];
 		const project = projectRegistry.get(projectId);
-		// Test-only bypass: BOBBIT_E2E=1 + ?force=1 allows deleting the last
-		// project so GR-09 (zero-project first-run UX) can exercise the empty state.
-		const forceDelete = process.env.BOBBIT_E2E === "1" && url.searchParams.get("force") === "1";
-		// The synthetic "system" project (hidden) doesn't count toward the
-		// "at least one real project" guard.
-		const visibleCount = projectRegistry.list().filter(p => !p.hidden).length;
-		if (project && !project.hidden && visibleCount === 1 && !forceDelete) {
-			json({ error: "Cannot delete the last remaining project — add another project first" }, 400);
-			return;
-		}
 		try {
 			// Drain the project's worktree pool before removing
 			await sessionManager.removeWorktreePool(projectId);
@@ -3059,6 +3059,11 @@ async function handleApiRoute(
 		// setting up a NEW project — they get a provisional project registration so sessions
 		// persist under their own project context (survives page refresh).
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
+		// Role/Tool/Staff assistants edit server-scope config and do not require a
+		// project. When the client supplies a projectId we still attach to it (the
+		// Roles page can be scoped to a project); otherwise we skip project
+		// resolution entirely so `npx bobbit` in a non-project directory works.
+		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool" || assistantType === "staff";
 		let resolvedProjectId = body?.projectId as string | undefined;
 		let provisionalProjectId: string | undefined;
 
@@ -3110,7 +3115,12 @@ async function handleApiRoute(
 		// Project must be resolvable explicitly or from cwd — no silent default fallback.
 		// (Provisional-project handling above may already have set resolvedProjectId;
 		// if so, skip the resolver.)
-		if (!resolvedProjectId) {
+		// Server-scope assistants (role/tool/staff) without an explicit projectId
+		// anchor at the synthetic system project so they have a valid persistence
+		// store without forcing the user to register a real project.
+		if (!resolvedProjectId && isServerScopeAssistant) {
+			resolvedProjectId = SYSTEM_PROJECT_ID;
+		} else if (!resolvedProjectId) {
 			const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body?.projectId, cwd });
 			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
 			resolvedProjectId = resolved.projectId;
@@ -5000,6 +5010,16 @@ async function handleApiRoute(
 					await verificationHarness.cancelStaleVerifications(goalId, gateId);
 					// Fall through to create new signal
 				} else {
+					// Surface the step states so a future 409 is diagnosable from
+					// logs alone — see goal "Unstick verification lock on restart".
+					const stepSummary = runningDup.steps.map((s: any) => ({
+						name: s.name,
+						status: s.status,
+						pid: s.pid,
+						bootEpoch: s.bootEpoch,
+						sessionId: s.sessionId,
+					}));
+					console.warn(`[api] Rejecting gate_signal as duplicate: gate=${gateId} signalId=${runningDup.signalId} aliveCheck=true steps=${JSON.stringify(stepSummary)}`);
 					json({ error: "Verification already in progress for this commit", existingSignalId: runningDup.signalId }, 409);
 					return;
 				}
@@ -6864,6 +6884,86 @@ async function handleApiRoute(
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 			});
+			json(envelope);
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				const status = err.code === "transcript_unavailable" ? 404 : 400;
+				json({ error: err.code, detail: err.message }, status);
+			} else {
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/transcript/before-compaction — orphaned
+	// pre-compaction history for the named sidecar compaction id, paginated.
+	// See docs/design/persist-compaction-history.md §4.2.
+	const beforeCompactionMatch = url.pathname.match(
+		/^\/api\/sessions\/([^/]+)\/transcript\/before-compaction$/,
+	);
+	if (beforeCompactionMatch && req.method === "GET") {
+		const [, targetId] = beforeCompactionMatch;
+		const targetPs = sessionManager.getPersistedSession(targetId);
+		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+
+		// Caller-project authorisation header check — same shape as the
+		// sibling transcript route.
+		const callerSid = req.headers["x-bobbit-session-id"];
+		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
+		if (callerSidStr) {
+			const callerPs = sessionManager.getPersistedSession(callerSidStr);
+			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
+				json({ error: "permission_denied" }, 403); return;
+			}
+		}
+
+		const compactionId = url.searchParams.get("compactionId");
+		if (!compactionId) {
+			json({ error: "invalid_params", detail: "compactionId required" }, 400);
+			return;
+		}
+		const entry = findCompactionSidecarEntry(targetId, compactionId);
+		if (!entry) {
+			json({ error: "compaction_not_found" }, 404);
+			return;
+		}
+		const qp2 = url.searchParams;
+		let cursor: number | undefined;
+		let limit: number | undefined;
+		try {
+			if (qp2.has("cursor")) {
+				const c = Number(qp2.get("cursor"));
+				if (!Number.isFinite(c) || !Number.isInteger(c) || c < 0) {
+					throw new TranscriptReaderError("invalid_params", "cursor must be a non-negative integer");
+				}
+				cursor = c;
+			}
+			if (qp2.has("limit")) {
+				const n = Number(qp2.get("limit"));
+				if (!Number.isFinite(n) || !Number.isInteger(n)) {
+					throw new TranscriptReaderError("invalid_params", "limit must be an integer");
+				}
+				limit = n;
+			}
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				json({ error: err.code, detail: err.message }, 400);
+			} else {
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+			return;
+		}
+		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+		try {
+			const envelope = await readOrphanedBeforeCompaction(
+				{ compactionId, cursor, limit },
+				{
+					readContent: () => sessionFileRead(ctx2, targetPs.agentSessionFile!, sandboxManager),
+					firstKeptEntryId: entry.firstKeptEntryId,
+				},
+			);
 			json(envelope);
 		} catch (err) {
 			if (err instanceof TranscriptReaderError) {

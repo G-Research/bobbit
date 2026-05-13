@@ -15,7 +15,7 @@ Non-2xx JSON responses follow:
 - `code` — optional machine-readable code (e.g. `"symlink_root"`).
 - Additional fields may be merged via `extra` (e.g. `canonical` for symlink rejection).
 
-Client API wrappers in `src/app/api.ts` parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`).
+Client call sites use the shared helpers `errorFromResponse(res, fallback)` and `errorDetails(err)` from `src/app/error-helpers.ts` to parse this body, attach `code`/`stack` to the thrown `Error`, and forward both to `showConnectionError(title, message, { code, stack })`, which renders via the `<error-details>` component (`src/ui/components/ErrorDetails.ts`). The set of modal call sites that must forward `{ code, stack }` is pinned by `tests/error-modal-call-sites.test.ts`; the helper contract is pinned by `tests/error-helpers.test.ts`.
 
 ### Health & Info
 
@@ -44,6 +44,7 @@ Client API wrappers in `src/app/api.ts` parse this body, attach `code`/`stack` t
 | `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
+| `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
 
 
 ### Proposal drafts
@@ -271,6 +272,18 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `projectId` provided, unknown id | 400 | `{"error":"Invalid project"}` |
 
 The helper implementing this is `resolveProjectForRequest` in `src/server/agent/resolve-project.ts`. Callers in new handlers should invoke it at the top of the handler and return the 400 directly when `ok === false`.
+
+#### `POST /api/sessions` — `assistantType` carve-outs
+
+`POST /api/sessions` accepts an optional `assistantType` that changes how project resolution applies. The rule is one sentence: **only project-scope assistants require a resolvable project; server-scope assistants do not.**
+
+| `assistantType` | Scope | Project resolution |
+|---|---|---|
+| _(unset)_, `goal` | project | Standard contract above — `projectId` or matching `cwd` required, else 400. |
+| `project`, `project-scaffolding` | project (new) | The server creates a provisional project registration so the session persists under its own context. |
+| `role`, `tool`, `staff` | server | `projectId` is **optional**. When omitted, the server anchors the session at the synthetic `system` project (see [internals.md — Synthetic system project](internals.md#synthetic-system-project)). When the caller _does_ pass a `projectId` (e.g. the Roles/Tools/Staff pages when scoped to a project), it is honoured normally. |
+
+Why: `role` / `tool` / `staff` assistants edit project-independent config (custom roles, custom tools, staff agents) that lives at server scope. Forcing them through the project-resolution gate would make `npx bobbit` from a non-project directory return 400 just for opening the Roles page's "+ New Role" button. The system-project anchor gives those sessions a valid persistence store without requiring the user to register a real project first.
 
 ### Project Config
 

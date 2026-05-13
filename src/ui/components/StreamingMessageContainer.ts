@@ -21,8 +21,11 @@ export class StreamingMessageContainer extends LitElement {
 	private _exitVariant: 'exit' | 'exit-roll' = 'exit';
 	private _entryVariant: 'enter' | 'enter-roll' = 'enter';
 	private _entryTimer: ReturnType<typeof setTimeout> | null = null;
+	private _exitTimer: ReturnType<typeof setTimeout> | null = null;
 	private _compactEntryTimer: ReturnType<typeof setTimeout> | null = null;
 	private _compactSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+	private _compactPopTimer: ReturnType<typeof setTimeout> | null = null;
+	private _compactExitTimer: ReturnType<typeof setTimeout> | null = null;
 	private _compactStartedAt: number = 0;
 	private _pendingMessage: AgentMessage | null = null;
 	private _updateScheduled = false;
@@ -44,7 +47,12 @@ export class StreamingMessageContainer extends LitElement {
 			if (this._blobState === 'compact-shake' || this._blobState === 'compacting' || this._blobState === 'compact-pop' || this._compactEntryTimer) {
 				// no-op — compaction owns the blob state until endCompacting() finishes
 			} else if (this.isStreaming && this._blobState === 'idle') {
-				// Coming from idle — play entry animation
+				// Coming from idle — play entry animation. Cancel any pending
+				// exit timer so it can't later overwrite state back to 'idle'.
+				if (this._exitTimer) {
+					clearTimeout(this._exitTimer);
+					this._exitTimer = null;
+				}
 				this._entryVariant = Math.random() < 0.5 ? 'enter' : 'enter-roll';
 				this._blobState = 'entering';
 				this._entryTimer = setTimeout(() => {
@@ -52,6 +60,12 @@ export class StreamingMessageContainer extends LitElement {
 					this._blobState = 'active';
 				}, this._entryVariant === 'enter-roll' ? 900 : 700);
 			} else if (this.isStreaming) {
+				// Cancel any pending exit timer so it can't strand the blob in
+				// 'idle' while the agent is actively streaming.
+				if (this._exitTimer) {
+					clearTimeout(this._exitTimer);
+					this._exitTimer = null;
+				}
 				this._blobState = 'active';
 			} else if (this._blobState === 'active' || this._blobState === 'entering') {
 				// Streaming stopped — cancel any pending entry timer and play exit
@@ -59,10 +73,20 @@ export class StreamingMessageContainer extends LitElement {
 					clearTimeout(this._entryTimer);
 					this._entryTimer = null;
 				}
+				if (this._exitTimer) {
+					clearTimeout(this._exitTimer);
+					this._exitTimer = null;
+				}
 				this._exitVariant = Math.random() < 0.5 ? 'exit' : 'exit-roll';
 				this._blobState = 'exiting';
-				setTimeout(() => {
-					this._blobState = 'idle';
+				this._exitTimer = setTimeout(() => {
+					this._exitTimer = null;
+					// Guard: only go idle if streaming hasn't restarted and we
+					// are still in 'exiting'. Otherwise a later isStreaming=true
+					// transition has already taken ownership of the blob.
+					if (!this.isStreaming && this._blobState === 'exiting') {
+						this._blobState = 'idle';
+					}
 				}, this._exitVariant === 'exit-roll' ? 900 : 700);
 			}
 		}
@@ -91,6 +115,24 @@ export class StreamingMessageContainer extends LitElement {
 	/** Start the compaction squash animation */
 	public startCompacting() {
 		this._compactStartedAt = Date.now();
+		// Compaction takes ownership of the blob — cancel any pending
+		// entry/exit/pop timers that might otherwise overwrite our state.
+		if (this._exitTimer) {
+			clearTimeout(this._exitTimer);
+			this._exitTimer = null;
+		}
+		if (this._entryTimer) {
+			clearTimeout(this._entryTimer);
+			this._entryTimer = null;
+		}
+		if (this._compactPopTimer) {
+			clearTimeout(this._compactPopTimer);
+			this._compactPopTimer = null;
+		}
+		if (this._compactExitTimer) {
+			clearTimeout(this._compactExitTimer);
+			this._compactExitTimer = null;
+		}
 		// If idle, enter first then shake then compact; if active, shake then compact
 		const startShake = () => {
 			this._blobState = 'compact-shake';
@@ -150,12 +192,26 @@ export class StreamingMessageContainer extends LitElement {
 			clearTimeout(this._compactSafetyTimer);
 			this._compactSafetyTimer = null;
 		}
+		if (this._compactPopTimer) {
+			clearTimeout(this._compactPopTimer);
+			this._compactPopTimer = null;
+		}
+		if (this._compactExitTimer) {
+			clearTimeout(this._compactExitTimer);
+			this._compactExitTimer = null;
+		}
 		this._blobState = 'compact-pop';
-		setTimeout(() => {
+		this._compactPopTimer = setTimeout(() => {
+			this._compactPopTimer = null;
 			this._exitVariant = Math.random() < 0.5 ? 'exit' : 'exit-roll';
 			this._blobState = 'exiting';
-			setTimeout(() => {
-				this._blobState = 'idle';
+			this._compactExitTimer = setTimeout(() => {
+				this._compactExitTimer = null;
+				// Guard: only go idle if streaming hasn't restarted and we
+				// are still in 'exiting'.
+				if (!this.isStreaming && this._blobState === 'exiting') {
+					this._blobState = 'idle';
+				}
 			}, this._exitVariant === 'exit-roll' ? 900 : 700);
 		}, 600); // pop duration
 	}
@@ -262,6 +318,11 @@ export class StreamingMessageContainer extends LitElement {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__shadow"></div>
+					<div class="bobbit-blob__zzz" aria-hidden="true">
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--1">z</span>
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--2">z</span>
+						<span class="bobbit-blob__zzz-letter bobbit-blob__zzz-letter--3">z</span>
+					</div>
 				</div>` : nothing}
 				${showTimer
 					? html`<div class="px-2 sm:px-4 text-xs text-muted-foreground text-right tabular-nums" style="margin-top:-32px;">

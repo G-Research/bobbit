@@ -27,6 +27,13 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - Tool-call messages stay in streaming until the next message starts.
 - See [docs/internals.md — Reducer ordering invariant](internals.md#reducer-ordering-invariant) for the single-sort-key contract.
 
+## Blob stuck idle while streaming (zzz visible with stop button)
+
+- **Symptom**: chat blob shows the desaturated idle sprite with floating `zzz` while the agent is actively streaming (stop button visible, tool calls running). Stays wrong until the next `isStreaming` transition. Most reproducible by sending a new message immediately after the previous turn ends.
+- **Root cause**: orphan `setTimeout` in `src/ui/components/StreamingMessageContainer.ts` exit/compaction paths writing `_blobState = 'idle'` after `isStreaming` flipped back to `true`. The entry path tracked its timer in `_entryTimer` and cleared it; exit/compaction timers were untracked.
+- **Invariant**: every timer that writes `_blobState` must be stored in a field, cleared on any transition back to `active`/`entering`, and its callback must re-check `this.isStreaming` and the expected source state before writing.
+- **Pinning test**: `tests/streaming-blob-state.spec.ts` — drives `isStreaming` false→true within the exit window and asserts the blob ends up `active`, not `idle`. Must fail on pre-fix master.
+
 ## Streaming dedup / reorder
 
 - **Symptoms**: during live streaming (not reload-replay), assistant or toolResult messages appear twice, or parallel tool results appear in the wrong order. Most often observed right after a mid-turn WS reconnect (dev-server restart, tab sleep/resume, flaky network) or during rapid parallel tool-call bursts.
@@ -170,8 +177,9 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 
 ## Compaction
 
-- Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is now a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
-- `compacting_placeholder` must be filtered and re-added correctly across server refreshes — the reducer drops the synthetic when a snapshot row carries the server-persisted compaction marker (id-match, with `"Context compacted"` text fallback).
+- Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
+- `compacting_placeholder` must be filtered and re-added correctly across server refreshes — the reducer drops the synthetic when a snapshot row carries the server-persisted compaction marker (id-match, with `"Context compacted"` text fallback for legacy snapshots).
+- **Card disappears after navigate-away or reload** — the server-side sidecar splice did not run. Check that `mergeCompactionSidecarIntoMessages` is wired into both the `get_messages` WS handler and `refreshAfterCompaction`. Sidecar file: `<stateDir>/compaction-sidecar/<sessionId>.jsonl`. See [docs/compaction-history.md](compaction-history.md).
 
 ## Goal creation fails with `Workflow not found: general`
 
@@ -617,11 +625,12 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - `ProjectContextManager` manages all `ProjectContext` instances and routes store access
 - Project registry at `<server-cwd>/.bobbit/state/projects.json` — check file exists and is valid JSON
 - **No default user project.** The server never auto-registers a *user* project. A fresh install has an empty `projects.json` (visible projects only) and the UI forces Add Project before any goal/session work in user projects. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` matching a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
-- **Synthetic `system` project carve-out.** At startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`, `hidden: true`) via `registerSystemProject()`. It does **not** appear in `GET /api/projects` and is invisible to `state.projects`, but it is a valid `projectId` for `POST /api/sessions`. System-scope tool-assistant sessions (Tools page → New Tool with scope = System) explicitly pass `projectId: "system"` instead of relying on `cwd` resolution, which is why they no longer 400. See [internals.md — Synthetic system project](internals.md#synthetic-system-project).
+- **Synthetic `system` project carve-out.** At startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`, `hidden: true`) via `registerSystemProject()`. It does **not** appear in `GET /api/projects` and is invisible to `state.projects`, but it is a valid `projectId` for `POST /api/sessions`. Two kinds of caller land here: (a) the Tools page → New Tool with scope = System, which passes `projectId: "system"` explicitly; and (b) `POST /api/sessions` with `assistantType ∈ {role, tool, staff}` and no `projectId` — the server's `isServerScopeAssistant` branch anchors these at `SYSTEM_PROJECT_ID` without consulting `resolveProjectForRequest`. See [internals.md — Synthetic system project](internals.md#synthetic-system-project) and [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs).
 - **Diagnosing a user-visible 400 "projectId required":**
-  1. Was the request from a system-scope tool assistant? It must carry `projectId: "system"` in the POST body — if `cwd`-only, it will 400 because `findByCwd` skips hidden projects.
-  2. Was the request from the splash-screen "New Session" / "Quick Session" button? Those are gated on `state.projects.length` (0 → New Project CTA, 1 → bound session, ≥2 → splash picker via `state.splashProjectPickerOpen`); a 400 here means the gating regressed.
-  3. Confirm the system project is registered — `state.projects` will not show it (by design), but its presence is observable via the server log line on startup or by inspecting `<bobbitStateDir>/projects.json` directly. There is no `?includeHidden=1` query flag.
+  1. Was the request a `POST /api/sessions` with `assistantType ∈ {role, tool, staff}`? It should never 400 on missing project — the server anchors at `system`. A 400 here means the server-scope carve-out regressed; check the `isServerScopeAssistant` branch in `handleApiRoute()`.
+  2. Was the request from a system-scope tool assistant relying on `cwd` only? It must carry `projectId: "system"` in the POST body — `cwd`-only resolution will 400 because `findByCwd` skips hidden projects.
+  3. Was the request from the splash-screen "New Session" / "Quick Session" button? Those are gated on `state.projects.length` (0 → New Project CTA, 1 → bound session, ≥2 → splash picker via `state.splashProjectPickerOpen`); a 400 here means the gating regressed.
+  4. Confirm the system project is registered — `state.projects` will not show it (by design), but its presence is observable via the server log line on startup or by inspecting `<bobbitStateDir>/projects.json` directly. There is no `?includeHidden=1` query flag.
 - `GET /api/projects` to list all registered projects
 - Sessions/goals not appearing? Check `projectId` field matches the expected project. Verify the correct project's `sessions.json` / `goals.json` contains the record
 - Sidebar not grouping? Project folder rows are always shown — check that `state.projects` is populated and `renderProjectHeader()` is being called
@@ -685,7 +694,15 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - Check `sessionManager` and `teamManager` passed to `VerificationHarness`
 - Inspect: `GET /api/goals/:goalId/verifications/active`
 - **Stuck verification?** Cancel manually via `POST /api/goals/:goalId/gates/:gateId/cancel-verification` (returns `{ cancelled: true }` or `{ cancelled: false }` if nothing was running). The goal dashboard also shows a Cancel button when a verification is in "running" state.
-- **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. If all reviewer sessions are dead, the stale verification is auto-cancelled and the new signal proceeds. Command steps (no `sessionId`) and waiting steps are treated as alive.
+- **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. Reviewer/agent steps are alive iff `sessionManager.getSession(step.sessionId)` resolves; command steps are alive iff `step.bootEpoch === harness.bootEpoch && isPidAlive(step.pid)` — a persisted `status: "running"` from a previous gateway lifetime never satisfies this and so cannot lock the gate.
+
+## HTTP 409 `Verification already in progress` after gateway restart
+
+- **Symptom**: after a gateway restart that killed an in-flight command-type verification, `POST /api/goals/:id/gates/:gateId/signal` on the same commit returns `409 { error: "Verification already in progress for this commit", existingSignalId: ... }` even though nothing is actually running. Pre-fix the only unstick was pushing an empty commit to change the SHA.
+- **Cause**: `areVerificationSessionsAlive` treated any persisted `status === "running"` command step (no `sessionId`) as proof of liveness. Persisted state survives restart; the spawned `npm run test:e2e` child does not. The in-memory map and the on-disk gate status drifted (gate looked failed, lock looked running).
+- **Fix**: command-step liveness now requires `step.bootEpoch === this.bootEpoch && isPidAlive(step.pid)`; `bootEpoch` is a per-`VerificationHarness`-instance UUID, so post-restart it can never match. `resumeInterruptedVerifications()` also synchronously deletes failed-on-resume entries from `activeVerifications` and rewrites `active-verifications.json` in a `finally`, so the duplicate-detection check has nothing to false-positive on. See [docs/verification-restart.md](verification-restart.md) for the full design.
+- **If it recurs**: grep server stdout for `[api] Rejecting gate_signal as duplicate` — that log line now dumps `signalId` + per-step `{ name, status, pid, bootEpoch, sessionId }` so you can tell at a glance whether a step is genuinely alive (matching bootEpoch + live pid) or a zombie. A zombie with the current `bootEpoch` means we kept the entry across an explicit `cancelStaleVerifications` — investigate that path. A zombie with a stale `bootEpoch` means the resume cleanup didn't run — check for exceptions during boot in `resumeInterruptedVerifications`.
+- **Pinning tests**: `tests/verification-harness-restart.test.ts` (zombie alive-check, pid-reuse safeguard, resume-removes-from-disk-and-memory); `tests/e2e/verification-restart-resignal.spec.ts` (full HTTP round-trip — seed a zombie, resume, re-signal, assert 200).
 
 ## Phased verification
 
@@ -1093,6 +1110,14 @@ The HTML video-capture report is only emitted when `RECORDSCREEN=1`. If ffmpeg i
 
 If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-status?flowId=&provider=` directly to see whether the server received the callback. Files: `src/server/auth/oauth.ts`; REST: `/api/oauth/*`.
 
+## 60+ TSchema errors / typebox flavor mismatch after pi upgrade
+
+- **Symptom**: after bumping `@mariozechner/pi-ai` (or any `@mariozechner/pi-*` package that re-exports schema helpers), `npm run check` floods with structurally-incompatible-type errors against `TSchema`, `TObject`, `TProperties`, `Static<...>`, etc. Errors typically point at a file that mixes `Type.Object(...)` / `Static<typeof X>` with a pi-ai-returning helper like `StringEnum` or a tool whose `parameters` schema is consumed by pi-ai.
+- **Root cause**: pi-ai 0.73+ re-exports `Type` and `Static` from typebox **v1**. Bobbit also has a direct dependency on `@sinclair/typebox` v0.34. The two packages publish structurally-different `TSchema` types, so a value built with `@sinclair/typebox`'s `Type.Object(...)` is no longer assignable to a slot that pi-ai expects to be a v1 `TObject`, even though the runtime JSON shape is identical.
+- **Rule**: in any file that combines pi-ai schema helpers (or hands a schema to a pi-ai-typed slot) with `Type.Object(...)` / `Static<typeof X>`, import `Type` and `Static` from `@mariozechner/pi-ai` — not from `@sinclair/typebox`. Mixing flavors in the same file is the bug; picking one and using it consistently is the fix.
+- **Reference**: `src/ui/tools/artifacts/artifacts.ts` is the canonical example — it imports `StringEnum, Static, ToolCall, Type` together from `@mariozechner/pi-ai`. Files that have no pi-ai schema interop can keep importing from `@sinclair/typebox` as before.
+- **Diagnosis tip**: if the error count is large (dozens to hundreds) and all variants of `TSchema is not assignable to TSchema` originate from the same module, you're looking at a flavor mismatch, not a real type bug. Switch the `Type` / `Static` import in that file and re-run `npm run check` before changing any schema definitions.
+
 ## Bundle-size assertion fails
 
 `tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and asserts ≤ 600 kB gzipped, plus ≤ 500 kB gzipped for any non-worker chunk. Check `dist/ui/.vite/manifest.j
@@ -1151,16 +1176,18 @@ Should not happen post-fix. `ProjectRegistry.findByCwd()` canonicalises both the
 
 Symptom: triggering an action (e.g. create goal) produces a modal whose body is just "Failed: 400" or "Failed to create goal: 400" — no description, no code, no stack.
 
-Diagnosis: the API wrapper in `src/app/api.ts` (or `src/app/session-manager.ts`) is dropping the structured server error body. The reference pattern is the throw side parsing `await res.json().catch(() => ({}))` and attaching `data.code` and `data.stack` to the thrown `Error`, plus the catch side reading both back off the error object and forwarding them to `showConnectionError(title, msg, { code, stack })` in `src/app/dialogs.ts`. Both halves must be applied together — fixing only one half drops the structured info.
+Diagnosis: a client call site is dropping the structured server error body. Both halves must be applied together — fixing only one half drops the structured info.
 
-Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (defined in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+Reference pattern, using the shared helpers in `src/app/error-helpers.ts`:
 
-Fix path:
+- Throw side: `if (!res.ok) throw await errorFromResponse(res, "Failed to …");` — parses `{ error, code, stack }` off the JSON body and attaches `code`/`stack` to the `Error`. Falls back to `Failed: <status>` on a non-JSON body.
+- Catch side: `showConnectionError(title, e.message, errorDetails(e));` — extracts `{ message, code?, stack? }` from any caught value (Error, custom subclass with `.code`, or non-Error) without throwing.
 
-- `src/app/api.ts` wrapper: replace `throw new Error(\`Failed: ${res.status}\`)` with the parse-and-attach pattern; update the catch block to read `code`/`stack` off the error and pass them to `showConnectionError`.
-- `src/server/server.ts` handler: convert `catch (err) { json({ error: String(err) }, status); }` to `catch (err) { jsonError(status, err); }`.
-- `<error-details>` (`src/ui/components/ErrorDetails.ts`) renders the message + optional code + collapsible stack disclosure when both halves are wired correctly.
-- The background polling site in `refreshSessions()` is intentionally silent and does NOT surface a modal — failures there are dropped on purpose.
+Server side: confirm the handler whose response surfaced is using `jsonError(status, err, extra?)` (in `src/server/server.ts`) for caught exceptions, not literal `json({ error: String(err) }, ...)` or `json({ error: err.message }, ...)`. Validation responses with literal strings (e.g. `"Missing title"`) intentionally stay as `json({ error: "..." }, ...)` — they have no useful stack.
+
+The `<error-details>` component (`src/ui/components/ErrorDetails.ts`) renders message + optional code + collapsible stack disclosure when both halves are wired. Background polling sites (e.g. `refreshSessions()`) are intentionally silent and do NOT surface a modal.
+
+Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call site that must forward `{ code, stack }`) and `tests/error-helpers.test.ts` (helper contract). Add new modal call sites to the former; do not add a new `showConnectionError(...)` without forwarding `errorDetails(err)`.
 
 ## Agent `fetch failed` against gateway when started with `--host 0.0.0.0`
 
