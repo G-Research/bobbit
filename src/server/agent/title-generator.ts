@@ -67,7 +67,7 @@ export interface TitleGenOptions {
 	namingModel?: string;
 	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
 	aigwUrl?: string;
-	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high" */
+	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
 }
 

@@ -1314,7 +1314,7 @@ Two optional fields on the `Role` interface in `role-store.ts`:
 | Field | Type | Meaning |
 |---|---|---|
 | `model` | `"<provider>/<modelId>"` | Same shape as `default.sessionModel` (e.g. `anthropic/claude-opus-4-1`). Empty/missing = inherit. |
-| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` | Same value space as the global thinking selector. Empty/missing = inherit. |
+| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | Same value space as the global thinking selector. `xhigh` is only honoured on models that support it (Opus 4.6+, gpt-5.1-codex-max, gpt-5.2*) — unsupported levels are clamped down at use-time. Empty/missing = inherit. See [Per-model thinking-level capabilities](thinking-levels.md). |
 
 `parseRole` and `serializeRole` round-trip both fields and omit them from YAML when unset ("absent" and "empty string" are equivalent on the wire). Malformed values (e.g. `model: "no-slash"`, `thinkingLevel: "weird"`) are silently dropped at parse time so a typo never breaks role loading; the API layer rejects them with 400 so the UI surfaces the error.
 
@@ -1359,7 +1359,7 @@ Agent processes are now spawned with the desired model and reasoning level passe
 `RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
 
 - `initialModel?: string` - literal `<provider>/<modelId>`.
-- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high`.
+- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
 
 `buildAgentArgs(options)` in the same file translates them to `--model <provider>/<modelId>` and `--thinking <level>` and prepends them to the agent argv. Malformed values (no `/`, unknown level) are silently dropped - the post-spawn helpers will still bind correctly.
 
@@ -1374,6 +1374,8 @@ Agent processes are now spawned with the desired model and reasoning level passe
 `resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
 
 **Team-lead and worker spawn pass an explicit `initialModel` / `initialThinkingLevel` through `createSession` opts.** `team-manager.ts::_startTeamImpl` (team-lead) and `team-manager.ts::spawnRole` (workers) resolve the role through the full cascade via `resolveRole(goal, name, roleStore)` — inline-roles → project → server → builtin — and forward `role.model` / `role.thinkingLevel` (empty string ⇒ `undefined` ⇒ system default) to `createSession`. The session-setup pipeline takes the explicit-caller branch in `resolveBridgeOptions` and pins those values, so the team-lead and every worker honour the role's configured model override at spawn time without relying on a post-spawn `setModel`. Pinned by `tests/team-manager-role-model.test.ts`.
+
+`SessionSetupPlan` exposes two parallel fields naming the same role — `role` and `roleName` — because callers were added at different times and never converged. `team-manager.spawnRole`, `startTeam` for the team lead, and `staff-manager` pass only `roleName`; the verification harness and respawn paths pass `role`. `_resolveBridgeOptions` therefore resolves overrides from `plan.role ?? plan.roleName` (and `spawnAgent` / `persistOnce` mirror the same fallback when populating `session.role`, so the post-spawn `tryAutoSelectModel` safety net keys off the right id). Collapsing the duality into a single field is a separate refactor; until then, new spawn sites should set `roleName` and rely on the fallback rather than re-introducing it elsewhere.
 
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
@@ -1585,7 +1587,7 @@ Indexes are a rebuildable cache; the source-of-truth stores repopulate automatic
 
 ## Thinking level configuration
 
-Configurable via `default_thinking_level` in `project.yaml`. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `""` (empty = agent default `"medium"`).
+Configurable via `default_thinking_level` in `project.yaml`. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `""` (empty = agent default `"medium"`). `xhigh` is only honoured on models that advertise it (Anthropic Opus 4.6+, OpenAI `gpt-5.1-codex-max`, `gpt-5.2*`); on other models it clamps down at session-start. See [docs/thinking-levels.md](thinking-levels.md) for the capability matrix and clamping semantics.
 
 Token budgets (hardcoded in `remote-agent.ts`): minimal=1024, low=4096, medium=10240, high=32768.
 
@@ -2653,3 +2655,4 @@ Only truly global state lives in the server's central state directory.
 | File | Purpose |
 |---|---|
 | `~/.bobbit/agent/auth.json` | API auth credentials |
+| `~/.bobbit/agent/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@bobbit/binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |

@@ -27,6 +27,8 @@
  * O(n + e) and pure.
  */
 
+import { resolvePlanNodeChild } from "./plan-node-state.js";
+
 export interface SynthesisGoal {
 	id: string;
 	parentGoalId?: string;
@@ -34,6 +36,7 @@ export interface SynthesisGoal {
 	createdAt: number;
 	state: "todo" | "in-progress" | "complete" | "shelved";
 	archived?: boolean;
+	paused?: boolean;
 	title: string;
 	workflowId?: string;
 	/** Explicit sibling planIds this child depends on (Phase 5). */
@@ -65,15 +68,10 @@ export interface BuildPlanStepsOpts {
 	childGoals: SynthesisGoal[];
 }
 
-function pickResolvedChild(planId: string, childGoals: SynthesisGoal[]): string | undefined {
-	// Prefer the most-recent matching child by createdAt (mirrors plan-node-state
-	// tie-break at the top level — full tier preference lives in plan-node-state.ts).
-	let best: SynthesisGoal | undefined;
-	for (const c of childGoals) {
-		if (c.spawnedFromPlanId !== planId) continue;
-		if (!best || c.createdAt > best.createdAt) best = c;
-	}
-	return best?.id;
+function pickResolvedChild(planId: string, childGoals: SynthesisGoal[]): SynthesisGoal | undefined {
+	// Delegate to the canonical tier resolver so server, plan-node-state, and
+	// plan-synthesis agree on which child wins per planId.
+	return resolvePlanNodeChild(planId, childGoals).child as SynthesisGoal | undefined;
 }
 
 interface Layered {
@@ -176,7 +174,7 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 			spec: s.spec,
 			phase: depth.get(s.planId) ?? 0,
 			dependsOn: (s.dependsOn ?? []).slice(),
-			childGoalId: pickResolvedChild(s.planId, childGoals),
+			childGoalId: pickResolvedChild(s.planId, childGoals)?.id,
 		}));
 		for (let i = 0; i < orphans.length; i++) {
 			const c = orphans[i];
@@ -194,21 +192,54 @@ export function buildPlanSteps(opts: BuildPlanStepsOpts): PlanStep[] {
 	}
 
 	// Living plan: synthesise from ALL children — archived included.
+	// Group by real planId so re-spawned children (archived + live for the
+	// same plan) collapse to one row. The canonical tier resolver picks the
+	// winner. Children with no `spawnedFromPlanId` are true orphans — keep
+	// each as its own `synth:<id>` row (no grouping possible).
 	const sorted = childGoals
 		.slice()
 		.sort((a, b) => a.createdAt - b.createdAt);
-	const planIds = sorted.map(c => c.spawnedFromPlanId ?? `synth:${c.id}`);
-	const layered: Layered[] = sorted.map((c, i) => ({
-		planId: planIds[i],
-		dependsOn: c.dependsOnPlanIds ?? [],
+
+	// Bucket children by planId. For real planIds, collect all siblings so
+	// the tier resolver sees the full candidate set. Synth planIds are
+	// unique per child by construction.
+	const groupOrder: string[] = [];
+	const groupMembers = new Map<string, SynthesisGoal[]>();
+	for (const c of sorted) {
+		const planId = c.spawnedFromPlanId ?? `synth:${c.id}`;
+		if (!groupMembers.has(planId)) {
+			groupOrder.push(planId);
+			groupMembers.set(planId, []);
+		}
+		groupMembers.get(planId)!.push(c);
+	}
+
+	// Resolve a single winner per planId via the canonical tier resolver.
+	// For synth groups (size 1) the winner is just that child.
+	const winners: { planId: string; child: SynthesisGoal }[] = [];
+	for (const planId of groupOrder) {
+		const members = groupMembers.get(planId)!;
+		if (planId.startsWith("synth:")) {
+			winners.push({ planId, child: members[0] });
+			continue;
+		}
+		const resolved = resolvePlanNodeChild(planId, members).child as SynthesisGoal | undefined;
+		// Resolver always returns a child when matching.length > 0, but be
+		// defensive (matches plan-node-state.ts "Unreachable" branch).
+		winners.push({ planId, child: resolved ?? members[members.length - 1] });
+	}
+
+	const layered: Layered[] = winners.map(w => ({
+		planId: w.planId,
+		dependsOn: w.child.dependsOnPlanIds ?? [],
 	}));
 	const depth = computeDepth(layered);
-	return sorted.map((c, i) => ({
-		planId: planIds[i],
-		title: c.title,
+	return winners.map(w => ({
+		planId: w.planId,
+		title: w.child.title,
 		spec: undefined,
-		phase: depth.get(planIds[i]) ?? 0,
-		dependsOn: (c.dependsOnPlanIds ?? []).slice(),
-		childGoalId: c.id,
+		phase: depth.get(w.planId) ?? 0,
+		dependsOn: (w.child.dependsOnPlanIds ?? []).slice(),
+		childGoalId: w.child.id,
 	}));
 }

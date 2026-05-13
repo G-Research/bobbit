@@ -57,6 +57,25 @@ import { applyReviewModelOverrides, applyModelString } from "./review-model-over
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
 import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js";
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
+import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
+import { inferMeta } from "./aigw-manager.js";
+
+/**
+ * Clamp a thinking-level value against the resolved reviewer/QA model. When
+ * the model string is in canonical `provider/modelId` form, infer reasoning
+ * metadata and clamp. When no model is resolvable, return the value as-is
+ * (the agent will fall back to its built-in default).
+ */
+function clampReviewThinking(level: string | undefined, modelStr: string | undefined): string | undefined {
+	if (!level) return level;
+	if (!modelStr) return level;
+	const slash = modelStr.indexOf("/");
+	if (slash <= 0) return level;
+	const provider = modelStr.slice(0, slash);
+	const modelId = modelStr.slice(slash + 1);
+	const meta = inferMeta(modelId);
+	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+}
 
 /**
  * Resolve a component's cwd within `branchContainer`. Multi-repo:
@@ -1959,10 +1978,11 @@ export class VerificationHarness {
 				: ((_preReviewPref && /^[^/]+\/.+$/.test(_preReviewPref)) ? _preReviewPref : undefined);
 			const _preRoleThinking = _preRoleOverrides?.thinkingLevel;
 			const _preReviewThinkingPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-			const _validLevels = ["off", "minimal", "low", "medium", "high"];
-			const _preInitialThinking = (_preRoleThinking && _validLevels.includes(_preRoleThinking))
+			const _validLevels = THINKING_LEVELS as readonly string[];
+			const _preInitialThinkingRaw = (_preRoleThinking && _validLevels.includes(_preRoleThinking))
 				? _preRoleThinking
 				: ((_preReviewThinkingPref && _validLevels.includes(_preReviewThinkingPref)) ? _preReviewThinkingPref : "off");
+			const _preInitialThinking = clampReviewThinking(_preInitialThinkingRaw, _preInitialModel) ?? _preInitialThinkingRaw;
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
@@ -2056,9 +2076,12 @@ export class VerificationHarness {
 					level = roleThinking_r;
 				} else {
 					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
+				// Clamp against the reviewer's resolved model so xhigh on a model
+				// that doesn't support it degrades to high before the RPC.
+				level = clampReviewThinking(level, roleModel_r ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${sessionId}`);
 				} else {
@@ -2288,10 +2311,11 @@ export class VerificationHarness {
 				: ((_preQaReviewPref && /^[^/]+\/.+$/.test(_preQaReviewPref)) ? _preQaReviewPref : undefined);
 			const _preQaRoleThinking = _preQaRoleOverrides?.thinkingLevel;
 			const _preQaReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-			const _qaValidLevels = ["off", "minimal", "low", "medium", "high"];
-			const _preQaInitialThinking = (_preQaRoleThinking && _qaValidLevels.includes(_preQaRoleThinking))
+			const _qaValidLevels = THINKING_LEVELS as readonly string[];
+			const _preQaInitialThinkingRaw = (_preQaRoleThinking && _qaValidLevels.includes(_preQaRoleThinking))
 				? _preQaRoleThinking
 				: ((_preQaReviewThinkPref && _qaValidLevels.includes(_preQaReviewThinkPref)) ? _preQaReviewThinkPref : "off");
+			const _preQaInitialThinking = clampReviewThinking(_preQaInitialThinkingRaw, _preQaInitialModel) ?? _preQaInitialThinkingRaw;
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
 				rolePrompt: combinedPrompt,
@@ -2377,9 +2401,10 @@ export class VerificationHarness {
 					level = roleThinking_q;
 				} else {
 					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
+				level = clampReviewThinking(level, roleModel_q ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preQaInitialThinking === level) {
 					console.log(`[verification] QA thinking level "${level}" already pinned at spawn for ${qaSessionId}`);
 				} else {
@@ -2514,10 +2539,11 @@ export class VerificationHarness {
 		if (_preLegacyInitialModel) bridgeOptions.initialModel = _preLegacyInitialModel;
 		const _preLegacyRoleThinking = _preLegacyRoleOverrides?.thinkingLevel;
 		const _preLegacyReviewThinkPref = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-		const _legacyValidLevels = ["off", "minimal", "low", "medium", "high"];
-		const _preLegacyInitialThinking = (_preLegacyRoleThinking && _legacyValidLevels.includes(_preLegacyRoleThinking))
+		const _legacyValidLevels = THINKING_LEVELS as readonly string[];
+		const _preLegacyInitialThinkingRaw = (_preLegacyRoleThinking && _legacyValidLevels.includes(_preLegacyRoleThinking))
 			? _preLegacyRoleThinking
 			: ((_preLegacyReviewThinkPref && _legacyValidLevels.includes(_preLegacyReviewThinkPref)) ? _preLegacyReviewThinkPref : "off");
+		const _preLegacyInitialThinking = clampReviewThinking(_preLegacyInitialThinkingRaw, _preLegacyInitialModel) ?? _preLegacyInitialThinkingRaw;
 		bridgeOptions.initialThinkingLevel = _preLegacyInitialThinking;
 
 		const rpc = new RpcBridge(bridgeOptions);
@@ -2597,9 +2623,10 @@ export class VerificationHarness {
 					level = roleThinking_s;
 				} else {
 					const reviewThinking = this.preferencesStore?.get("default.reviewThinkingLevel") as string | undefined;
-					level = (reviewThinking && ["off", "minimal", "low", "medium", "high"].includes(reviewThinking))
+					level = (reviewThinking && (THINKING_LEVELS as readonly string[]).includes(reviewThinking))
 						? reviewThinking : "off";
 				}
+				level = clampReviewThinking(level, roleModel_s ?? this.preferencesStore?.get("default.reviewModel") as string | undefined) ?? level;
 				if (_preLegacyInitialThinking === level) {
 					console.log(`[verification] Review thinking level "${level}" already pinned at spawn for ${subSessionId}`);
 				} else {

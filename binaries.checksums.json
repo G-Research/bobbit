@@ -1,0 +1,12 @@
+{
+  "fd-v10.2.0-aarch64-apple-darwin.tar.gz":          "ae6327ba8c9a487cd63edd8bddd97da0207887a66d61e067dfe80c1430c5ae36",
+  "fd-v10.2.0-x86_64-apple-darwin.tar.gz":           "991a648a58870230af9547c1ae33e72cb5c5199a622fe5e540e162d6dba82d48",
+  "fd-v10.2.0-x86_64-unknown-linux-gnu.tar.gz":      "5f9030bcb0e1d03818521ed2e3d74fdb046480a45a4418ccff4f070241b4ed25",
+  "fd-v10.2.0-aarch64-unknown-linux-gnu.tar.gz":     "6de8be7a3d8ca27954a6d1e22bc327af4cf6fc7622791e68b820197f915c422b",
+  "fd-v10.2.0-x86_64-pc-windows-msvc.zip":           "92ac9e6b0a0c6ecdab638ffe210dc786403fff4c66373604cf70df27be45e4fe",
+  "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz":      "24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be",
+  "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz":       "fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3",
+  "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz": "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e",
+  "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz": "c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f",
+  "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip":       "d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1"
+}
