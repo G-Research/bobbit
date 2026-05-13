@@ -99,9 +99,11 @@ const INFER_RULES: InferRule[] = [
 	// ── OpenAI GPT-5.x (pro first so it doesn't match the bare 5.5) ─
 	{ test: /gpt-5\.5-pro/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.5/, meta: { contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
-	// gpt-5.1-codex-max and gpt-5.2* are reasoning models (and xhigh-capable per
-	// src/shared/thinking-levels.ts). They must be classified as reasoning so
-	// server-side clamping does not collapse xhigh to off for aigw-routed users.
+	// gpt-5.1-codex-max and gpt-5.2* / gpt-5.4* are reasoning models (and
+	// xhigh-capable per src/shared/thinking-levels.ts). They must be classified
+	// as reasoning so server-side clamping does not collapse xhigh to off for
+	// aigw-routed users.
+	{ test: /gpt-5\.4/, meta: { contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.2/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5\.1-codex-max/, meta: { contextWindow: 400_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"] } },
 	{ test: /gpt-5/, meta: { contextWindow: 400_000, maxTokens: 32_768, reasoning: false, input: ["text", "image"] } },
@@ -382,6 +384,37 @@ export function removeAigwModelsJson(): void {
 // ── Startup internet check ─────────────────────────────────────────
 
 /**
+ * Apply `PI_OFFLINE=1` to the gateway process env when no internet was
+ * detected at startup. Spawned pi-coding-agent subprocesses inherit
+ * `process.env` (see `rpc-bridge.ts`) and pi 0.74.0+ honours this var by
+ * skipping the GitHub fd/rg download path in `ensureTool()` — returning
+ * `undefined` cleanly instead of timing out (~10s) on each first call.
+ *
+ * Rules:
+ *   • If the user has already set `PI_OFFLINE` (any non-empty value), it is
+ *     preserved verbatim — never overridden.
+ *   • Otherwise, when `hasInternet === false`, set `PI_OFFLINE=1` and log a
+ *     single explanatory line.
+ *   • When `hasInternet === true`, do NOT set `PI_OFFLINE`. Leave existing
+ *     state alone — don't introduce an unset that would change behaviour
+ *     for online users who currently rely on pi's download fallback.
+ *
+ * Exported for unit testing. Idempotent.
+ */
+export function applyPiOfflineEnv(hasInternet: boolean): void {
+	const userValue = process.env.PI_OFFLINE;
+	if (userValue !== undefined && userValue !== "") {
+		// Respect any pre-existing user-supplied value.
+		return;
+	}
+	if (hasInternet) return;
+	process.env.PI_OFFLINE = "1";
+	console.log(
+		"[pi-offline] Internet unavailable; setting PI_OFFLINE=1 — pi will skip GitHub fd/rg downloads. Use bundled binaries or pre-install fd/rg on PATH.",
+	);
+}
+
+/**
  * One-shot internet check at gateway startup. Tries HEAD requests to
  * well-known LLM API endpoints. Returns true if any responds.
  * Called once — not repeated after startup.
@@ -414,6 +447,17 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 	if (existingUrl) {
 		console.log("[aigw] AI Gateway already configured:", existingUrl);
 		setBedrockEnvVars(existingUrl);
+		// Users with a local aigw are typically offline; probe the public
+		// internet once and wire PI_OFFLINE accordingly. The probe is short
+		// (≤4s) and runs in parallel with no other startup work below.
+		if (!process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
+			try {
+				const hasInternet = await checkInternetAvailable();
+				applyPiOfflineEnv(hasInternet);
+			} catch {
+				applyPiOfflineEnv(false);
+			}
+		}
 		if (process.env.BOBBIT_SKIP_AIGW_DISCOVERY) {
 			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
 			return true;
@@ -436,6 +480,7 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 
 	// Check internet
 	const hasInternet = await checkInternetAvailable();
+	applyPiOfflineEnv(hasInternet);
 	if (hasInternet) {
 		console.log("[aigw] Internet available — using standard providers");
 		return false;

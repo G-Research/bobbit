@@ -29,6 +29,8 @@
     <option value="anthropic|claude-haiku-4-5|0">Anthropic Claude Haiku 4-5 (non-reasoning)</option>
     <option value="openai|gpt-5.2-codex|1">OpenAI gpt-5.2-codex (reasoning)</option>
     <option value="openai|gpt-5.2|1">OpenAI gpt-5.2 (reasoning)</option>
+    <option value="openai|gpt-5.4|1">OpenAI gpt-5.4 (reasoning)</option>
+    <option value="openai|gpt-5.5|1">OpenAI gpt-5.5 (reasoning)</option>
     <option value="openai|gpt-5.1-codex-max|1">OpenAI gpt-5.1-codex-max (reasoning)</option>
     <option value="openai|gpt-5|1">OpenAI gpt-5 (reasoning)</option>
     <option value="openai|gpt-4o|0">OpenAI gpt-4o (non-reasoning)</option>
@@ -57,7 +59,7 @@ function supportsXHigh(m) {
   const anthropicProviderOk = !provider || provider === "anthropic" || provider === "aigw";
   if (anthropicProviderOk && /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id)) return true;
   const openaiProviderOk = !provider || provider === "openai" || provider === "aigw";
-  if (openaiProviderOk && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.2/i.test(id))) return true;
+  if (openaiProviderOk && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id))) return true;
   return false;
 }
 

@@ -2644,3 +2644,4 @@ Only truly global state lives in the server's central state directory.
 | File | Purpose |
 |---|---|
 | `~/.bobbit/agent/auth.json` | API auth credentials |
+| `~/.bobbit/agent/bin/{fd,rg}[.exe]` | Bundled search binaries staged at gateway boot from `@bobbit/binaries-<plat>-<arch>` optional sub-packages. Picked up by pi-coding-agent's `getToolPath()`. Resolver + staging live in `src/server/binaries.ts`; build/release flow in [`docs/releasing.md`](releasing.md). |

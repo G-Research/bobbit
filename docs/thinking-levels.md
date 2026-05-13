@@ -34,8 +34,9 @@ existed, and the settings page offered `minimal` on models that don't
 support it.
 
 The shared module collapses every capability decision to one function and
-one clamping rule. Adding a level upstream is now a one-line addition to
-`THINKING_LEVELS` plus a regex update in the family detector.
+one clamping rule. When upstream model metadata includes a per-model
+`thinkingLevelMap`, Bobbit now consumes that directly for `xhigh` support;
+only sparse payloads still rely on the fallback family regex.
 
 ## The canonical set
 
@@ -62,15 +63,24 @@ model:
 | `reasoning !== false` and `supportsXHigh(model)` | `off, minimal, low, medium, high, xhigh` |
 | `reasoning !== false` otherwise | `off, minimal, low, medium, high` |
 
-`supportsXHigh(model)` mirrors the rules used by upstream pi-mono /
-pi-coding-agent. Two families currently qualify:
+`supportsXHigh(model)` now resolves in two stages:
+
+1. **Metadata first**: if the model carries upstream `thinkingLevelMap`,
+   `xhigh` is supported iff that map has a non-null `xhigh` entry. This lets
+   newly-added families (for example GPT-5.4 / GPT-5.5) light up
+   automatically without a Bobbit code change.
+2. **Fallback heuristic** for sparse payloads: when `thinkingLevelMap` is
+   absent, Bobbit falls back to family matching.
+
+The fallback families currently qualify:
 
 - **Anthropic Claude Opus 4.6 and later** — matched by
   `/claude-opus-4-(?:[6-9]|\d{2,})\b/i`, so `claude-opus-4-6`, `-4-7`, and
   any future `-4-10`+ light up without a code change.
-- **OpenAI gpt-5.1-codex-max and any gpt-5.2\*** — matched by
-  `/^gpt-5\.1-codex-max\b/i` and `/^gpt-5\.2/i`. `gpt-5.2-codex` is covered
-  by the second regex.
+- **OpenAI gpt-5.1-codex-max and any gpt-5.2\* / gpt-5.4\* / gpt-5.5\*** —
+  matched by `/^gpt-5\.1-codex-max\b/i` and
+  `/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i`. `gpt-5.2-codex`, `gpt-5.4-mini`, and
+  `gpt-5.5-pro` are covered by the second regex.
 
 ### Why the regex tolerates 4-10+ but not 4-5
 

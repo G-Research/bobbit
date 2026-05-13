@@ -246,6 +246,15 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	args.push("-e", "NODE_OPTIONS=--no-warnings");
 	args.push("-e", "PI_CODING_AGENT_DIR=/home/node/.bobbit/agent");
 
+	// Propagate PI_OFFLINE into the container so pi-coding-agent inside the
+	// sandbox skips GitHub fd/rg downloads when the host gateway detected no
+	// internet at startup. The container has its own apt-installed binaries,
+	// so this is belt-and-braces — but if those are ever missing, pi fails
+	// fast instead of hanging on a doomed download.
+	if (process.env.PI_OFFLINE && process.env.PI_OFFLINE !== "") {
+		args.push("-e", `PI_OFFLINE=${process.env.PI_OFFLINE}`);
+	}
+
 	// Sandbox credentials
 	if (sandboxCredentials) {
 		for (const [key, value] of Object.entries(sandboxCredentials)) {
