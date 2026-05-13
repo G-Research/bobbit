@@ -4,14 +4,17 @@
  * Pins the contract laid out in docs/design (Verification command-step
  * tree-kill v2): when a `command` verification step exceeds its timeout
  * or is cancelled, the entire spawned process tree must be reaped — not
- * just the immediate shell — and the step must resolve as failed with the
- * specified marker text.
+ * just the immediate shell — and the step must resolve as failed with
+ * the specified marker text.
  *
- * Cross-platform: every test runs on POSIX and Windows. Polling uses
- * `process.kill(pid, 0)` (cross-platform liveness check that maps to
- * the right OS primitive in Node) and `node -e ...` for spawned
- * payloads (avoids `bash` / `sleep` / `cmd` / `ping` shell-specific
- * fixtures).
+ * Every test runs on POSIX *and* Windows. The fixtures rely only on:
+ *   - `process.execPath` to invoke Node from itself.
+ *   - inline `node -e "<js>"` payloads (no bash, no cmd builtins, no
+ *     temp script files).
+ *   - `process.kill(pid, 0)` for liveness — maps to ESRCH/EPERM via
+ *     OpenProcess+ExitCode on Windows and kill(pid,0) on POSIX.
+ *
+ * There are no `process.platform` skip guards anywhere.
  */
 
 import { describe, it, after } from "node:test";
@@ -41,8 +44,8 @@ async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: numbe
  * Cross-platform: is `pid` a live OS process?
  *
  * `process.kill(pid, 0)` sends signal 0 — a permission/existence check that
- * delivers no signal. Maps to OpenProcess+ExitCode on Windows, kill(pid, 0)
- * on POSIX. ESRCH = gone, EPERM = exists but we don't own it (count alive).
+ * delivers no signal. Node maps this to OpenProcess+ExitCode on Windows and
+ * kill(pid, 0) on POSIX. ESRCH = gone, EPERM = alive but we don't own it.
  */
 function isAlive(pid: number): boolean {
 	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
@@ -70,36 +73,47 @@ function makeHarness() {
 }
 
 /**
- * Build a portable shell command that runs node with a script file.
- * Cross-platform-safe because the path is quoted with double-quotes
- * which both `bash` and `cmd` honour. Avoids any inline `-e` escaping
- * headaches across shells.
+ * Inline JS payload (passed via `node -e`) that:
+ *   - prints `PARENT_PID=<pid>`
+ *   - spawns an inner `node -e` child that prints `CHILD_PID=<pid>` and idles
+ *   - pipes the inner stdout through so the parent's stdout carries both
+ *   - idles forever (the test kills the parent via tree-kill)
+ *
+ * Works identically on POSIX and Windows.
  */
-function nodeCmd(scriptPath: string): string {
-	return `"${process.execPath}" "${scriptPath}"`;
-}
+// Inner script: print CHILD_PID then idle. The child writes through its own
+// piped stdout, which the parent forwards onto its own stdout. We wait for
+// the first chunk before printing PARENT_PID so the test always sees both
+// pids together (no timing window where only PARENT_PID is visible).
+// Three-level escaping (this TS source → outer node -e → inner node -e).
+// To get a real newline written by the innermost script, the inner-
+// inner JS source string must contain the literal sequence `\n` (two
+// chars). The outer payload is itself a JS string, so we double again
+// to `\\n`. That requires four backslashes in this TS source.
+const TREE_PAYLOAD = [
+	'var cp=require("child_process");',
+	'var inner=\'process.stdout.write("CHILD_PID="+process.pid+"\\\\n");setInterval(function(){},1000);\';',
+	'var c=cp.spawn(process.execPath,["-e",inner],{stdio:["ignore","pipe","inherit"]});',
+	'c.stdout.on("data",function(d){process.stdout.write(d);});',
+	'c.stdout.once("data",function(){process.stdout.write("PARENT_PID="+process.pid+"\\n");});',
+	'setInterval(function(){},1000);',
+].join("");
 
 /**
- * Write a node script that prints `PARENT_PID=<n>` then spawns a
- * child node process, prints `CHILD_PID=<n>`, and keeps both alive for
- * the requested duration. Used to verify that tree-kill reaps the
- * grandchild (which is the CHILD_PID), not just the shell.
+ * The verification step receives a `run:` string that gets passed through
+ * the system shell (`/bin/sh -c "<run>"` on POSIX, `cmd /d /s /c "<run>"`
+ * on Windows). Avoid every quoting headache by base64-encoding the JS
+ * payload and decoding it inside `node -e`. Identical text on every
+ * platform; the shell only sees ASCII letters/digits + a few safe chars.
  */
-function writeTreeScript(dir: string, holdMs = 60_000): string {
-	const file = path.join(dir, "tree.cjs");
-	fs.writeFileSync(file, `
-process.stdout.write("PARENT_PID=" + process.pid + "\\n");
-const cp = require("child_process");
-const c = cp.spawn(process.execPath, ["-e", "setTimeout(()=>{}, ${holdMs})"], { stdio: "ignore" });
-process.stdout.write("CHILD_PID=" + c.pid + "\\n");
-setTimeout(()=>{}, ${holdMs});
-`);
-	return file;
+function nodeTreeShellCmd(): string {
+	const b64 = Buffer.from(TREE_PAYLOAD, "utf8").toString("base64");
+	return `"${process.execPath}" -e "eval(Buffer.from('${b64}','base64').toString())"`;
 }
 
 describe("spawn-tree helper", () => {
 	it("times out, reports timedOut()=true, and reaps the child", async () => {
-		const t = spawnTracked(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], {
+		const t = spawnTracked(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], {
 			stdio: "ignore",
 			timeoutMs: 200,
 		});
@@ -111,15 +125,15 @@ describe("spawn-tree helper", () => {
 	});
 
 	it("killTree reaps the entire subprocess tree", async () => {
-		// Outer node spawns inner node, prints both pids on stdout. We then call
-		// killTree() and assert BOTH pids become unreachable.
-		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "tree-"));
-		const script = writeTreeScript(tmp);
+		// Parent node spawns inner node. Parent pipes inner stdout through its
+		// own, so we can capture BOTH PARENT_PID and CHILD_PID from a single
+		// stdout stream without any platform-specific tooling.
 		let buf = "";
-		const t = spawnTracked(process.execPath, [script], { stdio: ["ignore", "pipe", "ignore"] });
+		const t = spawnTracked(process.execPath, ["-e", TREE_PAYLOAD], {
+			stdio: ["ignore", "pipe", "ignore"],
+		});
 		t.child.stdout!.on("data", (d: Buffer) => { buf += d.toString(); });
 
-		// Wait until both pids are printed.
 		const got = await poll(() => /PARENT_PID=(\d+)/.test(buf) && /CHILD_PID=(\d+)/.test(buf), 5000);
 		assert.ok(got, `expected both pids on stdout; got: ${JSON.stringify(buf)}`);
 		const parentPid = Number(/PARENT_PID=(\d+)/.exec(buf)![1]);
@@ -136,7 +150,7 @@ describe("spawn-tree helper", () => {
 
 	it("killAllTracked reaps every tracked child", async () => {
 		const children = [0, 1, 2].map(() =>
-			spawnTracked(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], { stdio: "ignore" }),
+			spawnTracked(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" }),
 		);
 		const pids = children.map(c => c.child.pid!);
 		assert.ok(_trackedCount() >= 3, `expected >=3 tracked, got ${_trackedCount()}`);
@@ -151,12 +165,12 @@ describe("runCommandStep tree-kill", () => {
 	it("kills the entire subprocess tree on step timeout and emits the marker", async () => {
 		const harness = makeHarness();
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
-		const script = writeTreeScript(tmp);
 
-		// No streamCtx → attached pipe mode on all platforms; output is captured
-		// directly into result.output, where we can grep for PARENT_PID/CHILD_PID.
+		// No streamCtx → attached pipe mode on all platforms; output is
+		// captured into result.output, where we extract PARENT_PID/CHILD_PID
+		// from the parent payload's piped-through stdout.
 		const result = await (harness as any).runCommandStep(
-			nodeCmd(script), tmp, 2, false, undefined, undefined, undefined,
+			nodeTreeShellCmd(), tmp, 2, false, undefined, undefined, undefined,
 		);
 		assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
 		assert.ok(
@@ -178,14 +192,11 @@ describe("runCommandStep tree-kill", () => {
 	it("cancellation tree-kills the subprocess and emits the cancelled marker", async () => {
 		const harness = makeHarness();
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-cancel-"));
-		const script = writeTreeScript(tmp);
 
 		const goalId = "goal-cancel";
 		const gateId = "gate-cancel";
 		const signalId = "sig-cancel-1";
 		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		// Seed activeVerification so the persisted-step write path is happy
-		// and so the cancellation lookup hits this signalId.
 		(harness as any).activeVerifications.set(signalId, {
 			goalId, gateId, signalId,
 			overallStatus: "running",
@@ -194,14 +205,11 @@ describe("runCommandStep tree-kill", () => {
 			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
 		});
 
-		// Kick off the long-running step. Captures stdout into step.output via
-		// the broadcastFn path or via the detached-mode tail.
+		// Long-running step; output piped into step.output via tail/broadcast.
 		const stepPromise = (harness as any).runCommandStep(
-			nodeCmd(script), tmp, 60, false, streamCtx, undefined, undefined,
+			nodeTreeShellCmd(), tmp, 60, false, streamCtx, undefined, undefined,
 		);
 
-		// Wait until the tracked child is registered AND the script has printed
-		// both pids so we have something to assert against.
 		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
 		assert.ok(registered, "tracked child should be registered shortly after spawn");
 
@@ -218,8 +226,6 @@ describe("runCommandStep tree-kill", () => {
 
 		await harness.cancelStaleVerifications(goalId, gateId);
 
-		// Tree should be reaped within ~1s (SIGTERM grace 1000ms → SIGKILL on POSIX;
-		// taskkill /T /F is unconditional on Windows).
 		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 3000);
 		assert.ok(dead, `tree should be reaped within budget; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 
