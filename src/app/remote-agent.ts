@@ -2095,7 +2095,14 @@ export class RemoteAgent {
 			case "auto_compaction_end": {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
-				const success = event.type === "compaction_end" ? event.success : !event.aborted;
+				// Success resolution: pi-coding-agent 0.74.0+ emits
+				// `compaction_end { aborted, result, ... }` for the manual path
+				// instead of the older `{ success: true|false }` shape that the
+				// Bobbit ws-handler wrapper used to inject. Accept both: prefer
+				// the explicit boolean, fall back to `!aborted`.
+				const success = typeof event.success === "boolean"
+					? event.success
+					: !event.aborted;
 				const trigger = this._triggerFromEvent(event);
 				const errMsg: string | undefined =
 					(event as any).errorMessage || (event as any).error;
