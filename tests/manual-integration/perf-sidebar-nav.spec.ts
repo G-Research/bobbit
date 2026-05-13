@@ -821,7 +821,12 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		try { parentCommit = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		try { branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		const short = commit.slice(0, 12);
-		const historyPath = join(HISTORY_DIR, `${short}.json`);
+		// Suffix the history file with the fixture size so medium / large runs
+		// on the same commit don't overwrite each other. The cross-commit
+		// report (scripts/perf-report.mjs) groups by SHA and reads the JSON's
+		// own `fixtureSize` field, so the file name is purely a uniqueness key.
+		const suffix = fixtureSizeName === "medium" ? "" : `-${fixtureSizeName}`;
+		const historyPath = join(HISTORY_DIR, `${short}${suffix}.json`);
 		writeFileSync(historyPath, JSON.stringify({
 			commit, parentCommit, branch,
 			timestamp: new Date().toISOString(),

@@ -143,11 +143,121 @@ realistic session corpus (long transcripts, multiple gates, an active
 team). Phase 2 should re-baseline against such a corpus before committing
 to optimisations.
 
-## 4. Tried, didn't pay off
+## 4. Realistic-fixture baseline (Phase 2A)
+
+The Phase 1 baseline above seeded ten sessions with *empty* transcripts via
+`POST /api/sessions`. That made `reducer.rehydrate` and `api.session.fetch`
+artificially cheap and gave us no signal about how the click path scales
+with real-world transcript sizes.
+
+Phase 2A (task `3b056b96`) extends the harness with a deterministic,
+seeded transcript fixture. For each of the ten sessions it writes a JSONL
+transcript to disk mixing user/assistant text, 5–10 `tool_use` + matching
+`tool_result` pairs, and one ≥50 KB tool-result blob. The harness then
+flips those rows to `archived: true` in the project's `sessions.json`
+*before* the gateway re-reads them on restart, so the WS archived-attach
+path (`getArchivedMessages` → disk JSONL parse) drives a real `messages`
+frame into the client. Warm-pass nav is driven via
+`window.__bobbitOpenForNavItem`, the same entry point keyboard nav uses,
+so `nav.click` + `nav.session.ready` fire identically for archived rows.
+See `tests/manual-integration/perf-sidebar-nav.spec.ts` for mechanism.
+
+Fixture size is selectable:
+
+| `BOBBIT_PERF_FIXTURE_SIZE` | msgs / session | total JSONL |
+|---|---:|---:|
+| `small`  |  10 |  ≈0.1 MB |
+| `medium` (default) |  50 |  ≈0.7 MB |
+| `large`  | 200 |  ≈2.3 MB |
+
+### 4.1 Numbers — medium fixture (50 msgs/session)
+
+Commit `c25e40be730b` on `goal-goal-profile-si-320532b0-coder-95006287`,
+2026-05-13T21:48Z. All durations in milliseconds.
+
+| Span | n | p50 | p95 | p99 | mean | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `nav.session.ready` | 20 | 34.1 |  92.2 |  92.2 | 48.5 | 118.1 |
+| `nav.goal.ready`    |  2 | 20.3 |  20.3 |  20.3 | 30.6 |  40.9 |
+| `nav.click`         | 22 |  1.1 |   1.6 |   1.6 |  1.1 |   1.7 |
+| `ws.attach`         | 11 |  4.3 |  22.3 |  22.3 | 10.9 |  22.8 |
+| `paint.first`       | 66 | 16.9 |  27.5 |  34.8 | 18.0 |  73.8 |
+| `api.session.fetch` | 41 | 15.6 |  32.2 |  32.5 | 19.3 |  32.7 |
+| `api.goal.fetch`    |  3 |  8.1 |   8.1 |   8.1 | 11.1 |  20.9 |
+| `api.goal.gates.fetch`  | 8 |  4.0 |  21.1 |  21.1 |  8.7 |  21.2 |
+| `api.goal.agents.fetch` | 8 |  3.4 |   7.9 |   7.9 |  6.3 |  20.6 |
+| `reducer.rehydrate` | 11 |  0.2 |   0.2 |   0.2 |  0.2 |   0.2 |
+
+### 4.2 Stress numbers — large fixture (200 msgs/session)
+
+Same commit, run with `BOBBIT_PERF_FIXTURE_SIZE=large`. Stored under
+`docs/perf/history/c25e40be730b-large.json` so it doesn't displace the
+canonical medium-run history entry.
+
+| Span | n | p50 | p95 | p99 | mean | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `nav.session.ready` | 20 | 58.2 | 208.6 | 208.6 | 90.6 | 220.9 |
+| `paint.first`       | 66 | 16.8 | 103.0 | 159.5 | 29.9 | 177.1 |
+| `api.session.fetch` | 41 | 18.6 |  97.1 |  97.3 | 35.0 |  97.4 |
+| `reducer.rehydrate` | 11 |  0.4 |   0.5 |   0.5 |  0.4 |   0.5 |
+| `ws.attach`         | 11 |  4.0 |  24.4 |  24.4 | 12.6 |  30.6 |
+
+### 4.3 What changed vs the empty-fixture baseline
+
+**Caveat first.** The numbers are NOT apples-to-apples with §2. Phase 1
+clicked *live* session rows (with real WS attach, agent RPC, etc.). The
+realistic fixture rows are *archived*, so the click path is lighter—no
+rpcClient.getState, no live event-buffer subscription. That is precisely
+why `ws.attach` p50 drops from 36 ms (live) to 4 ms (archived) and
+`nav.session.ready` p50 drops from 89 ms to 34 ms. The archived path is
+the right harness to measure transcript-driven cost specifically; once
+the lazy-tool-content optimisation lands (Phase 2B) we should add a
+live-session fixture pass that prompts a real agent so we can compare
+the full click path under realistic transcript load.
+
+With that caveat, the realistic fixture surfaces three findings:
+
+1. **`reducer.rehydrate` is decisively not a hotspot.** Even at 200 msgs
+   it's 0.4 ms p50, 0.5 ms max. The Phase 1 candidate “LRU-cache reducer
+   state keyed by session id” can be deprioritised — there is no win to
+   bank. Pinning test material for a future regression: any commit that
+   pushes this above ~5 ms p50 with the medium fixture is a real bug.
+2. **`paint.first` is the new transcript-scaling hotspot.** Medium p95 is
+   27.5 ms; large p95 jumps to 103 ms, p99 to 159 ms, max 177 ms. The
+   click path renders the entire transcript synchronously into
+   `pi-chat-panel`; markdown / syntax-highlight cost dominates. Phase 2
+   candidates: defer off-screen blocks via `requestIdleCallback`,
+   virtualise long transcripts, or render text-only then upgrade.
+3. **`api.session.fetch` p95 ≥97 ms under contention.** The endpoint is
+   metadata-only (server `[timing]` shows it taking 0.5–1 ms). The
+   wall-clock cost is the cold-pass `page.goto` opening many WS + REST
+   connections in parallel and saturating the browser's HTTP/1.1 limit.
+   Real users don't hit this pattern — they nav one session at a time —
+   so this is a harness artefact, not a product hotspot. Worth
+   instrumenting separately if we ever drive a “prefetch on hover”
+   experiment.
+
+### 4.4 Re-ranked hotspots
+
+| Rank | Span | medium p50 / p95 | large p95 | Phase 2B candidate? |
+|---|---|---|---|---|
+| 1 | `paint.first` | 16.9 / 27.5 | **103** | yes — transcript-render scaling |
+| 2 | `nav.session.ready` | **34.1** / 92.2 | 208 | downstream of paint.first |
+| 3 | `api.session.fetch` payload size | 15.6 / 32.2 | 97 | yes — lazy-tool-content target |
+| 4 | `api.goal.gates.fetch` | 4.0 / 21.1 | 16.2 | no — already cheap |
+| 5 | `reducer.rehydrate` | 0.2 / 0.2 | 0.5 | **no — confirmed not a hotspot** |
+
+Neither `nav.session.ready` nor `reducer.rehydrate` p50 clears the 100 ms
+snappy threshold per the task gating rule, so neither auto-promotes to
+Phase 2B. **But** `nav.session.ready` p95 clears 100 ms at the large
+fixture size, and the underlying driver is `paint.first` scaling with
+transcript length — that is where the real perceived-snappiness wins are.
+
+## 5. Tried, didn't pay off
 
 *(Phase 2/3 fills this in. Empty for now.)*
 
-## 5. Implementation notes (Phase 1 only — not for prose-pinning invariants)
+## 6. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
 - Client trace primitive: `src/app/perf-trace.ts`. Cost-when-disabled
   pinned by `tests/perf-trace.spec.ts`.
