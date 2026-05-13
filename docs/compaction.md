@@ -150,45 +150,40 @@ back-fill the field, but v1 accepts the null and keeps the reducer simple.
 
 ## Round-tripping across navigation and reload
 
-Compaction produces two artefacts:
+Compaction events are persisted server-side in a per-session sidecar
+(`<stateDir>/compaction-sidecar/<sessionId>.jsonl`), and every snapshot
+the server broadcasts is spliced with synthetic `__compaction_summary`
+rows reconstructed from that sidecar. The card therefore survives both
+navigate-away and full page reload — the reducer just sees the same
+rich row it would have seen live.
 
-1. The **live, rich synthetic** the client builds in `remote-agent.ts`
-   from the `compaction_end` event.
-2. The agent subprocess's own **plain-text marker** — a row whose text
-   starts with `"Context compacted"`. This row is part of the transcript
-   the server returns on every snapshot. We cannot edit the upstream
-   agent from this PR, so the marker is here to stay.
+The live in-flight card (id `compact_active`) and the persisted sidecar
+card (id `c_<startedAtMs>_<rand6>`) dedup against each other:
 
-If the reducer treated those as independent rows the user would see a
-double — the card *and* the text — every time a snapshot landed after a
-live compaction. The dedup logic in `src/app/message-reducer.ts`
-(`compaction-result` action plus the `snapshot` merge) resolves this with
-a two-way rule:
+- **Live path.** While `compact_active` is on screen, the splice drops
+  the most-recent sidecar row — it represents the same compaction
+  surfaced live.
+- **Reload path.** No `compact_active` exists; the splice prepends the
+  sidecar's rich rows directly. The renderer reads `payload.compactionId`
+  and mounts the pre-compaction history affordance.
 
-- **Live path — rich wins.** When the snapshot arrives and a rich
-  synthetic for that compaction already exists, the server's plain-text
-  marker is dropped from the merged result.
-- **Reload path — server text is upgraded.** On a fresh page load there
-  is no live synthetic. The reducer recognises the server's plain-text
-  marker via `isServerCompactionTextMarker`, parses `tokensBefore` out of
-  the formatted string with `parseTokensBeforeFromServerMarker`, and
-  replaces the row in place with a rich synthetic via
-  `upgradeServerCompactionMarker`. `tokensAfter` and `reductionPct` stay
-  `null` (the marker text does not carry them); `trigger` defaults to
-  `manual` because the row alone cannot disambiguate.
+Full mechanics, schema, and the REST endpoint that surfaces the
+pre-compaction transcript live in
+[docs/compaction-history.md](compaction-history.md).
 
-The "rich wins on live, server-wins-by-upgrade on reload" split exists
-because the two sides have different information. The live event knows
-the trigger and (post-refresh) the after-count. The persisted server row
-knows nothing structural — only the formatted text. Upgrading the server
-row preserves position and id while attaching whatever structure can be
-recovered from the text.
+A narrow legacy-fallback path remains in `src/app/message-reducer.ts`
+(`isLegacyTextCompaction`) for snapshots that pre-date the sidecar and
+carry only the agent's plain-text `"Context compacted"` row — the
+reducer drops that row in favour of any rich synthetic at the same
+position. The richer in-place upgrade helpers
+(`upgradeServerCompactionMarker`, `isServerCompactionTextMarker`) were
+removed when the sidecar landed; the sidecar splice supplies a real
+structured row instead of trying to reconstruct one from text.
 
-These invariants are pinned by `tests/message-reducer.test.ts` cases 12,
-12b, 12c, 12d (in-place lifecycle transition), and 12e (overflow trigger
-+ tokensBefore propagation). The text-prefix parser is intentionally
-coupled to the pi-coding-agent transcript format; case 12c's token-value
-assertion is the regression sentinel if that format ever changes.
+Invariants are pinned by `tests/message-reducer.test.ts` cases 12, 12b,
+12d (in-place lifecycle transition), 12e (overflow trigger +
+tokensBefore propagation), and the sidecar-snapshot reducer test that
+replaced case 12c.
 
 ## Tests
 
@@ -242,7 +237,8 @@ npm run test:manual
 
 | Concern | File |
 | --- | --- |
-| Payload type + envelope builder + reload-upgrade helpers | `src/app/compaction-types.ts` |
+| Payload type + envelope builder | `src/app/compaction-types.ts` |
+| Server-side persistence + snapshot splice | `src/server/agent/compaction-sidecar.ts` — see [compaction-history.md](compaction-history.md) |
 | Live emission (manual / auto / overflow) | `src/app/remote-agent.ts` — `compaction_start` / `compaction_end` handlers, `_triggerFromEvent`, `_lastKnownContextTokens` |
 | Server-side manual broadcast | `src/server/ws/handler.ts` — emits `reason: "manual"` on the manual `/compact` path |
 | Reducer (in-progress, result, snapshot dedup, reload upgrade) | `src/app/message-reducer.ts` — `compaction-placeholder`, `compaction-result`, and `snapshot` cases |

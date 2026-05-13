@@ -32,6 +32,11 @@ import { recordElapsed } from "./agent/profiling.js";
 import { resolveGrantPolicy } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	initCompactionSidecarDir,
+	findCompactionSidecarEntry,
+} from "./agent/compaction-sidecar.js";
+import { readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -503,6 +508,7 @@ export function createGateway(config: GatewayConfig) {
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
+	initCompactionSidecarDir(stateDir);
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level.
@@ -6476,6 +6482,86 @@ async function handleApiRoute(
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 			});
+			json(envelope);
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				const status = err.code === "transcript_unavailable" ? 404 : 400;
+				json({ error: err.code, detail: err.message }, status);
+			} else {
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/transcript/before-compaction — orphaned
+	// pre-compaction history for the named sidecar compaction id, paginated.
+	// See docs/design/persist-compaction-history.md §4.2.
+	const beforeCompactionMatch = url.pathname.match(
+		/^\/api\/sessions\/([^/]+)\/transcript\/before-compaction$/,
+	);
+	if (beforeCompactionMatch && req.method === "GET") {
+		const [, targetId] = beforeCompactionMatch;
+		const targetPs = sessionManager.getPersistedSession(targetId);
+		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
+
+		// Caller-project authorisation header check — same shape as the
+		// sibling transcript route.
+		const callerSid = req.headers["x-bobbit-session-id"];
+		const callerSidStr = Array.isArray(callerSid) ? callerSid[0] : callerSid;
+		if (callerSidStr) {
+			const callerPs = sessionManager.getPersistedSession(callerSidStr);
+			if (callerPs && targetPs.projectId && callerPs.projectId && callerPs.projectId !== targetPs.projectId) {
+				json({ error: "permission_denied" }, 403); return;
+			}
+		}
+
+		const compactionId = url.searchParams.get("compactionId");
+		if (!compactionId) {
+			json({ error: "invalid_params", detail: "compactionId required" }, 400);
+			return;
+		}
+		const entry = findCompactionSidecarEntry(targetId, compactionId);
+		if (!entry) {
+			json({ error: "compaction_not_found" }, 404);
+			return;
+		}
+		const qp2 = url.searchParams;
+		let cursor: number | undefined;
+		let limit: number | undefined;
+		try {
+			if (qp2.has("cursor")) {
+				const c = Number(qp2.get("cursor"));
+				if (!Number.isFinite(c) || !Number.isInteger(c) || c < 0) {
+					throw new TranscriptReaderError("invalid_params", "cursor must be a non-negative integer");
+				}
+				cursor = c;
+			}
+			if (qp2.has("limit")) {
+				const n = Number(qp2.get("limit"));
+				if (!Number.isFinite(n) || !Number.isInteger(n)) {
+					throw new TranscriptReaderError("invalid_params", "limit must be an integer");
+				}
+				limit = n;
+			}
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				json({ error: err.code, detail: err.message }, 400);
+			} else {
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+			return;
+		}
+		const ctx2: SessionFsContext = { sandboxed: targetPs.sandboxed, projectId: targetPs.projectId };
+		try {
+			const envelope = await readOrphanedBeforeCompaction(
+				{ compactionId, cursor, limit },
+				{
+					readContent: () => sessionFileRead(ctx2, targetPs.agentSessionFile!, sandboxManager),
+					firstKeptEntryId: entry.firstKeptEntryId,
+				},
+			);
 			json(envelope);
 		} catch (err) {
 			if (err instanceof TranscriptReaderError) {
