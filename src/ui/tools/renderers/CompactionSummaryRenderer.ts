@@ -7,7 +7,8 @@ import { AlertTriangle, Check, PackageOpen, X } from "lucide";
 import { renderCollapsibleHeader, renderHeader, type ToolHeaderState } from "../renderer-registry.js";
 import { formatDuration } from "./delegate-cards.js";
 import "../../components/LiveTimer.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import "../../components/PreCompactionHistory.js";
+import type { ToolRenderer, ToolRenderResult, ToolRenderContext } from "../types.js";
 import type {
 	CompactionState,
 	CompactionSummaryPayload,
@@ -60,6 +61,7 @@ export class CompactionSummaryRenderer
 		params: CompactionSummaryPayload | undefined,
 		result: ToolResultMessage<CompactionSummaryPayload> | undefined,
 		_isStreaming?: boolean,
+		ctx?: ToolRenderContext,
 	): ToolRenderResult {
 		const payload: CompactionSummaryPayload | undefined =
 			(result?.details as CompactionSummaryPayload | undefined) ?? params;
@@ -137,6 +139,20 @@ export class CompactionSummaryRenderer
 			${verdictPill}
 		`;
 
+		// Pre-compaction history affordance — mounted as a child of the card
+		// when the payload carries a sidecar compactionId (persisted row) and
+		// we know the session. Component handles lazy count fetch and the
+		// expand affordance internally.
+		const preCompactionHistory = (() => {
+			const compactionId = (payload as any).compactionId;
+			if (!compactionId || typeof compactionId !== "string") return nothing;
+			if (!ctx?.sessionId) return nothing;
+			return html`<bobbit-pre-compaction-history
+				compaction-id=${compactionId}
+				session-id=${ctx.sessionId}
+			></bobbit-pre-compaction-history>`;
+		})();
+
 		const errorLine = (() => {
 			const msg = friendlyError(payload);
 			if (!msg) return nothing;
@@ -166,6 +182,7 @@ ${JSON.stringify(payload, null, 2)}</pre>
 						data-state=${state}
 						class="rounded-md border border-border bg-card p-3"
 					>
+						${preCompactionHistory}
 						${renderCollapsibleHeader(
 							headerState,
 							headerIcon,
@@ -194,6 +211,7 @@ ${JSON.stringify(payload, null, 2)}</pre>
 					data-state=${state}
 					class="rounded-md border border-border bg-card p-3"
 				>
+					${preCompactionHistory}
 					${renderHeader(
 						headerState,
 						headerIcon,

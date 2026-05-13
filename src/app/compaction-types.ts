@@ -50,6 +50,12 @@ export interface CompactionSummaryPayload {
 	startedAt?: string;
 	/** Total compaction duration, ms. Set only on terminal payloads. */
 	durationMs?: number;
+	/** Sidecar entry id when this payload was reconstructed from a server-
+	 *  side `compaction-sidecar/<sessionId>.jsonl` row. Present means the
+	 *  pre-compaction history endpoint can be queried with this id. Absent
+	 *  on live in-flight payloads (which use the stable `compact_active`
+	 *  id and have no sidecar row yet). */
+	compactionId?: string;
 }
 
 export interface CompactionSummaryMessages {
@@ -170,78 +176,9 @@ export function parseTokensBeforeFromServerMarker(text: string): number | null {
 	return Math.round(n);
 }
 
-/**
- * Test whether a message looks like the server's plain-text compaction marker.
- * Used to identify rows the reducer should upgrade in-place on reload.
- */
-export function isServerCompactionTextMarker(m: any): boolean {
-	if (!m || m.role !== "assistant") return false;
-	const c = m.content;
-	let text = "";
-	if (typeof c === "string") text = c;
-	else if (Array.isArray(c)) {
-		text = c
-			.filter((x: any) => x?.type === "text")
-			.map((x: any) => x.text || "")
-			.join("\n");
-	} else return false;
-	return typeof text === "string" && text.startsWith("Context compacted");
-}
-
-function extractTextFromMessage(m: any): string {
-	if (!m) return "";
-	const c = m.content;
-	if (typeof c === "string") return c;
-	if (Array.isArray(c)) {
-		return c
-			.filter((x: any) => x?.type === "text")
-			.map((x: any) => x.text || "")
-			.join("\n");
-	}
-	return "";
-}
-
-/**
- * Upgrade a server plain-text compaction marker into a rich synthetic
- * carrying a `__compaction_summary` toolCall. Used by the snapshot path on
- * reload when no live synthetic exists yet. `tokensAfter` / `reductionPct`
- * stay null; trigger defaults to "manual" (we cannot tell from the row
- * alone). NOTE: this uses the server-row's original id (NOT the stable
- * `compact_active` id) — this is pre-existing reload-time data, not the
- * live lifecycle, so we don't need DOM-identity continuity.
- */
-export function upgradeServerCompactionMarker(serverRow: any): any {
-	const text = extractTextFromMessage(serverRow);
-	const tokensBefore = parseTokensBeforeFromServerMarker(text);
-	const payload: CompactionSummaryPayload = {
-		schemaVersion: 1,
-		trigger: "manual",
-		state: "complete",
-		success: true,
-		timestamp:
-			typeof serverRow?.timestamp === "number"
-				? new Date(serverRow.timestamp).toISOString()
-				: new Date(0).toISOString(),
-		tokensBefore,
-		tokensAfter: null,
-		reductionPct: null,
-	};
-	const id =
-		typeof serverRow?.id === "string" && serverRow.id.length > 0
-			? serverRow.id
-			: `compact_done_${Date.now()}`;
-	const toolCallId = `compaction-summary:${id}`;
-	return {
-		...serverRow,
-		id,
-		role: "assistant",
-		content: [
-			{
-				type: "toolCall",
-				id: toolCallId,
-				name: COMPACTION_TOOL_NAME,
-				arguments: payload,
-			},
-		],
-	};
-}
+// `isServerCompactionTextMarker` and `upgradeServerCompactionMarker`
+// removed — with the compaction sidecar (docs/design/persist-compaction-
+// history.md §A), the server splices the rich synthetic into snapshots
+// directly; the legacy plain-text marker is no longer produced or
+// upgraded client-side. `parseTokensBeforeFromServerMarker` stays as a
+// pure helper referenced by tests of the legacy parse path.

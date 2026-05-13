@@ -116,64 +116,13 @@ function isLegacyTextCompaction(m: any): boolean {
 	return typeof t === "string" && t.startsWith("Context compacted");
 }
 
-/**
- * Parse "Context compacted from Xk tokens." back into a number. Coupled to
- * pi-coding-agent transcript format — see
- * `docs/design/compaction-e2e-rich-summary.md` §2.4 / §4 risk 1. Case (12c)
- * pins this as a regression sentinel.
- */
-function parseTokensBeforeFromServerMarker(text: string): number | null {
-	const m = /Context compacted from\s+([\d.]+)\s*([kKmM]?)\s*tokens?/.exec(text);
-	if (!m) return null;
-	const n = parseFloat(m[1]);
-	if (!Number.isFinite(n)) return null;
-	const suffix = m[2]?.toLowerCase();
-	if (suffix === "k") return Math.round(n * 1000);
-	if (suffix === "m") return Math.round(n * 1_000_000);
-	return Math.round(n);
-}
-
-/**
- * Upgrade a server plain-text compaction marker in-place into a rich
- * synthetic carrying a `__compaction_summary` toolCall. Used by the
- * snapshot path on reload when no live rich synthetic exists yet.
- * `tokensAfter` / `reductionPct` stay null; trigger defaults to "manual".
- */
-function upgradeServerCompactionMarker(serverRow: any): any {
-	const text = extractText(serverRow);
-	const tokensBefore = parseTokensBeforeFromServerMarker(text);
-	const payload = {
-		schemaVersion: 1 as const,
-		trigger: "manual" as const,
-		state: "complete" as const,
-		success: true,
-		timestamp:
-			typeof serverRow?.timestamp === "number"
-				? new Date(serverRow.timestamp).toISOString()
-				: new Date(0).toISOString(),
-		tokensBefore,
-		tokensAfter: null,
-		reductionPct: null,
-	};
-	const id =
-		typeof serverRow?.id === "string" && serverRow.id.length > 0
-			? serverRow.id
-			: `compact_done_${tokensBefore ?? 0}`;
-	const toolCallId = `compaction-summary:${id}`;
-	return {
-		...serverRow,
-		id,
-		role: "assistant",
-		content: [
-			{
-				type: "toolCall",
-				id: toolCallId,
-				name: COMPACTION_TOOL_NAME,
-				arguments: payload,
-			},
-		],
-	};
-}
+// `parseTokensBeforeFromServerMarker` and `upgradeServerCompactionMarker`
+// removed. With the compaction sidecar (docs/design/persist-compaction-
+// history.md §A), the server splices the rich synthetic into snapshots
+// directly — the reload-path upgrade adapter is no longer reachable.
+// Branches (a) and (b) of the snapshot dedup below still handle the
+// legacy text-marker passes so the active-session live state isn't
+// disturbed.
 
 /**
  * Plain-text row test: assistant/user rows whose content has no toolCall and
@@ -299,26 +248,22 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			//       drop the server's plain-text marker from this snapshot. Rich
 			//       wins; the synthetic survives untouched. (Case 12b.)
 			//   (b) State has a legacy text-form synthetic compaction marker —
-			//       leave the snapshot alone; the synthetic is dropped below by the
-			//       survivor pass so the server text wins. (Cases 12 and
+			//       leave the snapshot alone; the synthetic is dropped below by
+			//       the survivor pass so the server text wins. (Cases 12 and
 			//       "snapshot drops trailing synthetic compaction marker".)
-			//   (c) No synthetic at all (reload path) — upgrade the server's text
-			//       marker in place into a rich synthetic so the renderer fires.
-			//       tokensAfter / reductionPct stay null. (Case 12c.)
+			//
+			//   Former branch (c) — "upgrade the server's text marker in place
+			//   into a rich synthetic" — is gone. The compaction sidecar
+			//   (docs/design/persist-compaction-history.md §A) splices the rich
+			//   synthetic into snapshots server-side; no client-side upgrade is
+			//   needed and pi-coding-agent never produced the text marker we
+			//   were upgrading from.
 			const hasRichSyntheticCompaction = state.messages.some(
 				(m) => m._origin === "synthetic" && hasCompactionToolCall(m),
-			);
-			const hasLegacySyntheticCompaction = state.messages.some(
-				(m) => m._origin === "synthetic" && isLegacyTextCompaction(m)
-					&& !hasCompactionToolCall(m),
 			);
 			let effectiveRows = enriched;
 			if (hasRichSyntheticCompaction) {
 				effectiveRows = enriched.filter((m: any) => !isLegacyTextCompaction(m));
-			} else if (!hasLegacySyntheticCompaction) {
-				effectiveRows = enriched.map((m: any) =>
-					isLegacyTextCompaction(m) ? upgradeServerCompactionMarker(m) : m,
-				);
 			}
 			const snapshotRows: OrderedMessage[] = effectiveRows.map((m, i) => {
 				const explicit = (m as any)._order;
