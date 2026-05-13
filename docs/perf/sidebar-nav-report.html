@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sidebar nav perf — cross-commit report</title>
+<style>
+	:root {
+		color-scheme: light dark;
+		/* Defensive fallbacks for the preview-bridge HMR race; the parent's
+		   tokens always win when present. See defaults/docs/html-rendering.md. */
+		--chart-1: oklch(0.58 0.16 250);
+		--chart-2: oklch(0.62 0.16 65);
+		--chart-3: oklch(0.55 0.16 145);
+		--chart-4: oklch(0.55 0.18 25);
+		--chart-5: oklch(0.55 0.16 305);
+		--chart-6: oklch(0.60 0.14 195);
+		--positive: oklch(0.55 0.15 145);
+		--negative: oklch(0.55 0.18 25);
+		--warning: oklch(0.62 0.15 75);
+	}
+	* { box-sizing: border-box; }
+	body {
+		font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+		margin: 0;
+		padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
+		background: var(--background);
+		color: var(--foreground);
+		line-height: 1.45;
+		font-size: 14px;
+	}
+	a { color: var(--chart-1); }
+	code, .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.92em; }
+
+	header.page {
+		display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.75rem 1.25rem;
+		padding-bottom: 1rem; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem;
+	}
+	header.page h1 { font-size: 1.35rem; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+	header.page .meta { color: var(--muted-foreground); font-size: 0.85rem; display: flex; gap: 0.5rem 1rem; flex-wrap: wrap; }
+	header.page .meta strong { color: var(--foreground); font-weight: 500; }
+
+	.headlines {
+		display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 0.75rem; margin-bottom: 2rem;
+	}
+	.headline {
+		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+		padding: 0.7rem 0.9rem; display: flex; flex-direction: column; gap: 0.15rem;
+	}
+	.headline .label {
+		font-family: ui-monospace, monospace; font-size: 0.78rem;
+		color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	}
+	.headline .value { display: flex; align-items: baseline; gap: 0.4rem; font-variant-numeric: tabular-nums; }
+	.headline .value .now { font-size: 1.25rem; font-weight: 600; font-family: ui-monospace, monospace; }
+	.headline .value .unit { font-size: 0.75rem; color: var(--muted-foreground); }
+	.headline .delta { font-size: 0.78rem; font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+	.delta-good { color: var(--positive); }
+	.delta-bad  { color: var(--negative); }
+	.delta-flat { color: var(--muted-foreground); }
+	.headline.good { border-top: 2px solid var(--positive); }
+	.headline.bad  { border-top: 2px solid var(--negative); }
+	.headline.flat { border-top: 2px solid var(--border); }
+
+	h2 { font-size: 1rem; margin: 2.25rem 0 0.6rem; font-weight: 600; letter-spacing: -0.005em; }
+	h2 .count { color: var(--muted-foreground); font-weight: 400; font-size: 0.85em; margin-left: 0.4rem; }
+
+	.table-wrap { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card); }
+	table.summary { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+	table.summary th, table.summary td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+	table.summary tbody tr:last-child td { border-bottom: none; }
+	table.summary thead th {
+		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+		font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+		color: var(--muted-foreground); position: sticky; top: 0;
+	}
+	table.summary tbody tr.group td {
+		background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+		font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+		color: var(--muted-foreground); padding: 5px 12px;
+	}
+	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+	td.name { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+	td.delta { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+	td.delta .pill { display: inline-block; min-width: 4.6em; padding: 1px 6px; border-radius: 4px; text-align: right; }
+	td.delta.good .pill { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
+	td.delta.bad  .pill { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
+	td.delta.flat .pill { background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); color: var(--muted-foreground); }
+	td.spark { width: 90px; padding: 4px 12px; }
+	td.spark svg { display: block; }
+
+	.charts-grid { display: grid; grid-template-columns: 1fr; gap: 0.85rem; margin-top: 0.6rem; }
+	@media (min-width: 900px)  { .charts-grid { grid-template-columns: 1fr 1fr; } }
+	@media (min-width: 1400px) { .charts-grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+	.chart-card {
+		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+		padding: 0.6rem 0.85rem 0.5rem; display: flex; flex-direction: column; gap: 0.35rem;
+	}
+	.chart-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+	.chart-card h3 { font-family: ui-monospace, monospace; font-size: 0.85rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+	.chart-card .meta { font-size: 0.72rem; color: var(--muted-foreground); display: flex; gap: 0.5rem; font-variant-numeric: tabular-nums; }
+	.chart-card .meta .pill { padding: 0 6px; border-radius: 3px; background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); }
+	.chart-card .meta .pill.good { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
+	.chart-card .meta .pill.bad  { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
+	.chart-card svg { display: block; width: 100%; height: auto; }
+	.chart-empty {
+		font-size: 0.82rem; color: var(--muted-foreground); font-style: italic;
+		padding: 0.75rem; text-align: center;
+	}
+
+	.runs-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-family: ui-monospace, monospace; }
+	.runs-table th, .runs-table td { padding: 5px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+	.runs-table thead th {
+		font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+		color: var(--muted-foreground); font-weight: 600; font-family: system-ui, sans-serif;
+		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+	}
+	.runs-table tbody tr:last-child td { border-bottom: none; }
+	.runs-table .latest td { background: color-mix(in oklch, var(--chart-1) 6%, transparent); }
+	.runs-table .latest td:nth-child(2)::after {
+		content: "← latest"; font-family: system-ui, sans-serif; color: var(--chart-1);
+		margin-left: 0.5rem; font-size: 0.75rem;
+	}
+
+	footer.page {
+		margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border);
+		color: var(--muted-foreground); font-size: 0.78rem;
+	}
+
+	.empty-state {
+		border: 1px dashed var(--border); border-radius: 8px;
+		padding: 2rem; text-align: center; color: var(--muted-foreground); margin: 2rem 0;
+	}
+</style>
+</head>
+<body>
+
+<header class="page">
+	<h1>Sidebar nav perf — cross-commit report</h1>
+	<div class="meta">
+		<span>Generated <strong>2026-05-13 22:20</strong> from <strong>1 commit</strong></span>
+		<span>Range <span class="mono">999bdc2</span></span>
+		<span>Latest branch <span class="mono">goal-goal-profile-si-320532b0-coder-51f8eddc</span></span>
+	</div>
+</header>
+
+<div class="empty-state">Only one run on file — first-vs-latest deltas will appear once a second harness run lands. Showing the single run below.</div><div class="table-wrap"><table class="summary">
+		<thead><tr>
+			<th>span</th>
+			<th class="num">first p50</th>
+			<th class="num">latest p50</th>
+			<th class="num">Δ p50</th>
+			<th class="num">first p95</th>
+			<th class="num">latest p95</th>
+			<th class="num">Δ p95</th>
+			<th class="num">n</th>
+			<th>trend p50</th>
+		</tr></thead>
+		<tbody>
+		<tr class="group"><td colspan="9">Navigation — click → ready</td></tr>
+		<tr>
+			<td class="name">nav.click</td>
+			<td class="num">1.50</td>
+			<td class="num">1.50</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">2.30</td>
+			<td class="num">2.30</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">20</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">nav.goal.ready</td>
+			<td class="num">29.5</td>
+			<td class="num">29.5</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">29.5</td>
+			<td class="num">29.5</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">2</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">nav.session.ready</td>
+			<td class="num">88.8</td>
+			<td class="num">88.8</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">193</td>
+			<td class="num">193</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">18</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">nav.goal.cold</td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">0</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">nav.session.cold</td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">0</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr>
+	
+		<tr class="group"><td colspan="9">API — REST calls on the critical path</td></tr>
+		<tr>
+			<td class="name">api.goal.agents.fetch</td>
+			<td class="num">10.4</td>
+			<td class="num">10.4</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">14.9</td>
+			<td class="num">14.9</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">8</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">api.goal.fetch</td>
+			<td class="num">12.1</td>
+			<td class="num">12.1</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">12.1</td>
+			<td class="num">12.1</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">3</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">api.goal.gates.fetch</td>
+			<td class="num">12.0</td>
+			<td class="num">12.0</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">93.8</td>
+			<td class="num">93.8</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">8</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">api.session.fetch</td>
+			<td class="num">10.4</td>
+			<td class="num">10.4</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">31.6</td>
+			<td class="num">31.6</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">12</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr>
+	
+		<tr class="group"><td colspan="9">Render &amp; runtime</td></tr>
+		<tr>
+			<td class="name">paint.first</td>
+			<td class="num">16.8</td>
+			<td class="num">16.8</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">31.2</td>
+			<td class="num">31.2</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">79</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">reducer.rehydrate</td>
+			<td class="num">0.10</td>
+			<td class="num">0.10</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">0.10</td>
+			<td class="num">0.10</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">11</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">ws.attach</td>
+			<td class="num">36.4</td>
+			<td class="num">36.4</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">46.9</td>
+			<td class="num">46.9</td>
+			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">11</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr><tr>
+			<td class="name">paint.tool-content.lazy</td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">—</td>
+			<td class="num">—</td>
+			<td class="delta flat"><span class="pill">—</span></td>
+			<td class="num">0</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+		</tr>
+	</tbody>
+	</table></div><h2>Per-span values <span class="count">single commit</span></h2><div class="charts-grid"><article class="chart-card">
+					<header>
+						<h3>nav.click</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=20</span>
+							<span>1.50 / 2.30 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.click trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">3.00</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2.25</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="44.6" r="2" fill="var(--chart-4)"><title>999bdc2  p95=2.30ms  n=20</title></circle>
+		<circle cx="50.0" cy="75.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=1.50ms  n=20</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>nav.goal.ready</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=2</span>
+							<span>29.5 / 29.5 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.ready trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="64.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=29.5ms  n=2</title></circle>
+		<circle cx="50.0" cy="64.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=29.5ms  n=2</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>nav.session.ready</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=18</span>
+							<span>88.8 / 193 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">300</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">225</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="58.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=193ms  n=18</title></circle>
+		<circle cx="50.0" cy="98.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=88.8ms  n=18</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.goal.agents.fetch</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=8</span>
+							<span>10.4 / 14.9 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.agents.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">20.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="47.1" r="2" fill="var(--chart-4)"><title>999bdc2  p95=14.9ms  n=8</title></circle>
+		<circle cx="50.0" cy="72.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=8</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.goal.fetch</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=3</span>
+							<span>12.1 / 12.1 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">20.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="63.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=12.1ms  n=3</title></circle>
+		<circle cx="50.0" cy="63.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.1ms  n=3</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.goal.gates.fetch</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=8</span>
+							<span>12.0 / 93.8 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="60.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=93.8ms  n=8</title></circle>
+		<circle cx="50.0" cy="122.9" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.0ms  n=8</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.session.fetch</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=12</span>
+							<span>10.4 / 31.6 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.session.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="60.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.6ms  n=12</title></circle>
+		<circle cx="50.0" cy="108.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=12</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>paint.first</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=79</span>
+							<span>16.8 / 31.2 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="paint.first trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="60.9" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.2ms  n=79</title></circle>
+		<circle cx="50.0" cy="93.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=16.8ms  n=79</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>reducer.rehydrate</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=11</span>
+							<span>0.10 / 0.10 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="reducer.rehydrate trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.13</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.38</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="124.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=0.10ms  n=11</title></circle>
+		<circle cx="50.0" cy="124.4" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=0.10ms  n=11</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>ws.attach</h3>
+						<div class="meta">
+							<span class="pill ">flat</span>
+							<span>n=11</span>
+							<span>36.4 / 46.9 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		
+		
+		
+		<circle cx="50.0" cy="78.5" r="2" fill="var(--chart-4)"><title>999bdc2  p95=46.9ms  n=11</title></circle>
+		<circle cx="50.0" cy="90.5" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=36.4ms  n=11</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+	</svg>
+				</article></div><h2>Runs <span class="count">1 commit</span></h2><div class="table-wrap"><table class="runs-table">
+		<thead><tr>
+			<th>#</th>
+			<th>commit</th>
+			<th>branch</th>
+			<th>timestamp</th>
+			<th class="num">spans</th>
+		</tr></thead>
+		<tbody><tr class="latest">
+			<td>1</td>
+			<td class="mono">999bdc2ed47e</td>
+			<td class="mono">goal-goal-profile-si-320532b0-coder-51f8eddc</td>
+			<td class="mono">2026-05-13 21:08</td>
+			<td class="num">10</td>
+		</tr></tbody>
+	</table></div>
+
+<footer class="page">
+	Generated by <code>scripts/perf-report.mjs</code> from <code>docs/perf/history/*.json</code>.
+	Re-run the manual harness (<code>npx playwright test --config playwright-manual.config.ts --grep perf-sidebar-nav</code>) to refresh.
+	See <a href="./sidebar-nav-baseline.md"><code>sidebar-nav-baseline.md</code></a> for repro instructions
+	and <a href="./mockups/sidebar-nav-report.html">the static mockup</a> for the canonical visual reference.
+</footer>
+
+</body>
+</html>

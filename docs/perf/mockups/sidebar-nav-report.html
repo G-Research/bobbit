@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sidebar nav perf — cross-commit report (mockup)</title>
+<!--
+  Mockup for `docs/perf/sidebar-nav-report.html`, the cross-commit
+  view emitted by `scripts/perf-report.mjs` after every manual perf
+  harness run.
+
+  Goal: scannable at-a-glance.
+    - Header summarises run count, time range, latest commit.
+    - "Headlines" strip surfaces the biggest movers (p50 delta).
+    - Summary table groups spans by category (nav, api, render/ws)
+      with green / red tinted delta cells.
+    - Per-span small-multiples chart grid (p50 solid + p95 dashed)
+      so every canonical span is visible in one glance.
+
+  Theme: Bobbit CSS tokens only. `--chart-1` solid for p50, `--chart-4`
+  dashed for p95 (visually distinct from `--positive` / `--negative`
+  used by delta cells). Tints via `color-mix`. Defensive fallbacks
+  in `:root` cover the HMR/bridge race per `defaults/docs/html-rendering.md`.
+
+  Data: SYNTHETIC. Eight commits telling a mixed story:
+    - nav.session.ready, ws.attach, api.goal.gates.fetch:  IMPROVING
+    - nav.goal.ready, api.goal.fetch:                       REGRESSING
+    - nav.click, paint.first, reducer.rehydrate, others:    FLAT
+    - paint.tool-content.lazy:                              NEW (appears mid-history)
+-->
+<style>
+	:root {
+		color-scheme: light dark;
+		/* Defensive fallbacks for the bridge race; the parent's tokens
+		   override these whenever the bridge fires. */
+		--chart-1: oklch(0.58 0.16 250);
+		--chart-2: oklch(0.62 0.16 65);
+		--chart-3: oklch(0.55 0.16 145);
+		--chart-4: oklch(0.55 0.18 25);
+		--chart-5: oklch(0.55 0.16 305);
+		--chart-6: oklch(0.60 0.14 195);
+		--positive: oklch(0.55 0.15 145);
+		--negative: oklch(0.55 0.18 25);
+		--warning: oklch(0.62 0.15 75);
+	}
+
+	* { box-sizing: border-box; }
+
+	body {
+		font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+		margin: 0;
+		padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
+		background: var(--background);
+		color: var(--foreground);
+		line-height: 1.45;
+		font-size: 14px;
+	}
+
+	a { color: var(--chart-1); }
+
+	code, .mono {
+		font-family: ui-monospace, "SF Mono", Consolas, monospace;
+		font-size: 0.92em;
+	}
+
+	/* ───────── Header ───────── */
+	header.page {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 0.75rem 1.25rem;
+		padding-bottom: 1rem;
+		border-bottom: 1px solid var(--border);
+		margin-bottom: 1.5rem;
+	}
+	header.page h1 {
+		font-size: 1.35rem;
+		margin: 0;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+	header.page .meta {
+		color: var(--muted-foreground);
+		font-size: 0.85rem;
+		display: flex;
+		gap: 0.5rem 1rem;
+		flex-wrap: wrap;
+	}
+	header.page .meta strong {
+		color: var(--foreground);
+		font-weight: 500;
+	}
+
+	/* ───────── Headlines strip ───────── */
+	.headlines {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 0.75rem;
+		margin-bottom: 2rem;
+	}
+	.headline {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.7rem 0.9rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+	.headline .label {
+		font-family: ui-monospace, monospace;
+		font-size: 0.78rem;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.headline .value {
+		display: flex;
+		align-items: baseline;
+		gap: 0.4rem;
+		font-variant-numeric: tabular-nums;
+	}
+	.headline .value .now {
+		font-size: 1.25rem;
+		font-weight: 600;
+		font-family: ui-monospace, monospace;
+	}
+	.headline .value .unit {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+	}
+	.headline .delta {
+		font-size: 0.78rem;
+		font-family: ui-monospace, monospace;
+		font-variant-numeric: tabular-nums;
+	}
+	.delta-good { color: var(--positive); }
+	.delta-bad  { color: var(--negative); }
+	.delta-flat { color: var(--muted-foreground); }
+
+	.headline.good { border-top: 2px solid var(--positive); }
+	.headline.bad  { border-top: 2px solid var(--negative); }
+	.headline.flat { border-top: 2px solid var(--border); }
+
+	/* ───────── Section headings ───────── */
+	h2 {
+		font-size: 1rem;
+		margin: 2.25rem 0 0.6rem;
+		font-weight: 600;
+		letter-spacing: -0.005em;
+	}
+	h2 .count {
+		color: var(--muted-foreground);
+		font-weight: 400;
+		font-size: 0.85em;
+		margin-left: 0.4rem;
+	}
+
+	/* ───────── Summary table ───────── */
+	.table-wrap {
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+		background: var(--card);
+	}
+	table.summary {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.85rem;
+	}
+	table.summary th, table.summary td {
+		padding: 7px 12px;
+		text-align: left;
+		border-bottom: 1px solid var(--border);
+	}
+	table.summary tbody tr:last-child td { border-bottom: none; }
+	table.summary thead th {
+		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+		font-weight: 600;
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--muted-foreground);
+		position: sticky;
+		top: 0;
+	}
+	table.summary tbody tr.group td {
+		background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+		font-size: 0.7rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--muted-foreground);
+		padding: 5px 12px;
+	}
+	td.num, th.num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+		font-family: ui-monospace, monospace;
+	}
+	td.name {
+		font-family: ui-monospace, monospace;
+		font-size: 0.85rem;
+	}
+	td.delta {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+		font-family: ui-monospace, monospace;
+		font-size: 0.82rem;
+	}
+	td.delta .pill {
+		display: inline-block;
+		min-width: 4.6em;
+		padding: 1px 6px;
+		border-radius: 4px;
+		text-align: right;
+	}
+	td.delta.good .pill { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
+	td.delta.bad  .pill { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
+	td.delta.flat .pill { background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); color: var(--muted-foreground); }
+
+	td.spark { width: 90px; padding: 4px 12px; }
+	td.spark svg { display: block; }
+
+	/* ───────── Charts grid ───────── */
+	.charts-grid {
+		display: grid;
+		grid-template-columns: 1fr;
+		gap: 0.85rem;
+		margin-top: 0.6rem;
+	}
+	@media (min-width: 900px)  { .charts-grid { grid-template-columns: 1fr 1fr; } }
+	@media (min-width: 1400px) { .charts-grid { grid-template-columns: 1fr 1fr 1fr; } }
+
+	.chart-card {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.6rem 0.85rem 0.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+	.chart-card header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+	.chart-card h3 {
+		font-family: ui-monospace, monospace;
+		font-size: 0.85rem;
+		font-weight: 600;
+		margin: 0;
+		letter-spacing: -0.01em;
+	}
+	.chart-card .meta {
+		font-size: 0.72rem;
+		color: var(--muted-foreground);
+		display: flex;
+		gap: 0.5rem;
+		font-variant-numeric: tabular-nums;
+	}
+	.chart-card .meta .pill {
+		padding: 0 6px;
+		border-radius: 3px;
+		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+	}
+	.chart-card .meta .pill.good { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
+	.chart-card .meta .pill.bad  { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
+	.chart-card svg { display: block; width: 100%; height: auto; }
+
+	/* ───────── Runs list ───────── */
+	.runs-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.8rem;
+		font-family: ui-monospace, monospace;
+	}
+	.runs-table th, .runs-table td {
+		padding: 5px 12px;
+		text-align: left;
+		border-bottom: 1px solid var(--border);
+	}
+	.runs-table thead th {
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--muted-foreground);
+		font-weight: 600;
+		font-family: system-ui, sans-serif;
+		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+	}
+	.runs-table tbody tr:last-child td { border-bottom: none; }
+	.runs-table .latest td {
+		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
+	}
+	.runs-table .latest .mono::after {
+		content: "← latest";
+		font-family: system-ui, sans-serif;
+		color: var(--chart-1);
+		margin-left: 0.5rem;
+		font-size: 0.75rem;
+	}
+
+	footer.page {
+		margin-top: 2.5rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+		color: var(--muted-foreground);
+		font-size: 0.78rem;
+	}
+</style>
+</head>
+<body>
+
+<header class="page">
+	<h1>Sidebar nav perf — cross-commit report</h1>
+	<div class="meta">
+		<span>Generated <strong>2026-05-13 21:08</strong> from <strong>8 commits</strong></span>
+		<span>Range <span class="mono">a1b2c3d</span> → <span class="mono">999bdc2</span></span>
+		<span>Branch <span class="mono">goal-…-coder-51f8eddc</span></span>
+	</div>
+</header>
+
+<!-- ───────── Headlines: biggest movers, ranked ───────── -->
+<section class="headlines">
+	<div class="headline good">
+		<div class="label">nav.session.ready (p50)</div>
+		<div class="value"><span class="now">71.4</span><span class="unit">ms</span></div>
+		<div class="delta delta-good">−48.6 ms (−40.5%) vs first</div>
+	</div>
+	<div class="headline good">
+		<div class="label">api.goal.gates.fetch (p95)</div>
+		<div class="value"><span class="now">28.0</span><span class="unit">ms</span></div>
+		<div class="delta delta-good">−92.0 ms (−76.7%) vs first</div>
+	</div>
+	<div class="headline good">
+		<div class="label">ws.attach (p50)</div>
+		<div class="value"><span class="now">22.1</span><span class="unit">ms</span></div>
+		<div class="delta delta-good">−27.9 ms (−55.8%) vs first</div>
+	</div>
+	<div class="headline bad">
+		<div class="label">nav.goal.ready (p50)</div>
+		<div class="value"><span class="now">62.3</span><span class="unit">ms</span></div>
+		<div class="delta delta-bad">+33.3 ms (+114.8%) vs first</div>
+	</div>
+	<div class="headline bad">
+		<div class="label">api.goal.fetch (p50)</div>
+		<div class="value"><span class="now">19.4</span><span class="unit">ms</span></div>
+		<div class="delta delta-bad">+11.3 ms (+139.5%) vs first</div>
+	</div>
+	<div class="headline flat">
+		<div class="label">paint.first (p50)</div>
+		<div class="value"><span class="now">16.9</span><span class="unit">ms</span></div>
+		<div class="delta delta-flat">+0.1 ms (+0.6%) vs first</div>
+	</div>
+</section>
+
+<!-- ───────── Summary table ───────── -->
+<h2>Summary <span class="count">first baseline vs latest, ordered by |Δms| within group</span></h2>
+<div class="table-wrap">
+<table class="summary">
+	<thead>
+		<tr>
+			<th>span</th>
+			<th class="num">first p50</th>
+			<th class="num">latest p50</th>
+			<th class="num">Δ p50</th>
+			<th class="num">first p95</th>
+			<th class="num">latest p95</th>
+			<th class="num">Δ p95</th>
+			<th class="num">n</th>
+			<th>trend p50</th>
+		</tr>
+	</thead>
+	<tbody>
+
+		<!-- ─── Navigation (click → ready) ─── -->
+		<tr class="group"><td colspan="9">Navigation — click → ready</td></tr>
+
+		<tr>
+			<td class="name">nav.session.ready</td>
+			<td class="num">120.0</td>
+			<td class="num">71.4</td>
+			<td class="delta good"><span class="pill">−48.6 / −40.5%</span></td>
+			<td class="num">220.0</td>
+			<td class="num">138.0</td>
+			<td class="delta good"><span class="pill">−82.0 / −37.3%</span></td>
+			<td class="num">18</td>
+			<td class="spark">
+				<!-- spark: improving -->
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,4 12,5 23,7 34,9 45,12 56,14 67,17 78,18"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">nav.goal.ready</td>
+			<td class="num">29.0</td>
+			<td class="num">62.3</td>
+			<td class="delta bad"><span class="pill">+33.3 / +114.8%</span></td>
+			<td class="num">44.0</td>
+			<td class="num">88.0</td>
+			<td class="delta bad"><span class="pill">+44.0 / +100.0%</span></td>
+			<td class="num">12</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,18 12,17 23,15 34,13 45,11 56,9 67,6 78,4"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">nav.click</td>
+			<td class="num">1.5</td>
+			<td class="num">1.4</td>
+			<td class="delta flat"><span class="pill">−0.1 / −6.7%</span></td>
+			<td class="num">2.4</td>
+			<td class="num">2.3</td>
+			<td class="delta flat"><span class="pill">−0.1 / −4.2%</span></td>
+			<td class="num">22</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,11 12,12 23,10 34,11 45,12 56,10 67,11 78,11"/>
+				</svg>
+			</td>
+		</tr>
+
+		<!-- ─── API ─── -->
+		<tr class="group"><td colspan="9">API — REST calls on the critical path</td></tr>
+
+		<tr>
+			<td class="name">api.goal.gates.fetch</td>
+			<td class="num">14.0</td>
+			<td class="num">11.8</td>
+			<td class="delta good"><span class="pill">−2.2 / −15.7%</span></td>
+			<td class="num">120.0</td>
+			<td class="num">28.0</td>
+			<td class="delta good"><span class="pill">−92.0 / −76.7%</span></td>
+			<td class="num">8</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,3 12,5 23,8 34,11 45,13 56,15 67,16 78,17"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">api.session.fetch</td>
+			<td class="num">10.6</td>
+			<td class="num">10.2</td>
+			<td class="delta flat"><span class="pill">−0.4 / −3.8%</span></td>
+			<td class="num">33.0</td>
+			<td class="num">31.0</td>
+			<td class="delta flat"><span class="pill">−2.0 / −6.1%</span></td>
+			<td class="num">12</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,11 12,10 23,12 34,11 45,11 56,12 67,11 78,11"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">api.goal.fetch</td>
+			<td class="num">8.1</td>
+			<td class="num">19.4</td>
+			<td class="delta bad"><span class="pill">+11.3 / +139.5%</span></td>
+			<td class="num">14.0</td>
+			<td class="num">28.0</td>
+			<td class="delta bad"><span class="pill">+14.0 / +100.0%</span></td>
+			<td class="num">10</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,18 12,17 23,15 34,12 45,11 56,9 67,6 78,4"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">api.goal.agents.fetch</td>
+			<td class="num">10.4</td>
+			<td class="num">10.0</td>
+			<td class="delta flat"><span class="pill">−0.4 / −3.8%</span></td>
+			<td class="num">15.0</td>
+			<td class="num">14.5</td>
+			<td class="delta flat"><span class="pill">−0.5 / −3.3%</span></td>
+			<td class="num">8</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,11 12,11 23,12 34,11 45,11 56,10 67,11 78,11"/>
+				</svg>
+			</td>
+		</tr>
+
+		<!-- ─── Render / runtime ─── -->
+		<tr class="group"><td colspan="9">Render &amp; runtime</td></tr>
+
+		<tr>
+			<td class="name">ws.attach</td>
+			<td class="num">50.0</td>
+			<td class="num">22.1</td>
+			<td class="delta good"><span class="pill">−27.9 / −55.8%</span></td>
+			<td class="num">85.0</td>
+			<td class="num">38.0</td>
+			<td class="delta good"><span class="pill">−47.0 / −55.3%</span></td>
+			<td class="num">11</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,4 12,5 23,7 34,10 45,13 56,15 67,17 78,18"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">paint.first</td>
+			<td class="num">16.8</td>
+			<td class="num">16.9</td>
+			<td class="delta flat"><span class="pill">+0.1 / +0.6%</span></td>
+			<td class="num">31.0</td>
+			<td class="num">30.5</td>
+			<td class="delta flat"><span class="pill">−0.5 / −1.6%</span></td>
+			<td class="num">79</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,12 12,11 23,12 34,12 45,11 56,12 67,11 78,12"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">paint.tool-content.lazy</td>
+			<td class="num">—</td>
+			<td class="num">8.6</td>
+			<td class="delta flat"><span class="pill">new</span></td>
+			<td class="num">—</td>
+			<td class="num">14.5</td>
+			<td class="delta flat"><span class="pill">new</span></td>
+			<td class="num">22</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="40,18 50,14 60,12 70,11 78,11"/>
+				</svg>
+			</td>
+		</tr>
+
+		<tr>
+			<td class="name">reducer.rehydrate</td>
+			<td class="num">0.1</td>
+			<td class="num">0.1</td>
+			<td class="delta flat"><span class="pill">0.0 / 0.0%</span></td>
+			<td class="num">0.1</td>
+			<td class="num">0.1</td>
+			<td class="delta flat"><span class="pill">0.0 / 0.0%</span></td>
+			<td class="num">11</td>
+			<td class="spark">
+				<svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true">
+					<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5"
+						points="2,11 12,11 23,11 34,11 45,11 56,11 67,11 78,11"/>
+				</svg>
+			</td>
+		</tr>
+
+	</tbody>
+</table>
+</div>
+
+<!-- ───────── Charts grid ───────── -->
+<h2>Per-span trend <span class="count">p50 solid · p95 dashed · 8 commits</span></h2>
+<div class="charts-grid">
+
+	<!-- ============ nav.session.ready: IMPROVING ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>nav.session.ready</h3>
+			<div class="meta">
+				<span class="pill good">−40.5%</span>
+				<span>n=18</span>
+				<span>71.4 / 138.0 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
+			<!-- gridlines + Y labels -->
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">250</text>
+				<text x="44" y="58"  text-anchor="end">187</text>
+				<text x="44" y="93"  text-anchor="end">125</text>
+				<text x="44" y="128" text-anchor="end">62</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<!-- p50 area fill -->
+			<path d="M 60 56 L 100 60 L 140 67 L 180 76 L 220 89 L 260 99 L 300 109 L 340 109 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<!-- p95 dashed line -->
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,21 100,27 140,38 180,51 220,68 260,80 300,89 340,84"/>
+			<!-- p50 solid line -->
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,56 100,60 140,67 180,76 220,89 260,99 300,109 340,109"/>
+			<!-- dots p50 -->
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="56"  r="2.5"/><circle cx="100" cy="60" r="2.5"/>
+				<circle cx="140" cy="67"  r="2.5"/><circle cx="180" cy="76" r="2.5"/>
+				<circle cx="220" cy="89"  r="2.5"/><circle cx="260" cy="99" r="2.5"/>
+				<circle cx="300" cy="109" r="2.5"/><circle cx="340" cy="109" r="2.5"/>
+			</g>
+			<!-- dots p95 -->
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="21" r="2"/><circle cx="100" cy="27" r="2"/>
+				<circle cx="140" cy="38" r="2"/><circle cx="180" cy="51" r="2"/>
+				<circle cx="220" cy="68" r="2"/><circle cx="260" cy="80" r="2"/>
+				<circle cx="300" cy="89" r="2"/><circle cx="340" cy="84" r="2"/>
+			</g>
+			<!-- x labels -->
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+	<!-- ============ nav.goal.ready: REGRESSING ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>nav.goal.ready</h3>
+			<div class="meta">
+				<span class="pill bad">+114.8%</span>
+				<span>n=12</span>
+				<span>62.3 / 88.0 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.ready trend">
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">100</text>
+				<text x="44" y="58"  text-anchor="end">75</text>
+				<text x="44" y="93"  text-anchor="end">50</text>
+				<text x="44" y="128" text-anchor="end">25</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<path d="M 60 110 L 100 108 L 140 102 L 180 92 L 220 81 L 260 71 L 300 64 L 340 58 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,84 100,80 140,72 180,60 220,48 260,38 300,29 340,21"/>
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,110 100,108 140,102 180,92 220,81 260,71 300,64 340,58"/>
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="110" r="2.5"/><circle cx="100" cy="108" r="2.5"/>
+				<circle cx="140" cy="102" r="2.5"/><circle cx="180" cy="92"  r="2.5"/>
+				<circle cx="220" cy="81"  r="2.5"/><circle cx="260" cy="71"  r="2.5"/>
+				<circle cx="300" cy="64"  r="2.5"/><circle cx="340" cy="58"  r="2.5"/>
+			</g>
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="84" r="2"/><circle cx="100" cy="80" r="2"/>
+				<circle cx="140" cy="72" r="2"/><circle cx="180" cy="60" r="2"/>
+				<circle cx="220" cy="48" r="2"/><circle cx="260" cy="38" r="2"/>
+				<circle cx="300" cy="29" r="2"/><circle cx="340" cy="21" r="2"/>
+			</g>
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+	<!-- ============ api.goal.gates.fetch: IMPROVING p95 ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>api.goal.gates.fetch</h3>
+			<div class="meta">
+				<span class="pill good">−76.7% p95</span>
+				<span>n=8</span>
+				<span>11.8 / 28.0 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">140</text>
+				<text x="44" y="58"  text-anchor="end">105</text>
+				<text x="44" y="93"  text-anchor="end">70</text>
+				<text x="44" y="128" text-anchor="end">35</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<path d="M 60 137 L 100 135 L 140 133 L 180 131 L 220 134 L 260 136 L 300 137 L 340 138 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,25 100,42 140,69 180,99 220,112 260,118 300,124 340,130"/>
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,137 100,135 140,133 180,131 220,134 260,136 300,137 340,138"/>
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="137" r="2.5"/><circle cx="100" cy="135" r="2.5"/>
+				<circle cx="140" cy="133" r="2.5"/><circle cx="180" cy="131" r="2.5"/>
+				<circle cx="220" cy="134" r="2.5"/><circle cx="260" cy="136" r="2.5"/>
+				<circle cx="300" cy="137" r="2.5"/><circle cx="340" cy="138" r="2.5"/>
+			</g>
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="25"  r="2"/><circle cx="100" cy="42"  r="2"/>
+				<circle cx="140" cy="69"  r="2"/><circle cx="180" cy="99"  r="2"/>
+				<circle cx="220" cy="112" r="2"/><circle cx="260" cy="118" r="2"/>
+				<circle cx="300" cy="124" r="2"/><circle cx="340" cy="130" r="2"/>
+			</g>
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+	<!-- ============ ws.attach: IMPROVING ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>ws.attach</h3>
+			<div class="meta">
+				<span class="pill good">−55.8%</span>
+				<span>n=11</span>
+				<span>22.1 / 38.0 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">100</text>
+				<text x="44" y="58"  text-anchor="end">75</text>
+				<text x="44" y="93"  text-anchor="end">50</text>
+				<text x="44" y="128" text-anchor="end">25</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<path d="M 60 75 L 100 79 L 140 88 L 180 99 L 220 110 L 260 117 L 300 122 L 340 124 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,26 100,38 140,55 180,72 220,86 260,98 300,108 340,113"/>
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,75 100,79 140,88 180,99 220,110 260,117 300,122 340,124"/>
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="75"  r="2.5"/><circle cx="100" cy="79"  r="2.5"/>
+				<circle cx="140" cy="88"  r="2.5"/><circle cx="180" cy="99"  r="2.5"/>
+				<circle cx="220" cy="110" r="2.5"/><circle cx="260" cy="117" r="2.5"/>
+				<circle cx="300" cy="122" r="2.5"/><circle cx="340" cy="124" r="2.5"/>
+			</g>
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="26"  r="2"/><circle cx="100" cy="38"  r="2"/>
+				<circle cx="140" cy="55"  r="2"/><circle cx="180" cy="72"  r="2"/>
+				<circle cx="220" cy="86"  r="2"/><circle cx="260" cy="98"  r="2"/>
+				<circle cx="300" cy="108" r="2"/><circle cx="340" cy="113" r="2"/>
+			</g>
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+	<!-- ============ paint.first: FLAT ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>paint.first</h3>
+			<div class="meta">
+				<span class="pill">flat</span>
+				<span>n=79</span>
+				<span>16.9 / 30.5 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="paint.first trend">
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">40</text>
+				<text x="44" y="58"  text-anchor="end">30</text>
+				<text x="44" y="93"  text-anchor="end">20</text>
+				<text x="44" y="128" text-anchor="end">10</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<path d="M 60 96 L 100 97 L 140 96 L 180 98 L 220 95 L 260 96 L 300 97 L 340 96 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,58 100,60 140,57 180,59 220,56 260,58 300,57 340,59"/>
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,96 100,97 140,96 180,98 220,95 260,96 300,97 340,96"/>
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="96" r="2.5"/><circle cx="100" cy="97" r="2.5"/>
+				<circle cx="140" cy="96" r="2.5"/><circle cx="180" cy="98" r="2.5"/>
+				<circle cx="220" cy="95" r="2.5"/><circle cx="260" cy="96" r="2.5"/>
+				<circle cx="300" cy="97" r="2.5"/><circle cx="340" cy="96" r="2.5"/>
+			</g>
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="58" r="2"/><circle cx="100" cy="60" r="2"/>
+				<circle cx="140" cy="57" r="2"/><circle cx="180" cy="59" r="2"/>
+				<circle cx="220" cy="56" r="2"/><circle cx="260" cy="58" r="2"/>
+				<circle cx="300" cy="57" r="2"/><circle cx="340" cy="59" r="2"/>
+			</g>
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+	<!-- ============ api.goal.fetch: REGRESSING ============ -->
+	<article class="chart-card">
+		<header>
+			<h3>api.goal.fetch</h3>
+			<div class="meta">
+				<span class="pill bad">+139.5%</span>
+				<span>n=10</span>
+				<span>19.4 / 28.0 ms</span>
+			</div>
+		</header>
+		<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.fetch trend">
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">
+				<line x1="50" y1="20"  x2="350" y2="20"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="55"  x2="350" y2="55"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="90"  x2="350" y2="90"  stroke="var(--border)" opacity="0.4"/>
+				<line x1="50" y1="125" x2="350" y2="125" stroke="var(--border)" opacity="0.4"/>
+				<text x="44" y="23"  text-anchor="end">40</text>
+				<text x="44" y="58"  text-anchor="end">30</text>
+				<text x="44" y="93"  text-anchor="end">20</text>
+				<text x="44" y="128" text-anchor="end">10</text>
+				<text x="44" y="148" text-anchor="end">0</text>
+			</g>
+			<path d="M 60 125 L 100 122 L 140 117 L 180 110 L 220 102 L 260 92 L 300 84 L 340 78 L 340 145 L 60 145 Z"
+				fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+			<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3"
+				points="60,108 100,103 140,95 180,86 220,75 260,65 300,58 340,52"/>
+			<polyline fill="none" stroke="var(--chart-1)" stroke-width="2"
+				points="60,125 100,122 140,117 180,110 220,102 260,92 300,84 340,78"/>
+			<g fill="var(--chart-1)">
+				<circle cx="60"  cy="125" r="2.5"/><circle cx="100" cy="122" r="2.5"/>
+				<circle cx="140" cy="117" r="2.5"/><circle cx="180" cy="110" r="2.5"/>
+				<circle cx="220" cy="102" r="2.5"/><circle cx="260" cy="92"  r="2.5"/>
+				<circle cx="300" cy="84"  r="2.5"/><circle cx="340" cy="78"  r="2.5"/>
+			</g>
+			<g fill="var(--chart-4)">
+				<circle cx="60"  cy="108" r="2"/><circle cx="100" cy="103" r="2"/>
+				<circle cx="140" cy="95"  r="2"/><circle cx="180" cy="86"  r="2"/>
+				<circle cx="220" cy="75"  r="2"/><circle cx="260" cy="65"  r="2"/>
+				<circle cx="300" cy="58"  r="2"/><circle cx="340" cy="52"  r="2"/>
+			</g>
+			<g font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)" text-anchor="middle">
+				<text x="60"  y="158">a1b2c3d</text>
+				<text x="140" y="158">e8f7a21</text>
+				<text x="220" y="158">9b726ff</text>
+				<text x="300" y="158">d894538</text>
+				<text x="340" y="158">999bdc2</text>
+			</g>
+		</svg>
+	</article>
+
+</div>
+
+<!-- ───────── Runs list ───────── -->
+<h2>Runs <span class="count">8 commits, oldest first</span></h2>
+<div class="table-wrap">
+<table class="runs-table">
+	<thead>
+		<tr>
+			<th>#</th>
+			<th>commit</th>
+			<th>branch</th>
+			<th>timestamp</th>
+			<th class="num">spans</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr><td>1</td><td class="mono">a1b2c3d</td><td>master</td><td>2026-05-08 14:02</td><td class="num">10</td></tr>
+		<tr><td>2</td><td class="mono">b34d6ef</td><td>master</td><td>2026-05-09 11:17</td><td class="num">10</td></tr>
+		<tr><td>3</td><td class="mono">c57e811</td><td>goal-…-coder-415ace98</td><td>2026-05-10 09:44</td><td class="num">10</td></tr>
+		<tr><td>4</td><td class="mono">e8f7a21</td><td>goal-…-coder-415ace98</td><td>2026-05-10 18:31</td><td class="num">11</td></tr>
+		<tr><td>5</td><td class="mono">f1a2b09</td><td>goal-…-coder-51f8eddc</td><td>2026-05-11 15:08</td><td class="num">11</td></tr>
+		<tr><td>6</td><td class="mono">9b726ff</td><td>goal-…-coder-51f8eddc</td><td>2026-05-12 10:22</td><td class="num">11</td></tr>
+		<tr><td>7</td><td class="mono">d894538</td><td>goal-…-coder-51f8eddc</td><td>2026-05-13 09:55</td><td class="num">11</td></tr>
+		<tr class="latest"><td>8</td><td class="mono">999bdc2</td><td>goal-…-coder-51f8eddc</td><td>2026-05-13 21:08</td><td class="num">11</td></tr>
+	</tbody>
+</table>
+</div>
+
+<footer class="page">
+	Generated by <code>scripts/perf-report.mjs</code> from <code>docs/perf/history/*.json</code>.
+	Re-run the manual harness (<code>npx playwright test --config playwright-manual.config.ts --grep perf-sidebar-nav</code>) to refresh.
+	See <a href="../sidebar-nav-baseline.md"><code>sidebar-nav-baseline.md</code></a> for repro instructions.
+</footer>
+
+</body>
+</html>
