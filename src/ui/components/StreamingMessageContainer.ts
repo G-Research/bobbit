@@ -43,6 +43,25 @@ export class StreamingMessageContainer extends LitElement {
 	override updated(changed: Map<string, unknown>) {
 		if (this.archived) return; // No animation state transitions when archived
 		if (changed.has("isStreaming")) {
+			// Compaction-state safety net: when the next turn starts streaming
+			// (i.e. `isStreaming` flips to true) AND we're still in a compaction
+			// animation state, force the compaction exit immediately. The
+			// `endCompacting()` setTimeout SHOULD have already transitioned us
+			// out, but if it was missed (compaction_end not received, race
+			// during session switch, etc.) the sprite would otherwise stay
+			// wedged in 'compacting' until the 10-minute safety timer fires.
+			// Recognise the next turn as authoritative evidence that compaction
+			// is done and clear the visual state.
+			if (
+				this.isStreaming
+				&& (this._blobState === 'compact-shake'
+					|| this._blobState === 'compacting'
+					|| this._blobState === 'compact-pop')
+			) {
+				this._doEndCompacting();
+				// Fall through to the regular isStreaming branches below so the
+				// blob picks up its `active`/`entering` state for the new turn.
+			}
 			// Don't let agent_start/agent_end events override the compaction animation
 			if (this._blobState === 'compact-shake' || this._blobState === 'compacting' || this._blobState === 'compact-pop' || this._compactEntryTimer) {
 				// no-op — compaction owns the blob state until endCompacting() finishes
