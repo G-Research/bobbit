@@ -67,8 +67,16 @@ test("empty-workflows banner gates goal creation and opens project assistant", a
 
 	// Click "Open Project Assistant" — must POST /api/sessions with
 	// assistantType "project" or "project-scaffolding".
+	// Filter on the request body so a stray unrelated /api/sessions POST
+	// (e.g. tab-switch session persistence) can't be matched first.
 	const projectAssistantPost = page.waitForResponse(
-		(resp) => resp.url().includes("/api/sessions") && resp.request().method() === "POST" && resp.ok(),
+		(resp) => {
+			if (!resp.url().includes("/api/sessions") || resp.request().method() !== "POST" || !resp.ok()) return false;
+			try {
+				const body = resp.request().postDataJSON?.() ?? JSON.parse(resp.request().postData() || "{}");
+				return body?.assistantType === "project" || body?.assistantType === "project-scaffolding";
+			} catch { return false; }
+		},
 		{ timeout: 30_000 },
 	);
 	await page.locator('[data-testid="goal-form-open-project-assistant"]').first().click();

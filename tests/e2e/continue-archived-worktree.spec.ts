@@ -32,7 +32,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, connectWs, agentEndPredicate } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { mkdirSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,8 +78,12 @@ test.describe("Continue-Archived from worktree-backed source", () => {
 
 	test.beforeAll(async () => {
 		const base = join(tmpdir(), `bobbit-e2e-cont-wt-${process.pid}-${Date.now()}`);
-		repoPath = join(base, "repo");
-		mkdirSync(repoPath, { recursive: true });
+		const rawRepo = join(base, "repo");
+		mkdirSync(rawRepo, { recursive: true });
+		// macOS tmpdir is a symlink (/var → /private/var). Both the project
+		// rootPath and the session cwd must be canonical so they match
+		// post-canonicalisation on the server side.
+		repoPath = realpathSync(rawRepo);
 		execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath });
 		execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath });
 		execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath });
