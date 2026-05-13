@@ -3898,6 +3898,17 @@ export class SessionManager {
 		};
 	}
 
+	/**
+	 * @internal — full in-memory `SessionInfo[]` for callers inside
+	 * `src/server/agent/` that need to drive `forceAbort`/lifecycle ops
+	 * over every session (e.g. the pause-cascade sweep in
+	 * `nested-goal-routes.ts`). Do NOT expose over REST or WS — leaks
+	 * `rpcClient`, `eventBuffer`, etc.
+	 */
+	getAllSessionsRaw(): SessionInfo[] {
+		return Array.from(this.sessions.values());
+	}
+
 	listSessions(): Array<{
 		id: string;
 		title: string;

@@ -620,6 +620,104 @@ in `src/app/api.ts` pre-flights `cascade=false` and on 409 opens
 `showStopTeamDialog` (the same pattern as showArchive/Pause/Resume) for
 explicit confirmation. Wired into the dashboard's `handleEndTeam`.
 
+## Pause / resume
+
+`POST /api/goals/:id/pause {cascade:true}` must actually stop the work,
+not just flip a flag. Before this fix the handler set `paused:true` on
+every descendant and returned `{paused:N}` while team-leads, coders,
+reviewers and `llm-review-*` verifier sessions kept streaming — and the
+boot-respawn supervisor immediately re-created any team-lead an operator
+manually aborted. Operators chasing a runaway subtree played whack-a-mole.
+
+The fix shuts three holes with one helper plus narrow guards at every
+spawn site. See [docs/design/pause-cascade.md](design/pause-cascade.md)
+for the full design.
+
+### What `pause {cascade:true}` does
+
+1. Walks the descendant set (BFS via `parentGoalId`), sets `paused:true`
+   on each, and cancels in-flight gate verifications via
+   `cancelAllVerifications(goalId)` (this also terminates the
+   `llm-review-*` reviewer sessions tracked in `activeVerifications`).
+2. Sweeps every session in `SessionManager.getAllSessionsRaw()` whose
+   `goalId` is in the paused subtree and calls `forceAbort(id)` —
+   best-effort, errors are logged and do not block the rest of the
+   sweep. This is the canonical "interrupt this session" path (same as
+   `POST /api/sessions/:id/abort`) so team-leads, coders, reviewers and
+   any straggler `llm-review-*` sessions whose verification record was
+   GC'd are all caught.
+3. Returns `{paused: N}` where `N` is the number of goals newly flipped
+   (re-pausing an already-paused goal is a no-op and is not counted).
+
+### Spawn-path guards (409 `GOAL_PAUSED`)
+
+While a goal is paused, every code path that would create a session on
+it refuses with
+
+```json
+{ "error": "Goal <id> is paused", "code": "GOAL_PAUSED", "goalId": "<id>" }
+```
+
+at HTTP status `409`. The shape mirrors the existing
+`GateDependencyError` convention. Guarded sites:
+
+| Site | Where the guard lives |
+|---|---|
+| `POST /api/goals/:id/team/spawn` | Inline check before `teamManager.spawnRole(...)`. |
+| `POST /api/goals/:id/team/start` | Catches `GoalPausedError` thrown by `TeamManager._startTeamImpl` and translates to 409 (the in-process throw lets team-lead extension callers that bypass REST also fail safely). |
+| `POST /api/goals/:id/spawn-child` | Inline check on the parent goal, BEFORE the `planId` idempotency check — a re-spawn of the same `planId` on a paused parent is still a spawn intent the operator wants blocked. |
+| `POST /api/goals/:id/gates/:gateId/signal` | Inline check at the most upstream point — rejects both the gate-signal accept and the verifier spawn it would otherwise trigger. |
+| `TeamManager.spawnRole`, `TeamManager._startTeamImpl` | Throw `GoalPausedError` (defence-in-depth for in-process callers — the children-tools extension calling `team_spawn` MCP bypasses REST). |
+| `VerificationHarness.runLlmReviewViaSession` | Throws before `createSession`, closing the race window between gate-signal accept and the deeper-descendant pause flag being set. |
+
+The single shared primitive lives in
+`src/server/agent/goal-paused-guard.ts`: `GoalPausedError` (with
+`code: "GOAL_PAUSED"`, `status: 409`) and `requireGoalNotPaused(goalId,
+lookup)`. REST handlers catch and re-shape; in-process callers let it
+propagate.
+
+### Supervisor respawn skip (the whack-a-mole fix)
+
+`TeamManager._bootRespawnSessionlessGoals` runs on boot and on
+`resubscribeTeamEvents` to re-create a team-lead for every
+`state:"in-progress"` goal that no longer has a live session. Before the
+fix, manually aborting a team-lead on a paused goal triggered this loop
+and a fresh team-lead appeared within seconds. The loop now skips any
+goal with `paused:true`, so a paused subtree stays paused even when an
+operator force-kills sessions externally. This single guard is the
+highest-impact change in the fix — it is what makes pause actually
+stick.
+
+Pinned by `tests/team-manager-boot-respawn-sessionless.test.ts` (source
+grep + `shouldRespawn` mirror, so the predicate can't drift without a
+test failure).
+
+### Resume semantics
+
+`POST /api/goals/:id/resume {cascade:true}` walks the same descendant
+set and clears `paused:false`. It does **NOT** auto-restart team-leads,
+coders, or reviewers — the operator restarts work manually via
+`POST /team/start` or the UI button. Auto-restart on resume was
+explicitly rejected: resume's contract is "allow new spawns again",
+not "replay the subtree".
+
+The `dependsOn`-on-completion auto-unpause interaction (where a child
+becomes runnable after its dependency completes) is owned by a separate
+fix and is intentionally out of scope here.
+
+### Integration tests
+
+Three e2e tests under `tests/e2e/` pin the contract:
+
+- `pause-cascade-aborts-sessions.spec.ts` — subtree sessions stop within
+  5 s; 409 `GOAL_PAUSED` from `team/spawn`, `spawn-child`, gate signal;
+  resume re-enables spawn.
+- `pause-cancels-verifiers.spec.ts` — pause cancels an in-flight slow
+  command verification within 5 s; no replacement reviewer appears.
+- `pause-blocks-supervisor-respawn.spec.ts` — drives
+  `_bootRespawnSessionlessGoals` directly while the goal is paused and
+  asserts no team-lead respawn.
+
 ## Sub-goal sidebar placement
 
 ### Cascade resolution at spawn time
@@ -1092,8 +1190,8 @@ each event with a 250ms trailing-edge throttle to avoid layout thrash.
 | PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
-| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Cancels in-flight verifications; does NOT halt streaming team-lead/worker sessions today (`showPauseGoalDialog` text surfaces this partial-pause limitation). |
-| POST | `/api/goals/:id/resume` | `{ cascade: boolean }` | Same 422 contract as pause. |
+| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Flips `paused:true` on every (cascaded) descendant, cancels in-flight gate verifications, and `forceAbort`s every streaming session whose `goalId` is in the paused subtree (team-leads, coders, reviewers, `llm-review-*` verifiers). While paused, every spawn path returns 409 `{code:"GOAL_PAUSED", goalId}` and `_bootRespawnSessionlessGoals` skips the goal. See [Pause / resume](#pause--resume). |
+| POST | `/api/goals/:id/resume` | `{ cascade: boolean }` | Same 422 contract as pause. Clears `paused:false` on the subtree; does NOT auto-restart sessions — operator restarts manually via `/team/start`. |
 | POST | `/api/goals/:id/mutation/:requestId/decision` | `{ decision: "approve" \| "reject" }` | 404 `REQUEST_NOT_FOUND`. Bumps `replanCount`; auto-pauses past 5. |
 | PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. The `goal_state_changed` broadcast carries the new values inline so clients don't need to re-fetch. |
 | DELETE | `/api/goals/:id?cascade=true\|false[&mergedManually=true]` | (query) | 422 `CASCADE_REQUIRED`, 409 `HAS_DESCENDANTS` when `cascade=false`. Optional `mergedManually=true` stamps the target's `state` to `"complete"` before archiving (target-only) so the Plan-tab DAG renders it green; for use after a manual `git merge` of a child whose `ready-to-merge` failed. |

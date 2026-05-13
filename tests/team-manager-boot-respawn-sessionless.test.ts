@@ -34,10 +34,14 @@ describe("boot-respawn for sessionless in-progress goals — source-grep guard",
 		assert.match(window, /_bootRespawnSessionlessGoals\(\)/);
 	});
 
-	it("checks the four-conjunct predicate (archived, state, setupStatus, team)", () => {
+	it("checks the five-conjunct predicate (archived, paused, state, setupStatus, team)", () => {
 		const helperIdx = text.lastIndexOf("_bootRespawnSessionlessGoals");
 		const window = text.slice(helperIdx, helperIdx + 4_000);
 		assert.match(window, /goal\.archived/, "predicate must check archived");
+		// pause-cascade anti-whack-a-mole guard — paused goals must NOT be respawned
+		// by the boot supervisor. This is the load-bearing fix from
+		// docs/design/pause-cascade.md call-site 7.
+		assert.match(window, /goal\.paused/, "predicate must check paused (anti-whack-a-mole)");
 		assert.match(window, /goal\.state/, "predicate must check state");
 		assert.match(window, /goal\.setupStatus/, "predicate must check setupStatus");
 		assert.match(window, /goal\.team/, "predicate must check team flag");
@@ -64,6 +68,7 @@ describe("boot-respawn for sessionless in-progress goals — predicate iteration
 		id: string;
 		title: string;
 		archived?: boolean;
+		paused?: boolean;
 		state?: string;
 		setupStatus?: string;
 		team?: boolean;
@@ -71,6 +76,7 @@ describe("boot-respawn for sessionless in-progress goals — predicate iteration
 
 	function shouldRespawn(goal: Goal, teamsHas: (id: string) => boolean): boolean {
 		if (goal.archived) return false;
+		if (goal.paused) return false; // anti-whack-a-mole — pause-cascade guard
 		if (goal.state !== "in-progress") return false;
 		if (goal.setupStatus !== "ready") return false;
 		if (!goal.team) return false;
@@ -88,6 +94,15 @@ describe("boot-respawn for sessionless in-progress goals — predicate iteration
 
 	it("skips an archived goal", () => {
 		const goal: Goal = { id: "g2", title: "g2", archived: true, state: "in-progress", setupStatus: "ready", team: true };
+		assert.equal(shouldRespawn(goal, teamsHas), false);
+	});
+
+	it("skips a paused goal (anti-whack-a-mole guard)", () => {
+		// Pause cascade sets paused:true on every descendant. If the boot-respawn
+		// supervisor doesn't honour this flag, manually aborting a team-lead on a
+		// paused goal immediately respawns a fresh one — the whack-a-mole bug fixed
+		// by docs/design/pause-cascade.md call-site 7.
+		const goal: Goal = { id: "g-paused", title: "g-paused", paused: true, state: "in-progress", setupStatus: "ready", team: true };
 		assert.equal(shouldRespawn(goal, teamsHas), false);
 	});
 
