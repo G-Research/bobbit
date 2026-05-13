@@ -20,7 +20,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -76,7 +76,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + a per-worker counter so retries don't collide with a
 		// previous worker's teardown that still holds file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-inproc-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -84,6 +84,8 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize: see same comment in gateway-harness.ts.
+		bobbitDir = realpathSync(bobbitDir);
 		// Seed projects.json. The server no longer auto-registers a default project,
 		// so we register one explicitly via the API after startup (see below) to
 		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
@@ -180,7 +182,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
 			});
 		} catch { /* best-effort */ }
 

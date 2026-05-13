@@ -22,7 +22,7 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -123,7 +123,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-browser-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -131,6 +131,11 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize: on macOS, tmpdir() is a symlink (/var/folders ->
+		// /private/var/folders). Resolving it now means every downstream
+		// project / session / preview path uses the canonical form, avoiding
+		// symlink_root rejections and keeping path-length-sensitive tests stable.
+		bobbitDir = realpathSync(bobbitDir);
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
@@ -264,7 +269,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
 			});
 		} catch { /* best-effort */ }
 

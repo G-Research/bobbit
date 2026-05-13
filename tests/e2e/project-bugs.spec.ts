@@ -11,7 +11,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -38,6 +38,7 @@ test.describe("Bug 3: Project registration upsert (idempotent)", () => {
 		// Create a real directory to use as project root
 		projectRootPath = join(tmpdir(), `bobbit-e2e-project-${Date.now()}`);
 		mkdirSync(projectRootPath, { recursive: true });
+		projectRootPath = realpathSync(projectRootPath);
 	});
 
 	test("registering the same rootPath twice with upsert returns existing project", async () => {
@@ -74,6 +75,7 @@ test.describe("Bug 3b: Config write atomicity", () => {
 	test.beforeAll(async () => {
 		projectRootPath = join(tmpdir(), `bobbit-e2e-config-${Date.now()}`);
 		mkdirSync(projectRootPath, { recursive: true });
+		projectRootPath = realpathSync(projectRootPath);
 
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",
@@ -140,6 +142,8 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
+		repoDir = realpathSync(repoDir);
+		subdirPath = realpathSync(subdirPath);
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
 		writeFileSync(join(repoDir, "README.md"), "# Monorepo\n");
 
