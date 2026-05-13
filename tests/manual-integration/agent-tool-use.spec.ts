@@ -6,12 +6,22 @@
  * exercised a real LLM-driven agent calling tools end-to-end. This file
  * closes that gap.
  *
- * Five scenarios, each in its own fresh sandboxed session:
- *   1. bash       — builtin shell, command echo produces sentinel HELLO_<nonce>
- *   2. edit       — defaults/tools/filesystem/edit on a pre-created file, sentinel DONE
- *   3. find       — defaults/tools/filesystem/find on pre-created files, sentinel COUNT=3
- *   4. interrupt  — long-running bash, then steer to PIVOT_ACK
- *   5. error      — edit on missing file, sentinel EDIT_FAILED:
+ * Seven scenarios, each in its own fresh sandboxed session:
+ *   1. bash         — builtin shell, command echo produces sentinel HELLO_<nonce>
+ *   2. edit         — defaults/tools/filesystem/edit on a pre-created file, sentinel DONE
+ *   3. find         — defaults/tools/filesystem/find on pre-created files, sentinel COUNT=3
+ *   4. interrupt    — long-running bash, then steer to PIVOT_ACK
+ *   5. error        — edit on missing file, sentinel EDIT_FAILED:
+ *   6. web_fetch    — Bobbit extension tool, fetches gateway /api/health, sentinel HEALTH_OK_<nonce>
+ *   7. mcp_describe — MCP meta-tool, describes playwright MCP server, sentinel MCP_OPS_<nonce>=<n>
+ *
+ * Assertions are tool-name-specific (not substring-of-any-card): every
+ * tool-card wrapper in the UI carries `data-tool-name="<name>"`, and
+ * `countToolCardsByName` / `assertNoOtherToolCards` enforce that the LLM
+ * actually invoked the named tool — not a substitute that happened to
+ * produce the same visible side-effect. This is the regression the prior
+ * version of this spec missed (see design doc: Harden tool-use canary).
+
  *
  * Helpers (`startGW`, `stopGW`, `api`, `pollIdle`, `browserSend`,
  * `interruptAndSend`, `initRepo`, `projectRegistrationBody`, `getSession`,
@@ -84,8 +94,13 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	// Bind to 0.0.0.0 so sandboxed containers can reach the gateway via
+	// host.docker.internal (which is --add-host'd into every sandbox by
+	// docker-args.ts). Without this, scenarios that exercise gateway-callback
+	// tools (mcp_describe, and any extension that reads BOBBIT_GATEWAY_URL)
+	// would fail because the container's loopback isn't the host's loopback.
 	const proc = spawn(process.execPath, [
-		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
+		SERVER_CLI, "--host", "0.0.0.0", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
 		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
@@ -108,6 +123,14 @@ async function startGW(dir: string, port: number): Promise<GW> {
 	}
 	if (Date.now() >= deadline) { proc.kill(); throw new Error(`Not healthy:\n${stderr}`); }
 	const token = readFileSync(join(dir, ".bobbit", "state", "token"), "utf-8").trim();
+	// Overwrite gateway-url so sandboxed sessions get an address that resolves
+	// from inside the container. cli.ts wrote `http://127.0.0.1:<port>` which
+	// only works for host-side callers; sandboxed agents need host.docker.internal.
+	writeFileSync(
+		join(dir, ".bobbit", "state", "gateway-url"),
+		`http://host.docker.internal:${port}`,
+		"utf-8",
+	);
 	return { proc, port, dir, token, base: `http://127.0.0.1:${port}` };
 }
 
@@ -288,22 +311,53 @@ async function createFreshSession(gw: GW): Promise<string> {
 }
 
 /**
- * Locate a rendered tool-call card by matching multiple substrings against
- * its text content. Tool calls render as `<div class="... bg-card ...">`
- * wrappers (see `src/ui/components/Messages.ts` — there is no `<details>`
- * element). We look for any tool-card div whose innerText contains every
- * provided substring.
+ * Count rendered tool-call cards whose tool name matches `name` AND whose
+ * innerText contains every supplied substring.
  *
- * Returns the count of matching cards (asserted > 0 by callers).
+ * Tool cards in the UI are wrapped by `src/ui/components/Messages.ts` with
+ * `<div data-tool-name="<name>" class="... bg-card ...">`. The marker is
+ * authoritative — substring matching alone (the previous helper) can be
+ * fooled by a substitute tool whose body happens to mention the same
+ * filename/sentinel, which is exactly the regression that motivated this
+ * spec rewrite.
  */
-async function countToolCardsMatching(page: Page, ...substrings: string[]): Promise<number> {
-	return page.evaluate((subs: string[]) => {
-		const cards = Array.from(document.querySelectorAll<HTMLElement>("div.bg-card"));
+async function countToolCardsByName(page: Page, name: string, ...substrings: string[]): Promise<number> {
+	return page.evaluate(({ name, substrings }: { name: string; substrings: string[] }) => {
+		const cards = Array.from(document.querySelectorAll<HTMLElement>(`div[data-tool-name="${name}"]`));
 		return cards.filter(c => {
 			const t = (c.innerText || c.textContent || "");
-			return subs.every(s => t.includes(s));
+			return substrings.every(s => t.includes(s));
 		}).length;
-	}, substrings);
+	}, { name, substrings });
+}
+
+/**
+ * Assert no tool card OTHER than `exceptName` matches every supplied
+ * substring. This is the negative half of the regression net: if `bash` is
+ * stripped from allowlist and the LLM substitutes `write`/`read` to
+ * achieve the same effect, those substitute cards still mention the same
+ * filenames and sentinels — without this assertion the positive
+ * substring check alone would pass on a broken pi.
+ *
+ * Choose substrings that uniquely identify the target invocation, not
+ * setup/cross-check operations on the same artefacts (otherwise this will
+ * flag legitimate setup-bash cards as offenders).
+ */
+async function assertNoOtherToolCards(page: Page, exceptName: string, ...substrings: string[]): Promise<void> {
+	const offenders = await page.evaluate(({ exceptName, substrings }: { exceptName: string; substrings: string[] }) => {
+		const cards = Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"));
+		return cards
+			.filter(c => c.getAttribute("data-tool-name") !== exceptName)
+			.filter(c => {
+				const t = (c.innerText || c.textContent || "");
+				return substrings.every(s => t.includes(s));
+			})
+			.map(c => c.getAttribute("data-tool-name") || "<unknown>");
+	}, { exceptName, substrings });
+	expect(
+		offenders,
+		`expected only ${exceptName} for substrings [${substrings.join(", ")}], also saw: ${offenders.join(", ")}`,
+	).toHaveLength(0);
 }
 
 // ===================================================================
@@ -336,6 +390,24 @@ test.describe.serial("Agent tool use", () => {
 		].join("\n") + "\n";
 		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), yaml);
 		writeFileSync(join(dir, ".bobbit", "state", "projects.json"), "[]");
+
+		// Register a `playwright` MCP server so scenario 7 (mcp_describe) has
+		// something to describe. mcp_describe queries the gateway's MCP
+		// manager; the manager need only know the server is configured to
+		// produce a tools-list response — even if the server fails to start
+		// (e.g. npx cold-start), the rendered tool card still carries the
+		// `playwright` argument substring which is what the assertion checks.
+		writeFileSync(
+			join(dir, ".bobbit", "config", "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					playwright: {
+						command: "npx",
+						args: ["@playwright/mcp@latest", "--headless", "--isolated"],
+					},
+				},
+			}, null, 2),
+		);
 
 		gw = await startGW(dir, port);
 		console.log(`  Gateway :${port}  cwd=${dir}`);
@@ -384,10 +456,15 @@ test.describe.serial("Agent tool use", () => {
 			240_000);
 		await takeScreenshot(page, `tooluse-1-bash-${nonce}.png`);
 
-		// DOM: the bash tool block must be rendered. Bash tool cards include
-		// the command text verbatim (see BashRenderer).
-		const bashCardCount = await countToolCardsMatching(page, "marker.txt", sentinel);
-		expect(bashCardCount).toBeGreaterThan(0);
+		// Positive: bash card with the command text + sentinel.
+		const bashCardCount = await countToolCardsByName(page, "bash", "marker.txt", sentinel);
+		expect(bashCardCount, "expected bash tool card with marker.txt + sentinel").toBeGreaterThan(0);
+
+		// Negative: no OTHER tool (write/read/edit/...) achieved the same effect.
+		// This is the regression net — if `bash` is stripped from allowlist the
+		// LLM substitutes write+read, those cards mention marker.txt + sentinel
+		// too, and the prior substring-only check passed on the broken pi.
+		await assertNoOtherToolCards(page, "bash", "marker.txt", sentinel);
 
 		// Full transcript text contains the sentinel (from the cat'd output)
 		const body = await page.locator("body").innerText();
@@ -413,9 +490,17 @@ test.describe.serial("Agent tool use", () => {
 			240_000);
 		await takeScreenshot(page, "tooluse-2-edit.png");
 
-		// DOM: edit tool card present, referencing target.txt
-		const editCardCount = await countToolCardsMatching(page, "target.txt");
-		expect(editCardCount).toBeGreaterThan(0);
+		// Positive: edit card carrying target.txt + both old/new payloads.
+		// The combined substrings (target.txt + before + after) uniquely
+		// identify the edit invocation — the setup bash card has
+		// (target.txt, before) but not "after" yet.
+		const editCardCount = await countToolCardsByName(page, "edit", "target.txt", "before", "after");
+		expect(editCardCount, "expected edit tool card with target.txt + before/after payload").toBeGreaterThan(0);
+
+		// Negative: no other tool (write/bash via sed/etc.) produced a card
+		// with the same triple. ASSERT BEFORE the cross-check bash turn so the
+		// cross-check bash (which prints "after") doesn't pollute the check.
+		await assertNoOtherToolCards(page, "edit", "target.txt", "before", "after");
 
 		// Assistant final message contains DONE
 		const body = await page.locator("body").innerText();
@@ -449,9 +534,14 @@ test.describe.serial("Agent tool use", () => {
 			240_000);
 		await takeScreenshot(page, `tooluse-3-find-${nonce}.png`);
 
-		// DOM: find tool card present
-		const findCardCount = await countToolCardsMatching(page, "findme", nonce);
-		expect(findCardCount).toBeGreaterThan(0);
+		// Positive: find card with the glob pattern. The asterisk-prefixed
+		// pattern `*_<nonce>` only appears in the find tool's arguments —
+		// the setup bash card uses literal paths `findme/a_<nonce>.txt` etc.
+		const findCardCount = await countToolCardsByName(page, "find", "findme", `*_${nonce}`);
+		expect(findCardCount, "expected find tool card with glob pattern").toBeGreaterThan(0);
+
+		// Negative: no other tool produced a card with the glob pattern.
+		await assertNoOtherToolCards(page, "find", "findme", `*_${nonce}`);
 
 		// Assistant final message contains COUNT=3
 		const body = await page.locator("body").innerText();
@@ -469,9 +559,12 @@ test.describe.serial("Agent tool use", () => {
 		await page.goto(sessionUrl(gw, id));
 		await page.waitForSelector("textarea", { timeout: 30_000 });
 		await page.waitForTimeout(500);
+		// Unique sentinel so the negative tool-name check can target ONLY the
+		// long-running bash invocation (not any prior or later card).
+		const loopTag = `LOOPTAG_${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 		const longPrompt =
 			`Use the bash tool exactly once to run this command (do not modify it):\n` +
-			`bash -c 'node -e "let i=0;setInterval(()=>{require(\\"fs\\").writeFileSync(\\"step.txt\\",String(++i));console.log(\\"step\\",i)},1000)"'\n` +
+			`bash -c 'node -e "let i=0;setInterval(()=>{require(\\"fs\\").writeFileSync(\\"step.txt\\",String(++i));console.log(\\"${loopTag}\\",i)},1000)"'\n` +
 			`Do not reply or summarise until the command finishes.`;
 		await page.fill("textarea", longPrompt);
 		await page.press("textarea", "Enter");
@@ -496,6 +589,14 @@ test.describe.serial("Agent tool use", () => {
 			240_000);
 		await takeScreenshot(page, "tooluse-4-interrupt.png");
 
+		// Positive: bash card carrying the loop sentinel.
+		const bashCardCount = await countToolCardsByName(page, "bash", loopTag);
+		expect(bashCardCount, "expected bash tool card with long-running loop sentinel").toBeGreaterThan(0);
+
+		// Negative: no other tool was substituted for the bash invocation
+		// (substitute attempt would render `loopTag` in its card body).
+		await assertNoOtherToolCards(page, "bash", loopTag);
+
 		// PIVOT_ACK must appear in the page text — proof the agent honoured
 		// the pivot rather than continuing the previous tool call.
 		const body = await page.locator("body").innerText();
@@ -518,9 +619,12 @@ test.describe.serial("Agent tool use", () => {
 		const info = await getSession(gw, id);
 		expect(info.status).toBe("idle");
 
-		// Edit tool card present, referencing the bogus path.
-		const editCardCount = await countToolCardsMatching(page, `nonexistent_${nonce}.txt`);
-		expect(editCardCount).toBeGreaterThan(0);
+		// Positive: edit card referencing the bogus path.
+		const editCardCount = await countToolCardsByName(page, "edit", `nonexistent_${nonce}.txt`);
+		expect(editCardCount, "expected edit tool card with nonexistent path").toBeGreaterThan(0);
+
+		// Negative: no other tool invented a card referencing the bogus path.
+		await assertNoOtherToolCards(page, "edit", `nonexistent_${nonce}.txt`);
 
 		// Assistant final message includes EDIT_FAILED:
 		const body = await page.locator("body").innerText();
@@ -538,5 +642,64 @@ test.describe.serial("Agent tool use", () => {
 		];
 		const sawFailure = failureEvidence.some(e => bodyLower.includes(e));
 		expect(sawFailure, `expected one of ${failureEvidence.join(", ")} in transcript`).toBe(true);
+	});
+
+	// ---------------------------------------------------------------
+	// 6. Bobbit extension tool — web_fetch (non-pi-builtin)
+	// ---------------------------------------------------------------
+	test("6. web_fetch tool — fetch gateway /api/health", async ({ page }) => {
+		const id = await createFreshSession(gw);
+		const nonce = Math.random().toString(36).slice(2, 10).toUpperCase();
+		const sentinel = `HEALTH_OK_${nonce}`;
+
+		// Sandboxed containers reach the host gateway via host.docker.internal
+		// (added unconditionally by docker-args.ts); the test gateway binds
+		// 0.0.0.0 (see startGW) so the host port is exposed to the container's
+		// network. /api/health is unauthenticated by design.
+		const healthUrl = `http://host.docker.internal:${gw.port}/api/health`;
+
+		await browserSend(page, gw, id,
+			`Use the "web_fetch" tool with url="${healthUrl}". Do not use bash, curl, or browser_navigate. ` +
+			`After the response comes back, reply with a single line: ${sentinel} followed by the value of the "status" field from the JSON response. Example reply: "${sentinel} ok".`,
+			240_000);
+		await takeScreenshot(page, `tooluse-6-web-fetch-${nonce}.png`);
+
+		// Positive: web_fetch card carrying the gateway URL.
+		const webFetchCount = await countToolCardsByName(page, "web_fetch", "/api/health");
+		expect(webFetchCount, "expected web_fetch tool card with /api/health URL").toBeGreaterThan(0);
+
+		// Negative: no bash/browser_navigate/etc. substituted for web_fetch.
+		await assertNoOtherToolCards(page, "web_fetch", "/api/health");
+
+		// Sentinel reply present.
+		const body = await page.locator("body").innerText();
+		expect(body).toContain(sentinel);
+	});
+
+	// ---------------------------------------------------------------
+	// 7. MCP meta-tool — mcp_describe
+	// ---------------------------------------------------------------
+	test("7. mcp_describe tool — describe playwright MCP server", async ({ page }) => {
+		const id = await createFreshSession(gw);
+		const nonce = Math.random().toString(36).slice(2, 10).toUpperCase();
+		const sentinel = `MCP_OPS_${nonce}`;
+
+		await browserSend(page, gw, id,
+			`Use the "mcp_describe" tool with server="playwright" (no operation argument). ` +
+			`After it returns, reply with a single line: ${sentinel}=<n> where <n> is your best estimate of the number of operations listed in the response. If the response is an error, reply ${sentinel}=ERROR instead. Do not use any other tool.`,
+			240_000);
+		await takeScreenshot(page, `tooluse-7-mcp-describe-${nonce}.png`);
+
+		// Positive: mcp_describe card with the server name.
+		const mcpCount = await countToolCardsByName(page, "mcp_describe", "playwright");
+		expect(mcpCount, "expected mcp_describe tool card with playwright server").toBeGreaterThan(0);
+
+		// Negative: no other tool was substituted to describe the MCP server.
+		await assertNoOtherToolCards(page, "mcp_describe", "playwright");
+
+		// Sentinel reply present (count or ERROR — either proves the tool
+		// was actually called and the agent observed the result).
+		const body = await page.locator("body").innerText();
+		expect(body).toMatch(new RegExp(`${sentinel}=(\\d+|ERROR)`));
 	});
 });
