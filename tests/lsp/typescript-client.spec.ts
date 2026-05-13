@@ -88,14 +88,14 @@ describe("typescript LSP adapter", skip, () => {
 		// Introduce a type error.
 		await fs.writeFile(mathPath, `export function add(a: number, b: number): number {\n\treturn a + b + "oops";\n}\n`, "utf-8");
 		await client.ensureDocOpen(mathPath);  // triggers didChange
-		await new Promise(r => setTimeout(r, 300));
+		// Finding #8: rely on event-driven waitForDiagnostics inside diagnostics();
+		// no fixed sleep needed.
 		const dirty = await client.diagnostics(mathPath);
 		assert.ok(dirty.length >= 1, "expected diagnostics after introducing type error");
 
 		// Revert.
 		await fs.writeFile(mathPath, originalMath, "utf-8");
 		await client.ensureDocOpen(mathPath);
-		await new Promise(r => setTimeout(r, 300));
 		const reverted = await client.diagnostics(mathPath);
 		assert.equal(reverted.length, 0, `expected clean after revert, got ${JSON.stringify(reverted)}`);
 	});

@@ -7,14 +7,16 @@
  *   • idle-TTL shutdown
  *   • refcount-based release tied to session terminate
  *   • crash backoff with a stderr ring buffer surfaced through errors
+ *   • config-file watcher → graceful shutdown (lazy respawn) on tsconfig change
  *
  * Adapters (typescript, pyright…) register a `LspClientFactory` at
  * construction. No language-specific code lives here.
  */
+import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
-import type { LspClient, LspClientFactory, SandboxLspBridge } from "./client.js";
+import type { LspClient, LspClientFactory, SandboxLspBridge, SpawnOpts } from "./client.js";
 import { languageForFile, findProjectRoot, detectLanguages } from "./language-detect.js";
 import type { Language, Location } from "./types.js";
 import { LspCapacityError, LspUnavailableError } from "./error.js";
@@ -26,7 +28,23 @@ export interface LspSupervisorOptions {
 	idleTtlMs?: number;
 	sandbox?: SandboxLspBridge | undefined;
 	factories?: LspClientFactory[];
+	/** Globally disable LSP — every tool call returns `lsp_unavailable`. */
+	disabled?: boolean;
+	/** Globally disable pre-warm (still allows on-demand `ensure`). */
+	preWarmEnabled?: boolean;
+	/** Filenames (relative to worktree) that should trigger a debounced restart. */
+	watchFiles?: string[];
+	/** Debounce window for config-file changes. */
+	configChangeDebounceMs?: number;
 }
+
+/** Default config files that trigger a TS server restart on change. */
+const DEFAULT_WATCH_FILES = [
+	"tsconfig.json", "jsconfig.json", "package.json",
+	// `fs.watch(dir)` reports any change in the dir; we filter by name below
+	// so wildcards like tsconfig.*.json are honoured via the filter, not
+	// individual watches.
+];
 
 interface Entry {
 	key: ServerKey;
@@ -39,11 +57,16 @@ interface Entry {
 	crashCount: number;
 	lastCrashAt: number;
 	disabledUntil: number;
+	configWatcher?: fs.FSWatcher;
+	configDebounce?: NodeJS.Timeout;
 }
 
 export interface LspStats {
 	maxServers: number;
 	idleTtlMs: number;
+	disabled: boolean;
+	preWarmEnabled: boolean;
+	sandbox: boolean;
 	entries: Array<{
 		worktreePath: string;
 		language: Language;
@@ -52,6 +75,7 @@ export interface LspStats {
 		refcount: number;
 		inFlight: number;
 		crashCount: number;
+		disabledUntil: number;
 	}>;
 	evictedTotal: number;
 }
@@ -61,16 +85,28 @@ function keyOf(k: ServerKey): string { return `${k.language}::${k.worktreePath}`
 export class LspSupervisor {
 	readonly maxServers: number;
 	readonly idleTtlMs: number;
+	readonly disabled: boolean;
+	readonly preWarmEnabled: boolean;
 	private sandbox?: SandboxLspBridge | undefined;
 	private factories = new Map<Language, LspClientFactory>();
 	private entries = new Map<string, Entry>();
+	/** Finding #3: crash state persists across entry deletions so 3 crashes
+	 *  in 60s reliably trips the cooldown even though we delete the dead
+	 *  entry on every exit. */
+	private crashState = new Map<string, { count: number; lastAt: number; disabledUntil: number }>();
 	private evictedTotal = 0;
 	private shuttingDown = false;
+	private watchFiles: string[];
+	private configChangeDebounceMs: number;
 
 	constructor(opts: LspSupervisorOptions = {}) {
 		this.maxServers = opts.maxServers ?? 4;
 		this.idleTtlMs = opts.idleTtlMs ?? 10 * 60_000;
+		this.disabled = opts.disabled ?? false;
+		this.preWarmEnabled = opts.preWarmEnabled ?? true;
 		this.sandbox = opts.sandbox;
+		this.watchFiles = opts.watchFiles ?? DEFAULT_WATCH_FILES;
+		this.configChangeDebounceMs = opts.configChangeDebounceMs ?? 1500;
 		for (const f of opts.factories ?? []) this.factories.set(f.language, f);
 	}
 
@@ -82,21 +118,64 @@ export class LspSupervisor {
 		return this.factories.has(language) && this.factories.get(language)!.isInstalled();
 	}
 
+	/** Install or replace the sandbox bridge after construction (finding #6:
+	 *  the SandboxManager is wired later in server boot than the supervisor). */
+	setSandboxBridge(bridge: SandboxLspBridge | undefined): void {
+		this.sandbox = bridge;
+		this._sandboxLogged = false;
+	}
+
+	/** Whether a sandbox bridge is configured (finding #6 plumbing check). */
+	hasSandboxBridge(): boolean { return !!this.sandbox; }
+
 	stats(): LspStats {
 		return {
 			maxServers: this.maxServers,
 			idleTtlMs: this.idleTtlMs,
+			disabled: this.disabled,
+			preWarmEnabled: this.preWarmEnabled,
+			sandbox: !!this.sandbox,
 			evictedTotal: this.evictedTotal,
-			entries: [...this.entries.values()].map(e => ({
-				worktreePath: e.key.worktreePath,
-				language: e.key.language,
-				state: e.client?.state ?? "starting",
-				lastActivityAt: e.lastActivityAt,
-				refcount: e.refcount,
-				inFlight: e.inFlight,
-				crashCount: e.crashCount,
-			})),
+			entries: [...this.entries.values()].map(e => {
+				const cs = this.crashState.get(keyOf(e.key));
+				return {
+					worktreePath: e.key.worktreePath,
+					language: e.key.language,
+					state: e.client?.state ?? "starting",
+					lastActivityAt: e.lastActivityAt,
+					refcount: e.refcount,
+					inFlight: e.inFlight,
+					crashCount: cs?.count ?? 0,
+					disabledUntil: cs?.disabledUntil ?? 0,
+				};
+			}),
 		};
+	}
+
+	/**
+	 * Public state lookup used by the progress-signal HTTP route (finding #2).
+	 * Returns the entry's current client state, or `"cold"` if no entry exists.
+	 */
+	stateFor(key: ServerKey): string {
+		const e = this.entries.get(keyOf(key));
+		if (!e) return "cold";
+		return e.client?.state ?? "starting";
+	}
+
+	/**
+	 * Resolve `(worktree, language)` from a tool-call arg shape so the route
+	 * can query state without performing a full dispatch. Mirrors the head of
+	 * `dispatch()`.
+	 */
+	resolveKey(cwd: string, relPath?: string): ServerKey {
+		const absInput = relPath ? path.resolve(cwd, relPath) : path.resolve(cwd);
+		let lang: Language | null = relPath ? languageForFile(relPath) : null;
+		if (!lang) {
+			const root = findProjectRoot(path.resolve(cwd), "typescript");
+			lang = detectLanguages(root)[0] ?? "typescript";
+		}
+		const worktreePath = findProjectRoot(relPath ? path.dirname(absInput) : path.resolve(cwd), lang);
+		return { worktreePath, language: lang };
 	}
 
 	/**
@@ -105,6 +184,7 @@ export class LspSupervisor {
 	 * they are short-lived and refcount is for session-scope holders.
 	 */
 	async ensure(key: ServerKey): Promise<LspClient> {
+		if (this.disabled) throw new LspUnavailableError("disabled by project config");
 		if (this.shuttingDown) throw new LspUnavailableError("supervisor shutting down");
 		const factory = this.factories.get(key.language);
 		if (!factory) throw new LspUnavailableError(`no LSP adapter for ${key.language}`);
@@ -112,11 +192,12 @@ export class LspSupervisor {
 			throw new LspUnavailableError(`${key.language} LSP server not installed`);
 		}
 		const id = keyOf(key);
+	const cs = this.crashState.get(id);
+		if (cs && cs.disabledUntil > Date.now()) {
+			throw new LspUnavailableError(`${key.language} disabled (recent crashes); retry later`);
+		}
 		let entry = this.entries.get(id);
 		if (entry) {
-			if (entry.disabledUntil > Date.now()) {
-				throw new LspUnavailableError(`${key.language} disabled (recent crashes); retry later`);
-			}
 			entry.lastActivityAt = Date.now();
 			return entry.clientP;
 		}
@@ -124,9 +205,16 @@ export class LspSupervisor {
 		if (this.entries.size >= this.maxServers) {
 			this.evictLru(id);
 		}
+		const spawnOpts: SpawnOpts = {
+			worktreePath: key.worktreePath,
+			sandbox: this.sandbox,
+			// Finding #3: factories that honour `onClose` will invoke this on
+			// unexpected child exit so the supervisor can drop the dead entry.
+			onClose: (graceful: boolean) => this.handleEntryClose(id, graceful),
+		};
 		const newEntry: Entry = {
 			key,
-			clientP: factory.spawn({ worktreePath: key.worktreePath, sandbox: this.sandbox })
+			clientP: factory.spawn(spawnOpts)
 				.then(c => { newEntry.client = c; return c; })
 				.catch(err => {
 					// Failed to spawn — drop the entry so a retry will respawn.
@@ -141,12 +229,24 @@ export class LspSupervisor {
 			disabledUntil: 0,
 		};
 		this.entries.set(id, newEntry);
+		// Finding #5: watch tsconfig/package.json so we restart on schema
+		// changes. Only meaningful for typescript adapters; cheap no-op for
+		// other languages where the watch dir won't have these markers.
+		this.installConfigWatcher(newEntry);
+		// Finding #6: surface the sandbox-bridge presence once, the first
+		// time we spawn an entry.
+		if (this.sandbox && !this._sandboxLogged) {
+			console.log(`[lsp] sandbox bridge active`);
+			this._sandboxLogged = true;
+		}
 		return newEntry.clientP;
 	}
 
+	private _sandboxLogged = false;
+
 	/** Best-effort pre-warm. Errors logged at warn, never thrown. */
 	preWarm(worktreePath: string, _projectId?: string): void {
-		if (this.shuttingDown) return;
+		if (this.shuttingDown || this.disabled || !this.preWarmEnabled) return;
 		const wp = path.resolve(worktreePath);
 		const langs = detectLanguages(wp);
 		for (const lang of langs) {
@@ -163,7 +263,13 @@ export class LspSupervisor {
 	acquire(worktreePath: string): void {
 		const wp = path.resolve(worktreePath);
 		for (const entry of this.entries.values()) {
-			if (entry.key.worktreePath === wp) entry.refcount++;
+			if (entry.key.worktreePath === wp) {
+				entry.refcount++;
+				if (entry.idleTimer) {
+					clearTimeout(entry.idleTimer);
+					entry.idleTimer = undefined;
+				}
+			}
 		}
 	}
 
@@ -188,6 +294,7 @@ export class LspSupervisor {
 			if (entry.key.worktreePath !== wp) continue;
 			this.entries.delete(id);
 			if (entry.idleTimer) clearTimeout(entry.idleTimer);
+			this.disposeWatcher(entry);
 			promises.push(this.shutdownEntry(entry));
 		}
 		await Promise.allSettled(promises);
@@ -198,6 +305,7 @@ export class LspSupervisor {
 		const promises: Promise<void>[] = [];
 		for (const [, entry] of [...this.entries.entries()]) {
 			if (entry.idleTimer) clearTimeout(entry.idleTimer);
+			this.disposeWatcher(entry);
 			promises.push(this.shutdownEntry(entry));
 		}
 		this.entries.clear();
@@ -220,7 +328,24 @@ export class LspSupervisor {
 		newName?: string;
 		includeDeclaration?: boolean;
 	}): Promise<unknown> {
+		if (this.disabled) throw new LspUnavailableError("disabled by project config");
 		const cwd = path.resolve(args.cwd);
+		// Finding #7: clamp `path` to live inside `cwd`. Reject absolute or
+		// upward-traversing inputs so a malicious agent cannot read files
+		// outside its worktree via the LSP tool surface.
+		if (args.path !== undefined) {
+			if (typeof args.path !== "string" || args.path.length === 0) {
+				throw new LspUnavailableError("path must be a non-empty string");
+			}
+			if (path.isAbsolute(args.path)) {
+				throw new LspUnavailableError("path outside worktree");
+			}
+			const candidate = path.resolve(cwd, args.path);
+			const rel = path.relative(cwd, candidate);
+			if (rel.startsWith("..") || path.isAbsolute(rel)) {
+				throw new LspUnavailableError("path outside worktree");
+			}
+		}
 		const absInput = args.path ? path.resolve(cwd, args.path) : cwd;
 		// Pick language: from file extension if a path is given, else default
 		// to typescript for the worktree.
@@ -295,12 +420,14 @@ export class LspSupervisor {
 		this.entries.delete(id);
 		this.evictedTotal++;
 		if (oldest.idleTimer) clearTimeout(oldest.idleTimer);
+		this.disposeWatcher(oldest);
 		console.log(`[lsp] evicting ${id} to make room`);
 		this.shutdownEntry(oldest).catch(() => { /* logged in entry */ });
 	}
 
 	private maybeArmIdleTimer(entry: Entry): void {
 		if (entry.idleTimer) clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
 		if (entry.refcount > 0 || entry.inFlight > 0) return;
 		entry.idleTimer = setTimeout(() => {
 			const id = keyOf(entry.key);
@@ -310,6 +437,7 @@ export class LspSupervisor {
 				return;
 			}
 			this.entries.delete(id);
+			this.disposeWatcher(entry);
 			this.shutdownEntry(entry).catch(() => { /* logged */ });
 		}, this.idleTtlMs);
 		(entry.idleTimer as any).unref?.();
@@ -321,6 +449,77 @@ export class LspSupervisor {
 			if (client) await client.shutdown(true);
 		} catch (err) {
 			console.warn(`[lsp] shutdown error for ${keyOf(entry.key)}: ${(err as Error)?.message ?? err}`);
+		}
+	}
+
+	// ── Finding #3: crash detection + backoff ──────────────────────────
+
+	/**
+	 * Called by the client adapter when its child exits unexpectedly.
+	 * `graceful=true` means we asked it to stop (no crash bookkeeping).
+	 */
+	private handleEntryClose(id: string, graceful: boolean): void {
+		const entry = this.entries.get(id);
+		if (entry) {
+			this.entries.delete(id);
+			this.disposeWatcher(entry);
+			if (entry.idleTimer) clearTimeout(entry.idleTimer);
+		}
+		if (graceful) return;
+		const now = Date.now();
+		let cs = this.crashState.get(id);
+		if (!cs) cs = { count: 0, lastAt: 0, disabledUntil: 0 };
+		// Reset crash window after 60s of quiet (per design).
+		if (now - cs.lastAt > 60_000) cs.count = 0;
+		cs.count++;
+		cs.lastAt = now;
+		if (cs.count >= 3) {
+			cs.disabledUntil = now + 5 * 60_000;
+			console.warn(`[lsp] ${id} disabled for 5min after ${cs.count} crashes`);
+		}
+		this.crashState.set(id, cs);
+	}
+
+	// ── Finding #5: tsconfig/package.json watcher ──────────────────────
+
+	private installConfigWatcher(entry: Entry): void {
+		if (entry.key.language !== "typescript") return;
+		const dir = entry.key.worktreePath;
+		try {
+			const watcher = fs.watch(dir, { persistent: false }, (_evt, filename) => {
+				if (!filename) return;
+				const name = String(filename);
+				// Match the explicit list + `tsconfig.*.json` family.
+				const interesting =
+					this.watchFiles.includes(name) ||
+					/^tsconfig\..+\.json$/.test(name);
+				if (!interesting) return;
+				if (entry.configDebounce) clearTimeout(entry.configDebounce);
+				entry.configDebounce = setTimeout(() => {
+					if (this.entries.get(keyOf(entry.key)) !== entry) return;
+					console.log(`[lsp] config change in ${dir}/${name} — graceful restart (lazy respawn)`);
+					this.entries.delete(keyOf(entry.key));
+					this.disposeWatcher(entry);
+					if (entry.idleTimer) clearTimeout(entry.idleTimer);
+					this.shutdownEntry(entry).catch(() => { /* logged */ });
+				}, this.configChangeDebounceMs);
+				(entry.configDebounce as any).unref?.();
+			});
+			watcher.on("error", () => { /* ignore — best-effort */ });
+			entry.configWatcher = watcher;
+		} catch (err) {
+			console.warn(`[lsp] config watcher failed for ${dir}: ${(err as Error)?.message ?? err}`);
+		}
+	}
+
+	private disposeWatcher(entry: Entry): void {
+		if (entry.configDebounce) {
+			clearTimeout(entry.configDebounce);
+			entry.configDebounce = undefined;
+		}
+		if (entry.configWatcher) {
+			try { entry.configWatcher.close(); } catch { /* ignore */ }
+			entry.configWatcher = undefined;
 		}
 	}
 }

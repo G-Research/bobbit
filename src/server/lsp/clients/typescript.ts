@@ -49,12 +49,17 @@ class TypescriptLspClient implements LspClient {
 	private diagnosticsByUri = new Map<string, Diagnostic[]>();
 	private diagVersionByUri = new Map<string, number>();
 	private diagListeners = new Map<string, Set<() => void>>();
+	/** Finding #3: set to true when shutdown() is invoked so the exit handler
+	 *  reports a graceful close instead of a crash. */
+	private shutdownRequested = false;
+	private onClose?: (graceful: boolean) => void;
 
 	constructor(worktreePath: string) {
 		this.worktreePath = worktreePath;
 	}
 
-	async start(sandbox: SpawnOpts["sandbox"]): Promise<void> {
+	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
+		this.onClose = onClose;
 		const resolved = resolveTypescriptLanguageServer();
 		if (!resolved) throw new Error("typescript-language-server not installed");
 		this.proc = await spawnLspChild({
@@ -65,9 +70,15 @@ class TypescriptLspClient implements LspClient {
 		});
 
 		this.proc.child.on("exit", (code) => {
+			const wasWarm = this.state !== "stopping" && this.state !== "stopped";
 			this.state = "stopped";
 			if (code !== 0 && code !== null) {
 				console.warn(`[lsp:ts] child exited code=${code}\n${this.proc.stderrTail().slice(-2048)}`);
+			}
+			// Finding #3: notify supervisor on every exit so it can drop the dead
+			// entry. `graceful=true` if we explicitly asked the child to stop.
+			if (wasWarm) {
+				try { this.onClose?.(this.shutdownRequested); } catch { /* ignore */ }
 			}
 		});
 
@@ -278,6 +289,7 @@ class TypescriptLspClient implements LspClient {
 	}
 
 	async shutdown(graceful: boolean): Promise<void> {
+		this.shutdownRequested = true;
 		this.state = "stopping";
 		try {
 			if (this.proc) await this.proc.stop(graceful);
@@ -294,7 +306,7 @@ export class TypescriptLspFactory implements LspClientFactory {
 	}
 	async spawn(opts: SpawnOpts): Promise<LspClient> {
 		const client = new TypescriptLspClient(opts.worktreePath);
-		await client.start(opts.sandbox);
+		await client.start(opts.sandbox, opts.onClose);
 		return client;
 	}
 }

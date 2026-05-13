@@ -15,6 +15,14 @@ export interface SpawnOpts {
 	worktreePath: string;
 	/** Optional sandbox bridge — when set, child runs via docker exec. */
 	sandbox?: SandboxLspBridge;
+	/**
+	 * Supervisor-supplied close callback (finding #3).
+	 * `graceful=true` means the supervisor asked the child to stop —
+	 * adapters should pass `true` from their own `shutdown()` flow, and
+	 * `false` from an unexpected exit handler so the supervisor counts it
+	 * as a crash.
+	 */
+	onClose?: (graceful: boolean) => void;
 }
 
 export interface LspClient {
