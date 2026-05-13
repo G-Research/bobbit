@@ -213,6 +213,11 @@ export class AssistantMessage extends LitElement {
 	@property({ attribute: false }) onCostClick?: () => void;
 	@property({ attribute: false }) onRetry?: () => void;
 	@property({ type: Number }) turnStartTime: number | null = null;
+	/** Hide the destructive-red "Request aborted" banner. Set by the
+	 *  message list when the abort was caused by the agent self-aborting to
+	 *  run auto-compaction (detected via an immediately-following synthetic
+	 *  compaction-summary row) — not a user-initiated Stop. */
+	@property({ type: Boolean }) suppressAbortedBanner = false;
 	@state() private _retrying = false;
 
 	private _throttledContent: string = "";
@@ -418,7 +423,7 @@ export class AssistantMessage extends LitElement {
 						: ""
 				}
 				${
-					this.message.stopReason === "aborted"
+					this.message.stopReason === "aborted" && !this.suppressAbortedBanner
 						? html`<span class="text-sm text-destructive italic">${i18n("Request aborted")}</span>`
 						: ""
 				}

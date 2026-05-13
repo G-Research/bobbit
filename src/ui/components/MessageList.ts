@@ -28,6 +28,18 @@ function getCompactionSidecarId(msg: any): string | null {
 	return typeof cid === "string" && cid.length > 0 ? cid : null;
 }
 
+/** Live (in-progress / no-sidecar-id-yet) compaction-summary detection —
+ *  separate from `getCompactionSidecarId` which only matches persisted rows.
+ *  Used to suppress the destructive "Request aborted" banner on the assistant
+ *  message that the agent self-aborted to make room for compaction. */
+function isLiveCompactionSummary(msg: any): boolean {
+	if (!msg || msg.role !== "assistant") return false;
+	const content = msg.content;
+	if (!Array.isArray(content) || content.length !== 1) return false;
+	const block = content[0];
+	return !!(block && block.type === "toolCall" && block.name === COMPACTION_TOOL_NAME);
+}
+
 /** Build a stable render key for a message — id-based with a synthetic
  *  fallback that includes reducer metadata when available. */
 function keyFor(msg: any, group?: string): string {
@@ -224,6 +236,22 @@ export class MessageList extends LitElement {
 					if (msgs[k].role === "assistant") { isLastAssistant = false; break; }
 				}
 				const showRetry = isLastAssistant && amsg.stopReason === "error" && this.onRetry;
+				// Hide the destructive "Request aborted" banner when the agent
+				// aborted its own turn to make room for auto-compaction — detected
+				// by an immediately-following synthetic compaction-summary row.
+				// A user-initiated Stop has no compaction following it, so the
+				// banner still shows in that case.
+				let suppressAbortedBanner = false;
+				if (amsg.stopReason === "aborted") {
+					for (let k = i + 1; k < msgs.length; k++) {
+						const next = msgs[k];
+						if (next.role === "toolResult" || next.role === "artifact") continue;
+						if (getCompactionSidecarId(next) || isLiveCompactionSummary(next)) {
+							suppressAbortedBanner = true;
+						}
+						break;
+					}
+				}
 				items.push({
 					key: keyFor(msg),
 					template: html`<assistant-message
@@ -237,6 +265,7 @@ export class MessageList extends LitElement {
 						.hidePendingToolCalls=${this.isStreaming && this.hasStreamMessage}
 						.onCostClick=${this.onCostClick}
 						.onRetry=${showRetry ? this.onRetry : undefined}
+						.suppressAbortedBanner=${suppressAbortedBanner}
 					></assistant-message>`,
 				});
 				i++;
