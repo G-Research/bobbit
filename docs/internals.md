@@ -1231,6 +1231,8 @@ This happens transparently in `normalizeGrantPolicy()` - existing role YAML and 
 
 > **Important:** Session creation must not use `role.allowedTools` directly to determine which tools are active, because that excludes `ask`-policy tools entirely. Instead, `server.ts` calls `computeEffectiveAllowedTools()` from `tool-activation.ts`, which returns both `allow` and `ask` tools. This ensures `resolveToolActivation()` in the session setup pipeline sees the full set and generates the guard extension for `ask`-policy tools. Without this, roles with only `ask` policies would produce sessions with no tool guard - the agent could use guarded tools without user approval.
 
+> **Activation flag contract (pi 0.70+).** `computeToolActivationArgs()` emits `--no-builtin-tools` + `--no-extensions` + an explicit `--extension <…>/defaults/tools/_builtins/extension.ts` with `env.BOBBIT_BUILTIN_TOOLS` carrying the sorted list of pi file-builtins to re-register. The shape is pinned by `tests/tool-activation-contract.test.ts` (unit, seconds) and end-to-end by `tests/manual-integration/agent-tool-use.spec.ts`. Background and the diagnostic flow live in [docs/debugging.md — Agent silently substitutes file tools](debugging.md#agent-silently-substitutes-file-tools-when-prompted-for-bash--web--mcp) and [docs/testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers).
+
 ---
 
 ## Per-role model & thinking-level overrides
