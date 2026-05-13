@@ -2519,6 +2519,15 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 
 ---
 
+## LSP
+
+The LSP supervisor gives agents IDE-grade code intelligence (definition, references, hover, diagnostics, symbols, rename) instead of `grep` + `read` + `npm run check`. One language-server child per `(worktreePath, language)`, shared across sessions, LRU-evicted at a hard cap, idle-shutdown after a TTL.
+
+- Entry point: [`src/server/lsp/supervisor.ts`](../src/server/lsp/supervisor.ts) (singleton owned by `SessionManager`). Lifecycle hooks land in `src/server/agent/session-setup.ts` (pre-warm + acquire) and `src/server/agent/session-manager.ts` (release on termination).
+- Tool YAMLs: [`defaults/tools/lsp/`](../defaults/tools/lsp/) — seven `lsp_*` tools, each POSTing to `/api/lsp/<method>`. Budget-pinned by `tests/tool-description-budget.test.ts`.
+- Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md).
+- Operator + agent reference: [docs/lsp.md](lsp.md) (supported languages, config keys, troubleshooting, when-to-use guidance).
+
 ## Disk state
 
 ### `defaults/` - version controlled (shipped builtins)

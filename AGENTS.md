@@ -30,7 +30,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 
 ## Before editing anything non-trivial
 
-1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before writing code.
+1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before writing code. For symbol lookup, prefer `lsp_definition` / `lsp_references` over `grep`; for post-edit verification, prefer `lsp_diagnostics` over `npm run check`. See [docs/lsp.md](docs/lsp.md).
 2. **Look for a pinning test.** Tests are how invariants are enforced — not prose. If you break one, fix the bug, not the test. If a regression isn't caught by a test, the missing test IS the bug; add it.
 3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** in source comments around what you're touching.
 4. **`docs/debugging.md`** has full diagnostic walkthroughs indexed by symptom — search there before guessing.
@@ -68,4 +68,4 @@ AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 
 ## Reference docs
 
-[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)
+[docs/internals.md](docs/internals.md) · [docs/debugging.md](docs/debugging.md) · [docs/dev-workflow.md](docs/dev-workflow.md) · [docs/testing-strategy.md](docs/testing-strategy.md) · [docs/architecture.md](docs/architecture.md) · [docs/goals-workflows-tasks.md](docs/goals-workflows-tasks.md) · [docs/lsp.md](docs/lsp.md) · [docs/rest-api.md](docs/rest-api.md) · [docs/preview-architecture.md](docs/preview-architecture.md) · [docs/mcp-meta-tools.md](docs/mcp-meta-tools.md) · [docs/qa-testing.md](docs/qa-testing.md)
