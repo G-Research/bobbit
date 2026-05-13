@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
-import { toDockerPath } from "./rpc-bridge.js";
+import { toDockerPath, PRELOAD_PATH, CONTAINER_PRELOAD_PATH } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 
@@ -144,6 +144,17 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// pi-coding-agent is baked into the Docker image (avoids 20x slower
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);
+
+	// Undici idle-stream timeout preload — bind-mounted read-only at a fixed
+	// path; loaded via NODE_OPTIONS=--require in rpc-bridge.spawnDockerExec.
+	try {
+		if (fs.statSync(PRELOAD_PATH).isFile()) {
+			args.push("-v", `${toDockerPath(PRELOAD_PATH)}:${CONTAINER_PRELOAD_PATH}:ro`);
+		}
+	} catch {
+		// Preload missing (e.g. dev tree before build) — the agent still runs;
+		// idle timeouts simply won't be enforced for this container.
+	}
 
 	// Mount builtin tools directory for cascade-resolved builtin extensions
 	if (builtinToolsDir && builtinToolsDir !== toolsDir) {

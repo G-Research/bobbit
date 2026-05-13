@@ -10,6 +10,43 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
 const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
 
+/**
+ * Host path to the undici idle-stream timeout preload, copied into
+ * dist/server/defaults/agent-preload/ by scripts/copy-defaults.mjs.
+ *
+ * Injected into every agent subprocess via NODE_OPTIONS=--require=... — see
+ * design doc "Idle-stream timeout for remote LLM calls" and the preload
+ * source for rationale.
+ */
+export const PRELOAD_PATH = path.join(__dirname, "..", "defaults", "agent-preload", "undici-idle-timeouts.cjs");
+/** Container path the preload is bind-mounted to for Docker sessions. */
+export const CONTAINER_PRELOAD_PATH = "/bobbit-preload/undici-idle-timeouts.cjs";
+
+/**
+ * Env vars for the idle-stream timeout preload — exported on every agent
+ * spawn so the preload sees consistent values across direct and Docker
+ * branches. Host operators can override defaults via process.env.
+ */
+export function buildPreloadEnv(): Record<string, string> {
+	return {
+		BOBBIT_REMOTE_BODY_TIMEOUT_MS: process.env.BOBBIT_REMOTE_BODY_TIMEOUT_MS ?? "120000",
+		BOBBIT_REMOTE_HEADERS_TIMEOUT_MS: process.env.BOBBIT_REMOTE_HEADERS_TIMEOUT_MS ?? "60000",
+		BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS: process.env.BOBBIT_TRUSTED_NO_TIMEOUT_ORIGINS ?? "",
+	};
+}
+
+/**
+ * Compose a NODE_OPTIONS string for the direct-spawn agent, preserving any
+ * caller-provided NODE_OPTIONS and appending --no-warnings + --require=<preload>.
+ * The preload path is JSON-quoted so paths with spaces survive on Windows
+ * (Node's NODE_OPTIONS parser accepts double-quoted arg values).
+ */
+function buildDirectNodeOptions(): string {
+	const existing = (process.env.NODE_OPTIONS ?? "").trim();
+	const requireArg = `--require=${JSON.stringify(PRELOAD_PATH)}`;
+	return [existing, "--no-warnings", requireArg].filter(Boolean).join(" ");
+}
+
 /** Redact sensitive env vars (-e KEY=VALUE) from Docker arg arrays for logging. */
 function redactDockerArgs(args: string[]): string {
 	const sensitiveKeys = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET|.*_API_KEY|.*_OAUTH_TOKEN|.*_ACCESS_KEY)/i;
@@ -282,6 +319,9 @@ export class RpcBridge {
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),
 					// preventing split-brain between ~/.bobbit/agent/ and ~/.pi/agent/.
 					PI_CODING_AGENT_DIR: globalAgentDir(),
+					// Idle-stream timeout preload — see PRELOAD_PATH/buildPreloadEnv.
+					NODE_OPTIONS: buildDirectNodeOptions(),
+					...buildPreloadEnv(),
 					...tlsEnv,
 					...this.options.env,
 				},
@@ -487,7 +527,11 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
+		// Idle-stream timeout preload — bind-mounted by buildDockerRunArgs.
+		execArgs.push("-e", `NODE_OPTIONS=--no-warnings --require=${CONTAINER_PRELOAD_PATH}`);
+		for (const [k, v] of Object.entries(buildPreloadEnv())) {
+			execArgs.push("-e", `${k}=${v}`);
+		}
 
 		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
 		if (this.options.sandboxCredentials) {
@@ -663,6 +707,10 @@ function buildMountTable(builtinToolsDir?: string): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
+		// Single-file bind mount (read-only) for the undici idle-timeout preload.
+		// hostPath is the parent dir so prefix→hostPath joining stays well-defined
+		// even though only one file lives under it.
+		{ containerPrefix: "/bobbit-preload", hostPath: path.dirname(PRELOAD_PATH) },
 	];
 
 	// Add builtin tools dir mapping (for cascade-resolved builtin paths)
