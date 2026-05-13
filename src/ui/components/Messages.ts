@@ -619,7 +619,7 @@ export class ToolMessage extends LitElement {
 
 		// Default: wrap in card
 		return html`
-			<div class="p-2.5 border border-border rounded-md bg-card text-card-foreground shadow-xs">
+			<div data-tool-name="${toolName}" class="p-2.5 border border-border rounded-md bg-card text-card-foreground shadow-xs">
 				${renderResult.content}
 			</div>
 		`;
