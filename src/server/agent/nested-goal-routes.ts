@@ -211,6 +211,14 @@ export async function tryHandleNestedGoalRoute(
 		const parentId = spawnChildMatch[1];
 		const parent = getGoalAcrossProjects(parentId);
 		if (!parent) { json({ error: "Parent goal not found" }, 404); return true; }
+		// Pause-cascade: refuse to spawn a child on a paused parent. The
+		// guard runs BEFORE the planId idempotency check below — a re-call
+		// with the same planId on a paused parent still represents a spawn
+		// intent the operator wants blocked (see docs/design/pause-cascade.md).
+		if (parent.paused) {
+			json({ error: `Parent goal ${parentId} is paused`, code: "GOAL_PAUSED", goalId: parentId }, 409);
+			return true;
+		}
 		const body = await readBody(req).catch(() => null);
 		if (!body) { json({ error: "Missing body" }, 400); return true; }
 		const planId = typeof body.planId === "string" ? body.planId.trim() : "";
@@ -765,14 +773,27 @@ export async function tryHandleNestedGoalRoute(
 		const cascade: boolean = body.cascade;
 		const goalManager = getGoalManagerForGoal(id);
 		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendantsLocal(id) : [])];
+		const pausedIds = new Set<string>([id]);
 		let count = 0;
 		for (const g of targets) {
+			pausedIds.add(g.id);
 			// R-039: symmetric with resume's `if (!g.paused) continue;`.
 			if (g.paused) continue;
 			await goalManager.updateGoal(g.id, { paused: true });
 			await cancelAllVerifications(g.id);
 			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
 			count++;
+		}
+		// Pause-cascade: best-effort abort sweep over every streaming
+		// session whose goalId is in the paused subtree. One bad session
+		// must not block the rest — errors are logged and the loop
+		// continues. See docs/design/pause-cascade.md §Call-site 1.
+		for (const s of sessionManager.getAllSessionsRaw()) {
+			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
+			if (s.status !== "streaming") continue;
+			sessionManager.forceAbort(s.id).catch((err) => {
+				console.warn(`[pause] forceAbort failed for session=${s.id} goal=${s.goalId}:`, err);
+			});
 		}
 		json({ paused: count });
 		return true;

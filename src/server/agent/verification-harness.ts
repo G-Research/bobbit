@@ -17,6 +17,7 @@ import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { resolveRole as resolveRoleFromGoal, listAvailableRoles } from "./resolve-role.js";
+import { GoalPausedError } from "./goal-paused-guard.js";
 import type { PersistedGoal } from "./goal-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
@@ -1920,6 +1921,16 @@ export class VerificationHarness {
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
 	): Promise<{ passed: boolean; output: string; sessionId?: string }> {
+		// Pause-cascade backstop: race-window guard. The mainline path is
+		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
+		// can be paused between signal-accept and verifier-spawn. Refuse to
+		// create the llm-review session and surface a failed-result instead.
+		if (goalId) {
+			const g = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+			if (g?.paused) {
+				throw new GoalPausedError(goalId);
+			}
+		}
 		// Pre-generate sessionId so we can register the verification_result resolver and extension before session creation
 		const sessionId = preGeneratedSessionId || `llm-review-${randomUUID().slice(0, 12)}`;
 
