@@ -134,9 +134,6 @@ export class RemoteAgent {
 	 *  Window opens on `auto_compaction_start { reason: "overflow" }` and stays
 	 *  open until either the next assistant `message_end` lands or 60 s passes. */
 	private _overflowRecoveryDeadline: number | null = null;
-	/** Last overflow-trigger compaction payload — re-dispatched with the real
-	 *  retry error if a failed retry arrives inside the recovery window. */
-	private _lastOverflowPayload: import("./compaction-types.js").CompactionSummaryPayload | null = null;
 
 	/** Payload of the most recent compaction whose `tokensAfter` we haven't
 	 *  amended yet. The server emits `compaction_end` BEFORE the post-compaction
@@ -1877,53 +1874,35 @@ export class RemoteAgent {
 				if (event.message) {
 					let msg = event.message;
 					if (msg.role === "assistant") {
-						// Overflow-recovery fold: if the upstream just compacted on
-						// `reason: "overflow"` and the retry ALSO failed with the
-						// canonical "prompt is too long" error, attach the real error
-						// to the existing compaction card and mark this message to
-						// suppress its standalone red error block. Window closes either
-						// way — a single recovery attempt is all upstream gives us.
-						let foldedIntoCompactionCard = false;
+						// Overflow-recovery suppression: when pi-coding-agent auto-compacts
+						// on overflow, it sometimes fires a retry from the still-in-flight
+						// pre-compaction transcript right as the compaction is committed.
+						// That retry gets rejected by the API (`prompt is too long`,
+						// `usage.totalTokens === 0`, content is empty) before the agent
+						// then runs the next turn cleanly against the compacted state.
+						// Hide the spurious red banner — the compaction card itself is
+						// already rendered as "complete" (forced for overflow trigger),
+						// so showing a standalone overflow error after it is doubly
+						// misleading.
+						let suppressedOverflowRetry = false;
 						if (
 							this._overflowRecoveryDeadline !== null
 							&& Date.now() <= this._overflowRecoveryDeadline
 							&& msg.stopReason === "error"
 							&& typeof msg.errorMessage === "string"
+							&& /prompt is too long|tokens?\s*>\s*\d/i.test(msg.errorMessage)
 						) {
-							const err: string = msg.errorMessage;
-							const isOverflowErr = /prompt is too long|tokens?\s*>\s*\d/i.test(err);
-							if (isOverflowErr && this._lastOverflowPayload) {
-								const updated = {
-									...this._lastOverflowPayload,
-									state: "error" as const,
-									success: false,
-									error: err,
-								};
-								const { message: cm, toolResult: ctr } =
-									buildCompactionSummaryMessages(updated);
-								this.apply({
-									type: "compaction-result",
-									message: cm,
-									success: false,
-									toolResult: ctr,
-								});
-								msg = { ...msg, _suppressedByOverflowRecovery: true };
-								foldedIntoCompactionCard = true;
-								// Failed retry — don't keep waiting for a clean amend.
-								this._pendingCompactionAmend = null;
-							}
+							msg = { ...msg, _suppressedByOverflowRecovery: true };
+							suppressedOverflowRetry = true;
+							// Failed retry — the next clean turn will provide fresh usage.
 						}
 						this._overflowRecoveryDeadline = null;
-						this._lastOverflowPayload = null;
 
 						// Tokens-after amendment: the first clean assistant turn after
 						// compaction has authoritative `usage` reflecting the real
-						// post-compaction context size. Re-dispatch the compaction
-						// card with that number filled in (single DOM identity via
-						// stable id). Also fires later from the snapshot path so the
-						// refreshAfterCompaction broadcast can populate the spinner
-						// even when no follow-up turn happens yet.
-						if (!foldedIntoCompactionCard) {
+						// post-compaction context size. Skip when this very turn IS the
+						// suppressed spurious retry — the next turn will carry real usage.
+						if (!suppressedOverflowRetry) {
 							this._tryAmendPendingCompaction();
 						}
 
