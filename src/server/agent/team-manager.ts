@@ -10,6 +10,7 @@ import { GoalStore, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles } from "./resolve-role.js";
+import { GoalPausedError } from "./goal-paused-guard.js";
 import { TeamStore } from "./team-store.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { PersistedTeamEntry } from "./team-store.js";
@@ -913,6 +914,12 @@ export class TeamManager {
 		for (const ctx of this.config.projectContextManager.all()) {
 			for (const goal of ctx.goalStore.getAll()) {
 				if (goal.archived) continue;
+				// Pause-cascade: a paused goal must never trigger a fresh
+				// team-lead spawn on boot/respawn. Without this guard, an
+				// operator who pauses a goal then aborts its team-lead would
+				// see a new team-lead reappear within seconds (whack-a-mole).
+				// See docs/design/pause-cascade.md §Call-site 7 (CRITICAL).
+				if (goal.paused) continue;
 				if (goal.state !== "in-progress") continue;
 				if (goal.setupStatus !== "ready") continue;
 				if (!goal.team) continue;
@@ -1230,6 +1237,8 @@ export class TeamManager {
 		if (this.teams.has(goalId)) {
 			throw new Error(`Team already active for goal: ${goalId}`);
 		}
+		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal.
+		if (goal.paused) throw new GoalPausedError(goalId);
 
 		// Use the goal's worktree/cwd for the team lead
 		const cwd = goal.worktreePath || goal.cwd;
@@ -1438,6 +1447,9 @@ export class TeamManager {
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
 		}
+		// Pause-cascade guard — in-process callers (team-lead extension
+		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
+		if (goal.paused) throw new GoalPausedError(goalId);
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.

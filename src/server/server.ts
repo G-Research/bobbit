@@ -27,6 +27,7 @@ import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -1022,6 +1023,8 @@ export function createGateway(config: GatewayConfig) {
 		sessionManager,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
+		teamManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -4951,6 +4954,10 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		// Pause-cascade: a paused goal must reject gate signals. This is the
+		// most upstream block for both llm-review-* verifier spawns and
+		// command/qa-step kickoffs in the same handler chain.
+		if (goal.paused) { json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
 		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
@@ -5384,6 +5391,11 @@ async function handleApiRoute(
 			json({ error: "Goal is archived" }, 409);
 			return;
 		}
+		// Pause-cascade: refuse to spawn role agents on a paused goal.
+		if (spawnGoal?.paused) {
+			json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
+			return;
+		}
 		// Guard: reject spawn if goal worktree is not ready
 		if (spawnGoal && spawnGoal.setupStatus !== "ready") {
 			json({ error: "Goal setup not complete" }, 409);
@@ -5403,6 +5415,8 @@ async function handleApiRoute(
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
 				jsonError(409, err);
+			} else if (err instanceof GoalPausedError) {
+				json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
 			} else {
 				jsonError(400, err);
 			}
