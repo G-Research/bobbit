@@ -440,6 +440,18 @@ A future **session-sidecar** file — written alongside each `.jsonl`, recording
 
 See [docs/design/session-recovery-boot-passes.md §4](design/session-recovery-boot-passes.md#4-why-pass-3-cannot-recover-the-original-session-id).
 
+## Archived goals show `$0.0000` in tree-cost breakdown
+
+Symptom: the tree-cost rollup on a goal dashboard shows real numbers for live descendants but `$0.0000` for every archived descendant, even though those subgoals demonstrably accumulated cost while live. The total at the top is correspondingly understated.
+
+Root cause: pre-fix, `getGoalCost(goalId)` resolved sessionIds by walking `sessionStore` for matching `goalId`. The 7-day archive sweep (and post-merge cleanup paths) purges session records but leaves `<projectStateDir>/session-costs.json` intact — so cost entries are orphaned: still on disk, addressable by sessionId, unreachable by goalId.
+
+Fix: cost entries are now stamped with `goalId` at record time (`SessionCost.goalId`, set write-once in `CostTracker.recordUsage`). `getGoalCost(goalId)` scans entries by stamped goalId instead of consulting `sessionStore`, so cost is decoupled from session lifetime. A boot-time backfill (`CostTracker.backfillGoalIds`, wired in `src/server/server.ts`) stamps `goalId` onto legacy entries from any session still in `sessionStore` — idempotent, second boot stamps zero. Dollars belonging to sessions purged before the fix landed remain unrecoverable; everything from that boot forward survives purge.
+
+If you still see `$0.0000` on a goal whose sessions are live: confirm `session.goalId` (or `teamGoalId`) is set on the `SessionInfo` at the moment `trackCostFromEvent` fires — only that call site stamps the entry. Tree-cost cache invalidation rides on `costTracker.getGeneration()`, which `recordUsage` and `backfillGoalIds` both bump.
+
+Pinned by `tests/cost-tracker-goal-stamp.test.ts`, `tests/cost-tracker-backfill.test.ts`, and `tests/tree-cost-purge-survival.test.ts`. Full design in [docs/nested-goals.md — Cost rollup](nested-goals.md#cost-rollup).
+
 ## Search index
 
 FlexSearch-backed lexical search (pure-JS, BM25-style ranking). Index per project at `<project-root>/.bobbit/state/search.flex/` (`index/*.json` + `meta.json`). No native binaries, no model downloads, no runtime network. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md) for the full design.
