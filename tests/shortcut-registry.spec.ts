@@ -420,7 +420,7 @@ test.describe("Shortcut Registry", () => {
 				label: "No Input",
 				category: "T",
 				defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
-				// allowInInput defaults to undefined/false
+				allowInInput: false,
 				handler: () => { called = true; },
 			});
 			r.startListening();
@@ -475,6 +475,7 @@ test.describe("Shortcut Registry", () => {
 				label: "No TA",
 				category: "T",
 				defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
+				allowInInput: false,
 				handler: () => { called = true; },
 			});
 			r.startListening();
@@ -501,6 +502,7 @@ test.describe("Shortcut Registry", () => {
 				label: "No CE",
 				category: "T",
 				defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
+				allowInInput: false,
 				handler: () => { called = true; },
 			});
 			r.startListening();
@@ -610,6 +612,61 @@ test.describe("Shortcut Registry", () => {
 			return count;
 		});
 		expect(result).toBe(2);
+	});
+
+	// ========================================================================
+	// Explicit allowInInput:false strictly blocks in inputs, even for
+	// ctrl/alt-modified bindings (e.g. Ctrl+ArrowLeft must passthrough to
+	// native word-jump in the prompt editor).
+	// ========================================================================
+	test("allowInInput:false blocks ctrl-modified shortcut in textarea (word-jump passthrough)", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const r = (window as any).__registry;
+			let called = false;
+			let defaultPrevented = false;
+			r.registerShortcut({
+				id: "sidebar-left",
+				label: "Sidebar Left",
+				category: "T",
+				defaultBindings: [{ key: "ArrowLeft", ctrlOrMeta: true, shift: false, alt: false }],
+				allowInInput: false,
+				handler: () => { called = true; },
+			});
+			r.startListening();
+
+			(document.getElementById("test-textarea") as HTMLTextAreaElement).focus();
+			const ev = new KeyboardEvent("keydown", {
+				key: "ArrowLeft", ctrlKey: true, bubbles: true, cancelable: true,
+			});
+			document.dispatchEvent(ev);
+			defaultPrevented = ev.defaultPrevented;
+			return { called, defaultPrevented };
+		});
+		expect(result.called).toBe(false);
+		expect(result.defaultPrevented).toBe(false);
+	});
+
+	test("allowInInput:false still fires when no input is focused", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			const r = (window as any).__registry;
+			let called = false;
+			r.registerShortcut({
+				id: "sidebar-left-2",
+				label: "Sidebar Left 2",
+				category: "T",
+				defaultBindings: [{ key: "ArrowLeft", ctrlOrMeta: true, shift: false, alt: false }],
+				allowInInput: false,
+				handler: () => { called = true; },
+			});
+			r.startListening();
+
+			(document.body as HTMLElement).focus();
+			document.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "ArrowLeft", ctrlKey: true, bubbles: true,
+			}));
+			return called;
+		});
+		expect(result).toBe(true);
 	});
 
 	// ========================================================================
