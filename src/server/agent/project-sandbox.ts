@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildDockerRunArgs } from "./docker-args.js";
+import { buildDockerRunArgs, CONTAINER_FEATURE_VERSION } from "./docker-args.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
@@ -491,10 +491,18 @@ export class ProjectSandbox {
 
 	private async _initContainer(): Promise<void> {
 		const { projectId } = this.options;
-		const label = `bobbit-project=${projectId}`;
+		// Match BOTH the project label AND the feature-version label, so
+		// containers created by older bobbit (without the version label, or
+		// with a different version) are treated as not-found and a fresh
+		// container is created. This guarantees the bind-mount surface the
+		// `docker exec` path depends on (e.g. /bobbit-preload) is present.
+		const labels = [
+			`bobbit-project=${projectId}`,
+			`bobbit-project-version=${CONTAINER_FEATURE_VERSION}`,
+		];
 
-		// 1. Find existing container by label
-		const existingId = await this._findContainerByLabel(label);
+		// 1. Find existing container by labels
+		const existingId = await this._findContainerByLabel(labels);
 
 		if (existingId) {
 			// Check if running
@@ -574,6 +582,7 @@ export class ProjectSandbox {
 			workspaceDir: "", // unused — named volume instead
 			label: projectId,
 			labelPrefix: "bobbit-project",
+			labelVersion: CONTAINER_FEATURE_VERSION,
 			projectId,
 			stateDir,
 			memoryLimit: `${totalMemGB}g`,
@@ -779,11 +788,17 @@ export class ProjectSandbox {
 
 	// ── Private: Docker helpers ────────────────────────────────────────
 
-	private async _findContainerByLabel(label: string): Promise<string | null> {
+	private async _findContainerByLabel(labels: string | string[]): Promise<string | null> {
+		const labelList = Array.isArray(labels) ? labels : [labels];
+		if (labelList.length === 0) return null;
 		try {
+			const filterArgs: string[] = [];
+			for (const l of labelList) {
+				filterArgs.push("--filter", `label=${l}`);
+			}
 			const { stdout } = await execFileAsync("docker", [
 				"ps", "-a",
-				"--filter", `label=${label}`,
+				...filterArgs,
 				"--format", "{{.ID}}",
 			], {
 				timeout: 10_000,
