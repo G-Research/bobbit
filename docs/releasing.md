@@ -126,3 +126,28 @@ node -e "import('bobbit/dist/server/binaries.js').then(m => console.log(m.getFdP
 `docker/Dockerfile` apt-installs `fd-find` and `ripgrep` independently —
 the container does **not** mount host-bundled binaries. Bumping the
 bundled versions does not affect the sandbox.
+
+### Offline composition with `PI_OFFLINE`
+
+When the gateway's startup connectivity probe (`checkInternetAvailable()`
+in `src/server/agent/aigw-manager.ts`) determines we're offline, it sets
+`process.env.PI_OFFLINE = "1"` for the gateway process. Spawned
+pi-coding-agent subprocesses inherit `process.env` (and the Docker
+sandbox forwards `PI_OFFLINE` via `-e`), so pi 0.74.0+ skips the GitHub
+fd/rg download path in `ensureTool()` and returns `undefined` cleanly
+instead of timing out (~10s) on each first call.
+
+Composition:
+
+- **Offline + bundled binary present** — fast path; pi finds the staged
+  binary in `<agentDir>/bin` immediately.
+- **Offline + no bundled binary, no PATH binary** — pi returns “tool
+  unavailable” in ~50 ms instead of hanging on a doomed download. The
+  find/grep tool call fails cleanly with a useful error.
+- **Online** — `PI_OFFLINE` is not set; pi's download fallback still
+  works for users on exotic platforms.
+
+A user-supplied `PI_OFFLINE` value (set in the parent environment
+before the gateway starts) is always preserved verbatim — the gateway
+never overrides it. Set `PI_OFFLINE=1` manually to force the offline
+behaviour even when the connectivity probe would succeed.
