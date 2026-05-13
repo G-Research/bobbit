@@ -1,6 +1,6 @@
 import { i18n } from "@mariozechner/mini-lit";
 import { Select } from "@mariozechner/mini-lit/dist/Select.js";
-import { getProviders } from "@mariozechner/pi-ai";
+import { getProviders } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/api.js";

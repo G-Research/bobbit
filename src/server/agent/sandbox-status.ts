@@ -58,7 +58,7 @@ export async function getImageAgentVersion(imageName: string): Promise<string | 
 /** Get the host's installed pi-coding-agent version. */
 export function getHostAgentVersion(): string | null {
 	try {
-		const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
+		const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
 		const mainPath = fileURLToPath(mainUrl);
 		const pkgPath = path.resolve(path.dirname(mainPath), "..", "package.json");
 		const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));

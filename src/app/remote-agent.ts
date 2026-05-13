@@ -1,4 +1,4 @@
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
@@ -138,12 +138,19 @@ export class RemoteAgent {
 	private _isCompacting = false;
 	/** True from `compaction_end` (success path) until the next clean
 	 *  assistant turn lands carrying fresh `usage`. Read by the context-bar
-	 *  renderer in `AgentInterface` to display "Updating after compaction…"
-	 *  instead of the stale pre-compaction percentage (the snapshot's
-	 *  last-assistant-usage is still pre-compaction; pi-coding-agent doesn't
-	 *  emit a fresh per-message usage row for the synthetic summary entry).
+	 *  renderer in `AgentInterface` to show a shimmer-placeholder bar
+	 *  (the snapshot's last-assistant-usage post-compaction is still
+	 *  pre-compaction, so any number we'd show would be wrong;
+	 *  pi-coding-agent doesn't emit a fresh per-message usage row for the
+	 *  synthetic summary entry).
 	 *  Public so the renderer can read it via `session._usageStaleAfterCompaction`. */
 	_usageStaleAfterCompaction = false;
+	/** Pre-compaction context-fill percentage captured at `compaction_start`,
+	 *  so the placeholder bar can animate from the OLD fill down to the
+	 *  shimmer's resting width (~25%) during compaction. Null when no
+	 *  compaction is in flight or the source value couldn't be sampled.
+	 *  Range 0-100. Read by the renderer. */
+	_compactionStartPct: number | null = null;
 	/** Best-effort cache of the most recently seen context-token count; used
 	 *  as the final fallback when resolving `tokensBefore` for a compaction
 	 *  end event. See `docs/design/compaction-e2e-rich-summary.md` §7.3. */
@@ -2017,6 +2024,7 @@ export class RemoteAgent {
 							&& msg.stopReason !== "error"
 						) {
 							this._usageStaleAfterCompaction = false;
+							this._compactionStartPct = null;
 						}
 
 						// Check for proposals in assistant message
@@ -2136,6 +2144,21 @@ export class RemoteAgent {
 				// is still the pre-compaction value, so we'd otherwise show a wrong
 				// percentage on the bar until the next turn happens.
 				this._usageStaleAfterCompaction = true;
+				// Sample current context-fill percentage so the placeholder bar
+				// can deflate from here to the shimmer resting width. Reads the
+				// transcript's last-assistant usage (still pre-compaction at
+				// `compaction_start` — the snapshot refresh hasn't landed yet).
+				try {
+					const tokens = this._readContextTokens();
+					const win = (this._state.model as any)?.contextWindow;
+					if (typeof tokens === "number" && tokens > 0 && typeof win === "number" && win > 0) {
+						this._compactionStartPct = Math.min(100, Math.round((tokens / win) * 100));
+					} else {
+						this._compactionStartPct = null;
+					}
+				} catch {
+					this._compactionStartPct = null;
+				}
 				// Open the overflow-recovery window so a trailing "prompt is too long"
 				// retry error gets folded into the compaction card instead of
 				// surfacing as a standalone red banner.
@@ -2171,7 +2194,26 @@ export class RemoteAgent {
 			case "auto_compaction_end": {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
-				const success = event.type === "compaction_end" ? event.success : !event.aborted;
+				// Minimum elapsed time the in-progress card must remain visible.
+				// pi-coding-agent's compaction — especially auto/threshold paths —
+				// can complete in well under a second. The bobbit-blob sprite
+				// enforces its own min-duration via `StreamingMessageContainer.
+				// COMPACT_MIN_DURATION` so the squash animation is actually seen.
+				// Without a matching card-side floor the user sees "Context
+				// compacted" appear while the sprite is still shaking. Use a
+				// slightly shorter floor than the sprite (2.5 s vs 3.5 s) so the
+				// card lands first and the sprite's pop-back animation lands a
+				// beat later — reading as "done, settling" rather than
+				// "done, still working". */
+				const COMPACT_CARD_MIN_DURATION = 2500;
+				// Success resolution: pi-coding-agent 0.74.0+ emits
+				// `compaction_end { aborted, result, ... }` for the manual path
+				// instead of the older `{ success: true|false }` shape that the
+				// Bobbit ws-handler wrapper used to inject. Accept both: prefer
+				// the explicit boolean, fall back to `!aborted`.
+				const success = typeof event.success === "boolean"
+					? event.success
+					: !event.aborted;
 				const trigger = this._triggerFromEvent(event);
 				const errMsg: string | undefined =
 					(event as any).errorMessage || (event as any).error;
@@ -2226,12 +2268,21 @@ export class RemoteAgent {
 				// display from the existing transcript usage.
 				if (!displaySuccess) {
 					this._usageStaleAfterCompaction = false;
+					this._compactionStartPct = null;
 				}
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
-				this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
-				// Queue this card for tokens-after amendment on the next clean
-				// assistant `message_end` carrying usage.
-				this._pendingCompactionAmend = payload;
+				const elapsedSinceStart = startedAtMs != null ? nowMs - startedAtMs : COMPACT_CARD_MIN_DURATION;
+				const transitionCard = () => {
+					this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
+					// Queue this card for tokens-after amendment on the next clean
+					// assistant `message_end` carrying usage.
+					this._pendingCompactionAmend = payload;
+				};
+				if (elapsedSinceStart < COMPACT_CARD_MIN_DURATION) {
+					setTimeout(transitionCard, COMPACT_CARD_MIN_DURATION - elapsedSinceStart);
+				} else {
+					transitionCard();
+				}
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);

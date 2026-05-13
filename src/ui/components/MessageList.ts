@@ -1,9 +1,9 @@
-import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type {
 	AssistantMessage as AssistantMessageType,
 	ToolCall,
 	ToolResultMessage as ToolResultMessageType,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
@@ -11,6 +11,34 @@ import { renderMessage } from "./message-renderer-registry.js";
 import "./ErrorMessage.js";
 import "./ToolGroup.js";
 import "./ToolPermissionCard.js";
+import "./PreCompactionHistory.js";
+import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
+
+/** Detect a compaction-summary synthetic assistant message and pull out
+ *  the sidecar id. The arguments payload is whatever
+ *  `buildCompactionSummaryMessages()` stuffed in; persisted rows carry
+ *  `compactionId`, live-only rows do not. */
+function getCompactionSidecarId(msg: any): string | null {
+	if (!msg || msg.role !== "assistant") return null;
+	const content = msg.content;
+	if (!Array.isArray(content) || content.length !== 1) return null;
+	const block = content[0];
+	if (!block || block.type !== "toolCall" || block.name !== COMPACTION_TOOL_NAME) return null;
+	const cid = block.arguments?.compactionId;
+	return typeof cid === "string" && cid.length > 0 ? cid : null;
+}
+
+/** Live (in-progress / no-sidecar-id-yet) compaction-summary detection —
+ *  separate from `getCompactionSidecarId` which only matches persisted rows.
+ *  Used to suppress the destructive "Request aborted" banner on the assistant
+ *  message that the agent self-aborted to make room for compaction. */
+function isLiveCompactionSummary(msg: any): boolean {
+	if (!msg || msg.role !== "assistant") return false;
+	const content = msg.content;
+	if (!Array.isArray(content) || content.length !== 1) return false;
+	const block = content[0];
+	return !!(block && block.type === "toolCall" && block.name === COMPACTION_TOOL_NAME);
+}
 
 /** Build a stable render key for a message — id-based with a synthetic
  *  fallback that includes reducer metadata when available. */
@@ -60,6 +88,10 @@ export class MessageList extends LitElement {
 	@property({ attribute: false }) onDismissError?: (id: string) => void;
 	@property({ attribute: false }) onRestartAgent?: () => void;
 	@property({ attribute: false }) onRetry?: () => void;
+	/** Session id — forwarded to `<bobbit-pre-compaction-history>` when a
+	 *  compaction card appears in the transcript, so the inline expand
+	 *  affordance can call the orphan-transcript API. */
+	@property({ type: String }) sessionId: string = "";
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -88,6 +120,23 @@ export class MessageList extends LitElement {
 
 			// Skip artifact messages
 			if (msg.role === "artifact") { i++; continue; }
+
+			// Inline pre-compaction history affordance: when this row is the
+			// synthetic compaction-summary card AND the sidecar persisted a
+			// compactionId for it, prepend the expand-history component so
+			// the orphaned messages render directly in the transcript (above
+			// the card) rather than nested inside it. Pre-count + expand state
+			// is component-local; no impact on collapsed-by-default UX.
+			const compactionId = getCompactionSidecarId(msg);
+			if (compactionId && this.sessionId) {
+				items.push({
+					key: `precompact:${compactionId}`,
+					template: html`<bobbit-pre-compaction-history
+						compaction-id=${compactionId}
+						session-id=${this.sessionId}
+					></bobbit-pre-compaction-history>`,
+				});
+			}
 
 			// Render error messages as dismissable banners
 			if ((msg as any).role === "error") {
@@ -187,6 +236,22 @@ export class MessageList extends LitElement {
 					if (msgs[k].role === "assistant") { isLastAssistant = false; break; }
 				}
 				const showRetry = isLastAssistant && amsg.stopReason === "error" && this.onRetry;
+				// Hide the destructive "Request aborted" banner when the agent
+				// aborted its own turn to make room for auto-compaction — detected
+				// by an immediately-following synthetic compaction-summary row.
+				// A user-initiated Stop has no compaction following it, so the
+				// banner still shows in that case.
+				let suppressAbortedBanner = false;
+				if (amsg.stopReason === "aborted") {
+					for (let k = i + 1; k < msgs.length; k++) {
+						const next = msgs[k];
+						if (next.role === "toolResult" || next.role === "artifact") continue;
+						if (getCompactionSidecarId(next) || isLiveCompactionSummary(next)) {
+							suppressAbortedBanner = true;
+						}
+						break;
+					}
+				}
 				items.push({
 					key: keyFor(msg),
 					template: html`<assistant-message
@@ -200,6 +265,7 @@ export class MessageList extends LitElement {
 						.hidePendingToolCalls=${this.isStreaming && this.hasStreamMessage}
 						.onCostClick=${this.onCostClick}
 						.onRetry=${showRetry ? this.onRetry : undefined}
+						.suppressAbortedBanner=${suppressAbortedBanner}
 					></assistant-message>`,
 				});
 				i++;

@@ -497,7 +497,12 @@ export async function createGoal(opts: {
 	autoStartTeam?: boolean;
 	projectId?: string;
 }): Promise<{ id: string; [k: string]: unknown }> {
-	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, ...opts };
+	// Default spec for tests that don't care about spec content. The server now
+	// requires a non-placeholder spec (>=20 chars) before starting a team, so the
+	// helper supplies a sensible default. Tests that exercise SPEC_REQUIRED call
+	// apiFetch("/api/goals", ...) directly and bypass this helper.
+	const defaultSpec = "E2E harness goal — spec autopopulated by createGoal() helper for tests that do not exercise spec content.";
+	const body: Record<string, unknown> = { cwd: nonGitCwd(), worktree: false, spec: defaultSpec, ...opts };
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path

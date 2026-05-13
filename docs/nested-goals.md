@@ -220,6 +220,43 @@ step in a frozen plan is classified as `restructure` by the mutation
 classifier (overrides any `fix-up` it would otherwise be), so the
 divergence-policy decision matrix requires the goal to be paused first.
 
+### dependsOn scheduling
+
+`dependsOn` enforces scheduling on the **direct-spawn path** (`POST
+/api/goals/:id/spawn-child` and the `goal_plan_propose` fallback
+`spawn-children-direct`). The Plan-tab DAG edges and the scheduler agree
+— declared deps gate execution, they are not visualisation-only.
+
+Contract:
+
+- A child spawned with `dependsOn: [planId, ...]` is **created paused**
+  if ANY referenced sibling is not yet `state: "complete"`. The response
+  is `201 { id, suggestedRole, spawnedBySessionId, blocked: true,
+  pendingDeps: [...] }`. `setupWorktreeAndStartTeam` is NOT invoked —
+  the child sits with `setupStatus: "preparing"` and `paused: true`
+  until unblocked.
+- A child whose deps are all `state: "complete"` at spawn time starts
+  normally (response lacks the `blocked` field).
+- On `POST /api/goals/:id/integrate-child/:childId` (clean merge +
+  auto-archive), the route scans the parent's other live children for
+  any whose `dependsOnPlanIds` are now ALL satisfied. For each such
+  sibling that is currently `paused`, it clears `paused` and triggers
+  worktree setup + team start. Multi-dep children only unblock when the
+  LAST dep merges.
+- The auto-unblock scan is **best-effort** — any throw inside the scan
+  is caught and logged; the merge itself never fails on unblock errors.
+
+We currently reuse `paused: true` rather than introducing a distinct
+`state: "blocked"` value. TODO: future enhancement may introduce
+`state: "blocked"` so the UI can distinguish a dep-blocked child from a
+user-paused one. Until then the sidebar / Plan-tab show blocked children
+with the standard paused styling.
+
+The frozen-plan execution-gate path (`runSubgoalStep` in
+`verification-harness.ts`) sequences its own subgoal steps via the
+harness's `phase` ordering and is unaffected by this enforcement — the
+scheduling fix targets the direct-spawn fallback only.
+
 `runSubgoalStep` reads as follows. Each step encodes a hard-won lesson
 from PR #409 (see
 [debugging.md](debugging.md) for diagnostic checklists):

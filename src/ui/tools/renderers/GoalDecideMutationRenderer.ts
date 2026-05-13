@@ -5,7 +5,7 @@
  * mentioned in the goal spec is rendered conditionally only when a future
  * response carries one; currently we surface a muted applied/no-op summary.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { Gavel } from "lucide";
 import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";

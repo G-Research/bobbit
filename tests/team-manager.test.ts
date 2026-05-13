@@ -331,6 +331,41 @@ describe("TeamManager", () => {
 			assert.equal(session.role, "team-lead");
 			assert.equal(session.teamGoalId, "goal-1");
 		});
+
+		it("should inject goal spec into the team-lead's first user message", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ spec: "# Build feature X\nImplement parser and printer." });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			const session = await team.startTeam("goal-1");
+
+			// Wait a microtask so the async kickoff prompt is dispatched.
+			await new Promise((r) => setImmediate(r));
+
+			const promptMock = (session as any).rpcClient.prompt as ReturnType<typeof mock.fn>;
+			assert.equal(promptMock.mock.callCount(), 1, "prompt should be called once");
+			const kickoff: string = promptMock.mock.calls[0].arguments[0];
+			assert.ok(kickoff.startsWith("# Goal Spec\n\n"), `kickoff should start with "# Goal Spec", got: ${JSON.stringify(kickoff.slice(0, 80))}`);
+			assert.ok(kickoff.includes("# Build feature X\nImplement parser and printer."), "kickoff should include spec body");
+			assert.ok(kickoff.includes("Execute the task described in your system prompt"), "kickoff should include trailing instruction");
+		});
+
+		it("should fall back to legacy kickoff prompt when spec is empty", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ spec: "   " });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+
+			const session = await team.startTeam("goal-1");
+			await new Promise((r) => setImmediate(r));
+
+			const promptMock = (session as any).rpcClient.prompt as ReturnType<typeof mock.fn>;
+			const kickoff: string = promptMock.mock.calls[0].arguments[0];
+			assert.equal(kickoff, "Execute the task described in your system prompt. Follow the instructions carefully.");
+		});
 	});
 
 	// ---------------------------------------------------------------------------

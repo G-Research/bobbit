@@ -505,7 +505,7 @@ export class RpcBridge {
 
 		execArgs.push(
 			containerId,
-			"node", "--disable-warning=DEP0123", "/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+			"node", "--disable-warning=DEP0123", "/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
 			...this.remapArgsForContainer(agentArgs),
 		);
 
@@ -711,18 +711,18 @@ export function hostPathToContainer(hostPath: string): string {
 }
 
 /**
- * Resolve the parent directory of @mariozechner/pi-coding-agent package.
+ * Resolve the parent directory of @earendil-works/pi-coding-agent package.
  * This is the directory that will be mounted as /node_modules in Docker,
- * so that /node_modules/@mariozechner/pi-coding-agent/dist/cli.js works.
+ * so that /node_modules/@earendil-works/pi-coding-agent/dist/cli.js works.
  */
 export function resolveAgentModulesDir(): string {
-	const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
+	const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
 	const mainPath = fileURLToPath(mainUrl);
-	// mainPath = .../node_modules/@mariozechner/pi-coding-agent/dist/index.js
-	// Package root = .../node_modules/@mariozechner/pi-coding-agent
+	// mainPath = .../node_modules/@earendil-works/pi-coding-agent/dist/index.js
+	// Package root = .../node_modules/@earendil-works/pi-coding-agent
 	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
 	// We need the parent of @mariozechner (= node_modules dir)
-	// so that /node_modules/@mariozechner/pi-coding-agent/... works
+	// so that /node_modules/@earendil-works/pi-coding-agent/... works
 	return path.resolve(pkgRoot, "..", "..");
 }
 
@@ -730,14 +730,14 @@ export function resolveAgentModulesDir(): string {
 function findAgentCli(): string {
 	try {
 		// import.meta.resolve returns the URL of the package's main entry
-		const mainUrl = import.meta.resolve("@mariozechner/pi-coding-agent");
+		const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
 		const mainPath = fileURLToPath(mainUrl);
 		// Main entry is dist/index.js; cli.js is in the same directory
 		return path.join(path.dirname(mainPath), "cli.js");
 	} catch {
 		throw new Error(
 			"Could not find pi-coding-agent CLI. " +
-				"Either install @mariozechner/pi-coding-agent or pass --agent-cli /path/to/cli.js",
+				"Either install @earendil-works/pi-coding-agent or pass --agent-cli /path/to/cli.js",
 		);
 	}
 }

@@ -179,12 +179,18 @@ test.describe("Pre-compaction history affordance", () => {
 
 		await toggle.click();
 		await expect(widget).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
-		const rows = page.locator("[data-testid='pre-compaction-row']");
+		// Orphan messages now render through <message-list> (identical to the
+		// live transcript), so we count user-message + assistant-message rows
+		// inside the dedicated container.
+		const rows = page.locator(
+			"[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)",
+		);
 		await expect(rows).toHaveCount(3, { timeout: 15_000 });
 
-		// Dimmed + read-only: container has pointer-events:none and opacity ~0.65.
+		// Read-only treatment: container is visually dimmed (no pointer-events
+		// lock — rows go through the same interactive components as live, by
+		// design, so users can copy / expand tool details).
 		const container = page.locator("[data-testid='pre-compaction-rows']");
-		await expect(container).toHaveCSS("pointer-events", "none");
 		const opacity = await container.evaluate((el) => getComputedStyle(el).opacity);
 		expect(parseFloat(opacity)).toBeLessThan(1);
 
@@ -215,7 +221,8 @@ test.describe("Pre-compaction history affordance", () => {
 		await expect(widget2).toHaveAttribute("data-state", "collapsed", { timeout: 20_000 });
 		await page.locator("[data-testid='pre-compaction-toggle']").click();
 		await expect(widget2).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
-		await expect(page.locator("[data-testid='pre-compaction-row']"))
-			.toHaveCount(3, { timeout: 15_000 });
+		await expect(
+			page.locator("[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)"),
+		).toHaveCount(3, { timeout: 15_000 });
 	});
 });

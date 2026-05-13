@@ -13,7 +13,7 @@
  * cascade get a prompt rather than a silent allow.
  */
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {
@@ -83,7 +83,7 @@ export default function (pi: ExtensionAPI) {
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
 			}, { description: "Inline workflow snapshot; replaces the inherited parent workflow." })),
-			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child waits on. Server validates self-dep / unknown / cycle." })),
+			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child waits on. Enforces scheduling — child is created paused and auto-starts only when all deps have merged into the parent. Server validates self-dep / unknown / cycle." })),
 		}),
 		async execute(_id, params) {
 			try {

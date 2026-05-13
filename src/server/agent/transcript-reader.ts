@@ -45,6 +45,14 @@ export interface VerboseMessage {
 	role: string;
 	ts: string | null;
 	content: unknown;
+	/** Full pi-coding-agent message object (`entry.message`). Carries
+	 *  toolCallId/toolName/details/isError for toolResult rows and any
+	 *  other fields the renderer-side `<message-list>` component expects.
+	 *  Only populated for the orphan-history (`before-compaction`) path
+	 *  where the client renders these rows via the same Lit components
+	 *  that render the live transcript. `readTranscript` callers (read_session
+	 *  tool) still get just `content`. */
+	message?: Record<string, unknown>;
 }
 
 export type TranscriptMessage = CompactMessage | VerboseMessage;
@@ -86,6 +94,10 @@ interface RawMessage {
 	 *  Used by `readOrphanedBeforeCompaction` to spot the legacy in-jsonl
 	 *  compaction marker when the sidecar doesn't carry firstKeptEntryId. */
 	entryType: string;
+	/** Full `entry.message` object — captured for the verbose orphan path
+	 *  which needs toolCallId/toolName/etc. for `<message-list>` rendering.
+	 *  Other paths read `content` directly. */
+	fullMessage: Record<string, unknown>;
 }
 
 const TEXT_LIMIT = 800;
@@ -148,6 +160,7 @@ export function parseJsonl(content: string): RawMessage[] {
 			content: entry.message.content,
 			entryId,
 			entryType: entry.type,
+			fullMessage: entry.message as Record<string, unknown>,
 		});
 	}
 	return messages;
@@ -195,8 +208,10 @@ function toCompact(m: RawMessage): CompactMessage {
 	return out;
 }
 
-function toVerbose(m: RawMessage): VerboseMessage {
-	return { index: m.index, role: m.role, ts: m.ts, content: m.content };
+function toVerbose(m: RawMessage, includeFullMessage = false): VerboseMessage {
+	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: m.content };
+	if (includeFullMessage) out.message = m.fullMessage;
+	return out;
 }
 
 // ── Filter + window ──
@@ -283,6 +298,11 @@ export interface ReadOrphanedParams {
 	cursor?: number;
 	/** Default 50, range 1..200. */
 	limit?: number;
+	/** When true, return full `entry.message` objects (with toolCallId,
+	 *  toolName, details, etc.) so the client can render rows via the
+	 *  same `<message-list>` Lit component as the live transcript.
+	 *  Default false — returns the compact preview shape. */
+	verbose?: boolean;
 }
 
 export interface ReadOrphanedEnvelope {
@@ -291,7 +311,7 @@ export interface ReadOrphanedEnvelope {
 	returned: number;
 	/** Pass back as `cursor` for the next page. Null when no more pages. */
 	nextCursor: number | null;
-	messages: CompactMessage[];
+	messages: CompactMessage[] | VerboseMessage[];
 }
 
 export interface ReadOrphanedOptions {
@@ -374,6 +394,7 @@ export async function readOrphanedBeforeCompaction(
 			content: entry.message.content,
 			entryId: typeof entry.id === "string" ? entry.id : null,
 			entryType: entry.type,
+			fullMessage: entry.message as Record<string, unknown>,
 		});
 	}
 
@@ -381,7 +402,9 @@ export async function readOrphanedBeforeCompaction(
 	const start = Math.min(cursor, total);
 	const end = Math.min(total, start + limit);
 	const window = orphaned.slice(start, end);
-	const messages = window.map(toCompact);
+	const messages = params.verbose
+		? window.map((m) => toVerbose(m, /* includeFullMessage */ true))
+		: window.map(toCompact);
 	const nextCursor = end < total ? end : null;
 	return { total, returned: messages.length, nextCursor, messages };
 }

@@ -6,7 +6,7 @@
  * Design doc: docs/design/proposal-revision-snapshots.md \u2014 marker format.
  */
 
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 
 const PROPOSAL_REV_RE = /__proposal_rev_v1__:(\d+)\b/;
 

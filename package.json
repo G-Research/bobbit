@@ -39,9 +39,9 @@
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
     "@mariozechner/mini-lit": "^0.2.0",
-    "@mariozechner/pi-agent-core": "^0.73.1",
-    "@mariozechner/pi-ai": "^0.73.1",
-    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@earendil-works/pi-agent-core": "^0.74.0",
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
     "@recogito/text-annotator": "^3.4.9",
     "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",

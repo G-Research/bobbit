@@ -2,7 +2,7 @@
  * Renderer for all propose_* tools.
  * Shows a compact proposal summary card with an "Open proposal" button.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";

@@ -8,7 +8,7 @@
  * Calls the gateway REST API directly — no CLI wrapper needed.
  */
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readGatewayCreds, apiCall } from "../_shared/gateway.js";
 
 export default function (pi: ExtensionAPI) {

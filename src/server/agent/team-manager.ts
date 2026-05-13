@@ -1322,8 +1322,14 @@ export class TeamManager {
 			await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 		}
 
-		// Kick off the team lead with an initial prompt (same pattern as delegate sessions)
-		session.rpcClient.prompt("Execute the task described in your system prompt. Follow the instructions carefully.").catch((err: any) => {
+		// Kick off the team lead with an initial prompt (same pattern as delegate sessions).
+		// Re-read goal so we pick up any spec edits that happened during session setup.
+		const freshGoal = this.resolveGoal(goalId) ?? goal;
+		const specBody = (freshGoal.spec ?? "").trim();
+		const kickoff = specBody
+			? `# Goal Spec\n\n${specBody}\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.`
+			: "Execute the task described in your system prompt. Follow the instructions carefully.";
+		session.rpcClient.prompt(kickoff).catch((err: any) => {
 			console.error("[team-manager] Failed to send team lead kickoff prompt:", err);
 		});
 

@@ -311,6 +311,24 @@ export async function tryHandleNestedGoalRoute(
 			}
 		}
 
+		// dependsOn scheduling enforcement — resolve each declared dep planId
+		// to a sibling and check whether it is already merged (state=complete).
+		// Children with unresolved deps are created PAUSED and skip
+		// worktree/team start; integrate-child auto-unblocks them when their
+		// last dependency merges.
+		// TODO: future enhancement — introduce state="blocked" as a distinct
+		// GoalState rather than reusing paused (cleaner UI semantics).
+		const unresolvedDeps: string[] = [];
+		if (dependsOn && dependsOn.length > 0) {
+			for (const depPlanId of dependsOn) {
+				const sibling = siblings.find(g => g.spawnedFromPlanId === depPlanId);
+				if (!sibling || sibling.state !== "complete") {
+					unresolvedDeps.push(depPlanId);
+				}
+			}
+		}
+		const blocked = unresolvedDeps.length > 0;
+
 		try {
 			// Children inherit the ROOT REPO path, not the parent's cwd:
 			// a parent-worktree cwd would nest child worktrees and collapse
@@ -375,6 +393,9 @@ export async function tryHandleNestedGoalRoute(
 				...(suggestedRole ? { suggestedRole } : {}),
 				...(spawnedBySessionId ? { spawnedBySessionId } : {}),
 				...(dependsOn !== undefined ? { dependsOnPlanIds: dependsOn } : {}),
+				// dependsOn scheduling: stamp paused atomically so the child
+				// never has a window where it is unpaused with unresolved deps.
+				...(blocked ? { paused: true } : {}),
 			});
 			// Initialize gate states for the child's workflow gates.
 			// Without this, gate_list / gate_status / etc. see "no gates"
@@ -388,11 +409,18 @@ export async function tryHandleNestedGoalRoute(
 				console.warn(`[spawn-child] spawnedBySessionId could not be derived for goal=${child.id} parent=${parentId}`);
 			}
 			broadcastToAll({ type: "goal_created", goalId: child.id, parentGoalId: parentId });
-			json({ id: child.id, suggestedRole, spawnedBySessionId }, 201);
+			json({
+				id: child.id,
+				suggestedRole,
+				spawnedBySessionId,
+				...(blocked ? { blocked: true, pendingDeps: unresolvedDeps } : {}),
+			}, 201);
 
 			// Trigger worktree setup + team start exactly like POST /api/goals.
 			// Without this the child sits in setupStatus="preparing" forever.
-			if (child.setupStatus === "preparing") {
+			// Blocked children skip this — integrate-child re-invokes setup when
+			// the final dep merges (see auto-unblock scan below).
+			if (child.setupStatus === "preparing" && !blocked) {
 				goalManager.setupWorktreeAndStartTeam(child.id, () => teamManager.startTeam(child.id))
 					.then(() => {
 						broadcastToAll({ type: "goal_setup_complete", goalId: child.id });
@@ -671,6 +699,47 @@ export async function tryHandleNestedGoalRoute(
 					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
 				}
 				await goalManager.archiveGoalAfterMerge(childId);
+				// dependsOn scheduling — auto-unblock any sibling whose deps are
+				// now ALL complete after this merge. Best-effort: any throw is
+				// caught and logged so the merge itself still returns success.
+				try {
+					const mergedPlanId = child.spawnedFromPlanId;
+					if (mergedPlanId) {
+						const allSiblings = ctx.goalStore.getAll()
+							.filter(g => g.parentGoalId === parentId && !g.archived && g.id !== childId);
+						for (const sib of allSiblings) {
+							const deps = sib.dependsOnPlanIds;
+							if (!deps || deps.length === 0) continue;
+							if (!deps.includes(mergedPlanId)) continue;
+							// Re-check ALL deps — multi-dep children only unblock
+							// when the LAST dep merges.
+							const allResolved = deps.every(depPid => {
+								const depSib = ctx.goalStore.getAll().find(g =>
+									g.parentGoalId === parentId && g.spawnedFromPlanId === depPid);
+								return !!depSib && depSib.state === "complete";
+							});
+							if (!allResolved) continue;
+							if (!sib.paused) continue;
+							// Unblock: clear paused, trigger worktree setup + team start.
+							await goalManager.updateGoal(sib.id, { paused: false });
+							broadcastToAll({ type: "goal_state_changed", goalId: sib.id });
+							if (sib.setupStatus === "preparing") {
+								goalManager.setupWorktreeAndStartTeam(sib.id, () => teamManager.startTeam(sib.id))
+									.then(() => broadcastToAll({ type: "goal_setup_complete", goalId: sib.id }))
+									.catch(err => {
+										console.error(`[integrate-child] auto-unblock setup failed for ${sib.id}:`, err);
+										broadcastToAll({ type: "goal_setup_error", goalId: sib.id, error: String(err) });
+									});
+							} else if (sib.setupStatus === "ready") {
+								// Worktree already exists (resumed paused goal): just start the team.
+								try { await teamManager.startTeam(sib.id); }
+								catch (err) { console.error(`[integrate-child] startTeam failed for ${sib.id}:`, err); }
+							}
+						}
+					}
+				} catch (err) {
+					console.error(`[integrate-child] auto-unblock scan failed (non-fatal):`, err);
+				}
 				broadcastToAll({ type: "goal_state_changed", goalId: childId });
 				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
 				json({ merged: true, alreadyMerged: !!outcome.alreadyMerged, pushed: !!outcome.pushed });
