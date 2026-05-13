@@ -292,6 +292,13 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 	// Code) for full feature parity — native tool use, images, streaming.
 	// Non-Claude models use OpenAI completions with conservative compat.
 	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
+	// Bedrock Converse traffic goes to <gateway>/aws/model/<id>/converse-stream;
+	// the provider's normalized baseUrl ends in /v1 for the OpenAI-compatible path
+	// and is wrong for Bedrock. pi-ai uses `model.baseUrl` directly as the
+	// `BedrockRuntimeClient` endpoint, so emit a per-model override on Claude
+	// entries pointing at the /aws sub-tree. Mirrors the env var written by
+	// setBedrockEnvVars() but survives across subprocess/env-strip boundaries.
+	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
 
 	const openaiCompat: Record<string, unknown> = {
 		supportsDeveloperRole: false,
@@ -333,6 +340,9 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 					reasoning: m.reasoning,
 					input: m.input,
 					api: "bedrock-converse-stream",
+					// Per-model Bedrock endpoint override — provider baseUrl is the
+					// OpenAI-compatible /v1 root; Bedrock Converse lives under /aws.
+					baseUrl: bedrockBaseUrl,
 					...(m.compat ? { compat: m.compat } : {}),
 				};
 			}
