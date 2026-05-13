@@ -40,7 +40,14 @@ const matrix: MatrixRow[] = [
 	// OpenAI families that get xhigh.
 	{ label: "gpt-5.2-codex", model: { id: "gpt-5.2-codex", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "gpt-5.2", model: { id: "gpt-5.2", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "gpt-5.4", model: { id: "gpt-5.4", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "gpt-5.5", model: { id: "gpt-5.5", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "gpt-5.5-pro", model: { id: "gpt-5.5-pro", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
 	{ label: "gpt-5.1-codex-max", model: { id: "gpt-5.1-codex-max", provider: "openai", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	// Metadata-based detection should light up xhigh even for families Bobbit
+	// doesn't know by regex, and should override the heuristic when present.
+	{ label: "metadata-driven xhigh", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
+	{ label: "metadata disables xhigh despite heuristic match", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: null } }, expected: ALL_BASE },
 	// OpenAI families that do NOT get xhigh.
 	{ label: "gpt-5.1-codex (no -max)", model: { id: "gpt-5.1-codex", provider: "openai", reasoning: true }, expected: ALL_BASE },
 	{ label: "gpt-5", model: { id: "gpt-5", provider: "openai", reasoning: true }, expected: ALL_BASE },
@@ -49,8 +56,9 @@ const matrix: MatrixRow[] = [
 	{ label: "Gemini 3.1 Pro", model: { id: "gemini-3.1-pro", provider: "google", reasoning: true }, expected: ALL_BASE },
 	// aigw-routed Opus 4-7 — provider is "aigw" but id carries the canonical family.
 	{ label: "aigw/claude-opus-4-7", model: { id: "claude-opus-4-7-20251101", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
-	// aigw-routed gpt-5.2 — same rule.
+	// aigw-routed gpt-5.2 / gpt-5.4 — same rule.
 	{ label: "aigw/gpt-5.2", model: { id: "gpt-5.2", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
+	{ label: "aigw/gpt-5.4", model: { id: "gpt-5.4", provider: "aigw", reasoning: true }, expected: ALL_PLUS_XHIGH },
 ];
 
 test("THINKING_LEVELS contains the canonical 6-element ordered set", () => {
@@ -84,14 +92,17 @@ test("supportsXHigh: cross-provider id collision fails closed", () => {
 	assert.equal(supportsXHigh({ id: "claude-opus-4-7", provider: "google" }), false);
 });
 
-test("supportsXHigh: returns true only for Opus 4.6+ and gpt-5.1-codex-max / gpt-5.2*", () => {
+test("supportsXHigh: uses metadata first, else Opus 4.6+ and gpt-5.1-codex-max / gpt-5.2* / gpt-5.4* / gpt-5.5* fallback", () => {
 	assert.equal(supportsXHigh({ id: "claude-opus-4-7-x", provider: "anthropic" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-6-x", provider: "anthropic" }), true);
 	assert.equal(supportsXHigh({ id: "claude-opus-4-5-x", provider: "anthropic" }), false);
 	assert.equal(supportsXHigh({ id: "claude-sonnet-4-6-x", provider: "anthropic" }), false);
 	assert.equal(supportsXHigh({ id: "gpt-5.2-codex", provider: "openai" }), true);
-	assert.equal(supportsXHigh({ id: "gpt-5.2", provider: "openai" }), true);
+	assert.equal(supportsXHigh({ id: "gpt-5.4", provider: "openai" }), true);
+	assert.equal(supportsXHigh({ id: "gpt-5.5-pro", provider: "openai" }), true);
 	assert.equal(supportsXHigh({ id: "gpt-5.1-codex-max", provider: "openai" }), true);
+	assert.equal(supportsXHigh({ id: "future-reasoner", provider: "openai", thinkingLevelMap: { xhigh: "xhigh" } }), true);
+	assert.equal(supportsXHigh({ id: "gpt-5.5", provider: "openai", thinkingLevelMap: { xhigh: null } }), false);
 	assert.equal(supportsXHigh({ id: "gpt-5.1-codex", provider: "openai" }), false);
 	assert.equal(supportsXHigh({ id: "gpt-5", provider: "openai" }), false);
 	assert.equal(supportsXHigh({ id: "gemini-3.1-pro", provider: "google" }), false);

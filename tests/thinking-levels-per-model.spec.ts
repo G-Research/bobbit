@@ -41,6 +41,18 @@ test.describe("Per-model thinking-level selector", () => {
 		expect(supported).toContain("xhigh");
 	});
 
+	test("gpt-5.4 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("openai|gpt-5.4|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toContain("xhigh");
+	});
+
+	test("gpt-5.5 exposes xhigh option", async ({ page }) => {
+		await page.evaluate(() => (window as any).setModelByValue("openai|gpt-5.5|1"));
+		const supported = await page.evaluate(() => (window as any).getSupported());
+		expect(supported).toContain("xhigh");
+	});
+
 	test("gpt-5.1-codex-max exposes xhigh option", async ({ page }) => {
 		await page.evaluate(() => (window as any).setModelByValue("openai|gpt-5.1-codex-max|1"));
 		const supported = await page.evaluate(() => (window as any).getSupported());

@@ -2,14 +2,20 @@
  * Per-model thinking-level capabilities. Single source of truth shared
  * between the server (`src/server/`) and the UI (`src/app/`, `src/ui/`).
  *
- * Mirrors the rules used by upstream pi-mono / pi-coding-agent:
+ * Resolution order:
+ *   1. If the model carries upstream per-model metadata (`thinkingLevelMap`),
+ *      trust it for xhigh support.
+ *   2. Otherwise fall back to Bobbit's family heuristics for sparse model
+ *      payloads (notably AI Gateway / fallback persisted state).
+ *
+ * Base rules:
  *   - "off" is always supported.
  *   - "minimal"/"low"/"medium"/"high" are supported iff the model has
  *     `reasoning === true`.
- *   - "xhigh" is supported only by a small set of model families:
+ *   - Fallback heuristic: "xhigh" is supported by:
  *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, -4-7, …)
  *       • OpenAI gpt-5.1-codex-max
- *       • OpenAI gpt-5.2* (incl. gpt-5.2-codex)
+ *       • OpenAI gpt-5.2* / gpt-5.4* / gpt-5.5*
  *
  * Clamping (`clampThinkingLevel`) steps **down** by rank to the next-lower
  * supported level when the requested level is unsupported. Unknown tokens
@@ -44,6 +50,8 @@ export interface ModelLike {
 	provider?: string;
 	/** Whether the model supports reasoning/thinking at all. */
 	reasoning?: boolean;
+	/** Optional upstream per-model effort metadata from pi-ai. */
+	thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
 }
 
 /** Test whether a value is one of the canonical thinking levels. */
@@ -95,22 +103,28 @@ function isOpusXHigh(id: string, provider: string): boolean {
 
 /**
  * Does the given model's id/provider indicate an OpenAI family that
- * supports xhigh? Currently gpt-5.1-codex-max and any gpt-5.2*.
+ * supports xhigh in Bobbit's fallback heuristic? Currently
+ * gpt-5.1-codex-max and any gpt-5.2* / gpt-5.4* / gpt-5.5*.
  */
 function isOpenAiXHigh(id: string, provider: string): boolean {
 	if (!providerMatches(provider, "openai")) return false;
 	if (/^gpt-5\.1-codex-max\b/i.test(id)) return true;
-	if (/^gpt-5\.2/i.test(id)) return true;
+	if (/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id)) return true;
 	return false;
 }
 
 /**
- * Whether the given model supports the "xhigh" thinking level. Uses
- * substring matches on the id as the primary signal (so aigw-routed models
- * are detected correctly when `provider === "aigw"` but the id still
- * carries the canonical family name).
+ * Whether the given model supports the "xhigh" thinking level.
+ *
+ * Prefer upstream per-model metadata when present (`thinkingLevelMap`) so
+ * newly-added model families light up automatically without a Bobbit code
+ * change. Fall back to id/provider heuristics for sparse payloads such as
+ * AI Gateway discovery and persisted fallback state.
  */
 export function supportsXHigh(m: ModelLike): boolean {
+	if (m.thinkingLevelMap !== undefined) {
+		return m.thinkingLevelMap.xhigh !== undefined && m.thinkingLevelMap.xhigh !== null;
+	}
 	const id = m.id || "";
 	const provider = (m.provider || "").toLowerCase();
 	return isOpusXHigh(id, provider) || isOpenAiXHigh(id, provider);
