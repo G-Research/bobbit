@@ -1,8 +1,8 @@
 /**
- * Sidebar-nav perf harness (Phase 1).
+ * Sidebar-nav perf harness (Phase 1 + Phase 2A).
  *
- * Boots a real gateway, pre-seeds N=10 sessions (REST-only, no agent spawn —
- * we measure nav perf, not agent latency), then drives the browser through
+ * Boots a real gateway, pre-seeds N=10 sessions with REALISTIC transcript
+ * fixtures (Phase 2A: spec task 3b056b96), then drives the browser through
  * three passes — warm, goal, cold — dumping `window.__bobbitPerf.entries()`
  * after each pass plus a tail of the server's `[timing]` lines.
  *
@@ -20,7 +20,30 @@
  * dumping diagnostics. A silently-broken instrumentation must NOT pass with
  * empty data.
  *
- * SCREENSHOTS=1 dumps full-page PNGs at each nav step under .perf-out/screens/.
+ * Phase 2A — realistic transcript fixture
+ * ---------------------------------------
+ * The Phase 1 baseline measured against EMPTY sessions, so `reducer.rehydrate`
+ * and `api.session.fetch` payload sizes were artificially zero. Phase 2A
+ * pre-seeds each of the 10 sessions with N synthetic transcript messages
+ * (mixing user text, assistant text, tool_use / tool_result blocks, and at
+ * least one ≥50 KB tool-result blob).
+ *
+ * Mechanism (no `src/` changes): we stop the gateway after project
+ * registration, write a real `sessions.json` with N **archived** session
+ * rows pointing at synthetic JSONL files on disk, then restart the gateway.
+ * The per-project `SessionStore` reads our seeded rows on boot; the WS
+ * archived-attach path (`getArchivedMessages`) parses our JSONL and emits a
+ * real `messages` frame to the client, which makes the message-reducer
+ * actually rehydrate non-trivial state. The cold + warm passes navigate to
+ * these archived sessions via `window.__bobbitOpenForNavItem` so the
+ * `nav.click` / `nav.session.ready` instrumentation fires the same way it
+ * does for live rows. The (separate) goal pass is unchanged.
+ *
+ * Env vars:
+ *   BOBBIT_PERF_FIXTURE_SIZE = small | medium | large
+ *     Selects 10 / 50 / 200 messages per session. Default `medium`.
+ *   SCREENSHOTS=1 dumps full-page PNGs at each nav step under
+ *     .perf-out/screens/.
  */
 import { test, expect, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -35,6 +58,15 @@ const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
 const OUT_DIR = join(PROJECT_ROOT, "tests", "manual-integration", ".perf-out");
 const WANT_SCREENSHOTS = !!process.env.SCREENSHOTS;
+
+// Phase 2A fixture sizing. Order: small < medium < large.
+const FIXTURE_SIZES = { small: 10, medium: 50, large: 200 } as const;
+type FixtureSize = keyof typeof FIXTURE_SIZES;
+function resolveFixtureSize(): { name: FixtureSize; msgsPerSession: number } {
+	const raw = String(process.env.BOBBIT_PERF_FIXTURE_SIZE ?? "medium").toLowerCase();
+	const name = (raw in FIXTURE_SIZES ? raw : "medium") as FixtureSize;
+	return { name, msgsPerSession: FIXTURE_SIZES[name] };
+}
 
 const CANONICAL_GATE_SPANS = [
 	"nav.session.ready",
@@ -278,6 +310,173 @@ function escapeHtml(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 2A — realistic transcript fixture
+// ---------------------------------------------------------------------------
+// Deterministic-by-seed JSONL builder. Each line is a pi-coding-agent
+// session-entry of `type:"message"`, matching the shape parsed by
+// `src/server/agent/transcript-reader.ts::parseJsonl` and consumed by
+// `getArchivedMessages` (which is what the WS archived-attach path reads to
+// emit the snapshot frame).
+//
+// Mix (rough proportions per session):
+//   ~50% interleaved user + assistant text messages
+//   ~30% assistant tool_use + matching user tool_result pairs (5–10 pairs)
+//   ~20% padding / chatter — short lines so total size scales gently
+//
+// At least one assistant tool_use is paired with a large (>=50 KB) tool_result
+// blob to exercise the lazy-tool-content code path the Phase 2B optimisation
+// targets. The blob is deterministic ASCII so JSONL gzip ratios match what we
+// would see for real `bash` / `read_file` outputs (not random noise).
+
+function _msgEntry(ts: string, id: string, role: string, content: unknown): string {
+	return JSON.stringify({ type: "message", ts, id, message: { role, content } });
+}
+
+function _largeBlob(approxBytes: number, sessionIndex: number): string {
+	// Build a deterministic, line-oriented blob (mimics a `ls -lR` / log dump).
+	// 80-char lines so it looks like real tool output and compresses similarly.
+	const lines: string[] = [];
+	let bytes = 0;
+	let i = 0;
+	while (bytes < approxBytes) {
+		const line = `2026-05-13T${String(10 + (i % 14)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:${String((i * 7) % 60).padStart(2, "0")}.${String((i * 31) % 1000).padStart(3, "0")}Z  s${sessionIndex} line ${i.toString().padStart(6, "0")}  ${"x".repeat(24)}`;
+		lines.push(line);
+		bytes += line.length + 1; // + newline
+		i++;
+	}
+	return lines.join("\n");
+}
+
+function buildRealisticJsonl(sessionIndex: number, totalMsgs: number): string {
+	// Aim for 5–10 tool-call/tool-result pairs (deterministic from sessionIndex).
+	const toolPairs = Math.min(10, Math.max(5, 5 + (sessionIndex % 6)));
+	const lines: string[] = [];
+	const baseTs = Date.parse("2026-05-01T00:00:00.000Z");
+	const stamp = (i: number) => new Date(baseTs + sessionIndex * 3_600_000 + i * 15_000).toISOString();
+	const toolNames = ["bash", "read", "edit", "grep", "find", "write", "web_fetch"];
+
+	// Spread tool pairs roughly evenly across the transcript.
+	const toolPositions = new Set<number>();
+	if (toolPairs > 0 && totalMsgs > 4) {
+		const stride = Math.max(2, Math.floor((totalMsgs - 2) / toolPairs));
+		for (let k = 0; k < toolPairs; k++) toolPositions.add(2 + k * stride);
+	}
+	// Designate one tool pair to carry the >=50 KB blob.
+	const bigBlobPos = toolPositions.size > 0 ? [...toolPositions][Math.floor(toolPositions.size / 2)] : -1;
+
+	let i = 0;
+	let toolIdCounter = 0;
+	while (lines.length < totalMsgs) {
+		const ts = stamp(i);
+		const entryId = `e-${sessionIndex}-${i}`;
+		if (toolPositions.has(i) && lines.length + 1 < totalMsgs) {
+			// Emit assistant tool_use + user tool_result pair (counts as 2 messages).
+			const tname = toolNames[toolIdCounter % toolNames.length];
+			const toolUseId = `toolu_${sessionIndex}_${toolIdCounter}`;
+			toolIdCounter++;
+			const inputs: Record<string, unknown> = tname === "bash"
+				? { command: `ls -lR /workspace/sess-${sessionIndex} | head -n 40` }
+				: tname === "read"
+				? { path: `src/module-${i % 12}.ts`, offset: 1, limit: 80 }
+				: tname === "edit"
+				? { path: `src/module-${i % 12}.ts`, oldText: `// TODO ${i}`, newText: `// done ${i}` }
+				: tname === "grep"
+				? { pattern: `function\\s+name${i}`, path: "src/", glob: "*.ts" }
+				: tname === "find"
+				? { pattern: `**/*-${i % 7}.spec.ts`, path: "tests/" }
+				: tname === "write"
+				? { path: `out/result-${i}.txt`, content: `pass ${i}\n` }
+				: { url: `https://example.test/api/${i}.json` };
+			lines.push(_msgEntry(ts, entryId, "assistant", [
+				{ type: "text", text: `Running ${tname} for step ${i} (session ${sessionIndex}).` },
+				{ type: "tool_use", id: toolUseId, name: tname, input: inputs },
+			]));
+			const body = i === bigBlobPos
+				? _largeBlob(60_000, sessionIndex) // >=50 KB blob
+				: `ok\n${tname} completed in ${(i % 90) + 10}ms\n${"line " + i + "\n".repeat(1)}`.repeat(3);
+			lines.push(_msgEntry(stamp(i + 1), `e-${sessionIndex}-${i}-r`, "user", [
+				{ type: "tool_result", tool_use_id: toolUseId, content: body },
+			]));
+			i += 2;
+			continue;
+		}
+		// Plain alternating user / assistant text.
+		const isUser = i % 2 === 0;
+		const role = isUser ? "user" : "assistant";
+		const text = isUser
+			? `Step ${i}: please look at module-${i % 12}.ts and confirm the edge case from issue #${1000 + sessionIndex * 17 + i}.`
+			: `Looking at module-${i % 12}.ts now. The edge case at line ${30 + (i % 90)} reproduces with input ${i * 7 + sessionIndex}. Suggested fix: clamp the index before dispatching.`;
+		const content = isUser ? text : [{ type: "text", text }];
+		lines.push(_msgEntry(ts, entryId, role, content));
+		i++;
+	}
+	return lines.join("\n") + "\n";
+}
+
+/**
+ * Pre-seed N **archived** session rows in the project's `sessions.json` and
+ * write a matching JSONL transcript for each. Must run while the gateway is
+ * stopped — `SessionStore` reads `sessions.json` once at construction time
+ * (in `ProjectContext.open()` / `initAll()` at gateway boot), and writes
+ * back its in-memory view on mutation. Writing while the gateway is up
+ * would either be clobbered by the next save or trip the stale-snapshot
+ * guard.
+ */
+function seedArchivedFixtures(opts: {
+	projectStateDir: string;
+	projectId: string;
+	count: number;
+	msgsPerSession: number;
+}): { ids: string[]; bytesByteSum: number } {
+	const { projectStateDir, projectId, count, msgsPerSession } = opts;
+	const jsonlDir = join(projectStateDir, "perf-fixture-sessions");
+	mkdirSync(jsonlDir, { recursive: true });
+	const ids: string[] = [];
+	let bytesByteSum = 0;
+	const now = Date.now();
+	const rows: Record<string, unknown>[] = [];
+	for (let i = 0; i < count; i++) {
+		// Deterministic ID so multiple runs in the same dir are idempotent.
+		const id = `00000000-perf-${String(i).padStart(4, "0")}-0000-000000000000`;
+		const jsonlPath = join(jsonlDir, `${id}.jsonl`);
+		const body = buildRealisticJsonl(i, msgsPerSession);
+		writeFileSync(jsonlPath, body, "utf-8");
+		bytesByteSum += Buffer.byteLength(body, "utf-8");
+		ids.push(id);
+		rows.push({
+			id,
+			title: `perf-fixture-${i} (${msgsPerSession} msgs)`,
+			cwd: projectStateDir,
+			agentSessionFile: jsonlPath,
+			createdAt: now - (count - i) * 60_000,
+			lastActivity: now - (count - i) * 30_000,
+			projectId,
+			archived: true,
+			archivedAt: now - (count - i) * 10_000,
+		});
+	}
+	// Read any existing sessions.json so we don't trample concurrent fixtures
+	// (e.g. the goal pass's bare goal session, though it doesn't go through
+	// this dir). Preserve unknown fields by re-emitting them.
+	const storeFile = join(projectStateDir, "sessions.json");
+	let existing: { version: number; epoch: number; sessions: any[] } = { version: 2, epoch: 0, sessions: [] };
+	try {
+		const raw = readFileSync(storeFile, "utf-8");
+		const parsed = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && parsed.version === 2 && Array.isArray(parsed.sessions)) {
+			existing = parsed;
+		}
+	} catch { /* missing or unparseable — start fresh */ }
+	// Drop any of our previous fixture rows (idempotent re-runs) so we don't
+	// duplicate them; identified by the `perf-fixture-` title prefix.
+	const keep = existing.sessions.filter((s) => !(typeof s?.title === "string" && s.title.startsWith("perf-fixture-")));
+	const nextEpoch = (existing.epoch || 0) + 1;
+	const payload = { version: 2 as const, epoch: nextEpoch, sessions: [...keep, ...rows] };
+	writeFileSync(storeFile, JSON.stringify(payload, null, 2), "utf-8");
+	return { ids, bytesByteSum };
+}
+
+// ---------------------------------------------------------------------------
 // Test
 // ---------------------------------------------------------------------------
 let gw: GW | null = null;
@@ -330,40 +529,42 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	}
 	expect(gw.defaultProjectId, "project registration failed — cannot seed sessions").toBeTruthy();
 
-	// ── Pre-seed N=10 sessions via REST ─────────────────────────────
-	const sessionIds: string[] = [];
-	for (let i = 0; i < 10; i++) {
-		const body = JSON.stringify({
-			projectId: gw.defaultProjectId,
-			title: `perf-bench-${i}`,
-			cwd: dir,
-			// Empty / minimal — we don't want an agent to actually spawn.
-			noAgent: true,
-		});
-		const r = await api(gw, "/api/sessions", { method: "POST", body });
-		const j = r.ok ? await r.json() : null;
-		const sid = j?.id ?? j?.session?.id ?? j?.sessionId;
-		if (sid) sessionIds.push(sid);
-		else console.warn(`Failed to create session ${i}: ${r.status}`);
-	}
-	console.log(`[harness] seeded ${sessionIds.length} sessions`);
-	expect(sessionIds.length, "need at least 5 seeded sessions to measure nav perf").toBeGreaterThanOrEqual(5);
+	// ── Phase 2A: pre-seed N=10 sessions with REALISTIC transcripts ─
+	// Stop the gateway, seed sessions.json + JSONL files on disk, then
+	// restart. See header comment + `seedArchivedFixtures` for the mechanism.
+	const { name: fixtureSizeName, msgsPerSession } = resolveFixtureSize();
+	const FIXTURE_COUNT = 10;
+	const projectStateDir = join(dir, ".bobbit", "state");
+	const capturedProjectId = gw.defaultProjectId!;
+	console.log(`[harness] fixture size = ${fixtureSizeName} (${msgsPerSession} msgs/session × ${FIXTURE_COUNT} sessions)`);
 
-	// Probe what GET /api/sessions returns server-side so we can tell whether
-	// the sidebar filter is the problem or the seed itself never landed.
+	await stopGW(gw);
+	const seeded = seedArchivedFixtures({
+		projectStateDir,
+		projectId: capturedProjectId,
+		count: FIXTURE_COUNT,
+		msgsPerSession,
+	});
+	console.log(`[harness] wrote ${seeded.ids.length} JSONL fixtures (${(seeded.bytesByteSum / 1024).toFixed(1)} KB total)`);
+	gw = await startGW(dir, port);
+	gw.defaultProjectId = capturedProjectId;
+
+	const sessionIds = seeded.ids;
+	expect(sessionIds.length, "fixture seeding produced fewer than 5 sessions").toBeGreaterThanOrEqual(5);
+
+	// Sanity-check the gateway actually loaded our archived rows.
 	try {
-		const r = await api(gw, "/api/sessions");
+		const r = await api(gw, "/api/sessions?include=archived&limit=200");
 		if (r.ok) {
 			const j: any = await r.json();
-			const arr = Array.isArray(j) ? j : (j.sessions || j.data || []);
-			const withProjectId = arr.filter((s: any) => s.projectId).length;
-			console.log(`[harness] GET /api/sessions: ${arr.length} session(s), ${withProjectId} with projectId`);
-			if (arr[0]) console.log(`[harness] first session keys:`, Object.keys(arr[0]).join(","));
+			const arr = Array.isArray(j) ? j : (j.sessions || j.archived || j.data || []);
+			const fixtureRows = arr.filter((s: any) => typeof s.title === "string" && s.title.startsWith("perf-fixture-"));
+			console.log(`[harness] GET /api/sessions?include=archived: ${arr.length} total, ${fixtureRows.length} fixture row(s)`);
 		} else {
-			console.warn(`[harness] GET /api/sessions failed: ${r.status}`);
+			console.warn(`[harness] GET /api/sessions?include=archived failed: ${r.status}`);
 		}
 	} catch (err) {
-		console.warn(`[harness] GET /api/sessions threw:`, err);
+		console.warn(`[harness] GET /api/sessions?include=archived threw:`, err);
 	}
 
 	// ── Browser context: enable perf + console log ──────────────────
@@ -378,6 +579,10 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	await page.addInitScript(() => {
 		try { localStorage.setItem("bobbitPerf", "1"); } catch { /* swallow */ }
 		try { localStorage.setItem("BOBBIT_PERF_LOG", "1"); } catch { /* swallow */ }
+		// Phase 2A: surface archived sessions in the sidebar so we can drive
+		// nav from the keyboard / programmatic openForNavItem path the same
+		// way we would for live rows.
+		try { localStorage.setItem("bobbit-show-archived", "true"); } catch { /* swallow */ }
 	});
 
 	const clientEntries: Array<{ name: string; dur: number; detail?: any; pass: string }> = [];
@@ -408,28 +613,12 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		await dumpClientEntries("cold");
 	}
 
-	// ── Re-seed sessions before the warm pass ─────────────────────
-	// The cold pass connects to + then drops sessions; some server-side
-	// archive-on-disconnect path then sweeps the originals before we get to
-	// click them in warm pass. Re-seed a fresh batch so warm pass has live
-	// rows to click. We don't spelunk into the archive code path — this is
-	// the pragmatic fix per the task spec.
-	const warmSessionIds: string[] = [];
-	for (let i = 0; i < 10; i++) {
-		const body = JSON.stringify({
-			projectId: gw.defaultProjectId,
-			title: `perf-bench-warm-${i}`,
-			cwd: dir,
-			noAgent: true,
-		});
-		const r = await api(gw, "/api/sessions", { method: "POST", body });
-		const j = r.ok ? await r.json() : null;
-		const sid = j?.id ?? j?.session?.id ?? j?.sessionId;
-		if (sid) warmSessionIds.push(sid);
-	}
-	console.log(`[harness] re-seeded ${warmSessionIds.length} warm-pass sessions`);
+	// ── Phase 2A: pre-seeded archived fixtures persist across the cold
+	// pass (archived rows are not auto-swept on disconnect), so the warm
+	// pass reuses the same `sessionIds` instead of re-seeding.
+	const warmSessionIds: string[] = sessionIds;
 
-	// ── Warm pass: navigate to landing, then click through sessions ──
+	// ── Warm pass: navigate to landing, then nav through sessions ────
 	await page.goto(appUrl);
 	await page.waitForLoadState("domcontentloaded");
 	// Initial landing on a tokenised URL does not fire a hashchange, and the
@@ -499,16 +688,21 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		console.warn("[harness] sidebar probe:", JSON.stringify(diag));
 	}
 
+	// Drive nav programmatically via `window.__bobbitOpenForNavItem` (set up
+	// by main.ts). This is the same entry point keyboard navigation uses, and
+	// it fires the canonical `nav.click` + `nav.session.ready` spans whether
+	// the row is live or archived. The original row-click path bypasses
+	// `openForNavItem` for archived rows (see render-helpers.ts:501 — calls
+	// connectToSession directly), so a literal click on a fixture row would
+	// produce zero `nav.session.ready` samples and trip the canonical-span
+	// invariant.
+	await page.waitForFunction(() => !!(window as any).__bobbitOpenForNavItem, undefined, { timeout: 10_000 });
 	const clickIds = warmSessionIds.length > 0 ? warmSessionIds : sessionIds;
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of clickIds) {
-			const row = page.locator(`[data-nav-id="session:${sid}"]`).first();
-			const rowCount = await row.count();
-			if (rowCount === 0) {
-				console.warn(`[harness] sidebar row for session ${sid} not found — skipping`);
-				continue;
-			}
-			await row.click({ force: true });
+			await page.evaluate((id) => {
+				(window as any).__bobbitOpenForNavItem({ kind: "session", id });
+			}, sid);
 			try {
 				await page.waitForSelector(`#app[data-perf-ready="session"]`, { timeout: 10_000 });
 			} catch { /* keep going */ }
@@ -603,6 +797,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	writeFileSync(jsonPath, JSON.stringify({
 		timestamp: ts,
 		seededSessions: sessionIds.length,
+		fixtureSize: fixtureSizeName,
+		msgsPerSession,
 		goalId,
 		clientEntries,
 		serverTimingLines: timingTail,
@@ -625,11 +821,18 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		try { parentCommit = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		try { branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		const short = commit.slice(0, 12);
-		const historyPath = join(HISTORY_DIR, `${short}.json`);
+		// Suffix the history file with the fixture size so medium / large runs
+		// on the same commit don't overwrite each other. The cross-commit
+		// report (scripts/perf-report.mjs) groups by SHA and reads the JSON's
+		// own `fixtureSize` field, so the file name is purely a uniqueness key.
+		const suffix = fixtureSizeName === "medium" ? "" : `-${fixtureSizeName}`;
+		const historyPath = join(HISTORY_DIR, `${short}${suffix}.json`);
 		writeFileSync(historyPath, JSON.stringify({
 			commit, parentCommit, branch,
 			timestamp: new Date().toISOString(),
 			seededSessions: sessionIds.length,
+			fixtureSize: fixtureSizeName,
+			msgsPerSession,
 			spans,
 		}, null, 2));
 		console.log(`[harness] wrote ${historyPath}`);
