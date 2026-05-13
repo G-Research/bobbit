@@ -49,7 +49,7 @@ test.beforeAll(() => { token = readE2EToken(); });
 
 test.describe("No default workflow scaffold", () => {
 	test("Case A — POST /api/projects without workflows persists with zero workflows", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-"));
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-")));
 		gitInit(root);
 
 		const projName = `nodef-a-${Date.now()}`;
@@ -86,7 +86,7 @@ test.describe("No default workflow scaffold", () => {
 	});
 
 	test("Case B — workflows in proposal are kept exactly, no defaults merged", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-"));
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-")));
 		gitInit(root);
 
 		const projName = `nodef-b-${Date.now()}`;
@@ -126,7 +126,7 @@ test.describe("No default workflow scaffold", () => {
 	});
 
 	test("Case C — goal-creation side-effects do not seed workflows into a zero-workflows project", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-"));
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
 		const projName = `nodef-c-${Date.now()}`;

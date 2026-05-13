@@ -218,7 +218,7 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 		const createResp = await fetch(`${base()}/api/projects`, {
 			method: "POST",
 			headers: authHeaders(),
-			body: JSON.stringify({ name: "other-precomp", rootPath: otherRoot, upsert: true, __e2e_seed_skip__: true }),
+			body: JSON.stringify({ name: "other-precomp", rootPath: otherRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
 		});
 		expect(createResp.ok).toBe(true);
 		const otherProj = await createResp.json();

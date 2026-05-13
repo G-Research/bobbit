@@ -29,7 +29,7 @@ function gitInit(dir: string): void {
 test.beforeAll(() => { token = readE2EToken(); });
 
 test("multi-repo goal creates per-repo worktrees", async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-goal-"));
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-goal-")));
 	gitInit(path.join(root, "api"));
 	gitInit(path.join(root, "web"));
 	gitInit(path.join(root, "shared"));
