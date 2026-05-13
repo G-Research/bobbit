@@ -6,7 +6,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-addproj-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });
-	return dir;
+	// Canonicalize: tmpdir() is a /var/folders symlink on macOS. Returning the
+	// canonical path keeps test comparisons (p.rootPath === dir) consistent
+	// with what the registry stores after the UI's acceptCanonical resubmit.
+	return realpathSync(dir);
 }
 
 test.describe("Add Project flow (UI)", () => {
@@ -62,10 +65,13 @@ test.describe("Add Project flow (UI)", () => {
 	});
 
 	test("auto-import project with existing .bobbit directory", async ({ page }) => {
-		// Create a temp dir with .bobbit/config and .bobbit/state
+		// Create a temp dir with .bobbit/config/project.yaml — required for
+		// hasBobbit=true since commit 54d5b710 (project.yaml is now the source
+		// of truth, not the bare .bobbit/ directory).
 		const dir = uniqueDir("bobbit-import");
 		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "name: test\n");
 		writeFileSync(join(dir, "README.md"), "# Test Project\n");
 
 		await openApp(page);
