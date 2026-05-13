@@ -5,7 +5,13 @@
  * Maintainer-run, NOT executed on `npm install`. Downloads fd and ripgrep
  * release archives for every supported platform, verifies SHA-256, extracts
  * the binaries into `binaries/binaries-<plat>-<arch>/bin/`, and bumps each
- * sub-package's version to match the root package.
+ * sub-package's bin/ directory.
+ *
+ * Sub-package versions are INDEPENDENT of the root bobbit version — fd and rg
+ * change rarely (~yearly), so we bump sub-package versions only when fd/rg
+ * versions in binaries.versions.json change. The root bobbit can ship many
+ * versions while the sub-packages stay pinned. The root's optionalDependencies
+ * block in package.json controls which sub-package version is required.
  *
  * Inputs:
  *   - binaries.versions.json — pinned fd / ripgrep versions
@@ -218,12 +224,12 @@ async function buildOne(target, versions, checksums) {
 			console.log(`  → ${path.relative(REPO_ROOT, destBinary)}`);
 		}
 
-		// Bump version to match root.
+		// Sub-package version is independent of root bobbit version. Bump it manually
+		// in each binaries/binaries-*/package.json when you actually intend to publish
+		// a new sub-package (fd/rg upstream change).
 		const subPkgPath = path.join(pkgDir, "package.json");
 		const sub = JSON.parse(fs.readFileSync(subPkgPath, "utf-8"));
-		sub.version = ROOT_PKG.version;
-		fs.writeFileSync(subPkgPath, JSON.stringify(sub, null, 2) + "\n");
-		console.log(`  version → ${ROOT_PKG.version}`);
+		console.log(`  version: ${sub.version} (pinned, decoupled from root ${ROOT_PKG.version})`);
 	} finally {
 		fs.rmSync(tmpRoot, { recursive: true, force: true });
 	}
@@ -255,13 +261,21 @@ async function main() {
 		await buildOne(t, versions, checksums);
 	}
 
-	console.log("\nDone. To publish:");
+	console.log(
+		"\nDone. Sub-packages are decoupled from the root bobbit version — only\n" +
+			"publish them when fd/rg upstream versions change (rare, ~yearly).\n\n" +
+			"If you DID change fd/rg versions and need to publish:\n" +
+			"  1. Bump version in each binaries/binaries-*/package.json by hand\n" +
+			"  2. Bump the matching pin in root package.json optionalDependencies\n" +
+			"  3. Run the commands below (publishConfig.access=public is baked in)",
+	);
 	for (const t of targets) {
-		console.log(`  npm publish --access public ./binaries/${t.pkg}`);
+		console.log(`     npm publish ./binaries/${t.pkg}`);
 	}
 	console.log(
-		"\nReview each sub-package, then run the commands above. Make sure you're\n" +
-			"logged in (`npm whoami`) and the @bobbit scope exists.",
+		"\nIf you're just bumping bobbit and didn't touch binaries.versions.json,\n" +
+			"skip the sub-package publishes — they stay at their current version and\n" +
+			"bobbit's existing optionalDependencies range will pick them up.",
 	);
 }
 

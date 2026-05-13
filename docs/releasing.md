@@ -27,7 +27,11 @@ scripts/build-binaries.mjs
 
 Each sub-package declares strict `os` / `cpu` fields so npm installs
 exactly one per host. The root `package.json` lists all of them under
-`optionalDependencies` at the same version as the root (lockstep).
+`optionalDependencies` pinned to an exact version. Sub-package versions
+are **decoupled from the root bobbit version** — fd and ripgrep change
+upstream rarely (~yearly), so the sub-packages stay pinned across many
+bobbit releases. Only bump and republish them when `binaries.versions.json`
+changes.
 
 ### Bumping fd or ripgrep
 
@@ -58,23 +62,30 @@ exactly one per host. The root `package.json` lists all of them under
    and the regenerated `binaries/binaries-*/package.json` files.
    **Do not commit the binaries themselves** (`bin/` is `.gitignore`d
    inside each sub-package).
-6. Publish each sub-package, then the root:
+6. Bump the version in each `binaries/binaries-*/package.json` by hand
+   (the build script no longer auto-bumps these). Update the matching
+   pin in the root `package.json` `optionalDependencies` block to the
+   new version.
+7. Publish each sub-package, then the root:
    ```bash
-   npm publish --access public ./binaries/binaries-darwin-arm64
-   npm publish --access public ./binaries/binaries-darwin-x64
-   npm publish --access public ./binaries/binaries-linux-x64
-   npm publish --access public ./binaries/binaries-linux-arm64
-   npm publish --access public ./binaries/binaries-win32-x64
+   npm publish ./binaries/binaries-darwin-arm64
+   npm publish ./binaries/binaries-darwin-x64
+   npm publish ./binaries/binaries-linux-x64
+   npm publish ./binaries/binaries-linux-arm64
+   npm publish ./binaries/binaries-win32-x64
    npm publish
    ```
-   The build script prints these commands at the end of its run.
+   `publishConfig.access: "public"` is baked into each sub-package, so
+   `--access public` is no longer needed on the CLI.
 
-### Lockstep versioning
+### Decoupled versioning
 
-Sub-package versions track the root `package.json` `version`. The build
-script overwrites each sub-package's `version` field to match. Bumping
-fd or ripgrep is therefore a normal Bobbit version bump — there is no
-independent sub-package version to manage.
+Sub-package versions are pinned independently of the root bobbit version.
+For a typical bobbit release that doesn't touch fd or ripgrep, you only
+publish the root — the sub-packages stay at their current version and
+the existing `optionalDependencies` pin in `package.json` continues to
+resolve. Only republish sub-packages when `binaries.versions.json`
+changes, and update the root pin to match in the same commit.
 
 ### Behaviour when the sub-package is missing
 
