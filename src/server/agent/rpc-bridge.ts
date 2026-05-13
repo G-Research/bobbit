@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
+import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -122,8 +123,9 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 		}
 	}
 	if (options.initialThinkingLevel) {
-		const valid = ["off", "minimal", "low", "medium", "high"];
-		if (valid.includes(options.initialThinkingLevel)) {
+		// CLI accepts any known token; per-model clamping is a UI/server-boundary
+		// concern, not a CLI concern. The agent itself ignores unsupported levels.
+		if ((THINKING_LEVELS as readonly string[]).includes(options.initialThinkingLevel)) {
 			args.push("--thinking", options.initialThinkingLevel);
 		}
 	}

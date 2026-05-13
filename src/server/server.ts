@@ -50,6 +50,7 @@ import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
+import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-levels.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
 // `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
@@ -75,7 +76,7 @@ import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
@@ -118,6 +119,26 @@ const execFileAsync = promisify(execFileCb);
  * Delete remote branches associated with a goal (integration + agent worktree branches).
  * Fire-and-forget — errors are logged but never block the archive flow.
  */
+/**
+ * Clamp a thinking-level token against a role's pinned model (if any).
+ * - Validates that the token is in the canonical set; returns undefined otherwise.
+ * - When `modelStr` is set in canonical `provider/modelId` form, clamps the
+ *   level against that model's inferred reasoning/family.
+ * - When `modelStr` is empty (role inherits), returns the validated token as-is
+ *   — the per-session clamp at spawn time will handle model resolution.
+ */
+function clampRoleThinking(value: unknown, modelStr: string | undefined): string | undefined {
+	const known = isKnownThinkingLevel(value);
+	if (!known) return undefined;
+	if (!modelStr) return known;
+	const slash = modelStr.indexOf("/");
+	if (slash <= 0) return known;
+	const provider = modelStr.slice(0, slash);
+	const modelId = modelStr.slice(slash + 1);
+	const meta = inferMeta(modelId);
+	return clampThinkingLevel(known, { id: modelId, provider, reasoning: meta.reasoning });
+}
+
 async function deleteRemoteGoalBranches(
 	goal: PersistedGoal,
 	extraBranches: readonly string[],
@@ -4304,14 +4325,15 @@ async function handleApiRoute(
 				const ctx = projectContextManager.getOrCreate(targetProjectId);
 				if (!ctx) { json({ error: "Project not found" }, 404); return; }
 				const now = Date.now();
+				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 				const role = {
 					name: body?.name,
 					label: body?.label ?? body?.name,
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory ?? "none",
 					toolPolicies: body?.toolPolicies,
-					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
-					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
+					model: modelStr,
+					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -4321,14 +4343,15 @@ async function handleApiRoute(
 				ctx.roleStore.put(role);
 				json(role, 201);
 			} else {
+				const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 				const role = roleManager.createRole({
 					name: body?.name,
 					label: body?.label,
 					promptTemplate: body?.promptTemplate || "",
 					accessory: body?.accessory,
 					toolPolicies: body?.toolPolicies,
-					model: typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined,
-					thinkingLevel: typeof body?.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined,
+					model: modelStr,
+					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
 				});
 				json(role, 201);
 			}
@@ -4437,7 +4460,7 @@ async function handleApiRoute(
 				}
 				let thinkingLevel = existing.thinkingLevel;
 				if (body.thinkingLevel !== undefined) {
-					thinkingLevel = typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : undefined;
+					thinkingLevel = clampRoleThinking(body.thinkingLevel, model);
 				}
 				const updated = {
 					...existing,
@@ -4458,7 +4481,7 @@ async function handleApiRoute(
 					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
 					: undefined;
 				const thinkingUpdate = body.thinkingLevel !== undefined
-					? (typeof body.thinkingLevel === "string" && body.thinkingLevel.trim() ? body.thinkingLevel.trim() : "")
+					? (clampRoleThinking(body.thinkingLevel, typeof modelUpdate === "string" ? modelUpdate : undefined) ?? "")
 					: undefined;
 				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
 				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
