@@ -293,6 +293,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	await page.setViewportSize({ width: 1280, height: 800 });
 
 	mkdirSync(OUT_DIR, { recursive: true });
+	const HISTORY_DIR = resolve(PROJECT_ROOT, "docs", "perf", "history");
+	mkdirSync(HISTORY_DIR, { recursive: true });
 	if (WANT_SCREENSHOTS) mkdirSync(join(OUT_DIR, "screens"), { recursive: true });
 
 	// ── Boot gateway in an isolated dir ────────────────────────────
@@ -347,6 +349,23 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	console.log(`[harness] seeded ${sessionIds.length} sessions`);
 	expect(sessionIds.length, "need at least 5 seeded sessions to measure nav perf").toBeGreaterThanOrEqual(5);
 
+	// Probe what GET /api/sessions returns server-side so we can tell whether
+	// the sidebar filter is the problem or the seed itself never landed.
+	try {
+		const r = await api(gw, "/api/sessions");
+		if (r.ok) {
+			const j: any = await r.json();
+			const arr = Array.isArray(j) ? j : (j.sessions || j.data || []);
+			const withProjectId = arr.filter((s: any) => s.projectId).length;
+			console.log(`[harness] GET /api/sessions: ${arr.length} session(s), ${withProjectId} with projectId`);
+			if (arr[0]) console.log(`[harness] first session keys:`, Object.keys(arr[0]).join(","));
+		} else {
+			console.warn(`[harness] GET /api/sessions failed: ${r.status}`);
+		}
+	} catch (err) {
+		console.warn(`[harness] GET /api/sessions threw:`, err);
+	}
+
 	// ── Browser context: enable perf + console log ──────────────────
 	page.on("console", (msg) => {
 		if (msg.text().startsWith("[perf]")) {
@@ -389,38 +408,117 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		await dumpClientEntries("cold");
 	}
 
+	// ── Re-seed sessions before the warm pass ─────────────────────
+	// The cold pass connects to + then drops sessions; some server-side
+	// archive-on-disconnect path then sweeps the originals before we get to
+	// click them in warm pass. Re-seed a fresh batch so warm pass has live
+	// rows to click. We don't spelunk into the archive code path — this is
+	// the pragmatic fix per the task spec.
+	const warmSessionIds: string[] = [];
+	for (let i = 0; i < 10; i++) {
+		const body = JSON.stringify({
+			projectId: gw.defaultProjectId,
+			title: `perf-bench-warm-${i}`,
+			cwd: dir,
+			noAgent: true,
+		});
+		const r = await api(gw, "/api/sessions", { method: "POST", body });
+		const j = r.ok ? await r.json() : null;
+		const sid = j?.id ?? j?.session?.id ?? j?.sessionId;
+		if (sid) warmSessionIds.push(sid);
+	}
+	console.log(`[harness] re-seeded ${warmSessionIds.length} warm-pass sessions`);
+
 	// ── Warm pass: navigate to landing, then click through sessions ──
 	await page.goto(appUrl);
 	await page.waitForLoadState("domcontentloaded");
-	// Wait for any session row to show up in the sidebar before we start clicking.
+	// Initial landing on a tokenised URL does not fire a hashchange, and the
+	// landing-branch boot path in main.ts doesn't call `refreshSessions()` —
+	// so without a refresh kick the sidebar renders 0 sessions. Wait for the
+	// `__bobbitRefreshSessions` window surface (set by main.ts) and call it.
+	try {
+		await page.waitForFunction(() => !!(window as any).__bobbitRefreshSessions, undefined, { timeout: 10_000 });
+		const diag = await page.evaluate(async () => {
+			try {
+				const tok = localStorage.getItem("gateway.token") || "";
+				const rurl = (localStorage.getItem("gateway.url") || location.origin) + "/api/sessions";
+				const r = await fetch(rurl, { headers: { Authorization: `Bearer ${tok}` } });
+				const body = await r.text();
+				let n = -1;
+				try { const j = JSON.parse(body); n = (j.sessions ?? j).length; } catch {}
+				await (window as any).__bobbitRefreshSessions();
+				const st = (window as any).__bobbitState;
+				return {
+					ok: true,
+					directFetchStatus: r.status,
+					directFetchCount: n,
+					directBodyHead: body.slice(0, 300),
+					stateCount: st?.gatewaySessions?.length ?? -1,
+					sessionsGen: st?.sessionsGeneration ?? null,
+					err: st?.sessionsError ?? null,
+				};
+			} catch (err) {
+				return { ok: false, err: String(err) };
+			}
+		});
+		console.log("[harness] post-refresh state:", JSON.stringify(diag));
+	} catch {
+		console.warn("[harness] __bobbitRefreshSessions not available");
+	}
+	// The ungrouped-header is EXPANDED by default — the persisted state is
+	// the *collapsed* set in localStorage (`bobbit-collapsed-ungrouped`).
+	// Clear that set so all ungrouped sections are visible, then trigger a
+	// re-render. (Clicking the header would TOGGLE — i.e. collapse it.)
+	await page.evaluate(() => {
+		try { localStorage.setItem("bobbit-collapsed-ungrouped", "[]"); } catch { /* swallow */ }
+	});
+	try {
+		await page.waitForSelector('[data-nav-id^="ungrouped-header:"]', { timeout: 15_000 });
+	} catch {
+		console.warn("[harness] no ungrouped header in sidebar after 15s");
+	}
+	// Confirm at least one session row is now visible before we start clicking.
 	try {
 		await page.waitForSelector('[data-nav-id^="session:"]', { timeout: 15_000 });
 	} catch {
-		const html = await page.content();
-		console.warn("[harness] no session rows in sidebar after 15s — first 4k of body:");
-		console.warn(html.slice(0, 4000));
+		const diag = await page.evaluate(() => {
+			const w = window as any;
+			const st = w.state || w.__bobbitState;
+			const nav = Array.from(document.querySelectorAll("[data-nav-id]")).map((el) => el.getAttribute("data-nav-id")).filter(Boolean);
+			return {
+				nav,
+				hasState: !!st,
+				sessionsCount: st?.gatewaySessions?.length ?? null,
+				sessionsLoading: st?.sessionsLoading ?? null,
+				sessionsError: st?.sessionsError ?? null,
+				appView: st?.appView ?? null,
+				projectsCount: st?.projects?.length ?? null,
+				firstSession: st?.gatewaySessions?.[0] ? { id: st.gatewaySessions[0].id, projectId: st.gatewaySessions[0].projectId, goalId: st.gatewaySessions[0].goalId, status: st.gatewaySessions[0].status, archived: st.gatewaySessions[0].archived } : null,
+			};
+		});
+		console.warn("[harness] sidebar probe:", JSON.stringify(diag));
 	}
 
+	const clickIds = warmSessionIds.length > 0 ? warmSessionIds : sessionIds;
 	for (let lap = 0; lap < 2; lap++) {
-		for (const sid of sessionIds) {
-			// Prefer clicking the sidebar row (mirrors user interaction).
+		for (const sid of clickIds) {
 			const row = page.locator(`[data-nav-id="session:${sid}"]`).first();
 			const rowCount = await row.count();
-			if (rowCount > 0) {
-				await row.click({ force: true });
-			} else {
-				// Fallback: invoke the same code path the click handler uses.
-				await page.evaluate(async (id) => {
-					const mod = await import("/src/app/sidebar-nav.ts");
-					mod.openForNavItem({ kind: "session", id });
-				}, sid).catch(() => {
-					return page.evaluate((id) => { location.hash = `#/session/${id}`; }, sid);
-				});
+			if (rowCount === 0) {
+				console.warn(`[harness] sidebar row for session ${sid} not found — skipping`);
+				continue;
 			}
+			await row.click({ force: true });
 			try {
 				await page.waitForSelector(`#app[data-perf-ready="session"]`, { timeout: 10_000 });
 			} catch { /* keep going */ }
 			await page.waitForTimeout(50);
+			// Clear the sentinel so the *next* nav can re-set it (avoids a stale
+			// `data-perf-ready` immediately satisfying the wait).
+			await page.evaluate(() => {
+				const el = document.getElementById("app");
+				if (el) el.removeAttribute("data-perf-ready");
+			});
 		}
 	}
 	await dumpClientEntries("warm");
@@ -444,31 +542,55 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	if (goalId) {
 		await page.goto(appUrl);
 		await page.waitForTimeout(1500);
+		// Kick a refresh so state.goals + state.gatewaySessions populate.
+		try {
+			await page.waitForFunction(() => !!(window as any).__bobbitRefreshSessions, undefined, { timeout: 10_000 });
+			await page.evaluate(async () => { await (window as any).__bobbitRefreshSessions(); });
+		} catch { /* swallow */ }
+		try {
+			await page.waitForFunction((id: string) => {
+				const st = (window as any).__bobbitState;
+				return st && (st.goals?.some((g: any) => g.id === id) ?? false);
+			}, goalId, { timeout: 10_000 });
+		} catch {
+			console.warn("[harness] goal never appeared in state.goals");
+		}
 		for (let lap = 0; lap < 2; lap++) {
-			// Click the goal sidebar row when available so nav.click + nav.goal.ready fire.
+			// The goal-row click only expands the goal group; navigation to the
+			// dashboard happens via the per-goal dashboard button which carries
+			// `data-nav-action="goal-dashboard"`. Hover the row first to reveal
+			// the sidebar-actions overlay.
 			const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-			const rowCount = await row.count();
-			if (rowCount > 0) {
-				await row.click({ force: true });
-			} else {
-				await page.evaluate(async (id) => {
-					const mod = await import("/src/app/sidebar-nav.ts");
-					mod.openForNavItem({ kind: "goal", id });
-				}, goalId).catch(() => {
-					return page.evaluate((id) => { location.hash = `#/goal/${id}`; }, goalId);
-				});
+			if (await row.count() === 0) {
+				console.warn(`[harness] sidebar row for goal ${goalId} not found on lap ${lap}`);
+				break;
 			}
+			await row.hover();
+			const dashBtn = page.locator(`[data-nav-action="goal-dashboard"][data-goal-id="${goalId}"]`).first();
+			if (await dashBtn.count() === 0) {
+				console.warn(`[harness] goal dashboard button not found on lap ${lap}`);
+				break;
+			}
+			await dashBtn.click({ force: true });
 			try {
 				await page.waitForSelector(`#app[data-perf-ready="goal"]`, { timeout: 10_000 });
 			} catch { /* keep going */ }
 			await page.waitForTimeout(150);
-			await page.evaluate(() => { location.hash = "#/"; });
+			await page.evaluate(() => {
+				const el = document.getElementById("app");
+				if (el) el.removeAttribute("data-perf-ready");
+				location.hash = "#/";
+			});
 			await page.waitForTimeout(150);
 		}
+		// Dump warm-goal entries BEFORE the cold reload — page.goto clears the
+		// per-page ring buffer, and we want the click-driven nav.click /
+		// nav.goal.ready samples preserved.
+		await dumpClientEntries("goal-warm");
 		// One cold reload
 		await page.goto(`${appUrl}#/goal/${goalId}`);
 		try { await page.waitForSelector(`#app[data-perf-ready="goal"]`, { timeout: 10_000 }); } catch { /* swallow */ }
-		await dumpClientEntries("goal");
+		await dumpClientEntries("goal-cold");
 	} else {
 		console.warn("[harness] goal creation failed \u2014 goal pass skipped");
 	}
@@ -492,6 +614,37 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	}));
 	console.log(`[harness] wrote ${jsonPath}`);
 	console.log(`[harness] wrote ${htmlPath}`);
+
+	// ── Cross-commit history: write docs/perf/history/<sha>.json ─────
+	try {
+		const rows = summarise(clientEntries);
+		const spans: Record<string, { p50: number; p95: number; p99: number; n: number; mean: number; max: number }> = {};
+		for (const r of rows) spans[r.name] = { p50: r.p50, p95: r.p95, p99: r.p99, n: r.n, mean: r.mean, max: r.max };
+		let commit = "unknown", parentCommit = "unknown", branch = "unknown";
+		try { commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		try { parentCommit = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		try { branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
+		const short = commit.slice(0, 12);
+		const historyPath = join(HISTORY_DIR, `${short}.json`);
+		writeFileSync(historyPath, JSON.stringify({
+			commit, parentCommit, branch,
+			timestamp: new Date().toISOString(),
+			seededSessions: sessionIds.length,
+			spans,
+		}, null, 2));
+		console.log(`[harness] wrote ${historyPath}`);
+		// Regenerate the cross-commit comparison report.
+		try {
+			execFileSync(process.execPath, [resolve(PROJECT_ROOT, "scripts", "perf-report.mjs")], {
+				cwd: PROJECT_ROOT,
+				stdio: "inherit",
+			});
+		} catch (err) {
+			console.warn(`[harness] perf-report.mjs failed:`, err);
+		}
+	} catch (err) {
+		console.warn("[harness] failed to emit history JSON:", err);
+	}
 
 	// ── Hard-fail if any canonical span has zero samples ───────────
 	const byName = new Map<string, number>();

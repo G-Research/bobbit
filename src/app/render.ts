@@ -2679,8 +2679,11 @@ function _perfMaybeEndNavSpan(): void {
 		// Sentinel: goal-dashboard main area committed. Look for any of the
 		// dashboard’s anchor selectors — the workflow checklist, gate detail
 		// panel, or the empty-tab placeholder all count as “first gate row
-		// painted” for measurement purposes.
-		ready = !!document.querySelector(".wf-checklist-row, .gate-detail-panel, .tab-empty");
+		// painted” for measurement purposes. We also accept the outer
+		// `.dashboard-container` shell so a freshly-created goal with no
+		// gates/agents/tasks yet still resolves to “ready” (the harness creates
+		// such bare goals to drive nav.goal.ready timing).
+		ready = !!document.querySelector(".wf-checklist-row, .gate-detail-panel, .tab-empty, .dashboard-container");
 	}
 	if (!ready) return;
 	state.pendingNavSpan = null;

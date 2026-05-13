@@ -20,8 +20,8 @@ import {
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
+import { openForNavItem } from "./sidebar-nav.js";
 import { showRenameDialog } from "./dialogs.js";
-import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 
@@ -438,7 +438,7 @@ export function renderSessionRow(session: GatewaySession) {
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
-			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@click=${() => { if (!active && !connecting) openForNavItem({ kind: "session", id: session.id }); }}
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -574,7 +574,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
-			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@click=${() => { if (!active && !connecting) openForNavItem({ kind: "session", id: session.id }); }}
 		>
 			${chevron}
 			<div class="shrink-0 flex items-center justify-center">
@@ -727,7 +727,9 @@ export function renderGoalGroup(goal: Goal) {
 
 	const dashboardBtn = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); }}
+			data-nav-action="goal-dashboard"
+			data-goal-id=${goal.id}
+			@click=${(e: Event) => { e.stopPropagation(); openForNavItem({ kind: "goal", id: goal.id }); }}
 			title="Goal dashboard">${icon(LayoutDashboard, "xs")}</button>
 	`;
 

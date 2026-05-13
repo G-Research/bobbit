@@ -17,6 +17,7 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
+import { startSpan as _perfStartSpan, isEnabled as _perfIsEnabled } from "./perf-trace.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -526,10 +527,21 @@ export class RemoteAgent {
 	 */
 	private _connectWs(initial: boolean): Promise<void> {
 		const wsUrl = this._gatewayUrl.replace(/^http/, "ws");
+		// Perf: span covers ws-create → auth_ok (full attach). Cheap when disabled
+		// (perf-trace returns a shared no-op handle in that case).
+		const wsAttachSpan = _perfIsEnabled()
+			? _perfStartSpan("ws.attach", { sessionId: this._sessionId, initial })
+			: null;
 
 		return new Promise<void>((resolve, reject) => {
 			this.ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
 			let settled = false;
+			let attachClosed = false;
+			const closeAttach = (extra: Record<string, unknown>) => {
+				if (attachClosed) return;
+				attachClosed = true;
+				wsAttachSpan?.end(extra);
+			};
 
 			this.ws.onopen = () => {
 				this.ws!.send(JSON.stringify({ type: "auth", token: this._authToken }));
@@ -548,6 +560,7 @@ export class RemoteAgent {
 						settled = true;
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
+						closeAttach({ outcome: "auth_ok" });
 						resolve();
 						// On reconnect, try a seq-based resume before falling back
 						// to a full snapshot. If the server still holds our last seen
@@ -578,12 +591,14 @@ export class RemoteAgent {
 						}
 					} else if (msg.type === "auth_failed") {
 						settled = true;
+						closeAttach({ outcome: "auth_failed" });
 						if (initial) {
 							reject(new Error("Authentication failed"));
 						}
 						return;
 					} else if (msg.type === "error") {
 						settled = true;
+						closeAttach({ outcome: "error" });
 						if (initial) {
 							reject(new Error(msg.message || "Connection error"));
 						}
@@ -597,6 +612,7 @@ export class RemoteAgent {
 			this.ws.onerror = () => {
 				if (!settled) {
 					settled = true;
+					closeAttach({ outcome: "ws_error" });
 					if (initial) {
 						reject(new Error("WebSocket connection failed"));
 					}
@@ -608,6 +624,7 @@ export class RemoteAgent {
 				// must run a fresh `requestMessages()` to pick up anything we
 				// missed while disconnected.
 				this._hadDisconnectSinceLastSnapshot = true;
+				closeAttach({ outcome: "close" });
 				if (!settled) {
 					settled = true;
 					if (initial) {
