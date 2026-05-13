@@ -1371,6 +1371,8 @@ Agent processes are now spawned with the desired model and reasoning level passe
 
 `resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
 
+**Team-lead and worker spawn pass an explicit `initialModel` / `initialThinkingLevel` through `createSession` opts.** `team-manager.ts::_startTeamImpl` (team-lead) and `team-manager.ts::spawnRole` (workers) resolve the role through the full cascade via `resolveRole(goal, name, roleStore)` — inline-roles → project → server → builtin — and forward `role.model` / `role.thinkingLevel` (empty string ⇒ `undefined` ⇒ system default) to `createSession`. The session-setup pipeline takes the explicit-caller branch in `resolveBridgeOptions` and pins those values, so the team-lead and every worker honour the role's configured model override at spawn time without relying on a post-spawn `setModel`. Pinned by `tests/team-manager-role-model.test.ts`.
+
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
 `applyModelString` and `applyReviewModelOverrides` in `src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`. When `true`, the helper skips the `setModel` RPC but still calls `rpc.getState()` and throws on mismatch - the same contract as the unconditional `setModel` path. `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` and the three verification sub-session sites set `skipSetModel: true` exactly when `session.spawnPinnedModel` equals the model they would otherwise bind. Net effect: the read-back verification still runs, but the redundant `setModel` RPC (and its `model_change` event) is elided.
@@ -1394,6 +1396,7 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
+| `src/server/agent/team-manager.ts` | `_startTeamImpl` (team-lead) and `spawnRole` (workers) pass cascade-resolved `role.model` / `role.thinkingLevel` as `initialModel` / `initialThinkingLevel` |
 | `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection |
 | `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
 

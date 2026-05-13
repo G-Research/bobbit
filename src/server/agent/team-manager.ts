@@ -1237,7 +1237,9 @@ export class TeamManager {
 		// Build the Team Lead role prompt with structural placeholders only
 		// Secrets (gateway URL, auth token, goal ID) are passed as env vars, NOT embedded in prompt text
 		const roleStore = this.config.roleStore;
-		const storedRole = roleStore?.get("team-lead");
+		// Resolve via the goal's inline-roles snapshot first, then the
+		// project/server/builtin role-store cascade — same precedence as spawnRole().
+		const storedRole = resolveRole(goal, "team-lead", roleStore);
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
@@ -1272,6 +1274,10 @@ export class TeamManager {
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container
 				sandboxBranch: sandboxed && goal.branch ? goal.branch : undefined,
+				// Honour role-level model / thinking-level override (cascade-resolved above).
+				// Empty string falls through to undefined → system default.
+				initialModel: storedRole.model || undefined,
+				initialThinkingLevel: storedRole.thinkingLevel || undefined,
 			},
 		);
 
@@ -1516,6 +1522,10 @@ export class TeamManager {
 					// Pass branch info so applySandboxWiring creates the worktree inside the container
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName && goal.branch ? `origin/${goal.branch}` : undefined,
+					// Honour role-level model / thinking-level override (cascade-resolved above).
+					// Empty string falls through to undefined → system default.
+					initialModel: storedRoleDef.model || undefined,
+					initialThinkingLevel: storedRoleDef.thinkingLevel || undefined,
 				},
 			);
 

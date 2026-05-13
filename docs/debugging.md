@@ -932,7 +932,7 @@ Diagnose:
 
 Tests pinning the precedence rule: `tests/resolve-role.test.ts`. Snapshot + child-merge: `tests/goal-manager-inline-roles.test.ts`. Full HTTP roundtrip: `tests/e2e/api-goals-spawn-child-route.spec.ts`.
 
-Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/team-manager.ts::spawnRole`, three sites in `src/server/agent/verification-harness.ts` (model-resolution, llm-review, agent-qa).
+Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/team-manager.ts::_startTeamImpl` (team-lead spawn) and `team-manager.ts::spawnRole` (worker spawn), three sites in `src/server/agent/verification-harness.ts` (model-resolution, llm-review, agent-qa). All five sites also forward the resolved role's `model` / `thinkingLevel` as `initialModel` / `initialThinkingLevel` — see [docs/internals.md — Spawn-time model pinning](internals.md#spawn-time-model-pinning).
 
 ## propose_goal inline fields silently dropped
 
