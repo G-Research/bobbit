@@ -154,6 +154,31 @@ describe("session-setup: role-keyed model/thinking-level overrides on spawn", ()
 		);
 	});
 
+	it("case 3 (AC3): staff role with `roleName` only → override flows through (staff-manager path)", () => {
+		// staff-manager.createStaff / wakeStaff shape: passes `roleName: staff.roleId`,
+		// never `role`. Once staff-manager is fixed to forward `roleName`, the existing
+		// session-setup fallback `plan.role ?? plan.roleName` must do the rest.
+		const STAFF_ROLE_MODEL = "override-provider/staff-role-model";
+		const STAFF_ROLE_THINKING = "high";
+		const ctx = makeResolvers({
+			"librarian": { model: STAFF_ROLE_MODEL, thinkingLevel: STAFF_ROLE_THINKING },
+		});
+		const plan = makePlan({ roleName: "librarian" });
+
+		runResolver(plan, ctx);
+
+		assert.equal(
+			plan.bridgeOptions.initialModel,
+			STAFF_ROLE_MODEL,
+			"Staff role `model` override must be honored when staff-manager passes `roleName: staff.roleId`.",
+		);
+		assert.equal(
+			plan.bridgeOptions.initialThinkingLevel,
+			STAFF_ROLE_THINKING,
+			"Staff role `thinkingLevel` override must be honored at staff-session spawn.",
+		);
+	});
+
 	it("case 2: team-lead role with `roleName: 'team-lead'` only → override flows through", () => {
 		const ctx = makeResolvers({
 			"team-lead": { model: LEAD_ROLE_MODEL, thinkingLevel: LEAD_ROLE_THINKING },
