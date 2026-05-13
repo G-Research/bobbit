@@ -24,6 +24,8 @@ import {
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
 import { errorDetails } from "./error-helpers.js";
 import { clearSessionModel } from "./routing.js";
+import { isEnabled as _perfIsEnabled, startSpan as _perfStartSpan } from "./perf-trace.js";
+import { getRouteFromHash as _getRouteFromHash } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
@@ -2636,6 +2638,63 @@ function renderArchivedBanner() {
 }
 
 export function doRenderApp(): void {
+	_perfDoRenderApp();
+}
+
+/**
+ * Perf-instrumented wrapper around the real render. When perf-trace is
+ * enabled, the body runs inside a `paint.first` span whose `.end()` fires
+ * on the next `requestAnimationFrame` (to capture compositor delay), and
+ * any `state.pendingNavSpan` is closed once the route + sentinel match.
+ *
+ * Disabled-path cost: one `_perfIsEnabled()` call, one function call.
+ */
+function _perfDoRenderApp(): void {
+	if (!_perfIsEnabled()) { _doRenderAppImpl(); return; }
+	const paintSpan = _perfStartSpan("paint.first");
+	let rendered = false;
+	try { _doRenderAppImpl(); rendered = true; }
+	finally {
+		if (rendered) {
+			requestAnimationFrame(() => paintSpan.end());
+			_perfMaybeEndNavSpan();
+		} else {
+			paintSpan.end({ aborted: true });
+		}
+	}
+}
+
+function _perfMaybeEndNavSpan(): void {
+	const pending = state.pendingNavSpan;
+	if (!pending) return;
+	const route = _getRouteFromHash();
+	let ready = false;
+	if (pending.view === "session" && route.view === "session" && route.sessionId === pending.id) {
+		// Sentinel: chat panel committed to DOM AND a real or empty-state
+		// message area is visible. `pi-chat-panel` is always present once the
+		// session view renders; we additionally require the app root to NOT be
+		// in a transient "gateway-starting" / "disconnected" view.
+		ready = state.appView === "authenticated" && !!document.querySelector("pi-chat-panel");
+	} else if (pending.view === "goal-dashboard" && route.view === "goal-dashboard" && route.goalId === pending.id) {
+		// Sentinel: goal-dashboard main area committed. Look for any of the
+		// dashboard’s anchor selectors — the workflow checklist, gate detail
+		// panel, or the empty-tab placeholder all count as “first gate row
+		// painted” for measurement purposes.
+		ready = !!document.querySelector(".wf-checklist-row, .gate-detail-panel, .tab-empty");
+	}
+	if (!ready) return;
+	state.pendingNavSpan = null;
+	const readyKind = pending.view === "session" ? "session" : "goal";
+	try {
+		const appEl = document.getElementById("app");
+		if (appEl) appEl.setAttribute("data-perf-ready", readyKind);
+	} catch { /* swallow */ }
+	// Defer `.end()` to the next paint frame so the duration captures
+	// compositor/layout time, not just JS work.
+	requestAnimationFrame(() => pending.span.end({ readyKind }));
+}
+
+function _doRenderAppImpl(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
 

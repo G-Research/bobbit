@@ -1,5 +1,17 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
+import type { SpanHandle as PerfSpanHandle } from "./perf-trace.js";
+
+/**
+ * Active sidebar-nav perf span. Set by `openForNavItem` (sidebar-nav.ts)
+ * when the user clicks a session/goal row; ended by render.ts on the first
+ * `doRenderApp` for that view+id once a meaningful sentinel is committed.
+ */
+export interface PendingNavSpan {
+	span: PerfSpanHandle;
+	view: "session" | "goal-dashboard";
+	id: string;
+}
 import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
@@ -176,6 +188,9 @@ _applySidebarFontScaleVar(_loadSidebarFontScale());
 
 export const state = {
 	chatPanel: null as ChatPanel | null,
+	/** Active sidebar-nav perf span awaiting its first-paint sentinel.
+	 *  See `src/app/perf-trace.ts` and the Phase 1 design doc. */
+	pendingNavSpan: null as PendingNavSpan | null,
 	remoteAgent: null as RemoteAgent | null,
 	connectionStatus: "disconnected" as ConnectionStatus,
 	appView: "disconnected" as AppView,

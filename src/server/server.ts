@@ -788,13 +788,53 @@ export function createGateway(config: GatewayConfig) {
 			}
 
 			// Optional per-request timing for performance profiling.
-			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
+			//
+			// Enable via BOBBIT_TIMING_LOG=1 to print one parseable line per request:
+			//   [timing] METHOD path ${ms}ms bytes=${bytes} io=${ioCount}
+			//
+			// By default every request is logged. Set BOBBIT_TIMING_LOG_MIN_MS=<n>
+			// to restore a threshold (e.g. 100 = only log slow requests).
+			//
+			// `io` is the per-route file/DB read counter — incremented manually by
+			// the hot endpoints listed in the Phase 1 perf design (§2.3):
+			//   GET /api/sessions/:id
+			//   GET /api/goals/:id
+			//   GET /api/goals/:id/gates
+			//   GET /api/goals/:id/team/agents
+			//   GET /api/sessions/:id/tool-content/:mi/:bi
+			// For all other routes `io=0`. Bytes is captured from the response
+			// `Content-Length` header (or computed from the buffered body when
+			// the header isn't set).
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
+			const _timingMinMs = Number(process.env.BOBBIT_TIMING_LOG_MIN_MS ?? "0") || 0;
 			const _timingStart = _timingEnabled ? performance.now() : 0;
+			let _timingBytes = 0;
+			if (_timingEnabled) {
+				// Wrap res.write / res.end so we tally response payload size.
+				const origWrite = res.write.bind(res);
+				const origEnd = res.end.bind(res);
+				res.write = ((chunk: any, ...rest: any[]) => {
+					if (chunk) _timingBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+					return (origWrite as any)(chunk, ...rest);
+				}) as any;
+				res.end = ((chunk?: any, ...rest: any[]) => {
+					if (chunk) _timingBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+					return (origEnd as any)(chunk, ...rest);
+				}) as any;
+				// Per-request IO read counter. Hot endpoints bump this via the
+				// `__perfBumpIo` helper attached to req below.
+				(req as any).__perfIoCount = 0;
+				(req as any).__perfBumpIo = () => { (req as any).__perfIoCount++; };
+			}
 			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
-				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
+				if (dur >= _timingMinMs) {
+					const lenHdr = Number(res.getHeader("content-length") ?? 0) || 0;
+					const bytes = lenHdr || _timingBytes;
+					const ioCount = (req as any).__perfIoCount ?? 0;
+					console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms bytes=${bytes} io=${ioCount}`);
+				}
 			}
 
 			return;
@@ -2827,6 +2867,8 @@ async function handleApiRoute(
 	// GET /api/sessions/:id (exact match — not /api/sessions/:id/output etc.)
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
+		// Perf: route is one of the five hot endpoints tracked by BOBBIT_TIMING_LOG.
+		(req as any).__perfBumpIo?.();
 		const id = singleSessionMatch[1];
 		const session = sessionManager.getSession(id);
 		if (!session) {
@@ -3413,6 +3455,8 @@ async function handleApiRoute(
 		const id = goalMatch[1];
 
 		if (req.method === "GET") {
+			// Perf: hot endpoint tracked by BOBBIT_TIMING_LOG.
+			(req as any).__perfBumpIo?.();
 			const goal = getGoalAcrossProjects(id);
 			if (!goal) { json({ error: "Goal not found" }, 404); return; }
 			json(goal);
@@ -4596,6 +4640,8 @@ async function handleApiRoute(
 	// GET /api/goals/:goalId/gates — list gates for a goal
 	const goalGatesMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates$/);
 	if (goalGatesMatch && req.method === "GET") {
+		// Perf: hot endpoint tracked by BOBBIT_TIMING_LOG.
+		(req as any).__perfBumpIo?.();
 		const goalId = goalGatesMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
@@ -5567,6 +5613,8 @@ async function handleApiRoute(
 	// GET /api/goals/:id/team/agents — list agents for a team goal
 	const teamAgentsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/agents$/);
 	if (teamAgentsMatch && req.method === "GET") {
+		// Perf: hot endpoint tracked by BOBBIT_TIMING_LOG.
+		(req as any).__perfBumpIo?.();
 		const goalId = teamAgentsMatch[1];
 		const agents = teamManager.listAgents(goalId);
 
@@ -6430,6 +6478,8 @@ async function handleApiRoute(
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
 	const toolContentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/(\d+)\/(\d+)$/);
 	if (toolContentMatch && req.method === "GET") {
+		// Perf: hot endpoint tracked by BOBBIT_TIMING_LOG.
+		(req as any).__perfBumpIo?.();
 		const [, id, msgIdxStr, blkIdxStr] = toolContentMatch;
 		const messageIndex = parseInt(msgIdxStr, 10);
 		const blockIndex = parseInt(blkIdxStr, 10);

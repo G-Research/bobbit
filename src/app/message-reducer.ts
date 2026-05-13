@@ -13,7 +13,13 @@
  *   every reduce.
  * - All entries carry numeric `_order` + `_origin` + `_insertionTick`.
  * - Server snapshot is authoritative for any id it contains.
+ *
+ * Perf-trace note: the `snapshot` branch is wrapped in a `reducer.rehydrate`
+ * span (Phase 1 perf instrumentation). The span is observation-only — it
+ * never reads or mutates the input/output messages — and is no-op when
+ * perf-trace is disabled, so the purity contract above is preserved.
  */
+import { startSpan as _perfStartSpan, isEnabled as _perfIsEnabled } from "./perf-trace.js";
 
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
@@ -241,6 +247,10 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 		}
 
 		case "snapshot": {
+			const _perfSpan = _perfIsEnabled()
+				? _perfStartSpan("reducer.rehydrate", { messages: action.messages?.length ?? 0 })
+				: null;
+			try {
 			const tick = state.nextTick;
 			const enriched = action.messages.map(enrichUserMessage);
 			// Two-way compaction dedup:
@@ -445,6 +455,7 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: positiveMax,
 			};
+			} finally { _perfSpan?.end(); }
 		}
 
 		case "replace-messages": {

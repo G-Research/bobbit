@@ -12,8 +12,62 @@ import {
 // `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
 // dependency-free) so utility modules like `fetch-tool-content.ts` can
 // import it without pulling the entire app-shell graph.
-import { gatewayFetch } from "./gateway-fetch.js";
-export { gatewayFetch };
+import { gatewayFetch as _rawGatewayFetch } from "./gateway-fetch.js";
+import { measureAsync as _perfMeasureAsync, isEnabled as _perfIsEnabled } from "./perf-trace.js";
+
+/**
+ * Match the request URL/path against the hot endpoints called out in the
+ * Phase 1 perf design (§2.2). Returns a canonical perf-trace span name or
+ * `null` when this isn't a hot endpoint (most calls).
+ *
+ * The matcher is cheap (a couple of string ops + a regex hit) and is only
+ * invoked when perf-trace is enabled — see the early-return below.
+ */
+function _perfSpanFor(url: string): { name: string; detail: Record<string, unknown> } | null {
+	// Strip query string + leading origin for matching.
+	const qIdx = url.indexOf("?");
+	const pathRaw = qIdx >= 0 ? url.slice(0, qIdx) : url;
+	const path = pathRaw.startsWith("http") ? pathRaw.replace(/^https?:\/\/[^/]+/, "") : pathRaw;
+	// /api/sessions/<id>/tool-content/<mi>/<bi>
+	const tc = path.match(/^\/api\/sessions\/([^/]+)\/tool-content\//);
+	if (tc) return { name: "paint.tool-content.lazy", detail: { sessionId: tc[1] } };
+	// /api/sessions/<id> (full transcript fetch — no further path segments)
+	const s = path.match(/^\/api\/sessions\/([^/]+)$/);
+	if (s) return { name: "api.session.fetch", detail: { sessionId: s[1] } };
+	// /api/goals/<id>/gates*
+	const gg = path.match(/^\/api\/goals\/([^/]+)\/gates(?:\/|$)/);
+	if (gg) return { name: "api.goal.gates.fetch", detail: { goalId: gg[1] } };
+	// /api/goals/<id>/team/agents or /api/goals/<id>/team
+	const ga = path.match(/^\/api\/goals\/([^/]+)\/team(?:\/agents)?$/);
+	if (ga) return { name: "api.goal.agents.fetch", detail: { goalId: ga[1] } };
+	// /api/goals/<id> (single goal fetch, no further segments)
+	const g = path.match(/^\/api\/goals\/([^/]+)$/);
+	if (g) return { name: "api.goal.fetch", detail: { goalId: g[1] } };
+	return null;
+}
+
+/**
+ * Instrumented re-export of `gatewayFetch` — adds a perf-trace span around
+ * hot endpoints listed in the Phase 1 design (`api.session.fetch`,
+ * `api.goal.fetch`, `api.goal.gates.fetch`, `api.goal.agents.fetch`,
+ * `paint.tool-content.lazy`). Cheap when perf-trace is disabled — the
+ * branch falls through to the raw fetch with no allocation.
+ */
+export function gatewayFetch(url: string, init?: RequestInit): Promise<Response> {
+	if (!_perfIsEnabled()) return _rawGatewayFetch(url, init);
+	const span = _perfSpanFor(url);
+	if (!span) return _rawGatewayFetch(url, init);
+	return _perfMeasureAsync(span.name, async () => {
+		const res = await _rawGatewayFetch(url, init);
+		// Attach payload size when known.
+		try {
+			const len = res.headers.get("content-length");
+			if (len) (span.detail as any).bytes = Number(len);
+			(span.detail as any).status = res.status;
+		} catch { /* swallow */ }
+		return res;
+	}, span.detail);
+}
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";

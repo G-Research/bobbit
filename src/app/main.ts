@@ -1,3 +1,8 @@
+// Perf trace primitive must initialize before anything else so the boot
+// mark records the earliest possible timestamp on cold load. See
+// `src/app/perf-trace.ts` and the Phase 1 design doc.
+import { mark as perfMark } from "./perf-trace.js";
+perfMark("app.boot");
 import "./app.css";
 // Eagerly load CSS that is also used by proposal preview panes
 // ([data-panel="project-proposal"], [data-panel="role-proposal"],
