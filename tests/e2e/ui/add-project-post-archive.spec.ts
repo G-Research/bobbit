@@ -61,8 +61,8 @@ test.describe("Add Project — post-archive routes to assistant", () => {
 	});
 
 	test("after archiving an existing .bobbit/, Continue opens the project assistant (not auto-import)", async ({ page }, testInfo) => {
-		test.setTimeout(60_000); // many sequential UI waits; 30s default is too tight under E2E suite load
 		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
+		test.setTimeout(60_000); // many sequential UI waits; 30s default is too tight under E2E suite load
 
 		// Seed: non-empty .bobbit/ but NO project.yaml. This is the "ghost
 		// .bobbit/" shape: presence of the directory but no configured project.
@@ -128,6 +128,9 @@ test.describe("Add Project — post-archive routes to assistant", () => {
 			{ timeout: 15_000, intervals: [100, 200, 500] },
 		).toMatch(/^#\/session\//);
 
+		// Snapshot the URL hash + the projects list to figure out which
+		// branch the dialog took. We assert a stable, grep-able message so
+		// the failure shows up cleanly in --reporter=json output.
 		const hash = await page.evaluate(() => window.location.hash);
 		const isAssistantSession = /^#\/session\//.test(hash);
 
