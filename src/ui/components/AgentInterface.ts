@@ -1294,19 +1294,30 @@ export class AgentInterface extends LitElement {
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
 		const model = state.model;
-		// After compaction, the last assistant message's usage reflects the old
-		// (pre-compaction) context size.  Show "?" until the next real LLM
-		// response provides fresh usage data (matches the TUI behaviour).
+		// After compaction the last assistant `usage` still reflects the
+		// pre-compaction context size and pi-coding-agent doesn't expose a
+		// post-compaction count anywhere. While the stale flag is set we
+		// render a subtle shimmering placeholder bar so the user knows the
+		// real number is pending without misleading them with stale data.
 		const usageStale = (this.session as any)?._usageStaleAfterCompaction === true;
 		if (model?.contextWindow) {
 			if (usageStale) {
-				// Show an empty bar with "?" — exact token count unknown until next response
+				// Deflation animation: bar starts at the pre-compaction fill
+				// percentage (captured on `compaction_start`) and CSS-eases
+				// down to the shimmer resting width (25%). Falls back to a
+				// static 25% bar when we couldn't sample the original fill.
+				const startPct = (this.session as any)?._compactionStartPct as number | null | undefined;
+				const hasStart = typeof startPct === "number" && startPct > 25;
+				const innerStyle = hasStart
+					? `--from-pct:${startPct}%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;opacity:0.4;`
+					: `width:25%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;opacity:0.4;`;
+				const innerClass = hasStart ? "context-bar-deflate" : "";
 				contextHtml = html`
-					<span class="flex items-center gap-1.5" title="Context usage unknown until next response">
-						<span style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden">
-							<span style="width:0%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;transition:width 0.3s"></span>
+					<span class="flex items-center gap-1.5" title="Context usage refreshing after compaction…">
+						<span class="context-bar-shimmer" style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden;">
+							<span class=${innerClass} style=${innerStyle}></span>
 						</span>
-						<span>—</span>
+						<span style="opacity:0.6">-%</span>
 					</span>
 				`;
 			} else {

@@ -1043,6 +1043,43 @@ html {
 	animation: shimmer 2s ease-in-out infinite;
 }
 
+/* Context-bar shimmer placeholder shown immediately after a compaction,
+   before the next real LLM turn provides authoritative usage. Moving
+   highlight on top of the filled portion communicates "still loading
+   the real number" without showing stale data. */
+.context-bar-shimmer {
+	position: relative;
+}
+.context-bar-shimmer::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background: linear-gradient(
+		90deg,
+		transparent 0%,
+		rgba(255, 255, 255, 0.08) 40%,
+		rgba(255, 255, 255, 0.22) 50%,
+		rgba(255, 255, 255, 0.08) 60%,
+		transparent 100%
+	);
+	background-size: 200% 100%;
+	animation: shimmer 1.4s linear infinite;
+	pointer-events: none;
+}
+
+/* Deflate animation: bar drains from the pre-compaction fill percentage
+   (passed as `--from-pct` inline) down to the shimmer's 25% resting
+   width. Runs once, then `forwards` holds at 25% until real usage
+   replaces the placeholder. */
+@keyframes context-bar-deflate {
+	from { width: var(--from-pct, 100%); }
+	to   { width: 25%; }
+}
+.context-bar-deflate {
+	width: 25%;
+	animation: context-bar-deflate 0.9s ease-in-out forwards;
+}
+
 /* Slow heartbeat pulse for tools that are waiting on user input (e.g.
    ask_user_choices). Communicates "idle, awaiting you" rather than the
    "working" connotation of a spinner. */
