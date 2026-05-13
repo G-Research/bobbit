@@ -295,8 +295,12 @@ Three-way agreement is mandatory: server-harness
 server-REST (`GET /api/goals/:id/plan` delegates to the harness's
 method — single source of truth, no inline copy), and client
 (`resolvePlanNodeChild` in `src/app/plan-node-state.ts`) all implement
-the same preference. Divergence between any two means a tier-resolver
-copy crept back in. Pinned by `tests/api-goals-plan-tier-parity.test.ts`.
+the same preference. Plan-tab synthesis
+(`src/app/plan-synthesis.ts::buildPlanSteps`) does NOT carry its own
+tier logic — both the formal-plan and living-plan paths delegate to
+`resolvePlanNodeChild` to pick the per-planId winner. Divergence
+between any two means a tier-resolver copy crept back in. Pinned by
+`tests/api-goals-plan-tier-parity.test.ts`.
 
 ## Mutation classifier
 
@@ -1154,6 +1158,32 @@ is a separate constant).
 Live updates subscribe to `goal_state_changed` and `goal_child_spawned`
 WS events on every visible goal in the tree; the synthesis recomputes on
 each event with a 250ms trailing-edge throttle to avoid layout thrash.
+
+### Living-plan dedupe by `planId`
+
+The living-plan path (no formal `execution` gate — e.g. workflows like
+`phase-implementation`) emits **one PlanStep per unique
+`spawnedFromPlanId`**, not one per child. Without this, archiving a
+child and then re-spawning (or unarchiving) a sibling for the same
+planId rendered two DAG nodes for the same logical step: a faded
+`archived non-complete` ghost plus the live row.
+
+Rule:
+
+- Children are bucketed by `spawnedFromPlanId`. Each bucket is fed to
+  `resolvePlanNodeChild` (see [Tier preference](#tier-preference)) and
+  collapses to a single winner — same resolver the formal-plan path
+  and the server use, so the displayed state agrees everywhere.
+- True orphans (children with no `spawnedFromPlanId`) get a
+  `synth:<childGoalId>` fallback planId. These are unique by
+  construction and are **not** grouped — every orphan still renders as
+  its own node.
+
+The living-plan path used to map child-goals → PlanSteps 1:1 with no
+grouping, which was the bug. The fix kept the renderer untouched —
+`plan-synthesis.ts` is the only file that changed — because
+`plan-node-state.ts` already had the canonical resolver; living-plan
+synthesis just wasn't using it.
 
 ## Recovery patterns
 
