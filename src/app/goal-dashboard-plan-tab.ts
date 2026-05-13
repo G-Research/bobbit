@@ -220,6 +220,7 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 			createdAt: g.createdAt,
 			state: g.state as any,
 			archived: !!g.archived,
+			paused: !!(g as any).paused,
 			title: g.title,
 			workflowId: g.workflowId,
 			dependsOnPlanIds: g.dependsOnPlanIds,
