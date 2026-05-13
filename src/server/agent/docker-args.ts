@@ -28,6 +28,19 @@ import { toDockerPath, PRELOAD_PATH, CONTAINER_PRELOAD_PATH } from "./rpc-bridge
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 
+/**
+ * Container feature-version tag — stamped onto every container we create
+ * via the `<labelPrefix>-version` label and matched on discovery. Bump
+ * this string whenever the container's bind-mount surface or baked-in
+ * tooling changes in a way that breaks compatibility with `docker exec`
+ * against pre-existing containers, so stale containers from older bobbit
+ * versions are treated as not-found and recreated.
+ *
+ * Current value covers: undici idle-stream preload mounted at
+ * `/bobbit-preload/undici-idle-timeouts.cjs`.
+ */
+export const CONTAINER_FEATURE_VERSION = "preload-1";
+
 // ── Config ─────────────────────────────────────────────────────────────────
 
 export interface DockerRunConfig {

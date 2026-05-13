@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,54 @@ const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
 export const PRELOAD_PATH = path.join(__dirname, "..", "defaults", "agent-preload", "undici-idle-timeouts.cjs");
 /** Container path the preload is bind-mounted to for Docker sessions. */
 export const CONTAINER_PRELOAD_PATH = "/bobbit-preload/undici-idle-timeouts.cjs";
+
+/**
+ * Per-container cache of whether the preload file is actually mounted inside
+ * the container. Probed once on first exec via `docker exec <id> test -f ...`.
+ *
+ * Required because (a) older containers created before the preload-mount
+ * feature won't have the bind mount, and (b) the host-side `fs.statSync`
+ * guard in docker-args.ts means a missing host file produces a container
+ * without the mount. Without this check, `node --require=<missing>` exits
+ * immediately and breaks the session.
+ */
+const _preloadMountCache = new Map<string, boolean>();
+
+/** For tests — reset the per-container preload-mount probe cache. */
+export function _resetPreloadMountCacheForTests(): void {
+	_preloadMountCache.clear();
+}
+
+/**
+ * Probe whether the undici idle-timeout preload is mounted at
+ * {@link CONTAINER_PRELOAD_PATH} inside the given container. Result is
+ * cached per containerId for the lifetime of the gateway process.
+ *
+ * Short-circuits to `false` (without shelling out) if the host preload
+ * file is missing — mirroring the guard in docker-args.ts and avoiding
+ * needless `docker exec` calls in dev trees.
+ */
+function probePreloadMounted(containerId: string): boolean {
+	const cached = _preloadMountCache.get(containerId);
+	if (cached !== undefined) return cached;
+
+	let present = false;
+	try {
+		if (!fs.existsSync(PRELOAD_PATH)) {
+			_preloadMountCache.set(containerId, false);
+			return false;
+		}
+		execFileSync("docker", ["exec", containerId, "test", "-f", CONTAINER_PRELOAD_PATH], {
+			timeout: 5_000,
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		present = true;
+	} catch {
+		present = false;
+	}
+	_preloadMountCache.set(containerId, present);
+	return present;
+}
 
 /**
  * Env vars for the idle-stream timeout preload — exported on every agent
@@ -527,8 +575,22 @@ export class RpcBridge {
 			execArgs.push("-e", `BOBBIT_GATEWAY_URL=${this.options.gatewayUrl}`);
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
-		// Idle-stream timeout preload — bind-mounted by buildDockerRunArgs.
-		execArgs.push("-e", `NODE_OPTIONS=--no-warnings --require=${CONTAINER_PRELOAD_PATH}`);
+		// Idle-stream timeout preload — only inject the --require flag when the
+		// preload file is actually present inside the container. Older containers
+		// created before the bind-mount existed (or when the host preload was
+		// missing at `docker run` time) would otherwise fail with "Cannot find
+		// module" and break the session. The timeout env vars are still exported
+		// unconditionally — harmless when the preload isn't loaded.
+		const preloadMounted = probePreloadMounted(containerId);
+		if (preloadMounted) {
+			execArgs.push("-e", `NODE_OPTIONS=--no-warnings --require=${CONTAINER_PRELOAD_PATH}`);
+		} else {
+			execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
+			console.warn(
+				`[rpc-bridge] preload not mounted in container ${containerId.substring(0, 12)}; ` +
+				`idle-stream timeouts disabled for this session`,
+			);
+		}
 		for (const [k, v] of Object.entries(buildPreloadEnv())) {
 			execArgs.push("-e", `${k}=${v}`);
 		}
