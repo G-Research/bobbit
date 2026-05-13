@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { getProviders, getModels } from "@mariozechner/pi-ai";
+import { getProviders, getModels } from "@earendil-works/pi-ai";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";

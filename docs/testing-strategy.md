@@ -523,7 +523,7 @@ The canary for `--tools` allowlist regressions has two layers, both pinning the 
 - **Unit contract pin** — `tests/tool-activation-contract.test.ts`. Runs in seconds under `npm run test:unit`; asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
 - **Manual-integration canary** — `tests/manual-integration/agent-tool-use.spec.ts`. Real agent in a sandboxed session, seven scenarios covering pi builtins (bash, edit, find), the steer/interrupt path, a tool-error path, a Bobbit extension tool (`web_fetch`), and an MCP meta-tool (`mcp_describe`). Tool-card assertions are tool-name-specific (`data-tool-name="<name>"` on the shared wrapper in `src/ui/components/Messages.ts`); substitute tools that produce the same visible side-effect no longer pass.
 
-Run the unit pin on every commit and the integration canary before and after any `@mariozechner/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
+Run the unit pin on every commit and the integration canary before and after any `@earendil-works/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
 
 ## Target State
 

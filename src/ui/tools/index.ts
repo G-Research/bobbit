@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { getToolRenderer, registerToolRenderer, registerLazyToolRenderer } from "./renderer-registry.js";
 import { BashRenderer } from "./renderers/BashRenderer.js";
 import { BrowserClickRenderer } from "./renderers/BrowserClickRenderer.js";

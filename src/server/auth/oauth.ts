@@ -7,11 +7,11 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { getOAuthProvider, type OAuthCredentials } from "@mariozechner/pi-ai/oauth";
+import { getOAuthProvider, type OAuthCredentials } from "@earendil-works/pi-ai/oauth";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
 
-// Anthropic OAuth constants (same as in @mariozechner/pi-ai)
+// Anthropic OAuth constants (same as in @earendil-works/pi-ai)
 const CLIENT_ID = Buffer.from("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", "base64").toString();
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";

@@ -2,7 +2,7 @@
  * Renderers for gate_list, gate_signal, gate_status tools.
  * Compact gate cards with status badges and dependency info.
  */
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { ShieldCheck } from "lucide";

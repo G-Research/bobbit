@@ -1,7 +1,7 @@
 /**
  * Agent tool-use canary — proves end-to-end tool calls really work.
  *
- * This is the regression net for upstream `@mariozechner/pi-*` upgrades. A
+ * This is the regression net for upstream `@earendil-works/pi-*` upgrades. A
  * previous upgrade silently broke all agent tool use; no existing test
  * exercised a real LLM-driven agent calling tools end-to-end. This file
  * closes that gap.

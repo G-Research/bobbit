@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";

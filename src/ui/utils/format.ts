@@ -1,5 +1,5 @@
 import { i18n } from "@mariozechner/mini-lit";
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 
 export function formatCost(cost: number): string {
 	if (cost < 1) return `$${cost.toFixed(1).replace(/\.0$/, "")}`;

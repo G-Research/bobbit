@@ -187,7 +187,7 @@ function writeModelsJson(data: Record<string, any>): void {
 function parseModelsGenerated(): Map<string, string[]> {
 	const providerModels = new Map<string, string[]>();
 	try {
-		const pkgUrl = import.meta.resolve("@mariozechner/pi-ai");
+		const pkgUrl = import.meta.resolve("@earendil-works/pi-ai");
 		const pkgDir = path.dirname(fileURLToPath(pkgUrl));
 		const modelsPath = path.join(pkgDir, "models.generated.js");
 		const text = fs.readFileSync(modelsPath, "utf-8");

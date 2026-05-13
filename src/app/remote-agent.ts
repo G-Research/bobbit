@@ -1,4 +1,4 @@
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";

@@ -1,5 +1,5 @@
 import { icon } from "@mariozechner/mini-lit";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { AlertTriangle, Check, PackageOpen, X } from "lucide";

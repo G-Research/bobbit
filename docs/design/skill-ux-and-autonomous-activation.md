@@ -132,7 +132,7 @@ Path: `<agentSessionFile>.skill-meta.jsonl` (sits next to the agent's session fi
 **Lookup key** when restoring: `(timestamp ± 2s, modelText)`. Sidecar entries are matched on the model-facing user message in `.jsonl` and merged when `getMessages()` returns. Match-miss = old/legacy message → render plain.
 
 **Why a sidecar, not new fields in the agent message:**
-1. Agent CLI is third-party (`@mariozechner/pi-coding-agent`); it owns the `.jsonl` schema.
+1. Agent CLI is third-party (`@earendil-works/pi-coding-agent`); it owns the `.jsonl` schema.
 2. Sidecar means *zero* schema risk for the model and keeps the model's transcript byte-equal to today.
 3. Backward compat is automatic: missing sidecar → no chips.
 
