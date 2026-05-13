@@ -186,9 +186,9 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles` | List all roles |
-| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory?, model?, thinkingLevel? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. `model` is `"<provider>/<modelId>"` format and overrides `default.sessionModel` / `default.reviewModel` for sessions of this role. `thinkingLevel` is one of `"off" | "minimal" | "low" | "medium" | "high"`. |
+| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory?, model?, thinkingLevel? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. `model` is `"<provider>/<modelId>"` format and overrides `default.sessionModel` / `default.reviewModel` for sessions of this role. `thinkingLevel` is one of `"off" | "minimal" | "low" | "medium" | "high" | "xhigh"` (clamped to the role's model capability at write time when `model` is set; see [docs/thinking-levels.md](thinking-levels.md)). |
 | `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies` and derived `allowedTools`) |
-| `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high"`). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
+| `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, clamped to the role's model capability when `model` is set). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
 
 ### Tool Group Policies

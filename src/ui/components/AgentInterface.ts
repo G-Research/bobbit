@@ -1,5 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { isAskResponseEnvelope } from "../../shared/ask-envelope.js";
+import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { streamSimple, type ToolResultMessage, type Usage } from "@earendil-works/pi-ai";
@@ -1354,14 +1355,18 @@ export class AgentInterface extends LitElement {
 		// The dropdown popover always shows full labels; on mobile (<640px) the trigger
 		// label is rewritten to an abbreviation in updated() (DOM post-processing) so the
 		// popover items remain readable.
-		const fullLabels = {
+		const fullLabels: Record<ThinkingLevel, string> = {
 			off: i18n("Off"),
 			minimal: i18n("Minimal"),
 			low: i18n("Low"),
 			medium: i18n("Medium"),
 			high: i18n("High"),
+			xhigh: i18n("Extra high"),
 		};
-		const thinkingTitle = fullLabels[(state.thinkingLevel as keyof typeof fullLabels) ?? "off"] ?? fullLabels.off;
+		const supportedLevels: ThinkingLevel[] = state.model
+			? getSupportedThinkingLevels(state.model as any)
+			: ["off", "minimal", "low", "medium", "high"];
+		const thinkingTitle = fullLabels[(state.thinkingLevel as ThinkingLevel) ?? "off"] ?? fullLabels.off;
 
 		const thinkingSelect = supportsThinking && this.enableThinkingSelector
 			// Outer button gap (label → chevron) tightened to 2px; inner span gap
@@ -1369,13 +1374,7 @@ export class AgentInterface extends LitElement {
 			? html`<span class="thinking-select-compact [&_button]:!gap-0.5 [&_button]:!px-1.5 [&_button>span]:!gap-1" title="${thinkingTitle}">${Select({
 				value: state.thinkingLevel,
 				placeholder: fullLabels.off,
-				options: [
-					{ value: "off", label: fullLabels.off, icon: icon(Brain, "sm") },
-					{ value: "minimal", label: fullLabels.minimal, icon: icon(Brain, "sm") },
-					{ value: "low", label: fullLabels.low, icon: icon(Brain, "sm") },
-					{ value: "medium", label: fullLabels.medium, icon: icon(Brain, "sm") },
-					{ value: "high", label: fullLabels.high, icon: icon(Brain, "sm") },
-				] as SelectOption[],
+				options: supportedLevels.map(lvl => ({ value: lvl, label: fullLabels[lvl], icon: icon(Brain, "sm") })) as SelectOption[],
 				onChange: (value: string) => {
 					if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(value);
 					else session.state.thinkingLevel = value as any;
@@ -1395,6 +1394,17 @@ export class AgentInterface extends LitElement {
 					ModelSelector.open(state.model, (m) => {
 						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
 						else session.state.model = m;
+						// After model change, clamp the current thinking level to one
+						// supported by the new model. The server boundary re-clamps
+						// defensively, but doing it here keeps the UI in sync.
+						const current = session.state?.thinkingLevel as string | undefined;
+						if (current) {
+							const clamped = clampThinkingLevel(current, m as any);
+							if (clamped && clamped !== current) {
+								if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
+								else session.state.thinkingLevel = clamped as any;
+							}
+						}
 					});
 				},
 				children: html`
@@ -1701,11 +1711,20 @@ export class AgentInterface extends LitElement {
 								ModelSelector.open(state.model, (model) => {
 								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
 								else session.state.model = model;
+								// Clamp thinking-level against the newly selected model.
+								const current = session.state?.thinkingLevel as string | undefined;
+								if (current) {
+									const clamped = clampThinkingLevel(current, model as any);
+									if (clamped && clamped !== current) {
+										if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
+										else session.state.thinkingLevel = clamped as any;
+									}
+								}
 							});
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector
-									? (level: "off" | "minimal" | "low" | "medium" | "high") => {
+									? (level: ThinkingLevel) => {
 											if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(level);
 											else session.state.thinkingLevel = level;
 										}

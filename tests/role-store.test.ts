@@ -38,8 +38,8 @@ describe("validateModelString", () => {
 });
 
 describe("validateThinkingLevel", () => {
-	it("accepts canonical values", () => {
-		for (const v of ["off", "minimal", "low", "medium", "high"]) {
+	it("accepts canonical values (including xhigh)", () => {
+		for (const v of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
 			assert.equal(validateThinkingLevel(v), v);
 		}
 	});
