@@ -465,17 +465,17 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	} catch {
 		console.warn("[harness] __bobbitRefreshSessions not available");
 	}
-	// REST-seeded sessions render under an `ungrouped-header:<projectId>` group
-	// that is collapsed by default. Expand every ungrouped header so the per-
-	// session rows become visible & clickable.
+	// The ungrouped-header is EXPANDED by default — the persisted state is
+	// the *collapsed* set in localStorage (`bobbit-collapsed-ungrouped`).
+	// Clear that set so all ungrouped sections are visible, then trigger a
+	// re-render. (Clicking the header would TOGGLE — i.e. collapse it.)
+	await page.evaluate(() => {
+		try { localStorage.setItem("bobbit-collapsed-ungrouped", "[]"); } catch { /* swallow */ }
+	});
 	try {
 		await page.waitForSelector('[data-nav-id^="ungrouped-header:"]', { timeout: 15_000 });
 	} catch {
 		console.warn("[harness] no ungrouped header in sidebar after 15s");
-	}
-	const ungrouped = await page.locator('[data-nav-id^="ungrouped-header:"]').all();
-	for (const row of ungrouped) {
-		try { await row.click({ force: true }); } catch { /* swallow */ }
 	}
 	// Confirm at least one session row is now visible before we start clicking.
 	try {
