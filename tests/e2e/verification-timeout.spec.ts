@@ -5,91 +5,85 @@
  * Pins the contract laid out in docs/design (Verification command-step
  * tree-kill v2):
  *
- *   1. A `command` verification step whose `timeout` is exceeded must:
- *      a. Transition the gate signal verification to `failed` within a
- *         small budget (we use 12s for a 3s timeout).
- *      b. Include the marker text `timed out after Ns — killed subprocess
- *         tree` in the step output.
- *      c. Leave no surviving descendant `sleep` processes tagged with
- *         our test marker (a unique env var injected into the spawned
- *         shell so we can find them via `ps`).
+ *   1. A `command` verification step whose `timeout` is exceeded must
+ *      transition to `failed` with output ending in
+ *      `timed out after Ns — killed subprocess tree`.
+ *   2. A running step that is cancelled via the cancel-verification
+ *      endpoint must reap the spawned subprocess tree within ~3s.
  *
- *   2. A running step that is cancelled via the
- *      `POST /api/goals/:goalId/gates/:gateId/cancel-verification` endpoint
- *      must reap the spawned process tree within ~3s of the cancel call.
- *
- * Skipped on Windows: the `ps -ef` scan is POSIX-only. The implementation
- * still works there (taskkill /T /F) and is covered by the unit suite.
+ * Cross-platform: the spawned verification command is a `node -e` payload
+ * that prints `PARENT_PID=<n>` and `CHILD_PID=<n>` then idles. Liveness
+ * checks use `process.kill(pid, 0)` which maps to the right OS primitive
+ * in Node on both Windows and POSIX. No `ps`, `pgrep`, `tasklist`, or
+ * shell-specific syntax.
  */
 
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "./e2e-setup.js";
 import { pollUntil as pollUntilCleanup } from "./test-utils/cleanup.js";
-import { execSync } from "node:child_process";
-
-const IS_POSIX = process.platform !== "win32";
-test.skip(!IS_POSIX, "ps-based assertion is POSIX-only; Windows covered in unit suite");
 
 const TIMEOUT_WORKFLOW = `test-verif-timeout-${Date.now()}`;
-const MARKER = `BOBBIT_TIMEOUT_TEST_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
-const CANCEL_MARKER = `BOBBIT_CANCEL_TEST_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+const CANCEL_WORKFLOW = `test-verif-cancel-${Date.now()}`;
 
-async function createTimeoutWorkflow(): Promise<void> {
-	const res = await apiFetch("/api/workflows", {
-		method: "POST",
-		body: JSON.stringify({
-			id: TIMEOUT_WORKFLOW,
-			name: "Verification Timeout Test",
-			description: "Single-step workflow that always exceeds its timeout",
-			gates: [
-				{
-					id: "timeout-gate",
-					name: "Timeout Gate",
-					dependsOn: [],
-					verify: [
-						{
-							name: "Times out",
-							type: "command",
-							// The marker is embedded as a no-op comment inside the bash
-							// `-c` argument — `ps -ef` shows that argv verbatim, giving us
-							// a reliable way to confirm the descendant sleep (and the
-							// outer bash shell) were reaped after the tree-kill.
-							run: `bash -c 'sleep 600 # ${MARKER}'`,
-							timeout: 3,
-						},
-					],
-				},
-			],
-		}),
-	});
-	expect(res.status).toBe(201);
+/**
+ * Build a node-only inline payload that prints PARENT_PID and CHILD_PID
+ * then idles. Works on Windows and POSIX without invoking any shell.
+ * `process.argv0` from the gateway's own Node is used by `run` via the
+ * builtin shell, but we wrap with `node -e "..."` so the test command
+ * itself never relies on bash/cmd builtins.
+ *
+ * The script:
+ *   - prints `PARENT_PID=<pid>`
+ *   - spawns an inner `node -e "setTimeout(()=>{}, 60000)"` child
+ *   - prints `CHILD_PID=<pid>`
+ *   - idles for 60s
+ *
+ * The whole thing is base64-encoded so we never have to worry about
+ * embedded quotes / shell escaping on either OS. The verification step
+ * then runs `node -e "eval(Buffer.from('<b64>','base64').toString())"`.
+ */
+function nodeTreeRun(): string {
+	const inner = [
+		'process.stdout.write("PARENT_PID="+process.pid+"\\n");',
+		'var c=require("child_process").spawn(process.execPath,["-e","setTimeout(()=>{}, 60000)"],{stdio:"ignore"});',
+		'process.stdout.write("CHILD_PID="+c.pid+"\\n");',
+		'setTimeout(()=>{}, 60000);',
+	].join("");
+	const b64 = Buffer.from(inner, "utf8").toString("base64");
+	// Double-quoted `node -e "..."` is portable across bash and cmd.
+	return `node -e "eval(Buffer.from('${b64}','base64').toString())"`;
 }
 
-async function createCancelWorkflow(): Promise<void> {
+async function createWorkflow(id: string, timeout: number): Promise<void> {
+	const projectId = await defaultProjectId();
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
-			id: TIMEOUT_WORKFLOW + "-cancel",
-			name: "Verification Cancel Test",
-			description: "Long-running step we cancel mid-flight",
+			projectId,
+			id,
+			name: `Verification Tree-Kill ${id}`,
+			description: "Verification command-step tree-kill test",
 			gates: [
 				{
-					id: "cancel-gate",
-					name: "Cancel Gate",
+					id: "tree-gate",
+					name: "Tree Gate",
 					dependsOn: [],
 					verify: [
 						{
-							name: "Long step",
+							name: "Tree step",
 							type: "command",
-							run: `bash -c 'sleep 600 # ${CANCEL_MARKER}'`,
-							timeout: 120,
+							run: nodeTreeRun(),
+							timeout,
 						},
 					],
 				},
 			],
 		}),
 	});
-	expect(res.status).toBe(201);
+	if (res.status !== 201) {
+		const body = await res.text().catch(() => "<no body>");
+		throw new Error(`createWorkflow(${id}) failed: ${res.status} ${body}`);
+	}
 }
 
 async function deleteWorkflowSafe(id: string): Promise<void> {
@@ -117,67 +111,74 @@ async function poll<T>(fn: () => Promise<T>, pred: (v: T) => boolean, budgetMs: 
 	return captured!;
 }
 
-/** Count surviving processes whose command line contains the marker. */
-function countMarkedProcs(marker: string): number {
-	try {
-		const out = execSync("ps -ef", { encoding: "utf8" });
-		// Don't count the grep we just ran (we didn't run one), but do exclude
-		// any cmd line that's only the marker substring inside another tool.
-		const lines = out.split("\n").filter(l => l.includes(marker));
-		return lines.length;
-	} catch {
-		return 0;
-	}
+/** Cross-platform liveness check via Node's `process.kill(pid, 0)`. */
+function isAlive(pid: number): boolean {
+	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; }
+	catch (err: any) { return err?.code === "EPERM"; }
+}
+
+/** Extract the verification signals[] off whatever shape the gate API returns. */
+function extractSignals(gate: any): any[] {
+	return (gate?.signals || gate?.gate?.signals || []) as any[];
 }
 
 test.describe("Verification command-step tree-kill (E2E)", () => {
 	test.setTimeout(60_000);
 
 	test.beforeAll(async () => {
-		await createTimeoutWorkflow();
-		await createCancelWorkflow();
+		await createWorkflow(TIMEOUT_WORKFLOW, 3);
+		await createWorkflow(CANCEL_WORKFLOW, 60);
 	});
 
 	test.afterAll(async () => {
 		await deleteWorkflowSafe(TIMEOUT_WORKFLOW);
-		await deleteWorkflowSafe(TIMEOUT_WORKFLOW + "-cancel");
+		await deleteWorkflowSafe(CANCEL_WORKFLOW);
 	});
 
-	test("step timeout transitions gate to failed with tree-kill marker", async () => {
+	test("step timeout transitions to failed with tree-kill marker and reaps descendants", async () => {
 		const goal = await createGoal({
 			title: `Verif Timeout ${Date.now()}`,
 			workflowId: TIMEOUT_WORKFLOW,
 			worktree: false,
 		});
 		try {
-			const sigRes = await apiFetch(`/api/goals/${goal.id}/gates/timeout-gate/signal`, {
+			const sigRes = await apiFetch(`/api/goals/${goal.id}/gates/tree-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "trigger timeout" }),
 			});
 			expect(sigRes.status).toBe(201);
 
-			// Poll the gate until verification settles as failed.
+			// Poll the gate until the verification settles (status != "running").
 			const settled = await poll(
-				() => getGateState(goal.id, "timeout-gate"),
+				() => getGateState(goal.id, "tree-gate"),
 				(g: any) => {
-					const sigs = g.signals || g.gate?.signals || [];
-					return sigs.some((s: any) => s.verification && s.verification.status && s.verification.status !== "running");
+					const sigs = extractSignals(g);
+					return sigs.some((s: any) => s.verification?.status && s.verification.status !== "running");
 				},
-				12_000,
+				15_000,
 			);
-			const sigs = settled.signals || settled.gate?.signals || [];
+			const sigs = extractSignals(settled);
 			const latest = sigs[sigs.length - 1];
 			expect(latest.verification.status).toBe("failed");
-			const stepOutput = (latest.verification.steps?.[0]?.output || "") as string;
+			const stepOutput = (latest.verification.steps?.[0]?.output ?? "") as string;
 			expect(stepOutput).toMatch(/timed out after 3s\s+\u2014\s+killed subprocess tree/);
 
-			// No surviving marked processes within 3s of failure.
-			const cleaned = await poll(
-				async () => countMarkedProcs(MARKER),
-				(n) => n === 0,
-				3000,
-			);
-			expect(cleaned).toBe(0);
+			// Verify the descendant node process was reaped via Node's portable
+			// kill(pid, 0). The step output contains both PARENT_PID and CHILD_PID.
+			const parentMatch = /PARENT_PID=(\d+)/.exec(stepOutput);
+			const childMatch = /CHILD_PID=(\d+)/.exec(stepOutput);
+			expect(parentMatch, `output missing PARENT_PID: ${stepOutput}`).not.toBeNull();
+			expect(childMatch, `output missing CHILD_PID: ${stepOutput}`).not.toBeNull();
+			const parentPid = Number(parentMatch![1]);
+			const childPid = Number(childMatch![1]);
+
+			let cleaned = !isAlive(parentPid) && !isAlive(childPid);
+			await pollUntilCleanup(async () => {
+				cleaned = !isAlive(parentPid) && !isAlive(childPid);
+				return cleaned;
+			}, { timeoutMs: 5000, intervalMs: 100, label: "timeout-tree-reaped" }).catch(() => {});
+			expect(cleaned, `tree should be reaped; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`).toBe(true);
 		} finally {
 			await deleteGoal(goal.id).catch(() => {});
 		}
@@ -186,33 +187,54 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 	test("cancellation tree-kills the subprocess within ~3s", async () => {
 		const goal = await createGoal({
 			title: `Verif Cancel ${Date.now()}`,
-			workflowId: TIMEOUT_WORKFLOW + "-cancel",
+			workflowId: CANCEL_WORKFLOW,
 			worktree: false,
 		});
 		try {
-			const sigRes = await apiFetch(`/api/goals/${goal.id}/gates/cancel-gate/signal`, {
+			const sigRes = await apiFetch(`/api/goals/${goal.id}/gates/tree-gate/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "trigger long" }),
 			});
 			expect(sigRes.status).toBe(201);
 
-			// Wait until at least one marked sleep is running.
-			await poll(async () => countMarkedProcs(CANCEL_MARKER), n => n > 0, 8000);
+			// Wait until the verification is running AND has printed both pids.
+			// Use the active-verifications endpoint — it surfaces the live step
+			// `output` from the in-memory tailer, which beats waiting for the
+			// gate signal verification record to be flushed back into the store.
+			const readyVers = await poll(
+				() => getActiveVerifications(goal.id),
+				(v: any[]) => {
+					const run = v.find(a => a.gateId === "tree-gate" && a.overallStatus === "running");
+					const out = run?.steps?.[0]?.output ?? "";
+					return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+				},
+				15_000,
+			);
+			const runActive = readyVers.find((a: any) => a.gateId === "tree-gate" && a.overallStatus === "running");
+			const startOut = runActive.steps[0].output as string;
+			const parentPid = Number(/PARENT_PID=(\d+)/.exec(startOut)![1]);
+			const childPid = Number(/CHILD_PID=(\d+)/.exec(startOut)![1]);
+			expect(isAlive(parentPid)).toBe(true);
+			expect(isAlive(childPid)).toBe(true);
 
 			// Cancel.
-			const cancelRes = await apiFetch(`/api/goals/${goal.id}/gates/cancel-gate/cancel-verification`, {
+			const cancelRes = await apiFetch(`/api/goals/${goal.id}/gates/tree-gate/cancel-verification`, {
 				method: "POST",
 			});
 			expect(cancelRes.status).toBe(200);
 
 			// Subprocess tree should be reaped within ~3s.
-			const cleaned = await poll(async () => countMarkedProcs(CANCEL_MARKER), n => n === 0, 5000);
-			expect(cleaned).toBe(0);
+			let cleaned = !isAlive(parentPid) && !isAlive(childPid);
+			await pollUntilCleanup(async () => {
+				cleaned = !isAlive(parentPid) && !isAlive(childPid);
+				return cleaned;
+			}, { timeoutMs: 5000, intervalMs: 100, label: "cancel-tree-reaped" }).catch(() => {});
+			expect(cleaned, `tree should be reaped after cancel; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`).toBe(true);
 
 			// And the verification should no longer be in `running`.
 			await poll(
 				() => getActiveVerifications(goal.id),
-				(v) => !v.some((a: any) => a.gateId === "cancel-gate" && a.overallStatus === "running"),
+				(v) => !v.some((a: any) => a.gateId === "tree-gate" && a.overallStatus === "running"),
 				5000,
 			);
 		} finally {

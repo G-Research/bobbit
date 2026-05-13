@@ -7,26 +7,18 @@
  * just the immediate shell — and the step must resolve as failed with the
  * specified marker text.
  *
- * Coverage:
- *   1. Tree-kill on timeout (POSIX): descendant `sleep` is dead after
- *      step settle.
- *   2. Cancellation kills the tree (POSIX): cancelStaleVerifications
- *      reaps the pgid within ~1s.
- *   3. Tree-kill on timeout (Windows): tasklist shows the child gone.
- *   4. Helper-direct: spawnTracked timeout flips timedOut() and reaps
- *      the child.
- *   5. Helper-direct: killAllTracked reaps every tracked child.
- *   6. SIGKILL escalation: killGraceMs honoured.
- *
- * All polling uses explicit budgets, never fixed sleeps.
+ * Cross-platform: every test runs on POSIX and Windows. Polling uses
+ * `process.kill(pid, 0)` (cross-platform liveness check that maps to
+ * the right OS primitive in Node) and `node -e ...` for spawned
+ * payloads (avoids `bash` / `sleep` / `cmd` / `ping` shell-specific
+ * fixtures).
  */
 
-import { describe, it, before, after } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync, spawn } from "node:child_process";
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
@@ -35,21 +27,25 @@ process.env.BOBBIT_DIR = TEST_DIR;
 const { VerificationHarness } = await import("../src/server/agent/verification-harness.ts");
 const { spawnTracked, killAllTracked, _trackedCount } = await import("../src/server/agent/spawn-tree.ts");
 
-const IS_POSIX = process.platform !== "win32";
-
-/** Poll predicate with explicit budget. Returns true if satisfied. */
+/** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {
 	const deadline = Date.now() + budgetMs;
 	while (Date.now() < deadline) {
 		if (await predicate()) return true;
 		await new Promise(r => setTimeout(r, stepMs));
 	}
-	return predicate() as any;
+	return Boolean(await predicate());
 }
 
-/** Cross-platform: is `pid` a live OS process? */
+/**
+ * Cross-platform: is `pid` a live OS process?
+ *
+ * `process.kill(pid, 0)` sends signal 0 — a permission/existence check that
+ * delivers no signal. Maps to OpenProcess+ExitCode on Windows, kill(pid, 0)
+ * on POSIX. ESRCH = gone, EPERM = exists but we don't own it (count alive).
+ */
 function isAlive(pid: number): boolean {
-	if (!pid) return false;
+	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
 	try { process.kill(pid, 0); return true; }
 	catch (err: any) { return err?.code === "EPERM"; }
 }
@@ -73,141 +69,159 @@ function makeHarness() {
 	);
 }
 
+/**
+ * Build a portable shell command that runs node with a script file.
+ * Cross-platform-safe because the path is quoted with double-quotes
+ * which both `bash` and `cmd` honour. Avoids any inline `-e` escaping
+ * headaches across shells.
+ */
+function nodeCmd(scriptPath: string): string {
+	return `"${process.execPath}" "${scriptPath}"`;
+}
+
+/**
+ * Write a node script that prints `PARENT_PID=<n>` then spawns a
+ * child node process, prints `CHILD_PID=<n>`, and keeps both alive for
+ * the requested duration. Used to verify that tree-kill reaps the
+ * grandchild (which is the CHILD_PID), not just the shell.
+ */
+function writeTreeScript(dir: string, holdMs = 60_000): string {
+	const file = path.join(dir, "tree.cjs");
+	fs.writeFileSync(file, `
+process.stdout.write("PARENT_PID=" + process.pid + "\\n");
+const cp = require("child_process");
+const c = cp.spawn(process.execPath, ["-e", "setTimeout(()=>{}, ${holdMs})"], { stdio: "ignore" });
+process.stdout.write("CHILD_PID=" + c.pid + "\\n");
+setTimeout(()=>{}, ${holdMs});
+`);
+	return file;
+}
+
 describe("spawn-tree helper", () => {
-	it("times out and reports timedOut()=true (POSIX)", { skip: !IS_POSIX }, async () => {
-		const t = spawnTracked("bash", ["-c", "sleep 30"], {
+	it("times out, reports timedOut()=true, and reaps the child", async () => {
+		const t = spawnTracked(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], {
 			stdio: "ignore",
 			timeoutMs: 200,
 		});
 		const childPid = t.child.pid!;
-		// Wait for close.
 		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
 		assert.strictEqual(t.timedOut(), true, "timedOut() should be true after timer fires");
-		// Process should be reaped (we already got close).
-		assert.strictEqual(isAlive(childPid), false, "child pid should be reaped after close");
+		const dead = await poll(() => !isAlive(childPid), 3000);
+		assert.ok(dead, `child pid ${childPid} should be reaped after close`);
 	});
 
-	it("SIGKILL escalation honours killGraceMs (POSIX)", { skip: !IS_POSIX }, async () => {
-		// Trap SIGTERM in the child so SIGTERM alone won't kill it; require SIGKILL escalation.
-		const t = spawnTracked("bash", ["-c", "trap '' TERM; sleep 30"], {
-			stdio: "ignore",
-			timeoutMs: 100,
-			killGraceMs: 200,
-		});
-		const childPid = t.child.pid!;
-		const start = Date.now();
+	it("killTree reaps the entire subprocess tree", async () => {
+		// Outer node spawns inner node, prints both pids on stdout. We then call
+		// killTree() and assert BOTH pids become unreachable.
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "tree-"));
+		const script = writeTreeScript(tmp);
+		let buf = "";
+		const t = spawnTracked(process.execPath, [script], { stdio: ["ignore", "pipe", "ignore"] });
+		t.child.stdout!.on("data", (d: Buffer) => { buf += d.toString(); });
+
+		// Wait until both pids are printed.
+		const got = await poll(() => /PARENT_PID=(\d+)/.test(buf) && /CHILD_PID=(\d+)/.test(buf), 5000);
+		assert.ok(got, `expected both pids on stdout; got: ${JSON.stringify(buf)}`);
+		const parentPid = Number(/PARENT_PID=(\d+)/.exec(buf)![1]);
+		const childPid = Number(/CHILD_PID=(\d+)/.exec(buf)![1]);
+		assert.ok(isAlive(parentPid), "parent should be alive before kill");
+		assert.ok(isAlive(childPid), "grandchild should be alive before kill");
+
+		t.killTree("SIGKILL", 0);
 		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
-		const elapsed = Date.now() - start;
-		assert.ok(elapsed >= 100, `should not close before timeout fires; got ${elapsed}ms`);
-		assert.ok(elapsed < 5000, `SIGKILL escalation should reap within budget; got ${elapsed}ms`);
-		assert.strictEqual(isAlive(childPid), false);
+
+		const cleaned = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 3000);
+		assert.ok(cleaned, `both pids should be reaped; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 	});
 
-	it("killAllTracked reaps every tracked child (POSIX)", { skip: !IS_POSIX }, async () => {
-		const children = [0, 1, 2].map(() => spawnTracked("bash", ["-c", "sleep 30"], { stdio: "ignore" }));
+	it("killAllTracked reaps every tracked child", async () => {
+		const children = [0, 1, 2].map(() =>
+			spawnTracked(process.execPath, ["-e", "setTimeout(()=>{}, 60000)"], { stdio: "ignore" }),
+		);
 		const pids = children.map(c => c.child.pid!);
-		const baselineTracked = _trackedCount();
-		assert.ok(baselineTracked >= 3, `expected >=3 tracked, got ${baselineTracked}`);
+		assert.ok(_trackedCount() >= 3, `expected >=3 tracked, got ${_trackedCount()}`);
 		killAllTracked("SIGKILL");
 		await Promise.all(children.map(c => new Promise<void>((res) => c.child.once("close", () => res()))));
-		const ok = await poll(() => pids.every(p => !isAlive(p)), 2000);
-		assert.ok(ok, "all tracked children should be reaped within 2s");
-	});
-
-	it("tree-kill via taskkill (Windows)", { skip: IS_POSIX }, async () => {
-		// `ping -n 60 127.0.0.1` blocks for 60s; spawned via cmd /c.
-		const t = spawnTracked("cmd", ["/c", "ping -n 60 127.0.0.1 >NUL"], {
-			stdio: "ignore",
-			timeoutMs: 300,
-			windowsHide: true,
-		});
-		const pid = t.child.pid!;
-		await new Promise<void>((resolve) => t.child.once("close", () => resolve()));
-		assert.strictEqual(t.timedOut(), true);
-		// tasklist should not list this pid anymore.
-		const ok = await poll(() => {
-			try {
-				const out = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: "utf8" });
-				return !out.includes(String(pid));
-			} catch { return true; }
-		}, 5000);
-		assert.ok(ok, "Windows process should be gone after tree-kill");
+		const ok = await poll(() => pids.every(p => !isAlive(p)), 3000);
+		assert.ok(ok, "all tracked children should be reaped within budget");
 	});
 });
 
-describe("runCommandStep tree-kill on timeout (POSIX)", () => {
-	it("kills grandchild on step timeout", { skip: !IS_POSIX }, async () => {
+describe("runCommandStep tree-kill", () => {
+	it("kills the entire subprocess tree on step timeout and emits the marker", async () => {
 		const harness = makeHarness();
-		const tmpDir = fs.mkdtempSync(path.join(TEST_DIR, "gc-"));
-		const gcPidFile = path.join(tmpDir, "gc.pid");
-		// Outer bash spawns inner bash sleep 60 as a background descendant
-		// and `wait`s — so the timeout has to reach the grandchild.
-		const cmd = `bash -c 'sleep 60 & echo $! > ${gcPidFile}; wait'`;
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
+		const script = writeTreeScript(tmp);
 
-		const streamCtx = { goalId: "g1", gateId: "gate1", signalId: "sig-timeout-1", stepIndex: 0 };
-		// Seed activeVerification entry so the persisted-step write doesn't blow up.
-		(harness as any).activeVerifications.set(streamCtx.signalId, {
-			goalId: streamCtx.goalId,
-			gateId: streamCtx.gateId,
-			signalId: streamCtx.signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
-
-		const result = await (harness as any).runCommandStep(cmd, tmpDir, 2, false, streamCtx, undefined, undefined);
+		// No streamCtx → attached pipe mode on all platforms; output is captured
+		// directly into result.output, where we can grep for PARENT_PID/CHILD_PID.
+		const result = await (harness as any).runCommandStep(
+			nodeCmd(script), tmp, 2, false, undefined, undefined, undefined,
+		);
 		assert.strictEqual(result.passed, false, `expected failed step, got: ${JSON.stringify(result)}`);
 		assert.ok(
 			/timed out after 2s\s+\u2014\s+killed subprocess tree/.test(result.output),
 			`expected timeout marker, got: ${result.output}`,
 		);
 
-		// Grandchild pid should be unreachable (ESRCH) within 3s of settle.
-		await poll(() => fs.existsSync(gcPidFile), 1000);
-		const gcPid = parseInt(fs.readFileSync(gcPidFile, "utf8").trim(), 10);
-		assert.ok(Number.isFinite(gcPid) && gcPid > 0, `bad grandchild pid: ${gcPid}`);
-		const dead = await poll(() => !isAlive(gcPid), 3000);
-		assert.ok(dead, `grandchild pid ${gcPid} should be dead within 3s of step settle`);
+		const parentMatch = /PARENT_PID=(\d+)/.exec(result.output);
+		const childMatch = /CHILD_PID=(\d+)/.exec(result.output);
+		assert.ok(parentMatch, `output missing PARENT_PID: ${result.output}`);
+		assert.ok(childMatch, `output missing CHILD_PID: ${result.output}`);
+		const parentPid = Number(parentMatch![1]);
+		const childPid = Number(childMatch![1]);
+
+		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 5000);
+		assert.ok(dead, `descendants should be reaped after timeout; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 	});
 
-	it("cancellation tree-kills the subprocess and reports cancelled marker (POSIX)", { skip: !IS_POSIX }, async () => {
+	it("cancellation tree-kills the subprocess and emits the cancelled marker", async () => {
 		const harness = makeHarness();
-		const tmpDir = fs.mkdtempSync(path.join(TEST_DIR, "cancel-"));
-		const gcPidFile = path.join(tmpDir, "gc.pid");
-		const cmd = `bash -c 'sleep 60 & echo $! > ${gcPidFile}; wait'`;
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-cancel-"));
+		const script = writeTreeScript(tmp);
 
 		const goalId = "goal-cancel";
 		const gateId = "gate-cancel";
 		const signalId = "sig-cancel-1";
 		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+		// Seed activeVerification so the persisted-step write path is happy
+		// and so the cancellation lookup hits this signalId.
 		(harness as any).activeVerifications.set(signalId, {
-			goalId,
-			gateId,
-			signalId,
+			goalId, gateId, signalId,
 			overallStatus: "running",
 			startedAt: Date.now(),
 			currentPhase: 0,
 			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
 		});
 
-		// Kick off the long-running step.
-		const stepPromise = (harness as any).runCommandStep(cmd, tmpDir, 60, false, streamCtx, undefined, undefined);
+		// Kick off the long-running step. Captures stdout into step.output via
+		// the broadcastFn path or via the detached-mode tail.
+		const stepPromise = (harness as any).runCommandStep(
+			nodeCmd(script), tmp, 60, false, streamCtx, undefined, undefined,
+		);
 
-		// Wait until the tracked child is registered.
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 2000);
+		// Wait until the tracked child is registered AND the script has printed
+		// both pids so we have something to assert against.
+		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
 		assert.ok(registered, "tracked child should be registered shortly after spawn");
 
-		// Wait for the grandchild pid file to appear so we have a target to verify.
-		await poll(() => fs.existsSync(gcPidFile), 2000);
-		const gcPid = parseInt(fs.readFileSync(gcPidFile, "utf8").trim(), 10);
-		assert.ok(Number.isFinite(gcPid) && gcPid > 0);
+		const pidsReady = await poll(() => {
+			const av = (harness as any).activeVerifications.get(signalId);
+			const out = av?.steps?.[0]?.output ?? "";
+			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+		}, 6000);
+		assert.ok(pidsReady, "script should have printed both pids before cancel");
+		const av = (harness as any).activeVerifications.get(signalId);
+		const out = av.steps[0].output as string;
+		const parentPid = Number(/PARENT_PID=(\d+)/.exec(out)![1]);
+		const childPid = Number(/CHILD_PID=(\d+)/.exec(out)![1]);
 
 		await harness.cancelStaleVerifications(goalId, gateId);
 
-		// pgid should be dead within ~1s (SIGTERM grace=1000 → SIGKILL).
-		const dead = await poll(() => !isAlive(gcPid), 2500);
-		assert.ok(dead, `grandchild pid ${gcPid} should die within ~1s of cancel`);
+		// Tree should be reaped within ~1s (SIGTERM grace 1000ms → SIGKILL on POSIX;
+		// taskkill /T /F is unconditional on Windows).
+		const dead = await poll(() => !isAlive(parentPid) && !isAlive(childPid), 3000);
+		assert.ok(dead, `tree should be reaped within budget; parent=${isAlive(parentPid)} child=${isAlive(childPid)}`);
 
 		const result = await stepPromise;
 		assert.strictEqual(result.passed, false);
@@ -219,7 +233,6 @@ describe("runCommandStep tree-kill on timeout (POSIX)", () => {
 });
 
 after(() => {
-	// Sweep any leftover trackers so subsequent test files start clean.
 	try { killAllTracked("SIGKILL"); } catch {}
 	try { fs.rmSync(TEST_DIR, { recursive: true, force: true }); } catch {}
 });

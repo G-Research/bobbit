@@ -180,7 +180,12 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// `acceptCanonical: true` is required on macOS where `os.tmpdir()`
+				// returns `/var/folders/...` which is a symlink to `/private/var/...`.
+				// Without it, the registry rejects the rootPath with `symlink_root`
+				// and the harness boots with zero projects — silently breaking
+				// every test that relies on `apiFetch` auto-injecting a projectId.
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 
