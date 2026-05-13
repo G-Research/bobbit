@@ -2095,6 +2095,18 @@ export class RemoteAgent {
 			case "auto_compaction_end": {
 				this._isCompacting = false;
 				this.onCompactionChange?.(false);
+				// Minimum elapsed time the in-progress card must remain visible.
+				// pi-coding-agent's compaction — especially auto/threshold paths —
+				// can complete in well under a second. The bobbit-blob sprite
+				// enforces its own min-duration via `StreamingMessageContainer.
+				// COMPACT_MIN_DURATION` so the squash animation is actually seen.
+				// Without a matching card-side floor the user sees "Context
+				// compacted" appear while the sprite is still shaking. Use a
+				// slightly shorter floor than the sprite (2.5 s vs 3.5 s) so the
+				// card lands first and the sprite's pop-back animation lands a
+				// beat later — reading as "done, settling" rather than
+				// "done, still working". */
+				const COMPACT_CARD_MIN_DURATION = 2500;
 				// Success resolution: pi-coding-agent 0.74.0+ emits
 				// `compaction_end { aborted, result, ... }` for the manual path
 				// instead of the older `{ success: true|false }` shape that the
@@ -2160,10 +2172,18 @@ export class RemoteAgent {
 					this._compactionStartPct = null;
 				}
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
-				this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
-				// Queue this card for tokens-after amendment on the next clean
-				// assistant `message_end` carrying usage.
-				this._pendingCompactionAmend = payload;
+				const elapsedSinceStart = startedAtMs != null ? nowMs - startedAtMs : COMPACT_CARD_MIN_DURATION;
+				const transitionCard = () => {
+					this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
+					// Queue this card for tokens-after amendment on the next clean
+					// assistant `message_end` carrying usage.
+					this._pendingCompactionAmend = payload;
+				};
+				if (elapsedSinceStart < COMPACT_CARD_MIN_DURATION) {
+					setTimeout(transitionCard, COMPACT_CARD_MIN_DURATION - elapsedSinceStart);
+				} else {
+					transitionCard();
+				}
 				// Normalize to compaction_end for UI subscribers
 				if (event.type === "auto_compaction_end") {
 					this.emit({ type: "compaction_end", success } as any);
