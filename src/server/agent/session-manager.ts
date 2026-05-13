@@ -46,6 +46,7 @@ import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank } from "./model-registry.js";
+import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
 import { ProjectContextManager } from "./project-context-manager.js";
@@ -3038,7 +3039,11 @@ export class SessionManager {
 				assistantType: undefined,
 				taskId: opts?.taskId,
 				allowedTools: opts?.allowedTools,
-				role: opts?.role,
+				// Mirror session-setup's effectiveRoleId fallback: when callers
+				// (team-manager, staff-manager) pass only `roleName`, use that as
+				// `session.role` so the post-spawn auto-model safety net still
+				// keys off the right role id during the worktree-prep window.
+				role: opts?.role ?? opts?.roleName,
 				accessory: opts?.accessory,
 				worktreePath,
 				projectId,
@@ -3438,17 +3443,36 @@ export class SessionManager {
 	 * for invalid values so the agent's built-in default applies.
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
-		const valid = ["off", "minimal", "low", "medium", "high"];
+		let candidate: string | undefined;
 		if (role && this.configCascade) {
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
 				const t = resolved.find(r => r.item.name === role)?.item.thinkingLevel;
-				if (t && valid.includes(t)) return t;
+				const known = isKnownThinkingLevel(t);
+				if (known) candidate = known;
 			} catch { /* fall through */ }
 		}
-		const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
-		if (pref && valid.includes(pref)) return pref;
-		return "medium";
+		if (!candidate) {
+			const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
+			const known = isKnownThinkingLevel(pref);
+			if (known) candidate = known;
+		}
+		if (!candidate) candidate = "medium";
+		// Defensive clamp against the resolved spawn model (if known). For
+		// non-reasoning models this collapses to "off"; for older Opus models
+		// "xhigh" falls back to "high". When no model is resolvable, leave the
+		// candidate as-is — the per-session clamp at apply time handles it.
+		const initialModelStr = this.resolveInitialModel(role, projectId);
+		if (initialModelStr) {
+			const slash = initialModelStr.indexOf("/");
+			if (slash > 0) {
+				const provider = initialModelStr.slice(0, slash);
+				const modelId = initialModelStr.slice(slash + 1);
+				const meta = inferMeta(modelId);
+				return clampThinkingLevel(candidate, { id: modelId, provider, reasoning: meta.reasoning });
+			}
+		}
+		return candidate;
 	}
 
 	/**
@@ -3606,8 +3630,23 @@ export class SessionManager {
 		// display default and ensures team/delegate agents get an explicit level
 		// instead of relying on the agent's built-in default.
 		if (!level) level = "medium";
-		const valid = ["off", "minimal", "low", "medium", "high"];
-		if (!valid.includes(level)) return;
+		const knownLevel = isKnownThinkingLevel(level);
+		if (!knownLevel) return;
+		level = knownLevel;
+		// Clamp against the session's current model when known so xhigh on a
+		// non-supporting model degrades to high (etc.) at apply time.
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			if (persisted?.modelId) {
+				const meta = inferMeta(persisted.modelId);
+				const clamped = clampThinkingLevel(level, {
+					id: persisted.modelId,
+					provider: persisted.modelProvider,
+					reasoning: meta.reasoning,
+				});
+				if (clamped) level = clamped;
+			}
+		} catch { /* best-effort */ }
 		if (spawnPinnedThinking === level) {
 			console.log(`[session-manager] Default thinking level "${level}" already pinned at spawn for ${session.id}`);
 			return;

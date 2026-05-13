@@ -45,3 +45,4 @@ dist/
 - [WebSocket Protocol](websocket-protocol.md) — real-time communication protocol
 - [Security](security.md) — auth, TLS, and threat model
 - [Networking](networking.md) — remote access and multi-device setup
+- [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model

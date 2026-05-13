@@ -1181,6 +1181,20 @@ export class RemoteAgent {
 					// Streaming preview: if the snapshot contains the streaming
 					// message id, it's no longer in-flight on this client.
 					this.streamingMessageId = undefined;
+					// Also clear any stale `streamingMessage` left over from a
+					// pre-disconnect `message_update`. The snapshot is the
+					// authoritative point-in-time state — the completed assistant
+					// row (if the turn finished) is already in `messages`, and any
+					// still-in-flight turn will repopulate via the next live
+					// `message_update`. Without this clear, the StreamingMessage-
+					// Container keeps rendering the stale partial (e.g. a lone
+					// thinking chunk) alongside the completed message in the
+					// message list, leaving the chat in an incoherent duplicate
+					// state that only a hard reload clears. The snapshot path
+					// below emits synthetic `message_end` frames; AgentInterface's
+					// handler reads `streamingMessage` and only clears the
+					// container when it's null — so we must clear here first.
+					this._state.streamingMessage = null;
 
 					// Emit message_end for each message so AgentInterface re-renders
 					for (const m of this._state.messages) {

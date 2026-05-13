@@ -1,0 +1,3 @@
+# Binaries (fd, rg) are populated by scripts/build-binaries.mjs at release time.
+# This file keeps the bin/ directory in version control even when binaries
+# are absent (local dev before a release build).

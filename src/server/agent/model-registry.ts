@@ -29,6 +29,7 @@ export interface ApiModel {
 	contextWindow: number;
 	maxTokens: number;
 	reasoning: boolean;
+	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	authenticated: boolean;
@@ -140,6 +141,7 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 						contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
 						maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 						reasoning: meta.reasoning || m.reasoning || false,
+						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
 						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
 						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						authenticated: isAuth,

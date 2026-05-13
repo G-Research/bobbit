@@ -1,4 +1,5 @@
 import { YamlStore } from "./yaml-store.js";
+import { THINKING_LEVELS as SHARED_THINKING_LEVELS, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 
 /** Grant policy controlling what happens when an agent uses an ungranted tool. */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
@@ -37,8 +38,12 @@ function normalizeToolPolicies(policies: Record<string, unknown> | undefined): R
 	return Object.keys(result).length > 0 ? result : undefined;
 }
 
-/** Valid thinking level values. Mirrors the set used in session-manager.ts. */
-export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+/**
+ * Valid thinking level values. Re-exports the shared canonical set so callers
+ * that import from role-store keep a stable path. The shared module is the
+ * single source of truth — extending the set requires touching one place.
+ */
+export const VALID_THINKING_LEVELS = SHARED_THINKING_LEVELS;
 
 /**
  * Validate a model string. Accepts only "<provider>/<modelId>" with non-empty
@@ -57,13 +62,12 @@ export function validateModelString(value: unknown): string | undefined {
 
 /**
  * Validate a thinking-level string. Accepts only the canonical set
- * (off, minimal, low, medium, high). Unknown values are silently dropped.
+ * (off, minimal, low, medium, high, xhigh). Unknown values are silently
+ * dropped. Clamping against a specific model happens at use-time via
+ * `clampThinkingLevel` from `src/shared/thinking-levels.ts`.
  */
 export function validateThinkingLevel(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	if (!trimmed) return undefined;
-	return (VALID_THINKING_LEVELS as readonly string[]).includes(trimmed) ? trimmed : undefined;
+	return isKnownThinkingLevel(value);
 }
 
 export interface Role {
@@ -79,7 +83,7 @@ export interface Role {
 	toolPolicies?: Record<string, GrantPolicy>;
 	/** "<provider>/<modelId>" — overrides default.sessionModel / default.reviewModel for sessions of this role */
 	model?: string;
-	/** "off" | "minimal" | "low" | "medium" | "high" — overrides default thinking level for sessions of this role */
+	/** "off" | "minimal" | "low" | "medium" | "high" | "xhigh" — overrides default thinking level for sessions of this role. Clamped to the role's model capability at write time when a model is set. */
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
