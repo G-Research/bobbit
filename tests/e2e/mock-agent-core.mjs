@@ -1842,9 +1842,22 @@ export class MockAgentCore {
 				}
 
 				if (steeredText) {
+					// Test-only knob (MOCK_STEER_ECHO_DELAY_MS=N): delay the
+					// steered handlePrompt by N ms so the dispatch→echo race
+					// window in SessionManager._dispatchSteer (queue row
+					// removed + ledger pushed, awaiting the user-role
+					// message_end echo) is wide enough to be observed by a
+					// client `get_messages` poll. Used by
+					// tests/e2e/steer-snapshot-continuity.spec.ts to pin the
+					// invariant that the steer text never disappears from both
+					// the queue pill and the transcript simultaneously.
+					const delayMs = parseInt(this.env.MOCK_STEER_ECHO_DELAY_MS || "0", 10);
 					this._promptChain = this._promptChain
 						.catch(() => {})
-						.then(() => this.handlePrompt(steeredText))
+						.then(async () => {
+							if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
+							return this.handlePrompt(steeredText);
+						})
 						.catch(err => {
 							console.error("[mock-agent-core] Steered prompt error:", err);
 						});
