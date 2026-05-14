@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>notification-policy fixture</title>
+</head>
+<body>
+<div id="container"></div>
+<script>
+	// localStorage stubs so gatewayFetch / app modules don't crash reading them.
+	try { localStorage.setItem("gateway.url", "http://127.0.0.1:1"); } catch {}
+	try { localStorage.setItem("gateway.token", "test"); } catch {}
+</script>
+<script src="./notification-policy-bundle.js"></script>
+</body>
+</html>

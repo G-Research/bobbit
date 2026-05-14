@@ -690,6 +690,9 @@ export function createGateway(config: GatewayConfig) {
 		maxServers: lspMaxServers,
 		idleTtlMs: lspIdleTtlMs,
 	});
+	if (!lspDisabled) {
+		console.log("[lsp] supervisor ready; routes /api/lsp/{state,stats,definition,references,hover,diagnostics,document_symbols,workspace_symbol,rename} registered, 2 factories");
+	}
 	// SandboxManager is wired later when sandbox=docker, so the supervisor
 	// exposes a setter rather than taking it via constructor.
 	sessionManager.setLspSupervisor(lspSupervisor);
@@ -1365,7 +1368,69 @@ export function createGateway(config: GatewayConfig) {
 					}));
 				})();
 
-				await Promise.all([sweeperTask, poolInitTask]);
+				// LSP route self-check: loopback probes verify /api/lsp/* routes are
+				// registered in handleApiRoute(). A merge regression can silently drop
+				// the route block while leaving everything else intact. Skip when
+				// lsp_disabled is set — there are no LSP routes to check.
+				const lspRouteCheckTask = (async () => {
+					if (lspDisabled) return;
+					const addr = server.address() as import("node:net").AddressInfo;
+					const checkPort = addr.port;
+					const base = `http://127.0.0.1:${checkPort}`;
+					const authHeaders = { "Authorization": `Bearer ${config.authToken}` };
+					const cwd = config.defaultCwd || getProjectRoot();
+					// Use server.ts itself as the "real src file" for the /state probe.
+					const srcFile = path.resolve(getProjectRoot(), "src/server/server.ts");
+					const probes: Array<{ route: string; url: string; method: string; body?: string; failOn404Only: boolean }> = [
+						{
+							route: "/api/lsp/stats",
+							url: `${base}/api/lsp/stats`,
+							method: "GET",
+							failOn404Only: false,
+						},
+						{
+							route: "/api/lsp/state",
+							url: `${base}/api/lsp/state?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(srcFile)}`,
+							method: "GET",
+							failOn404Only: false,
+						},
+						{
+							route: "/api/lsp/diagnostics",
+							url: `${base}/api/lsp/diagnostics`,
+							method: "POST",
+							body: JSON.stringify({ cwd }),
+							failOn404Only: true,
+						},
+					];
+					for (const probe of probes) {
+						const ac = new AbortController();
+						const timer = setTimeout(() => ac.abort(), 2000);
+						try {
+							const res = await fetch(probe.url, {
+								method: probe.method,
+								headers: { ...authHeaders, ...(probe.body ? { "Content-Type": "application/json" } : {}) },
+								body: probe.body,
+								signal: ac.signal,
+							});
+							clearTimeout(timer);
+							const failed = probe.failOn404Only ? res.status === 404 : res.status !== 200;
+							if (failed) {
+								const checkResult = `failed:${probe.route}:${res.status}`;
+								lspSupervisor.setRouteSelfCheck(checkResult);
+								console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
+								return;
+							}
+						} catch (err: any) {
+							clearTimeout(timer);
+							// Timeout or network error — not a missing route, skip loudly
+							console.warn(`[lsp] route self-check: ${probe.route} probe failed (${err?.message ?? err}) — skipping check`);
+							return;
+						}
+					}
+					lspSupervisor.setRouteSelfCheck("ok");
+				})();
+
+				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
@@ -5274,9 +5339,18 @@ async function handleApiRoute(
 			}
 		}
 
-		// Create signal record
+		// Cancel any in-flight verifications for the same gate BEFORE seeding
+		// the new one — otherwise cancelStaleVerifications would observe and
+		// tear down the just-seeded active entry.
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
+		// Create signal record. Step enumeration is performed synchronously
+		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
+		// `activeVerifications` agree on the step list from the very first
+		// persisted state. See goal "Fix verification progress race".
+		const signalId = randomUUID();
 		const signal = {
-			id: randomUUID(),
+			id: signalId,
 			gateId,
 			goalId,
 			sessionId: signalSessionId,
@@ -5285,8 +5359,11 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
-			verification: { status: "running" as const, steps: [] },
+			verification: { status: "running" as const, steps: [] as any[] },
 		};
+
+		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
 
@@ -5301,6 +5378,23 @@ async function handleApiRoute(
 		// Broadcast signal received
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
+		// Broadcast verification started AFTER signal received — WS clients
+		// depend on this ordering (see tests/e2e/verification-core.spec.ts
+		// "WS events have correct shape, timestamps, and ordering"). The
+		// `gate_verification_started` event used to be fired synchronously
+		// inside `beginVerification` which inverted the order on the wire.
+		const activeForBroadcast = verificationHarness.getActiveVerification(signal.id);
+		if (activeForBroadcast && initialSteps.length > 0) {
+			broadcastToGoal(goalId, {
+				type: "gate_verification_started",
+				goalId,
+				gateId,
+				signalId: signal.id,
+				startedAt: activeForBroadcast.startedAt,
+				steps: (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+		}
+
 		// Build gate state map for metadata variable resolution + LLM reviewer context
 		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
 		for (const gs of gateStore.getGatesForGoal(goalId)) {
@@ -5312,9 +5406,6 @@ async function handleApiRoute(
 				injectDownstream: def?.injectDownstream,
 			});
 		}
-
-		// Cancel any in-flight verifications for the same gate before starting new ones
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
 
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale

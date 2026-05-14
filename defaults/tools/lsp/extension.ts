@@ -13,6 +13,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
+/** Methods that returned HTTP 404 this process lifetime — cached to avoid re-hitting the gateway. */
+const routeMissing404Cache = new Set<string>();
+
 function resolveGateway(): { baseUrl: string; token: string } {
 	let token = "";
 	let baseUrl = "";
@@ -65,6 +68,12 @@ export default function (pi: ExtensionAPI) {
 		body: Record<string, unknown>,
 		onUpdate?: (u: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void,
 	): Promise<unknown> {
+		if (routeMissing404Cache.has(method)) {
+			return {
+				error: "lsp_route_missing",
+				message: `LSP route /api/lsp/${method} not registered on the gateway — likely a server build regression. Notify the operator; do not silently fall back to grep on every subsequent call.`,
+			};
+		}
 		// Prefer BOBBIT_HOST_CWD when running inside a container — process.cwd()
 		// would be the container path, but the gateway's /api/lsp/* routes
 		// need the host-side cwd to spawn the LSP server correctly.
@@ -95,6 +104,21 @@ export default function (pi: ExtensionAPI) {
 				},
 				body: JSON.stringify(fullBody),
 			});
+			if (res.status === 404) {
+				routeMissing404Cache.add(method);
+				return {
+					error: "lsp_route_missing",
+					message: `LSP route /api/lsp/${method} not registered on the gateway — likely a server build regression. Notify the operator; do not silently fall back to grep on every subsequent call.`,
+				};
+			}
+			if (res.status >= 500) {
+				let errMsg = `HTTP ${res.status}`;
+				try {
+					const errBody = await res.json() as Record<string, unknown>;
+					errMsg = String(errBody?.message ?? errBody?.error ?? errMsg);
+				} catch { /* ignore */ }
+				throw new Error(`/api/lsp/${method} failed (${res.status}): ${errMsg}`);
+			}
 			if (!res.ok) {
 				const t = await res.text();
 				throw new Error(`/api/lsp/${method} failed (${res.status}): ${t}`);
@@ -122,7 +146,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("definition", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -135,7 +163,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("references", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -147,7 +179,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("hover", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -159,7 +195,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("diagnostics", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -169,7 +209,11 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ path: pathParam }),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("document_symbols", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -181,7 +225,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("workspace_symbol", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 
@@ -194,7 +242,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("rename", args, onUpdate)); }
-			catch (err: any) { return asText({ error: "lsp_unavailable", message: String(err?.message ?? err) }); }
+			catch (err: any) {
+			const msg = String(err?.message ?? err);
+			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+		}
 		},
 	});
 }

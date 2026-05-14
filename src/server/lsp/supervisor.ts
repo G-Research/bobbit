@@ -78,6 +78,9 @@ export interface LspStats {
 		disabledUntil: number;
 	}>;
 	evictedTotal: number;
+	/** Post-boot loopback self-check result. "ok" = all /api/lsp/* routes responded correctly;
+	 *  "pending" = check has not completed yet; "failed:<route>:<status>" = route returned unexpected status. */
+	routeSelfCheck: string;
 }
 
 function keyOf(k: ServerKey): string { return `${k.language}::${k.worktreePath}`; }
@@ -98,6 +101,7 @@ export class LspSupervisor {
 	private shuttingDown = false;
 	private watchFiles: string[];
 	private configChangeDebounceMs: number;
+	private _routeSelfCheck = "pending";
 
 	constructor(opts: LspSupervisorOptions = {}) {
 		this.maxServers = opts.maxServers ?? 4;
@@ -128,6 +132,11 @@ export class LspSupervisor {
 	/** Whether a sandbox bridge is configured (finding #6 plumbing check). */
 	hasSandboxBridge(): boolean { return !!this.sandbox; }
 
+	/** Set the result of the post-boot route self-check. Called by the server boot loop. */
+	setRouteSelfCheck(value: string): void {
+		this._routeSelfCheck = value;
+	}
+
 	stats(): LspStats {
 		return {
 			maxServers: this.maxServers,
@@ -136,6 +145,7 @@ export class LspSupervisor {
 			preWarmEnabled: this.preWarmEnabled,
 			sandbox: !!this.sandbox,
 			evictedTotal: this.evictedTotal,
+			routeSelfCheck: this._routeSelfCheck,
 			entries: [...this.entries.values()].map(e => {
 				const cs = this.crashState.get(keyOf(e.key));
 				return {

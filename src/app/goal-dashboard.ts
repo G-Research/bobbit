@@ -2245,10 +2245,22 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								<span>Passed (no verification)</span>
 							</div>`
 						: html`
-						${signal.verification.steps.map((step, si) => html`
-							<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
+						${signal.verification.steps.map((step, si) => {
+							// For in-flight signals seeded by beginVerification, prefer
+							// `step.status` over `step.passed` so waiting/running rows
+							// don't render as failed. Completed signals leave `status`
+							// unset and fall back to the boolean `passed` verdict.
+							const inFlight = vStatus === "running" && step.status && step.status !== "passed" && step.status !== "failed";
+							const stepClass = inFlight
+								? (step.status === "running" ? "running" : step.status === "skipped" ? "skip" : "waiting")
+								: (step.passed ? "pass" : "fail");
+							const stepIcon = inFlight
+								? (step.status === "running" ? "\u25CF" : step.status === "skipped" ? "\u2192" : "\u25CB")
+								: (step.passed ? "\u2713" : "\u2717");
+							return html`
+							<div class="verify-step verify-step--${stepClass}">
 								<div class="verify-step__header">
-									<span class="verify-step__icon">${step.passed ? "\u2713" : "\u2717"}</span>
+									<span class="verify-step__icon">${stepIcon}</span>
 									<span class="verify-step__name">${step.name}</span>
 									<span class="verify-step__type">${step.type}</span>
 									${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
@@ -2261,7 +2273,8 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								) : nothing}
 								${step.artifact ? renderStepArtifact(step.artifact, `${signal.id}:${si}`) : nothing}
 							</div>
-						`)}
+						`;
+						})}
 					`}
 					${signal.metadata && Object.keys(signal.metadata).length > 0 ? html`
 						<div class="signal-metadata">

@@ -200,6 +200,10 @@ The live llm-review path is not actually affected by the bug (the kickoff prompt
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
 
+#### Atomic step enumeration on `gate_signal`
+
+The `gate_signal` REST handler enumerates the verification step list **synchronously** before recording the signal, so the persisted `signal.verification.steps[]` and the in-memory `activeVerifications` entry agree from the very first state any consumer can observe. Pre-fix the gate-store wrote `steps: []` and the harness populated the entry several `await`s later — a 15-30 s race window on multi-step gates during which the dashboard rendered no progress. Split via `VerificationHarness.beginVerification(signal, gate)` (synchronous enumeration + active-map seed, no WS broadcast) and `getActiveVerification(signalId)` (lookup for ordered broadcast). The handler order is `cancelStaleVerifications` → `beginVerification` → `recordSignal` → `gate_signal_received` → `gate_verification_started` → fire-and-forget `verifyGateSignal`. Full design and the symbol-level map are in [docs/gate-signal-step-enumeration.md](gate-signal-step-enumeration.md); symptom→fix lookup in [debugging.md — Empty `verification.steps[]` after `gate_signal`](debugging.md#empty-verificationsteps-after-gate_signal). Pinned by `tests/gate-signal-step-enumeration.test.ts`, `tests/e2e/gate-signal-progress.spec.ts`, and `tests/e2e/ui/verification-progress-indicator.spec.ts`.
+
 #### Command-step restart survival
 
 Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart via a detached-spawn + atomic exit-file scheme, with a `bootEpoch`-based correctness floor so a step from a previous gateway lifetime can never falsely lock the gate behind HTTP 409 `Verification already in progress`. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — HTTP 409 after gateway restart](debugging.md#http-409-verification-already-in-progress-after-gateway-restart). Pinned by `tests/verification-harness-restart.test.ts` and `tests/e2e/verification-restart-resignal.spec.ts`.
@@ -1167,7 +1171,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 Two invariants live in `hasUnseenActivity` and must be preserved by any future refactor:
 
 - **The active session is never "unseen".** Otherwise the user would see a dot on the very session they are looking at.
-- **Team-agent sessions are suppressed unless the goal is complete.** Mid-goal chatter from delegate/reviewer/QA agents would otherwise flood the sidebar with dots the user can't act on. Once the goal completes, normal unread semantics resume.
+- **The dot only surfaces when a human is actually needed.** The shared `needsHumanAttention` predicate in `src/app/notification-policy.ts` is the gate. Team members and delegates never surface; a team lead surfaces only when the goal is `complete` or the lead is stuck (no live downstream work and no in-flight verification). The same predicate also gates the polling beep in `src/app/api.ts` and the active-session `agent_end` beep in `src/app/remote-agent.ts`, so the three surfaces can't drift. See [design/notification-policy.md](design/notification-policy.md).
 
 ### Legacy localStorage migration
 
@@ -1212,6 +1216,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
+| `src/app/notification-policy.ts` | `needsHumanAttention` — shared predicate consulted by the unread dot, the polling beep, and the active-session `agent_end` beep |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
