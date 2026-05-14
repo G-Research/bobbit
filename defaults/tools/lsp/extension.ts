@@ -42,7 +42,11 @@ export default function (pi: ExtensionAPI) {
 	async function getState(body: Record<string, unknown>): Promise<string> {
 		try {
 			const params = new URLSearchParams();
-			params.set("cwd", String(body.cwd ?? process.cwd()));
+			// SECURITY: cwd must come from trusted runtime context only, never
+			// from `body` (which is LLM-supplied). Otherwise the model could
+			// override the worktree boundary that supervisor.ts's path-containment
+			// check relies on.
+			params.set("cwd", process.env.BOBBIT_HOST_CWD ?? process.cwd());
 			if (typeof body.path === "string") params.set("path", body.path);
 			const res = await fetch(`${baseUrl}/api/lsp/state?${params}`, {
 				headers: { "Authorization": `Bearer ${token}` },
@@ -64,7 +68,11 @@ export default function (pi: ExtensionAPI) {
 		// Prefer BOBBIT_HOST_CWD when running inside a container — process.cwd()
 		// would be the container path, but the gateway's /api/lsp/* routes
 		// need the host-side cwd to spawn the LSP server correctly.
-		const fullBody = { ...body, cwd: body.cwd ?? process.env.BOBBIT_HOST_CWD ?? process.cwd() };
+		// SECURITY: cwd is derived from trusted runtime context only. Never
+		// honour `body.cwd` — it's LLM-supplied and would let the model
+		// bypass the worktree boundary enforced in supervisor.ts.
+		const trustedCwd = process.env.BOBBIT_HOST_CWD ?? process.cwd();
+		const fullBody = { ...body, cwd: trustedCwd };
 		let announced = false;
 		const progressTimer = setTimeout(async () => {
 			if (announced || !onUpdate) return;
