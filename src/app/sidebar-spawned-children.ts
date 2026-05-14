@@ -41,7 +41,7 @@ export interface SessionLike {
  *         strict-parent attribution: an unstamped orphan only attaches
  *         to its parent's OWN team-lead, never a sibling's).
  *     Archived flag honoured per `showArchived`.
- *   - Dedupe by id (last-write-wins) — defensive guard against state.goals
+ *   - Dedupe by id (first-occurrence wins) — defensive guard against state.goals
  *     containing two copies of the same id during a reducer race.
  *   - Sort: non-archived before archived, then createdAt asc, ties broken
  *     by id asc — so active children render above archived ones and two
