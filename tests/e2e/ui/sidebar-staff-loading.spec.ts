@@ -23,11 +23,10 @@ test.describe("Sidebar +Staff loading feedback", () => {
 			{ timeout: 10_000 },
 		).catch(() => null);
 
-		// Post-surface-staff-in-sessions: the "+ New staff" button lives in the
-		// project header (title="New staff agent in <project>").
+		// The "+ New staff" button lives only on the Staff sub-section header
+		// (title="New staff agent") — the project-header copy was removed.
 		const newStaffBtn = page.locator("button[title^='New staff agent']").first();
 		await expect(newStaffBtn).toBeVisible({ timeout: 10_000 });
-		// Force-hover the project row so the (hidden) header button becomes clickable on desktop.
 		await newStaffBtn.evaluate((el) => (el as HTMLElement).click());
 		await expect(page.locator("[data-testid='bobbit-loader']")).toBeVisible({ timeout: 2_000 });
 
