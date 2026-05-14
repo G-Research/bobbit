@@ -7,6 +7,8 @@ provider:
 group: Children
 docs: |-
   Required: `cascade` (boolean — explicit, no default). Mirrors `goal_pause`. Returns 200 `{ resumed: <count> }`. Server returns 422 if `cascade` is omitted from the request body.
+
+  Optional: `childGoalId` (string) — when set, resume this specific direct child instead of the caller's own goal. The child must be a direct child. Returns 403 with code `NOT_DIRECT_CHILD` if not.
 detail_docs: >-
   ## Purpose
 

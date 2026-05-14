@@ -83,7 +83,7 @@ export default function (pi: ExtensionAPI) {
 				description: Type.Optional(Type.String()),
 				gates: Type.Array(Type.Any()),
 			}, { description: "Inline workflow snapshot; replaces the inherited parent workflow." })),
-			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child waits on. Enforces scheduling — child is created paused and auto-starts only when all deps have merged into the parent. Server validates self-dep / unknown / cycle." })),
+			dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Sibling planIds this child waits on. Enforces scheduling — child is created in state='blocked' (not paused) and auto-starts only when all deps have merged into the parent. Server validates self-dep / unknown / cycle." })),
 		}),
 		async execute(_id, params) {
 			try {
@@ -300,10 +300,15 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Pause the goal (cascade required).",
 		parameters: Type.Object({
 			cascade: Type.Boolean({ description: "Required. true = pause all descendants too." }),
+			childGoalId: Type.Optional(Type.String({
+				description: "If set, pause this specific direct child instead of the caller's own goal. Must be a direct child (parentGoalId === caller's goalId). Returns 403 if not."
+			})),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("POST", `/api/goals/${goalId}/pause`, { cascade: params.cascade }));
+				const body: Record<string, unknown> = { cascade: params.cascade };
+				if (params.childGoalId !== undefined) body.childGoalId = params.childGoalId;
+				return ok(await api("POST", `/api/goals/${goalId}/pause`, body));
 			} catch (e: any) { return err(e.message); }
 		},
 	});
@@ -315,10 +320,15 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Resume the goal (cascade required).",
 		parameters: Type.Object({
 			cascade: Type.Boolean({ description: "Required. true = resume all descendants too." }),
+			childGoalId: Type.Optional(Type.String({
+				description: "If set, resume this specific direct child instead of the caller's own goal. Must be a direct child. Returns 403 if not."
+			})),
 		}),
 		async execute(_id, params) {
 			try {
-				return ok(await api("POST", `/api/goals/${goalId}/resume`, { cascade: params.cascade }));
+				const body: Record<string, unknown> = { cascade: params.cascade };
+				if (params.childGoalId !== undefined) body.childGoalId = params.childGoalId;
+				return ok(await api("POST", `/api/goals/${goalId}/resume`, body));
 			} catch (e: any) { return err(e.message); }
 		},
 	});

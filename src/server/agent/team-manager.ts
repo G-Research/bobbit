@@ -1239,6 +1239,11 @@ export class TeamManager {
 		}
 		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal.
 		if (goal.paused) throw new GoalPausedError(goalId);
+		// Scheduler-block guard — refuse to start a goal that still has
+		// unresolved dependsOn deps. 'blocked' is set at spawn time and
+		// cleared by integrate-child when all deps merge. Manual team/start
+		// must be gated here so a user cannot bypass the scheduler block.
+		if (goal.state === "blocked") throw new GoalPausedError(goalId);
 
 		// Use the goal's worktree/cwd for the team lead
 		const cwd = goal.worktreePath || goal.cwd;

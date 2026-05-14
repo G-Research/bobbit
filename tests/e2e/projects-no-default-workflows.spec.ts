@@ -159,6 +159,7 @@ test.describe("No default workflow scaffold", () => {
 				projectId: project.id,
 				team: false,
 				autoStartTeam: false,
+				workflowId: "feature", // workflowId triggers auto-seeding on empty project
 			}),
 		});
 		// Goal creation should succeed and project.yaml should now have workflows.

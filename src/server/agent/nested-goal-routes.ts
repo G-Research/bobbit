@@ -136,6 +136,53 @@ export async function tryHandleNestedGoalRoute(
 	}
 
 	/**
+	 * Apply operator-pause semantics to a single goal: set paused=true,
+	 * cancel in-flight verifications, broadcast state change.
+	 *
+	 * THE ONLY CALLER of this function is `executePauseForGoals` below.
+	 * All code that needs to pause a goal (REST handler, replan-overflow)
+	 * MUST go through `executePauseForGoals`, not call this directly.
+	 */
+	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
+		await pauseGoalManager.updateGoal(goalId, { paused: true });
+		await cancelAllVerifications(goalId);
+		broadcastToAll({ type: "goal_state_changed", goalId });
+	}
+
+	/**
+	 * Execute a pause operation: pause all listed goals and abort their
+	 * streaming sessions (excluding the caller's own session).
+	 *
+	 * This is the SINGLE ENTRY POINT for goal-pause operations. Both the
+	 * REST POST /pause handler and the replan-overflow safety circuit
+	 * route through here. `applyOperatorPause` is only called from this
+	 * function — no other code touches goal.paused = true.
+	 */
+	async function executePauseForGoals(
+		targets: PersistedGoal[],
+		callerSessionId: string | undefined,
+	): Promise<number> {
+		const pausedIds = new Set<string>(targets.map(g => g.id));
+		let count = 0;
+		for (const g of targets) {
+			if (g.paused) continue;
+			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
+			count++;
+		}
+		for (const s of sessionManager.getAllSessionsRaw()) {
+			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
+			if (s.status !== "streaming") continue;
+			if (s.id === callerSessionId) continue;
+			sessionManager.abortSessionTurn(s.id).catch((err) => {
+				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
+			});
+		}
+		return count;
+	}
+
+
+
+	/**
 	 * Apply a (validated) plan replacement to a parent-workflow goal.
 	 * Updates the goal's workflow snapshot in place, persists, and
 	 * broadcasts a `goal_state_changed` event.
@@ -325,11 +372,9 @@ export async function tryHandleNestedGoalRoute(
 
 		// dependsOn scheduling enforcement — resolve each declared dep planId
 		// to a sibling and check whether it is already merged (state=complete).
-		// Children with unresolved deps are created PAUSED and skip
-		// worktree/team start; integrate-child auto-unblocks them when their
-		// last dependency merges.
-		// TODO: future enhancement — introduce state="blocked" as a distinct
-		// GoalState rather than reusing paused (cleaner UI semantics).
+		// Children with unresolved deps are stamped state='blocked' (not paused)
+		// and skip worktree/team start; integrate-child auto-unblocks them
+		// (blocked → todo) when their last dependency merges.
 		const unresolvedDeps: string[] = [];
 		if (dependsOn && dependsOn.length > 0) {
 			for (const depPlanId of dependsOn) {
@@ -405,9 +450,10 @@ export async function tryHandleNestedGoalRoute(
 				...(suggestedRole ? { suggestedRole } : {}),
 				...(spawnedBySessionId ? { spawnedBySessionId } : {}),
 				...(dependsOn !== undefined ? { dependsOnPlanIds: dependsOn } : {}),
-				// dependsOn scheduling: stamp paused atomically so the child
-				// never has a window where it is unpaused with unresolved deps.
-				...(blocked ? { paused: true } : {}),
+				// dependsOn scheduling: stamp state='blocked' atomically so the
+				// child never has a window where it is runnable with unresolved
+				// deps. 'blocked' is scheduler-managed; 'paused' is operator-only.
+				...(blocked ? { state: "blocked" as const } : {}),
 			});
 			// Initialize gate states for the child's workflow gates.
 			// Without this, gate_list / gate_status / etc. see "no gates"
@@ -732,9 +778,9 @@ export async function tryHandleNestedGoalRoute(
 								return !!depSib && depSib.state === "complete";
 							});
 							if (!allResolved) continue;
-							if (!sib.paused) continue;
-							// Unblock: clear paused, trigger worktree setup + team start.
-							await goalManager.updateGoal(sib.id, { paused: false });
+							if (sib.state !== "blocked") continue;
+							// Unblock: clear state='blocked' → 'todo', trigger worktree setup + team start.
+							await goalManager.updateGoal(sib.id, { state: "todo" });
 							broadcastToAll({ type: "goal_state_changed", goalId: sib.id });
 							if (sib.setupStatus === "preparing") {
 								goalManager.setupWorktreeAndStartTeam(sib.id, () => teamManager.startTeam(sib.id))
@@ -784,30 +830,34 @@ export async function tryHandleNestedGoalRoute(
 			return true;
 		}
 		const cascade: boolean = body.cascade;
-		const goalManager = getGoalManagerForGoal(id);
-		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendantsLocal(id) : [])];
-		const pausedIds = new Set<string>([id]);
-		let count = 0;
-		for (const g of targets) {
-			pausedIds.add(g.id);
-			// R-039: symmetric with resume's `if (!g.paused) continue;`.
-			if (g.paused) continue;
-			await goalManager.updateGoal(g.id, { paused: true });
-			await cancelAllVerifications(g.id);
-			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
-			count++;
+		// Optional targeted-child pause (Issue 4): retarget the cascade to a
+		// direct child instead of the caller's own goal.
+		const childGoalIdRaw: unknown = (body as { childGoalId?: unknown }).childGoalId;
+		const childGoalId: string | undefined = typeof childGoalIdRaw === "string" && childGoalIdRaw.trim()
+			? childGoalIdRaw.trim() : undefined;
+		let targetRoot: PersistedGoal = goal;
+		if (childGoalId !== undefined) {
+			const childGoal = getGoalAcrossProjects(childGoalId);
+			if (!childGoal || childGoal.archived) { json({ error: "Child goal not found" }, 404); return true; }
+			if (childGoal.parentGoalId !== id) {
+				json({ error: "childGoalId must be a direct child", code: "NOT_DIRECT_CHILD" }, 403);
+				return true;
+			}
+			targetRoot = childGoal;
 		}
-		// Pause-cascade: best-effort abort sweep over every streaming
-		// session whose goalId is in the paused subtree. One bad session
-		// must not block the rest — errors are logged and the loop
-		// continues. See docs/design/pause-cascade.md §Call-site 1.
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			sessionManager.forceAbort(s.id).catch((err) => {
-				console.warn(`[pause] forceAbort failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
-		}
+		// Read caller's session to exclude from cascade-abort (Issue 6).
+		const reqHeaders = req.headers as Record<string, string | string[] | undefined>;
+		const readHdr = (n: string): string | undefined => {
+			const v = reqHeaders[n.toLowerCase()];
+			const s = Array.isArray(v) ? v[0] : v;
+			return typeof s === "string" && s.trim() ? s.trim() : undefined;
+		};
+		const callerSessionId = readHdr("x-bobbit-spawning-session") ?? readHdr("x-bobbit-session-id");
+		// Route through executePauseForGoals — the single entry point for all
+		// pause operations. It calls applyOperatorPause per goal and handles
+		// the cascade-abort sweep excluding the caller's session.
+		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
+		const count = await executePauseForGoals(targets, callerSessionId);
 		json({ paused: count });
 		return true;
 	}
@@ -825,11 +875,27 @@ export async function tryHandleNestedGoalRoute(
 			return true;
 		}
 		const cascade: boolean = body.cascade;
-		const goalManager = getGoalManagerForGoal(id);
-		const targets: PersistedGoal[] = [goal, ...(cascade ? listDescendantsLocal(id) : [])];
+		const childGoalIdRaw: unknown = (body as { childGoalId?: unknown }).childGoalId;
+		const childGoalId: string | undefined = typeof childGoalIdRaw === "string" && childGoalIdRaw.trim()
+			? childGoalIdRaw.trim() : undefined;
+		let targetRoot: PersistedGoal = goal;
+		if (childGoalId !== undefined) {
+			const childGoal = getGoalAcrossProjects(childGoalId);
+			if (!childGoal || childGoal.archived) { json({ error: "Child goal not found" }, 404); return true; }
+			if (childGoal.parentGoalId !== id) {
+				json({ error: "childGoalId must be a direct child", code: "NOT_DIRECT_CHILD" }, 403);
+				return true;
+			}
+			targetRoot = childGoal;
+		}
+		const goalManager = getGoalManagerForGoal(targetRoot.id);
+		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
 		let count = 0;
 		for (const g of targets) {
-			// R-039: symmetric with the pause loop above.
+			// R-039: symmetric with the pause loop above. Resume is operator-
+			// only — it clears `paused`. The 'blocked' state is scheduler-
+			// managed (set/cleared by spawn-child / integrate-child) and is
+			// NOT touched here.
 			if (!g.paused) continue;
 			await goalManager.updateGoal(g.id, { paused: false });
 			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
@@ -871,15 +937,37 @@ export async function tryHandleNestedGoalRoute(
 		try {
 			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
 			const newReplanCount = (goal.replanCount ?? 0) + 1;
-			const updates: { replanCount: number; paused?: boolean } = { replanCount: newReplanCount };
-			if (newReplanCount > 5 && !goal.paused) updates.paused = true;
+			const updates: { replanCount: number } = { replanCount: newReplanCount };
 			await goalManager.updateGoal(goal.id, updates);
+			// Replan-overflow safety circuit: pause the goal after too many
+			// replans via the same mechanism as POST /pause — operator-style
+			// pause that is sticky and cleared only by goal_resume. This mirrors
+			// the loop body in the REST pause handler (paused: true +
+			// cancelAllVerifications + goal_state_changed broadcast) so that
+			// goal.paused has exactly TWO writers: this path and the REST handler.
+			const autoPaused = newReplanCount > 5 && !goal.paused;
+			if (autoPaused) {
+				// Route through executePauseForGoals — the canonical entry point
+				// for all pause operations, same as the REST POST /pause handler.
+				// Read the caller session from headers so the cascade-abort loop
+				// excludes the agent that triggered this mutation decision (same
+				// pattern as the REST pause handler's caller-exclusion, Issue 6).
+				const mutHdrs = req.headers as Record<string, string | string[] | undefined>;
+				const readMutHdr = (n: string): string | undefined => {
+					const v = mutHdrs[n.toLowerCase()];
+					const s = Array.isArray(v) ? v[0] : v;
+					return typeof s === "string" && s.trim() ? s.trim() : undefined;
+				};
+				const mutCallerSession = readMutHdr("x-bobbit-spawning-session") ?? readMutHdr("x-bobbit-session-id");
+				const goalRecord = getGoalAcrossProjects(goalId);
+				if (goalRecord) await executePauseForGoals([goalRecord], mutCallerSession);
+			}
 			planMutationStore.remove(goalId, requestId);
-			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused: !!updates.paused });
+			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
 			// Cross-team propagation: when a child goal is auto-paused,
 			// notify the PARENT's team-lead — without this the parent sits
 			// idle indefinitely after the replan-overflow tripwire fires.
-			if (updates.paused) {
+			if (autoPaused) {
 				try {
 					const { buildParentPausedNotification } = await import("./notify-team-lead-child-passed.js");
 					const parentNotify = buildParentPausedNotification(goal, "replan-overflow");
@@ -900,7 +988,7 @@ export async function tryHandleNestedGoalRoute(
 					console.warn("[plan-mutation] Failed to notify parent of auto-pause:", err);
 				}
 			}
-			json({ applied: true, replanCount: newReplanCount, autoPaused: !!updates.paused });
+			json({ applied: true, replanCount: newReplanCount, autoPaused });
 		} catch (err) {
 			jsonError(500, err);
 		}

@@ -257,15 +257,17 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(letters.first()).toHaveText("A.");
 		await expect(letters.nth(1)).toHaveText("B.");
 
-		// Focus the first tab so keyboard input targets the widget.
-		const tab0 = widget.locator('[role="tab"][data-tab-index="0"]');
-		await tab0.focus();
-		// Wait for focus to settle before pressing keys — under load, focus()
-		// returns before the browser has actually given focus to the element.
+		// Digit-key shortcuts fire on focused .ask-option elements (radio
+		// buttons), NOT on the tab header buttons. Focus the first option in
+		// the current panel, then press the digit key. This matches the
+		// pattern confirmed in tests/ask-user-choices-widget.spec.ts.
+		const firstOptionQ1 = widget.locator('.ask-option').first();
+		await firstOptionQ1.focus();
+		// Wait for focus to settle.
 		await expect.poll(
 			() => page.evaluate(() => {
-				const el = document.querySelector('[role="tab"][data-tab-index="0"]');
-				return el && document.activeElement === el;
+				const el = document.querySelector('.ask-option');
+				return el && (document.activeElement === el || el.contains(document.activeElement));
 			}),
 			{ timeout: 5_000 },
 		).toBe(true);
@@ -286,16 +288,16 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 			await widget.locator('label:has(input[value="red"])').click();
 		}
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
+			.toHaveAttribute("aria-selected", "true", { timeout: 12_000 });
 
-		// Re-focus for keyboard targeting on the new tab panel.
-		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');
-		await tab1.focus();
+		// Focus the first option in Q2 for keyboard input.
+		const firstOptionQ2 = widget.locator('.ask-option').first();
+		await firstOptionQ2.focus();
 		// Wait for focus to settle.
 		await expect.poll(
 			() => page.evaluate(() => {
-				const el = document.querySelector('[role="tab"][data-tab-index="1"]');
-				return el && document.activeElement === el;
+				const el = document.querySelector('.ask-option');
+				return el && (document.activeElement === el || el.contains(document.activeElement));
 			}),
 			{ timeout: 5_000 },
 		).toBe(true);

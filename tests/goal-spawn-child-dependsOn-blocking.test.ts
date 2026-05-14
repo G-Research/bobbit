@@ -190,7 +190,7 @@ let h: Harness;
 beforeEach(async () => { h = await makeHarness(); });
 
 describe("spawn-child dependsOn enforcement — direct cases", () => {
-	it("t1: unresolved dep → child paused, no team started, response blocked:true", async () => {
+	it("t1: unresolved dep → child blocked (state='blocked'), no team started, response blocked:true", async () => {
 		// Spawn dep first; it stays state=todo.
 		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
 		assert.equal(r1.status, 201);
@@ -201,7 +201,8 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 		assert.equal(r2.payload.blocked, true, "blocked=true in response");
 		assert.deepEqual(r2.payload.pendingDeps, ["planA"]);
 		const child = h.goalStore.getAll().find(g => g.spawnedFromPlanId === "planB")!;
-		assert.equal(child.paused, true, "child must be paused");
+		assert.equal(child.state, "blocked", "child must have state='blocked' (not paused)");
+		assert.notEqual(child.paused, true, "child must NOT have paused=true (operator-only flag)");
 		assert.equal(h.setupCalls.includes(child.id), false, "setupWorktreeAndStartTeam must NOT be called for blocked child");
 	});
 
@@ -214,6 +215,7 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 		assert.equal(r2.status, 201);
 		assert.equal(r2.payload.blocked, undefined);
 		const child = h.goalStore.get(r2.payload.id)!;
+		assert.notEqual(child.state, "blocked", "child must NOT be blocked when deps already resolved");
 		assert.notEqual(child.paused, true, "child must NOT be paused when deps already resolved");
 	});
 });
@@ -224,12 +226,14 @@ describe("integrate-child dependsOn auto-unblock", () => {
 		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
 		const childA = r1.payload.id;
 		const childB = r2.payload.id;
-		assert.equal(h.goalStore.get(childB)!.paused, true);
+		assert.equal(h.goalStore.get(childB)!.state, "blocked", "B must start as blocked");
+		assert.notEqual(h.goalStore.get(childB)!.paused, true, "B must NOT be paused (operator flag not set)");
 		h.setupCalls.length = 0;
 		h.startTeamCalls.length = 0;
 		await mergeAndArchive(h, childA);
 		const finalB = h.goalStore.get(childB)!;
-		assert.equal(finalB.paused, false, "B must be unpaused after A merges");
+		assert.equal(finalB.state, "todo", "B must transition to todo after A merges");
+		assert.notEqual(finalB.paused, true, "B.paused must not be set by scheduler");
 		assert.ok(h.setupCalls.includes(childB) || h.startTeamCalls.includes(childB),
 			"team startup must be invoked for unblocked child");
 	});
@@ -239,14 +243,15 @@ describe("integrate-child dependsOn auto-unblock", () => {
 		const rb = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer, depends on no other sibling for this test." });
 		const rleaf = await h.spawnChild({ planId: "leaf", title: "Leaf", spec: "Implement leaf feature: integrates feature A and B; runs only after both are complete.", dependsOn: ["A", "B"] });
 		const leafId = rleaf.payload.id;
-		assert.equal(h.goalStore.get(leafId)!.paused, true);
+		assert.equal(h.goalStore.get(leafId)!.state, "blocked", "leaf must start as blocked");
 
 		await mergeAndArchive(h, ra.payload.id);
-		assert.equal(h.goalStore.get(leafId)!.paused, true, "leaf still paused after only A merges");
+		assert.equal(h.goalStore.get(leafId)!.state, "blocked", "leaf still blocked after only A merges");
 
 		h.setupCalls.length = 0;
 		await mergeAndArchive(h, rb.payload.id);
-		assert.equal(h.goalStore.get(leafId)!.paused, false, "leaf unpauses when B (last dep) merges");
+		assert.equal(h.goalStore.get(leafId)!.state, "todo", "leaf unblocks when B (last dep) merges");
+		assert.notEqual(h.goalStore.get(leafId)!.paused, true, "leaf.paused must not be set by scheduler");
 		assert.ok(h.setupCalls.includes(leafId) || h.startTeamCalls.includes(leafId));
 	});
 
@@ -254,15 +259,15 @@ describe("integrate-child dependsOn auto-unblock", () => {
 		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
 		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the service layer on top of A; depends on A completing first.", dependsOn: ["A"] });
 		const rC = await h.spawnChild({ planId: "C", title: "C", spec: "Implement feature C: add the presentation layer; depends on B completing first in the chain.", dependsOn: ["B"] });
-		assert.equal(h.goalStore.get(rB.payload.id)!.paused, true);
-		assert.equal(h.goalStore.get(rC.payload.id)!.paused, true);
+		assert.equal(h.goalStore.get(rB.payload.id)!.state, "blocked", "B must start as blocked");
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "blocked", "C must start as blocked");
 
 		await mergeAndArchive(h, rA.payload.id);
-		assert.equal(h.goalStore.get(rB.payload.id)!.paused, false, "B unblocks after A");
-		assert.equal(h.goalStore.get(rC.payload.id)!.paused, true, "C still blocked on B");
+		assert.equal(h.goalStore.get(rB.payload.id)!.state, "todo", "B unblocks after A");
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "blocked", "C still blocked on B");
 
 		await mergeAndArchive(h, rB.payload.id);
-		assert.equal(h.goalStore.get(rC.payload.id)!.paused, false, "C unblocks after B");
+		assert.equal(h.goalStore.get(rC.payload.id)!.state, "todo", "C unblocks after B");
 	});
 
 	it("t6: merging a child whose deps are already complete is a no-op (no throw, no double-start)", async () => {

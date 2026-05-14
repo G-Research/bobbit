@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 
-export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
+export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
 export interface PersistedGoal {
 	id: string;

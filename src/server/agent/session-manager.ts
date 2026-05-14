@@ -5241,6 +5241,18 @@ export class SessionManager {
 	 * Abort the agent. If the graceful abort doesn't resolve within a timeout,
 	 * force-kill the agent process and restart it so the session remains usable.
 	 */
+	/**
+	 * Soft-abort: interrupt the current streaming turn without killing the
+	 * agent process. Used by pause-cascade — the session stays registered so
+	 * `goal_resume` can resume it later. No kill/restart fallback.
+	 */
+	async abortSessionTurn(id: string): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session || session.status !== "streaming") return;
+		broadcastStatus(session, "aborting");
+		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
+	}
+
 	async forceAbort(id: string, gracePeriodMs = 3000): Promise<void> {
 		const session = this.sessions.get(id);
 		if (!session) return;

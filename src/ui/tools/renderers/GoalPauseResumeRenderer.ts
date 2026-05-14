@@ -45,7 +45,9 @@ function renderPauseResume(
 	}
 
 	const count: number = Number(
-		data?.count
+		data?.paused       // POST /pause returns { paused: N }
+		?? data?.resumed   // POST /resume returns { resumed: N }
+		?? data?.count
 		?? data?.pausedCount
 		?? data?.resumedCount
 		?? data?.affectedCount

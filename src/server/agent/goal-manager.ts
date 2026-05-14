@@ -111,8 +111,37 @@ export class GoalManager {
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;
 		this.workflowStore = workflowStore;
-		// Mark any goals stuck in "preparing" from a previous run as error
+		// Lazy-migrate legacy paused=true + unresolved-deps goals to state='blocked'
+		// BEFORE recovering stuck setups, so that newly-blocked goals don't get
+		// their setupStatus incorrectly marked 'error'. See docs/design/pause-cascade.md.
+		this._migratePausedDepsToBlocked();
+		// Mark any goals stuck in "preparing" from a previous run as error.
+		// Runs AFTER migration so that state='blocked' goals (which legitimately
+		// have setupStatus='preparing' pending dep-resolution) are excluded.
 		this._recoverStuckSetups();
+	}
+
+	/**
+	 * Boot migration: legacy `paused: true` goals whose deps are still unmet
+	 * become `state: 'blocked', paused: false`. Operator-paused goals (no
+	 * dependsOnPlanIds or all resolved) keep `paused: true`.
+	 */
+	private _migratePausedDepsToBlocked(): void {
+		const all = this.store.getAll();
+		for (const goal of all) {
+			if (!goal.paused || goal.archived) continue;
+			const deps = goal.dependsOnPlanIds;
+			if (!deps || deps.length === 0) continue;
+			const allResolved = deps.every(depPid => {
+				const depSib = all.find(g =>
+					g.parentGoalId === goal.parentGoalId &&
+					g.spawnedFromPlanId === depPid);
+				return !!depSib && depSib.state === "complete";
+			});
+			if (allResolved) continue; // operator-paused — preserve
+			this.store.update(goal.id, { state: "blocked", paused: false });
+			console.log(`[goal-manager] Migrated goal ${goal.id} ("${goal.title}") from paused=true to state='blocked' (unresolved deps)`);
+		}
 	}
 
 	/**
@@ -150,6 +179,10 @@ export class GoalManager {
 	private _recoverStuckSetups(): void {
 		for (const goal of this.store.getAll()) {
 			if (goal.setupStatus === "preparing") {
+				// Skip goals in state='blocked' — they legitimately have
+				// setupStatus='preparing' while waiting for deps to merge.
+				// Their setup will begin when integrate-child auto-unblocks them.
+				if (goal.state === "blocked") continue;
 				this.store.update(goal.id, {
 					setupStatus: "error",
 					setupError: "Setup interrupted by server restart",

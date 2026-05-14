@@ -235,28 +235,28 @@ child's deps already present when it validates the `dependsOn` field.
 
 Contract:
 
-- A child spawned with `dependsOn: [planId, ...]` is **created paused**
-  if ANY referenced sibling is not yet `state: "complete"`. The response
-  is `201 { id, suggestedRole, spawnedBySessionId, blocked: true,
-  pendingDeps: [...] }`. `setupWorktreeAndStartTeam` is NOT invoked —
-  the child sits with `setupStatus: "preparing"` and `paused: true`
-  until unblocked.
+- A child spawned with `dependsOn: [planId, ...]` is **created with
+  `state: "blocked"`** if ANY referenced sibling is not yet
+  `state: "complete"`. The response is `201 { id, suggestedRole,
+  spawnedBySessionId, blocked: true, pendingDeps: [...] }`.
+  `setupWorktreeAndStartTeam` is NOT invoked — the child sits with
+  `setupStatus: "preparing"` and `state: "blocked"` until unblocked.
 - A child whose deps are all `state: "complete"` at spawn time starts
   normally (response lacks the `blocked` field).
 - On `POST /api/goals/:id/integrate-child/:childId` (clean merge +
   auto-archive), the route scans the parent's other live children for
   any whose `dependsOnPlanIds` are now ALL satisfied. For each such
-  sibling that is currently `paused`, it clears `paused` and triggers
-  worktree setup + team start. Multi-dep children only unblock when the
-  LAST dep merges.
+  sibling that is currently `state: "blocked"`, it clears the blocked
+  state and triggers worktree setup + team start. Multi-dep children
+  only unblock when the LAST dep merges.
 - The auto-unblock scan is **best-effort** — any throw inside the scan
   is caught and logged; the merge itself never fails on unblock errors.
 
-We currently reuse `paused: true` rather than introducing a distinct
-`state: "blocked"` value. TODO: future enhancement may introduce
-`state: "blocked"` so the UI can distinguish a dep-blocked child from a
-user-paused one. Until then the sidebar / Plan-tab show blocked children
-with the standard paused styling.
+`state: "blocked"` is a distinct goal state (separate from
+user-initiated `paused: true`), so the UI can distinguish a dep-blocked
+child from a user-paused one. See
+[docs/design/pause-cascade.md](design/pause-cascade.md) for the full
+implementation description.
 
 The frozen-plan execution-gate path (`runSubgoalStep` in
 `verification-harness.ts`) sequences its own subgoal steps via the
@@ -739,17 +739,21 @@ for the full design.
 
 ### What `pause {cascade:true}` does
 
+See [docs/design/pause-cascade.md](design/pause-cascade.md) for the full
+implementation description. In brief:
+
 1. Walks the descendant set (BFS via `parentGoalId`), sets `paused:true`
    on each, and cancels in-flight gate verifications via
    `cancelAllVerifications(goalId)` (this also terminates the
    `llm-review-*` reviewer sessions tracked in `activeVerifications`).
 2. Sweeps every session in `SessionManager.getAllSessionsRaw()` whose
-   `goalId` is in the paused subtree and calls `forceAbort(id)` —
-   best-effort, errors are logged and do not block the rest of the
-   sweep. This is the canonical "interrupt this session" path (same as
-   `POST /api/sessions/:id/abort`) so team-leads, coders, reviewers and
-   any straggler `llm-review-*` sessions whose verification record was
-   GC'd are all caught.
+   `goalId` is in the paused subtree and calls `abortSessionTurn(id)` —
+   a **soft interrupt** (sessions stay registered, ready to be resumed)
+   rather than the old `forceAbort`. Best-effort: errors are logged and
+   do not block the rest of the sweep. The caller's own session is
+   **excluded** from the sweep (via `x-bobbit-spawning-session` /
+   `x-bobbit-session-id` headers) so a coordinator pausing its own
+   subtree does not abort itself mid-turn.
 3. Returns `{paused: N}` where `N` is the number of goals newly flipped
    (re-pausing an already-paused goal is a no-op and is not counted).
 

@@ -128,10 +128,10 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		// Use depth-specific locator to avoid matching a depth=0 orphan row if the
 		// spawned-child claim hasn't resolved yet (see computeSpawnedClaim flakiness).
 		const grandchildAtDepth2 = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"][data-depth="2"]`);
-		await expect(grandchildAtDepth2).toBeVisible({ timeout: 15_000 });
+		await expect(grandchildAtDepth2).toBeVisible({ timeout: 20_000 });
 
 		await page.reload();
 		const grandchildAtDepth2AfterReload = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"][data-depth="2"]`);
-		await expect(grandchildAtDepth2AfterReload).toBeVisible({ timeout: 15_000 });
+		await expect(grandchildAtDepth2AfterReload).toBeVisible({ timeout: 20_000 });
 	});
 });

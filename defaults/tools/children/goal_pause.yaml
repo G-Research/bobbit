@@ -7,6 +7,8 @@ provider:
 group: Children
 docs: |-
   Required: `cascade` (boolean — explicit, no default). When `cascade=false`, only the current goal is paused. When `cascade=true`, the entire descendant subtree is paused. Any in-flight gate verifications on paused goals are cancelled. Returns 200 `{ paused: <count> }`. Server returns 422 if `cascade` is omitted from the request body.
+
+  Optional: `childGoalId` (string) — when set, pause this specific direct child instead of the caller's own goal. The child must be a direct child (parentGoalId === caller's goalId). Returns 403 with code `NOT_DIRECT_CHILD` if not. `cascade` still applies to the named child's subtree.
 detail_docs: >-
   ## Purpose
 

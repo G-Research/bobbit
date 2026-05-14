@@ -239,9 +239,12 @@ describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 			assert.ok(Array.isArray(payload.pendingDeps) && payload.pendingDeps.length > 0,
 				`${planId} response.pendingDeps must be non-empty`);
 		}
-		assert.equal(a.paused, true, "a must be paused");
-		assert.equal(b.paused, true, "b must be paused");
-		assert.equal(leaf.paused, true, "leaf must be paused");
+		assert.equal(a.state, "blocked", "a must have state='blocked'");
+		assert.equal(b.state, "blocked", "b must have state='blocked'");
+		assert.equal(leaf.state, "blocked", "leaf must have state='blocked'");
+		assert.notEqual(a.paused, true, "a must NOT have paused=true (operator flag)");
+		assert.notEqual(b.paused, true, "b must NOT have paused=true (operator flag)");
+		assert.notEqual(leaf.paused, true, "leaf must NOT have paused=true (operator flag)");
 
 		// dependsOnPlanIds stamped on each.
 		assert.deepEqual(a.dependsOnPlanIds, ["root"]);

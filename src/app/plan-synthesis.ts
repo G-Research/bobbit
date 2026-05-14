@@ -34,7 +34,7 @@ export interface SynthesisGoal {
 	parentGoalId?: string;
 	spawnedFromPlanId?: string;
 	createdAt: number;
-	state: "todo" | "in-progress" | "complete" | "shelved";
+	state: "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 	archived?: boolean;
 	paused?: boolean;
 	title: string;

@@ -66,7 +66,7 @@ export interface GatewaySession {
 	nonInteractive?: boolean;
 }
 
-export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
+export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
 export interface Goal {
 	id: string;
@@ -623,6 +623,7 @@ export const GOAL_STATE_LABELS: Record<GoalState, string> = {
 	"in-progress": "In Progress",
 	"complete": "Complete",
 	"shelved": "Shelved",
+	"blocked": "Blocked",
 };
 
 // ============================================================================
