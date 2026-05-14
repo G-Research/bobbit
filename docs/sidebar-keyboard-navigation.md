@@ -89,7 +89,7 @@ document.querySelector(".sidebar-edge")
 …and returns the ids in document order. This is deliberate. The sidebar's
 visibility rules are non-trivial — they depend on `state.searchQuery`,
 `state.showArchived`, per-project expansion state for projects, goals, the
-ungrouped section, and the archived section. Re-deriving
+ungrouped section, the staff section, and the archived section. Re-deriving
 that order in a separate model helper would mean keeping two implementations
 in sync forever.
 
