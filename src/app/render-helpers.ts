@@ -36,16 +36,44 @@ import { getActiveNavId } from "./sidebar-nav.js";
 /**
  * Shared muted divider used to mark the boundary between active and archived
  * items inside a sidebar group. Render only when both classes are present in
- * the same group — callers gate on `activeCount > 0 && archivedCount > 0`.
+ * the same group — callers gate on `activeCount > 0 && archivedCount > 0`,
+ * typically via `bucketActiveArchived().needsDivider`.
+ *
+ * When `owner` is provided, the label renders as "ARCHIVED · <owner>" with
+ * the owner name in normal case (the uppercase CSS class only applies to the
+ * leading "Archived ·" span). The owner is also exposed as `data-owner` for
+ * test selectors. Callers in `renderTeamGroup` pass the team-lead's title so
+ * stacked archive sections in a multi-team-lead subtree have unambiguous
+ * ownership; project-level and nested-goal callers omit the owner to keep
+ * the plain "Archived" label (back-compat with existing tests).
  * See docs/design `Active-before-archived sidebar ordering`.
  */
-export const archivedDivider = () => html`
-	<div class="flex items-center gap-2 my-1 mx-2" data-testid="sidebar-archived-divider">
+export const archivedDivider = (owner?: string) => html`
+	<div class="flex items-center gap-2 my-1 mx-2" data-testid="sidebar-archived-divider" data-owner="${owner ?? ""}">
 		<div class="flex-1 border-t border-border/30"></div>
-		<span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Archived</span>
+		<span class="text-muted-foreground uppercase tracking-wider opacity-50" style="font-size: 0.75em;">Archived${owner ? " ·" : ""}</span>
+		${owner ? html`<span class="text-muted-foreground tracking-wider opacity-60 normal-case truncate" style="font-size: 0.75em;">${owner}</span>` : ""}
 		<div class="flex-1 border-t border-border/30"></div>
 	</div>
 `;
+
+/**
+ * Pure helper: split `rows` into active vs archived buckets using `isArchived`.
+ * `needsDivider` is true iff both buckets are non-empty — the canonical signal
+ * for callers deciding whether to emit `archivedDivider()` between them.
+ * Single source of truth for every active-before-archived render path.
+ */
+export function bucketActiveArchived<T>(
+	rows: T[],
+	isArchived: (r: T) => boolean,
+): { active: T[]; archived: T[]; needsDivider: boolean } {
+	const active: T[] = [];
+	const archived: T[] = [];
+	for (const r of rows) {
+		if (isArchived(r)) archived.push(r); else active.push(r);
+	}
+	return { active, archived, needsDivider: active.length > 0 && archived.length > 0 };
+}
 
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
@@ -967,10 +995,14 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		const liveSuffixes = computeTitleSuffixes(spawnedChildren);
 
 		// Active-before-archived ordering: emit live team children + active
-		// spawned-child goals first, then a single muted "Archived" divider,
-		// then archived team workers + archived spawned-child goals.
-		const activeSpawned = spawnedChildren.filter(g => !g.archived);
-		const archivedSpawned = spawnedChildren.filter(g => !!g.archived);
+		// spawned-child goals first, then a single muted "Archived · <lead>"
+		// divider, then archived team workers + archived spawned-child goals.
+		// Owner label disambiguates dividers when multiple team-leads stack in
+		// the same expanded subtree (Bugs Bunny → Otis → Zoidberg repro).
+		const { active: activeSpawned, archived: archivedSpawned } = bucketActiveArchived(
+			spawnedChildren,
+			g => !!g.archived,
+		);
 		// Split teamChildren by status: live members render above the
 		// "Archived" divider, terminated/archived ones merge into the
 		// archived bucket below (deduped against archivedForLiveLead — a
@@ -990,7 +1022,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${liveTeamChildren.map(renderSessionRow)}
 					${activeSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
-					${hasActiveAbove && hasArchivedBelow ? archivedDivider() : ""}
+					${hasActiveAbove && hasArchivedBelow ? archivedDivider(teamLead.title) : ""}
 					${archivedBelow.map(s => html`
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}

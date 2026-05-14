@@ -52,7 +52,7 @@ async function createLiveGoal(projectId: string, title: string): Promise<string>
 async function createLiveChild(parentId: string, title: string, planId: string): Promise<string> {
 	const resp = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		body: JSON.stringify({ planId, title, spec: "E2E test child goal for sidebar archive-render labeled-divider verification.", autoStartTeam: false }),
+		body: JSON.stringify({ planId, title, spec: "placeholder", autoStartTeam: false }),
 	});
 	expect(resp.status).toBe(201);
 	return (await resp.json()).id;
