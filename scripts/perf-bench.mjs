@@ -102,7 +102,10 @@ function runOnce({ replicateTag, kind, flags, fixtureSize, grep, dryRun }) {
 		console.log(`[perf-bench]   would run: ${cmd} ${args.join(" ")}`);
 		return 0;
 	}
-	const r = spawnSync(cmd, args, { cwd: ROOT, env, stdio: "inherit" });
+	// `shell: true` is required on Windows so `npx.cmd` resolves through the
+	// PATHEXT-aware shell. Without it, `spawnSync("npx", ...)` returns EINVAL
+	// on every replicate. Harmless on POSIX (still uses /bin/sh).
+	const r = spawnSync(cmd, args, { cwd: ROOT, env, stdio: "inherit", shell: true });
 	if (r.error) { console.error(`[perf-bench] spawn error:`, r.error); return 1; }
 	return r.status ?? 1;
 }

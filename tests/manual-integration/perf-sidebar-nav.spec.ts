@@ -837,19 +837,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// invariant.
 	await page.waitForFunction(() => !!(window as any).__bobbitOpenForNavItem, undefined, { timeout: 10_000 });
 	const clickIds = (warmSessionIds.length > 0 ? warmSessionIds : sessionIds).slice(0, WARM_PASS_COUNT);
-	// Phase 2C: when measuring prefetch-on-hover, hover the sidebar row first
-	// so the prefetch listener fires before the programmatic nav. Gated on
-	// the flag so it doesn't distort other A/B runs.
-	const wantHoverWarmup = perfFlagsArg.split(",").map(s => s.trim()).includes("prefetchOnHover");
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of clickIds) {
-			if (wantHoverWarmup) {
-				const row = page.locator(`[data-nav-id="session:${sid}"]`).first();
-				if (await row.count() > 0) {
-					try { await row.hover({ timeout: 1_000 }); } catch { /* best-effort */ }
-					await page.waitForTimeout(120);
-				}
-			}
 			await page.evaluate((id) => {
 				(window as any).__bobbitOpenForNavItem({ kind: "session", id });
 			}, sid);
