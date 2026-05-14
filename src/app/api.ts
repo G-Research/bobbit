@@ -220,6 +220,10 @@ export async function refreshSessions(): Promise<void> {
 				for (const g of incoming) {
 					if (!prevGoalIds.has(g.id) && state.gatewaySessions.some((s) => s.goalId === g.id)) {
 						expandedGoals.add(g.id);
+						// Also expand the parent so this goal's own row is visible in the
+						// sidebar (child rows only render when the parent is expanded).
+						const parentId = (g as { parentGoalId?: string }).parentGoalId;
+						if (parentId) expandedGoals.add(parentId);
 						saveExpandedGoals();
 					}
 				}
