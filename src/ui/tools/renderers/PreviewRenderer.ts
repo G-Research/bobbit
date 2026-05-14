@@ -3,6 +3,7 @@ import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderContext, ToolRenderer, ToolRenderResult } from "../types.js";
+import { state as appState, renderApp } from "../../../app/state.js";
 
 /** Must match `defaults/tools/html/snapshot.ts`. */
 // Read-only legacy support for archived sessions stamped before the v3 cutover. Do not extend.
@@ -90,7 +91,6 @@ function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block:
 /** Locate (messageIndex, blockIndex) for a tool_result message whose toolCallId matches. */
 async function locateToolResultBlock(toolUseId: string | undefined, blockIndexInResult: number): Promise<{ messageIndex: number; blockIndex: number } | null> {
 	if (!toolUseId) return null;
-	const { state: appState } = await import("../../../app/state.js");
 	const messages: any[] | undefined = (appState as any).remoteAgent?.state?.messages;
 	if (!Array.isArray(messages)) return null;
 	for (let mi = 0; mi < messages.length; mi++) {
@@ -222,7 +222,6 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				//    force the iframe to reload (its src includes `#mtime=<n>`
 				//    as a cache buster) and set the entry from the snapshot URL.
 				try {
-					const { state: appState, renderApp } = await import("../../../app/state.js");
 					let entry = entryFromPost;
 					if (!entry && parsed.kind === "preview") {
 						entry = parsed.entry;

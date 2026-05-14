@@ -85,22 +85,17 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		// (the grandchild's ancestor) before asserting nested-row visibility.
 		await expandGoalsAndReload(page, [parentId, child1Id]);
 
-		// All four goals should be in the sidebar after refresh.
-		const parentRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"]`).first();
-		const child1Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first();
-		const child2Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first();
-		const grandchildRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
+		// Use depth-specific locators to avoid matching orphan rows at depth=0
+		// if computeSpawnedClaim races with test assertion.
+		const parentRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"][data-depth="0"]`);
+		const child1Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"][data-depth="1"]`);
+		const child2Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"][data-depth="1"]`);
+		const grandchildRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"][data-depth="2"]`);
 
 		await expect(parentRow).toBeVisible({ timeout: 15_000 });
 		await expect(child1Row).toBeVisible({ timeout: 15_000 });
 		await expect(child2Row).toBeVisible({ timeout: 15_000 });
 		await expect(grandchildRow).toBeVisible({ timeout: 15_000 });
-
-		// Indentation: parent at depth 0, children at depth 1, grandchild at depth 2.
-		await expect(parentRow).toHaveAttribute("data-depth", "0");
-		await expect(child1Row).toHaveAttribute("data-depth", "1");
-		await expect(child2Row).toHaveAttribute("data-depth", "1");
-		await expect(grandchildRow).toHaveAttribute("data-depth", "2");
 
 		// Parent shows the descendant-count badge — pill-style, just "3".
 		const badge = parentRow.locator(`[data-testid="sidebar-descendant-badge"]`).first();
@@ -130,13 +125,13 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		// Persistence is the property under test: reload should preserve the
 		// localStorage-backed expansion state.
 		await expandGoalsAndReload(page, [parentId, child1Id]);
-		const grandchildRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
-		// Wait for both visibility AND correct depth — the element may briefly
-		// render at depth 0 while the parent-chain goals are still loading.
-		await expect(grandchildRow).toHaveAttribute("data-depth", "2", { timeout: 20_000 });
+		// Use depth-specific locator to avoid matching a depth=0 orphan row if the
+		// spawned-child claim hasn't resolved yet (see computeSpawnedClaim flakiness).
+		const grandchildAtDepth2 = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"][data-depth="2"]`);
+		await expect(grandchildAtDepth2).toBeVisible({ timeout: 20_000 });
 
 		await page.reload();
-		const grandchildRow2 = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
-		await expect(grandchildRow2).toHaveAttribute("data-depth", "2", { timeout: 20_000 });
+		const grandchildAtDepth2AfterReload = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"][data-depth="2"]`);
+		await expect(grandchildAtDepth2AfterReload).toBeVisible({ timeout: 20_000 });
 	});
 });

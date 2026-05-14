@@ -22,9 +22,14 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
+import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
+import { renderTool } from "../ui/tools/index.js";
+import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
+import { toggleRolePicker } from "./sidebar.js";
+import { startNewGoalFlow } from "./goal-entry.js";
+import { toggleShowArchived, toggleShowBusy, toggleShowRead } from "../ui/components/sidebar-filters.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
@@ -52,7 +57,7 @@ setRenderApp(doRenderApp);
 // E2E test hook: expose renderTool() and lit-html's render() so browser-based
 // tests can mount renderers directly without going through the session
 // pipeline. Used by tests/e2e/ui/children-tool-renderers.spec.ts.
-import("../ui/tools/index.js").then(m => { (window as any).__bobbitRenderTool = m.renderTool; }).catch(() => {});
+(window as any).__bobbitRenderTool = renderTool;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
 
 // ============================================================================
@@ -235,7 +240,6 @@ async function handleHashChange(): Promise<void> {
 			// Settings is the single home for managing them.
 			const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
 			if (projectId) {
-				const { setHashRoute } = await import("./routing.js");
 				setHashRoute("settings", `${projectId}/workflows`, true);
 				return;
 			}
@@ -457,7 +461,6 @@ async function initApp() {
 			} else if (route.view === "workflows") {
 				const projectId = state.activeProjectId || (state.projects[0]?.id ?? null);
 				if (projectId) {
-					const { setHashRoute } = await import("./routing.js");
 					setHashRoute("settings", `${projectId}/workflows`, true);
 					return;
 				}
@@ -491,7 +494,6 @@ async function initApp() {
 	// Sidebar keyboard navigation. Source of truth for the row order is the
 	// rendered DOM (so search filters, collapsed sections, and archived view
 	// are honoured automatically). See src/app/sidebar-nav.ts.
-	const { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } = await import("./sidebar-nav.js");
 	installKeyboardNavOverrideClearListener();
 
 	// MIGRATED shortcuts (all allowInInput: true to preserve existing behavior)
@@ -512,9 +514,8 @@ async function initApp() {
 			{ key: "n", ctrlOrMeta: false, shift: true, alt: true },
 		],
 		allowInInput: true,
-		handler: async () => {
+		handler: () => {
 			if (state.appView !== "authenticated") return;
-			const { toggleRolePicker } = await import("./sidebar.js");
 			// Synthesize a click event targeting the new-session button area
 			const chevron = document.querySelector("[title='New session with role']");
 			const syntheticEvent = new MouseEvent("click", { bubbles: true });
@@ -658,10 +659,8 @@ async function initApp() {
 		id: "new-goal", label: "New goal", category: "Goals",
 		defaultBindings: [{ key: "g", ctrlOrMeta: false, shift: false, alt: true }],
 		handler: () => {
-			import("./goal-entry.js").then(({ startNewGoalFlow }) => {
-				const anchor = document.querySelector("[data-new-goal-trigger]") as HTMLElement | null;
-				startNewGoalFlow(anchor);
-			});
+			const anchor = document.querySelector("[data-new-goal-trigger]") as HTMLElement | null;
+			startNewGoalFlow(anchor);
 		},
 	});
 
@@ -678,8 +677,7 @@ async function initApp() {
 		id: "ui.toggle-show-archived", label: "Toggle Show Archived", category: "UI",
 		defaultBindings: [{ key: "a", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
-		handler: async () => {
-			const { toggleShowArchived } = await import("../ui/components/sidebar-filters.js");
+		handler: () => {
 			toggleShowArchived();
 		},
 	});
@@ -688,8 +686,7 @@ async function initApp() {
 		id: "ui.toggle-show-busy", label: "Toggle Show Busy", category: "UI",
 		defaultBindings: [{ key: "b", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
-		handler: async () => {
-			const { toggleShowBusy } = await import("../ui/components/sidebar-filters.js");
+		handler: () => {
 			toggleShowBusy();
 		},
 	});
@@ -698,8 +695,7 @@ async function initApp() {
 		id: "ui.toggle-show-read", label: "Toggle Show Read", category: "UI",
 		defaultBindings: [{ key: "r", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
-		handler: async () => {
-			const { toggleShowRead } = await import("../ui/components/sidebar-filters.js");
+		handler: () => {
 			toggleShowRead();
 		},
 	});
@@ -777,6 +773,6 @@ if (import.meta.hot) {
 	import.meta.hot.on('vite:beforeFullReload', () => {
 		sessionStorage.setItem('bobbit-hot-reload', '1');
 		// Flush any pending draft so the message editor content survives the reload
-		import("./session-manager.js").then(m => m.flushPendingDraft());
+		flushPendingDraft();
 	});
 }

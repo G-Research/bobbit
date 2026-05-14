@@ -525,6 +525,7 @@ export async function tryHandleNestedGoalRoute(
 			json({
 				error: `Goal's workflow (${goal.workflowId ?? "unknown"}) has no 'execution' gate to hold a subgoal plan. Either re-create the goal with the 'parent' workflow, or call goal_spawn_child directly for each step.`,
 				code: "NO_EXECUTION_GATE",
+				warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
 			}, 400);
 			return true;
 		}

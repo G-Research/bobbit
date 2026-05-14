@@ -5,6 +5,9 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide";
 import { fetchTools, updateRole, deleteRole, gatewayFetch, fetchAssistantPrompts, updateAssistantPrompt, fetchGroupPolicies, type RoleData, type ToolInfo, type AssistantPromptInfo } from "./api.js";
+import { errorFromResponse, errorDetails } from "./error-helpers.js";
+import { connectToSession } from "./session-manager.js";
+import { showConnectionError, confirmAction } from "./dialogs.js";
 import { ACCESSORY_IDS, getAccessory } from "./session-colors.js";
 import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
@@ -232,15 +235,11 @@ async function createRoleAssistantSession(): Promise<void> {
 			body: JSON.stringify(bodyObj),
 		});
 		if (!res.ok) {
-			const { errorFromResponse } = await import("./error-helpers.js");
 			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
 		}
 		const { id } = await res.json();
-		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "role" });
 	} catch (err) {
-		const { showConnectionError } = await import("./dialogs.js");
-		const { errorDetails } = await import("./error-helpers.js");
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create role assistant", message, { code, stack });
 	} finally {
@@ -293,7 +292,6 @@ async function handleSave(): Promise<void> {
 
 async function handleDelete(): Promise<void> {
 	if (!selectedRole) return;
-	const { confirmAction } = await import("./dialogs.js");
 	const confirmed = await confirmAction(
 		"Delete Role",
 		`Are you sure you want to delete "${selectedRole.label}"? This cannot be undone.`,
@@ -395,7 +393,6 @@ function renderNavBar(): TemplateResult {
 // ============================================================================
 
 async function handleDeleteFromList(role: RoleData): Promise<void> {
-	const { confirmAction } = await import("./dialogs.js");
 	const confirmed = await confirmAction(
 		"Delete Role",
 		`Are you sure you want to delete "${role.label}"? This cannot be undone.`,

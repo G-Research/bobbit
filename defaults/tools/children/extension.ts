@@ -101,8 +101,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_plan_propose",
 		label: "Propose Goal Plan",
-		description: "Submit (or re-submit) a plan of subgoal steps. Falls back to direct spawn when the workflow has no execution gate.",
-		promptSnippet: "Propose a (re-)plan for the goal. Auto-falls-back to direct child spawn when the workflow has no execution gate.",
+		description: "Submit (or re-submit) a plan. Call FIRST for multi-step plans. Non-parent workflows: auto-pause enforces dependsOn, returns warning+blockedCount.",
+		promptSnippet: "Propose a (re-)plan for the goal. Always use this before goal_spawn_child for multi-step plans. Falls back to spawn-children-direct with auto-pause enforcement when the workflow has no execution gate.",
 		parameters: Type.Object({
 			steps: Type.Array(Type.Object({
 				planId: Type.String(),
@@ -149,8 +149,79 @@ export default function (pi: ExtensionAPI) {
 							`To use the full freeze/replan flow, recreate the goal with the 'parent' workflow.`,
 						);
 					}
-					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; error?: string }> = [];
-					for (const step of params.steps) {
+					// Validate the full dependency graph BEFORE spawning anything.
+					// An invalid graph (unknown planId, self-dep, cycle, duplicate planId)
+					// must be rejected atomically — no partial state.
+					{
+						const planIdSet = new Set<string>();
+						const dupErrors: string[] = [];
+						for (const s of params.steps) {
+							if (planIdSet.has(s.planId)) dupErrors.push(`duplicate planId "${s.planId}"`);
+							planIdSet.add(s.planId);
+						}
+						if (dupErrors.length > 0) return err(`spawn-children-direct: ${dupErrors.join("; ")}`);
+						const depErrors: string[] = [];
+						for (const s of params.steps) {
+							for (const dep of s.dependsOn ?? []) {
+								if (dep === s.planId) depErrors.push(`self-dependency on "${s.planId}"`);
+								else if (!planIdSet.has(dep)) depErrors.push(`"${s.planId}" dependsOn unknown planId "${dep}"`);
+							}
+						}
+						if (depErrors.length > 0) return err(`spawn-children-direct: ${depErrors.join("; ")}`);
+						// Cycle detection via Kahn's topo sort — any unvisited node after the sort is part of a cycle.
+						const indeg = new Map(params.steps.map(s => [s.planId, 0]));
+						for (const s of params.steps) for (const d of s.dependsOn ?? []) indeg.set(s.planId, (indeg.get(s.planId) ?? 0) + 1);
+						const q: string[] = params.steps.filter(s => (indeg.get(s.planId) ?? 0) === 0).map(s => s.planId);
+						const visited = new Set<string>();
+						while (q.length > 0) {
+							const n = q.shift()!; visited.add(n);
+							for (const s of params.steps) {
+								if (visited.has(s.planId) || !(s.dependsOn ?? []).includes(n)) continue;
+								const d = (indeg.get(s.planId) ?? 1) - 1; indeg.set(s.planId, d);
+								if (d === 0) q.push(s.planId);
+							}
+						}
+						const cycleNodes = params.steps.filter(s => !visited.has(s.planId)).map(s => s.planId);
+						if (cycleNodes.length > 0) return err(`spawn-children-direct: dependency cycle detected among: ${cycleNodes.join(", ")}`);
+					}
+					const hasDependsOn = params.steps.some(s => s.dependsOn && s.dependsOn.length > 0);
+					// Topological sort — spawn deps before dependants so each
+					// spawn-child call finds its dependsOn siblings already present.
+					// This prevents UNKNOWN_PLAN_ID when a valid DAG is submitted
+					// in non-topological order (which is valid per the spec).
+					const stepsInOrder = (() => {
+						const byId = new Map(params.steps.map(s => [s.planId, s]));
+						const indegree = new Map(params.steps.map(s => [s.planId, 0]));
+						for (const s of params.steps) {
+							for (const dep of s.dependsOn ?? []) {
+								if (byId.has(dep)) indegree.set(s.planId, (indegree.get(s.planId) ?? 0) + 1);
+							}
+						}
+						const queue = params.steps.filter(s => (indegree.get(s.planId) ?? 0) === 0);
+						const sorted: typeof params.steps = [];
+						const visited = new Set<string>();
+						while (queue.length > 0) {
+							const node = queue.shift()!;
+							if (visited.has(node.planId)) continue;
+							visited.add(node.planId);
+							sorted.push(node);
+							for (const s of params.steps) {
+								if (visited.has(s.planId)) continue;
+								if ((s.dependsOn ?? []).includes(node.planId)) {
+									const deg = (indegree.get(s.planId) ?? 1) - 1;
+									indegree.set(s.planId, deg);
+									if (deg === 0) queue.push(s);
+								}
+							}
+						}
+						// Append any remaining (shouldn't happen after dependsOn validation)
+						for (const s of params.steps) {
+							if (!visited.has(s.planId)) sorted.push(s);
+						}
+						return sorted;
+					})();
+					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; blocked?: boolean; pendingDeps?: string[]; error?: string }> = [];
+					for (const step of stepsInOrder) {
 						try {
 							const result = await api("POST", `/api/goals/${goalId}/spawn-child`, {
 								planId: step.planId,
@@ -159,21 +230,28 @@ export default function (pi: ExtensionAPI) {
 								workflowId: step.workflowId,
 								suggestedRole: step.suggestedRole,
 								...(step.dependsOn !== undefined ? { dependsOn: step.dependsOn } : {}),
-							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string };
+							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string; blocked?: boolean; pendingDeps?: string[] };
 							spawned.push({
 								planId: step.planId,
 								childGoalId: result.id,
 								alreadyExists: result.alreadyExists,
 								suggestedRole: result.suggestedRole,
+								...(result.blocked ? { blocked: true, pendingDeps: result.pendingDeps } : {}),
 							});
 						} catch (spawnErr: any) {
 							spawned.push({ planId: step.planId, error: spawnErr?.message ?? String(spawnErr) });
 						}
 					}
 					const failed = spawned.filter(s => s.error).length;
+					const blockedEntries = spawned.filter(s => s.blocked);
 					return ok({
 						fallback: "spawn-children-direct",
 						note: "Goal's workflow has no execution gate, so the classifier/freeze flow was skipped. Each step was spawned via goal_spawn_child instead (idempotent on planId). To use the full plan/freeze/replan flow, recreate the goal with the 'parent' workflow.",
+						...(hasDependsOn ? {
+							warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
+							blockedCount: blockedEntries.length,
+							blockedPlanIds: blockedEntries.map(s => s.planId),
+						} : {}),
 						spawned,
 						spawnedCount: spawned.length - failed,
 						failedCount: failed,

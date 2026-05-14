@@ -18,11 +18,15 @@ import {
 	type GoalState,
 	type Project,
 } from "./state.js";
-import { gatewayFetch, updateGoal, SymlinkRootError } from "./api.js";
+import { gatewayFetch, updateGoal, SymlinkRootError, detectProject, registerProject, fetchProjects, scanProjectRepos, browseDirectory, fetchRoles, patchSession } from "./api.js";
 import { errorDetails } from "./error-helpers.js";
 import "../ui/components/ErrorDetails.js";
 import { updateLocalSessionTitle } from "./api.js";
 import { refreshSessions } from "./api.js";
+// Static import of session-manager creates a cycle (session-manager imports
+// dialogs.ts statically), but neither module references the other at
+// module-init time — ESM live bindings resolve at call time.
+import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -672,7 +676,6 @@ export function openGatewayDialog(): void {
 		const token = tokenValue.trim();
 
 		try {
-			const { authenticateGateway } = await import("./session-manager.js");
 			await authenticateGateway(url, token);
 			cleanup();
 		} catch (err) {
@@ -693,8 +696,7 @@ export function openGatewayDialog(): void {
 			while (Date.now() - start < MAX_WAIT) {
 				await new Promise(r => setTimeout(r, POLL_INTERVAL));
 				try {
-					const { authenticateGateway: auth } = await import("./session-manager.js");
-					await auth(url, token);
+					await authenticateGateway(url, token);
 					cleanup();
 					return;
 				} catch (retryErr: any) {
@@ -960,9 +962,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 	let pendingColorIndex: number | null = null;
 
 	// Load roles for the picker
-	import("./api.js").then(({ fetchRoles }) => {
-		if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
-	});
+	if (state.roles.length === 0) fetchRoles().then(() => renderDialog());
 
 	const cleanup = () => {
 		titleChangeUnsub?.();
@@ -979,9 +979,7 @@ export function showRenameDialog(sessionId: string, currentTitle: string): void 
 			if (state.remoteAgent && activeSessionId() === sessionId) {
 				state.remoteAgent.setTitle(trimmed);
 			} else {
-				import("./api.js").then(({ patchSession }) => {
-					patchSession(sessionId, { title: trimmed });
-				});
+				patchSession(sessionId, { title: trimmed });
 				refreshSessions();
 			}
 		}
@@ -1321,7 +1319,6 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 			state.previewProjectId = projectId;
 			if (project && !state.previewCwdEdited) state.previewCwd = project.rootPath;
 		}
-		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { assistantType: "goal" });
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
@@ -1563,7 +1560,6 @@ export function showProjectDialog(): void {
 	const runDetection = async (dirPath: string) => {
 		if (!dirPath.trim()) { detectionResult = null; renderDialog(); return; }
 		try {
-			const { detectProject } = await import("./api.js");
 			detectionResult = await detectProject(dirPath.trim());
 		} catch {
 			detectionResult = null;
@@ -1625,7 +1621,6 @@ export function showProjectDialog(): void {
 		renderDialog();
 
 		try {
-			const { detectProject, registerProject, fetchProjects, scanProjectRepos } = await import("./api.js");
 			const detection = await detectProject(trimmedPath);
 
 			if (detection.hasBobbit) {
@@ -1717,7 +1712,6 @@ export function showProjectDialog(): void {
 		browseError = "";
 		renderDialog();
 		try {
-			const { browseDirectory } = await import("./api.js");
 			const result = await browseDirectory(pathValue.trim() || undefined);
 			browseEntries = result.entries;
 			browseCurrent = result.current;
@@ -1734,7 +1728,6 @@ export function showProjectDialog(): void {
 		browseError = "";
 		renderDialog();
 		try {
-			const { browseDirectory } = await import("./api.js");
 			const result = await browseDirectory(dirPath);
 			browseEntries = result.entries;
 			browseCurrent = result.current;
@@ -1966,10 +1959,7 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 		// Refresh projects so the sidebar sees the newly-created provisional project
 		// before connectToSession renders. Without this, the session falls into the
 		// default project bucket because state.projects doesn't contain the new ID yet.
-		const { fetchProjects } = await import("./api.js");
-		const { setProjects } = await import("./state.js");
 		setProjects(await fetchProjects());
-		const { connectToSession } = await import("./session-manager.js");
 		const actualType = scaffolding ? "project-scaffolding" : "project";
 		// Edit-mode is signalled solely by `projectId` (an already-registered
 		// project). `existingProjectName` is only a display hint; if it's empty we

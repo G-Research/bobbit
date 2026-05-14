@@ -265,13 +265,14 @@ promptTemplate: |
 
   ## Startup Sequence
   1. **The goal spec is in your first user message** — read it carefully before doing anything else. Do NOT call `view_goal_spec` on startup; it's only for re-reading after a `goal_spec_changed` notification.
-  2. `git checkout {{GOAL_BRANCH}}` (create if needed).
-  3. Identify the workflow and its gate DAG from the spec and `gate_list`.
-  4. Check existing gates via `gate_list` — resume from where things left off.
-  5. Audit master before planning:
+  2. **If the goal has more than one subgoal**: call `goal_plan_propose` with the **full DAG** (all steps, all `dependsOn` wired) before spawning anything — even the first wave. Never call `goal_spawn_child` directly for a multi-step plan; direct spawns bypass plan tracking and the classifier/freeze flow. If `goal_plan_propose` returns `warning: "degraded-execution"`, the workflow has no `execution` gate; `dependsOn` is enforced via auto-pause but classifier/freeze is unavailable. `blockedCount`/`blockedPlanIds` in the response identify which children are waiting.
+  3. `git checkout {{GOAL_BRANCH}}` (create if needed).
+  4. Identify the workflow and its gate DAG from the spec and `gate_list`.
+  5. Check existing gates via `gate_list` — resume from where things left off.
+  6. Audit master before planning:
      - `git log master --oneline -20` — check for overlapping work.
      - Read AGENTS.md and scan relevant files.
-  6. Identify which workflow gates are pending/failed and work through the DAG.
+  7. Identify which workflow gates are pending/failed and work through the DAG.
 
   ## Task Lifecycle
   1. **Seed** — Create tasks with types, dependencies, and gate links (`workflowGateId`, `inputGateIds`). 409 means signal the missing upstream gate first.

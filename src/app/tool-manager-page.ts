@@ -4,6 +4,9 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { ArrowLeft, Pencil, Plus } from "lucide";
 import { fetchTools, fetchToolDetail, updateTool, fetchRoles, updateRole, fetchGroupPolicies, updateGroupPolicy, fetchMcpServers, gatewayFetch, type ToolInfo, type RoleData, type McpServerInfo, type McpOperationInfo } from "./api.js";
+import { errorFromResponse, errorDetails } from "./error-helpers.js";
+import { connectToSession } from "./session-manager.js";
+import { showConnectionError } from "./dialogs.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { renderTool } from "../ui/tools/index.js";
@@ -437,15 +440,11 @@ async function createToolAssistantSession(): Promise<void> {
 			body: JSON.stringify({ toolAssistant: true, projectId }),
 		});
 		if (!res.ok) {
-			const { errorFromResponse } = await import("./error-helpers.js");
 			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
 		}
 		const { id } = await res.json();
-		const { connectToSession } = await import("./session-manager.js");
 		await connectToSession(id, false, { isToolAssistant: true });
 	} catch (err) {
-		const { showConnectionError } = await import("./dialogs.js");
-		const { errorDetails } = await import("./error-helpers.js");
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create tool assistant", message, { code, stack });
 	} finally {

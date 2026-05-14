@@ -220,6 +220,12 @@ step in a frozen plan is classified as `restructure` by the mutation
 classifier (overrides any `fix-up` it would otherwise be), so the
 divergence-policy decision matrix requires the goal to be paused first.
 
+**Topological ordering guarantee**: `goal_plan_propose` always spawns
+steps in dependency order — dependencies before dependants. This means a
+valid DAG submitted in any order (e.g. step B listed before step A even
+though B `dependsOn` A) will still spawn correctly; the server sees each
+child's deps already present when it validates the `dependsOn` field.
+
 ### dependsOn scheduling
 
 `dependsOn` enforces scheduling on the **direct-spawn path** (`POST
@@ -302,7 +308,101 @@ tier logic — both the formal-plan and living-plan paths delegate to
 between any two means a tier-resolver copy crept back in. Pinned by
 `tests/api-goals-plan-tier-parity.test.ts`.
 
+## `goal_plan_propose` execution paths
+
+`goal_plan_propose` (tool) / `PATCH /api/goals/:id/plan` (REST) takes one
+of two paths depending on whether the goal's workflow has an `execution`
+gate.
+
+### Path 1 — parent workflow (execution gate present)
+
+The full classifier + freeze flow runs:
+
+- Server validates `dependsOn` (self-dep, unknown planId, cycle) before
+  classifying.
+- Returns `applied`, `requiresApproval`, or an error (e.g.
+  `CRITERIA_DROP`, `RESTRUCTURE_REQUIRES_PAUSE`).
+- Plan is frozen on `goal-plan` gate signal; subsequent calls run through
+  the mutation classifier (see [Mutation classifier](#mutation-classifier)).
+
+### Path 2 — non-parent workflow (`spawn-children-direct` fallback)
+
+When the goal's workflow has no `execution` gate, `PATCH
+/api/goals/:id/plan` returns `400 NO_EXECUTION_GATE`. The response body
+includes:
+
+```json
+{
+  "code": "NO_EXECUTION_GATE",
+  "error": "Goal's workflow (...) has no 'execution' gate...",
+  "warning": "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow."
+}
+```
+
+The `warning` field is always present on `NO_EXECUTION_GATE` responses to
+aid caller diagnostics, regardless of whether `dependsOn` was used.
+
+The `goal_plan_propose` tool wraps this by offering a
+`fallback: "spawn-children-direct"` parameter. When passed, the tool opts
+into the fallback path instead of surfacing the 400 error:
+
+1. **Pre-spawn DAG validation** — the full dependency graph is validated
+   atomically before any spawn:
+   - Duplicate `planId` values in the steps array → rejected.
+   - Self-dependency (`dependsOn` contains own `planId`) → rejected.
+   - Unknown `planId` in `dependsOn` (not in proposed steps) → rejected.
+   - Cycles (detected via Kahn's algorithm) → rejected.
+
+   If any check fails, **no children are spawned**. This is an
+   all-or-nothing guard to prevent partial plan state.
+
+2. **Topological sort** — steps are reordered by dependency order before
+   spawning, so each `POST /spawn-child` call finds its `dependsOn`
+   siblings already present. This prevents `UNKNOWN_PLAN_ID` on valid
+   DAGs submitted in non-topological order.
+
+3. **Spawn loop** — each step is spawned via `POST /api/goals/:id/spawn-child`
+   (idempotent on `planId`). Children with unmet deps are created paused
+   (`blocked: true`, `pendingDeps: [...]` in the spawn response) and
+   auto-resume when their last dep merges.
+
+#### Fallback response shape
+
+The tool result always includes:
+
+| Field | Type | Description |
+|---|---|---|
+| `fallback` | `"spawn-children-direct"` | Identifies the path taken. |
+| `note` | string | Human-readable explanation of degraded mode. |
+| `spawned` | array | Per-step result. Each entry: `planId`, `childGoalId`, `alreadyExists?`, `suggestedRole?`, `blocked?`, `pendingDeps?`, `error?`. |
+| `spawnedCount` | number | Steps spawned successfully. |
+| `failedCount` | number | Steps that errored. |
+
+When **any step has `dependsOn`**, these additional fields appear:
+
+| Field | Type | Description |
+|---|---|---|
+| `warning` | string | `"degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn..."` |
+| `blockedCount` | number | Number of children created paused due to unmet deps at spawn time. |
+| `blockedPlanIds` | string[] | `planId` of each blocked child. |
+
+The `warning` field is the signal to the team-lead that dependency
+enforcement is active but the full classifier flow is not. The team-lead
+should not manually re-spawn blocked children — they auto-unblock when
+their dependencies merge (via `integrate-child` → `dependsOnPlanIds`
+resolution).
+
+#### Choosing a path
+
+| Need | Recommended approach |
+|---|---|
+| Full plan/freeze/approve/mutation-classify flow | Create goal with `parent` workflow |
+| Simple parallel or sequential child spawning without plan-lock semantics | `goal_plan_propose` with `fallback: "spawn-children-direct"` |
+| Single one-off child | `goal_spawn_child` directly |
+
 ## Mutation classifier
+
+> **Workflow-type requirement.** The full classifier + freeze + approve flow described below requires the `parent` workflow (or any workflow with an `execution` gate). Without an `execution` gate, `goal_plan_propose` falls back to `spawn-children-direct` and the classifier is unavailable. `dependsOn` auto-pause/resume still works on every workflow type — children with unmet deps are created paused and auto-resume when their last dependency merges — but fix-up/expansion/restructure classification and plan mutation approval are not. To use the full flow, create the goal with the `parent` workflow.
 
 Once `goal-plan` is signalled, `execution.verify[]` is **frozen** by
 `computePlanFreezeUpdate()` in
@@ -1221,7 +1321,7 @@ synthesis just wasn't using it.
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
 | POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SPEC_TOO_SHORT {actualLength, minLength}` / 400 `SPEC_PLACEHOLDER` (see [Spawn-time spec validation](#spawn-time-spec-validation)), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 403 `SUBGOALS_DISABLED` / 403 `NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}` (see [Nesting depth limit & per-goal toggle](#nesting-depth-limit--per-goal-toggle)), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal; new children inherit the parent's effective `subgoalsAllowed` / `maxNestingDepth`. |
-| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
+| PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`, 400 `NO_EXECUTION_GATE { code, error, warning }` when the workflow has no execution gate (the `warning` field is always present and describes degraded-execution semantics — see [`goal_plan_propose` execution paths](#goal_plan_propose-execution-paths)). |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
 | POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Flips `paused:true` on every (cascaded) descendant, cancels in-flight gate verifications, and `forceAbort`s every streaming session whose `goalId` is in the paused subtree (team-leads, coders, reviewers, `llm-review-*` verifiers). While paused, every spawn path returns 409 `{code:"GOAL_PAUSED", goalId}` and `_bootRespawnSessionlessGoals` skips the goal. See [Pause / resume](#pause--resume). |

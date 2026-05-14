@@ -108,6 +108,14 @@ function componentRoot(c: Component, branchContainer: string): string {
  * — the validator catches these at load-time, but runtime resolution still
  * defends in case the workflow snapshot was created before component edits.
  */
+/** Return the un-offset branch container for a goal. `goal.worktreePath` is
+ * always the worktree root; `goal.cwd` may carry a monorepo sub-path offset.
+ * resolveStep() layers repo + relativePath itself, so we pass the unoffset
+ * root to avoid applying the offset twice. */
+export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string {
+	return goal.worktreePath ?? goal.cwd;
+}
+
 export function resolveStep(
 	step: VerifyStep,
 	components: Component[],

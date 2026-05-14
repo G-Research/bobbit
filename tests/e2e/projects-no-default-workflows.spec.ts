@@ -126,11 +126,10 @@ test.describe("No default workflow scaffold", () => {
 	});
 
 	test("Case C — goal-creation in a zero-workflows project auto-seeds default workflows", async () => {
-		// e04159ff intentionally added auto-seeding: when a goal is first
+		// Auto-seeding always persists to disk (7b75dca4): when a goal is first
 		// created in a project with no workflows, the server seeds the canonical
 		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
-		// This test pins that behavior, replacing the pre-e04159ff expectation
-		// that project.yaml would remain unchanged.
+		// Pinned by goal-creation-auto-seed.spec.ts and this test.
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
@@ -151,10 +150,6 @@ test.describe("No default workflow scaffold", () => {
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
 
-		// Goal creation triggers auto-seeding (see e04159ff). Use the
-		// `__e2e_seed_skip__` mechanism is irrelevant here; we test via
-		// regular fetch (same as real user) so harness auto-seed runs too
-		// and doesn't interfere (it's idempotent).
 		const goalRes = await fetch(`${base()}/api/goals`, {
 			method: "POST",
 			headers: headers(),
@@ -167,8 +162,7 @@ test.describe("No default workflow scaffold", () => {
 				workflowId: "feature", // workflowId triggers auto-seeding on empty project
 			}),
 		});
-		// Goal creation with workflowId should succeed and seed default workflows
-		// into project.yaml (only fires when workflowId is given on an empty store).
+		// Goal creation should succeed and project.yaml should now have workflows.
 		expect([200, 201]).toContain(goalRes.status);
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
 	});
