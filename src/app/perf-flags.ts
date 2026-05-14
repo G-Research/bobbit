@@ -28,6 +28,19 @@ export type PerfFlag = string;
  */
 export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 	{
+		name: "deferSyntaxHighlight",
+		description:
+			"Phase 2 Opt-G (experiment) — defer syntax-highlighting of " +
+			"`<code-block>` elements in the transcript path. With the flag on, " +
+			"each `<code-block>` callsite emits a `<deferred-code-block>` that " +
+			"renders plain `<pre><code>{source}</code></pre>` synchronously and " +
+			"upgrades to a real `<code-block>` (running `hljs.highlight()`) on " +
+			"`requestIdleCallback` with a 200ms timeout fallback. The eager-tail " +
+			"messages from Opt-A render their visible code blocks immediately as " +
+			"plain monospace text, freeing the click → first-paint critical path " +
+			"of hljs work. Default OFF until A/B replicates ship.",
+	},
+	{
 		name: "deferOffscreenRender",
 		description:
 			"Phase 2 Opt-A (SHIPPED, default-ON) — defer markdown / tool-call " +
@@ -44,6 +57,9 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 
 /** Convenience canonical flag name for Phase 2 Opt-A. SHIPPED default-ON. */
 export const PERF_FLAG_DEFER_OFFSCREEN_RENDER = "deferOffscreenRender";
+
+/** Convenience canonical flag name for Phase 2 Opt-G (experiment). */
+export const PERF_FLAG_DEFER_SYNTAX_HIGHLIGHT = "deferSyntaxHighlight";
 
 /** Flags that default to ON. Listed here so the runtime check (
  *  `isPerfFlagEnabled`) treats absence-of-explicit-localStorage-entry as
