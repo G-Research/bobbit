@@ -1421,26 +1421,35 @@ export function createGateway(config: GatewayConfig) {
 								signal: ac.signal,
 							});
 							const failed = probe.failOn404Only ? res.status === 404 : res.status !== 200;
-							if (failed) {
-								clearTimeout(timer);
-								const checkResult = `failed:${probe.route}:${res.status}`;
-								lspSupervisor.setRouteSelfCheck(checkResult);
-								console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
-								return;
-							}
+							// For inspectBody probes, read the body BEFORE deciding on a generic
+							// status failure: the ENOENT bridge-mis-attach bug surfaces as HTTP 500
+							// via jsonError(500, err), so a status-first short-circuit would mask it
+							// with a generic failed:/api/lsp/diagnostics:500 and miss the required
+							// failed:diagnostics:initialize_failed signal.
 							if (probe.inspectBody) {
 								// Body should be either real diagnostics or a structured supervisor
 								// envelope ({error: lsp_unavailable|lsp_capacity|lsp_timeout, ...}).
 								// ENOENT or "stat '" indicate the bridge mis-attaching bug — fail loudly.
-								const text = await res.text();
+								let text = "";
+								try { text = await res.text(); } catch { /* ignore body read errors */ }
 								clearTimeout(timer);
 								if (text.includes("ENOENT") || text.includes("stat '")) {
 									lspSupervisor.setRouteSelfCheck("failed:diagnostics:initialize_failed");
-									console.error(`[lsp] route self-check FAILED: ${probe.route} returned 200 but body contained ENOENT/stat ' — the TypeScript LSP bridge is likely attached without a running sandbox container (see sessions 03afb128 / 9150a1de). Agents will see lsp_unavailable for every diagnostics call. Body snippet: ${text.slice(0, 400)}`);
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} and body contained ENOENT/stat ' — the TypeScript LSP bridge is likely attached without a running sandbox container (see sessions 03afb128 / 9150a1de). Agents will see lsp_unavailable for every diagnostics call. Body snippet: ${text.slice(0, 400)}`);
+									return;
+								}
+								if (failed) {
+									lspSupervisor.setRouteSelfCheck(`failed:${probe.route}:${res.status}`);
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
 									return;
 								}
 							} else {
 								clearTimeout(timer);
+								if (failed) {
+									lspSupervisor.setRouteSelfCheck(`failed:${probe.route}:${res.status}`);
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
+									return;
+								}
 							}
 						} catch (err: any) {
 							clearTimeout(timer);
