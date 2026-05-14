@@ -53,6 +53,14 @@ interface MessageFingerprint {
  * equal.
  */
 async function snapshotMessages(page: import("@playwright/test").Page): Promise<MessageFingerprint[]> {
+	// Opt-A (`deferOffscreenRender`) wraps off-screen messages in
+	// `<deferred-block>` placeholders whose text content differs from the
+	// resolved message. Transcript-fidelity compares live DOM to post-refresh
+	// DOM — both must be fully resolved for the comparison to be meaningful.
+	// This is the canonical correctness check for Opt-A: force-resolve every
+	// placeholder and wait one frame for the swap to land, then snapshot.
+	await page.evaluate(() => (window as any).DeferredBlock?.forceResolveAll?.());
+	await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
 	return await page.evaluate(() => {
 		const sel = "user-message, assistant-message, tool-message";
 		const nodes = Array.from(document.querySelectorAll(sel)) as HTMLElement[];

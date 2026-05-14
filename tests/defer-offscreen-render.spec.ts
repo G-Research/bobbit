@@ -123,6 +123,13 @@ test.describe("MessageList — perf-flag gating", () => {
 	test("flag OFF: no <deferred-block> wrappers (historical path preserved)", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(() => {
+			// Opt-A flipped `deferOffscreenRender` into DEFAULT_ON_FLAGS, so the
+			// absence of a localStorage entry now resolves to ON. To exercise the
+			// historical OFF path we must explicitly opt out — the canonical
+			// syntax (see src/app/perf-flags.ts::isPerfFlagEnabled) is a leading
+			// `-` in the comma-separated flag list.
+			localStorage.setItem("bobbitPerfFlags", "-deferOffscreenRender");
+			(window as any).__reloadPerfFlags();
 			(window as any).__setPerfFlag("deferOffscreenRender", false);
 			(window as any).__mountMessageList("slot", { count: 20 });
 		});
