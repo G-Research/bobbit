@@ -5,11 +5,9 @@ import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import yaml from "yaml";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, Bot, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, List, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
@@ -33,8 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError, confirmAction, createProjectAssistantSession } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, synthStaffSessionRow, filterStaffByQuery } from "./sidebar.js";
-import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -384,24 +381,14 @@ function renderMobileLanding() {
 											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
-										// Bucket staff and prepend their synthesised session rows to the project's
-										// Sessions list in stable alphabetical order (surface-staff-in-sessions §2).
-										const mobileStaffRowsByProject = new Map<string, typeof ungroupedSessions>();
+										// Bucket staff per project for the dedicated Staff sub-section
+										// (rendered via renderStaffSidebarSection in the project's expanded
+										// body) — staff are NOT merged into the Sessions list.
 										for (const s of staffList) {
-											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
+											if (!s.projectId) continue;
 											const bucket = projectMap.get(s.projectId);
-											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
+											if (!bucket) continue;
 											bucket.staff.push(s);
-											const synth = synthStaffSessionRow(s);
-											if (!synth) continue;
-											let rows = mobileStaffRowsByProject.get(s.projectId);
-											if (!rows) { rows = []; mobileStaffRowsByProject.set(s.projectId, rows); }
-											rows.push(synth);
-										}
-										for (const [pid, rows] of mobileStaffRowsByProject) {
-											rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-											const bucket = projectMap.get(pid);
-											if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
 										}
 										// Bucket archived goals + standalone archived sessions per project.
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
@@ -455,24 +442,12 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${expanded ? (() => {
-													// Apply the same claim/exclude dedup as the desktop sidebar so spawned
-													// children render under their team-lead (Path A) and NOT also at the
-													// project root. Without this filter, mobile double-renders every
-													// spawned child deterministically.
-													const mobileClaimed = computeSpawnedClaim(
-														data.goals as any,
-														state.gatewaySessions,
-														state.archivedSessions,
-														state.showArchived,
-													);
-													const forestGoalsMobile = data.goals.filter(g => !mobileClaimed.has(g.id));
-													return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-													${forestGoalsMobile.map((goal, gi) => html`
+												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+													${data.goals.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${forestGoalsMobile.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
 															@click=${() => { setUngroupedExpanded(project.id, !_mobileUngroupedExp); renderApp(); }}>
@@ -499,13 +474,13 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
+													${renderStaffSidebarSection(data.staff, project.id)}
 													${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
 													})()}
-												</div>`;
-											})() : ""}
+												</div>` : ""}
 											`;
 										})}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
@@ -549,10 +524,6 @@ let _cachedWorkflows: Workflow[] = [];
 let _selectedWorkflowId = "";
 let _goalSandboxed = false;
 let _goalAutoStartTeam = true;
-/** Per-goal subgoals-allowed override; null = inherit system default at submit time. */
-let _goalSubgoalsAllowed: boolean | null = null;
-/** Per-goal max-nesting-depth override; null = inherit system default at submit time. */
-let _goalMaxNestingDepth: number | null = null;
 let _staffSandboxed = false;
 let _assistantEnabledOptionalSteps: string[] = [];
 
@@ -604,7 +575,8 @@ function workflowStateFor(projectId: string | undefined): "no-project" | "loadin
 
 let _sandboxStatusFetching = false;
 
-/** Cached `repoCount` per project (multi-repo indicator). Counts distinct `repo` values across components. */
+/** Cached `repoCount` per project for the goal-creation multi-repo indicator.
+ *  Phase 4b. Counts distinct `repo` values across configured components. */
 const _projectComponentsCache = new Map<string, { repoCount: number; componentCount: number; multiRepo: boolean }>();
 const _projectComponentsFetching = new Set<string>();
 function ensureProjectComponentsLoaded(projectId: string): void {
@@ -806,13 +778,6 @@ interface GoalFormConfig {
 	autoStartTeam: boolean;
 	onAutoStartTeamChange: (e: Event) => void;
 
-	// Subgoal nesting controls. Visible only when the system-scope
-	// Subgoals (Experimental) flag is ON — see subgoals-flag.ts.
-	subgoalsAllowed: boolean;
-	maxNestingDepth: number;
-	onSubgoalsAllowedChange: (e: Event) => void;
-	onMaxNestingDepthChange: (e: Event) => void;
-
 	// CWD combobox state
 	cwdDropdownOpen: boolean;
 	cwdHighlightIndex: number;
@@ -833,14 +798,6 @@ interface GoalFormConfig {
 	 * proposal-panel call site — the goal-dashboard view stays read-only.
 	 */
 	commentable?: boolean;
-
-	// Inline workflow / inline roles YAML editors (parallel to body.workflow / inlineRoles).
-	inlineWorkflowYaml?: string;
-	inlineWorkflowYamlError?: string;
-	onInlineWorkflowYamlChange?: (e: Event) => void;
-	inlineRolesYaml?: string;
-	inlineRolesYamlError?: string;
-	onInlineRolesYamlChange?: (e: Event) => void;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -909,51 +866,25 @@ function renderGoalForm(config: GoalFormConfig) {
 						})}
 					</div>
 				</div>
-				${(() => {
-					// Workflow row: skeleton while loading; otherwise render when either stored workflows
-					// are present OR an inline workflow is active (the row vanishes only when both are
-					// empty). Inline workflow is the source of truth for projects without stored ones.
-					if (workflowsLoading) {
-						return html`
-							<div class="flex items-center gap-2 md:shrink-0">
-								<label class="${lblCls} w-20 md:w-auto">Workflow</label>
-								<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
-							</div>
-						`;
-					}
-					const inlineYaml = (config.inlineWorkflowYaml ?? "").trim();
-					const inlineActive = inlineYaml.length > 0 && !config.inlineWorkflowYamlError;
-					if (_cachedWorkflows.length === 0 && !inlineActive) return "";
-					let inlineGateCount: number | undefined;
-					if (inlineActive) {
-						try {
-							const parsed = yaml.parse(inlineYaml) as { gates?: unknown[] } | null;
-							if (parsed && Array.isArray(parsed.gates)) inlineGateCount = parsed.gates.length;
-						} catch { /* validator already showed the error */ }
-					}
-					return html`
-						<div class="flex items-center gap-2 md:shrink-0" data-testid="goal-workflow-select-wrap">
-							<label class="${lblCls} w-20 md:w-auto">Workflow</label>
-							<select
-								class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9 ${inlineActive ? "opacity-60" : ""}"
-								.value=${inlineActive ? "__inline__" : config.workflowId}
-								@change=${config.onWorkflowChange}
-								?disabled=${inlineActive}
-								title=${inlineActive ? "Inline workflow YAML is active — clear it below to choose a stored workflow" : ""}
-								data-testid="goal-workflow-select"
-							>
-								${inlineActive ? html`
-									<option value="__inline__" selected>Inline${inlineGateCount !== undefined ? ` (${inlineGateCount} gate${inlineGateCount === 1 ? "" : "s"})` : ""}</option>
-								` : ""}
-								${_cachedWorkflows
-									.filter(w => w.id !== "parent" || isSubgoalsEnabled())
-									.map((w) => html`
-										<option value=${w.id} ?selected=${!inlineActive && config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
-									`)}
-							</select>
-						</div>
-					`;
-				})()}
+				${workflowsLoading ? html`
+					<div class="flex items-center gap-2 md:shrink-0">
+						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+						<div class="flex-1 md:flex-none md:w-44 h-9 rounded-md bg-muted/40 animate-pulse" data-testid="goal-form-workflow-skeleton"></div>
+					</div>
+				` : _cachedWorkflows.length > 0 ? html`
+					<div class="flex items-center gap-2 md:shrink-0">
+						<label class="${lblCls} w-20 md:w-auto">Workflow</label>
+						<select
+							class="flex-1 md:flex-none md:w-44 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+							.value=${config.workflowId}
+							@change=${config.onWorkflowChange}
+						>
+							${_cachedWorkflows.map((w) => html`
+								<option value=${w.id} ?selected=${config.workflowId === w.id}>${w.name} (${w.gates.length} gates)</option>
+							`)}
+						</select>
+					</div>
+				` : ""}
 			</div>
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
@@ -1009,29 +940,6 @@ function renderGoalForm(config: GoalFormConfig) {
 					<span title="Automatically start the team lead when the worktree is ready"
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 				</label>
-				${isSubgoalsEnabled() ? html`
-					<label class="flex items-center gap-1.5 cursor-pointer" data-testid="goal-form-allow-subgoals-wrap">
-						<input type="checkbox" class="toggle-switch"
-							data-testid="goal-form-allow-subgoals"
-							.checked=${config.subgoalsAllowed}
-							@change=${config.onSubgoalsAllowedChange} />
-						<span class="text-xs text-muted-foreground font-medium">Allow subgoals</span>
-						<span title="Allow this goal tree to spawn nested subgoals. System setting is the ceiling — cannot enable above system."
-							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-					</label>
-					${config.subgoalsAllowed ? html`
-						<label class="flex items-center gap-1.5" data-testid="goal-form-max-depth-wrap">
-							<span class="text-xs text-muted-foreground font-medium">Max depth</span>
-							<input type="number" min="1" max="${getSystemMaxNestingDepth()}" step="1"
-								data-testid="goal-form-max-nesting-depth"
-								class="w-14 px-1.5 py-0.5 rounded border border-input bg-background text-xs"
-								.value=${String(config.maxNestingDepth)}
-								@change=${config.onMaxNestingDepthChange} />
-							<span title="Max nesting depth for this goal tree. Cannot exceed the system ceiling (currently ${getSystemMaxNestingDepth()})."
-								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
-						</label>
-					` : ""}
-				` : ""}
 				${optionalSteps.map(os => {
 					const qaDisabled = os.type === 'agent-qa' && !!config.linkedProjectId && _qaConfigCache.has(config.linkedProjectId) && !_qaConfigCache.get(config.linkedProjectId);
 					return html`
@@ -1111,40 +1019,6 @@ function renderGoalForm(config: GoalFormConfig) {
 				}
 			</div>
 		</div>
-		${config.onInlineWorkflowYamlChange !== undefined ? html`
-			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-workflow-yaml" ?open=${(config.inlineWorkflowYaml ?? "").trim() !== ""}>
-				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Advanced: paste inline workflow YAML</summary>
-				<div class="mt-2 flex flex-col gap-1">
-					<textarea
-						class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-						placeholder="# Optional: paste a workflow YAML snapshot to attach to this goal&#10;# (overrides workflow ID resolution from the project/server cascade)"
-						.value=${config.inlineWorkflowYaml ?? ""}
-						data-testid="goal-inline-workflow-yaml-textarea"
-						@input=${config.onInlineWorkflowYamlChange}
-					></textarea>
-					${config.inlineWorkflowYamlError ? html`
-						<div class="text-[11px] text-destructive" data-testid="goal-inline-workflow-yaml-error">${config.inlineWorkflowYamlError}</div>
-					` : ""}
-				</div>
-			</details>
-		` : ""}
-		${config.onInlineRolesYamlChange !== undefined ? html`
-			<details class="px-5 py-2 border-t border-border" data-testid="goal-inline-roles" ?open=${(config.inlineRolesYaml ?? "").trim() !== ""}>
-				<summary class="text-xs text-muted-foreground font-medium cursor-pointer">Advanced: paste inline roles YAML</summary>
-				<div class="mt-2 flex flex-col gap-1">
-					<textarea
-						class="w-full min-h-[120px] max-h-[300px] p-2 text-xs font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-						placeholder="# Optional: ephemeral role(s) for this goal only&#10;# Format: roleName: { name, label, promptTemplate, accessory, toolPolicies, ... }&#10;synthesis-reviewer:&#10;  name: synthesis-reviewer&#10;  label: Synthesis Reviewer&#10;  promptTemplate: |&#10;    You are a synthesis reviewer for this audit.&#10;  accessory: magnifying-glass"
-						.value=${config.inlineRolesYaml ?? ""}
-						data-testid="goal-inline-roles-yaml-textarea"
-						@input=${config.onInlineRolesYamlChange}
-					></textarea>
-					${config.inlineRolesYamlError ? html`
-						<div class="text-[11px] text-destructive" data-testid="goal-inline-roles-yaml-error">${config.inlineRolesYamlError}</div>
-					` : ""}
-				</div>
-			</details>
-		` : ""}
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
@@ -1169,7 +1043,7 @@ function renderGoalForm(config: GoalFormConfig) {
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
-					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows || !!config.inlineWorkflowYamlError || !!config.inlineRolesYamlError,
+					disabled: (config.createDisabled ?? !config.title.trim()) || !!config.streaming || noWorkflows,
 					children: config.saving ? "Creating…" : html`<span class="inline-flex items-center gap-1.5">${icon(GoalIcon, "sm")} Create Goal</span>`,
 				})}</span>
 			</div>
@@ -1208,20 +1082,9 @@ function goalPreviewPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
 		if (!trimmedTitle) return;
-		// Fall back to the active session's projectId when previewProjectId
-		// is empty — same defensive fix as goalProposalPanel below. Mid-
-		// session goal creation in a regular project session shouldn't fail
-		// if the proposal slot survived a refresh / draft-restore that
-		// happens to skip the projectId-set step.
 		if (!state.previewProjectId) {
-			const activeSid = activeSessionId();
-			const liveSess = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
-			if (liveSess?.projectId) {
-				state.previewProjectId = liveSess.projectId;
-			} else {
-				showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
-				return;
-			}
+			showConnectionError("No project selected for this goal", "Select a project from the + New Goal picker before creating a goal.");
+			return;
 		}
 		// Guard: refuse to accept while the linked project has no workflows.
 		// The form's banner handles the affordance; this is the defensive backstop.
@@ -1237,43 +1100,14 @@ function goalPreviewPanel() {
 		// reads the latest values (the user may have edited the workflow id /
 		// title between attempts).
 		const sessionId = activeSessionId();
+		const isAssistantContext = state.assistantType === "goal";
 		const projectId = state.previewProjectId || undefined;
 		const workflowId = _selectedWorkflowId || undefined;
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
-		// Subgoal nesting per-goal overrides — only sent when the system
-		// flag is ON (the server clamps anyway, but no point sending noise).
-		const subgoalsAllowed = isSubgoalsEnabled() && _goalSubgoalsAllowed !== null
-			? _goalSubgoalsAllowed
-			: undefined;
-		const maxNestingDepth = isSubgoalsEnabled() && _goalMaxNestingDepth !== null
-			? _goalMaxNestingDepth
-			: undefined;
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
-
-		// Mid-session acceptance must NOT tear down the active session — only
-		// the goal-assistant context owns the disconnect-and-navigate flow.
-		const isAssistantContext = state.assistantType === "goal";
-
-		// Snapshot the proposal slot's fields BEFORE we delete the slot below —
-		// otherwise inlineWorkflow / inlineRoles would be unrecoverable here.
-		// Closes the silent-drop gap where the agent's payload landed in
-		// state.activeProposals.goal.fields but never reached POST /api/goals
-		// because handleCreateGoal only read the textarea cache.
-		const proposalFields = (state.activeProposals.goal?.fields as Record<string, unknown> | undefined) ?? {};
-
-		// Textarea-driven `_assistantInlineWorkflowParsed` cache wins when the
-		// user has edited the panel; otherwise fall back to the snapshotted
-		// proposal slot. Same logic for inlineRoles.
-		const inlineWorkflow = _assistantInlineWorkflowParsed
-			?? (proposalFields.inlineWorkflow as unknown);
-		const inlineRolesCandidate: unknown = _assistantInlineRolesParsed
-			?? proposalFields.inlineRoles;
-		const inlineRoles = (inlineRolesCandidate && typeof inlineRolesCandidate === "object" && !Array.isArray(inlineRolesCandidate))
-			? (inlineRolesCandidate as Record<string, unknown>)
-			: undefined;
 
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
@@ -1288,10 +1122,6 @@ function goalPreviewPanel() {
 				projectId,
 				enabledOptionalSteps,
 				autoStartTeam,
-				workflow: inlineWorkflow,
-				inlineRoles,
-				subgoalsAllowed,
-				maxNestingDepth,
 			});
 		} catch (err) {
 			const { message, code, stack } = errorDetails(err);
@@ -1305,12 +1135,12 @@ function goalPreviewPanel() {
 		}
 
 		// --- Success path: now tear down the assistant. ---
-		if (isAssistantContext && state.remoteAgent) {
+		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		if (isAssistantContext) state.assistantType = null;
+		state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "goal");
 		resetProposalAnnCount("goal");
 		delete state.activeProposals.goal;
@@ -1318,24 +1148,12 @@ function goalPreviewPanel() {
 		_selectedWorkflowId = "";
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
-		_goalSubgoalsAllowed = null;
-		_goalMaxNestingDepth = null;
 		_assistantEnabledOptionalSteps = [];
-		_assistantInlineWorkflowYaml = "";
-		_assistantInlineWorkflowYamlError = "";
-		_assistantInlineWorkflowParsed = undefined;
-		_assistantInlineRolesYaml = "";
-		_assistantInlineRolesYamlError = "";
-		_assistantInlineRolesParsed = undefined;
-		// Clean up persisted draft
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
-		if (isAssistantContext) {
-			localStorage.removeItem("gateway.sessionId");
-			state.appView = "authenticated";
-		}
-
+		localStorage.removeItem("gateway.sessionId");
+		state.appView = "authenticated";
 
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "goal");
@@ -1428,22 +1246,6 @@ function goalPreviewPanel() {
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
 				autoStartTeam: _goalAutoStartTeam,
 				onAutoStartTeamChange: (e: Event) => { _goalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-				subgoalsAllowed: _goalSubgoalsAllowed ?? isSubgoalsEnabled(),
-				maxNestingDepth: _goalMaxNestingDepth ?? getSystemMaxNestingDepth(),
-				onSubgoalsAllowedChange: (e: Event) => {
-					_goalSubgoalsAllowed = (e.target as HTMLInputElement).checked;
-					renderApp();
-				},
-				onMaxNestingDepthChange: (e: Event) => {
-					const raw = Number((e.target as HTMLInputElement).value);
-					const sys = getSystemMaxNestingDepth();
-					if (!Number.isFinite(raw)) return;
-					let n = Math.floor(raw);
-					if (n < 1) n = 1;
-					if (n > sys) n = sys;
-					_goalMaxNestingDepth = n;
-					renderApp();
-				},
 				cwdDropdownOpen: state.cwdDropdownOpen,
 				cwdHighlightIndex: state.cwdHighlightIndex,
 				onCwdToggle: (open) => { state.cwdDropdownOpen = open; renderApp(); },
@@ -1451,24 +1253,6 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
-				inlineWorkflowYaml: _assistantInlineWorkflowYaml,
-				inlineWorkflowYamlError: _assistantInlineWorkflowYamlError,
-				onInlineWorkflowYamlChange: (e: Event) => {
-					_assistantInlineWorkflowYaml = (e.target as HTMLTextAreaElement).value;
-					const v = _validateInlineWorkflowYaml(_assistantInlineWorkflowYaml);
-					_assistantInlineWorkflowYamlError = v.error ?? "";
-					_assistantInlineWorkflowParsed = v.parsed;
-					renderApp();
-				},
-				inlineRolesYaml: _assistantInlineRolesYaml,
-				inlineRolesYamlError: _assistantInlineRolesYamlError,
-				onInlineRolesYamlChange: (e: Event) => {
-					_assistantInlineRolesYaml = (e.target as HTMLTextAreaElement).value;
-					const v = _validateInlineRolesYaml(_assistantInlineRolesYaml);
-					_assistantInlineRolesYamlError = v.error ?? "";
-					_assistantInlineRolesParsed = v.parsed;
-					renderApp();
-				},
 			})}
 		</div>
 	`;
@@ -1505,25 +1289,13 @@ function rolePreviewPanel() {
 		const trimmedLabel = state.rolePreviewLabel.trim();
 		if (!trimmedName || !trimmedLabel) return;
 		const sessionId = activeSessionId();
-		// Mid-session acceptance (agent proposed a role from a regular session)
-		// must NOT tear down the session. Only the role-assistant context owns
-		// the disconnect-and-navigate flow. Distinguished by `state.assistantType`.
 		const isAssistantContext = state.assistantType === "role";
-
-		// Snapshot the proposal slot's full field-set BEFORE deleting the
-		// slot. Closes the silent-drop gap parallel to goal proposals: the
-		// rolePreview* state only mirrors name/label/prompt/tools/accessory,
-		// so anything the agent added via edit_proposal (toolPolicies map,
-		// model, thinkingLevel, description) is recoverable only from the
-		// slot.fields snapshot.
-		const proposalFields = (state.activeProposals.role?.fields as Record<string, unknown> | undefined) ?? {};
-
-		if (isAssistantContext && state.remoteAgent) {
+		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		if (isAssistantContext) state.assistantType = null;
+		state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "role");
 		resetProposalAnnCount("role");
 		delete state.activeProposals.role;
@@ -1531,47 +1303,24 @@ function rolePreviewPanel() {
 		if (sessionId) {
 			deleteRoleDraft(sessionId);
 		}
-		if (isAssistantContext) {
-			localStorage.removeItem("gateway.sessionId");
-		}
+		localStorage.removeItem("gateway.sessionId");
 
-		// Tool policies precedence:
-		//   1. proposal.toolPolicies — explicit Record<tool, allow|ask|never>
-		//      from the agent's edit_proposal payload. Wins because it can
-		//      express the `never` policy that the comma-string reconstruction
-		//      below cannot.
-		//   2. comma-separated `tools` string → all entries set to "allow"
-		//      (legacy behaviour).
-		const proposalToolPolicies = proposalFields.toolPolicies;
-		let toolPolicies: Record<string, string> | undefined;
-		if (proposalToolPolicies && typeof proposalToolPolicies === "object" && !Array.isArray(proposalToolPolicies) && Object.keys(proposalToolPolicies).length > 0) {
-			toolPolicies = proposalToolPolicies as Record<string, string>;
-		} else {
-			const toolsList = state.rolePreviewTools
-				.split(",")
-				.map((t) => t.trim())
-				.filter(Boolean);
-			if (toolsList.length > 0) {
-				toolPolicies = {};
-				for (const t of toolsList) toolPolicies[t] = "allow";
-			}
-		}
+		// Parse tools: comma-separated string -> array
+		const toolsList = state.rolePreviewTools
+			.split(",")
+			.map((t) => t.trim())
+			.filter(Boolean);
 
-		// Optional fields the proposal YAML can carry; pass through to the
-		// server which already accepts them on POST /api/roles.
-		const model = typeof proposalFields.model === "string" ? proposalFields.model : undefined;
-		const thinkingLevel = typeof proposalFields.thinkingLevel === "string" ? proposalFields.thinkingLevel : undefined;
-		const description = typeof proposalFields.description === "string" ? proposalFields.description : undefined;
+		// Convert tools list to toolPolicies (all explicitly listed tools get "allow")
+		const toolPolicies: Record<string, string> = {};
+		for (const t of toolsList) toolPolicies[t] = "allow";
 
 		await createRole({
 			name: trimmedName,
 			label: trimmedLabel,
 			promptTemplate: state.rolePreviewPrompt,
-			toolPolicies,
+			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
 			accessory: state.rolePreviewAccessory,
-			model,
-			thinkingLevel,
-			description,
 		});
 
 		// Slice E: drop the on-disk proposal file once accepted.
@@ -1589,12 +1338,10 @@ function rolePreviewPanel() {
 			clearSessionModel(sessionId);
 		}
 
-		if (isAssistantContext) {
-			// Assistant flow ends by navigating to the roles page.
-			const { loadRolePageData } = await import("./role-manager-page.js");
-			await loadRolePageData();
-			setHashRoute("roles");
-		}
+		// Navigate to the roles page
+		const { loadRolePageData } = await import("./role-manager-page.js");
+		await loadRolePageData();
+		setHashRoute("roles");
 		renderApp();
 	};
 
@@ -2090,24 +1837,19 @@ function staffPreviewPanel() {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
 		const sessionId = activeSessionId();
-		// Mid-session acceptance must NOT tear down the active session — only
-		// the staff-assistant context owns the disconnect-and-navigate flow.
 		const isAssistantContext = state.assistantType === "staff";
-
-		if (isAssistantContext && state.remoteAgent) {
+		if (state.remoteAgent) {
 			state.remoteAgent.disconnect();
 			state.remoteAgent = null;
 			state.connectionStatus = "disconnected";
 		}
-		if (isAssistantContext) state.assistantType = null;
+		state.assistantType = null;
 		if (sessionId) clearProposalAnnotations(sessionId, "staff");
 		resetProposalAnnCount("staff");
 		delete state.activeProposals.staff;
-		if (isAssistantContext) {
-			localStorage.removeItem("gateway.sessionId");
-			setHashRoute("landing");
-			state.appView = "authenticated";
-		}
+		localStorage.removeItem("gateway.sessionId");
+		setHashRoute("landing");
+		state.appView = "authenticated";
 
 		let triggers: any[] = [];
 		try {
@@ -2578,99 +2320,15 @@ let _proposalCwdHighlightIndex = -1;
 let _proposalSaving = false;
 let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
-let _proposalSubgoalsAllowed: boolean | null = null;
-let _proposalMaxNestingDepth: number | null = null;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
-/** Inline workflow YAML for the goal proposal panel. */
-let _proposalInlineWorkflowYaml = "";
-let _proposalInlineWorkflowYamlError = "";
-let _proposalInlineWorkflowParsed: unknown | undefined;
-/** Same fields for the assistant-driven goal proposal entry. */
-let _assistantInlineWorkflowYaml = "";
-let _assistantInlineWorkflowYamlError = "";
-let _assistantInlineWorkflowParsed: unknown | undefined;
-
-/** Validate inline workflow YAML — synchronous since `yaml` is statically imported. */
-function _validateInlineWorkflowYaml(yamlText: string): { parsed?: unknown; error?: string } {
-	const trimmed = yamlText.trim();
-	if (!trimmed) return { parsed: undefined };
-	try {
-		const parsed = yaml.parse(trimmed);
-		if (parsed == null || typeof parsed !== "object") return { error: "Workflow must be a YAML mapping (object)." };
-		const obj = parsed as Record<string, unknown>;
-		if (!Array.isArray(obj.gates)) return { error: "Workflow must declare a `gates: []` array." };
-		return { parsed };
-	} catch (err) {
-		return { error: err instanceof Error ? err.message : String(err) };
-	}
-}
-
-// Inline-roles textarea caches — mirror inline-workflow. Textarea-driven cache
-// wins at accept time; else falls back to fields.inlineRoles.
-let _proposalInlineRolesYaml = "";
-let _proposalInlineRolesYamlError = "";
-let _proposalInlineRolesParsed: Record<string, unknown> | undefined;
-let _assistantInlineRolesYaml = "";
-let _assistantInlineRolesYamlError = "";
-let _assistantInlineRolesParsed: Record<string, unknown> | undefined;
-
-/**
- * Validate inline-roles YAML. Must parse to a `Record<roleName, Role>` —
- * each entry needs `name`, `label`, `promptTemplate`. Mirrors the structural
- * checks in src/server/proposals/proposal-types.ts::validateGoalInlineFields
- * so the user catches the same errors locally before the server rejects.
- */
-function _validateInlineRolesYaml(yamlText: string): { parsed?: Record<string, unknown>; error?: string } {
-	const trimmed = yamlText.trim();
-	if (!trimmed) return { parsed: undefined };
-	let parsed: unknown;
-	try {
-		parsed = yaml.parse(trimmed);
-	} catch (err) {
-		return { error: err instanceof Error ? err.message : String(err) };
-	}
-	if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-		return { error: "Inline roles must be a YAML mapping of roleName → Role definition." };
-	}
-	const map = parsed as Record<string, unknown>;
-	for (const [name, role] of Object.entries(map)) {
-		if (role == null || typeof role !== "object" || Array.isArray(role)) {
-			return { error: `Role "${name}" must be a YAML mapping.` };
-		}
-		const r = role as Record<string, unknown>;
-		for (const required of ["name", "label", "promptTemplate"] as const) {
-			const v = r[required];
-			if (typeof v !== "string" || v.trim() === "") {
-				return { error: `Role "${name}" is missing required field \`${required}\` (must be a non-empty string).` };
-			}
-		}
-	}
-	return { parsed: map };
-}
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | {
-		title: string;
-		spec: string;
-		cwd?: string;
-		workflow?: string;
-		options?: string;
-		inlineWorkflow?: unknown;
-		inlineRoles?: Record<string, unknown>;
-	};
+	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
 	if (!proposal) return;
-	// Identity check uses a fingerprint that includes inlineWorkflow + inlineRoles
-	// so a re-emitted proposal that adds (or edits) those fields re-seeds the
-	// textarea / role list — without this, an edit_proposal that adds inlineRoles
-	// after the first emit would leave the panel showing the original payload.
-	const inlineWorkflowKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
-	// Deeper-than-just-keys hash so that a re-emitted proposal that edits a
-	// role's prompt (without changing the role list) still re-seeds the
-	// textarea with the new content.
-	const inlineRolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${inlineWorkflowKey}|${inlineRolesKey}`;
+	// Use a simple identity check to avoid re-initializing on every render
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2684,39 +2342,6 @@ function syncProposalFormState(): void {
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
 		: [];
 	_proposalSaving = false;
-	// Seed the "Advanced: paste inline workflow YAML" textarea from the proposal
-	// when the agent provided one. The user can still edit; their edits land in
-	// _proposalInlineWorkflowYaml/_proposalInlineWorkflowParsed via the textarea
-	// onChange. Without this seed the agent's payload was visible in the
-	// proposal slot but invisible to the user — so they couldn't review it.
-	if (proposal.inlineWorkflow !== undefined && proposal.inlineWorkflow !== null) {
-		try {
-			_proposalInlineWorkflowYaml = yaml.stringify(proposal.inlineWorkflow);
-			_proposalInlineWorkflowParsed = proposal.inlineWorkflow;
-			_proposalInlineWorkflowYamlError = "";
-		} catch (err) {
-			_proposalInlineWorkflowYamlError = `Could not stringify inline workflow: ${err instanceof Error ? err.message : String(err)}`;
-		}
-	} else {
-		_proposalInlineWorkflowYaml = "";
-		_proposalInlineWorkflowParsed = undefined;
-		_proposalInlineWorkflowYamlError = "";
-	}
-	// Same seed pattern for inline roles: present in the proposal? stringify
-	// to YAML and pre-populate the textarea so users can review & edit.
-	if (proposal.inlineRoles && typeof proposal.inlineRoles === "object" && Object.keys(proposal.inlineRoles).length > 0) {
-		try {
-			_proposalInlineRolesYaml = yaml.stringify(proposal.inlineRoles);
-			_proposalInlineRolesParsed = proposal.inlineRoles as Record<string, unknown>;
-			_proposalInlineRolesYamlError = "";
-		} catch (err) {
-			_proposalInlineRolesYamlError = `Could not stringify inline roles: ${err instanceof Error ? err.message : String(err)}`;
-		}
-	} else {
-		_proposalInlineRolesYaml = "";
-		_proposalInlineRolesParsed = undefined;
-		_proposalInlineRolesYamlError = "";
-	}
 }
 
 function goalProposalPanel() {
@@ -2751,23 +2376,9 @@ function goalProposalPanel() {
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
 		if (!trimmedTitle || _proposalSaving) return;
-		// Fall back to the current session's projectId when previewProjectId
-		// is empty — covers the race where (a) onGoalProposal's projectId-set
-		// path didn't fire (e.g. proposal arrived via WS resume rather than a
-		// fresh emit), or (b) a previous goal-creation cleared previewProjectId
-		// and we're now accepting a second proposal in the same session
-		// without re-arrival. Without this, mid-session goal creation in a
-		// regular project session erroneously rejects with "No project
-		// selected".
 		if (!state.previewProjectId) {
-			const activeSid = activeSessionId();
-			const liveSess = activeSid ? state.gatewaySessions.find(s => s.id === activeSid) : undefined;
-			if (liveSess?.projectId) {
-				state.previewProjectId = liveSess.projectId;
-			} else {
-				showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
-				return;
-			}
+			showConnectionError("No project selected for this goal", "The assistant session is not linked to a project. Dismiss this proposal and start a new goal from the + New Goal button.");
+			return;
 		}
 		if (workflowStateFor(state.previewProjectId) === "empty") {
 			showConnectionError(
@@ -2781,12 +2392,6 @@ function goalProposalPanel() {
 		// latest values (workflow id, sandboxed, etc).
 		const sandboxed = _proposalSandboxed;
 		const autoStartTeam = _proposalAutoStartTeam;
-		const subgoalsAllowed = isSubgoalsEnabled() && _proposalSubgoalsAllowed !== null
-			? _proposalSubgoalsAllowed
-			: undefined;
-		const maxNestingDepth = isSubgoalsEnabled() && _proposalMaxNestingDepth !== null
-			? _proposalMaxNestingDepth
-			: undefined;
 		const workflowId = _proposalWorkflowId || undefined;
 		const enabledOptionalSteps = _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined;
 		const projectId = state.previewProjectId || undefined;
@@ -2796,18 +2401,6 @@ function goalProposalPanel() {
 
 		let goal;
 		try {
-			// Textarea-driven caches win when the user edited the panel; both
-			// inline-workflow and inline-roles fall back to the snapshotted
-			// proposal slot otherwise (covers the agent-only path where the
-			// user accepts without editing).
-			const proposalFields = (state.activeProposals.goal?.fields as Record<string, unknown> | undefined) ?? {};
-			const inlineWorkflow = _proposalInlineWorkflowParsed
-				?? (proposalFields.inlineWorkflow as unknown);
-			const inlineRolesCandidate: unknown = _proposalInlineRolesParsed
-				?? proposalFields.inlineRoles;
-			const inlineRoles = (inlineRolesCandidate && typeof inlineRolesCandidate === "object" && !Array.isArray(inlineRolesCandidate))
-				? (inlineRolesCandidate as Record<string, unknown>)
-				: undefined;
 			try {
 				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 					spec: _proposalSpec,
@@ -2816,10 +2409,6 @@ function goalProposalPanel() {
 					projectId,
 					enabledOptionalSteps,
 					autoStartTeam,
-					workflow: inlineWorkflow,
-					inlineRoles,
-					subgoalsAllowed,
-					maxNestingDepth,
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -2829,19 +2418,11 @@ function goalProposalPanel() {
 			if (!goal) return;
 
 			// --- Success: clear the proposal and navigate. ---
-			_proposalInlineWorkflowYaml = "";
-			_proposalInlineWorkflowYamlError = "";
-			_proposalInlineWorkflowParsed = undefined;
-			_proposalInlineRolesYaml = "";
-			_proposalInlineRolesYamlError = "";
-			_proposalInlineRolesParsed = undefined;
 			delete state.activeProposals.goal;
 			_proposalEnabledOptionalSteps = [];
 			_proposalInitializedFrom = null;
 			_proposalSandboxed = false;
 			_proposalAutoStartTeam = true;
-			_proposalSubgoalsAllowed = null;
-			_proposalMaxNestingDepth = null;
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2898,22 +2479,6 @@ function goalProposalPanel() {
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
 		autoStartTeam: _proposalAutoStartTeam,
 		onAutoStartTeamChange: (e: Event) => { _proposalAutoStartTeam = (e.target as HTMLInputElement).checked; renderApp(); },
-		subgoalsAllowed: _proposalSubgoalsAllowed ?? isSubgoalsEnabled(),
-		maxNestingDepth: _proposalMaxNestingDepth ?? getSystemMaxNestingDepth(),
-		onSubgoalsAllowedChange: (e: Event) => {
-			_proposalSubgoalsAllowed = (e.target as HTMLInputElement).checked;
-			renderApp();
-		},
-		onMaxNestingDepthChange: (e: Event) => {
-			const raw = Number((e.target as HTMLInputElement).value);
-			const sys = getSystemMaxNestingDepth();
-			if (!Number.isFinite(raw)) return;
-			let n = Math.floor(raw);
-			if (n < 1) n = 1;
-			if (n > sys) n = sys;
-			_proposalMaxNestingDepth = n;
-			renderApp();
-		},
 		cwdDropdownOpen: _proposalCwdDropdownOpen,
 		cwdHighlightIndex: _proposalCwdHighlightIndex,
 		onCwdToggle: (open) => { _proposalCwdDropdownOpen = open; renderApp(); },
@@ -2924,24 +2489,6 @@ function goalProposalPanel() {
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
 		streaming: isProposalStreaming("goal_proposal"),
 		commentable: true,
-		inlineWorkflowYaml: _proposalInlineWorkflowYaml,
-		inlineWorkflowYamlError: _proposalInlineWorkflowYamlError,
-		onInlineWorkflowYamlChange: (e: Event) => {
-			_proposalInlineWorkflowYaml = (e.target as HTMLTextAreaElement).value;
-			const v = _validateInlineWorkflowYaml(_proposalInlineWorkflowYaml);
-			_proposalInlineWorkflowYamlError = v.error ?? "";
-			_proposalInlineWorkflowParsed = v.parsed;
-			renderApp();
-		},
-		inlineRolesYaml: _proposalInlineRolesYaml,
-		inlineRolesYamlError: _proposalInlineRolesYamlError,
-		onInlineRolesYamlChange: (e: Event) => {
-			_proposalInlineRolesYaml = (e.target as HTMLTextAreaElement).value;
-			const v = _validateInlineRolesYaml(_proposalInlineRolesYaml);
-			_proposalInlineRolesYamlError = v.error ?? "";
-			_proposalInlineRolesParsed = v.parsed;
-			renderApp();
-		},
 	});
 }
 
@@ -2963,32 +2510,24 @@ function hasUnifiedPanel(): boolean {
 		state.isPreviewSession ||
 		state.activeProposals.goal != null ||
 		state.activeProposals.project != null ||
-		state.activeProposals.role != null ||
-		state.activeProposals.tool != null ||
-		state.activeProposals.staff != null ||
 		state.reviewPanelOpen
 	);
 }
 
-type UnifiedPanelTab = "chat" | "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff";
-
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): UnifiedPanelTab[] {
-	const tabs: UnifiedPanelTab[] = ["chat"];
+function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
+	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
 	if (state.activeProposals.goal != null) tabs.push("goal");
 	if (state.activeProposals.project != null) tabs.push("project");
-	if (state.activeProposals.role != null) tabs.push("role");
-	if (state.activeProposals.tool != null) tabs.push("tool");
-	if (state.activeProposals.staff != null) tabs.push("staff");
 	return tabs;
 }
 
 /** Index of the current previewPanelTab within unifiedPanelTabs(). Clamps to valid range. */
 function unifiedTabIndex(): number {
 	const tabs = unifiedPanelTabs();
-	const idx = tabs.indexOf(state.previewPanelTab);
+	const idx = (tabs as readonly string[]).indexOf(state.previewPanelTab);
 	if (idx >= 0) return idx;
 	state.previewPanelTab = tabs[tabs.length - 1];
 	return tabs.length - 1;
@@ -3443,27 +2982,6 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "project"; renderApp(); }}
 					>Project <span class="goal-tab-dot"></span></button>
 				` : ""}
-				${state.activeProposals.role != null ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "role" ? "goal-tab-pill--active" : ""}"
-						title="Role"
-						@click=${() => { state.previewPanelTab = "role"; renderApp(); }}
-					>Role <span class="goal-tab-dot"></span></button>
-				` : ""}
-				${state.activeProposals.tool != null ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "tool" ? "goal-tab-pill--active" : ""}"
-						title="Tool"
-						@click=${() => { state.previewPanelTab = "tool"; renderApp(); }}
-					>Tool <span class="goal-tab-dot"></span></button>
-				` : ""}
-				${state.activeProposals.staff != null ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "staff" ? "goal-tab-pill--active" : ""}"
-						title="Staff"
-						@click=${() => { state.previewPanelTab = "staff"; renderApp(); }}
-					>Staff <span class="goal-tab-dot"></span></button>
-				` : ""}
 			</div>
 		`;
 	};
@@ -3575,38 +3093,23 @@ export function doRenderApp(): void {
 	};
 
 	const unifiedPreviewPanel = () => {
-		// Auto-correct tab if the active tab's content is no longer available.
-		// Pick the highest-priority surviving tab as the fallback.
-		const pickFallback = (): "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" => {
-			if (state.activeProposals.goal != null) return "goal";
-			if (state.activeProposals.project != null) return "project";
-			if (state.activeProposals.role != null) return "role";
-			if (state.activeProposals.tool != null) return "tool";
-			if (state.activeProposals.staff != null) return "staff";
-			if (state.reviewPanelOpen) return "review";
-			return "preview";
-		};
-		const tabAvailable = (t: typeof state.previewPanelActiveTab): boolean => {
-			if (t === "preview") return state.isPreviewSession;
-			if (t === "review") return state.reviewPanelOpen;
-			if (t === "goal") return state.activeProposals.goal != null;
-			if (t === "project") return state.activeProposals.project != null;
-			if (t === "role") return state.activeProposals.role != null;
-			if (t === "tool") return state.activeProposals.tool != null;
-			if (t === "staff") return state.activeProposals.staff != null;
-			return false;
-		};
-		if (!tabAvailable(state.previewPanelActiveTab)) {
-			state.previewPanelActiveTab = pickFallback();
+		// Auto-correct tab if the active tab's content is no longer available
+		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
+		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
+			state.previewPanelActiveTab = "goal";
+		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
+			state.previewPanelActiveTab = "preview";
+		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
+				: (state.activeProposals.goal != null ? "goal"
+				: (state.reviewPanelOpen ? "review" : "preview"));
 		}
 
 		const showPreviewTab = state.isPreviewSession;
 		const showGoalTab = state.activeProposals.goal != null;
 		const showReviewTab = state.reviewPanelOpen;
 		const showProjectTab = state.activeProposals.project != null;
-		const showRoleTab = state.activeProposals.role != null;
-		const showToolTab = state.activeProposals.tool != null;
-		const showStaffTab = state.activeProposals.staff != null;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -3641,27 +3144,6 @@ export function doRenderApp(): void {
 								@click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
 							>Project <span class="goal-tab-dot"></span></button>
 						` : ""}
-						${showRoleTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "role" ? "goal-tab-pill--active" : ""}"
-								title="Role"
-								@click=${() => { state.previewPanelActiveTab = "role"; renderApp(); }}
-							>Role <span class="goal-tab-dot"></span></button>
-						` : ""}
-						${showToolTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "tool" ? "goal-tab-pill--active" : ""}"
-								title="Tool"
-								@click=${() => { state.previewPanelActiveTab = "tool"; renderApp(); }}
-							>Tool <span class="goal-tab-dot"></span></button>
-						` : ""}
-						${showStaffTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "staff" ? "goal-tab-pill--active" : ""}"
-								title="Staff"
-								@click=${() => { state.previewPanelActiveTab = "staff"; renderApp(); }}
-							>Staff <span class="goal-tab-dot"></span></button>
-						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
@@ -3683,13 +3165,7 @@ export function doRenderApp(): void {
 							? goalProposalPanel()
 							: state.previewPanelActiveTab === "project" && showProjectTab
 								? projectProposalPanel()
-								: state.previewPanelActiveTab === "role" && showRoleTab
-									? rolePreviewPanel()
-									: state.previewPanelActiveTab === "tool" && showToolTab
-										? toolPreviewPanel()
-										: state.previewPanelActiveTab === "staff" && showStaffTab
-											? staffPreviewPanel()
-											: ""}
+								: ""}
 			</div>
 		`;
 	};
@@ -3700,7 +3176,7 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: UnifiedPanelTab) => {
+	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project") => {
 		if (tab === "chat") return state.chatPanel;
 		if (tab === "preview" && state.isPreviewSession) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
@@ -3713,15 +3189,6 @@ export function doRenderApp(): void {
 		}
 		if (tab === "project" && state.activeProposals.project != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
-		}
-		if (tab === "role" && state.activeProposals.role != null) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${rolePreviewPanel()}</div>`;
-		}
-		if (tab === "tool" && state.activeProposals.tool != null) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${toolPreviewPanel()}</div>`;
-		}
-		if (tab === "staff" && state.activeProposals.staff != null) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${staffPreviewPanel()}</div>`;
 		}
 		return html``;
 	};

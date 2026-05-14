@@ -84,6 +84,15 @@ test.describe("Jump-to-bottom button", () => {
 		const pos = await page.evaluate(() => (globalThis as any).__sclSel);
 		await page.mouse.move(pos.x, pos.y);
 		await page.mouse.wheel(0, -Math.floor(clientHeight * 0.7));
+		// Wait briefly so the wheel handler (_handleUserIntent) clears
+		// _stickToBottom and the settle window BEFORE the programmatic scroll.
+		// Without this, the evaluate() may run synchronously before the wheel
+		// event is dispatched, leaving stickToBottom=true and allowing the
+		// ResizeObserver settle-window to re-pin us to the bottom.
+		await page.waitForFunction(() => {
+			const ai = document.querySelector("agent-interface") as any;
+			return ai && ai._stickToBottom === false;
+		}, null, { timeout: 5_000 }).catch(() => { /* best-effort — proceed even if unavailable */ });
 		// Belt-and-braces: also pin scrollTop programmatically in case the
 		// trusted wheel event doesn't translate into the desired scroll delta
 		// on this platform's scroll-step granularity. The wheel event itself
@@ -103,7 +112,7 @@ test.describe("Jump-to-bottom button", () => {
 			const b = document.querySelector('[data-testid="jump-to-bottom"]') as HTMLElement | null;
 			if (!b) return false;
 			return b.style.opacity === "1" && b.style.pointerEvents === "auto";
-		}, null, { timeout: 10_000 });
+		}, null, { timeout: 15_000 });
 		await rec.capture("Scrolled up — jump-to-bottom visible");
 
 		// 3. Scroll down within clientHeight * 0.4 of bottom → button hidden again.

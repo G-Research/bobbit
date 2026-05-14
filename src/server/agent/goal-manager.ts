@@ -96,6 +96,17 @@ export class GoalManager {
 	 * the project's container directory. Single-repo behavior is unchanged.
 	 */
 	private projectRootResolver?: (projectId: string) => string | undefined;
+	/** Resolve the configured base ref (e.g. master) for a project. Used by
+	 * setupWorktreeAndStartTeam to create the worktree from the right base
+	 * branch. Set by server.ts on startup. */
+	private baseRefResolver?: (projectId: string) => string | undefined;
+	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
+		this.baseRefResolver = resolver;
+	}
+	/** Returns the configured base ref for a project, if set. */
+	getBaseRef(projectId: string): string | undefined {
+		return this.baseRefResolver?.(projectId);
+	}
 
 	constructor(goalStore: GoalStore, workflowStore?: WorkflowStore) {
 		this.store = goalStore;

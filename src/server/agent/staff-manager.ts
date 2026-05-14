@@ -5,7 +5,7 @@ import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } f
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { SYSTEM_PROJECT_ID } from "./project-registry.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, resolveBaseRef } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 
@@ -141,7 +141,12 @@ export class StaffManager {
 		// Create a worktree for this staff agent
 		const shortId = randomUUID().slice(0, 8);
 		const branchName = "staff-" + sanitiseBranchName(name) + "-" + shortId;
-		const worktreeResult = await createWorktree(cwd, branchName);
+		// Thread the project's configured `base_ref` so the staff worktree branches
+		// from the configured integration target and tracks it as upstream. See
+		// docs/design/base-ref.md.
+		const projectCtx = this.pcm.getOrCreate(projectId);
+		const configuredBaseRef = projectCtx?.projectConfigStore.get("base_ref") || undefined;
+		const worktreeResult = await createWorktree(cwd, branchName, { configuredBaseRef });
 		staff.worktreePath = worktreeResult.worktreePath;
 		staff.branch = worktreeResult.branchName;
 
@@ -322,12 +327,21 @@ export class StaffManager {
 		}
 
 		try {
-			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: wt, timeout: 5_000 });
-			const primary = stdout.trim().replace("refs/remotes/origin/", "");
-			if (!primary || primary.startsWith("-")) {
-				console.warn(`[staff-manager] Could not detect primary branch in ${wt} (got "${primary}"), skipping rebase`);
+			// Resolve the rebase target via the centralised `resolveBaseRef` helper.
+			// When the project has a configured `base_ref`, that's the integration
+			// target we rebase onto; otherwise we fall back to today's behaviour
+			// (`git symbolic-ref refs/remotes/origin/HEAD`). The helper returns the
+			// full ref including any `origin/` prefix, so we use it directly.
+			const configuredBaseRef = ctx?.projectConfigStore.get("base_ref") || undefined;
+			const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef);
+			if (!rebaseTarget || rebaseTarget === "HEAD" || rebaseTarget.startsWith("-")) {
+				console.warn(`[staff-manager] Could not resolve rebase target in ${wt} (got "${rebaseTarget}"), skipping rebase`);
 			} else {
-				await execFile("git", ["rebase", `origin/${primary}`], { cwd: wt, timeout: 60_000 });
+				// `resolveBaseRef` returns `origin/<branch>` for remote bases and the
+				// bare branch name for local bases. For staff rebase we want to track
+				// the remote tip when configured remotely; for local bases we rebase
+				// against the local branch directly.
+				await execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
 			}
 		} catch (err) {
 			console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);

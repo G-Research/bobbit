@@ -20,7 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildDockerRunArgs } from "./docker-args.js";
 import type { ToolManager } from "./tool-manager.js";
-import { stripTokenFromGitUrl, shouldSkipRemotePush } from "../skills/git.js";
+import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -116,6 +116,14 @@ export interface ProjectSandboxOptions {
 	 * remote prefix and the host can resolve them via `git remote get-url`).
 	 */
 	repoUrlByName?: Record<string, string>;
+	/**
+	 * Live resolver for the project's `base_ref` setting. Called fresh on every
+	 * `createWorktree` / `createWorktreeSet` so the container path adopts the
+	 * current setting without sandbox recreation. Empty/undefined preserves
+	 * today's `symbolic-ref refs/remotes/origin/HEAD` fallback inside the
+	 * container. See `docs/design/base-ref.md` §6.
+	 */
+	baseRefResolver?: () => string | undefined;
 }
 
 export interface ContainerState {
@@ -206,18 +214,18 @@ export class ProjectSandbox {
 			// Fetch failure is non-fatal — may be offline
 		}
 
-		// Resolve start point: use baseBranch if provided, otherwise resolve
-		// the remote primary branch so we don't base on a stale local HEAD.
+		// Resolve start point: use baseBranch if provided, otherwise consult the
+		// project's configured `base_ref` (via the host-injected resolver),
+		// falling back to the container's `symbolic-ref refs/remotes/origin/HEAD`
+		// chain when unset. See `docs/design/base-ref.md` §6.
 		let startPoint = baseBranch;
+		const configuredBaseRef = this.options.baseRefResolver?.();
 		if (!startPoint) {
-			try {
-				const refResult = await this._dockerExec(containerId,
-					["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-					{ cwd: "/workspace" });
-				const ref = refResult.trim().replace("refs/remotes/", "");
-				if (ref) startPoint = ref;
-			} catch { /* fall back below */ }
-			if (!startPoint) startPoint = "origin/master";
+			const exec = async (args: string[]): Promise<string> => {
+				return this._dockerExec(containerId, ["git", ...args], { cwd: "/workspace" });
+			};
+			const { ref } = await resolveBaseRefWithExec(exec, configuredBaseRef);
+			startPoint = ref || "origin/master";
 		}
 
 		// Create the worktree
@@ -246,6 +254,23 @@ export class ProjectSandbox {
 			try {
 				await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: worktreePath });
 			} catch { /* push may fail if branch doesn't exist on remote yet */ }
+		}
+
+		// When the project has a configured `base_ref`, override the per-branch
+		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
+		// integration target rather than `origin/<branch>` that `git push -u`
+		// just set. Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
+		// Non-fatal in the sandbox — host-side save-time validation already
+		// guarantees the ref resolves; this is defence-in-depth.
+		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
+		if (configuredBaseRefTrimmed) {
+			try {
+				await this._dockerExec(containerId,
+					["git", "branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branch],
+					{ cwd: worktreePath });
+			} catch (err: any) {
+				console.warn(`[project-sandbox] Failed to set upstream for ${branch} to ${configuredBaseRefTrimmed}:`, err?.message || err);
+			}
 		}
 
 		console.log(`[project-sandbox] Created worktree ${name} (branch: ${branch}) at ${worktreePath}`);
@@ -291,6 +316,9 @@ export class ProjectSandbox {
 			], { timeout: 10_000, env: DOCKER_ENV });
 		}
 
+		const configuredBaseRef = this.options.baseRefResolver?.();
+		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
+
 		const out: Array<{ repo: string; worktreePath: string }> = [];
 		for (const repo of repos) {
 			const repoSrc = `/workspace/${repo}`;
@@ -298,16 +326,16 @@ export class ProjectSandbox {
 
 			// Resolve start point (per-repo so different repos can be at different
 			// primary branches if they ever drift — we still warn elsewhere).
+			// Honors the project's configured `base_ref` via the resolver injected
+			// from the host; empty/undefined falls back to the in-container
+			// `symbolic-ref refs/remotes/origin/HEAD` chain (today's behaviour).
 			let startPoint = baseBranch;
 			if (!startPoint) {
-				try {
-					const refResult = await this._dockerExec(containerId,
-						["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-						{ cwd: repoSrc });
-					const ref = refResult.trim().replace("refs/remotes/", "");
-					if (ref) startPoint = ref;
-				} catch { /* fall back below */ }
-				if (!startPoint) startPoint = "origin/master";
+				const exec = async (args: string[]): Promise<string> => {
+					return this._dockerExec(containerId, ["git", ...args], { cwd: repoSrc });
+				};
+				const { ref } = await resolveBaseRefWithExec(exec, configuredBaseRef);
+				startPoint = ref || "origin/master";
 			}
 
 			try {
@@ -329,6 +357,20 @@ export class ProjectSandbox {
 				try {
 					await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: wtPath });
 				} catch { /* push may fail if branch doesn't exist on remote yet */ }
+			}
+
+			// Override per-branch upstream to the configured `base_ref` when set,
+			// mirroring host-side `createWorktreeSet` (see `docs/design/base-ref.md` §2).
+			// Non-fatal — host-side save-time validation already guarantees the ref
+			// resolves; this is defence-in-depth for the container path.
+			if (configuredBaseRefTrimmed) {
+				try {
+					await this._dockerExec(containerId,
+						["git", "branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branch],
+						{ cwd: wtPath });
+				} catch (err: any) {
+					console.warn(`[project-sandbox] Failed to set upstream for ${branch} (${repo}) to ${configuredBaseRefTrimmed}:`, err?.message || err);
+				}
 			}
 
 			out.push({ repo, worktreePath: wtPath });

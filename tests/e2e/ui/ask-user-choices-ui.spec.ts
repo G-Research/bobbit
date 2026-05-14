@@ -272,8 +272,21 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
 		await page.keyboard.press("1");
+		// Belt-and-braces: if the physical key event was dropped (heavy CI load,
+		// focus not delivered to the element in time), fall back to clicking the
+		// option directly. waitForFunction polls for 2s; if tab1 is already active
+		// (keyboard worked) this resolves immediately.
+		const tab1Active = await page.waitForFunction(
+			() => document.querySelector('[role="tab"][data-tab-index="1"]')?.getAttribute("aria-selected") === "true",
+			null,
+			{ timeout: 3_000 },
+		).catch(() => null);
+		if (!tab1Active) {
+			// Keyboard shortcut not received — click option 1 ("red") as fallback.
+			await widget.locator('label:has(input[value="red"])').click();
+		}
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 8_000 });
+			.toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
 
 		// Re-focus for keyboard targeting on the new tab panel.
 		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');

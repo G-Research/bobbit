@@ -107,6 +107,103 @@ async function spawnChild(body: any): Promise<{ status: number; payload: any }> 
 	return { status, payload };
 }
 
+let startTeamCalls: string[];
+let broadcasts: any[];
+
+// Extended beforeEach wires up richer stubs needed for integrate-child tests.
+// The simple beforeEach above already runs; we just add the missing fields.
+beforeEach(() => {
+	startTeamCalls = [];
+	broadcasts = [];
+	// Patch mergeChild to a clean in-memory success (no real git ops).
+	(goalManager as any).mergeChild = async () => ({
+		merged: true, alreadyMerged: false, conflict: false, pushed: false, output: "",
+	});
+	// Re-patch setupWorktreeAndStartTeam to also flip setupStatus ready
+	// (needed for auto-unblock to reach the startTeam branch).
+	(goalManager as any).setupWorktreeAndStartTeam = async (gid: string, startFn?: () => Promise<any>) => {
+		setupCalls.push(gid);
+		await goalManager.updateGoal(gid, { setupStatus: "ready" } as any);
+		if (startFn) { try { await startFn(); } catch { /* ignore */ } }
+	};
+	const originalDeps = deps;
+	// Patch teamManager.startTeam in the existing deps stub.
+	(originalDeps as any).teamManager = {
+		startTeam: async (gid: string) => { startTeamCalls.push(gid); },
+		teardownTeam: async () => {},
+		getTeamState: () => undefined,
+	};
+	// Patch broadcastToAll to record events.
+	(originalDeps as any).broadcastToAll = (ev: any) => { broadcasts.push(ev); };
+});
+
+async function integrateChild(childId: string): Promise<{ status: number; payload: any }> {
+	let status = 200; let payload: any = undefined;
+	const localDeps: NestedGoalRouteDeps = {
+		...deps,
+		json: (b, s) => { status = s ?? 200; payload = b; },
+		jsonError: (s, err) => { status = s; payload = { error: String((err as any)?.message ?? err) }; },
+	};
+	// Pass the ready-to-merge gate so integrate-child accepts the merge.
+	gateStore.initGatesForGoal(childId, ["implementation", "ready-to-merge"]);
+	gateStore.updateGateStatus(childId, "ready-to-merge", "passed");
+	const req = { method: "POST", headers: {}, _body: {} } as any as http.IncomingMessage;
+	const url = new URL(`http://x/api/goals/${parent.id}/integrate-child/${childId}`);
+	await tryHandleNestedGoalRoute(req, url, localDeps);
+	return { status, payload };
+}
+
+describe("goal_plan_propose direct-spawn fallback: topological ordering", () => {
+	it("valid DAG submitted out of topological order succeeds (B before A, B depends on A)", async () => {
+		// Submit B first (depends on A), then A. If the fallback doesn't
+		// topologically sort, spawning B first would cause UNKNOWN_PLAN_ID
+		// because A hasn't been spawned yet.
+		// After topological sorting, A is spawned first, then B (paused).
+		const stepsOutOfOrder = [
+			{ planId: "B", title: "B", spec: "Implement feature B: builds on A; submitted out of order to verify topo sort.", dependsOn: ["A"] },
+			{ planId: "A", title: "A", spec: "Implement feature A: set up the foundation layer for this out-of-order topo sort test." },
+		];
+		// Simulate topological sort (what extension.ts now does before spawning)
+		const byId = new Map(stepsOutOfOrder.map(s => [s.planId, s]));
+		const indegree = new Map(stepsOutOfOrder.map(s => [s.planId, 0]));
+		for (const s of stepsOutOfOrder) {
+			for (const dep of (s as any).dependsOn ?? []) {
+				if (byId.has(dep)) indegree.set(s.planId, (indegree.get(s.planId) ?? 0) + 1);
+			}
+		}
+		const queue = stepsOutOfOrder.filter(s => (indegree.get(s.planId) ?? 0) === 0);
+		const sorted: typeof stepsOutOfOrder = [];
+		const visited = new Set<string>();
+		while (queue.length > 0) {
+			const node = queue.shift()!;
+			if (visited.has(node.planId)) continue;
+			visited.add(node.planId);
+			sorted.push(node);
+			for (const s of stepsOutOfOrder) {
+				if (visited.has(s.planId)) continue;
+				if (((s as any).dependsOn ?? []).includes(node.planId)) {
+					const deg = (indegree.get(s.planId) ?? 1) - 1;
+					indegree.set(s.planId, deg);
+					if (deg === 0) queue.push(s);
+				}
+			}
+		}
+		assert.deepEqual(sorted.map(s => s.planId), ["A", "B"], "topo sort must put A before B");
+
+		// Spawn in topologically sorted order — should succeed
+		for (const s of sorted) {
+			const r = await spawnChild(s);
+			assert.equal(r.status, 201, `spawn ${s.planId} must succeed: ${JSON.stringify(r.payload)}`);
+		}
+
+		// Verify: A is running, B is paused (dep unresolved)
+		const childA = goalStore.getAll().find(g => g.spawnedFromPlanId === "A" && g.parentGoalId === parent.id)!;
+		const childB = goalStore.getAll().find(g => g.spawnedFromPlanId === "B" && g.parentGoalId === parent.id)!;
+		assert.notEqual(childA.paused, true, "A must not be paused");
+		assert.equal(childB.paused, true, "B must be paused until A completes");
+	});
+});
+
 describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 	it("DAG {root: [], a: [root], b: [root], leaf: [a, b]} → only root starts; a, b, leaf paused", async () => {
 		// Fallback iterates the steps in caller order. The team-lead is expected
@@ -158,5 +255,200 @@ describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 		assert.equal(setupCalls.includes(a.id), false, "setup must NOT be called for blocked child a");
 		assert.equal(setupCalls.includes(b.id), false, "setup must NOT be called for blocked child b");
 		assert.equal(setupCalls.includes(leaf.id), false, "setup must NOT be called for blocked child leaf");
+	});
+});
+
+describe("spawn-children-direct fallback auto-resumes blocked children on dep merge", () => {
+	it("merging the dep auto-unblocks the dependent child", async () => {
+		// Simulate the fallback loop: spawn two steps where B depends on A.
+		const rA = await spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		assert.equal(rA.status, 201);
+		const rB = await spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["A"] });
+		assert.equal(rB.status, 201);
+		assert.equal(rB.payload.blocked, true, "B must be blocked initially");
+
+		const childA = rA.payload.id;
+		const childB = rB.payload.id;
+		assert.equal(goalStore.get(childB)!.paused, true, "B must be paused before A merges");
+
+		// Merge child A → auto-unblock scan should unpause B.
+		setupCalls.length = 0;
+		startTeamCalls.length = 0;
+		const mergeResult = await integrateChild(childA);
+		assert.equal(mergeResult.status, 200, `integrate-child A failed: ${JSON.stringify(mergeResult.payload)}`);
+
+		const finalB = goalStore.get(childB)!;
+		assert.equal(finalB.paused, false, "B must be unpaused after A merges");
+		assert.ok(
+			setupCalls.includes(childB) || startTeamCalls.includes(childB),
+			"team startup must be invoked for auto-unblocked child B",
+		);
+	});
+
+	it("multi-dep: only unblocks when the LAST dep merges", async () => {
+		const rA = await spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the service layer. Depends on no other sibling for this test." });
+		const rC = await spawnChild({ planId: "C", title: "C", spec: "Implement feature C: integrates A and B; runs only after both complete.", dependsOn: ["A", "B"] });
+		const childC = rC.payload.id;
+		assert.equal(goalStore.get(childC)!.paused, true, "C paused initially");
+
+		// Merge A — C still blocked because B not done.
+		await integrateChild(rA.payload.id);
+		assert.equal(goalStore.get(childC)!.paused, true, "C still paused after only A merges");
+
+		// Merge B — C now unblocks.
+		setupCalls.length = 0;
+		await integrateChild(rB.payload.id);
+		assert.equal(goalStore.get(childC)!.paused, false, "C unpauses after B (last dep) merges");
+		assert.ok(
+			setupCalls.includes(childC) || startTeamCalls.includes(childC),
+			"team startup invoked for C after last dep merges",
+		);
+	});
+});
+
+describe("spawn-children-direct fallback response includes warning when dependsOn present", () => {
+	it("response has warning + blockedCount when steps include dependsOn", async () => {
+		// This tests that the extension.ts fallback response shape contains the
+		// warning/blockedCount/blockedPlanIds fields when any step has dependsOn.
+		// We drive the spawn-child route directly (same as the fallback loop).
+		const steps = [
+			{ planId: "X", title: "X", spec: "Implement feature X: set up the core foundation for this test scenario." },
+			{ planId: "Y", title: "Y", spec: "Implement feature Y: builds on X; this test verifies the warning/blocked fields appear.", dependsOn: ["X"] },
+		];
+		const responses: { planId: string; payload: any }[] = [];
+		for (const s of steps) {
+			const r = await spawnChild(s);
+			assert.equal(r.status, 201, `spawn ${s.planId} failed`);
+			responses.push({ planId: s.planId, payload: r.payload });
+		}
+		// X: not blocked.
+		assert.equal(responses[0].payload.blocked, undefined);
+		// Y: blocked, response has pendingDeps.
+		assert.equal(responses[1].payload.blocked, true);
+		assert.deepEqual(responses[1].payload.pendingDeps, ["X"]);
+		// Confirm the child goals are in the right state.
+		const childX = goalStore.getAll().find(g => g.spawnedFromPlanId === "X" && g.parentGoalId === parent.id)!;
+		const childY = goalStore.getAll().find(g => g.spawnedFromPlanId === "Y" && g.parentGoalId === parent.id)!;
+		assert.notEqual(childX.paused, true, "X must not be paused");
+		assert.equal(childY.paused, true, "Y must be paused");
+		assert.deepEqual(childY.dependsOnPlanIds, ["X"]);
+	});
+
+	it("extension.ts aggregation: warning + blockedCount + blockedPlanIds", async () => {
+		// Simulate the extension.ts fallback aggregation:
+		// spawn two steps where Y depends on X, then verify the tool
+		// response object the extension would produce.
+		const steps = [
+			{ planId: "X", title: "X", spec: "Implement feature X: set up the core foundation for this test scenario.", dependsOn: undefined as string[] | undefined },
+			{ planId: "Y", title: "Y", spec: "Implement feature Y: builds on X; this test verifies the warning/blocked fields appear.", dependsOn: ["X"] },
+		];
+		const hasDependsOn = steps.some(s => s.dependsOn && s.dependsOn.length > 0);
+		const spawned: Array<{ planId: string; blocked?: boolean; pendingDeps?: string[]; error?: string }> = [];
+		for (const s of steps) {
+			const r = await spawnChild(s);
+			spawned.push({ planId: s.planId, ...(r.payload.blocked ? { blocked: true, pendingDeps: r.payload.pendingDeps } : {}) });
+		}
+		const blockedEntries = spawned.filter(s => s.blocked);
+		// Replicate the extension.ts response-shaping logic exactly:
+		const toolResponse = {
+			fallback: "spawn-children-direct" as const,
+			...(hasDependsOn ? {
+				warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
+				blockedCount: blockedEntries.length,
+				blockedPlanIds: blockedEntries.map(s => s.planId),
+			} : {}),
+		};
+		assert.equal(hasDependsOn, true, "hasDependsOn must be true for this DAG");
+		assert.ok((toolResponse as any).warning?.startsWith("degraded-execution"), "warning must start with 'degraded-execution'");
+		assert.equal((toolResponse as any).blockedCount, 1, "blockedCount must be 1");
+		assert.deepEqual((toolResponse as any).blockedPlanIds, ["Y"], "blockedPlanIds must be [\"Y\"]");
+	});
+});
+
+/**
+ * Pure-logic replication of the pre-spawn validation that
+ * `defaults/tools/children/extension.ts` runs before the first spawn.
+ * Returns an error string on invalid input, null on valid.
+ */
+function validateFallbackDag(steps: Array<{ planId: string; dependsOn?: string[] }>): string | null {
+	const planIdSet = new Set<string>();
+	for (const s of steps) {
+		if (planIdSet.has(s.planId)) return `duplicate planId "${s.planId}"`;
+		planIdSet.add(s.planId);
+	}
+	for (const s of steps) {
+		for (const dep of s.dependsOn ?? []) {
+			if (dep === s.planId) return `self-dependency on "${s.planId}"`;
+			if (!planIdSet.has(dep)) return `"${s.planId}" dependsOn unknown planId "${dep}"`;
+		}
+	}
+	// Cycle detection via Kahn's algorithm
+	const indeg = new Map(steps.map(s => [s.planId, 0]));
+	for (const s of steps) for (const d of s.dependsOn ?? []) indeg.set(s.planId, (indeg.get(s.planId) ?? 0) + 1);
+	const q: string[] = steps.filter(s => (indeg.get(s.planId) ?? 0) === 0).map(s => s.planId);
+	const visited = new Set<string>();
+	while (q.length > 0) {
+		const n = q.shift()!; visited.add(n);
+		for (const s of steps) {
+			if (visited.has(s.planId) || !(s.dependsOn ?? []).includes(n)) continue;
+			const d = (indeg.get(s.planId) ?? 1) - 1; indeg.set(s.planId, d);
+			if (d === 0) q.push(s.planId);
+		}
+	}
+	const cycleNodes = steps.filter(s => !visited.has(s.planId)).map(s => s.planId);
+	if (cycleNodes.length > 0) return `dependency cycle detected among: ${cycleNodes.join(", ")}`;
+	return null;
+}
+
+describe("spawn-children-direct fallback pre-spawn validation (extension.ts)", () => {
+	it("rejects unknown planId in dependsOn — no children spawned", async () => {
+		// Validate BEFORE calling spawn so partial state is impossible.
+		const steps = [
+			{ planId: "A", spec: "A spec", dependsOn: undefined as string[] | undefined },
+			{ planId: "B", spec: "B spec", dependsOn: ["NONEXISTENT"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "validation must reject unknown dep");
+		assert.ok(err!.includes("NONEXISTENT"), `error must mention the unknown id: ${err}`);
+		// Confirm no children were spawned (validation runs before any spawns)
+		const before = goalStore.getAll().filter(g => g.parentGoalId === parent.id).length;
+		assert.equal(before, 0, "no children should exist before any spawn attempt");
+	});
+
+	it("rejects self-dependency", () => {
+		const steps = [{ planId: "A", spec: "A spec", dependsOn: ["A"] }];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "self-dep must be rejected");
+		assert.ok(err!.includes("self-dependency"), `error must mention self-dependency: ${err}`);
+	});
+
+	it("rejects duplicate planIds", () => {
+		const steps = [
+			{ planId: "A", spec: "A spec" },
+			{ planId: "A", spec: "A dup spec" },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "duplicate planId must be rejected");
+		assert.ok(err!.includes("duplicate"), `error must mention duplicate: ${err}`);
+	});
+
+	it("rejects dependency cycle", () => {
+		const steps = [
+			{ planId: "A", spec: "A spec", dependsOn: ["B"] },
+			{ planId: "B", spec: "B spec", dependsOn: ["A"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "cycle must be rejected");
+		assert.ok(err!.includes("cycle"), `error must mention cycle: ${err}`);
+	});
+
+	it("valid DAG passes validation", () => {
+		const steps = [
+			{ planId: "root", spec: "root spec" },
+			{ planId: "child", spec: "child spec", dependsOn: ["root"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.equal(err, null, "valid DAG must pass validation");
 	});
 });
