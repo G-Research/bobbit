@@ -72,6 +72,27 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		);
 	}
 
+	// Snapshot every piece of process-wide state we touch so that shutdown
+	// restores it. Without this, the in-process-harness worker fixture (or any
+	// later spec in the same Playwright worker) inherits stale BOBBIT_DIR /
+	// project-root pointing at this spec's tmp dir — which gets rm'd in the
+	// finally block — and subsequent goal/project requests blow up with
+	// "no workflows configured" or similar. See task 229a0506 for the
+	// regression that motivated this isolation.
+	const MUTATED_ENV_KEYS = [
+		"BOBBIT_DIR",
+		"BOBBIT_SKIP_MCP",
+		"BOBBIT_SKIP_NPM_CI",
+		"BOBBIT_TEST_NO_PUSH",
+		"BOBBIT_LLM_REVIEW_SKIP",
+		"BOBBIT_NO_OPEN",
+		"BOBBIT_SKIP_AIGW_DISCOVERY",
+		"BOBBIT_SKIP_TITLE_GEN",
+		"BOBBIT_SKIP_WORKTREE_POOL",
+	] as const;
+	const envSnapshot: Record<string, string | undefined> = {};
+	for (const k of MUTATED_ENV_KEYS) envSnapshot[k] = process.env[k];
+
 	process.env.BOBBIT_DIR = bobbitDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -84,12 +105,22 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+	const bobbitDirMod = await import("../../dist/server/bobbit-dir.js");
+	const { setProjectRoot } = bobbitDirMod;
+	const prevProjectRoot = bobbitDirMod.getProjectRoot?.();
 	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 	const { createGateway } = await import("../../dist/server/server.js");
 	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+	// registerRpcBridgeFactory is a singleton setter — the in-process-harness
+	// worker fixture installs its own factory at worker startup, so capture
+	// no "previous" reference (the module doesn't expose one) and instead
+	// re-install null on shutdown only if no prior factory was visible. The
+	// safer path: re-import after shutdown and clear, but that risks stomping
+	// on a sibling factory. We therefore deliberately set it again — both
+	// the harness factory and this one route mock-agent cliPaths the same way,
+	// so the net effect after restore is identical.
 	registerRpcBridgeFactory((rpcOpts: any) => {
 		if (shouldUseInProcessMock(rpcOpts.cliPath)) return new InProcessMockBridge(rpcOpts);
 		return null;
@@ -165,8 +196,30 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		token,
 		consoleLogs,
 		shutdown: async () => {
+			// Always restore console.log first — even if gw.shutdown throws,
+			// we MUST NOT leak a patched console into later tests in the same
+			// Playwright worker (cost-backfill is api-project, where the
+			// in-process-harness worker fixture stays alive for the worker's
+			// entire lifetime).
 			console.log = origLog;
-			await gw.shutdown();
+			try {
+				await gw.shutdown();
+			} finally {
+				// Restore env vars exactly as they were before bootGateway() —
+				// `delete` keys that were originally unset so later code sees
+				// `undefined` not the literal value we wrote.
+				for (const k of MUTATED_ENV_KEYS) {
+					const prev = envSnapshot[k];
+					if (prev === undefined) delete process.env[k];
+					else process.env[k] = prev;
+				}
+				// Restore project root so the worker-scoped in-process-harness
+				// gateway (still running in this worker) sees its own bobbitDir
+				// again rather than our soon-to-be-rm'd tmp dir.
+				if (prevProjectRoot) {
+					try { setProjectRoot(prevProjectRoot); } catch { /* best-effort */ }
+				}
+			}
 		},
 	};
 }
