@@ -47,7 +47,9 @@ function fakeOriginRef(repo: string, branch: string, sha?: string): void {
 }
 
 async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
-	const body: Record<string, unknown> = { name, rootPath };
+	// macOS `os.tmpdir()` resolves through /private — register() would 400 with
+	// symlink_root unless we opt in to the canonical path.
+	const body: Record<string, unknown> = { name, rootPath, acceptCanonical: true };
 	if (components) body.components = components;
 	const res = await fetch(`${base()}/api/projects`, {
 		method: "POST",
