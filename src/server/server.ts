@@ -16,6 +16,7 @@ import { PrStatusStore } from "./agent/pr-status-store.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { listDescendants as nestedListDescendants, tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import { looksLikePlaceholder } from "./agent/spawn-child-spec-validation.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { LspSupervisor } from "./lsp/supervisor.js";
 import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
@@ -3688,6 +3689,21 @@ async function handleApiRoute(
 			// they read at startup has changed. No-op skip when the spec field
 			// is absent or identical (mirrors goal-store.update() R-007 behaviour).
 			if (typeof body.spec === "string" && body.spec !== prevSpec) {
+				// Warn when a placeholder spec is being edited shortly after spawn.
+				// This surfaces the placeholder-then-PUT anti-pattern even when the
+				// parent agent has already moved on. The child team-lead already
+				// received the placeholder in its first message — archive + respawn
+				// is the only clean recovery.
+				if (looksLikePlaceholder(prevSpec)) {
+					const teamState = teamManager.getTeamState(id);
+					if (teamState?.teamLeadSessionId) {
+						console.warn(
+							`[server] WARN: goal ${id} had a placeholder spec edited shortly after spawn. ` +
+							`The team-lead's first-message context was the placeholder, not this new content. ` +
+							`If you intended to fix a spawn-time miss, archive and respawn.`,
+						);
+					}
+				}
 				const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 				broadcastToAll({
 					type: "goal_spec_changed",

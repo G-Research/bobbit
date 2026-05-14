@@ -34,6 +34,7 @@ import {
 	inheritedChildOverrides,
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
+import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -227,6 +228,17 @@ export async function tryHandleNestedGoalRoute(
 		if (!planId) { json({ error: "planId is required" }, 400); return true; }
 		if (!title) { json({ error: "title is required" }, 400); return true; }
 		if (!spec) { json({ error: "spec is required" }, 400); return true; }
+		const specValidation = validateSpawnChildSpec(spec);
+		if (!specValidation.ok) {
+			json({
+				error: specValidation.error,
+				code: specValidation.code,
+				...(specValidation.code === "SPEC_TOO_SHORT"
+					? { actualLength: specValidation.actualLength, minLength: specValidation.minLength }
+					: {}),
+			}, 400);
+			return true;
+		}
 		// Optional explicit dependsOn (sibling planIds this child depends on).
 		let dependsOn: string[] | undefined;
 		if (Array.isArray((body as { dependsOn?: unknown }).dependsOn)) {

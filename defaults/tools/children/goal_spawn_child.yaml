@@ -1,12 +1,12 @@
 name: goal_spawn_child
-description: "Spawn a child goal idempotently keyed by planId"
+description: "Spawn a child goal under the current goal. The spec you pass here IS the child team-lead's task — it is injected directly into the child's first user message at spawn time. Pass the complete task description now; do NOT use a placeholder and PUT the real spec later."
 summary: "Create or return an existing child goal under the current goal, keyed by planId."
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Children
 docs: |-
-  Required: `planId`, `title`, `spec`. Optional: `workflowId` (defaults to "feature"), `suggestedRole`, `dependsOn` (sibling planIds this child depends on — empty/omitted = parallel sibling; validated for self-deps / unknown refs / cycles, returns 400 with code on failure). dependsOn enforces scheduling — a child declared with unresolved deps is created paused and auto-starts only when all declared dependencies have merged into the parent. Plan-tab DAG visualisation remains unchanged.. Idempotent: re-calling with the same `planId` returns the existing child id (200) instead of creating a duplicate. The child's branch is created off the parent's branch HEAD; child's `ready-to-merge` will merge LOCALLY into the parent (no remote PR raised). Cycle prevention: cannot spawn a child whose id appears in the parent's ancestor chain. Server enforces a nesting depth ceiling (system default 3, per-goal can tighten): 403 `NESTING_DEPTH_EXCEEDED` (with `currentDepth`/`maxDepth`) or 403 `SUBGOALS_DISABLED`.
+  Required: `planId`, `title`, `spec` (≥50 chars, not a placeholder — server returns 400 SPEC_TOO_SHORT or SPEC_PLACEHOLDER on violation). Optional: `workflowId` (defaults to "feature"), `suggestedRole`, `dependsOn` (sibling planIds this child depends on — empty/omitted = parallel sibling; validated for self-deps / unknown refs / cycles, returns 400 with code on failure). dependsOn enforces scheduling — a child declared with unresolved deps is created paused and auto-starts only when all declared dependencies have merged into the parent. Plan-tab DAG visualisation remains unchanged.. Idempotent: re-calling with the same `planId` returns the existing child id (200) instead of creating a duplicate. The child's branch is created off the parent's branch HEAD; child's `ready-to-merge` will merge LOCALLY into the parent (no remote PR raised). Cycle prevention: cannot spawn a child whose id appears in the parent's ancestor chain. Server enforces a nesting depth ceiling (system default 3, per-goal can tighten): 403 `NESTING_DEPTH_EXCEEDED` (with `currentDepth`/`maxDepth`) or 403 `SUBGOALS_DISABLED`.
 detail_docs: >-
   ## Purpose
 
@@ -16,6 +16,20 @@ detail_docs: >-
   `execution.verify[]` plan. The harness's `runSubgoalStep` handler also
   calls this REST endpoint internally; this tool is the agent-facing
   surface for ad-hoc / pre-plan spawning.
+
+
+  ## CRITICAL: pass the complete spec at spawn time
+
+
+  The `spec` field is injected into the child team-lead's FIRST user
+  message at spawn time. If you pass a placeholder ("placeholder", "tbd",
+  "todo", etc.) or a spec shorter than 50 characters, the server rejects
+  the call with 400 SPEC_PLACEHOLDER or SPEC_TOO_SHORT. Even if the
+  server did not reject it, the child team-lead would receive the
+  placeholder in its first message and have no task context — do NOT use
+  the placeholder-then-PUT pattern. Pass the complete task description
+  inline. Long markdown specs (>5 KB) are fine — there is no payload
+  limit.
 
 
   ## Idempotency

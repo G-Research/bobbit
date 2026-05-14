@@ -248,7 +248,7 @@ export function buildSubgoalStep(over: Partial<{ planId: string; title: string; 
 		subgoal: {
 			planId: over.planId ?? "p1",
 			title: over.title ?? "Build feature X",
-			spec: over.spec ?? "## Acceptance criteria\n- foo",
+			spec: over.spec ?? "Implement and verify feature X as described in the parent goal spec.\n\n## Acceptance criteria\n- foo",
 			...(over.workflowId !== undefined ? { workflowId: over.workflowId } : {}),
 			...(over.suggestedRole !== undefined ? { suggestedRole: over.suggestedRole } : {}),
 			...(over.dependsOn !== undefined ? { dependsOn: over.dependsOn } : {}),

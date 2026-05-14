@@ -192,11 +192,11 @@ beforeEach(async () => { h = await makeHarness(); });
 describe("spawn-child dependsOn enforcement — direct cases", () => {
 	it("t1: unresolved dep → child paused, no team started, response blocked:true", async () => {
 		// Spawn dep first; it stays state=todo.
-		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "spec A" });
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
 		assert.equal(r1.status, 201);
 		// Now spawn dependent.
 		h.setupCalls.length = 0;
-		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "spec B", dependsOn: ["planA"] });
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
 		assert.equal(r2.status, 201);
 		assert.equal(r2.payload.blocked, true, "blocked=true in response");
 		assert.deepEqual(r2.payload.pendingDeps, ["planA"]);
@@ -206,11 +206,11 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 	});
 
 	it("t2: resolved dep → child starts normally (no blocked field, not paused)", async () => {
-		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "spec A" });
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
 		// Mark planA complete (simulating prior merge).
 		await h.goalManager.updateGoal(r1.payload.id, { state: "complete" });
 		h.setupCalls.length = 0;
-		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "spec B", dependsOn: ["planA"] });
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
 		assert.equal(r2.status, 201);
 		assert.equal(r2.payload.blocked, undefined);
 		const child = h.goalStore.get(r2.payload.id)!;
@@ -220,8 +220,8 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 
 describe("integrate-child dependsOn auto-unblock", () => {
 	it("t3: blocked child auto-unblocks when its single dep merges", async () => {
-		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "spec A" });
-		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "spec B", dependsOn: ["planA"] });
+		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const r2 = await h.spawnChild({ planId: "planB", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["planA"] });
 		const childA = r1.payload.id;
 		const childB = r2.payload.id;
 		assert.equal(h.goalStore.get(childB)!.paused, true);
@@ -235,9 +235,9 @@ describe("integrate-child dependsOn auto-unblock", () => {
 	});
 
 	it("t4: multi-dep child only unblocks after the LAST dep merges", async () => {
-		const ra = await h.spawnChild({ planId: "A", title: "A", spec: "a" });
-		const rb = await h.spawnChild({ planId: "B", title: "B", spec: "b" });
-		const rleaf = await h.spawnChild({ planId: "leaf", title: "Leaf", spec: "leaf", dependsOn: ["A", "B"] });
+		const ra = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rb = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer, depends on no other sibling for this test." });
+		const rleaf = await h.spawnChild({ planId: "leaf", title: "Leaf", spec: "Implement leaf feature: integrates feature A and B; runs only after both are complete.", dependsOn: ["A", "B"] });
 		const leafId = rleaf.payload.id;
 		assert.equal(h.goalStore.get(leafId)!.paused, true);
 
@@ -251,9 +251,9 @@ describe("integrate-child dependsOn auto-unblock", () => {
 	});
 
 	it("t5: chain A→B→C unblocks one level at a time", async () => {
-		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "a" });
-		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "b", dependsOn: ["A"] });
-		const rC = await h.spawnChild({ planId: "C", title: "C", spec: "c", dependsOn: ["B"] });
+		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the service layer on top of A; depends on A completing first.", dependsOn: ["A"] });
+		const rC = await h.spawnChild({ planId: "C", title: "C", spec: "Implement feature C: add the presentation layer; depends on B completing first in the chain.", dependsOn: ["B"] });
 		assert.equal(h.goalStore.get(rB.payload.id)!.paused, true);
 		assert.equal(h.goalStore.get(rC.payload.id)!.paused, true);
 
@@ -268,8 +268,8 @@ describe("integrate-child dependsOn auto-unblock", () => {
 	it("t6: merging a child whose deps are already complete is a no-op (no throw, no double-start)", async () => {
 		// Two parallel children with no deps; merge them in sequence. Neither
 		// should trigger any auto-unblock side effect.
-		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "a" });
-		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "b" });
+		const rA = await h.spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await h.spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer, runs in parallel with A since it has no declared deps." });
 		h.setupCalls.length = 0;
 		h.startTeamCalls.length = 0;
 		await mergeAndArchive(h, rA.payload.id);
