@@ -1987,7 +1987,7 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 // authority. See AGENTS.md "Cascade confirmation dialogs".
 // ============================================================================
 
-interface CascadeArchiveResult { archived: number }
+interface CascadeArchiveResult { archived: number; hasErrors?: boolean }
 
 /**
  * Archive a goal with cascade UX. Returns count of goals archived (0=cancelled).
@@ -2054,14 +2054,15 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 				}
 				// Surface partial failures: server returns errors[] when some
 				// goals couldn't be archived (e.g. teardown failed).
-				if (Array.isArray(body?.errors) && body.errors.length > 0) {
+				const hasErrors = Array.isArray(body?.errors) && body.errors.length > 0;
+				if (hasErrors) {
 					const failCount = (body.errors as { goalId: string; error: string }[]).length;
 					showConnectionError(
 						"Partial archive",
 						`${failCount} goal${failCount === 1 ? "" : "s"} could not be archived (team teardown failed). Refresh to check status.`,
 					);
 				}
-				cleanup({ archived: typeof body?.archived === "number" ? body.archived : descendantCount + 1 });
+				cleanup({ archived: typeof body?.archived === "number" ? body.archived : descendantCount + 1, hasErrors });
 			} catch (err) {
 				confirming = false;
 				renderDialog();

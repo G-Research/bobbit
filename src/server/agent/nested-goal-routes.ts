@@ -35,7 +35,7 @@ import {
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
-import { walkGoalSubtree } from "./goal-subtree.js";
+import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -837,15 +837,38 @@ export async function tryHandleNestedGoalRoute(
 			return typeof s === "string" && s.trim() ? s.trim() : undefined;
 		};
 		const callerSessionId = readHdr("x-bobbit-spawning-session") ?? readHdr("x-bobbit-session-id");
-		// Route through executePauseForGoals — the single entry point for all
-		// pause operations. It calls applyOperatorPause per goal and handles
-		// the cascade-abort sweep excluding the caller's session.
+		// Pause via cascadeSubtree so per-node failures are collected in
+		// errors[] rather than aborting remaining goals. applyOperatorPause is
+		// the SINGLE WRITE site for goal.paused=true (enforced by comment on
+		// executePauseForGoals above). After the cascade, run the abort sweep
+		// to interrupt streaming sessions in the paused set.
 		const pauseCtx = projectContextManager.getContextForGoal(targetRoot.id);
 		const pauseAllGoals = pauseCtx?.goalStore.getAll() ?? [];
-		const targets: PersistedGoal[] = cascade
-			? walkGoalSubtree(targetRoot.id, pauseAllGoals, { includeRoot: true, includeArchived: false })
-			: [targetRoot];
-		const count = await executePauseForGoals(targets, callerSessionId);
+		const pauseResult = await cascadeSubtree(
+			targetRoot.id,
+			pauseAllGoals,
+			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
+			{
+				order: "top-down",
+				apply: async (g) => {
+					if (g.paused) return 0;
+					await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
+					return 1;
+				},
+			},
+		);
+		const count = pauseResult.processed.reduce((n, p) => n + (p.result as number), 0);
+		// Cascade-abort sweep: interrupt streaming sessions in the paused set,
+		// excluding the caller's own session (Issue 6).
+		const pausedIds = new Set(pauseResult.processed.map(p => p.goalId));
+		for (const s of sessionManager.getAllSessionsRaw()) {
+			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
+			if (s.status !== "streaming") continue;
+			if (s.id === callerSessionId) continue;
+			sessionManager.abortSessionTurn(s.id).catch((err) => {
+				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
+			});
+		}
 		json({ paused: count });
 		return true;
 	}
@@ -876,25 +899,28 @@ export async function tryHandleNestedGoalRoute(
 			}
 			targetRoot = childGoal;
 		}
-		const goalManager = getGoalManagerForGoal(targetRoot.id);
-		// Resume cascade order = top-down (parent reactivated first so it can
-		// re-supervise children).
+		// Resume via cascadeSubtree so per-node failures are collected in
+		// errors[] rather than aborting remaining goals. Resume is top-down
+		// (parent reactivated first so it can re-supervise children).
+		// R-039: resumes only `paused` goals; does NOT touch 'blocked' state.
 		const resumeCtx = projectContextManager.getContextForGoal(targetRoot.id);
 		const resumeAllGoals = resumeCtx?.goalStore.getAll() ?? [];
-		const targets: PersistedGoal[] = cascade
-			? walkGoalSubtree(targetRoot.id, resumeAllGoals, { includeRoot: true, includeArchived: false })
-			: [targetRoot];
-		let count = 0;
-		for (const g of targets) {
-			// R-039: symmetric with the pause loop above. Resume is operator-
-			// only — it clears `paused`. The 'blocked' state is scheduler-
-			// managed (set/cleared by spawn-child / integrate-child) and is
-			// NOT touched here.
-			if (!g.paused) continue;
-			await goalManager.updateGoal(g.id, { paused: false });
-			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
-			count++;
-		}
+		const resumeResult = await cascadeSubtree(
+			targetRoot.id,
+			resumeAllGoals,
+			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
+			{
+				order: "top-down",
+				apply: async (g) => {
+					if (!g.paused) return 0;
+					const gm = getGoalManagerForGoal(g.id);
+					await gm.updateGoal(g.id, { paused: false });
+					broadcastToAll({ type: "goal_state_changed", goalId: g.id });
+					return 1;
+				},
+			},
+		);
+		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
 		json({ resumed: count });
 		return true;
 	}

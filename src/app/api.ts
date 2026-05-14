@@ -951,9 +951,12 @@ export async function deleteGoal(id: string): Promise<void> {
 		const result = await showArchiveGoalDialog(goal);
 		if (result.archived > 0) {
 			// Eager local archive flip avoids a flash-of-live-goals.
-			// Only flip IDs that the server actually archived (result.archived count).
-			const allIds = collectGoalIdsFor(id);
-			eagerMarkArchived(allIds);
+			// Skip when partial errors occurred — the server may not have
+			// archived all descendants, so refreshSessions() is authoritative.
+			if (!result.hasErrors) {
+				const allIds = collectGoalIdsFor(id);
+				eagerMarkArchived(allIds);
+			}
 			setHashRoute("landing");
 			await refreshSessions();
 		}
