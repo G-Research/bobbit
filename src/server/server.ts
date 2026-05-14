@@ -3872,56 +3872,90 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			// Cancel any in-flight gate verifications (terminates reviewer sessions)
-			for (const active of verificationHarness.getActiveVerifications(id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(id, active.gateId);
-				} catch (err) {
-					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
-				}
-			}
-			// Capture agent branches BEFORE teardown erases the team store entry.
-			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
-			// mutates teamEntry.agents in place via dismissRole(), so we must
-			// snapshot the branch names into a fresh string[] now — reading
-			// teamEntry.agents after teardown returns an empty array.
-			const goalProjectCtx = projectContextManager.getContextForGoal(id);
-			const teamEntry = goalProjectCtx?.teamStore.get(id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
-				}
-			}
-			// Include the team-lead's own session branch if it differs from goal.branch.
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
+			const rootGoal = getGoalAcrossProjects(id);
+			if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
+
+			// `cascade` is REQUIRED — mirrors pause/resume. The UI is the cascade-policy
+			// authority; api.ts always sends ?cascade=true|false.
+			const cascadeParam = url.searchParams.get("cascade");
+			const mergedManually = url.searchParams.get("mergedManually") === "true";
+			if (cascadeParam !== "true" && cascadeParam !== "false") {
+				// Legacy path (no cascade param): archive just this goal (backward compat).
+				// Falls through to single-goal archive below.
 			}
 
-			// Tear down any active team first (dismisses agents, cleans up their worktrees)
-			const teamState = teamManager.getTeamState(id);
-			if (teamState) {
-				try {
-					await teamManager.teardownTeam(id);
-				} catch (err) {
-					console.error(`[api] Error tearing down team for goal ${id}:`, err);
+			const cascade = cascadeParam === "true";
+
+			// cascade=false + live descendants → 409 HAS_DESCENDANTS. The UI dialog
+			// (showArchiveGoalDialog) uses this preflight to decide whether to show
+			// the cascade-confirm dialog.
+			if (cascadeParam === "false") {
+				const liveDescendants = collectDescendants(id,
+					projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? []
+				).filter(g => !g.archived);
+				if (liveDescendants.length > 0) {
+					json({
+						error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
+						code: "HAS_DESCENDANTS",
+						count: liveDescendants.length,
+					}, 409);
+					return;
 				}
 			}
-			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			const deleteGoalMgr = getGoalManagerForGoal(id);
-			await deleteGoalMgr.archiveGoal(id);
 
-			// Fire-and-forget: clean up remote branches for this goal
-			const archivedGoal = deleteGoalMgr.getGoal(id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
-				});
+			/** Per-goal archive action (idempotent). */
+			const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+				if (g.archived) return false;
+				if (mergedManually && g.id === id && g.state !== "complete") {
+					await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
+				}
+				for (const active of verificationHarness.getActiveVerifications(g.id)) {
+					try { await verificationHarness.cancelStaleVerifications(g.id, active.gateId); }
+					catch (err) { console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err); }
+				}
+				const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
+				const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+				const agentBranches: string[] = [];
+				if (teamEntry?.agents) {
+					for (const a of teamEntry.agents) { if (a.branch) agentBranches.push(a.branch); }
+				}
+				if (teamEntry?.teamLeadSessionId) {
+					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+					if (tl?.branch) agentBranches.push(tl.branch);
+				}
+				if (teamManager.getTeamState(g.id)) {
+					try { await teamManager.teardownTeam(g.id); }
+					catch (err) { console.error(`[api] archive: teardownTeam ${g.id} failed:`, err); }
+				}
+				const gm = getGoalManagerForGoal(g.id);
+				await gm.archiveGoal(g.id);
+				prStatusStore.remove(g.id);
+				const archivedGoal = gm.getGoal(g.id);
+				if (archivedGoal?.repoPath) {
+					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+						console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
+					});
+				}
+				return true;
+			};
+
+			if (!cascade) {
+				// Archive just this goal (no descendants or cascade=false with none).
+				await archiveOne(rootGoal);
+				json({ ok: true, archived: 1 });
+				return;
 			}
 
-			prStatusStore.remove(id);
-			json({ ok: true });
+			// cascade=true: archive root + all live descendants (bottom-up).
+			const allGoals = projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? [];
+			const descendants = collectDescendants(id, allGoals).filter(g => !g.archived);
+			// Bottom-up: children before parents.
+			const toArchive = [...descendants.reverse(), rootGoal];
+			let archived = 0;
+			for (const g of toArchive) {
+				if (await archiveOne(g)) archived++;
+			}
+			json({ ok: true, archived });
 			return;
 		}
 	}
