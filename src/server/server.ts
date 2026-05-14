@@ -3499,10 +3499,12 @@ async function handleApiRoute(
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					}
 				}
-				// Layer 2: store is empty → auto-seed defaults (fires for both
-				// explicit-id and no-id cases — the no-id case then falls through
-				// to GoalManager.createGoal's "first workflow in store" fallback).
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
+				// Layer 2: store is empty AND caller gave an explicit workflowId →
+				// auto-seed defaults so the requested id can resolve. Seeding is
+				// skipped for no-id goal creation (the goal is created without a
+				// workflow, which is correct for projects that deliberately have no
+				// workflows configured). See tests/e2e/projects-no-default-workflows.
+				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
 					seeds.parent = buildParentWorkflow();
