@@ -135,5 +135,8 @@
       "mean": 0.49302325536345326,
       "max": 0.9000000059604645
     }
-  }
+  },
+  "kind": "experiment",
+  "experimentTag": "opt-a",
+  "experimentCondition": "on"
 }
