@@ -447,7 +447,6 @@ function renderMobileLanding() {
 														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
 													`)}
-													${renderStaffSidebarSection(data.staff, project.id)}
 													${data.goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 													<div class="flex flex-col gap-0.5">
 														${(() => { const _mobileUngroupedExp = isUngroupedExpanded(project.id); return html`<div class="flex items-center gap-1.5 pl-0 pr-2 py-1.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
@@ -475,6 +474,7 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
+													${renderStaffSidebarSection(data.staff, project.id)}
 													${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";

@@ -916,7 +916,6 @@ function renderProjectContent(
 			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 			${renderGoalGroup(goal)}
 		`)}
-		${!isProvisional ? renderStaffSidebarSection(staff, project.id) : ""}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			${(() => { const ungNavId = `ungrouped-header:${project.id}`; const ungActive = getActiveNavId() === ungNavId; return html`
@@ -952,6 +951,7 @@ function renderProjectContent(
 			` : ""}
 			`; })()}
 		</div>
+		${!isProvisional ? renderStaffSidebarSection(staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions) : ""}
 	`;
 }
