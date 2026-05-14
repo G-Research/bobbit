@@ -8,6 +8,9 @@
   "msgsPerSession": 200,
   "perfFlags": null,
   "tag": "opt-b-off",
+  "kind": "experiment",
+  "experimentTag": "opt-b",
+  "experimentCondition": "off",
   "spans": {
     "nav.goal.cold": {
       "p50": 1735.6000000014901,

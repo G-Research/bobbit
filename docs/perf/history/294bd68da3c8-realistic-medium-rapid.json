@@ -6,6 +6,7 @@
   "seededSessions": 32,
   "fixtureSize": "medium",
   "msgsPerSession": 50,
+  "kind": "baseline",
   "spans": {
     "nav.goal.cold": {
       "p50": 1738.7999999970198,

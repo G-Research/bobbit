@@ -1120,6 +1120,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		// The report (scripts/perf-report.mjs) just globs `*.json` and reads
 		// each file's own `fixtureSize` field, so the name is purely a key.
 		const rawTag = (process.env.BOBBIT_PERF_HISTORY_TAG ?? "").trim();
+		const rawKind = (process.env.BOBBIT_PERF_HISTORY_KIND ?? "").trim().toLowerCase();
+		const kind = rawKind === "experiment" ? "experiment" : rawKind === "baseline" ? "baseline" : (perfFlagsCsv ? "experiment" : "baseline");
 		const tag = rawTag.replace(/[^a-zA-Z0-9._-]+/g, "-");
 		const suffix = tag
 			? `-${tag}`
@@ -1133,6 +1135,7 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 			msgsPerSession,
 			perfFlags: perfFlagsCsv || null,
 			tag: tag || null,
+			kind,
 			spans,
 		}, null, 2));
 		console.log(`[harness] wrote ${historyPath}`);

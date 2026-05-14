@@ -6,6 +6,7 @@
   "seededSessions": 10,
   "fixtureSize": "medium",
   "msgsPerSession": 50,
+  "kind": "baseline",
   "spans": {
     "nav.session.ready": {
       "p50": 34.09999999962747,

@@ -8,6 +8,9 @@
   "msgsPerSession": 200,
   "perfFlags": "lazyToolContent",
   "tag": "opt-b-on",
+  "kind": "experiment",
+  "experimentTag": "opt-b",
+  "experimentCondition": "on",
   "spans": {
     "nav.goal.cold": {
       "p50": 1862.5,
