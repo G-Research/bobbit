@@ -39,6 +39,13 @@ export interface PersistedStaff {
 	worktreePath?: string;
 	branch?: string;
 	projectId?: string;
+	/**
+	 * Per-staff sandbox preference. Chosen at creation, persisted on the record,
+	 * immutable for the staff's lifetime. Used directly on every spawn/wake —
+	 * the project's sandbox config is NEVER consulted in the staff path.
+	 * Legacy records loaded without this field normalise to `false`.
+	 */
+	sandboxed: boolean;
 }
 
 /**
@@ -63,6 +70,8 @@ export class StaffStore {
 				if (Array.isArray(data)) {
 					for (const s of data) {
 						if (s.id) {
+							// Legacy records lack `sandboxed`; normalise to false.
+							s.sandboxed = !!s.sandboxed;
 							this.staff.set(s.id, s);
 						}
 					}
