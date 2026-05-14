@@ -439,10 +439,18 @@ function renderMobileLanding() {
 															<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
 																<button
-																	class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
+																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
-																>${icon(Plus, "sm")}</button>
+																>
+																	<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
+																		${icon(MessagesSquare, "sm")}
+																		<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+																			<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+																		</svg>
+																	</span>
+																</button>
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
