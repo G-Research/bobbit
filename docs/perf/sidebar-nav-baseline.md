@@ -795,6 +795,74 @@ delivers the transcript over REST instead of WS would change this
 conclusion, but until then there is no win to ship.
 History: `docs/perf/history/d6585b472604-opt-b-{off,on}.json`.
 
+### 6.2 Opt-D — parallelise goal-dashboard team-state fetch (`parallelGoalFetches` flag)
+
+A/B'd on commit `606833ce8450` against the medium fixture (50 msgs/session
+× 32 sessions). **Five replicate runs per arm** — the initial single-pair
+run showed a −422 ms delta on `nav.goal.cold`, but replication revealed
+that as a first-pass warmup artefact (one-time OS / Docker / disk cache
+fill); subsequent runs all clustered at ~1840 ms regardless of flag
+state. The cross-arm distributions overlap on every span.
+
+Median-of-p50 across five replicates per arm (full data:
+`docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`,
+analyser `scripts/opt-d-analyse.mjs`):
+
+| Span                       |  OFF p50 med [min..max] |  ON p50 med [min..max] |      Δmed | Verdict |
+|----------------------------|------------------------:|-----------------------:|----------:|---------|
+| `nav.goal.cold`            |    1846.7 [1840.9..1915.9] |   1836.4 [1781.2..1889.6] |   −10.3 ms | within noise; ranges overlap |
+| `nav.goal.ready` (warm)    |        30.2 [21.3..43.5]   |       37.4 [30.2..46.8]   |    +7.2 ms | within noise |
+| `api.goal.fetch`           |        32.0 [21.1..45.8]   |       32.7 [28.3..61.8]   |    +0.7 ms | within noise |
+| `api.goal.gates.fetch`     |        27.3 [24.2..28.9]   |       28.9 [21.6..31.8]   |    +1.6 ms | within noise |
+| `api.goal.agents.fetch`    |         9.7 [5.5..21.5]    |       26.1 [17.6..38.6]   |   +16.4 ms | mildly worse |
+| `api.session.fetch`        |        68.4 [66.6..87.5]   |       76.2 [61.3..88.3]   |    +7.8 ms | within noise |
+| `nav.session.ready`        |       166.0 [133.0..196.5] |      148.3 [133.7..196.9] |   −17.7 ms | within noise |
+
+Raw p50 series, `nav.goal.cold`:
+- OFF: 1915.9, 1871.5, 1840.9, 1846.7, 1843.7
+- ON:  1836.4, 1889.6, 1781.2, 1838.5, 1829.3
+
+Decision rule (≥100 ms p50 reduction on `nav.goal.ready` / `nav.goal.cold`,
+or moves the span below 100 ms) is **not** met for the cold span (−10 ms,
+well within the 50 ms inter-run jitter visible in the raw series).
+
+### Why the original single-pair was misleading
+
+The first `opt-d-off` run hit a cold OS / Docker disk cache: that
+run's `nav.goal.cold` was 2270 ms, `api.goal.gates.fetch` 133 ms,
+`api.goal.agents.fetch` 80 ms — numbers that don't reappear in any of
+the five subsequent OFF replicates (which all sit at ~1840 / ~27 / ~10 ms).
+The Opt-D ‘win’ was the diff between *cold-cache OFF* and *warm-cache
+ON*, not the diff caused by the code change. Once both arms are run
+from a warm cache, the team-state RTT saving (one ~5 ms request that
+used to wait for a ~25 ms `Promise.all` to finish) collapses into the
+noise floor.
+
+### Why the theoretical win didn't materialise
+
+The `getTeamState` RTT is genuinely saved — the helper does fire all
+eight fetches concurrently, pinned by
+`tests/parallel-goal-fetches.spec.ts`. But the saving is bounded by:
+
+1. The team endpoint is fast on the server (~1–5 ms);
+2. The pre-existing 7-fetch `Promise.all` already takes ~25–40 ms of
+   wall time, and the team fetch's RTT mostly overlaps with the tail of
+   that bundle anyway when it issues sequentially — the browser still
+   has a free HTTP/1.1 slot for it as the other connections drain;
+3. `nav.goal.cold` is dominated by `paint.first` of the dashboard plus
+   WS connect + initial agent-poll-cycle, none of which Opt-D touches.
+   The bundle is ≤5 % of the `nav.goal.cold` budget regardless of
+   serial-vs-parallel.
+
+Flag stays default-OFF. The pure helper and unit test stay in tree as
+a cheap measurement hook and as a regression guard — the parallel path
+still correctly bundles all eight fetches, so a future architectural
+change that makes the team endpoint slower (e.g. adding a join, or
+shipping more state) would automatically pick up the win without a
+rewrite. Until then, there is nothing to ship.
+
+History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
+
 ## 7. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
 - Client trace primitive: `src/app/perf-trace.ts`. Cost-when-disabled
