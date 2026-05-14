@@ -3,8 +3,8 @@ description: "Compute a safe rename across files; returns a WorkspaceEdit to app
 summary: "Rename symbol (LSP)"
 params: [path, line, character, newName]
 provider:
-  type: builtin
-  tool: lsp_rename
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   Computes edits only; agent applies them with `edit`/`write`. 0-indexed line/char.
