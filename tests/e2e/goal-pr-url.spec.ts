@@ -33,7 +33,7 @@ async function createGoal(opts?: { title?: string }): Promise<{ id: string; proj
 }
 
 async function deleteGoal(id: string): Promise<void> {
-	await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+	await apiFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 }
 
 test.describe("Goal.prUrl removal — PrStatusStore is source of truth", () => {

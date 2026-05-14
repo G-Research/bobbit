@@ -195,7 +195,7 @@ test.describe("Project isolation — no default fallback", () => {
 			expect(notFoundInDefault).toBeUndefined();
 		} finally {
 			if (goalId) {
-				await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+				await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			}
 			await removeProject(projectB.id);
 		}
@@ -254,7 +254,7 @@ test.describe("Project isolation — no default fallback", () => {
 			expect(goalData.projectId).toBe(projectB.id);
 		} finally {
 			if (goalId) {
-				await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+				await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			}
 			await removeProject(projectB.id);
 		}

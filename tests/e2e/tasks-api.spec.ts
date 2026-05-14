@@ -43,7 +43,7 @@ test.beforeEach(async () => {
 
 test.afterEach(async () => {
 	if (goalId) {
-		await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+		await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 	}
 });
 

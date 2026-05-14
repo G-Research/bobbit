@@ -295,7 +295,7 @@ test.describe("search orphan filter & weak-match drop", () => {
 		// Snippet should have no <b> tag — it's a head-of-text preview.
 		expect(/<b>/i.test(goalHits[0].snippet)).toBe(false);
 
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
 
 	test("total equals filtered length (orphans don't inflate count)", async ({ gateway }) => {

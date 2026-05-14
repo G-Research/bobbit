@@ -21,7 +21,8 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
+import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
@@ -3846,56 +3847,116 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			// Cancel any in-flight gate verifications (terminates reviewer sessions)
-			for (const active of verificationHarness.getActiveVerifications(id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(id, active.gateId);
-				} catch (err) {
-					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
+			// `cascade` is REQUIRED — mirrors pause/resume/teardown. The UI is
+			// the cascade-policy authority; api.ts always sends ?cascade=.
+			const cascadeParam = url.searchParams.get("cascade");
+			if (cascadeParam !== "true" && cascadeParam !== "false") {
+				json({ error: "cascade=true|false query parameter is required", code: "CASCADE_REQUIRED" }, 422);
+				return;
+			}
+			const cascade = cascadeParam === "true";
+
+			const rootGoal = getGoalAcrossProjects(id);
+			if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
+
+			// cascade=false + live descendants → 409 HAS_DESCENDANTS. The
+			// existing UI dialog (showArchiveGoalDialog) uses this preflight
+			// to decide whether to show the cascade-confirm dialog.
+			if (!cascade) {
+				const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
+				if (liveDescendants.length > 0) {
+					json({
+						error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
+						code: "HAS_DESCENDANTS",
+						count: liveDescendants.length,
+					}, 409);
+					return;
 				}
 			}
-			// Capture agent branches BEFORE teardown erases the team store entry.
-			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
-			// mutates teamEntry.agents in place via dismissRole(), so we must
-			// snapshot the branch names into a fresh string[] now — reading
-			// teamEntry.agents after teardown returns an empty array.
-			const goalProjectCtx = projectContextManager.getContextForGoal(id);
-			const teamEntry = goalProjectCtx?.teamStore.get(id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
+
+			// Manual-merge reconciliation: `?mergedManually=true` stamps state="complete"
+			// on the target BEFORE archive (mirrors archiveGoalAfterMerge). Only the
+			// root goal gets this stamp — cascade descendants are archived as-is.
+			const mergedManually = url.searchParams.get("mergedManually") === "true";
+
+			/** Per-goal archive action (idempotent). */
+			const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+				if (g.archived) return false; // idempotent — already done
+				if (mergedManually && g.id === id && g.state !== "complete") {
+					await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
+				}
+				// 1. Cancel in-flight gate verifications (terminates reviewer sessions).
+				for (const active of verificationHarness.getActiveVerifications(g.id)) {
+					try {
+						await verificationHarness.cancelStaleVerifications(g.id, active.gateId);
+					} catch (err) {
+						console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err);
+					}
+				}
+				// 2. Capture agent branches BEFORE teardown erases the team
+				// store entry (orphan-remote-branch-cleanup invariant).
+				const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
+				const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+				const agentBranches: string[] = [];
+				if (teamEntry?.agents) {
+					for (const a of teamEntry.agents) {
+						if (a.branch) agentBranches.push(a.branch);
+					}
+				}
+				if (teamEntry?.teamLeadSessionId) {
+					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+					if (tl?.branch) agentBranches.push(tl.branch);
+				}
+				// 3. Tear down any active team.
+				if (teamManager.getTeamState(g.id)) {
+					try { await teamManager.teardownTeam(g.id); }
+					catch (err) { console.error(`[api] archive: teardownTeam ${g.id} failed:`, err); }
+				}
+				// 4. Archive the goal record.
+				const gm = getGoalManagerForGoal(g.id);
+				await gm.archiveGoal(g.id);
+				// 5. Drop PR status.
+				prStatusStore.remove(g.id);
+				// 6. Fire-and-forget remote branch cleanup.
+				const archivedGoal = gm.getGoal(g.id);
+				if (archivedGoal?.repoPath) {
+					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+						console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
+					});
+				}
+				return true;
+			};
+
+			if (!cascade) {
+				await archiveOne(rootGoal);
+				json({ ok: true, archived: 1 });
+				return;
+			}
+
+			// Cascade=true — bottom-up: children archived before parents.
+			// Include already-archived descendants (idempotent archiveOne
+			// drops them without counting).
+			const ctx = projectContextManager.getContextForGoal(id);
+			const allGoals = ctx?.goalStore.getAll() ?? [];
+			const result = await cascadeGoalSubtree(
+				id,
+				allGoals,
+				{ includeRoot: true, includeArchived: true },
+				{ order: "bottom-up", apply: archiveOne },
+			);
+			const archivedCount = result.processed.filter(p => p.result === true).length;
+			if (result.errors.length > 0) {
+				for (const e of result.errors) {
+					console.error(`[api] archive cascade: ${e.goalId} failed:`, e.error);
 				}
 			}
-			// Include the team-lead's own session branch if it differs from goal.branch.
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
-			}
-
-			// Tear down any active team first (dismisses agents, cleans up their worktrees)
-			const teamState = teamManager.getTeamState(id);
-			if (teamState) {
-				try {
-					await teamManager.teardownTeam(id);
-				} catch (err) {
-					console.error(`[api] Error tearing down team for goal ${id}:`, err);
-				}
-			}
-			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			const deleteGoalMgr = getGoalManagerForGoal(id);
-			await deleteGoalMgr.archiveGoal(id);
-
-			// Fire-and-forget: clean up remote branches for this goal
-			const archivedGoal = deleteGoalMgr.getGoal(id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
-				});
-			}
-
-			prStatusStore.remove(id);
-			json({ ok: true });
+			json({
+				ok: true,
+				archived: archivedCount,
+				...(result.errors.length > 0
+					? { errors: result.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
+					: {}),
+			});
 			return;
 		}
 	}
@@ -6043,16 +6104,58 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead)
+	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead).
+	// Cascade required — mirror of `tests/api-team-teardown-cascade.test.ts::teardownRoute`.
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];
-		try {
-			await teamManager.teardownTeam(goalId);
-			json({ ok: true });
-		} catch (err) {
-			jsonError(400, err);
+		const cascadeParam = url.searchParams.get("cascade");
+		if (cascadeParam !== "true" && cascadeParam !== "false") {
+			json({ error: "cascade=true|false query parameter is required", code: "CASCADE_REQUIRED" }, 422);
+			return;
 		}
+		const cascade = cascadeParam === "true";
+		const tdCtx = projectContextManager.getContextForGoal(goalId);
+		const tdAllGoals = tdCtx?.goalStore.getAll() ?? [];
+
+		// cascade=false + live descendant teams → 409 HAS_DESCENDANT_TEAMS.
+		if (!cascade) {
+			const descendants = walkGoalSubtree(goalId, tdAllGoals, { includeRoot: false, includeArchived: false });
+			const descendantsWithTeams = descendants
+				.filter(d => !!teamManager.getTeamState(d.id))
+				.map(d => ({ id: d.id, title: d.title }));
+			if (descendantsWithTeams.length > 0) {
+				json({
+					code: "HAS_DESCENDANT_TEAMS",
+					count: descendantsWithTeams.length,
+					descendants: descendantsWithTeams,
+					message: `Goal has ${descendantsWithTeams.length} descendant team(s) still running. Re-call with ?cascade=true to stop them all.`,
+				}, 409);
+				return;
+			}
+		}
+
+		// Bottom-up: children torn down before parents. Skip archived
+		// nodes. cascade=false collapses to root-only by capping depth at 0.
+		const result = await cascadeGoalSubtree(
+			goalId,
+			tdAllGoals,
+			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
+			{
+				order: "bottom-up",
+				apply: async (g) => {
+					if (!teamManager.getTeamState(g.id)) return false;
+					await teamManager.teardownTeam(g.id);
+					return true;
+				},
+			},
+		);
+		const toreDown = result.processed.filter(p => p.result === true).length;
+		json({
+			ok: true,
+			toreDown,
+			errors: result.errors.map(e => ({ goalId: e.goalId, error: e.error.message })),
+		});
 		return;
 	}
 
