@@ -376,9 +376,10 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. LSP symbol-lookup hint (injected when lsp_* tools are active)
+	// 5.5. LSP symbol-lookup hint (injected when lsp_* tools are active and LSP is enabled)
 	{
-		const lspHint = buildLspSymbolLookupHint(parts.allowedTools);
+		const lspDisabled = String(parts.projectConfigStore?.get("lsp_disabled") ?? "false").toLowerCase() === "true";
+		const lspHint = buildLspSymbolLookupHint(parts.allowedTools, lspDisabled);
 		if (lspHint) sections.push(lspHint);
 	}
 

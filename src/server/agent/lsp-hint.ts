@@ -27,9 +27,20 @@ Fall back to \`grep\` for free-text matching, comments, config files, or non-sou
 
 /**
  * Return the LSP symbol-lookup hint when the session's allowed-tools list
- * contains at least one `lsp_*` tool; otherwise return `undefined`.
+ * contains at least one `lsp_*` tool, and LSP is not explicitly disabled.
+ *
+ * @param allowedTools  Tool names for this session (undefined = unrestricted).
+ * @param lspDisabled   Whether the project has `lsp_disabled: true` set.
+ *                      When true, lsp_* tools return `lsp_unavailable` at
+ *                      runtime so the hint would be misleading — suppress it.
  */
-export function buildLspSymbolLookupHint(allowedTools: string[] | undefined): string | undefined {
+export function buildLspSymbolLookupHint(
+	allowedTools: string[] | undefined,
+	lspDisabled = false,
+): string | undefined {
+	// Never inject when the operator has explicitly disabled LSP for the project.
+	if (lspDisabled) return undefined;
+
 	if (allowedTools && allowedTools.some(t => t.startsWith("lsp_"))) {
 		return LSP_SYMBOL_LOOKUP_HINT;
 	}

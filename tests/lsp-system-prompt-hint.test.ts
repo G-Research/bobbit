@@ -30,13 +30,21 @@ after(() => {
  * Call assembleSystemPrompt with minimal PromptParts and return the assembled
  * content (read back from the written file).
  */
-function assemble(sessionId: string, allowedTools: string[] | undefined): string {
+function assemble(
+	sessionId: string,
+	allowedTools: string[] | undefined,
+	opts: { lspDisabled?: boolean } = {},
+): string {
+	const projectConfigStore = opts.lspDisabled !== undefined
+		? { get: (k: string) => k === "lsp_disabled" ? String(opts.lspDisabled) : undefined }
+		: undefined;
 	const promptPath = assembleSystemPrompt(sessionId, {
 		cwd: tmpDir,
 		goalSpec: "Test goal spec.",
 		goalTitle: "Test",
 		goalState: "active",
 		allowedTools,
+		projectConfigStore,
 	});
 	assert.ok(promptPath, "assembleSystemPrompt should return a path");
 	return fs.readFileSync(promptPath, "utf-8");
@@ -57,6 +65,16 @@ describe("LSP symbol-lookup hint — buildLspSymbolLookupHint()", () => {
 	it("returns undefined when allowedTools is defined but contains no lsp_ tools", () => {
 		const hint = buildLspSymbolLookupHint(["read", "bash", "grep", "find", "ls"]);
 		assert.strictEqual(hint, undefined, "Hint must be absent when no lsp_ tools are allowed");
+	});
+
+	it("returns undefined when lspDisabled=true even if lsp_ tools are present", () => {
+		const hint = buildLspSymbolLookupHint(["lsp_workspace_symbol", "read"], true);
+		assert.strictEqual(hint, undefined, "Hint must be suppressed when lsp_disabled=true");
+	});
+
+	it("returns undefined when lspDisabled=true and allowedTools is undefined", () => {
+		const hint = buildLspSymbolLookupHint(undefined, true);
+		assert.strictEqual(hint, undefined, "Hint must be suppressed when lsp_disabled=true even for unrestricted sessions");
 	});
 
 	it("returns the hint for any lsp_ tool prefix", () => {
@@ -103,6 +121,14 @@ describe("LSP symbol-lookup hint — assembleSystemPrompt integration", () => {
 		assert.ok(
 			content.includes(LSP_HINT_MARKER),
 			`Expected '${LSP_HINT_MARKER}' in assembled prompt when allowedTools is unrestricted.`,
+		);
+	});
+
+	it("excludes the hint when lsp_disabled=true even with lsp_ tools in allowedTools", () => {
+		const content = assemble("hint-test-lsp-disabled", ["lsp_workspace_symbol", "read"], { lspDisabled: true });
+		assert.ok(
+			!content.includes(LSP_HINT_MARKER),
+			`Expected '${LSP_HINT_MARKER}' to be absent when lsp_disabled=true.`,
 		);
 	});
 
