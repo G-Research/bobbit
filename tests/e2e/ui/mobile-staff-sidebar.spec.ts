@@ -1,6 +1,6 @@
 import { test, expect } from "../gateway-harness.js";
 import { openApp } from "./ui-helpers.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -8,50 +8,65 @@ import { tmpdir } from "node:os";
 
 test.use({ viewport: { width: 375, height: 667 } });
 
-test("staff section is nested inside project folder on mobile", async ({ page }) => {
+/**
+ * Post surface-staff-in-sessions: staff render as rows inside the project's
+ * Sessions list (NOT in a separate "Staff" sub-section). This test asserts a
+ * freshly-created staff agent appears with the staff name inside the project's
+ * Sessions bucket on mobile.
+ */
+test("staff appears inside the project's Sessions list on mobile", async ({ page }) => {
   // Staff creation needs a git repo for worktree setup — create a temp one
   const gitDir = join(tmpdir(), `bobbit-e2e-staff-git-${Date.now()}`);
   mkdirSync(gitDir, { recursive: true });
   execFileSync("git", ["init"], { cwd: gitDir, stdio: "pipe" });
   execFileSync("git", ["commit", "-m", "init", "--allow-empty"], { cwd: gitDir, stdio: "pipe" });
 
-  // Create a staff agent so the staff section renders
+  const pid = await defaultProjectId();
+  expect(pid).toBeTruthy();
+
+  // Create a staff agent so the staff row renders
+  const staffName = `MobileBot${Date.now()}`;
   const res = await apiFetch("/api/staff", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Test Bot", systemPrompt: "You are a test bot.", cwd: gitDir }),
+    body: JSON.stringify({ name: staffName, systemPrompt: "You are a test bot.", cwd: gitDir, projectId: pid }),
   });
   expect(res.ok).toBe(true);
 
   await openApp(page);
 
-  // Wait for the Staff section to be visible
-  const staffText = page.locator("span.uppercase").filter({ hasText: "Staff" });
-  await expect(staffText.first()).toBeVisible({ timeout: 10000 });
+  // The staff row should appear under a Sessions header in the same project bucket.
+  await expect(page.getByText(staffName, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 
-  // The Staff and Sessions sections must share a common ancestor that also
-  // contains the project name. This proves Staff is nested under the project
-  // folder rather than rendered as a detached top-level sidebar section.
-  // Use evaluate to walk up the DOM and verify structural nesting.
-  const isNested = await page.evaluate(() => {
-    const staffEl = [...document.querySelectorAll("span")]
-      .find(el => el.textContent?.trim() === "STAFF" || el.textContent?.trim() === "Staff");
+  // Assert the staff row shares a common ancestor with the project's "Sessions"
+  // sub-header within 8 levels — i.e. it is folded INTO Sessions, not split out.
+  const sharedAncestor = await page.evaluate((name) => {
+    const titleEls = [...document.querySelectorAll("span")]
+      .filter((el) => (el.textContent || "").includes(name));
+    if (titleEls.length === 0) return false;
     const sessionsEl = [...document.querySelectorAll("span")]
-      .find(el => el.textContent?.trim() === "SESSIONS" || el.textContent?.trim() === "Sessions");
-    if (!staffEl || !sessionsEl) return false;
-
-    // Walk up from both to find a shared ancestor within 6 levels
-    const staffAncestors = new Set<Element>();
-    let el: Element | null = staffEl;
-    for (let i = 0; i < 6 && el; i++) { staffAncestors.add(el); el = el.parentElement; }
-
-    el = sessionsEl;
-    for (let i = 0; i < 6 && el; i++) {
-      if (staffAncestors.has(el)) return true;
-      el = el.parentElement;
+      .find((el) => {
+        const t = el.textContent?.trim();
+        return t === "SESSIONS" || t === "Sessions";
+      });
+    if (!sessionsEl) return false;
+    const sessionAncestors = new Set<Element>();
+    let el: Element | null = sessionsEl;
+    for (let i = 0; i < 8 && el; i++) { sessionAncestors.add(el); el = el.parentElement; }
+    for (const titleEl of titleEls) {
+      let cur: Element | null = titleEl;
+      for (let i = 0; i < 8 && cur; i++) {
+        if (sessionAncestors.has(cur)) return true;
+        cur = cur.parentElement;
+      }
     }
     return false;
-  });
+  }, staffName);
 
-  expect(isNested).toBe(true);
+  expect(sharedAncestor).toBe(true);
+
+  // Cleanup
+  const list = (await (await apiFetch(`/api/staff?projectId=${encodeURIComponent(pid!)}`)).json()) as any;
+  const created = (list.staff as any[]).find((s) => s.name === staffName);
+  if (created) await apiFetch(`/api/staff/${created.id}`, { method: "DELETE" }).catch(() => {});
 });

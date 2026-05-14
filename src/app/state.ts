@@ -349,6 +349,9 @@ export const state = {
 	/** Staff agents list */
 	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string }>,
 
+	/** Orphaned staff records — projectId missing or set to the system project. Surfaced in the sidebar banner. */
+	orphanedStaff: [] as Array<{ id: string; name: string; description: string; state: string; projectId?: string }>,
+
 	// Staff assistant split-screen state
 	staffPreviewName: "",
 	staffPreviewDescription: "",

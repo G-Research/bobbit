@@ -1,27 +1,16 @@
 /**
- * Reproducer — POST /api/sessions for config-editing assistants (role/tool/staff)
- * returns 400 when no projectId is provided and cwd doesn't match a registered
- * project.
+ * POST /api/sessions for config-editing assistants.
  *
- * Issue: `src/app/role-manager-page.ts::createRoleAssistantSession` posts only
- * `{ assistantType: "role" }`. Under `npx bobbit` in a non-project directory,
- * the server unconditionally calls `resolveProjectForRequest` and 400s with
- * "projectId required ... does not match any registered project". Role/Tool/
- * Staff assistants are config-editing — they don't need a project.
+ * Role/Tool assistants edit server-scope config and do not require a project
+ * — they create sessions with projectId === undefined when no projectId is
+ * provided and cwd doesn't match a registered project.
  *
- * Fix (server `src/server/server.ts` ~L3068): when assistantType ∈ {role, tool,
- * staff} and no projectId was provided, skip project resolution and create the
- * session with projectId === undefined.
- *
- * Tests:
- *   1. role assistant with non-matching cwd → 201 (currently 400). FLIPS.
- *   2. tool assistant with non-matching cwd → 201 (currently 400). FLIPS.
- *   3. staff assistant with non-matching cwd → 201 (currently 400). FLIPS.
- *   4. goal assistant with non-matching cwd → 400 (regression guard, must
- *      continue to fail-fast — goal sessions require a project).
+ * Staff and Goal assistants are project-scoped and MUST 400 without a
+ * resolvable project (surface-staff-in-sessions design §5). Staff with both
+ * projectId AND cwd creates successfully.
  *
  * Uses `rawApiFetch` so the harness's default-project auto-injection doesn't
- * mask the bug. The cwd MUST exist on disk — otherwise the server's
+ * mask the requirement. The cwd MUST exist on disk — otherwise the server's
  * spawn-ENOENT guard rewrites it to defaultCwd (which matches the harness's
  * "default" project and masks the failure).
  */
@@ -46,9 +35,9 @@ test.afterAll(async () => {
 	try { fs.rmSync(bogusCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
-test.describe("POST /api/sessions — config-editing assistants don't need a project", () => {
-	for (const assistantType of ["role", "tool", "staff"] as const) {
-		test(`${assistantType} assistant without projectId — 201 (currently 400)`, async () => {
+test.describe("POST /api/sessions — server-scope vs project-scoped assistants", () => {
+	for (const assistantType of ["role", "tool"] as const) {
+		test(`${assistantType} assistant without projectId — 201 (server-scope, no project needed)`, async () => {
 			const resp = await rawApiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({ assistantType, cwd: bogusCwd }),
@@ -65,16 +54,42 @@ test.describe("POST /api/sessions — config-editing assistants don't need a pro
 		});
 	}
 
-	test("goal assistant without projectId — 400 (regression guard, must keep failing)", async () => {
+	for (const assistantType of ["goal", "staff"] as const) {
+		test(`${assistantType} assistant without projectId — 400 (project-scoped)`, async () => {
+			const resp = await rawApiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ assistantType, cwd: bogusCwd }),
+			});
+			const text = await resp.text();
+			expect(
+				resp.status,
+				`${assistantType} assistant must require a project; expected 400, got ${resp.status} body=${text}`,
+			).toBe(400);
+			expect(text).toMatch(/projectId required/);
+		});
+	}
+
+	test("staff assistant WITH projectId+cwd — 201", async () => {
+		const projResp = await rawApiFetch("/api/projects");
+		const list = await projResp.json() as Array<{ id: string; rootPath: string; name: string }>;
+		const defaultProject = list.find(p => p.name === "default") ?? list[0];
+		expect(defaultProject, "harness must register a default project").toBeTruthy();
+
 		const resp = await rawApiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ assistantType: "goal", cwd: bogusCwd }),
+			body: JSON.stringify({
+				assistantType: "staff",
+				projectId: defaultProject.id,
+				cwd: defaultProject.rootPath,
+			}),
 		});
 		const text = await resp.text();
 		expect(
 			resp.status,
-			`goal assistant must still require a project; expected 400, got ${resp.status} body=${text}`,
-		).toBe(400);
-		expect(text).toMatch(/projectId required/);
+			`staff assistant with projectId+cwd should succeed; got ${resp.status} body=${text}`,
+		).toBe(201);
+		const session = JSON.parse(text);
+		expect(session.assistantType).toBe("staff");
+		createdSessionIds.push(session.id);
 	});
 });

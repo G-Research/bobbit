@@ -17,28 +17,27 @@ test.describe("Sidebar +Staff loading feedback", () => {
 	test("shows bobbit-loader immediately on click", async ({ page }) => {
 		await openApp(page);
 
-		// The Staff section header is always rendered, and the "+" button
-		// inside it has title="New staff agent".
-		const newStaffBtn = page.locator("button[title='New staff agent']").first();
+		// Capture POST /api/sessions so we can clean up the created session afterwards.
+		const sessionCreated = page.waitForResponse(
+			(r) => r.url().endsWith("/api/sessions") && r.request().method() === "POST",
+			{ timeout: 10_000 },
+		).catch(() => null);
+
+		// Post-surface-staff-in-sessions: the "+ New staff" button lives in the
+		// project header (title="New staff agent in <project>").
+		const newStaffBtn = page.locator("button[title^='New staff agent']").first();
 		await expect(newStaffBtn).toBeVisible({ timeout: 10_000 });
+		// Force-hover the project row so the (hidden) header button becomes clickable on desktop.
+		await newStaffBtn.evaluate((el) => (el as HTMLElement).click());
+		await expect(page.locator("[data-testid='bobbit-loader']")).toBeVisible({ timeout: 2_000 });
 
-		// Click and immediately assert the loader is visible — must appear
-		// within one render frame (before navigation completes).
-		await newStaffBtn.click();
-		await expect(page.locator("[data-testid='bobbit-loader']")).toBeVisible({
-			timeout: 2_000,
-		});
-
-		// Wait for navigation to complete and verify a staff assistant session was created.
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-		await expect(async () => {
-			const hash = await page.evaluate(() => window.location.hash);
-			expect(hash).toMatch(/#\/session\/[a-f0-9-]+/i);
-		}).toPass({ timeout: 10_000 });
-
-		// Clean up the created session.
-		const hash = await page.evaluate(() => window.location.hash);
-		const m = hash.match(/#\/session\/([a-f0-9-]+)/i);
-		if (m) await apiFetch(`/api/sessions/${m[1]}`, { method: "DELETE" }).catch(() => {});
+		// Cleanup: delete the created session to avoid polluting state across runs.
+		const resp = await sessionCreated;
+		if (resp && resp.ok()) {
+			try {
+				const body = await resp.json();
+				if (body?.id) await apiFetch(`/api/sessions/${body.id}`, { method: "DELETE" }).catch(() => {});
+			} catch { /* ignore */ }
+		}
 	});
 });

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rapid Ctrl+↓ keystroke navigation — dropped-keystroke repro</title>
+</head>
+<body>
+<aside class="sidebar-edge"></aside>
+<script>
+/*
+ * Reproduces the dropped-keystroke bug noted in
+ * docs/perf/sidebar-nav-baseline.md §5.6.
+ *
+ * Scenario: rows in the sidebar are L (live, top), A, B, C, …  L's
+ * `connectToSession` is slow (~200ms async). User holds Ctrl+↓ at a
+ * 50ms cadence expecting the cursor to walk L→A→B→C→…
+ *
+ * Each `openForNavItem` for a session kind does:
+ *   1. set `keyboardNavActiveId = "session:<id>"` synchronously
+ *   2. kick off an async dynamic import + connectToSession which
+ *      eventually setHashRoute → hashchange → URL=#/session/<id>
+ *
+ * The buggy `getActiveNavId` only honoured `keyboardNavActiveId` when
+ * `window.location.hash === navIdToHash(override)`. Between keystrokes
+ * the override is set but the hash hasn't caught up yet, so the
+ * override is discarded and the function falls back to the previous
+ * route. `navigateSidebar` then re-derives the SAME row as "current"
+ * and `openForNavItem` is invoked with the same id repeatedly — 3–4
+ * keystrokes evaporate while L attaches.
+ *
+ * The fixed `getActiveNavId` trusts the override unconditionally; the
+ * hashchange listener still clears it if the URL ends up somewhere
+ * incompatible (user clicked elsewhere).
+ *
+ * The mirror below is parameterised by `trustOverrideAlways` so the
+ * test can drive both behaviours and assert the fix.
+ */
+
+const ORDER = ["session:L", "session:A", "session:B", "session:C", "session:D",
+               "session:E", "session:F", "session:G", "session:H", "session:I",
+               "session:J", "session:K"];
+
+function buildMirror(trustOverrideAlways) {
+	// Initial state mirrors the production case the bug surfaces in: the
+	// user has just opened the app on the landing route, the top sidebar
+	// row is a live session L that's mid-attach (no `connectToSession`
+	// has resolved yet, so neither the hash nor `selectedSessionId`
+	// reflect it). The first Ctrl+↓ keystroke lands on L; subsequent
+	// keystrokes should walk L→A→B→… even while L's 200ms attach is
+	// in flight.
+	const state = {
+		keyboardNavActiveId: null,
+		selectedSessionId: null,
+		_currentHash: "#/",
+	};
+	const opened = []; // navIds passed to openForNavItem, in order
+	const ready = [];  // navIds that completed the async attach
+
+	function navIdToHash(navId) {
+		if (navId.startsWith("session:")) return "#/session/" + navId.slice(8);
+		return null;
+	}
+
+	function getActiveNavId() {
+		const override = state.keyboardNavActiveId;
+		if (override) {
+			if (trustOverrideAlways) return override;
+			const expected = navIdToHash(override);
+			if (expected && state._currentHash === expected) return override;
+		}
+		const m = state._currentHash.match(/^#\/session\/(.+)$/);
+		if (m) return "session:" + m[1];
+		if (state.selectedSessionId) return "session:" + state.selectedSessionId;
+		return null;
+	}
+
+	function openForNavItem(navId) {
+		opened.push(navId);
+		state.keyboardNavActiveId = navId;
+		const id = navId.slice(8);
+		const delayMs = id === "L" ? 200 : 5;
+		// Mimic async connectToSession → setHashRoute path.
+		setTimeout(() => {
+			state._currentHash = "#/session/" + id;
+			state.selectedSessionId = id;
+			ready.push(navId);
+		}, delayMs);
+	}
+
+	function navigateDown() {
+		const currentId = getActiveNavId();
+		const idx = currentId ? ORDER.indexOf(currentId) : -1;
+		const next = ORDER[idx < 0 || idx >= ORDER.length - 1 ? 0 : idx + 1];
+		openForNavItem(next);
+	}
+
+	return { state, opened, ready, navigateDown };
+}
+
+window.__runScenario = async function(trustOverrideAlways, presses, cadenceMs) {
+	const m = buildMirror(trustOverrideAlways);
+	for (let i = 0; i < presses; i++) {
+		m.navigateDown();
+		await new Promise(r => setTimeout(r, cadenceMs));
+	}
+	// Wait for any tail attaches to flush.
+	await new Promise(r => setTimeout(r, 400));
+	const uniqueOpened = [...new Set(m.opened)];
+	return {
+		opened: m.opened,
+		uniqueOpened,
+		distinctCount: uniqueOpened.length,
+		droppedKeystrokes: m.opened.length - uniqueOpened.length,
+	};
+};
+
+document.title = "ready";
+</script>
+</body>
+</html>
