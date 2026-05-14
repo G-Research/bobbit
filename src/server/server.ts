@@ -22,6 +22,8 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import type { Workflow } from "./agent/workflow-store.js";
+import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
@@ -3632,12 +3634,54 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Resolve workflow through the config cascade (builtin → server → project)
-			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
+			let resolvedWorkflow: Workflow | undefined;
+			let resolvedWorkflowId = workflowId;
+			const inlineWorkflow = body?.workflow;
+			if (inlineWorkflow && typeof inlineWorkflow === "object") {
+				resolvedWorkflow = inlineWorkflow as Workflow;
+				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
+			} else {
+				// Layer 1: cascade lookup (only when workflowId given).
+				if (workflowId) {
+					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+					// Layer 1b: cascade miss — fall through to project store directly.
+					if (!resolvedWorkflow) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
+				}
+				// Layer 2: store is empty → auto-seed defaults.
+				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
+					const projName = resolved.project.name || "project";
+					const seeds = buildDefaultWorkflows(projName);
+					seeds.parent = buildParentWorkflow();
+					for (const wf of Object.values(seeds)) {
+						targetCtx.workflowStore.put(wf as unknown as Workflow);
+					}
+					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
+					if (workflowId) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					} else {
+						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+						resolvedWorkflowId = resolvedWorkflow?.id || "general";
+					}
+				}
+				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
+				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
+					const available = targetCtx.workflowStore.getAll().map(w => w.id);
+					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
+						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
+						code: "WORKFLOW_NOT_FOUND",
+						workflowId,
+						available,
+					});
+					return;
+				}
+			}
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
-				workflowId,
+				workflowId: resolvedWorkflowId,
 				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
@@ -5518,6 +5562,11 @@ async function handleApiRoute(
 			json({ error: "Goal setup not complete" }, 409);
 			return;
 		}
+		// Pause-cascade: refuse to spawn role agents on a paused goal.
+		if (spawnGoal?.paused) {
+			json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
+			return;
+		}
 		const body = await readBody(req);
 		if (!body?.role || !body?.task) {
 			json({ error: "Missing role or task" }, 400);
@@ -5842,10 +5891,23 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent
+		// Validate target is a team agent OR a direct-child team-lead
 		const agents = teamManager.listAgents(goalId);
-		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			json({ error: "Session is not a member of this team" }, 403);
+		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
+		if (!allowed) {
+			const targetSession = sessionManager.getSession(body.sessionId);
+			if (targetSession?.role === "team-lead" && targetSession.goalId) {
+				const targetGoal = getGoalAcrossProjects(targetSession.goalId);
+				if (targetGoal?.parentGoalId === goalId) {
+					allowed = true;
+				}
+			}
+		}
+		if (!allowed) {
+			json({
+				error: "Session is not a member of this team and is not a direct-child team-lead",
+				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
+			}, 403);
 			return;
 		}
 		const session = sessionManager.getSession(body.sessionId);
