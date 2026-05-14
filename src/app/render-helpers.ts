@@ -882,7 +882,15 @@ export function renderGoalGroup(goal: Goal) {
 			</div>
 			${isExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${displaySessions.length === 0 && !isCreatingHere ? (goal.archived ? nothing : emptyState) : (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow))}
+					${displaySessions.length === 0 && !isCreatingHere
+						? (goal.archived
+							? nothing
+							/* Suppress "No agents — Start Team" when the team IS active but its
+							   members have all been filtered out by the sidebar filters
+							   (Show Busy / Show Read / Show Archived). The active team is
+							   still alive — it would be misleading to offer Start Team. */
+							: (isTeamGoal && hasActiveTeam ? nothing : emptyState))
+						: (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow))}
 					${isCreatingHere ? html`<div style="padding-left:${CHEVRON_W}px;${mobile ? "" : "font-size: 0.8333em;"}" class="py-1 text-muted-foreground flex items-center gap-1">
 						<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
 						Creating…
