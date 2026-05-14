@@ -837,6 +837,7 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// invariant.
 	await page.waitForFunction(() => !!(window as any).__bobbitOpenForNavItem, undefined, { timeout: 10_000 });
 	const clickIds = (warmSessionIds.length > 0 ? warmSessionIds : sessionIds).slice(0, WARM_PASS_COUNT);
+
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of clickIds) {
 			await page.evaluate((id) => {
