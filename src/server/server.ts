@@ -7,7 +7,7 @@ import https from "node:https";
 import path from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -25,6 +25,7 @@ import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
 import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
+import { backfillLegacyCostGoalIds } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -1240,6 +1241,23 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
+
+			// One-shot legacy cost backfill: stamp `goalId` on cost entries
+			// that pre-date the forward-stamp fix (commit a4050f59). Runs
+			// once per project context after sessions are restored so the
+			// resolver can see live PersistedSession records. Idempotent.
+			try {
+				const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+				for (const ctx of projectContextManager.all()) {
+					backfillLegacyCostGoalIds({
+						costTracker: ctx.costTracker,
+						sessionManager,
+						agentSessionsRoot,
+					});
+				}
+			} catch (err) {
+				console.warn("[cost-backfill] boot backfill failed (non-fatal):", err);
+			}
 
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
@@ -3578,6 +3596,20 @@ async function handleApiRoute(
 			costTracker,
 			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
 		);
+		// Surface the unattributable legacy bucket (cost entries whose
+		// `goalId` could not be recovered by the boot backfill). NOT added
+		// to `totalCostUsd` — it's an informational residual, separate from
+		// the selected goal's subtree. Hidden entirely when empty.
+		const legacy = costTracker.getUnattributableLegacyCost();
+		if (legacy.totalCost > 0 || legacy.inputTokens > 0 || legacy.outputTokens > 0) {
+			(result as typeof result & { unattributableLegacy?: unknown }).unattributableLegacy = {
+				goalId: "__unattributable__",
+				title: "Unattributable (legacy)",
+				costUsd: legacy.totalCost,
+				tokensIn: legacy.inputTokens,
+				tokensOut: legacy.outputTokens,
+			};
+		}
 		json(result);
 		return;
 	}
