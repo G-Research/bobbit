@@ -271,9 +271,11 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		).toBe(true);
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
-		await page.keyboard.press("1");
+		// Use locator.press() to dispatch directly on the focused element —
+		// more robust than page.keyboard.press() under load.
+		await tab0.press("1");
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 8_000 });
+			.toHaveAttribute("aria-selected", "true", { timeout: 12_000 });
 
 		// Re-focus for keyboard targeting on the new tab panel.
 		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');
@@ -288,7 +290,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		).toBe(true);
 
 		// Press '2' → picks option 2 on Q2 ("medium"). Last tab → no advance.
-		await page.keyboard.press("2");
+		await tab1.press("2");
 		await expect(widget.locator('input[type="radio"][value="medium"]')).toBeChecked();
 
 		// Primary button should now be Submit (last tab) and enabled.

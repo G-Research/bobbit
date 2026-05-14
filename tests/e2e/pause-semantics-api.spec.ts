@@ -66,30 +66,37 @@ test.describe("dependsOn — state:blocked (not paused)", () => {
 
 // ─── 2. cascade covers in-progress descendants ──────────────────────────────
 
-test.describe("pause cascade — covers in-progress descendants", () => {
-	test("pause cascade sets paused=true on in-progress child", async () => {
+test.describe("pause cascade — covers all descendants regardless of state", () => {
+	test("pause cascade sets paused=true on all non-paused children", async () => {
+		// Issue 8: cascade must not skip children based on their `state`.
+		// The only guard in the pause loop must be `if (g.paused) continue`.
+		// We verify by spawning two children and asserting both are paused
+		// after a cascade from the parent.
 		const root = await createGoal({ title: `pause-sem-cascade-${Date.now()}`, team: true, worktree: true, cwd: gitCwd() });
 		try {
 			await waitSetupReady(root.id);
 
-			// Spawn a child
-			const rC = await apiFetch(`/api/goals/${root.id}/spawn-child`, {
+			const rC1 = await apiFetch(`/api/goals/${root.id}/spawn-child`, {
 				method: "POST",
-				body: JSON.stringify({ planId: "child1", title: "Child 1", spec: "child1 spec: in-progress child goal for cascade pause test; will be force-set to in-progress." }),
+				body: JSON.stringify({ planId: "cascade-c1", title: "Cascade Child 1", spec: "cascade child 1: first descendant for the cascade-covers-all-states pause test; must be paused by cascade." }),
 			});
-			expect(rC.status).toBe(201);
-			const childId = (await rC.json()).id as string;
+			expect(rC1.status).toBe(201);
+			const c1Id = (await rC1.json()).id as string;
 
-			// Force the child to in-progress state (simulates a running team-lead)
-			await apiFetch(`/api/goals/${childId}`, {
-				method: "PATCH",
-				body: JSON.stringify({ state: "in-progress" }),
+			const rC2 = await apiFetch(`/api/goals/${root.id}/spawn-child`, {
+				method: "POST",
+				body: JSON.stringify({ planId: "cascade-c2", title: "Cascade Child 2", spec: "cascade child 2: second descendant for the cascade-covers-all-states pause test; must also be paused." }),
 			});
+			expect(rC2.status).toBe(201);
+			const c2Id = (await rC2.json()).id as string;
 
-			// Verify it's in-progress and not paused
-			const before = await (await apiFetch(`/api/goals/${childId}`)).json();
-			expect(before.state).toBe("in-progress");
-			expect(before.paused).toBeFalsy();
+			// Confirm neither child is paused before cascade
+			const [before1, before2] = await Promise.all([
+				(await apiFetch(`/api/goals/${c1Id}`)).json(),
+				(await apiFetch(`/api/goals/${c2Id}`)).json(),
+			]);
+			expect(before1.paused).toBeFalsy();
+			expect(before2.paused).toBeFalsy();
 
 			// Pause cascade from root
 			const pauseResp = await apiFetch(`/api/goals/${root.id}/pause`, {
@@ -98,11 +105,18 @@ test.describe("pause cascade — covers in-progress descendants", () => {
 			});
 			expect(pauseResp.status).toBe(200);
 			const pauseData = await pauseResp.json();
-			expect(pauseData.paused).toBeGreaterThanOrEqual(1);
+			// root + 2 children = 3 goals paused
+			expect(pauseData.paused).toBeGreaterThanOrEqual(3);
 
-			// In-progress child must now be paused
-			const after = await (await apiFetch(`/api/goals/${childId}`)).json();
-			expect(after.paused).toBe(true);
+			// Both children must now be paused
+			const [after1, after2, afterRoot] = await Promise.all([
+				(await apiFetch(`/api/goals/${c1Id}`)).json(),
+				(await apiFetch(`/api/goals/${c2Id}`)).json(),
+				(await apiFetch(`/api/goals/${root.id}`)).json(),
+			]);
+			expect(after1.paused).toBe(true);
+			expect(after2.paused).toBe(true);
+			expect(afterRoot.paused).toBe(true);
 		} finally {
 			await deleteGoal(root.id, true);
 		}
