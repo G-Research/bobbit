@@ -50,10 +50,38 @@ test("GET /api/lsp/stats reports routeSelfCheck: 'ok' after clean boot", async (
 	// The post-boot loopback self-check probes /api/lsp/stats, /api/lsp/state, and
 	// /api/lsp/diagnostics. On a clean in-process boot all three routes are registered
 	// and the supervisor's routeSelfCheck field must be "ok".
+	//
+	// This used to race against the boot pipeline (lspRouteCheckTask was awaited only
+	// after `start()` returned, so an immediate /api/lsp/stats could see "pending").
+	// The fix (goal fix-routes-1db8c87b) makes /api/lsp/stats await the supervisor's
+	// in-flight self-check promise with a bounded cap. No polling here — a single
+	// synchronous read must see a settled "ok".
 	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
 	expect(res.status).toBe(200);
 	const body = await res.json() as Record<string, unknown>;
 	expect(body.routeSelfCheck, "routeSelfCheck must be 'ok' — if 'pending' the check did not run; if 'failed:...' a route is missing").toBe("ok");
+});
+
+test("GET /api/lsp/stats is never 'pending' on immediate post-boot read", async () => {
+	// Direct regression for goal fix-routes-1db8c87b: the previous fire-and-forget
+	// boot ordering let /api/lsp/stats return routeSelfCheck === "pending" if the
+	// caller read the route before the background self-check task settled.
+	//
+	// The fix awaits the supervisor's route-self-check promise inside the stats
+	// handler (bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS). A single synchronous
+	// fetch immediately after start() must therefore return a settled value.
+	//
+	// This assertion is intentionally weaker than the 'ok' test above: any settled
+	// state (ok / failed:...) is acceptable here. The point is that the route's
+	// observability contract is honored — callers never see the in-progress sentinel.
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status).toBe(200);
+	const body = await res.json() as Record<string, unknown>;
+	expect(
+		body.routeSelfCheck,
+		"routeSelfCheck must be settled — 'pending' means the stats handler did not await the self-check promise (goal fix-routes-1db8c87b)",
+	).not.toBe("pending");
+	expect(typeof body.routeSelfCheck, "routeSelfCheck must be a string").toBe("string");
 });
 
 test("GET /api/lsp/state is registered (never 404)", async () => {
