@@ -2052,6 +2052,15 @@ export async function showArchiveGoalDialog(goal: Goal): Promise<CascadeArchiveR
 					cleanup({ archived: 0 });
 					return;
 				}
+				// Surface partial failures: server returns errors[] when some
+				// goals couldn't be archived (e.g. teardown failed).
+				if (Array.isArray(body?.errors) && body.errors.length > 0) {
+					const failCount = (body.errors as { goalId: string; error: string }[]).length;
+					showConnectionError(
+						"Partial archive",
+						`${failCount} goal${failCount === 1 ? "" : "s"} could not be archived (team teardown failed). Refresh to check status.`,
+					);
+				}
 				cleanup({ archived: typeof body?.archived === "number" ? body.archived : descendantCount + 1 });
 			} catch (err) {
 				confirming = false;

@@ -46,11 +46,11 @@ test.describe("Sidebar cascade archive", () => {
 
 			// The sidebar archive icon is hover-revealed (`hidden group-hover:flex`)
 			// — the button exists in the DOM regardless. We dispatch the click
-			// programmatically to bypass the CSS hide, matching the pattern
-			// used in goal-archive-always-on.spec.ts.
-			const archiveButtons = page.locator('button[title="Archive goal"]');
-			await expect.poll(async () => archiveButtons.count(), { timeout: 5_000 }).toBeGreaterThan(0);
-			await archiveButtons.first().evaluate((el: HTMLElement) => el.click());
+			// programmatically to bypass the CSS hide, scoped to the goal row so
+			// we don't accidentally click an archive button on a different goal.
+			const archiveBtn = goalRow.locator('button[title="Archive goal"]').first();
+			await expect.poll(async () => archiveBtn.count(), { timeout: 5_000 }).toBeGreaterThan(0);
+			await archiveBtn.evaluate((el: HTMLElement) => el.click());
 
 			// Because the parent has 1 descendant, the cascade dialog must
 			// open (NOT the single-goal confirm modal).

@@ -944,17 +944,14 @@ export async function deleteGoal(id: string): Promise<void> {
 	const descendants = countDescendants(id);
 
 	if (descendants > 0) {
-		// Use cascade teardown so descendant teams don't block the archive dialog.
-		// teardownTeamWithDialog uses cascade=false first; if descendant teams are
-		// running it shows the stop-cascade dialog and tears all down before
-		// proceeding to the archive cascade.
-		if (teamActive) {
-			const ok = await teardownTeamWithDialog(id);
-			if (!ok) return;
-		}
+		// Show the cascade-archive confirmation dialog first. The server's
+		// archiveOne handles team teardown inside the cascade after the user
+		// confirms — we must NOT pre-tear down before confirmation (destructive,
+		// non-undoable). The cascade-confirm dialog handles teams itself.
 		const result = await showArchiveGoalDialog(goal);
 		if (result.archived > 0) {
 			// Eager local archive flip avoids a flash-of-live-goals.
+			// Only flip IDs that the server actually archived (result.archived count).
 			const allIds = collectGoalIdsFor(id);
 			eagerMarkArchived(allIds);
 			setHashRoute("landing");
