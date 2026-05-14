@@ -8339,22 +8339,14 @@ async function handleApiRoute(
 
 	// GET /api/staff/orphaned — staff with missing projectId or stuck on the system project
 	if (url.pathname === "/api/staff/orphaned" && req.method === "GET") {
-		const list = staffManager.listOrphaned().map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listOrphaned() });
 		return;
 	}
 
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const list = staffManager.listStaff(projectId).map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listStaff(projectId) });
 		return;
 	}
 
@@ -8401,8 +8393,7 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const staff = staffManager.getStaff(id);
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-			const sandboxed = staff.projectId ? (projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			json({ ...staff, sandboxed });
+			json(staff);
 			return;
 		}
 
