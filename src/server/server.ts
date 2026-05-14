@@ -22,7 +22,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
-import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
+import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -3578,9 +3578,43 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
+			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child)
+			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
+			let resolvedParentGoal: PersistedGoal | undefined;
+			if (parentGoalId) {
+				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId) ?? getGoalAcrossProjects(parentGoalId);
+				if (!resolvedParentGoal) {
+					json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
+					return;
+				}
+				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+				const nestResult = checkCanSpawnChild(
+					resolvedParentGoal,
+					prefs,
+					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
+				);
+				if (!nestResult.ok) {
+					if (nestResult.code === "SUBGOALS_DISABLED") {
+						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
+						return;
+					}
+					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
+						json({
+							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,
+							code: "NESTING_DEPTH_EXCEEDED",
+							currentDepth: nestResult.currentDepth,
+							maxDepth: nestResult.maxDepth,
+						}, 422);
+						return;
+					}
+				}
+			}
 			// Resolve workflow through the config cascade (builtin → server → project)
 			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
 			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+			const inheritedNesting = (parentGoalId && resolvedParentGoal)
+				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
+				: undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId,
@@ -3589,6 +3623,9 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				parentGoalId,
+				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
+				maxNestingDepth: inheritedNesting?.maxNestingDepth,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -6390,8 +6427,19 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal
+			let enrichedArgs = args as Record<string, unknown>;
+			if (proposalType === "goal") {
+				const sess = sessionManager.getSession(sessionId);
+				if (sess?.role === "team-lead" && sess.teamGoalId) {
+					const existingParent = enrichedArgs.parentGoalId;
+					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
+						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+					}
+				}
+			}
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
 					json(parsed, 400);
