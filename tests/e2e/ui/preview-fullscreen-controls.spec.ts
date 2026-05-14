@@ -78,7 +78,7 @@ test.describe("Preview fullscreen header controls (Bug 1)", () => {
 		).toBe(true);
 
 		// Exit-fullscreen button must be visible (sanity).
-		const exitBtn = page.locator('button[title="Exit fullscreen (Esc)"]').first();
+		const exitBtn = page.locator('button[title^="Collapse preview"]').first();
 		await expect(exitBtn).toBeVisible({ timeout: 5_000 });
 
 		// THE BUG: in fullscreen mode the Open-in-new-tab and Refresh controls
