@@ -15,6 +15,7 @@ import { html, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
 import { Archive, Eye, Filter, Zap } from "lucide";
 import { renderApp, resetArchivedExpandState, state } from "../../app/state.js";
+import { shortcutHint } from "../../app/shortcut-registry.js";
 
 // ---------------------------------------------------------------------------
 // Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
@@ -167,7 +168,7 @@ function _renderPopover(): TemplateResult | "" {
 				id: "archived",
 				icon: Archive,
 				label: "Show Archived",
-				shortcut: "Alt+Shift+A",
+				shortcut: shortcutHint("ui.toggle-show-archived", { prefix: "", suffix: "" }) || "Alt+Shift+A",
 				checked: state.showArchived,
 				onToggle: toggleShowArchived,
 			})}
@@ -175,7 +176,7 @@ function _renderPopover(): TemplateResult | "" {
 				id: "busy",
 				icon: Zap,
 				label: "Show Busy",
-				shortcut: "Alt+Shift+B",
+				shortcut: shortcutHint("ui.toggle-show-busy", { prefix: "", suffix: "" }) || "Alt+Shift+B",
 				checked: state.showBusy,
 				onToggle: toggleShowBusy,
 			})}
@@ -183,7 +184,7 @@ function _renderPopover(): TemplateResult | "" {
 				id: "read",
 				icon: Eye,
 				label: "Show Read",
-				shortcut: "Alt+Shift+R",
+				shortcut: shortcutHint("ui.toggle-show-read", { prefix: "", suffix: "" }) || "Alt+Shift+R",
 				checked: state.showRead,
 				onToggle: toggleShowRead,
 			})}
