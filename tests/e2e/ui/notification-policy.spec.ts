@@ -142,12 +142,97 @@ test.describe("Notification policy — sidebar unread dot", () => {
 			.toHaveCount(1, { timeout: 5_000 });
 	});
 
+	test("team-lead idle with goal complete shows the unread dot; in-progress goal hides it", async ({ page }) => {
+		const proj = await getDefaultProjectId();
+
+		// Create a real session so the server stamps lastActivity to now.
+		const sessResp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: proj.rootPath, projectId: proj.id }),
+		});
+		expect(sessResp.status).toBe(201);
+		const sess = await sessResp.json();
+		const sessionId: string = sess.id;
+		cleanupSessionIds.push(sessionId);
+
+		await openApp(page);
+		await navigateToHash(page, "#/");
+
+		// Wait for the session row to appear before patching.
+		await expect(page.locator(`[data-session-id="${sessionId}"]`).first())
+			.toBeVisible({ timeout: 15_000 });
+
+		await stopPolling(page);
+
+		// Inject a fabricated COMPLETE team goal scoped to this project so it
+		// passes the per-project bucketing filter in `sidebar.ts`. The session
+		// already carries `projectId` from creation. Also force-expand it so
+		// the team-lead row renders (the auto-expand path in api.ts only fires
+		// for server-confirmed goals).
+		const goalId = "e2e-fake-goal-complete";
+		await page.evaluate(({ goalId, projectId }) => {
+			const state: any = (window as any).__bobbitState;
+			state.goals.push({
+				id: goalId,
+				title: "Fake team goal",
+				cwd: "/tmp",
+				projectId,
+				state: "complete",
+				spec: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				team: true,
+			});
+			const expanded: Set<string> = (window as any).__bobbitExpandedGoals;
+			expanded.add(goalId);
+		}, { goalId, projectId: proj.id });
+
+		// Promote the session to a team-lead bound to the fabricated goal.
+		await patchSessionState(page, sessionId, {
+			role: "team-lead",
+			goalId,
+		});
+
+		// The session is now rendered via `renderTeamLeadRow` which uses
+		// `data-nav-id="session:<id>"` (not `data-session-id`). The unread
+		// dot lives inside `renderSessionTime` invoked from that row.
+		const tlRow = page.locator(`[data-nav-id="session:${sessionId}"]`).first();
+		await expect(tlRow).toBeVisible({ timeout: 5_000 });
+		await expect(tlRow.locator(".unseen-dot")).toHaveCount(1, { timeout: 5_000 });
+
+		// Flip the goal to in-progress — the team lead is no longer at the
+		// "goal complete" gate, AND has no live downstream work, so the
+		// predicate returns true (stuck) and the dot stays. To exercise the
+		// silent path, inject a streaming sibling member as well.
+		await page.evaluate(({ goalId, leadId }) => {
+			const state: any = (window as any).__bobbitState;
+			const g = state.goals.find((x: any) => x.id === goalId);
+			if (g) g.state = "in-progress";
+			state.gatewaySessions.push({
+				id: "e2e-fake-coder",
+				title: "fake coder",
+				cwd: "/tmp",
+				status: "streaming",
+				createdAt: Date.now(),
+				lastActivity: Date.now(),
+				clientCount: 1,
+				role: "coder",
+				teamGoalId: goalId,
+				teamLeadSessionId: leadId,
+				projectId: g?.projectId,
+			});
+		}, { goalId, leadId: sessionId });
+		await forceRender(page);
+
+		const tlRow2 = page.locator(`[data-nav-id="session:${sessionId}"]`).first();
+		await expect(tlRow2.locator(".unseen-dot")).toHaveCount(0, { timeout: 5_000 });
+	});
+
 	// Note: the full 9-row predicate table is covered by the unit fixture
-	// `tests/notification-policy.spec.ts`. This browser E2E only verifies the
-	// *wiring*: that `hasUnseenActivity` is consulted on every render, and
-	// that mutating the team affiliation flips the dot. Building real team
-	// goals via the API for each row would be slow and brittle for what is
-	// fundamentally pure predicate logic.
+	// `tests/notification-policy.spec.ts`. This browser E2E verifies the
+	// *wiring*: that `hasUnseenActivity` is consulted on every render, that
+	// mutating the team affiliation flips the dot, and that the goal-complete
+	// path is plumbed through the team-lead rendering branch.
 
 
 	test("dot state on reload matches server-side lastReadAt", async ({ page }) => {

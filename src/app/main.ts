@@ -19,6 +19,7 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
+	expandedGoals,
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
@@ -51,6 +52,10 @@ setRenderApp(doRenderApp);
 // Expose the render trigger too, so tests that patch in-memory state can
 // force a fresh paint without relying on viewport-resize side effects.
 (window as any).__bobbitRenderApp = renderApp;
+// Expose the expanded-goals set so tests that inject synthetic goals into
+// state.goals can also force them into the expanded state (the normal
+// auto-expand path only fires for goals the server has confirmed).
+(window as any).__bobbitExpandedGoals = expandedGoals;
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
