@@ -199,6 +199,36 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	return session.lastActivity > lastRead;
 }
 
+/**
+ * Apply sidebar visibility filters (Busy / Read).
+ * Active session is exempt — it always passes.
+ * Archived filtering is handled separately via `state.showArchived` flags
+ * already threaded through render-helpers.
+ * Search bypasses filters entirely — pass `bypass=true` when searchQuery is non-empty.
+ */
+export function passesSidebarFilters(
+	session: GatewaySession,
+	isActive: boolean,
+	bypass: boolean,
+): boolean {
+	if (bypass || isActive) return true;
+	if (!state.showBusy) {
+		const busy = session.status === "streaming"
+			|| session.status === "aborting"
+			|| session.status === "preparing"
+			|| session.status === "starting"
+			|| session.isCompacting;
+		if (busy) return false;
+	}
+	if (!state.showRead) {
+		// Only filter out idle/done sessions with no unread activity.
+		// Busy sessions (if not already filtered above) always remain visible.
+		const idleLike = session.status === "idle" || session.status === "terminated";
+		if (idleLike && !hasUnseenActivity(session)) return false;
+	}
+	return true;
+}
+
 /** One-shot migration: read the legacy localStorage map, POST mark-read for
  *  each entry to seed lastReadAt server-side, then delete the key.
  *  Idempotent — guarded by key existence. Call once at app boot. */
@@ -409,7 +439,11 @@ export function renderSessionRow(session: GatewaySession) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + archived delegates)
-	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id && (state.showArchived || s.status !== "terminated"));
+	const _bypassFilters = !!state.searchQuery.trim();
+	const liveDelegates = state.gatewaySessions.filter(s =>
+		s.delegateOf === session.id
+		&& (state.showArchived || s.status !== "terminated")
+		&& passesSidebarFilters(s, s.id === activeSessionId(), _bypassFilters));
 	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
 	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
 	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
@@ -469,7 +503,11 @@ export function renderSessionRow(session: GatewaySession) {
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId && (state.showArchived || s.status !== "terminated"));
+	const bypassFilters = !!state.searchQuery.trim();
+	const delegates = state.gatewaySessions.filter(s =>
+		s.delegateOf === parentSessionId
+		&& (state.showArchived || s.status !== "terminated")
+		&& passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => s.status === "terminated"

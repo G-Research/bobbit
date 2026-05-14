@@ -83,3 +83,4 @@ tests/fixtures/streaming-message-container-bundle.js
 tests/fixtures/streaming-message-container-bundle.css
 tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
+.qa-test-state/

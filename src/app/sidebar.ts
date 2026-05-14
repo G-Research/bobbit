@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Archive, Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
+import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -30,7 +30,8 @@ import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
+import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
@@ -667,7 +668,10 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // SEARCH HANDLERS
 // ============================================================================
 
-/** Tracks whether archived section was auto-opened by search (vs manual toggle). */
+/** Tracks whether archived section was auto-opened by search (vs manual toggle).
+ *  Exported so that a manual toggle from the Filters popover (or its keyboard shortcut)
+ *  can take precedence and prevent search-clear from undoing the user's choice. */
+export function clearArchivedBySearch(): void { _archivedBySearch = false; }
 let _archivedBySearch = false;
 
 /** Ensure archived data is loaded and the section is visible for search filtering.
@@ -828,7 +832,12 @@ function renderProjectContent(
 }
 
 export function renderSidebar() {
-	const { ungroupedSessions, liveGoals, archivedGoals } = getSidebarData();
+	const sidebarData = getSidebarData();
+	const { liveGoals, archivedGoals } = sidebarData;
+	const bypassFilters = !!state.searchQuery.trim();
+	// Apply Show Busy / Show Read filters to standalone live sessions.
+	const ungroupedSessions = sidebarData.ungroupedSessions.filter(s =>
+		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 
 	if (state.sidebarCollapsed) {
 		return renderCollapsedSidebar(liveGoals, ungroupedSessions, archivedGoals);
@@ -1036,25 +1045,7 @@ export function renderSidebar() {
 					${icon(Settings, "sm")}
 					<span>Settings</span>
 				</button>`; })()}
-				<button
-					class="flex items-center gap-1.5 px-2 py-2 ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} hover:text-foreground hover:bg-secondary/50 rounded transition-colors"
-					@click=${() => {
-						state.showArchived = !state.showArchived;
-						_archivedBySearch = false; // manual toggle takes precedence
-						localStorage.setItem("bobbit-show-archived", String(state.showArchived));
-						if (state.showArchived) {
-							import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
-						} else {
-							resetArchivedExpandState();
-							import("./api.js").then(m => m.clearArchivedSessionsState());
-						}
-						renderApp();
-					}}
-					title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}"
-				>
-					${icon(Archive, "sm")}
-					<span>See Archived</span>
-				</button>
+				${renderFiltersButton("desktop")}
 				<span class="flex-1"></span>
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"

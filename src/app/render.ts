@@ -1,6 +1,7 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import "../ui/components/CommentableMarkdown.js";
+import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
@@ -18,7 +19,6 @@ import {
 	isUngroupedExpanded,
 	setUngroupedExpanded,
 
-	resetArchivedExpandState,
 	getSidebarData,
 	isProposalStreaming,
 } from "./state.js";
@@ -41,7 +41,7 @@ import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
@@ -252,6 +252,8 @@ function renderMobileLanding() {
 	let { ungroupedSessions, liveGoals } = sidebarData;
 	let { archivedGoals } = sidebarData;
 
+	const bypassFilters = !!state.searchQuery.trim();
+
 	// Client-side title filtering for mobile
 	if (state.searchQuery) {
 		const q = state.searchQuery.toLowerCase();
@@ -264,6 +266,10 @@ function renderMobileLanding() {
 		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 		archivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 	}
+
+	// Apply Show Busy / Show Read filters to standalone live sessions.
+	ungroupedSessions = ungroupedSessions.filter(s =>
+		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root">
@@ -481,22 +487,7 @@ function renderMobileLanding() {
 				${icon(FolderPlus, "sm")}
 				<span>Add Project</span>
 			</button>` : ""}
-			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
-				@click=${() => {
-					state.showArchived = !state.showArchived;
-					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
-					if (state.showArchived) {
-						import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
-					} else {
-						resetArchivedExpandState();
-						import("./api.js").then(m => m.clearArchivedSessionsState());
-					}
-					renderApp();
-				}}
-				title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}">
-				${icon(Archive, "sm")}
-				<span>See Archived</span>
-			</button>
+			${renderFiltersButton("mobile")}
 		</div>
 	`;
 }
