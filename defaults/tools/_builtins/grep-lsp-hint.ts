@@ -29,7 +29,12 @@ export interface GrepLikeResult {
 const HINT_PREFIX = "[lsp-hint]";
 const MAX_HINT_LEN = 200;
 
-const SOURCE_EXT_RE = /\.(ts|tsx|js|jsx|mts|cts)\b/;
+// Match a TS/JS source extension token in a glob, with non-word boundaries on
+// both sides so we accept dotted forms (`*.ts`, `**/*.test.ts`) AND brace
+// expansions (`*.{ts,tsx}`, `**/*.{ts,tsx,js,jsx,mts,cts}`). A lookaround on
+// each side ensures we don't match inside longer identifiers like `json`
+// (which contains `js`) or `tsconfig` (which starts with `ts`).
+const SOURCE_EXT_RE = /(?<![A-Za-z0-9_])(?:ts|tsx|js|jsx|mts|cts)(?![A-Za-z0-9_])/;
 
 // Identifier with optional declaration prefix and optional escaped call suffix.
 // Declaration prefixes are stripped via the alternation in this regex.
@@ -62,8 +67,10 @@ export function parseSymbolPattern(pattern: string): { identifier: string; isCal
 /**
  * True if the glob (if any) suggests TS/JS source territory.
  *  - no glob → true (default search includes source)
- *  - glob mentions a source ext token → true
- *  - glob only mentions non-source extensions (e.g. `*.md`) → false
+ *  - glob mentions a source ext token, including inside brace expansions
+ *    like `*.{ts,tsx}` or `**\/*.{ts,tsx,js,jsx,mts,cts}` → true
+ *  - glob only mentions non-source extensions (e.g. `*.md`, `*.{md,txt}`,
+ *    `*.json`) → false
  */
 export function globIsTsJs(glob: string | undefined): boolean {
 	if (!glob) return true;

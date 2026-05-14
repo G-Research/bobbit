@@ -109,6 +109,36 @@ describe("lspHintFor — emits for symbol-shaped TS/JS patterns", () => {
 		assert.ok(hint, "expected a hint for tsx glob");
 		assertHintShape(hint!);
 	});
+
+	it("brace-expansion glob `**/*.{ts,tsx,js,jsx,mts,cts}` is allowed", () => {
+		const hint = lspHintFor(
+			{
+				pattern: "getPersistedSession",
+				glob: "**/*.{ts,tsx,js,jsx,mts,cts}",
+			},
+			grepResult(SAMPLE_HIT),
+		);
+		assert.ok(hint, "expected a hint for full source brace glob");
+		assertHintShape(hint!);
+	});
+
+	it("brace-expansion glob `*.{ts,tsx}` is allowed", () => {
+		const hint = lspHintFor(
+			{ pattern: "MyComponent", glob: "*.{ts,tsx}" },
+			grepResult("src/ui/x.tsx:1:export function MyComponent() {}"),
+		);
+		assert.ok(hint, "expected a hint for `*.{ts,tsx}` brace glob");
+		assertHintShape(hint!);
+	});
+
+	it("brace-expansion glob `**/*.{js,jsx}` is allowed", () => {
+		const hint = lspHintFor(
+			{ pattern: "renderThing", glob: "**/*.{js,jsx}" },
+			grepResult("src/x.js:1:function renderThing() {}"),
+		);
+		assert.ok(hint, "expected a hint for `**/*.{js,jsx}` brace glob");
+		assertHintShape(hint!);
+	});
 });
 
 describe("lspHintFor — suppresses hint for non-symbol or non-source cases", () => {
@@ -148,6 +178,22 @@ describe("lspHintFor — suppresses hint for non-symbol or non-source cases", ()
 		const hint = lspHintFor(
 			{ pattern: "getPersistedSession", glob: "*.md" },
 			grepResult("docs/x.md:1:getPersistedSession is the function"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("non-source brace glob `*.{md,txt}` suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "getPersistedSession", glob: "*.{md,txt}" },
+			grepResult("docs/x.md:1:getPersistedSession"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("non-source glob `*.json` suppresses hint (must not match `js` inside `json`)", () => {
+		const hint = lspHintFor(
+			{ pattern: "getPersistedSession", glob: "*.json" },
+			grepResult("package.json:1:..."),
 		);
 		assert.equal(hint, null);
 	});
