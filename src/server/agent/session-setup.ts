@@ -554,6 +554,9 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 			plan.cwd = plan.bridgeOptions.cwd;
 			resolvePrompt(plan, ctx);
 		}
+		// Preserve the host-side cwd so tool extensions running inside the container
+		// can pass the host path to gateway APIs (e.g. /api/lsp/*) that run on the host.
+		if (preSandboxCwd) plan.bridgeOptions.hostCwd = preSandboxCwd;
 	}
 
 	// Step 7: persist BEFORE spawning — if the spawn fails (e.g. Docker ENOENT),
@@ -746,6 +749,7 @@ export async function executeWorktreeAsync(
 			ctx.store.update(session.id, { cwd: session.cwd });
 			resolvePrompt(plan, ctx);
 		}
+		if (preSandboxCwd) plan.bridgeOptions.hostCwd = preSandboxCwd;
 	}
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.

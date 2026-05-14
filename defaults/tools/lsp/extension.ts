@@ -61,7 +61,10 @@ export default function (pi: ExtensionAPI) {
 		body: Record<string, unknown>,
 		onUpdate?: (u: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void,
 	): Promise<unknown> {
-		const fullBody = { ...body, cwd: body.cwd ?? process.cwd() };
+		// Prefer BOBBIT_HOST_CWD when running inside a container — process.cwd()
+		// would be the container path, but the gateway's /api/lsp/* routes
+		// need the host-side cwd to spawn the LSP server correctly.
+		const fullBody = { ...body, cwd: body.cwd ?? process.env.BOBBIT_HOST_CWD ?? process.cwd() };
 		let announced = false;
 		const progressTimer = setTimeout(async () => {
 			if (announced || !onUpdate) return;

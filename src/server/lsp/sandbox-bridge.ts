@@ -92,12 +92,13 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 
 	private bridgeForHostPath(hostPath: string): DockerSandboxLspBridge | null {
 		const abs = path.resolve(hostPath);
-		let best: { projectId: string; root: string } | null = null;
+		let best: { projectId: string; root: string; worktreeRoot: string } | null = null;
 		for (const ctx of this.projectContextManager.all()) {
 			const root = path.resolve(ctx.project.rootPath);
-			const worktreeRoot = root + "-wt";
-			// Match the project root itself, paths inside it, or its worktree
-			// directory (<rootPath>-wt/<branch>/…) where agent sessions live.
+			// Respect the project's worktree_root config if set; otherwise default
+			// to the conventional <rootPath>-wt sibling directory.
+			const configuredRoot = (ctx.projectConfigStore as any)?.get?.("worktree_root") as string | undefined;
+			const worktreeRoot = configuredRoot ? path.resolve(configuredRoot) : root + "-wt";
 			const matches =
 				abs === root ||
 				abs.startsWith(root + path.sep) ||
@@ -105,17 +106,16 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 				abs.startsWith(worktreeRoot + path.sep);
 			if (matches) {
 				if (!best || root.length > best.root.length) {
-					best = { projectId: ctx.project.id ?? ctx.project.name, root };
+					best = { projectId: ctx.project.id ?? ctx.project.name, root, worktreeRoot };
 				}
 			}
 		}
 		if (!best) return null;
-		// Worktree root for sessions is `<rootPath>-wt`; bind-mounted at
-		// `/workspace-wt` inside the container.
+		// Worktree root is bind-mounted at `/workspace-wt` inside the container.
 		const bridge = new DockerSandboxLspBridge(
 			this.sandboxManager,
 			best.projectId,
-			`${best.root}-wt`,
+			best.worktreeRoot,
 		);
 		this.lastBridge = bridge;
 		return bridge;
