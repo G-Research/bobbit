@@ -7,6 +7,7 @@ import { removeMount as removePreviewMount } from "../preview/mount.js";
 import { getAllConfigDirectories, type ProjectConfigReader } from "./config-directories.js";
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
+import { buildLspSymbolLookupHint } from "./lsp-hint.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -375,7 +376,14 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. Available Skills (autonomous activation catalog)
+	// 5.5. LSP symbol-lookup hint (injected when lsp_* tools are active and LSP is enabled)
+	{
+		const lspDisabled = String(parts.projectConfigStore?.get("lsp_disabled") ?? "false").toLowerCase() === "true";
+		const lspHint = buildLspSymbolLookupHint(parts.allowedTools, lspDisabled);
+		if (lspHint) sections.push(lspHint);
+	}
+
+	// 5.6. Available Skills (autonomous activation catalog)
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
 		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
 		if (skillsSection) sections.push(skillsSection);

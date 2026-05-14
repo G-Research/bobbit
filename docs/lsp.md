@@ -1,5 +1,7 @@
 # LSP Code Intelligence
 
+> All coding-role agents receive a short symbol-lookup hint in their system prompt summarising when to use `lsp_*` vs `grep` — see also AGENTS.md for project-specific nuance.
+
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
 > Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md). This page is the operator/agent-facing reference; the design doc is the architectural source of truth.

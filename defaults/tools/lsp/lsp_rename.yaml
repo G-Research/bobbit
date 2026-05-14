@@ -1,5 +1,5 @@
 name: lsp_rename
-description: "Compute a safe rename across files; returns a WorkspaceEdit to apply."
+description: "Safe rename across files; returns WorkspaceEdit. Prefer over hand-edits. 0-indexed line/char."
 summary: "Rename symbol (LSP)"
 params: [path, line, character, newName]
 provider:

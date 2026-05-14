@@ -1,5 +1,5 @@
 name: lsp_definition
-description: "Jump to symbol definition; returns file path + range. 0-indexed line/char."
+description: "Go to symbol definition. Prefer over grep+read for symbol lookups. 0-indexed line/char."
 summary: "Go to definition (LSP)"
 params: [path, line, character]
 provider:

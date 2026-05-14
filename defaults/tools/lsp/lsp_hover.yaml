@@ -1,5 +1,5 @@
 name: lsp_hover
-description: "Hover info (type, signature, doc) for a symbol. 0-indexed line/char."
+description: "Type/signature/docs for a symbol. Prefer over reading the file. 0-indexed line/char."
 summary: "Hover info (LSP)"
 params: [path, line, character]
 provider:

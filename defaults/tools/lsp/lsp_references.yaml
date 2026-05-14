@@ -1,5 +1,5 @@
 name: lsp_references
-description: "Find all references to a symbol; returns Location[]. 0-indexed line/char."
+description: "Find all symbol references. Prefer over grep for symbol callsites. 0-indexed line/char."
 summary: "Find references (LSP)"
 params: [path, line, character, includeDeclaration?]
 provider:
