@@ -886,6 +886,8 @@ sample mixed with rare retries; mean and median both improved slightly.
   the goal-dashboard `Promise.all` consult the prefetch cache for each.
   That is closer to Opt-D's scope.
 
+**Code reverted at 26d91326** — postmortem retained for historical reference.
+
 ### 6.3 Opt-D — parallelise goal-dashboard team-state fetch (`parallelGoalFetches` flag)
 
 A/B'd on commit `606833ce8450` against the medium fixture (50 msgs/session

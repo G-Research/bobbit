@@ -28,15 +28,6 @@ export type PerfFlag = string;
  */
 export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 	{
-		name: "prefetchOnHover",
-		description:
-			"Phase 2C — on `pointerover` / `focusin` of a sidebar session or " +
-			"goal row, kick off `GET /api/sessions/:id` or `GET /api/goals/:id` " +
-			"so the response is already in flight (or cached) by the time the " +
-			"user clicks. Cache is single-use, age-bounded, and bounded in size " +
-			"to avoid staleness.",
-	},
-	{
 		name: "deferOffscreenRender",
 		description:
 			"Phase 2 Opt-A (SHIPPED, default-ON) — defer markdown / tool-call " +
@@ -50,9 +41,6 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"`bobbitPerfFlags=-deferOffscreenRender` to disable.",
 	},
 ];
-
-/** Convenience canonical flag name for Phase 2C. */
-export const PERF_FLAG_PREFETCH_ON_HOVER = "prefetchOnHover";
 
 /** Convenience canonical flag name for Phase 2 Opt-A. SHIPPED default-ON. */
 export const PERF_FLAG_DEFER_OFFSCREEN_RENDER = "deferOffscreenRender";

@@ -14,7 +14,6 @@ import {
 // import it without pulling the entire app-shell graph.
 import { gatewayFetch as _rawGatewayFetch } from "./gateway-fetch.js";
 import { measureAsync as _perfMeasureAsync, isEnabled as _perfIsEnabled } from "./perf-trace.js";
-import { isPerfFlagEnabled, PERF_FLAG_PREFETCH_ON_HOVER } from "./perf-flags.js";
 
 /**
  * Match the request URL/path against the hot endpoints called out in the
@@ -55,17 +54,11 @@ function _perfSpanFor(url: string): { name: string; detail: Record<string, unkno
  * branch falls through to the raw fetch with no allocation.
  */
 export function gatewayFetch(url: string, init?: RequestInit): Promise<Response> {
-	// Phase 2C prefetch-on-hover: check the prefetch cache for a recent in-flight
-	// or just-resolved Response. Single-use to avoid staleness (see
-	// prefetch-on-hover.ts). Only consults the cache on GET — non-GET goes
-	// straight through.
-	const prefetched = _consumePrefetch(url, init);
-	if (!_perfIsEnabled()) return prefetched ?? _rawGatewayFetch(url, init);
+	if (!_perfIsEnabled()) return _rawGatewayFetch(url, init);
 	const span = _perfSpanFor(url);
-	if (!span) return prefetched ?? _rawGatewayFetch(url, init);
-	if (prefetched) (span.detail as any).prefetched = true;
+	if (!span) return _rawGatewayFetch(url, init);
 	return _perfMeasureAsync(span.name, async () => {
-		const res = await (prefetched ?? _rawGatewayFetch(url, init));
+		const res = await _rawGatewayFetch(url, init);
 		// Attach payload size when known.
 		try {
 			const len = res.headers.get("content-length");
@@ -76,121 +69,6 @@ export function gatewayFetch(url: string, init?: RequestInit): Promise<Response>
 	}, span.detail);
 }
 
-// ============================================================================
-// PHASE 2C — prefetch-on-hover cache
-//
-// `prefetchUrl()` kicks off a fetch in the background and remembers the
-// Promise<Response> under a tiny LRU keyed by URL. When the real consumer
-// calls `gatewayFetch(url)`, `_consumePrefetch()` returns the cached
-// promise (single-use, removed on consumption to avoid staleness) so the
-// network round-trip can be elided.
-//
-// Correctness:
-//   - The entry is deleted on consumption (single-use). A subsequent
-//     `gatewayFetch()` for the same URL re-fetches normally.
-//   - Entries older than `PREFETCH_TTL_MS` are evicted on read.
-//   - The cache is bounded by `PREFETCH_MAX_ENTRIES` and uses Map
-//     insertion-order to evict the oldest.
-//   - Multiple hovers on the same URL within `PREFETCH_DEBOUNCE_MS`
-//     coalesce to a single fetch.
-//   - Disabled entirely when `prefetchOnHover` perf flag is off — cheap
-//     when disabled (one localStorage probe via isPerfFlagEnabled).
-// ============================================================================
-
-export const PREFETCH_DEBOUNCE_MS = 50;
-export const PREFETCH_TTL_MS = 30_000;
-export const PREFETCH_MAX_ENTRIES = 20;
-
-interface _PrefetchEntry { promise: Promise<Response>; createdAt: number; }
-
-const _prefetchCache = new Map<string, _PrefetchEntry>();
-const _lastHoverAt = new Map<string, number>();
-
-/** Test seam: clear the prefetch cache and debounce state. */
-export function _resetPrefetchCacheForTest(): void {
-	_prefetchCache.clear();
-	_lastHoverAt.clear();
-}
-
-/** Test seam: read the current size of the prefetch cache. */
-export function _prefetchCacheSizeForTest(): number {
-	return _prefetchCache.size;
-}
-
-function _now(): number {
-	try { return performance.now(); } catch { return Date.now(); }
-}
-
-function _evictExpired(now: number): void {
-	for (const [k, v] of _prefetchCache) {
-		if (now - v.createdAt > PREFETCH_TTL_MS) _prefetchCache.delete(k);
-	}
-	while (_prefetchCache.size > PREFETCH_MAX_ENTRIES) {
-		const first = _prefetchCache.keys().next().value;
-		if (first === undefined) break;
-		_prefetchCache.delete(first);
-	}
-}
-
-/**
- * Kick off a prefetch for `url` and stash the in-flight Response in the
- * cache. No-op when the `prefetchOnHover` perf flag is disabled. Debounces
- * repeated calls for the same URL within `PREFETCH_DEBOUNCE_MS`.
- */
-export function prefetchUrl(url: string): void {
-	if (!isPerfFlagEnabled(PERF_FLAG_PREFETCH_ON_HOVER)) return;
-	const now = _now();
-	const last = _lastHoverAt.get(url) ?? -Infinity;
-	if (now - last < PREFETCH_DEBOUNCE_MS) return;
-	_lastHoverAt.set(url, now);
-	// Existing fresh entry? Don't double-fetch.
-	const existing = _prefetchCache.get(url);
-	if (existing && now - existing.createdAt < PREFETCH_TTL_MS) return;
-	// Re-insert at the end so LRU eviction prefers older entries.
-	_prefetchCache.delete(url);
-	const promise = _rawGatewayFetch(url).catch((err) => {
-		// Drop failed prefetches from the cache so the real call falls through
-		// to a fresh fetch. Swallow rejection here so unconsumed prefetches
-		// don't surface as unhandled rejections; the consumer (if any) will
-		// see the rejection via the awaited promise it inherits.
-		_prefetchCache.delete(url);
-		throw err;
-	});
-	// Attach a noop catch to mark the promise as handled when not consumed.
-	promise.catch(() => { /* prefetch failure, ok */ });
-	_prefetchCache.set(url, { promise, createdAt: now });
-	_evictExpired(now);
-}
-
-/** Prefetch a session detail payload. */
-export function prefetchSession(sessionId: string): void {
-	if (!sessionId) return;
-	prefetchUrl(`/api/sessions/${sessionId}`);
-}
-
-/** Prefetch a goal detail payload (the single fetch that gates the dashboard
- *  render — sibling fetches stay parallel via goal-dashboard.ts). */
-export function prefetchGoal(goalId: string): void {
-	if (!goalId) return;
-	prefetchUrl(`/api/goals/${goalId}`);
-}
-
-/**
- * If `url` has a cached prefetch entry that's still fresh and the request is
- * a GET, pop it out and return the Promise. Otherwise return `null` and the
- * caller falls through to a normal fetch.
- */
-function _consumePrefetch(url: string, init?: RequestInit): Promise<Response> | null {
-	if (!isPerfFlagEnabled(PERF_FLAG_PREFETCH_ON_HOVER)) return null;
-	const method = (init?.method || "GET").toUpperCase();
-	if (method !== "GET") return null;
-	const entry = _prefetchCache.get(url);
-	if (!entry) return null;
-	// Single-use — remove so a subsequent fetch for the same URL re-fetches.
-	_prefetchCache.delete(url);
-	if (_now() - entry.createdAt > PREFETCH_TTL_MS) return null;
-	return entry.promise;
-}
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
