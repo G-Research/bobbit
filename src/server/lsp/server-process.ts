@@ -116,8 +116,14 @@ export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 		}
 		try { connection.dispose(); } catch { /* ignore */ }
 		try { child.kill("SIGTERM"); } catch { /* ignore */ }
-		await new Promise(r => setTimeout(r, 50));
-		if (!child.killed) {
+		// Wait up to 500 ms for the process to actually exit before escalating.
+		// child.killed is set by child.kill() immediately — not on process exit —
+		// so we check child.exitCode (null = still running) instead.
+		await Promise.race([
+			new Promise<void>(r => child.once("exit", () => r())),
+			new Promise<void>(r => setTimeout(r, 500)),
+		]);
+		if (child.exitCode === null) {
 			try { child.kill("SIGKILL"); } catch { /* ignore */ }
 		}
 	};

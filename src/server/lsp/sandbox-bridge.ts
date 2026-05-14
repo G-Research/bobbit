@@ -88,7 +88,15 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 		let best: { projectId: string; root: string } | null = null;
 		for (const ctx of this.projectContextManager.all()) {
 			const root = path.resolve(ctx.project.rootPath);
-			if (abs === root || abs.startsWith(root + path.sep)) {
+			const worktreeRoot = root + "-wt";
+			// Match the project root itself, paths inside it, or its worktree
+			// directory (<rootPath>-wt/<branch>/…) where agent sessions live.
+			const matches =
+				abs === root ||
+				abs.startsWith(root + path.sep) ||
+				abs === worktreeRoot ||
+				abs.startsWith(worktreeRoot + path.sep);
+			if (matches) {
 				if (!best || root.length > best.root.length) {
 					best = { projectId: ctx.project.id ?? ctx.project.name, root };
 				}

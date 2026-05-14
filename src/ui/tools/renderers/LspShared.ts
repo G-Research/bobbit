@@ -209,7 +209,13 @@ export function renderSymbolRow(s: DocumentSymbol): TemplateResult {
 export function renderSymbolTree(syms: DocumentSymbol[], depth: number): TemplateResult {
 	if (depth >= DOC_SYM_MAX_DEPTH) {
 		const n = countNested(syms);
-		return html`<div class="pl-4 text-xs text-muted-foreground italic">(${n} more nested symbol${n === 1 ? "" : "s"})</div>`;
+		// Collapsed JSON fallback so power users can still access truncated data.
+		return html`
+			<details class="pl-4">
+				<summary class="text-xs text-muted-foreground italic cursor-pointer list-none">(${n} more nested symbol${n === 1 ? "" : "s"})</summary>
+				<pre class="text-xs font-mono overflow-auto max-h-[200px] bg-muted/50 rounded p-2 mt-1">${JSON.stringify(syms, null, 2)}</pre>
+			</details>
+		`;
 	}
 	return html`
 		<ul class="space-y-0 ${depth === 0 ? "" : "pl-4 border-l border-border ml-2"}">

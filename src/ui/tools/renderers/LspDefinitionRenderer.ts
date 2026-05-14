@@ -57,6 +57,12 @@ export class LspDefinitionRenderer implements ToolRenderer<DefParams, any> {
 		}
 
 		const locs: LspLocation[] = Array.isArray(data) ? data : [data];
+		if (locs.length === 0) {
+			return {
+				content: html`<div>${renderHeader(state, MapPin, headerText)}<div class="mt-1 text-sm text-muted-foreground italic">No definition found.</div></div>`,
+				isCustom: false,
+			};
+		}
 		return {
 			content: html`
 				<div>
