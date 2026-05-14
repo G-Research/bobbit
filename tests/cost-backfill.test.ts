@@ -35,12 +35,9 @@ const COSTS_FILE = path.join(stateDir, "session-costs.json");
 const SEEDED_JSONL_DIR = path.join(stateDir, "seeded-sessions");
 fs.mkdirSync(SEEDED_JSONL_DIR, { recursive: true });
 
-const { CostTracker } = await import("../src/server/agent/cost-tracker.ts");
+const { CostTracker, UNATTRIBUTABLE_LEGACY_GOAL_ID } = await import("../src/server/agent/cost-tracker.ts");
 const { writeSessionSidecar } = await import("../src/server/agent/session-sidecar.ts");
-const {
-	backfillLegacyCostGoalIds,
-	UNATTRIBUTABLE_LEGACY_GOAL_ID,
-} = await import("../src/server/agent/cost-backfill.ts");
+const { backfillLegacyCostGoalIds } = await import("../src/server/agent/cost-backfill.ts");
 
 /** Minimal session-manager stub conforming to the helper's interface. */
 function makeSessionManager(map: Record<string, Partial<{
@@ -115,7 +112,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		seedCosts({ s1: { totalCost: 0.001 } });
 		const tracker = new CostTracker(stateDir);
 		const sessionManager = makeSessionManager({ s1: { goalId: "goal-live" } });
-		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(stamped, 1);
 		assert.equal(unattributable, 0);
 		assert.equal(tracker.getSessionCost("s1")?.goalId, "goal-live");
@@ -125,7 +122,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		seedCosts({ s1: { totalCost: 0.001 } });
 		const tracker = new CostTracker(stateDir);
 		const sessionManager = makeSessionManager({ s1: { teamGoalId: "goal-team" } });
-		const { stamped } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const { stamped } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(stamped, 1);
 		assert.equal(tracker.getSessionCost("s1")?.goalId, "goal-team");
 	});
@@ -139,7 +136,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		// was partially purged or never carried a goalId at create time. The
 		// helper must use the jsonl path on the record to locate the sidecar.
 		const sessionManager = makeSessionManager({ s2: { agentSessionFile: jsonlPath } });
-		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(stamped, 1, "sidecar fallback must stamp the entry");
 		assert.equal(unattributable, 0);
 		assert.equal(tracker.getSessionCost("s2")?.goalId, "goal-sidecar");
@@ -149,7 +146,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		seedCosts({ ghost: { totalCost: 0.005, inputTokens: 1000, outputTokens: 500 } });
 		const tracker = new CostTracker(stateDir);
 		const sessionManager = makeSessionManager({});
-		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const { stamped, unattributable } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(stamped, 0);
 		assert.equal(unattributable, 1);
 		assert.equal(tracker.getSessionCost("ghost")?.goalId, undefined,
@@ -181,7 +178,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 			s1: { goalId: "goal-WRONG" },
 			s2: { goalId: "goal-new" },
 		});
-		const { stamped } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const { stamped } = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(stamped, 1, "only the previously-unstamped entry should be touched");
 		assert.equal(tracker.getSessionCost("s1")?.goalId, "goal-original");
 		assert.equal(tracker.getSessionCost("s2")?.goalId, "goal-new");
@@ -195,7 +192,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		const resA = backfillLegacyCostGoalIds({
 			costTracker: trackerA,
 			sessionManager: makeSessionManager({ s1: { goalId: "g" } }),
-			stateDir,
+			agentSessionsRoot: stateDir,
 		});
 		assert.equal(resA.stamped, 1);
 		assert.ok(trackerA.getGeneration() > genBeforeA,
@@ -210,7 +207,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		const resB = backfillLegacyCostGoalIds({
 			costTracker: trackerB,
 			sessionManager: makeSessionManager({}),
-			stateDir,
+			agentSessionsRoot: stateDir,
 		});
 		assert.equal(resB.stamped, 0);
 		assert.equal(trackerB.getGeneration(), genBeforeB,
@@ -221,7 +218,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		seedCosts({ s1: { totalCost: 0.003 } });
 		const t1 = new CostTracker(stateDir);
 		const sessionManager = makeSessionManager({ s1: { goalId: "goal-persisted" } });
-		backfillLegacyCostGoalIds({ costTracker: t1, sessionManager, stateDir });
+		backfillLegacyCostGoalIds({ costTracker: t1, sessionManager, agentSessionsRoot: stateDir });
 
 		const onDisk = JSON.parse(fs.readFileSync(COSTS_FILE, "utf-8"));
 		assert.equal(onDisk.s1.goalId, "goal-persisted");
@@ -245,7 +242,7 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 			// s-ghost and s-done deliberately absent / pre-stamped.
 		});
 		const { stamped, unattributable } = backfillLegacyCostGoalIds({
-			costTracker: tracker, sessionManager, stateDir,
+			costTracker: tracker, sessionManager, agentSessionsRoot: stateDir,
 		});
 		assert.equal(stamped, 2, "live + sidecar both stamped");
 		assert.equal(unattributable, 1, "ghost remains unattributable");
@@ -267,11 +264,11 @@ describe("backfillLegacyCostGoalIds + unattributable surface", () => {
 		const tracker = new CostTracker(stateDir);
 		const sessionManager = makeSessionManager({ s1: { goalId: "goal-X" } });
 
-		const first = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const first = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(first.stamped, 1);
 		const genAfterFirst = tracker.getGeneration();
 
-		const second = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, stateDir });
+		const second = backfillLegacyCostGoalIds({ costTracker: tracker, sessionManager, agentSessionsRoot: stateDir });
 		assert.equal(second.stamped, 0, "second invocation is a no-op");
 		assert.equal(tracker.getGeneration(), genAfterFirst, "no spurious cache invalidation");
 	});
