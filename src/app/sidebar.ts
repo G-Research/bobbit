@@ -26,9 +26,10 @@ import {
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
-import { showGoalDialog, showProjectDialog } from "./dialogs.js";
-import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
+import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState } from "./api.js";
+import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
@@ -534,7 +535,6 @@ export async function createStaffAssistantSession(
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
-	const { gatewayFetch } = await import("./api.js");
 	try {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
@@ -542,14 +542,11 @@ export async function createStaffAssistantSession(
 			body: JSON.stringify({ assistantType: "staff", projectId: opts.projectId, cwd: opts.cwd }),
 		});
 		if (!res.ok) {
-			const { errorFromResponse } = await import("./error-helpers.js");
 			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
 		}
 		const { id } = await res.json();
 		await connectToSession(id, false, { isStaffAssistant: true, assistantType: "staff" });
 	} catch (err) {
-		const { showConnectionError } = await import("./dialogs.js");
-		const { errorDetails } = await import("./error-helpers.js");
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create staff assistant", message, { code, stack });
 	} finally {
@@ -580,7 +577,6 @@ export async function startNewStaffFlow(e: Event, projectIdHint?: string): Promi
 		const only = projects[0];
 		return createStaffAssistantSession(e, { projectId: only.id, cwd: only.rootPath });
 	}
-	const { showProjectPickerPopover } = await import("./goal-entry.js");
 	showProjectPickerPopover(anchor, (pickedId: string) => {
 		const picked = state.projects.find(p => p.id === pickedId);
 		if (!picked) return;
@@ -630,7 +626,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				<div class="flex items-center" @click=${(e: Event) => e.stopPropagation()}>
 					<button
 						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
-						@click=${() => { import("./staff-page.js").then((m) => m.loadStaffPageData()); import("./routing.js").then((m) => m.setHashRoute("staff")); }}
+						@click=${() => { import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
 						title="Manage staff agents"
 					>${icon(List, mobile ? "sm" : "xs")}</button>
 					<button
@@ -728,10 +724,10 @@ function _ensureArchivedForSearch(): void {
 		_archivedBySearch = true;
 	}
 	if (!archivedSessionsLoaded()) {
-		import("./api.js").then(m => m.fetchArchivedSessions());
+		fetchArchivedSessions();
 	}
 	if (!archivedGoalsLoaded()) {
-		import("./api.js").then(m => m.fetchArchivedGoalsPaginated());
+		fetchArchivedGoalsPaginated();
 	}
 }
 
@@ -741,7 +737,7 @@ function _revertArchivedIfSearchOpened(): void {
 		state.showArchived = false;
 		_archivedBySearch = false;
 		resetArchivedExpandState();
-		import("./api.js").then(m => m.clearArchivedSessionsState());
+		clearArchivedSessionsState();
 	}
 }
 
@@ -819,11 +815,9 @@ function renderOrphanedStaffBanner() {
 							@click=${(e: Event) => {
 								e.stopPropagation();
 								const anchor = e.currentTarget as HTMLElement;
-								void import("./goal-entry.js").then(({ showProjectPickerPopover }) => {
-									showProjectPickerPopover(anchor, async (projectId: string) => {
-										const ok = await reassignStaffProject(agent.id, projectId);
-										if (ok) await reloadStaffList();
-									});
+								showProjectPickerPopover(anchor, async (projectId: string) => {
+									const ok = await reassignStaffProject(agent.id, projectId);
+									if (ok) await reloadStaffList();
 								});
 							}}
 							title="Assign to project…"
@@ -1071,7 +1065,6 @@ function renderProjectContent(
 			` : ""}
 			`; })()}
 		</div>
-		${!isProvisional && _staff ? renderStaffSidebarSection(_staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(
 			project,
 			// Bottom-section archived goals: only those whose parent is NOT
@@ -1109,7 +1102,7 @@ export function renderSidebar() {
 				<div class="flex items-center">
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isRolesActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); import("./routing.js").then((m) => m.setHashRoute("roles")); })}
+						@click=${() => toggleConfigPage(["roles", "role-edit"], () => { import("./role-manager-page.js").then((m) => m.loadRolePageData()); setHashRoute("roles"); })}
 						title="Manage roles"
 					>
 						${icon(Users, "xs", "!w-3.5 !h-3.5")}
@@ -1117,7 +1110,7 @@ export function renderSidebar() {
 					</button>
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 ${isToolsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); import("./routing.js").then((m) => m.setHashRoute("tools")); })}
+						@click=${() => toggleConfigPage(["tools", "tool-edit"], () => { import("./tool-manager-page.js").then((m) => m.loadToolPageData()); setHashRoute("tools"); })}
 						title="Manage tools"
 					>
 						${icon(Wrench, "xs", "!w-3.5 !h-3.5")}
@@ -1125,7 +1118,7 @@ export function renderSidebar() {
 					</button>
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isSkillsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); import("./routing.js").then((m) => m.setHashRoute("skills")); })}
+						@click=${() => toggleConfigPage(["skills"], () => { import("./skills-page.js").then((m) => m.loadSkillsPageData()); setHashRoute("skills"); })}
 						title="View skills"
 					>
 						${icon(Zap, "xs", "!w-3.5 !h-3.5")}
@@ -1135,7 +1128,7 @@ export function renderSidebar() {
 				<div class="flex items-center">
 					<button
 						class="flex-1 flex items-center justify-center gap-1 px-1 py-1 whitespace-nowrap ${isWorkflowsActive ? 'text-primary bg-primary/10 font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'} rounded-md transition-colors"
-						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); import("./routing.js").then((m) => m.setHashRoute("workflows")); })}
+						@click=${() => toggleConfigPage(["workflows", "workflow-edit"], () => { import("./workflow-page.js").then((m) => m.loadWorkflowPageData()); setHashRoute("workflows"); })}
 						title="Manage workflows"
 					>
 						${icon(Workflow, "xs", "!w-3.5 !h-3.5")}

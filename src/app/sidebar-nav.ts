@@ -23,6 +23,7 @@
 
 import { state, renderApp, expandedGoals, saveExpandedGoals, isUngroupedExpanded, setUngroupedExpanded, isStaffExpanded, setStaffSectionExpanded, isArchivedSectionExpanded, setArchivedSectionExpanded } from "./state.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { connectToSession } from "./session-manager.js";
 // sidebar.ts also imports from this module — ES modules handle the cycle
 // fine because we only reference these as function bindings at call time.
 import { isProjectExpanded as _isProjectExpanded, toggleProjectExpanded as _toggleProjectExpanded } from "./sidebar.js";
@@ -171,7 +172,7 @@ export function openForNavItem(item: NavItem): void {
 			// the async tail is just hydration. We don't await so the keyboard
 			// shortcut handler returns immediately and the next press finds the
 			// updated active row.
-			void import("./session-manager.js").then(m => m.connectToSession(item.id, true));
+			void connectToSession(item.id, true);
 			break;
 		case "goal":
 			setHashRoute("goal-dashboard", item.id);

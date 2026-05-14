@@ -12,7 +12,7 @@ import {
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, restoreProposalSnapshot, promoteProject, fetchProjects, notifyProposalDecision } from "./api.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
@@ -35,7 +35,10 @@ import {
 	isProposalDismissed as isProposalDismissedTyped,
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
+	deleteProposalFile,
 } from "./proposal-helpers.js";
+import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { resetProjectProposalPanel } from "./render.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 
 /**
@@ -1102,9 +1105,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			try { refreshGitStatusForSession(sessionId); } catch { /* ignore */ }
 			try { refreshBgProcessesForSession(sessionId); } catch { /* ignore */ }
 			try {
-				const { initAnnotationStore } = await import("../ui/components/review/AnnotationStore.js");
 				initAnnotationStore(sessionId).catch(() => { /* best-effort */ });
-			} catch { /* AnnotationStore module load failed — keep going */ }
+			} catch { /* AnnotationStore init failed — keep going */ }
 		};
 
 		// Server broadcasts session_removed when ANY session is terminated/archived/
@@ -1419,7 +1421,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// etc.) is populated.
 			if (typeof rev === "number" && Number.isFinite(rev) && rev > 0) {
 				try {
-					const { restoreProposalSnapshot } = await import("./api.js");
 					const res = await restoreProposalSnapshot(sessionId, type, rev);
 					if (res && (res as any).ok) {
 						const restoredFields = (res as any).fields as Record<string, unknown> | undefined;
@@ -2030,8 +2031,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
-	const { promoteProject, fetchProjects, gatewayFetch } = await import("./api.js");
-
 	// Promote the provisional project
 	const promoted = await promoteProject(projectId, typeof fields.name === "string" ? fields.name : "");
 	if (!promoted) return;
@@ -2054,7 +2053,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 				const details = Array.isArray(data?.details) && data.details.length > 0
 					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
 					: "";
-				const { showConnectionError } = await import("./dialogs.js");
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
@@ -2078,7 +2076,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
 	if (proposal.sessionId) {
 		deleteProjectDraft(proposal.sessionId);
 		// Slice E: drop the on-disk proposal file once accepted.
-		const { deleteProposalFile } = await import("./proposal-helpers.js");
 		void deleteProposalFile(proposal.sessionId, "project");
 	}
 
@@ -2093,7 +2090,6 @@ async function acceptProvisionalProjectProposal(): Promise<void> {
  * Project Assistant" button after Apply Changes.
  */
 export async function terminateProjectAssistantSession(sessionId: string): Promise<void> {
-	const { gatewayFetch } = await import("./api.js");
 	try {
 		uncacheSession(sessionId);
 		if (activeSessionId() === sessionId) {
@@ -2133,7 +2129,6 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	const projectId = session?.projectId;
 	if (!projectId) return;
 
-	const { gatewayFetch, fetchProjects } = await import("./api.js");
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 
 	// 1. Rename via PUT /api/projects/:id if a name is supplied.
@@ -2164,7 +2159,6 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 				const details = Array.isArray(data?.details) && data.details.length > 0
 					? data.details.map((d: any) => d?.message ?? String(d)).join("\n")
 					: "";
-				const { showConnectionError } = await import("./dialogs.js");
 				showConnectionError(
 					data?.error || `Config write failed (${res.status})`,
 					details || (data?.error ?? ""),
@@ -2188,13 +2182,11 @@ async function acceptRegisteredProjectProposal(): Promise<void> {
 	// Persist the accepted flag in the on-disk draft so it survives reload.
 	saveProjectDraft(propSessionId);
 	// Slice E: drop the on-disk proposal file once accepted.
-	const { deleteProposalFile } = await import("./proposal-helpers.js");
 	void deleteProposalFile(propSessionId, "project");
 	// Notify the proposing agent that the change is now live so it can
 	// continue its task without polling. Mid-session only — provisional
 	// (project-assistant) flow terminates the session, so notifying there
 	// is a no-op.
-	const { notifyProposalDecision } = await import("./api.js");
 	void notifyProposalDecision(propSessionId, "project", "accepted", fieldNameStr || "(unnamed)");
 	renderApp();
 }
@@ -2214,12 +2206,7 @@ export function backToSessions(): void {
 		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
 	}
 	delete state.activeProposals.project;
-	void (async () => {
-		try {
-			const { resetProjectProposalPanel } = await import("./render.js");
-			resetProjectProposalPanel();
-		} catch { /* ignore */ }
-	})();
+	try { resetProjectProposalPanel(); } catch { /* ignore */ }
 	state.assistantType = null;
 	state.assistantTab = "chat";
 	state.assistantHasProposal = false;

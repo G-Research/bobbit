@@ -24,14 +24,14 @@ import {
 	getSidebarData,
 	isProposalStreaming,
 } from "./state.js";
-import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
+import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus, notifyProposalDecision } from "./api.js";
 import { errorDetails } from "./error-helpers.js";
 import { clearSessionModel } from "./routing.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
-import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
+import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed, connectToSession, terminateProjectAssistantSession, acceptProjectProposal } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError, confirmAction, createProjectAssistantSession } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, synthStaffSessionRow, filterStaffByQuery } from "./sidebar.js";
 import { computeSpawnedClaim } from "./sidebar-spawned-children.js";
@@ -1352,7 +1352,6 @@ function goalPreviewPanel() {
 		// Notify the proposing agent (mid-session only — assistant context
 		// tears down the session below, so notifying there would be moot).
 		if (!isAssistantContext && sessionId && goal) {
-			const { notifyProposalDecision } = await import("./api.js");
 			void notifyProposalDecision(sessionId, "goal", "accepted", trimmedTitle);
 		}
 
@@ -1368,7 +1367,6 @@ function goalPreviewPanel() {
 	const handleOpenProjectAssistant = async () => {
 		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
 		if (!linked) return;
-		const { createProjectAssistantSession } = await import("./dialogs.js");
 		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 
@@ -1583,7 +1581,6 @@ function rolePreviewPanel() {
 		// the session will be terminated immediately below — skip the notify
 		// since there's no agent to receive it.
 		if (!isAssistantContext && sessionId) {
-			const { notifyProposalDecision } = await import("./api.js");
 			void notifyProposalDecision(sessionId, "role", "accepted", trimmedName);
 		}
 
@@ -2134,7 +2131,6 @@ function staffPreviewPanel() {
 		// Notify the proposing agent (fire-and-forget) — only when mid-session,
 		// since the assistant-context flow ends the session right here.
 		if (!isAssistantContext && sessionId) {
-			const { notifyProposalDecision } = await import("./api.js");
 			void notifyProposalDecision(sessionId, "staff", "accepted", trimmedName);
 		}
 
@@ -2145,7 +2141,6 @@ function staffPreviewPanel() {
 		reloadStaffList();
 		await refreshSessions();
 		if (isAssistantContext && result?.currentSessionId) {
-			const { connectToSession } = await import("./session-manager.js");
 			await connectToSession(result.currentSessionId, false);
 		}
 		renderApp();
@@ -2367,7 +2362,6 @@ function projectProposalPanel() {
 		const accepted = sessId ? state.projectProposalAcceptedBySessionId[sessId] : false;
 		if (accepted && sessId) {
 			const handleTerminate = async () => {
-				const { confirmAction } = await import("./dialogs.js");
 				const ok = await confirmAction(
 					"Terminate Project Assistant",
 					"End this assistant session and return to the dashboard?",
@@ -2375,7 +2369,6 @@ function projectProposalPanel() {
 					true,
 				);
 				if (!ok) return;
-				const { terminateProjectAssistantSession } = await import("./session-manager.js");
 				await terminateProjectAssistantSession(sessId);
 			};
 			return html`
@@ -2437,7 +2430,6 @@ function projectProposalPanel() {
 	}
 
 	const handleAccept = async () => {
-		const { acceptProjectProposal } = await import("./session-manager.js");
 		await acceptProjectProposal();
 	};
 
@@ -2860,7 +2852,6 @@ function goalProposalPanel() {
 	const handleOpenProjectAssistant = async () => {
 		const linked = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : null;
 		if (!linked) return;
-		const { createProjectAssistantSession } = await import("./dialogs.js");
 		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 

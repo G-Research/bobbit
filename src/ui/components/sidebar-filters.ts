@@ -16,6 +16,11 @@ import { icon } from "@mariozechner/mini-lit";
 import { Archive, Eye, Filter, Zap } from "lucide";
 import { renderApp, resetArchivedExpandState, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
+// Static cycle with sidebar.ts (which statically imports renderFiltersButton).
+// Both sides only reference the imported symbols inside function bodies, so
+// ESM live-binding resolves at call time.
+import { clearArchivedBySearch } from "../../app/sidebar.js";
+import { fetchArchivedSessions, fetchArchivedGoalsPaginated, clearArchivedSessionsState } from "../../app/api.js";
 
 // ---------------------------------------------------------------------------
 // Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
@@ -26,15 +31,13 @@ export function toggleShowArchived(): void {
 	state.showArchived = !state.showArchived;
 	localStorage.setItem("bobbit-show-archived", String(state.showArchived));
 	// Manual toggle takes precedence over search-driven auto-open.
-	import("../../app/sidebar.js").then(m => m.clearArchivedBySearch()).catch(() => {});
+	clearArchivedBySearch();
 	if (state.showArchived) {
-		import("../../app/api.js").then(m => {
-			m.fetchArchivedSessions();
-			m.fetchArchivedGoalsPaginated();
-		});
+		fetchArchivedSessions();
+		fetchArchivedGoalsPaginated();
 	} else {
 		resetArchivedExpandState();
-		import("../../app/api.js").then(m => m.clearArchivedSessionsState());
+		clearArchivedSessionsState();
 	}
 	renderApp();
 }
