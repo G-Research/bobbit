@@ -268,6 +268,15 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
+	/**
+	 * Actual ref used for `aheadOfPrimary`/`behindPrimary` calculations.
+	 * Equals `origin/<primaryBranch>` when the remote ref exists, else the
+	 * bare local branch name `<primaryBranch>`. Surfaced separately from
+	 * `primaryBranch` so the UI can render the truthful target (a configured
+	 * `base_ref` of `MyUpstream` is a LOCAL branch — "Merged into
+	 * origin/MyUpstream" is misleading when origin has no such ref).
+	 */
+	primaryRef: string;
 	status: { file: string; status: string }[];
 	hasUpstream: boolean; ahead: number; behind: number;
 	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
