@@ -3517,12 +3517,19 @@ async function handleApiRoute(
 						console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					} else {
-						// No id given: use "general" in-memory without persisting to disk.
-						// This lets goal creation succeed while leaving project.yaml unchanged.
-						const fallback = (seeds as Record<string, unknown>).general ?? Object.values(seeds)[0];
+						// No id given: persist all defaults to disk so subsequent goal creations
+						// in the same zero-workflows project also succeed. Then pick "general"
+						// as the resolved workflow for this goal.
+						// See e04159ff and tests/e2e/projects-no-default-workflows.spec.ts Case C.
+						seeds.parent = buildParentWorkflow();
+						for (const wf of Object.values(seeds)) {
+							targetCtx.workflowStore.put(wf as unknown as Workflow);
+						}
+						console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
+						const fallback = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
 						if (fallback) {
-							resolvedWorkflow = fallback as Workflow;
-							resolvedWorkflowId = (resolvedWorkflow as { id?: string }).id || "general";
+							resolvedWorkflow = fallback;
+							resolvedWorkflowId = fallback.id || "general";
 						}
 					}
 				}
