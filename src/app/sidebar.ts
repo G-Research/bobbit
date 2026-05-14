@@ -570,6 +570,7 @@ export async function startNewStaffFlow(e: Event, projectIdHint?: string): Promi
 		if (proj) {
 			return createStaffAssistantSession(e, { projectId: proj.id, cwd: proj.rootPath });
 		}
+		console.warn("[sidebar] startNewStaffFlow: project hint not found:", projectIdHint);
 	}
 	const projects = state.projects;
 	if (projects.length === 0) { showProjectDialog(); return; }
@@ -765,6 +766,23 @@ function _handleFullSearchClick(query: string): void {
 }
 
 /**
+ * Filter a list of staff agents by a lowercased search query, matching against
+ * `staff.name` OR the underlying live session's `title` / `role`. Shared
+ * between desktop (`renderSidebar`) and mobile (`render.ts::renderSidebarShellMobile`).
+ */
+export function filterStaffByQuery<T extends typeof state.staffList[0]>(staffList: T[], lowerQuery: string): T[] {
+	return staffList.filter(s => {
+		if (s.name?.toLowerCase().includes(lowerQuery)) return true;
+		if (s.currentSessionId) {
+			const sess = state.gatewaySessions.find(g => g.id === s.currentSessionId);
+			if (sess?.title?.toLowerCase().includes(lowerQuery)) return true;
+			if (sess?.role?.toLowerCase().includes(lowerQuery)) return true;
+		}
+		return false;
+	});
+}
+
+/**
  * Synthesise a session row for a staff agent.
  *
  * Returns the existing live GatewaySession with title/staffId overrides so
@@ -772,7 +790,7 @@ function _handleFullSearchClick(query: string): void {
  * Returns `null` if the staff has no current live session, or if the staff's
  * session is owned by a goal (the goal-team list already renders it).
  */
-function synthStaffSessionRow(agent: typeof state.staffList[0]): GatewaySession | null {
+export function synthStaffSessionRow(agent: typeof state.staffList[0]): GatewaySession | null {
 	if (!agent.currentSessionId) return null;
 	const archived = state.archivedSessions.find(s => s.id === agent.currentSessionId);
 	if (archived?.teamGoalId) return null;
@@ -1048,16 +1066,7 @@ export function renderSidebar() {
 									return goal;
 								}).filter(Boolean);
 								filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
-								// Match staff against staff.name OR the underlying session title/role.
-								filteredStaff = filteredStaff.filter(s => {
-									if (s.name?.toLowerCase().includes(q)) return true;
-									if (s.currentSessionId) {
-										const sess = state.gatewaySessions.find(g => g.id === s.currentSessionId);
-										if (sess?.title?.toLowerCase().includes(q)) return true;
-										if (sess?.role?.toLowerCase().includes(q)) return true;
-									}
-									return false;
-								});
+								filteredStaff = filterStaffByQuery(filteredStaff, q);
 							}
 							// No longer need to filter out pending project sessions — they have real projectIds now
 
@@ -1083,14 +1092,24 @@ export function renderSidebar() {
 								if (!bucket) { console.warn("[sidebar] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 								bucket.sessions.push(s);
 							}
+							// Collect staff rows per project, then prepend in stable alphabetical order
+							// so multiple staff don't shift around on re-render.
+							const staffRowsByProject = new Map<string, GatewaySession[]>();
 							for (const s of filteredStaff) {
 								if (!s.projectId) { /* orphan — surfaced in the banner */ continue; }
 								const bucket = projectMap.get(s.projectId);
 								if (!bucket) { /* orphan — surfaced in the banner */ continue; }
 								bucket.staff.push(s);
-								// Synthesise a session row so the staff appears in the project's Sessions list.
 								const synth = synthStaffSessionRow(s);
-								if (synth) bucket.sessions.unshift(synth);
+								if (!synth) continue;
+								let rows = staffRowsByProject.get(s.projectId);
+								if (!rows) { rows = []; staffRowsByProject.set(s.projectId, rows); }
+								rows.push(synth);
+							}
+							for (const [pid, rows] of staffRowsByProject) {
+								rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+								const bucket = projectMap.get(pid);
+								if (bucket) bucket.sessions.unshift(...rows);
 							}
 
 							// Filter + bucket archived goals / standalone archived sessions by project.
@@ -1188,15 +1207,39 @@ export function renderSidebar() {
 function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
 	const allSessions = state.gatewaySessions;
 	const { ungroupedSessions: ungroupedBare } = getSidebarData();
-	// Surface staff as rows in the SES bucket alongside ungrouped sessions — no
-	// flat per-global tail list (surface-staff-in-sessions design §3).
-	const staffSessionRows: GatewaySession[] = [];
+	// Bucket goals + ungrouped sessions + staff by project so the collapsed
+	// sidebar mirrors the expanded structure (surface-staff-in-sessions design §3).
+	interface CollapsedBucket { goals: Goal[]; sessions: GatewaySession[] }
+	const byProject = new Map<string, CollapsedBucket>();
+	for (const p of state.projects) byProject.set(p.id, { goals: [], sessions: [] });
+	for (const g of sortedGoals) {
+		if (!g.projectId) continue;
+		const bucket = byProject.get(g.projectId);
+		if (bucket) bucket.goals.push(g);
+	}
+	for (const s of ungroupedBare) {
+		if (!s.projectId) continue;
+		const bucket = byProject.get(s.projectId);
+		if (bucket) bucket.sessions.push(s);
+	}
+	// Surface staff as rows in each project's bucket — no flat global tail list.
+	const staffRowsByProject = new Map<string, GatewaySession[]>();
 	for (const agent of state.staffList) {
 		if (agent.state === "retired") continue;
+		if (!agent.projectId) continue;
 		const row = synthStaffSessionRow(agent);
-		if (row) staffSessionRows.push(row);
+		if (!row) continue;
+		let rows = staffRowsByProject.get(agent.projectId);
+		if (!rows) { rows = []; staffRowsByProject.set(agent.projectId, rows); }
+		rows.push(row);
 	}
-	const ungrouped = [...staffSessionRows, ...ungroupedBare].sort((a, b) => a.createdAt - b.createdAt);
+	for (const [pid, rows] of staffRowsByProject) {
+		rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+		const bucket = byProject.get(pid);
+		if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
+	}
+	// Stable date ordering for non-staff ungrouped, with staff already at the front above.
+	// (Don't resort because that would interleave staff with sessions.)
 
 	const renderCollapsedSession = (s: GatewaySession) => {
 		const active = activeSessionId() === s.id;
@@ -1241,34 +1284,40 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 	return html`
 		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
 			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
-				${sortedGoals.map((goal, i) => {
-					const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
-					const expanded = expandedGoals.has(goal.id);
+				${state.projects.map((project, pi) => {
+					const bucket = byProject.get(project.id) || { goals: [], sessions: [] };
+					if (bucket.goals.length === 0 && bucket.sessions.length === 0) return "";
+					const _collapsedUngroupedExp = isUngroupedExpanded(project.id);
 					return html`
-						${i > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
-						<button
+						${pi > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
+						${bucket.goals.map((goal, i) => {
+							const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+							const expanded = expandedGoals.has(goal.id);
+							return html`
+								${i > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
+								<button
+									class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+									title=${goal.title}
+									@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
+								>
+									<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
+									<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
+								</button>
+								${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
+							`;
+						})}
+						${bucket.goals.length > 0 && bucket.sessions.length > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
+						${bucket.goals.length > 0 && bucket.sessions.length > 0 ? html`<button
 							class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
-							title=${goal.title}
-							@click=${(e: Event) => { e.stopPropagation(); if (expandedGoals.has(goal.id)) expandedGoals.delete(goal.id); else expandedGoals.add(goal.id); saveExpandedGoals(); renderApp(); }}
+							title="Ungrouped sessions in ${project.name}"
+							@click=${() => { setUngroupedExpanded(project.id, !_collapsedUngroupedExp); renderApp(); }}
 						>
-							<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${expanded ? "▾" : "▸"}</span>
-							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">${sessionAcronym(goal.title)}</span>
+							<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
+							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
 						</button>
-						${expanded ? renderCollapsedGoalSessions(goalSessions, goal) : ""}
+						${_collapsedUngroupedExp ? bucket.sessions.map(renderCollapsedSession) : ""}` : bucket.sessions.map(renderCollapsedSession)}
 					`;
 				})}
-				${sortedGoals.length > 0 ? html`
-					<div class="w-7 border-t border-border/50 my-1.5"></div>
-					${(() => { const _collapsedUngroupedExp = isUngroupedExpanded(state.projects[0]?.id || ""); return html`<button
-						class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
-						title="Ungrouped sessions"
-						@click=${() => { setUngroupedExpanded(state.projects[0]?.id || "", !_collapsedUngroupedExp); renderApp(); }}
-					>
-						<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedUngroupedExp ? "▾" : "▸"}</span>
-						<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
-					</button>
-					${_collapsedUngroupedExp ? ungrouped.map(renderCollapsedSession) : ""}`; })()}
-				` : ungrouped.map(renderCollapsedSession)}
 				${state.showArchived && archivedGoals.length > 0 ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
 					${archivedGoals.map((goal) => {

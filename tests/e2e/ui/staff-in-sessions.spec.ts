@@ -52,13 +52,62 @@ test.describe("Staff folded into project Sessions list", () => {
 		await page.reload();
 		await expect(page.getByText(name, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 
-		// 3. Archive (DELETE) → row disappears.
-		await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" });
+		// 3a. Archive via PUT state:"retired" → row disappears (sidebar filters retired).
+		const retireResp = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ state: "retired" }),
+		});
+		expect(retireResp.ok).toBeTruthy();
 		await page.reload();
 		await expect(page.getByText(name, { exact: false })).toHaveCount(0, { timeout: 10_000 });
-		// Already removed: drop from cleanup so afterAll doesn't 404.
+
+		// 3b. Restore via PUT state:"active" → row reappears.
+		const restoreResp = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ state: "active" }),
+		});
+		expect(restoreResp.ok).toBeTruthy();
+		await page.reload();
+		await expect(page.getByText(name, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
+
+		// Final cleanup: DELETE so afterAll has nothing to do.
+		await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" });
 		const idx = cleanup.indexOf(staff.id);
 		if (idx >= 0) cleanup.splice(idx, 1);
+	});
+
+	test("PATCH /api/staff/:id { projectId } moves the row under the target project (orphan-banner fix path)", async ({ page }) => {
+		// Pins the REST contract the orphan banner depends on. We can't seed a
+		// staff under projectId="system" through REST (it validates), and direct
+		// staff-store file mutation is out of scope for a browser E2E. So this
+		// test exercises the PATCH endpoint + sidebar re-render, which is the
+		// fix path the banner triggers once orphans exist.
+		const pid = await defaultProjectId();
+		expect(pid).toBeTruthy();
+		const cwd = gitCwd();
+
+		const name = `OrphanBot${Date.now()}`;
+		const resp = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({ name, systemPrompt: "orphan test bot.", cwd, projectId: pid }),
+		});
+		expect(resp.status).toBe(201);
+		const staff = await resp.json();
+		cleanup.push(staff.id);
+
+		const patch = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PATCH",
+			body: JSON.stringify({ projectId: pid }),
+		});
+		expect(patch.ok).toBeTruthy();
+		const patched = await patch.json();
+		expect(patched.projectId).toBe(pid);
+
+		await openApp(page);
+		await expect(page.getByText(name, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+
+		await page.reload();
+		await expect(page.getByText(name, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("collapsed sidebar surfaces the staff inline (no flat tail list)", async ({ page }) => {

@@ -10,11 +10,18 @@
  * mirroring the behaviour of the "+ New Goal" / "+ Role" buttons.
  */
 import { test, expect } from "../gateway-harness.js";
+import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 test.describe("Sidebar +Staff loading feedback", () => {
 	test("shows bobbit-loader immediately on click", async ({ page }) => {
 		await openApp(page);
+
+		// Capture POST /api/sessions so we can clean up the created session afterwards.
+		const sessionCreated = page.waitForResponse(
+			(r) => r.url().endsWith("/api/sessions") && r.request().method() === "POST",
+			{ timeout: 10_000 },
+		).catch(() => null);
 
 		// Post-surface-staff-in-sessions: the "+ New staff" button lives in the
 		// project header (title="New staff agent in <project>").
@@ -23,5 +30,14 @@ test.describe("Sidebar +Staff loading feedback", () => {
 		// Force-hover the project row so the (hidden) header button becomes clickable on desktop.
 		await newStaffBtn.evaluate((el) => (el as HTMLElement).click());
 		await expect(page.locator("[data-testid='bobbit-loader']")).toBeVisible({ timeout: 2_000 });
+
+		// Cleanup: delete the created session to avoid polluting state across runs.
+		const resp = await sessionCreated;
+		if (resp && resp.ok()) {
+			try {
+				const body = await resp.json();
+				if (body?.id) await apiFetch(`/api/sessions/${body.id}`, { method: "DELETE" }).catch(() => {});
+			} catch { /* ignore */ }
+		}
 	});
 });

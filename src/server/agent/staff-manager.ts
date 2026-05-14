@@ -17,7 +17,6 @@ function sanitiseBranchName(name: string): string {
 
 export class StaffManager {
 	private pcm: ProjectContextManager;
-	private _orphanLogDone = false;
 
 	constructor(pcm: ProjectContextManager) {
 		this.pcm = pcm;
@@ -31,8 +30,6 @@ export class StaffManager {
 	 * re-homes them via the orphan banner.
 	 */
 	private logOrphansOnce(): void {
-		if (this._orphanLogDone) return;
-		this._orphanLogDone = true;
 		try {
 			for (const s of this.listOrphaned()) {
 				console.log(`[staff-manager] orphaned staff: id=${s.id} name=${s.name}${s.projectId ? ` (projectId=${s.projectId})` : " (no projectId)"}`);

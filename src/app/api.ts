@@ -1283,7 +1283,7 @@ export async function fetchOrphanedStaff(): Promise<StaffAgent[]> {
 
 export async function reassignStaffProject(id: string, projectId: string): Promise<boolean> {
 	try {
-		const res = await gatewayFetch(`/api/staff/${id}`, {
+		const res = await gatewayFetch(`/api/staff/${encodeURIComponent(id)}`, {
 			method: "PATCH",
 			body: JSON.stringify({ projectId }),
 		});
