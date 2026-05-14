@@ -700,14 +700,30 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		}
 	});
 	const appUrl = `${gw.base}/?token=${gw.token}`;
-	await page.addInitScript(() => {
+	// `BOBBIT_PERF_FLAGS` is the canonical A/B switch — comma-separated list
+	// of `KNOWN_PERF_FLAGS` names piped into `localStorage.bobbitPerfFlags`
+	// before any app code runs. Used by Opt-B (lazyToolContent) and any
+	// future flag-gated experiment. Documented in docs/perf/README.md §A/B.
+	const perfFlagsRaw = (process.env.BOBBIT_PERF_FLAGS ?? "").trim();
+	const perfFlagsCsv = perfFlagsRaw
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.join(",");
+	if (perfFlagsCsv) console.log(`[harness] BOBBIT_PERF_FLAGS = ${perfFlagsCsv}`);
+	await page.addInitScript((flags: string) => {
 		try { localStorage.setItem("bobbitPerf", "1"); } catch { /* swallow */ }
 		try { localStorage.setItem("BOBBIT_PERF_LOG", "1"); } catch { /* swallow */ }
 		// Phase 2A: surface archived sessions in the sidebar so we can drive
 		// nav from the keyboard / programmatic openForNavItem path the same
 		// way we would for live rows.
 		try { localStorage.setItem("bobbit-show-archived", "true"); } catch { /* swallow */ }
-	});
+		// A/B perf flags (Phase 2 hypotheses) — see src/app/perf-flags.ts.
+		try {
+			if (flags) localStorage.setItem("bobbitPerfFlags", flags);
+			else localStorage.removeItem("bobbitPerfFlags");
+		} catch { /* swallow */ }
+	}, perfFlagsCsv);
 
 	const clientEntries: Array<{ name: string; dur: number; detail?: any; pass: string }> = [];
 
@@ -1115,6 +1131,8 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 			seededSessions: sessionIds.length,
 			fixtureSize: fixtureSizeName,
 			msgsPerSession,
+			perfFlags: perfFlagsCsv || null,
+			tag: tag || null,
 			spans,
 		}, null, 2));
 		console.log(`[harness] wrote ${historyPath}`);
