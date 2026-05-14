@@ -199,14 +199,49 @@ BOBBIT_PERF_FLAGS=lazyToolContent \
 The harness writes `docs/perf/history/<sha>-flag-off.json` and
 `<sha>-flag-on.json`; the cross-commit report shows the delta visually.
 
-**Result.** _(Pending Phase 2A's richer transcript fixture — the
-`messages: 0` seed produces a no-op strip. Numbers are populated once the
-rich fixture lands and both passes are executed against it.)_
+**Result — A/B on the realistic-fixture corpus (Opt-B, task `1e57ca08`).**
 
-**Decision rule.** ≥100ms p50 reduction on `nav.session.ready` OR
-`api.session.fetch` against the richer fixture → recommend flag default-ON
-for Phase 3. Otherwise document as "tried, didn't pay off" and leave the
-flag default-OFF but available.
+Commit `d6585b472604` on `goal-goal-profile-si-320532b0-coder-ca587069`,
+2026-05-14. Same SHA, two runs, `BOBBIT_PERF_FIXTURE_SIZE=large` (200
+msgs/session × 32 sessions, ~57 MB JSONL on disk). History files:
+`docs/perf/history/d6585b472604-opt-b-off.json` and `-opt-b-on.json`. All
+durations in ms.
+
+| Span | n | p50 off | p95 off | p50 on | p95 on | Δ p50 | Δ p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `api.session.fetch`         | 130 |  46.3 | 198.5 |  74.7 | 443.9 | **+28.4** | **+245.4** |
+| `nav.session.ready`         |  60 | 148.9 | 200.8 | 155.2 | 319.7 |  +6.3 | +118.9 |
+| `nav.session.cold`          |   1 | 295.8 | 295.8 | 480.2 | 480.2 | +184.4 | +184.4 |
+| `paint.first`               | 192 |  22.0 |  88.3 |  30.2 | 103.0 |  +8.2 |  +14.7 |
+| `ws.attach`                 |  51 |  44.8 |  53.6 |  62.1 |  97.4 | +17.3 |  +43.8 |
+| `reducer.rehydrate`         |  47 |   0.4 |   0.6 |   0.5 |   0.8 |  +0.1 |   +0.2 |
+| `rapidnav.keystroke.uncached` |  20 | 150.6 | 197.5 | 182.8 | 322.9 | +32.2 | +125.4 |
+| `rapidnav.keystroke.cached`   |  20 | 122.6 | 188.0 | 150.8 | 301.1 | +28.2 | +113.1 |
+
+**Verdict: tried, didn't pay off — do NOT flip default-ON.** Every span
+that could conceivably benefit gets *worse*, in some cases dramatically
+(`api.session.fetch` p95 +245 ms, `nav.session.cold` p50 +184 ms).
+
+**Why it backfires (clear from §4's "Observation while implementing").**
+The stock `GET /api/sessions/:id` returns **metadata only** — the
+transcript is delivered over WebSocket via `get_messages`. Opting into
+`?stripToolContent=1` flips REST into shipping the transcript too
+(stripped). So the comparison is *metadata-only REST + WS transcript*
+vs *stripped-transcript REST + WS transcript*. The flag-ON path adds a
+full transcript serialisation pass (with strip+placeholder cost) to the
+REST hot path while the WS path keeps shipping the same bytes anyway.
+There is no win to be had until the WS transcript path is removed in
+favour of REST — which is out of scope for Phase 2 and would itself need
+its own A/B.
+
+**Decision rule check (from goal spec).** ≥100ms p50 reduction on
+`nav.session.ready` OR `api.session.fetch` → flip default-ON. Observed:
+*±zero* on `nav.session.ready` p50 (+6 ms, within noise) and **+28 ms
+regression** on `api.session.fetch` p50. Threshold not met (in fact the
+delta points the other way). The flag stays default-OFF; the
+implementation stays in tree as a measurement tool / future-architecture
+hook but is **not** enabled by default. See `§6 Tried, didn't pay off`
+for the one-paragraph postmortem.
 ## 5. Realistic-fixture baseline (Phase 2A)
 
 The Phase 1 baseline above seeded ten sessions with *empty* transcripts via
@@ -731,7 +766,20 @@ dedicated bug-fix task; reproducer = remove the
 
 ## 6. Tried, didn't pay off
 
-*(Phase 2/3 fills this in. Empty for now.)*
+### 6.1 Opt-B — lazy tool content stripping on REST (`lazyToolContent` flag)
+
+A/B'd on commit `d6585b472604` against the realistic-large fixture (200
+msgs/session × 32 sessions). Full numbers in §4. Headline: every span
+regressed (p50 `api.session.fetch` +28 ms, p95 +245 ms; p50
+`nav.session.cold` +184 ms). The hypothesis assumed REST was shipping the
+transcript; it isn't — the default REST response is metadata-only and the
+transcript comes over the WebSocket. So opting into `?stripToolContent=1`
+*adds* a stripped transcript to REST without removing the WS transcript,
+doubling the work for negative gain. Flag stays default-OFF and is kept
+in tree only as a measurement hook — a future architectural change that
+delivers the transcript over REST instead of WS would change this
+conclusion, but until then there is no win to ship.
+History: `docs/perf/history/d6585b472604-opt-b-{off,on}.json`.
 
 ## 7. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
