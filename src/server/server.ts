@@ -1906,6 +1906,49 @@ async function handleApiRoute(
 		return;
 	}
 
+	// LSP routes — agent-side tool surface
+	if (url.pathname === "/api/lsp/state" && req.method === "GET") {
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		if (supervisor.disabled) { json({ state: "disabled" }); return; }
+		const cwd = url.searchParams.get("cwd") || "";
+		const pathArg = url.searchParams.get("path") || undefined;
+		try {
+			const key = supervisor.resolveKey(cwd, pathArg);
+			json({ state: supervisor.stateFor(key), worktreePath: key.worktreePath, language: key.language });
+		} catch (err: any) {
+			json({ state: "unknown", error: String(err?.message ?? err) });
+		}
+		return;
+	}
+	const lspMatch = url.pathname.match(/^\/api\/lsp\/([a-z_]+)$/);
+	if (lspMatch && req.method === "POST") {
+		const method = lspMatch[1];
+		const body = await readBody(req).catch(() => ({}));
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		if (supervisor.disabled) {
+			json({ error: "lsp_unavailable", message: "disabled by project config" });
+			return;
+		}
+		try {
+			const result = await supervisor.dispatch(method, body || {});
+			json(result);
+		} catch (err: any) {
+			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
+				json({ error: err.code, message: err.message });
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
+		const supervisor = sessionManager.getLspSupervisor();
+		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
+		return;
+	}
+
 	// ── Project Detection & Browse ────────────────────────────────────
 
 	// GET /api/projects/preflight?path=<absolute>
