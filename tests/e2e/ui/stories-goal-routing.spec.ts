@@ -113,7 +113,7 @@ test.describe("CT-18: Multi-project goal/session routing @quarantine", () => {
 	test.afterEach(async () => {
 		await s.cleanup();
 		for (const id of goalsToCleanup.splice(0)) {
-			await apiFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		}
 		for (const id of sessionsToCleanup.splice(0)) {
 			await apiFetch(`/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
@@ -534,7 +534,7 @@ test.describe("CT-19: First-run and single-project UX @quarantine", () => {
 		});
 		expect(createResp.status).toBe(201);
 		const created = await createResp.json();
-		await apiFetch(`/api/goals/${created.id}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/goals/${created.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		expect(created.projectId).toBe(lone.id);
 	});
 });

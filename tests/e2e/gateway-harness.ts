@@ -66,6 +66,7 @@ export interface GatewayInfo {
 	wsBase: string;
 	bobbitDir: string;
 	sessionManager?: any;
+	teamManager?: any;
 	/** Server-side log ring buffer (last 200 lines), populated by the harness's
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
@@ -290,6 +291,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 			wsBase: `ws://127.0.0.1:${port}`,
 			bobbitDir,
 			sessionManager: gw.sessionManager,
+			teamManager: gw.teamManager,
 			logs: _serverLogs,
 			async crash() {
 				await gw.shutdown();
@@ -333,6 +335,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 					`http://127.0.0.1:${port}`,
 				);
 				info.sessionManager = gw.sessionManager;
+				info.teamManager = gw.teamManager;
 			},
 		};
 

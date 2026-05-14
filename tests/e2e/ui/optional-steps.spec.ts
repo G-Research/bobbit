@@ -71,7 +71,7 @@ async function createGoalWithOpts(opts: Record<string, unknown>): Promise<any> {
 
 /** Delete a goal (best-effort). */
 async function deleteGoal(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+	await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 }
 
 /** Poll until a gate reaches the target status. */

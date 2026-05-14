@@ -283,7 +283,7 @@ test.describe("multi-repo flow (UI)", () => {
 				}
 
 				// Archive → cleanup. Allow up to 15s for async teardown.
-				await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+				await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 				let allGone = false;
 				for (let i = 0; i < 30; i++) {
 					allGone = Object.values(goalRecord.repoWorktrees as Record<string, string>)
@@ -295,7 +295,7 @@ test.describe("multi-repo flow (UI)", () => {
 			} else {
 				// Pre-Phase-4a single-repo fallback: just verify a worktree was set up.
 				expect(goalRecord.worktreePath || goalRecord.cwd).toBeTruthy();
-				await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+				await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 			}
 		} finally {
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});

@@ -241,6 +241,6 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		expect(normalizedCwd.startsWith(normalizedWt)).toBe(true);
 
 		// Cleanup: delete the goal
-		await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
 });

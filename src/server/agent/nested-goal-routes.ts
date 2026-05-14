@@ -35,6 +35,7 @@ import {
 	type SubgoalNestingPrefs,
 } from "./subgoal-nesting-limit.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
+import { walkGoalSubtree } from "./goal-subtree.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -71,29 +72,13 @@ export function listDescendants(
 ): PersistedGoal[] {
 	const ctx = projectContextManager.getContextForGoal(goalId);
 	if (!ctx) return [];
-	const all = ctx.goalStore.getAll();
-	const includeArchived = opts?.includeArchived ?? false;
-	const out: PersistedGoal[] = [];
-	const seen = new Set<string>([goalId]);
-	const queue: string[] = [goalId];
-	while (queue.length > 0) {
-		const cur = queue.shift()!;
-		for (const g of all) {
-			// Walk THROUGH archived descendants when looking for live ones
-			// further down the tree (a live grandchild whose parent is
-			// archived must still block the cascade=false path) — but only
-			// INCLUDE the archived goal in `out` when the caller asked for
-			// it (cascade=true needs the full set).
-			if (g.parentGoalId === cur && !seen.has(g.id)) {
-				seen.add(g.id);
-				if (includeArchived || !g.archived) {
-					out.push(g);
-				}
-				queue.push(g.id);
-			}
-		}
-	}
-	return out;
+	// Walk-through-archived semantics live in `walkGoalSubtree` — see
+	// `src/server/agent/goal-subtree.ts`. The shared helper is the
+	// canonical BFS used by every cascade in the server.
+	return walkGoalSubtree(goalId, ctx.goalStore.getAll(), {
+		includeRoot: false,
+		includeArchived: opts?.includeArchived ?? false,
+	});
 }
 
 /**
@@ -120,9 +105,6 @@ export async function tryHandleNestedGoalRoute(
 		broadcastToAll,
 		getSubgoalNestingPrefs,
 	} = deps;
-
-	const listDescendantsLocal = (goalId: string, opts?: { includeArchived?: boolean }): PersistedGoal[] =>
-		listDescendants(projectContextManager, goalId, opts);
 
 	/** Cancel any in-flight verifications for a goal (best-effort). */
 	async function cancelAllVerifications(goalId: string): Promise<void> {
@@ -830,6 +812,8 @@ export async function tryHandleNestedGoalRoute(
 			return true;
 		}
 		const cascade: boolean = body.cascade;
+		// Pause cascade order = top-down (parent paused first so its
+		// supervisor doesn't respawn workers during child pauses).
 		// Optional targeted-child pause (Issue 4): retarget the cascade to a
 		// direct child instead of the caller's own goal.
 		const childGoalIdRaw: unknown = (body as { childGoalId?: unknown }).childGoalId;
@@ -856,7 +840,11 @@ export async function tryHandleNestedGoalRoute(
 		// Route through executePauseForGoals — the single entry point for all
 		// pause operations. It calls applyOperatorPause per goal and handles
 		// the cascade-abort sweep excluding the caller's session.
-		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
+		const pauseCtx = projectContextManager.getContextForGoal(targetRoot.id);
+		const pauseAllGoals = pauseCtx?.goalStore.getAll() ?? [];
+		const targets: PersistedGoal[] = cascade
+			? walkGoalSubtree(targetRoot.id, pauseAllGoals, { includeRoot: true, includeArchived: false })
+			: [targetRoot];
 		const count = await executePauseForGoals(targets, callerSessionId);
 		json({ paused: count });
 		return true;
@@ -889,7 +877,13 @@ export async function tryHandleNestedGoalRoute(
 			targetRoot = childGoal;
 		}
 		const goalManager = getGoalManagerForGoal(targetRoot.id);
-		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
+		// Resume cascade order = top-down (parent reactivated first so it can
+		// re-supervise children).
+		const resumeCtx = projectContextManager.getContextForGoal(targetRoot.id);
+		const resumeAllGoals = resumeCtx?.goalStore.getAll() ?? [];
+		const targets: PersistedGoal[] = cascade
+			? walkGoalSubtree(targetRoot.id, resumeAllGoals, { includeRoot: true, includeArchived: false })
+			: [targetRoot];
 		let count = 0;
 		for (const g of targets) {
 			// R-039: symmetric with the pause loop above. Resume is operator-

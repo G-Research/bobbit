@@ -160,7 +160,7 @@ test.describe("SB-29: Archived goals visible", () => {
 			});
 			goalIds.push(goal.id);
 			// Archive the goal via DELETE
-			await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+			await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 		}
 
 		await openApp(page);

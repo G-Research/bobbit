@@ -69,6 +69,6 @@ test("server broadcasts pr_status_changed on PR creation detection", async () =>
 		).toBe(200);
 	} finally {
 		// Cleanup
-		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+		await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 	}
 });

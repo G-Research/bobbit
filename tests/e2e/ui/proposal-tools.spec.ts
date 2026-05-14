@@ -39,7 +39,7 @@ async function deleteGoalByTitle(title: string) {
 	const data = await resp.json();
 	const goals = data.goals || data;
 	const goal = (goals as any[]).find((g: any) => g.title === title);
-	if (goal) await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
+	if (goal) await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 }
 
 test.describe("Proposal tool blocks @quarantine", () => {

@@ -40,7 +40,7 @@ async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 
 /** Delete a goal. */
 async function deleteGoal(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+	await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 }
 
 /**

@@ -21,10 +21,11 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
+import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
-import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
+import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
@@ -1101,10 +1102,10 @@ export function createGateway(config: GatewayConfig) {
 	return {
 		server,
 		sessionManager,
-		bgProcessManager,
-		projectContextManager,
 		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
 		teamManager,
+		bgProcessManager,
+		projectContextManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -3702,7 +3703,46 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
+			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
+			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
+			let resolvedParentGoal: PersistedGoal | undefined;
+			if (parentGoalId) {
+				// Parent MUST be in the same project context — cross-project hierarchy
+				// would corrupt the parentGoalId chain because createGoal only walks
+				// its own store. Reject cross-project parents with a clear 422.
+				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId);
+				if (!resolvedParentGoal) {
+					const crossProject = getGoalAcrossProjects(parentGoalId);
+					if (crossProject) {
+						json({ error: "Parent goal belongs to a different project. Select a parent in the same project.", code: "PARENT_CROSS_PROJECT" }, 422);
+					} else {
+						json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
+					}
+					return;
+				}
+				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+				const nestResult = checkCanSpawnChild(
+					resolvedParentGoal,
+					prefs,
+					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
+				);
+				if (!nestResult.ok) {
+					if (nestResult.code === "SUBGOALS_DISABLED") {
+						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
+						return;
+					}
+					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
+						json({
+							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,
+							code: "NESTING_DEPTH_EXCEEDED",
+							currentDepth: nestResult.currentDepth,
+							maxDepth: nestResult.maxDepth,
+						}, 422);
+						return;
+					}
+				}
+			}
+			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
 			let resolvedWorkflow: Workflow | undefined;
 			let resolvedWorkflowId = workflowId;
 			const inlineWorkflow = body?.workflow;
@@ -3747,6 +3787,9 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			const inheritedNesting = (parentGoalId && resolvedParentGoal)
+				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
+				: undefined;
 			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
 				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
 				: undefined;
@@ -3758,7 +3801,10 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				parentGoalId,
 				inlineRoles: bodyInlineRoles,
+				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
+				maxNestingDepth: inheritedNesting?.maxNestingDepth,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3892,27 +3938,23 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
+			// `cascade` is REQUIRED — mirrors pause/resume/teardown. The UI is
+			// the cascade-policy authority; api.ts always sends ?cascade=.
+			const cascadeParam = url.searchParams.get("cascade");
+			if (cascadeParam !== "true" && cascadeParam !== "false") {
+				json({ error: "cascade=true|false query parameter is required", code: "CASCADE_REQUIRED" }, 422);
+				return;
+			}
+			const cascade = cascadeParam === "true";
+
 			const rootGoal = getGoalAcrossProjects(id);
 			if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
 
-			// `cascade` is REQUIRED — mirrors pause/resume. The UI is the cascade-policy
-			// authority; api.ts always sends ?cascade=true|false.
-			const cascadeParam = url.searchParams.get("cascade");
-			const mergedManually = url.searchParams.get("mergedManually") === "true";
-			if (cascadeParam !== "true" && cascadeParam !== "false") {
-				// Legacy path (no cascade param): archive just this goal (backward compat).
-				// Falls through to single-goal archive below.
-			}
-
-			const cascade = cascadeParam === "true";
-
-			// cascade=false + live descendants → 409 HAS_DESCENDANTS. The UI dialog
-			// (showArchiveGoalDialog) uses this preflight to decide whether to show
-			// the cascade-confirm dialog.
-			if (cascadeParam === "false") {
-				const liveDescendants = collectDescendants(id,
-					projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? []
-				).filter(g => !g.archived);
+			// cascade=false + live descendants → 409 HAS_DESCENDANTS. The
+			// existing UI dialog (showArchiveGoalDialog) uses this preflight
+			// to decide whether to show the cascade-confirm dialog.
+			if (!cascade) {
+				const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
 				if (liveDescendants.length > 0) {
 					json({
 						error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
@@ -3923,33 +3965,45 @@ async function handleApiRoute(
 				}
 			}
 
+			// Manual-merge reconciliation: `?mergedManually=true` stamps state="complete"
+			// on the target BEFORE archive (mirrors archiveGoalAfterMerge). Only the
+			// root goal gets this stamp — cascade descendants are archived as-is.
+			const mergedManually = url.searchParams.get("mergedManually") === "true";
+
 			/** Per-goal archive action (idempotent). */
 			const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-				if (g.archived) return false;
+				if (g.archived) return false; // idempotent — already done
 				if (mergedManually && g.id === id && g.state !== "complete") {
 					await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 				}
+				// 1. Cancel in-flight gate verifications (terminates reviewer sessions).
 				for (const active of verificationHarness.getActiveVerifications(g.id)) {
-					try { await verificationHarness.cancelStaleVerifications(g.id, active.gateId); }
-					catch (err) { console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err); }
+					try {
+						await verificationHarness.cancelStaleVerifications(g.id, active.gateId);
+					} catch (err) {
+						console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err);
+					}
 				}
+				// 2. Capture agent branches BEFORE teardown erases the team
+				// store entry (orphan-remote-branch-cleanup invariant).
 				const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 				const teamEntry = goalProjectCtx?.teamStore.get(g.id);
 				const agentBranches: string[] = [];
 				if (teamEntry?.agents) {
-					for (const a of teamEntry.agents) { if (a.branch) agentBranches.push(a.branch); }
+					for (const a of teamEntry.agents) {
+						if (a.branch) agentBranches.push(a.branch);
+					}
 				}
 				if (teamEntry?.teamLeadSessionId) {
 					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 					if (tl?.branch) agentBranches.push(tl.branch);
 				}
-				if (teamManager.getTeamState(g.id)) {
-					try { await teamManager.teardownTeam(g.id); }
-					catch (err) { console.error(`[api] archive: teardownTeam ${g.id} failed:`, err); }
-				}
+				// 4. Archive the goal record.
 				const gm = getGoalManagerForGoal(g.id);
 				await gm.archiveGoal(g.id);
+				// 5. Drop PR status.
 				prStatusStore.remove(g.id);
+				// 6. Fire-and-forget remote branch cleanup.
 				const archivedGoal = gm.getGoal(g.id);
 				if (archivedGoal?.repoPath) {
 					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
@@ -3960,22 +4014,35 @@ async function handleApiRoute(
 			};
 
 			if (!cascade) {
-				// Archive just this goal (no descendants or cascade=false with none).
 				await archiveOne(rootGoal);
 				json({ ok: true, archived: 1 });
 				return;
 			}
 
-			// cascade=true: archive root + all live descendants (bottom-up).
-			const allGoals = projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? [];
-			const descendants = collectDescendants(id, allGoals).filter(g => !g.archived);
-			// Bottom-up: children before parents.
-			const toArchive = [...descendants.reverse(), rootGoal];
-			let archived = 0;
-			for (const g of toArchive) {
-				if (await archiveOne(g)) archived++;
+			// Cascade=true — bottom-up: children archived before parents.
+			// Include already-archived descendants (idempotent archiveOne
+			// drops them without counting).
+			const ctx = projectContextManager.getContextForGoal(id);
+			const allGoals = ctx?.goalStore.getAll() ?? [];
+			const result = await cascadeGoalSubtree(
+				id,
+				allGoals,
+				{ includeRoot: true, includeArchived: true },
+				{ order: "bottom-up", apply: archiveOne },
+			);
+			const archivedCount = result.processed.filter(p => p.result === true).length;
+			if (result.errors.length > 0) {
+				for (const e of result.errors) {
+					console.error(`[api] archive cascade: ${e.goalId} failed:`, e.error);
+				}
 			}
-			json({ ok: true, archived });
+			json({
+				ok: true,
+				archived: archivedCount,
+				...(result.errors.length > 0
+					? { errors: result.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
+					: {}),
+			});
 			return;
 		}
 	}
@@ -6161,16 +6228,58 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead)
+	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead).
+	// Cascade required — mirror of `tests/api-team-teardown-cascade.test.ts::teardownRoute`.
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];
-		try {
-			await teamManager.teardownTeam(goalId);
-			json({ ok: true });
-		} catch (err) {
-			jsonError(400, err);
+		const cascadeParam = url.searchParams.get("cascade");
+		if (cascadeParam !== "true" && cascadeParam !== "false") {
+			json({ error: "cascade=true|false query parameter is required", code: "CASCADE_REQUIRED" }, 422);
+			return;
 		}
+		const cascade = cascadeParam === "true";
+		const tdCtx = projectContextManager.getContextForGoal(goalId);
+		const tdAllGoals = tdCtx?.goalStore.getAll() ?? [];
+
+		// cascade=false + live descendant teams → 409 HAS_DESCENDANT_TEAMS.
+		if (!cascade) {
+			const descendants = walkGoalSubtree(goalId, tdAllGoals, { includeRoot: false, includeArchived: false });
+			const descendantsWithTeams = descendants
+				.filter(d => !!teamManager.getTeamState(d.id))
+				.map(d => ({ id: d.id, title: d.title }));
+			if (descendantsWithTeams.length > 0) {
+				json({
+					code: "HAS_DESCENDANT_TEAMS",
+					count: descendantsWithTeams.length,
+					descendants: descendantsWithTeams,
+					message: `Goal has ${descendantsWithTeams.length} descendant team(s) still running. Re-call with ?cascade=true to stop them all.`,
+				}, 409);
+				return;
+			}
+		}
+
+		// Bottom-up: children torn down before parents. Skip archived
+		// nodes. cascade=false collapses to root-only by capping depth at 0.
+		const result = await cascadeGoalSubtree(
+			goalId,
+			tdAllGoals,
+			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
+			{
+				order: "bottom-up",
+				apply: async (g) => {
+					if (!teamManager.getTeamState(g.id)) return false;
+					await teamManager.teardownTeam(g.id);
+					return true;
+				},
+			},
+		);
+		const toreDown = result.processed.filter(p => p.result === true).length;
+		json({
+			ok: true,
+			toreDown,
+			errors: result.errors.map(e => ({ goalId: e.goalId, error: e.error.message })),
+		});
 		return;
 	}
 
@@ -6667,8 +6776,19 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal
+			let enrichedArgs = args as Record<string, unknown>;
+			if (proposalType === "goal") {
+				const sess = sessionManager.getSession(sessionId);
+				if (sess?.role === "team-lead" && sess.teamGoalId) {
+					const existingParent = enrichedArgs.parentGoalId;
+					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
+						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+					}
+				}
+			}
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
 					json(parsed, 400);
