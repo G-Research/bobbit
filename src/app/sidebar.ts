@@ -28,7 +28,9 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, prefetchSession, prefetchGoal } from "./api.js";
+import { isPerfFlagEnabled, PERF_FLAG_PREFETCH_ON_HOVER } from "./perf-flags.js";
+import { parseNavId } from "./sidebar-nav.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
 import type { GatewaySession } from "./state.js";
@@ -255,6 +257,46 @@ export function renderRolePickerDropdown() {
 			</div>
 		</div>
 	`;
+}
+
+// ============================================================================
+// PHASE 2C — prefetch-on-hover
+//
+// One delegated listener catches `pointerover` and `focusin` on any
+// `[data-nav-id]` element inside `.sidebar-edge`, and kicks off a
+// background fetch for the destination via `prefetchSession()` /
+// `prefetchGoal()`. The helper itself is gated by the
+// `prefetchOnHover` perf flag, so this listener is a near-no-op when
+// the flag is off (one `closest()` call + one localStorage probe).
+//
+// Tracked here — in the sidebar shell module rather than render-helpers
+// — so the rendered row templates stay declarative.
+// ============================================================================
+let _prefetchListenerInstalled = false;
+export function installSidebarPrefetchListener(): void {
+	if (_prefetchListenerInstalled) return;
+	_prefetchListenerInstalled = true;
+	if (typeof document === "undefined") return;
+	const handle = (e: Event) => {
+		if (!isPerfFlagEnabled(PERF_FLAG_PREFETCH_ON_HOVER)) return;
+		const target = e.target;
+		if (!(target instanceof Element)) return;
+		const row = target.closest("[data-nav-id]");
+		if (!row) return;
+		// Only fire for rows inside a sidebar (collapsed or expanded). Both
+		// roots tag themselves with `.sidebar-edge`.
+		if (!row.closest(".sidebar-edge")) return;
+		const navId = row.getAttribute("data-nav-id");
+		if (!navId) return;
+		const item = parseNavId(navId);
+		if (!item) return;
+		if (item.kind === "session") prefetchSession(item.id);
+		else if (item.kind === "goal") prefetchGoal(item.id);
+	};
+	// `pointerover` bubbles (unlike `pointerenter`) so a single delegated
+	// listener catches every row, including ones added by later renders.
+	document.addEventListener("pointerover", handle, { passive: true });
+	document.addEventListener("focusin", handle, { passive: true });
 }
 
 // Close role picker on outside click

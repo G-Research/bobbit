@@ -35,11 +35,23 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"placeholders. The renderer loads full content on demand via " +
 			"`/tool-content/:mi/:bi`.",
 	},
+	{
+		name: "prefetchOnHover",
+		description:
+			"Phase 2C — on `pointerover` / `focusin` of a sidebar session or " +
+			"goal row, kick off `GET /api/sessions/:id` or `GET /api/goals/:id` " +
+			"so the response is already in flight (or cached) by the time the " +
+			"user clicks. Cache is single-use, age-bounded, and bounded in size " +
+			"to avoid staleness.",
+	},
 ];
 
 /** Convenience canonical flag name for Phase 2B. Imported by call sites so
  *  a typo on the magic string surfaces at build time. */
 export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
+
+/** Convenience canonical flag name for Phase 2C. */
+export const PERF_FLAG_PREFETCH_ON_HOVER = "prefetchOnHover";
 
 const LS_KEY = "bobbitPerfFlags";
 

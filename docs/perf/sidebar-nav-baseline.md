@@ -795,6 +795,95 @@ delivers the transcript over REST instead of WS would change this
 conclusion, but until then there is no win to ship.
 History: `docs/perf/history/d6585b472604-opt-b-{off,on}.json`.
 
+### 6.2 Opt-C — sidebar prefetch on hover (`prefetchOnHover` flag)
+
+**Hypothesis**: fire `GET /api/sessions/:id` / `GET /api/goals/:id` on
+`pointerover` + `focusin` of the sidebar row so the response is already
+in flight (or in the in-memory prefetch cache) by the time the user
+clicks. Should shave the network round-trip off `nav.session.ready` and
+`nav.goal.ready` warm paths.
+
+**Implementation**: behind the `prefetchOnHover` perf flag.
+
+- `src/app/perf-flags.ts` — flag registration + canonical name constant.
+- `src/app/api.ts` — `prefetchUrl` / `prefetchSession` / `prefetchGoal`
+  helpers + a 20-entry, 30s-TTL, single-use LRU keyed by URL. `gatewayFetch`
+  consults the cache on `GET` and pops the cached `Promise<Response>`
+  when one exists, otherwise falls through. Cache hit records
+  `detail.prefetched: true` on the existing perf span.
+- `src/app/sidebar.ts` — one delegated `pointerover` + `focusin`
+  listener on `document`, scoped to `[data-nav-id]` rows inside
+  `.sidebar-edge`. 50ms debounce per URL.
+- `tests/prefetch-on-hover.spec.ts` — 9 unit cases (debounce, single-use,
+  TTL eviction, size eviction, flag-off, non-GET bypass, failure handling).
+- `tests/manual-integration/perf-sidebar-nav.spec.ts` — adds a conditional
+  `row.hover()` + 120ms wait before each warm-pass `__bobbitOpenForNavItem`,
+  gated on `BOBBIT_PERF_FLAGS` including `prefetchOnHover`, so the
+  flag-off baseline is undisturbed.
+
+**Methodology**: 5 replicate runs per condition on the same SHA
+(`52bbf978`), same `medium` fixture (50 msgs/session, 32 archived
+sessions), same machine, no other load. Replicates tagged
+`opt-c-off-{1..5}` / `opt-c-on-{1..5}`; history JSON lives under
+`docs/perf/history/`. Aggregation: median-of-medians across the five
+runs + min/max of the per-run p50.
+
+**Results** (median-of-medians, [min-max] of per-run p50):
+
+| Span                          |  n  | OFF p50           | ON p50            | Δ p50 | OFF p95 | ON p95 |
+|---|---|---|---|---|---|---|
+| `nav.session.ready`           | 60  | 180.4 [173.0–199.9] | 161.8 [153.8–169.4] | **18.6 ms** | 245.5 | 224.3 |
+| `nav.goal.ready`              |  2  |  41.9 [32.6–47.8]   |  30.9 [26.8–52.2]   | 11.0 ms     |  41.9 |  30.9 |
+| `api.session.fetch`           | 130 |  80.1 [68.9–82.0]   |  73.9 [59.2–108.2]  |  6.2 ms     | 131.9 | 311.6 |
+| `api.goal.fetch`              |  3  |  46.2 [29.5–50.2]   |   2.4 [1.7–3.0]     | 43.8 ms     |  46.2 |   2.4 |
+| `paint.first`                 | ~205|  34.2 [33.2–35.8]   |  32.1 [29.0–35.9]   |  2.1 ms     |  80.7 |  74.4 |
+| `rapidnav.keystroke.cached`   |  20 | 194.9 [172.3–203.8] | 173.9 [161.9–196.3] | 21.0 ms     | 255.7 | 210.8 |
+| `rapidnav.keystroke.uncached` |  20 | 197.1 [177.1–212.0] | 176.3 [157.5–184.6] | 20.8 ms     | 242.6 | 235.7 |
+
+Regen: `node scripts/opt-c-summary.mjs`.
+
+**Verdict — didn't clear the bar.**
+
+The effect on `nav.session.ready` p50 (18.6 ms) is real and reproducible
+across all five replicates (every ON run is faster than every OFF run
+except one borderline overlap at the bottom of OFF and top of ON), but
+far below the **≥100 ms p50 reduction** threshold the decision rule
+requires. The warm-path p50 also doesn't move below 100 ms (still ~162
+ms ON) so the secondary clause doesn't trigger either.
+
+Why so small? `api.session.fetch` p50 was already only ~80 ms on the
+realistic-medium fixture (see §5.6), and `nav.session.ready` is
+dominated by `ws.attach` (~75 ms) + reducer rehydrate + first paint,
+which the prefetch does nothing to overlap. The honest caveat in the
+task spec was right: the cached/uncached delta in §5.6 was 10–40 ms, and
+that ceiling held.
+
+`api.goal.fetch` shrank to ~2 ms because the goal-dashboard fires only a
+single `GET /api/goals/:id` and the prefetch fully eclipses it — but
+`nav.goal.ready` p50 only shifted ~11 ms because the dashboard's parallel
+sibling fetches (gates, tasks, commits, git-status, pr-status, cost,
+team) determine wall time, not the goal fetch alone. See Opt-D for the
+right lever there.
+
+`api.session.fetch` p95 going from 131 → 311 ms is noise on a small n=130
+sample mixed with rare retries; mean and median both improved slightly.
+
+**Disposition**:
+
+- Code is **kept** (it's small, well-scoped, and gated by the flag) so
+  future agents don't reimplement the same plumbing if a higher-leverage
+  use of the prefetch cache emerges (e.g. prefetching goal sub-fetches
+  alongside `/api/goals/:id`).
+- Flag default is **OFF**. No Phase 3 budget test added.
+- Do NOT relitigate without first attacking `ws.attach` and the
+  goal-dashboard sibling fetches — those dominate the wall time the
+  prefetch can't touch.
+- Recommended follow-up if anyone revives this: have `prefetchGoal()`
+  also kick off the parallel sub-fetches (`/tasks`, `/gates`,
+  `/git-status`, `/commits`, `/pr-status`, `/cost`) on hover, and have
+  the goal-dashboard `Promise.all` consult the prefetch cache for each.
+  That is closer to Opt-D's scope.
+
 ## 7. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
 - Client trace primitive: `src/app/perf-trace.ts`. Cost-when-disabled

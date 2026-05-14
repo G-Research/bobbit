@@ -496,6 +496,10 @@ async function initApp() {
 	// are honoured automatically). See src/app/sidebar-nav.ts.
 	const { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } = await import("./sidebar-nav.js");
 	installKeyboardNavOverrideClearListener();
+	// Phase 2C — prefetch sidebar destinations on pointerover/focusin. Gated
+	// by the `prefetchOnHover` perf flag; near-no-op when disabled.
+	const { installSidebarPrefetchListener } = await import("./sidebar.js");
+	installSidebarPrefetchListener();
 
 	// MIGRATED shortcuts (all allowInInput: true to preserve existing behavior)
 	registerShortcut({
