@@ -31,12 +31,38 @@ import {
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { lspHintFor } from "./grep-lsp-hint.js";
+
+/**
+ * Wrap the built-in grep tool so that symbol-shaped queries against TS/JS
+ * source get a one-line `[lsp-hint]` line prepended to the tool result,
+ * nudging the agent toward `lsp_*` tools. See `grep-lsp-hint.ts`.
+ *
+ * The wrapper preserves the original tool definition (name, description,
+ * schema, renderers) and only intercepts `execute`. If no hint applies the
+ * original result is returned untouched.
+ */
+function wrapGrepWithLspHint<T extends { execute: (...args: any[]) => any }>(def: T): T {
+	const originalExecute = def.execute.bind(def);
+	const wrappedExecute = async (...args: unknown[]): Promise<unknown> => {
+		const result: any = await originalExecute(...(args as Parameters<typeof originalExecute>));
+		const params = args[1] as { pattern?: string; glob?: string; path?: string } | undefined;
+		const hint = lspHintFor(params, result);
+		if (!hint) return result;
+		const existingContent = Array.isArray(result?.content) ? result.content : [];
+		return {
+			...result,
+			content: [{ type: "text", text: hint }, ...existingContent],
+		};
+	};
+	return { ...def, execute: wrappedExecute as unknown as T["execute"] };
+}
 
 const FACTORIES: Record<string, (cwd: string) => unknown> = {
 	read: createReadToolDefinition,
 	edit: createEditToolDefinition,
 	write: createWriteToolDefinition,
-	grep: createGrepToolDefinition,
+	grep: (cwd: string) => wrapGrepWithLspHint(createGrepToolDefinition(cwd) as any),
 	find: createFindToolDefinition,
 	ls: createLsToolDefinition,
 };
