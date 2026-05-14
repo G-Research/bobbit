@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sidebar Goal-Group Filters — reproducing-test fixture</title>
+</head>
+<body>
+<script>
+/**
+ * Reproducing-test fixture for the "sidebar goal-group sessions ignore Show
+ * Busy / Show Read filters" bug.
+ *
+ * This file mirrors the CURRENT (buggy) `renderGoalGroup` partitioning from
+ * src/app/render-helpers.ts (~line 719) verbatim — NO filter call.  The spec
+ * (tests/sidebar-goal-group-filters.spec.ts) asserts the EXPECTED post-fix
+ * behaviour, so the tests MUST FAIL on master.  After the production fix
+ * lands, the `computeGoalGroupDisplaySessions` body below is updated to call
+ * `passesSidebarFilters` + apply team-lead sticky logic, and the spec passes.
+ *
+ * Nothing here imports from src/.  The page is self-contained.
+ */
+
+// --- helpers mirrored from src/app/render-helpers.ts -----------------------
+
+/**
+ * Mirror of `hasUnseenActivity` from src/app/render-helpers.ts:181, simplified.
+ *
+ * Real implementation also consults `needsHumanAttention` (delegates and team
+ * members never surface; team leads only when goal is complete or stuck).
+ * For this fixture we let the test set lastActivity/lastReadAt directly and
+ * treat *any* non-active idle/terminated session as eligible for the "unseen"
+ * check — which is sufficient for the cases the bug care about (read vs
+ * unread session under a goal).
+ */
+function hasUnseenActivity(session, isActive) {
+  if (session.status === "streaming" || session.status === "busy") return false;
+  if (isActive) return false;
+  const lastRead = session.lastReadAt != null ? session.lastReadAt : 0;
+  return (session.lastActivity || 0) > lastRead;
+}
+
+/**
+ * Verbatim mirror of `passesSidebarFilters` from src/app/render-helpers.ts:209.
+ * Takes the `state`-like flags as an explicit object instead of reading
+ * a module global.
+ */
+function passesSidebarFilters(session, isActive, bypass, flags) {
+  if (bypass || isActive) return true;
+  if (!flags.showBusy) {
+    const busy = session.status === "streaming"
+      || session.status === "aborting"
+      || session.status === "preparing"
+      || session.status === "starting"
+      || session.isCompacting;
+    if (busy) return false;
+  }
+  if (!flags.showRead) {
+    const idleLike = session.status === "idle" || session.status === "terminated";
+    if (idleLike && !hasUnseenActivity(session, isActive)) return false;
+  }
+  return true;
+}
+
+/**
+ * Pure extract of the logic in `renderGoalGroup` (src/app/render-helpers.ts
+ * ~line 719) that decides which session rows are rendered under an expanded
+ * goal.
+ *
+ * Inputs:
+ *   goalSessions: the unfiltered list (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf
+ *   opts.activeId:    the currently active session id (or null)
+ *   opts.showBusy:    state.showBusy
+ *   opts.showRead:    state.showRead
+ *   opts.searchQuery: state.searchQuery (untrimmed)
+ *   opts.isTeamGoal:  whether the goal is a team goal (governs team-lead-sticky)
+ *
+ * Output: the ordered list of sessions that SHOULD appear in the sidebar.
+ *
+ * ---------------------------------------------------------------------------
+ *  CURRENT MASTER BEHAVIOUR (BUG):
+ *    `renderGoalGroup` builds `goalSessions`, partitions it into
+ *    teamLead / teamChildren / nonTeamSessions, and renders EVERY entry
+ *    unconditionally.  No call to `passesSidebarFilters`.  That is why the
+ *    fixture below returns the unfiltered list verbatim — to reproduce the
+ *    bug.  The spec asserts the EXPECTED post-fix output, so every filter
+ *    case fails on master.
+ *
+ *  EXPECTED POST-FIX BEHAVIOUR (what the spec pins):
+ *    1. Apply `passesSidebarFilters(s, s.id === activeId, bypass)` to each
+ *       session in `goalSessions`.
+ *    2. `bypass = searchQuery.trim().length > 0`.
+ *    3. Team-lead-sticky (only when isTeamGoal && a team-lead exists):
+ *       if the lead would be filtered out but at least one team child
+ *       survived, keep the lead.
+ *    4. Active session is always exempt (already handled inside
+ *       `passesSidebarFilters` via the `isActive` param).
+ * ---------------------------------------------------------------------------
+ */
+function computeGoalGroupDisplaySessions(goalSessions, opts) {
+  // ----- CURRENT (BUGGY) BEHAVIOUR — verbatim mirror of master --------------
+  // No filtering whatsoever; every session in the unfiltered goal list is
+  // rendered.  See src/app/render-helpers.ts ~line 836 (`renderTeamGroup`)
+  // which simply consumes `teamLead`, `teamChildren`, and `nonTeamSessions`.
+  // -------------------------------------------------------------------------
+  return goalSessions.slice();
+}
+
+window.computeGoalGroupDisplaySessions = computeGoalGroupDisplaySessions;
+window.passesSidebarFilters = passesSidebarFilters;
+window.hasUnseenActivity = hasUnseenActivity;
+</script>
+</body>
+</html>
