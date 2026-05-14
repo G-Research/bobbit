@@ -1216,7 +1216,7 @@ synthesis just wasn't using it.
 
 | Method | Path | Body / query | Notes |
 |---|---|---|---|
-| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 403 `SUBGOALS_DISABLED` / 403 `NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}` (see [Nesting depth limit & per-goal toggle](#nesting-depth-limit--per-goal-toggle)), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal; new children inherit the parent's effective `subgoalsAllowed` / `maxNestingDepth`. |
+| POST | `/api/goals/:id/spawn-child` | `{ planId, title, spec, workflowId?, suggestedRole?, dependsOn?: string[] }` | Idempotent on `planId`. 201 (new), 200 (`alreadyExists: true`), 400 `SPEC_TOO_SHORT {actualLength, minLength}` / 400 `SPEC_PLACEHOLDER` (see [Spawn-time spec validation](#spawn-time-spec-validation)), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (depends-on validation, see [Declaring dependencies](#declaring-dependencies)), 400 (parent-cycle / missing field), 403 `SUBGOALS_DISABLED` / 403 `NESTING_DEPTH_EXCEEDED {currentDepth, maxDepth}` (see [Nesting depth limit & per-goal toggle](#nesting-depth-limit--per-goal-toggle)), 404 (parent missing). Stamps `spawnedFromPlanId` AND `dependsOnPlanIds` immediately after createGoal; new children inherit the parent's effective `subgoalsAllowed` / `maxNestingDepth`. |
 | PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`. |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
@@ -1398,6 +1398,74 @@ A user must be able to:
 17. **`npm run test:e2e` passes** — at least 4 browser E2E tests cover
     sidebar nesting, plan tab, child spawn, recursive merge.
 
+## Spawn-time spec validation
+
+The server rejects placeholder specs on `POST /api/goals/:id/spawn-child` and in the harness `runSubgoalStep` path. This is a load-bearing guard: the child team-lead's **first user message is built from the spec at spawn time** (see [Team-lead kickoff](goals-workflows-tasks.md#concepts)). A placeholder spec leaves the child with no task context in that message.
+
+### What is checked
+
+Validation runs in `src/server/agent/spawn-child-spec-validation.ts` and applies two checks in order:
+
+1. **Placeholder keyword match** — if the trimmed spec matches `placeholder`, `tbd`, `todo`, `wip`, `test`, or `temp` (case-insensitive, as the whole value), the request is rejected with `SPEC_PLACEHOLDER`.
+2. **Minimum length** — if the trimmed spec is shorter than 50 characters (and not a keyword match), the request is rejected with `SPEC_TOO_SHORT`.
+
+Checks are applied to the trimmed spec only. A real spec that happens to *contain* the word "placeholder" inside a longer description passes fine — only exact (whole-value) matches are rejected.
+
+### Error shapes
+
+**`SPEC_PLACEHOLDER`** (400)
+```json
+{ "code": "SPEC_PLACEHOLDER", "error": "Goal spec looks like a placeholder..." }
+```
+
+**`SPEC_TOO_SHORT`** (400)
+```json
+{ "code": "SPEC_TOO_SHORT", "error": "Goal spec must be at least 50 characters...", "actualLength": 12, "minLength": 50 }
+```
+
+### Harness path
+
+When `runSubgoalStep` in `verification-harness.ts` encounters a placeholder spec, it returns `{ passed: false }` rather than an HTTP error — the harness communicates back to the orchestration loop rather than surfacing a raw 400.
+
+### PUT warning
+
+If a goal's spec is edited via `PUT /api/goals/:id` after the team-lead has already started, and the previous spec looked like a placeholder, the server logs a console warning:
+
+```
+[server] WARN: goal <id> had a placeholder spec edited shortly after spawn. The team-lead's first-message context was the placeholder, not this new content. If you intended to fix a spawn-time miss, archive and respawn.
+```
+
+This does not reject the edit — legitimate mid-flight spec clarifications are allowed — but it surfaces the anti-pattern when it happens.
+
+### The anti-pattern being prevented
+
+Some agent code developed a habit of:
+1. Spawning a child with `spec: "placeholder"` to get a `goalId` quickly.
+2. Then building the real spec and `PUT`-ing it via a separate REST call.
+
+This pattern was originally a workaround for an assumed JSON payload size limit on `goal_spawn_child`. **That limit does not exist.** The endpoint accepts arbitrarily long spec strings — multi-KB markdown is fine.
+
+The pattern is harmful because the team-lead kickoff message is constructed at spawn time from the spec in the store. By the time the parent agent PUTs the real spec, the child team-lead may have already started with the placeholder in its context. The `goal_spec_changed` WS notification and `view_goal_spec` tool exist for legitimate mid-flight edits, not to paper over spawn-time omissions.
+
+### Migration
+
+Pass the complete spec at spawn time:
+
+```ts
+// ✅ Correct — full spec at spawn
+goal_spawn_child({
+  planId: "impl-auth",
+  title: "Implement OAuth flow",
+  spec: "## Task\nImplement the OAuth 2.0 authorisation code flow...\n\n## Acceptance criteria\n- Token refresh works\n- ..."
+})
+
+// ❌ Wrong — placeholder-then-PUT is rejected
+goal_spawn_child({ planId: "impl-auth", title: "Implement OAuth flow", spec: "placeholder" })
+// ... then later PUT /api/goals/:id { spec: "real spec" }  <-- server warns, child already started wrong
+```
+
+Long specs (multi-KB markdown) are fine inline — there is no payload limit on `goal_spawn_child`.
+
 ## Anti-patterns
 
 These are the foot-guns that PR #409 hit. Don't reinvent them:
@@ -1421,3 +1489,4 @@ These are the foot-guns that PR #409 hit. Don't reinvent them:
     them verbatim under `## Covers`.
 11. **Don't push to `master` from a child goal.** Only the root goal's
     `ready-to-merge` raises a PR.
+12. **Don't spawn with `spec: "placeholder"` and PUT the real spec later.** The child team-lead's first message is built from the spec at spawn time. Pass the complete spec to `goal_spawn_child` — long markdown is fine, there is no payload limit. The server rejects placeholder specs at spawn with `400 SPEC_PLACEHOLDER` / `SPEC_TOO_SHORT`.
