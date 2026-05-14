@@ -98,6 +98,14 @@ describe("severityLabel", () => {
 	it("hint uses muted color", () => {
 		assert.match(severityLabel("hint").color, /muted/);
 	});
+	it("normalises numeric severity (1=error)", () => {
+		// Regression: numeric LSP severities (1..4) used to fall through to `info`.
+		assert.match(severityLabel(1).color, /destructive/);
+		assert.equal(severityLabel(1).label, "Error");
+		assert.match(severityLabel(2).color, /amber/);
+		assert.match(severityLabel(3).color, /blue/);
+		assert.match(severityLabel(4).color, /muted/);
+	});
 });
 
 // ── normalisePath ────────────────────────────────────────────────────

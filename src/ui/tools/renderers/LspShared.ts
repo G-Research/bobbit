@@ -72,8 +72,19 @@ const SEVERITY: Record<DiagnosticSeverity, { label: string; color: string; icon:
 	hint: { label: "Hint", color: "text-muted-foreground", icon: Lightbulb },
 };
 
-export function severityLabel(s: DiagnosticSeverity | string): { label: string; color: string; icon: any } {
-	return SEVERITY[s as DiagnosticSeverity] ?? SEVERITY.info;
+// Numeric LSP severity (per spec): 1=Error, 2=Warning, 3=Information, 4=Hint.
+// Some servers/wire paths leak numeric severities through; normalise to strings
+// so callers don't silently fall through to `info` styling.
+const NUMERIC_SEVERITY: Record<number, DiagnosticSeverity> = { 1: "error", 2: "warning", 3: "info", 4: "hint" };
+
+export function normaliseSeverity(s: DiagnosticSeverity | string | number): DiagnosticSeverity {
+	if (typeof s === "number") return NUMERIC_SEVERITY[s] ?? "info";
+	return (s as DiagnosticSeverity);
+}
+
+export function severityLabel(s: DiagnosticSeverity | string | number): { label: string; color: string; icon: any } {
+	const key = normaliseSeverity(s);
+	return SEVERITY[key] ?? SEVERITY.info;
 }
 
 // ── Location rendering ───────────────────────────────────────────────
@@ -152,17 +163,20 @@ export function renderPathLineCol(path: string, line: number, character: number)
 export interface Diagnostic {
 	path: string;
 	range: { start: { line: number; character: number } };
-	severity: DiagnosticSeverity | string;
+	severity: DiagnosticSeverity | string | number;
 	message: string;
 	source?: string;
 }
 
 const SEV_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2, hint: 3 };
-export function sevOrder(s: string): number { return SEV_ORDER[s] ?? 2; }
+export function sevOrder(s: string | number): number { return SEV_ORDER[normaliseSeverity(s)] ?? 2; }
 
 export function summariseDiagnostics(diags: Diagnostic[]): string {
 	const counts: Record<string, number> = {};
-	for (const d of diags) counts[d.severity] = (counts[d.severity] || 0) + 1;
+	for (const d of diags) {
+		const key = normaliseSeverity(d.severity);
+		counts[key] = (counts[key] || 0) + 1;
+	}
 	const parts: string[] = [];
 	const plural: Record<string, [string, string]> = {
 		error: ["error", "errors"], warning: ["warning", "warnings"], info: ["info", "info"], hint: ["hint", "hints"],
