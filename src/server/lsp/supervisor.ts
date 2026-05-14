@@ -61,6 +61,33 @@ interface Entry {
 	configDebounce?: NodeJS.Timeout;
 }
 
+export type LspCallStatus = "ok" | "lsp_unavailable" | "lsp_capacity" | "lsp_timeout" | "lsp_route_missing" | "error";
+
+/**
+ * Process-local adoption telemetry. Owned by `LspSupervisor`, reset on every
+ * gateway restart — no persistence. Exposed via `GET /api/lsp/stats.counters`
+ * so we can measure whether LSP-vs-grep nudges are moving adoption.
+ */
+export interface LspTelemetryCounters {
+	lspCallsTotal: number;
+	lspCallsByMethod: Record<string, number>;
+	lspCallsByStatus: Record<LspCallStatus, number>;
+	/** Incremented by `recordHintEmitted()` from the grep/bash LSP hint tools
+	 *  via `POST /api/lsp/_internal/hint-emitted`. */
+	grepLspHintEmittedTotal: number;
+}
+
+/** Known LSP methods routed through `dispatch()`. Pre-seeded with 0 so the
+ *  stats response has a stable shape even before any calls. */
+const KNOWN_LSP_METHODS: readonly string[] = [
+	"definition", "references", "hover", "diagnostics",
+	"document_symbols", "workspace_symbol", "rename",
+];
+
+const KNOWN_LSP_STATUSES: readonly LspCallStatus[] = [
+	"ok", "lsp_unavailable", "lsp_capacity", "lsp_timeout", "lsp_route_missing", "error",
+];
+
 export interface LspStats {
 	maxServers: number;
 	idleTtlMs: number;
@@ -81,6 +108,8 @@ export interface LspStats {
 	/** Post-boot loopback self-check result. "ok" = all /api/lsp/* routes responded correctly;
 	 *  "pending" = check has not completed yet; "failed:<route>:<status>" = route returned unexpected status. */
 	routeSelfCheck: string;
+	/** Adoption telemetry — see `LspTelemetryCounters`. */
+	counters: LspTelemetryCounters;
 }
 
 function keyOf(k: ServerKey): string { return `${k.language}::${k.worktreePath}`; }
@@ -102,6 +131,12 @@ export class LspSupervisor {
 	private watchFiles: string[];
 	private configChangeDebounceMs: number;
 	private _routeSelfCheck = "pending";
+	private _counters: LspTelemetryCounters = {
+		lspCallsTotal: 0,
+		lspCallsByMethod: Object.fromEntries(KNOWN_LSP_METHODS.map(m => [m, 0])),
+		lspCallsByStatus: Object.fromEntries(KNOWN_LSP_STATUSES.map(s => [s, 0])) as Record<LspCallStatus, number>,
+		grepLspHintEmittedTotal: 0,
+	};
 
 	constructor(opts: LspSupervisorOptions = {}) {
 		this.maxServers = opts.maxServers ?? 4;
@@ -137,6 +172,23 @@ export class LspSupervisor {
 		this._routeSelfCheck = value;
 	}
 
+	/** Increment the grep/bash LSP-hint counter. Called via
+	 *  `POST /api/lsp/_internal/hint-emitted` from tool extensions. */
+	recordHintEmitted(): void {
+		this._counters.grepLspHintEmittedTotal++;
+	}
+
+	/** Defensive deep copy of the telemetry counters so callers can't mutate
+	 *  supervisor state through the `stats()` response. */
+	private snapshotCounters(): LspTelemetryCounters {
+		return {
+			lspCallsTotal: this._counters.lspCallsTotal,
+			lspCallsByMethod: { ...this._counters.lspCallsByMethod },
+			lspCallsByStatus: { ...this._counters.lspCallsByStatus } as Record<LspCallStatus, number>,
+			grepLspHintEmittedTotal: this._counters.grepLspHintEmittedTotal,
+		};
+	}
+
 	stats(): LspStats {
 		return {
 			maxServers: this.maxServers,
@@ -146,6 +198,7 @@ export class LspSupervisor {
 			sandbox: !!this.sandbox,
 			evictedTotal: this.evictedTotal,
 			routeSelfCheck: this._routeSelfCheck,
+			counters: this.snapshotCounters(),
 			entries: [...this.entries.values()].map(e => {
 				const cs = this.crashState.get(keyOf(e.key));
 				return {
@@ -330,6 +383,38 @@ export class LspSupervisor {
 	 * cwd; output `path` fields are returned relative to cwd.
 	 */
 	async dispatch(method: string, args: {
+		cwd: string;
+		path?: string;
+		line?: number;
+		character?: number;
+		query?: string;
+		newName?: string;
+		includeDeclaration?: boolean;
+	}): Promise<unknown> {
+		// Telemetry: every dispatch entry counts toward the totals, regardless
+		// of whether it succeeds. Status is recorded once via `recordStatus()`.
+		this._counters.lspCallsTotal++;
+		this._counters.lspCallsByMethod[method] = (this._counters.lspCallsByMethod[method] ?? 0) + 1;
+		try {
+			const out = await this.dispatchInner(method, args);
+			this.recordStatus("ok");
+			return out;
+		} catch (err: any) {
+			const code = err?.code;
+			if (code === "lsp_unavailable" || code === "lsp_capacity" || code === "lsp_timeout" || code === "lsp_route_missing") {
+				this.recordStatus(code as LspCallStatus);
+			} else {
+				this.recordStatus("error");
+			}
+			throw err;
+		}
+	}
+
+	private recordStatus(status: LspCallStatus): void {
+		this._counters.lspCallsByStatus[status] = (this._counters.lspCallsByStatus[status] ?? 0) + 1;
+	}
+
+	private async dispatchInner(method: string, args: {
 		cwd: string;
 		path?: string;
 		line?: number;
