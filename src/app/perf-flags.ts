@@ -45,13 +45,6 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"to avoid staleness.",
 	},
 	{
-		name: "parallelGoalFetches",
-		description:
-			"Phase 2D — include `GET /api/goals/:id/team` in the goal-dashboard " +
-			"load-time `Promise.all` bundle instead of awaiting it sequentially " +
-			"after the other fetches. Targets `nav.goal.cold` / `nav.goal.ready`.",
-	},
-	{
 		name: "deferOffscreenRender",
 		description:
 			"Phase 2 Opt-A (SHIPPED, default-ON) — defer markdown / tool-call " +
@@ -72,9 +65,6 @@ export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
 
 /** Convenience canonical flag name for Phase 2C. */
 export const PERF_FLAG_PREFETCH_ON_HOVER = "prefetchOnHover";
-
-/** Convenience canonical flag name for Phase 2D (Opt-D). */
-export const PERF_FLAG_PARALLEL_GOAL_FETCHES = "parallelGoalFetches";
 
 /** Convenience canonical flag name for Phase 2 Opt-A. SHIPPED default-ON. */
 export const PERF_FLAG_DEFER_OFFSCREEN_RENDER = "deferOffscreenRender";
