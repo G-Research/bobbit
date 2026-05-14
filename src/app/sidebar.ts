@@ -610,6 +610,8 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 	const list = filteredList ?? state.staffList.filter((s) => s.state !== "retired");
 	const mobile = !isDesktop();
 	const staffExpanded = isStaffExpanded(projectId || "");
+	const staffProject = projectId ? state.projects.find((p) => p.id === projectId) : undefined;
+	const staffAccentColor = staffProject ? getProjectAccentColor(staffProject) : "var(--primary)";
 	// Always show the Staff section so users can create their first staff agent
 
 	const staffNavId = `staff-header:${projectId || ""}`;
@@ -632,10 +634,18 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 						title="Manage staff agents"
 					>${icon(List, mobile ? "sm" : "xs")}</button>
 					<button
-						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
+						class="${mobile ? "p-1.5 rounded active:bg-secondary/50" : "p-0.5 rounded-md hover:bg-secondary"} text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
+						style="line-height:0;"
 						@click=${(e: Event) => startNewStaffFlow(e, projectId)}
 						title="New staff agent"
-					>${icon(Plus, mobile ? "sm" : "xs")}</button>
+					>
+						<span class="relative inline-flex items-center justify-center" style="width:${mobile ? "16px" : "12px"};height:${mobile ? "16px" : "12px"};">
+							${icon(Bot, mobile ? "sm" : "xs")}
+							<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:${mobile ? "9px" : "7px"};height:${mobile ? "9px" : "7px"};filter:drop-shadow(0 0 1.5px var(--background));">
+								<path d="M5 1V9M1 5H9" stroke="${staffAccentColor}" stroke-width="2.5" stroke-linecap="round"/>
+							</svg>
+						</span>
+					</button>
 				</div>
 			</div>
 			${staffExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">${list.filter((agent) => {
@@ -848,25 +858,6 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
-			<button
-				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
-				style="padding:0;line-height:0;"
-				@click=${(e: Event) => { e.stopPropagation(); import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
-				title="Manage staff agents"
-			>${icon(List, "xs")}</button>
-			<button
-				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0 ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
-				style="padding:0 2px;line-height:0;"
-				@click=${(e: Event) => { e.stopPropagation(); ensureStaffLoaded(); void startNewStaffFlow(e, project.id); }}
-				title="New staff agent in ${project.name}"
-			>
-				<span class="relative inline-flex" style="width:12px;height:12px;">
-					${icon(Bot, "xs")}
-					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
-						<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
-					</svg>
-				</span>
-			</button>
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
