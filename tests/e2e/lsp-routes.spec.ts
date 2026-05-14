@@ -46,6 +46,16 @@ test("GET /api/lsp/stats is registered (never 404)", async () => {
 	expect(res.status).toBe(200);
 });
 
+test("GET /api/lsp/stats reports routeSelfCheck: 'ok' after clean boot", async () => {
+	// The post-boot loopback self-check probes /api/lsp/stats, /api/lsp/state, and
+	// /api/lsp/diagnostics. On a clean in-process boot all three routes are registered
+	// and the supervisor's routeSelfCheck field must be "ok".
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status).toBe(200);
+	const body = await res.json() as Record<string, unknown>;
+	expect(body.routeSelfCheck, "routeSelfCheck must be 'ok' — if 'pending' the check did not run; if 'failed:...' a route is missing").toBe("ok");
+});
+
 test("GET /api/lsp/state is registered (never 404)", async () => {
 	const params = new URLSearchParams({ cwd: FIXTURE, path: "src/math.ts" });
 	const res = await apiFetch(`/api/lsp/state?${params}`, { method: "GET" });
