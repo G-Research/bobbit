@@ -886,7 +886,7 @@ sample mixed with rare retries; mean and median both improved slightly.
   the goal-dashboard `Promise.all` consult the prefetch cache for each.
   That is closer to Opt-D's scope.
 
-**Code reverted at 26d91326** — postmortem retained for historical reference.
+**Code reverted at `26d91326`** — postmortem retained for historical reference.
 
 ### 6.3 Opt-D — parallelise goal-dashboard team-state fetch (`parallelGoalFetches` flag)
 
@@ -1111,3 +1111,13 @@ displays, bump the constant rather than restructuring the deferral.
 - Cross-commit report: `scripts/perf-report.mjs` reads
   `docs/perf/history/*.json` and writes `docs/perf/sidebar-nav-report.html`.
   No deps, inline SVG, Bobbit CSS tokens.
+
+## 9. How to repeat this analysis
+
+Future agents extending this work should follow the recipe in
+[`HOW-TO-REPEAT.md`](HOW-TO-REPEAT.md) — exact harness commands, the
+n=5-replicate A/B workflow via `scripts/perf-bench.mjs`, the canonical
+decision rule, and the common pitfalls surfaced by this goal (single-sample
+noise, cold-cache effects, fixture distribution, architectural
+mismatches). The companion [`README.md`](README.md) covers the harness
+env vars and history-JSON schema.
