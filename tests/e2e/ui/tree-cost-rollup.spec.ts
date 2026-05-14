@@ -56,6 +56,17 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const breakdown = page.locator('[data-testid="tree-cost-breakdown"]').first();
 		await expect(breakdown).toBeVisible({ timeout: 5_000 });
 
+		// Expanded breakdown is wrapped in a scroll container with bounded
+		// height + overflow:auto so long lists are reachable. Without this
+		// the panel just grows indefinitely and rows below the fold are
+		// inaccessible — the user-reported scroll bug.
+		const scroll = page.locator('[data-testid="tree-cost-breakdown-scroll"]').first();
+		await expect(scroll).toBeVisible();
+		const overflowY = await scroll.evaluate((el) => getComputedStyle(el as HTMLElement).overflowY);
+		expect(overflowY).toBe("auto");
+		const maxHeightPx = await scroll.evaluate((el) => parseFloat(getComputedStyle(el as HTMLElement).maxHeight) || Infinity);
+		expect(maxHeightPx).toBeLessThan(Infinity);
+
 		// Cleanup.
 		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		// Avoid unused-var lint
