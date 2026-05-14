@@ -944,8 +944,12 @@ export async function deleteGoal(id: string): Promise<void> {
 	const descendants = countDescendants(id);
 
 	if (descendants > 0) {
+		// Use cascade teardown so descendant teams don't block the archive dialog.
+		// teardownTeamWithDialog uses cascade=false first; if descendant teams are
+		// running it shows the stop-cascade dialog and tears all down before
+		// proceeding to the archive cascade.
 		if (teamActive) {
-			const ok = await teardownTeam(id);
+			const ok = await teardownTeamWithDialog(id);
 			if (!ok) return;
 		}
 		const result = await showArchiveGoalDialog(goal);

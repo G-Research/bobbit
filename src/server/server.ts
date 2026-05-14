@@ -3843,10 +3843,10 @@ async function handleApiRoute(
 					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 					if (tl?.branch) agentBranches.push(tl.branch);
 				}
-				// 3. Tear down any active team.
+				// 3. Tear down any active team. Failure is re-thrown so cascadeSubtree
+				// records it in errors[] and does NOT archive this node.
 				if (teamManager.getTeamState(g.id)) {
-					try { await teamManager.teardownTeam(g.id); }
-					catch (err) { console.error(`[api] archive: teardownTeam ${g.id} failed:`, err); }
+					await teamManager.teardownTeam(g.id);
 				}
 				// 4. Archive the goal record.
 				const gm = getGoalManagerForGoal(g.id);
@@ -6059,6 +6059,8 @@ async function handleApiRoute(
 			return;
 		}
 		const cascade = cascadeParam === "true";
+		// Validate goal exists before attempting teardown.
+		if (!getGoalAcrossProjects(goalId)) { json({ error: "Goal not found" }, 404); return; }
 		const tdCtx = projectContextManager.getContextForGoal(goalId);
 		const tdAllGoals = tdCtx?.goalStore.getAll() ?? [];
 
