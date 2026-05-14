@@ -310,30 +310,89 @@ function escapeHtml(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2A — realistic transcript fixture
+// Realistic transcript fixture (tuned to docs/perf/real-session-profile.md §5)
 // ---------------------------------------------------------------------------
-// Deterministic-by-seed JSONL builder. Each line is a pi-coding-agent
-// session-entry of `type:"message"`, matching the shape parsed by
+// Deterministic-by-seed JSONL builder. Each `type:"message"` line is a
+// pi-coding-agent session entry as parsed by
 // `src/server/agent/transcript-reader.ts::parseJsonl` and consumed by
-// `getArchivedMessages` (which is what the WS archived-attach path reads to
-// emit the snapshot frame).
+// `getArchivedMessages` (the WS archived-attach path). Non-message lines
+// (`session`, `model_change`, `compaction`) are silently skipped by the
+// parser — they exist on disk and inflate JSONL size + read cost the same
+// way real corpora do.
 //
-// Mix (rough proportions per session):
-//   ~50% interleaved user + assistant text messages
-//   ~30% assistant tool_use + matching user tool_result pairs (5–10 pairs)
-//   ~20% padding / chatter — short lines so total size scales gently
+// Distribution targets (from real-session-profile.md §2, §3, §5):
+//   role mix      ~6% user / ~45% assistant / ~49% toolResult
+//   tool-pair density ≈ 1 pair per 2 messages
+//   tool mix      weighted: bash 35 / read 29 / bash_bg 12 / edit 9 /
+//                  grep 7 / write 3 / ls 1 / find 1
+//   thinking      block on ~1 in 3 assistant turns
+//   result sizes  30% ≤500B · 40% 1–2KB · 20% 5–10KB · 7% 30–60KB ·
+//                 2% 100–250KB · ≤1 outlier 2MB (large fixture only)
+//   headers       1 session + 1 model_change per file; large adds 1–3
+//                 ~20 KB compaction lines
 //
-// At least one assistant tool_use is paired with a large (>=50 KB) tool_result
-// blob to exercise the lazy-tool-content code path the Phase 2B optimisation
-// targets. The blob is deterministic ASCII so JSONL gzip ratios match what we
-// would see for real `bash` / `read_file` outputs (not random noise).
+// PRNG: mulberry32 seeded from sessionIndex. 20 lines, dependency-free,
+// bit-identical across runs on the same SHA — keeps the perf numbers
+// reproducible while still spreading the weighted-sample decisions.
+
+function _mulberry32(seed: number): () => number {
+	let a = seed >>> 0;
+	return () => {
+		a = (a + 0x6D2B79F5) >>> 0;
+		let t = a;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+function _weightedPick<T>(rng: () => number, items: ReadonlyArray<readonly [T, number]>): T {
+	let total = 0;
+	for (const [, w] of items) total += w;
+	let r = rng() * total;
+	for (const [v, w] of items) { r -= w; if (r <= 0) return v; }
+	return items[items.length - 1][0];
+}
+
+const TOOL_WEIGHTS: ReadonlyArray<readonly [string, number]> = [
+	["bash", 35], ["read", 29], ["bash_bg", 12], ["edit", 9],
+	["grep", 7], ["write", 3], ["ls", 1], ["find", 1],
+];
+
+function _toolInput(tool: string, sessionIndex: number, i: number): Record<string, unknown> {
+	switch (tool) {
+		case "bash": return { command: `ls -lR /workspace/sess-${sessionIndex} | head -n 40` };
+		case "bash_bg": return { action: "logs", id: `bg-${sessionIndex}-${i}`, tail: 200 };
+		case "read": return { path: `src/module-${i % 12}.ts`, offset: 1, limit: 200 };
+		case "edit": return { path: `src/module-${i % 12}.ts`, oldText: `// TODO ${i}`, newText: `// done ${i}` };
+		case "grep": return { pattern: `function\\s+name${i}`, path: "src/", glob: "*.ts" };
+		case "write": return { path: `out/result-${i}.txt`, content: `pass ${i}\n` };
+		case "ls": return { path: `src/module-${i % 12}` };
+		case "find": return { pattern: `**/*-${i % 7}.spec.ts`, path: "tests/" };
+		default: return {};
+	}
+}
+
+// Result-size buckets per §5 of real-session-profile.md. Returns the
+// approximate body-byte target the synthesised tool_result should hit.
+// The 2 MB outlier bucket is gated by `allowOutlier` so it only fires once
+// per `large` session and never on `small`/`medium`.
+function _pickResultSize(rng: () => number, allowOutlier: boolean): { bytes: number; outlier: boolean } {
+	const r = rng();
+	if (allowOutlier && r < 0.005) return { bytes: 2_000_000, outlier: true };
+	if (r < 0.30) return { bytes: 200 + Math.floor(rng() * 300), outlier: false };       // ≤500 B (30%)
+	if (r < 0.70) return { bytes: 1_000 + Math.floor(rng() * 1_000), outlier: false };    // 1–2 KB (40%)
+	if (r < 0.90) return { bytes: 5_000 + Math.floor(rng() * 5_000), outlier: false };    // 5–10 KB (20%)
+	if (r < 0.97) return { bytes: 30_000 + Math.floor(rng() * 30_000), outlier: false };  // 30–60 KB (7%)
+	return { bytes: 100_000 + Math.floor(rng() * 150_000), outlier: false };              // 100–250 KB (~2%)
+}
 
 function _msgEntry(ts: string, id: string, role: string, content: unknown): string {
 	return JSON.stringify({ type: "message", ts, id, message: { role, content } });
 }
 
 function _largeBlob(approxBytes: number, sessionIndex: number): string {
-	// Build a deterministic, line-oriented blob (mimics a `ls -lR` / log dump).
+	// Deterministic line-oriented blob (mimics `ls -lR` / log / bash_bg stdout).
 	// 80-char lines so it looks like real tool output and compresses similarly.
 	const lines: string[] = [];
 	let bytes = 0;
@@ -347,67 +406,116 @@ function _largeBlob(approxBytes: number, sessionIndex: number): string {
 	return lines.join("\n");
 }
 
+function _resultBody(tool: string, bytes: number, sessionIndex: number, i: number): string {
+	// §4: every >50 KB blob in the real corpus is a single text body, never
+	// multi-block. Match that — tiny buckets get a short ack, everything else
+	// gets the deterministic line-oriented dump.
+	if (bytes <= 500) return `${tool} ok (step ${i}, ${bytes}B)`;
+	return _largeBlob(bytes, sessionIndex);
+}
+
 function buildRealisticJsonl(sessionIndex: number, totalMsgs: number): string {
-	// Aim for 5–10 tool-call/tool-result pairs (deterministic from sessionIndex).
-	const toolPairs = Math.min(10, Math.max(5, 5 + (sessionIndex % 6)));
+	// Mulberry32 seeded from sessionIndex — same-SHA, same-fixture-size runs
+	// are bit-identical. Xor with a fixed constant so seed=0 still spreads.
+	const rng = _mulberry32((sessionIndex + 1) * 0x9E3779B1);
 	const lines: string[] = [];
 	const baseTs = Date.parse("2026-05-01T00:00:00.000Z");
 	const stamp = (i: number) => new Date(baseTs + sessionIndex * 3_600_000 + i * 15_000).toISOString();
-	const toolNames = ["bash", "read", "edit", "grep", "find", "write", "web_fetch"];
 
-	// Spread tool pairs roughly evenly across the transcript.
-	const toolPositions = new Set<number>();
-	if (toolPairs > 0 && totalMsgs > 4) {
-		const stride = Math.max(2, Math.floor((totalMsgs - 2) / toolPairs));
-		for (let k = 0; k < toolPairs; k++) toolPositions.add(2 + k * stride);
+	// `large` fixture (≥150 msgs) gets the 2 MB outlier budget + 1–3 compaction
+	// markers. `small` and `medium` skip both — §6 anti-pattern: don't model
+	// outlier behaviour where it isn't realistic.
+	const isLarge = totalMsgs >= 150;
+	let outlierBudget = isLarge ? 1 : 0;
+
+	// 1) Header records — silently skipped by parseJsonl, but shipped to disk
+	// and read off the wire so they cost the same bytes a real corpus does.
+	lines.push(JSON.stringify({
+		type: "session", sessionId: `perf-${sessionIndex}`, ts: stamp(0),
+		cwd: `/workspace/sess-${sessionIndex}`,
+	}));
+	lines.push(JSON.stringify({
+		type: "model_change", ts: stamp(0), model: "anthropic/claude-sonnet-4",
+	}));
+
+	// 2) Compaction markers (large only). Sprinkle 1..3 ~20 KB lines evenly.
+	const compactionPositions = new Set<number>();
+	if (isLarge) {
+		const compactionCount = 1 + Math.floor(rng() * 3); // 1..3 inclusive
+		for (let k = 0; k < compactionCount; k++) {
+			compactionPositions.add(Math.floor(totalMsgs * (k + 1) / (compactionCount + 1)));
+		}
 	}
-	// Designate one tool pair to carry the >=50 KB blob.
-	const bigBlobPos = toolPositions.size > 0 ? [...toolPositions][Math.floor(toolPositions.size / 2)] : -1;
 
-	let i = 0;
+	let i = 0; // message-line counter (only `type:"message"` lines count)
 	let toolIdCounter = 0;
-	while (lines.length < totalMsgs) {
-		const ts = stamp(i);
-		const entryId = `e-${sessionIndex}-${i}`;
-		if (toolPositions.has(i) && lines.length + 1 < totalMsgs) {
-			// Emit assistant tool_use + user tool_result pair (counts as 2 messages).
-			const tname = toolNames[toolIdCounter % toolNames.length];
-			const toolUseId = `toolu_${sessionIndex}_${toolIdCounter}`;
-			toolIdCounter++;
-			const inputs: Record<string, unknown> = tname === "bash"
-				? { command: `ls -lR /workspace/sess-${sessionIndex} | head -n 40` }
-				: tname === "read"
-				? { path: `src/module-${i % 12}.ts`, offset: 1, limit: 80 }
-				: tname === "edit"
-				? { path: `src/module-${i % 12}.ts`, oldText: `// TODO ${i}`, newText: `// done ${i}` }
-				: tname === "grep"
-				? { pattern: `function\\s+name${i}`, path: "src/", glob: "*.ts" }
-				: tname === "find"
-				? { pattern: `**/*-${i % 7}.spec.ts`, path: "tests/" }
-				: tname === "write"
-				? { path: `out/result-${i}.txt`, content: `pass ${i}\n` }
-				: { url: `https://example.test/api/${i}.json` };
-			lines.push(_msgEntry(ts, entryId, "assistant", [
-				{ type: "text", text: `Running ${tname} for step ${i} (session ${sessionIndex}).` },
-				{ type: "tool_use", id: toolUseId, name: tname, input: inputs },
-			]));
-			const body = i === bigBlobPos
-				? _largeBlob(60_000, sessionIndex) // >=50 KB blob
-				: `ok\n${tname} completed in ${(i % 90) + 10}ms\n${"line " + i + "\n".repeat(1)}`.repeat(3);
+	while (i < totalMsgs) {
+		if (compactionPositions.has(i)) {
+			lines.push(JSON.stringify({
+				type: "compaction", ts: stamp(i),
+				// §6: real compactions are opaque ~13–28 KB filler. One fixed
+				// shape is enough; no need to randomise contents.
+				summary: _largeBlob(20_000, sessionIndex).slice(0, 20_000),
+			}));
+			compactionPositions.delete(i);
+		}
+
+		const roll = rng();
+		// Probability tuning: the real corpus line-share is ~6% user / ~45%
+		// assistant / ~49% toolResult (real-session-profile.md §2). Tool pairs
+		// produce TWO lines (assistant + toolResult), so iteration probabilities
+		// don't equal line shares. Solving p_p/(1+p_p) ≈ 0.49 forces p_p ≈ 0.95
+		// just to land toolResult at ~47%. We use p_user=0.10, p_pair=0.88,
+		// p_text=0.02 — which yields line shares ~5.3% / ~47.9% / ~46.8%, the
+		// closest match achievable without injecting orphan tool_results.
+		if (roll < 0.10) {
+			// User text. §6 anti-pattern: keep user lines small (<1 KB).
+			const text = `Step ${i}: please look at module-${i % 12}.ts and confirm the edge case from issue #${1000 + sessionIndex * 17 + i}.`;
+			lines.push(_msgEntry(stamp(i), `e-${sessionIndex}-${i}`, "user", text));
+			i++;
+			continue;
+		}
+
+		if (roll < 0.98 && i + 1 < totalMsgs) {
+			// Tool pair (1 assistant + 1 toolResult line). Weighted by §3
+			// real-corpus tool-call shares; emits bash_bg, which the previous
+			// fixture missed and which produces the heavy-tail blobs.
+			const tool = _weightedPick(rng, TOOL_WEIGHTS);
+			const toolUseId = `toolu_${sessionIndex}_${toolIdCounter++}`;
+			const blocks: unknown[] = [];
+			if (rng() < 0.33) {
+				// §5.4: thinking on ~1 in 3 assistant turns. Keep it short — real
+				// thinking blocks are mostly small.
+				blocks.push({
+					type: "thinking",
+					thinking: `Need to ${tool} module-${i % 12} to check step ${i}. Repro is deterministic on input ${i * 7 + sessionIndex}.`,
+				});
+			}
+			blocks.push({ type: "text", text: `Running ${tool} for step ${i} (session ${sessionIndex}).` });
+			blocks.push({ type: "tool_use", id: toolUseId, name: tool, input: _toolInput(tool, sessionIndex, i) });
+			lines.push(_msgEntry(stamp(i), `e-${sessionIndex}-${i}`, "assistant", blocks));
+
+			const pick = _pickResultSize(rng, outlierBudget > 0);
+			if (pick.outlier) outlierBudget--;
+			const body = _resultBody(tool, pick.bytes, sessionIndex, i);
 			lines.push(_msgEntry(stamp(i + 1), `e-${sessionIndex}-${i}-r`, "user", [
 				{ type: "tool_result", tool_use_id: toolUseId, content: body },
 			]));
 			i += 2;
 			continue;
 		}
-		// Plain alternating user / assistant text.
-		const isUser = i % 2 === 0;
-		const role = isUser ? "user" : "assistant";
-		const text = isUser
-			? `Step ${i}: please look at module-${i % 12}.ts and confirm the edge case from issue #${1000 + sessionIndex * 17 + i}.`
-			: `Looking at module-${i % 12}.ts now. The edge case at line ${30 + (i % 90)} reproduces with input ${i * 7 + sessionIndex}. Suggested fix: clamp the index before dispatching.`;
-		const content = isUser ? text : [{ type: "text", text }];
-		lines.push(_msgEntry(ts, entryId, role, content));
+
+		// 44% pure-assistant text (with optional thinking). This is the smaller
+		// slice that makes the assistant/toolResult ratio land near 45/49.
+		const blocks: unknown[] = [];
+		if (rng() < 0.33) {
+			blocks.push({ type: "thinking", thinking: `Considering the next step at line ${30 + (i % 90)}.` });
+		}
+		blocks.push({
+			type: "text",
+			text: `Looking at module-${i % 12}.ts now. The edge case at line ${30 + (i % 90)} reproduces with input ${i * 7 + sessionIndex}. Suggested fix: clamp the index before dispatching.`,
+		});
+		lines.push(_msgEntry(stamp(i), `e-${sessionIndex}-${i}`, "assistant", blocks));
 		i++;
 	}
 	return lines.join("\n") + "\n";
@@ -821,11 +929,22 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		try { parentCommit = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		try { branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: PROJECT_ROOT }).toString().trim(); } catch { /* swallow */ }
 		const short = commit.slice(0, 12);
-		// Suffix the history file with the fixture size so medium / large runs
-		// on the same commit don't overwrite each other. The cross-commit
-		// report (scripts/perf-report.mjs) groups by SHA and reads the JSON's
-		// own `fixtureSize` field, so the file name is purely a uniqueness key.
-		const suffix = fixtureSizeName === "medium" ? "" : `-${fixtureSizeName}`;
+		// History-file suffix policy:
+		//   1. `BOBBIT_PERF_HISTORY_TAG` (if set) wins — used for A/B runs on
+		//      the same commit, e.g. `flag-off` / `flag-on`, or to tag a
+		//      realistic-corpus re-baseline as `realistic-medium` /
+		//      `realistic-large`. Documented in docs/perf/README.md.
+		//   2. Otherwise fall back to the fixture-size suffix so medium/large
+		//      runs on the same SHA don't overwrite each other. `medium` (the
+		//      default) gets no suffix so the cross-commit report's primary
+		//      timeline stays continuous across SHAs.
+		// The report (scripts/perf-report.mjs) just globs `*.json` and reads
+		// each file's own `fixtureSize` field, so the name is purely a key.
+		const rawTag = (process.env.BOBBIT_PERF_HISTORY_TAG ?? "").trim();
+		const tag = rawTag.replace(/[^a-zA-Z0-9._-]+/g, "-");
+		const suffix = tag
+			? `-${tag}`
+			: fixtureSizeName === "medium" ? "" : `-${fixtureSizeName}`;
 		const historyPath = join(HISTORY_DIR, `${short}${suffix}.json`);
 		writeFileSync(historyPath, JSON.stringify({
 			commit, parentCommit, branch,
