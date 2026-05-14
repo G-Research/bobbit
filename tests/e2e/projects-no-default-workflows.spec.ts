@@ -125,12 +125,11 @@ test.describe("No default workflow scaffold", () => {
 		expect(wf["quick-fix"]).toBeUndefined();
 	});
 
-	test("Case C — goal-creation in a zero-workflows project auto-seeds default workflows", async () => {
-		// e04159ff intentionally added auto-seeding: when a goal is first
-		// created in a project with no workflows, the server seeds the canonical
-		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
-		// This test pins that behavior, replacing the pre-e04159ff expectation
-		// that project.yaml would remain unchanged.
+	test("Case C — goal-creation in a zero-workflows project succeeds without persisting workflows", async () => {
+		// When a goal is created without an explicit workflowId, the server uses
+		// 'general' in-memory without persisting to project.yaml (so the yaml
+		// remains unchanged). Goal creation still succeeds (201). This preserves
+		// the user's intentional zero-workflows project configuration.
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
@@ -151,10 +150,6 @@ test.describe("No default workflow scaffold", () => {
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
 
-		// Goal creation triggers auto-seeding (see e04159ff). Use the
-		// `__e2e_seed_skip__` mechanism is irrelevant here; we test via
-		// regular fetch (same as real user) so harness auto-seed runs too
-		// and doesn't interfere (it's idempotent).
 		const goalRes = await fetch(`${base()}/api/goals`, {
 			method: "POST",
 			headers: headers(),
@@ -166,9 +161,9 @@ test.describe("No default workflow scaffold", () => {
 				autoStartTeam: false,
 			}),
 		});
-		// Goal creation should succeed (201) and the project.yaml should now
-		// have workflows seeded into it.
+		// Goal creation succeeds; project.yaml is left unchanged (no seeding for
+		// no-workflowId goal creation — see server.ts Layer 2 else branch).
 		expect([200, 201]).toContain(goalRes.status);
-		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
+		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
 	});
 });
