@@ -795,6 +795,8 @@ delivers the transcript over REST instead of WS would change this
 conclusion, but until then there is no win to ship.
 History: `docs/perf/history/d6585b472604-opt-b-{off,on}.json`.
 
+**Code reverted at `c69f4ecc`** — postmortem retained for historical reference.
+
 ### 6.2 Opt-C — sidebar prefetch on hover (`prefetchOnHover` flag)
 
 **Hypothesis**: fire `GET /api/sessions/:id` / `GET /api/goals/:id` on
@@ -884,6 +886,8 @@ sample mixed with rare retries; mean and median both improved slightly.
   the goal-dashboard `Promise.all` consult the prefetch cache for each.
   That is closer to Opt-D's scope.
 
+**Code reverted at `26d91326`** — postmortem retained for historical reference.
+
 ### 6.3 Opt-D — parallelise goal-dashboard team-state fetch (`parallelGoalFetches` flag)
 
 A/B'd on commit `606833ce8450` against the medium fixture (50 msgs/session
@@ -951,6 +955,8 @@ shipping more state) would automatically pick up the win without a
 rewrite. Until then, there is nothing to ship.
 
 History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
+
+**Code reverted at `6f330231`** — postmortem retained for historical reference.
 
 ## 7. Shipped wins
 
@@ -1105,3 +1111,13 @@ displays, bump the constant rather than restructuring the deferral.
 - Cross-commit report: `scripts/perf-report.mjs` reads
   `docs/perf/history/*.json` and writes `docs/perf/sidebar-nav-report.html`.
   No deps, inline SVG, Bobbit CSS tokens.
+
+## 9. How to repeat this analysis
+
+Future agents extending this work should follow the recipe in
+[`HOW-TO-REPEAT.md`](HOW-TO-REPEAT.md) — exact harness commands, the
+n=5-replicate A/B workflow via `scripts/perf-bench.mjs`, the canonical
+decision rule, and the common pitfalls surfaced by this goal (single-sample
+noise, cold-cache effects, fixture distribution, architectural
+mismatches). The companion [`README.md`](README.md) covers the harness
+env vars and history-JSON schema.
