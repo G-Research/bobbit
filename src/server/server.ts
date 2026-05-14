@@ -21,6 +21,8 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -1604,6 +1606,13 @@ async function handleApiRoute(
 		const e = err instanceof Error ? err : new Error(String(err));
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
+
+	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
+	function requireSubgoalsEnabled(): boolean {
+		if (preferencesStore.get("subgoalsEnabled") === true) return true;
+		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
+		return false;
+	}
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -3391,6 +3400,25 @@ async function handleApiRoute(
 			recordElapsed("POST /api/sessions", performance.now() - __t0);
 		}
 	}
+
+	// ── Nested-goal endpoints ─────────────────────────────────────
+	// REST surface for the team-lead-only `goal_*` tools. Implementation in
+	// `nested-goal-routes.ts`. Cascade-affecting routes require explicit
+	// `cascade` (422 otherwise). UI is the cascade-policy authority.
+	if (await tryHandleNestedGoalRoute(req, url, {
+		projectContextManager,
+		verificationHarness,
+		teamManager,
+		sessionManager,
+		requireSubgoalsEnabled,
+		getGoalAcrossProjects,
+		getGoalManagerForGoal,
+		readBody,
+		json,
+		jsonError,
+		broadcastToAll,
+		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+	})) return;
 
 	// ── Goal endpoints ─────────────────────────────────────────────
 
