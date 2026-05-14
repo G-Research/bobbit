@@ -53,6 +53,9 @@ export interface LspClientFactory {
  * Docker. Mirror of `rpc-bridge.spawnDockerExec` minus the agent specifics.
  */
 export interface SandboxLspBridge {
+	/** Return a stable bridge scoped to one worktree path, avoiding shared
+	 *  mutable state in multi-project bridges. Falls back to `this`. */
+	resolveForWorktree?(worktreePath: string): SandboxLspBridge;
 	/** Spawn a child inside the sandbox container; return its stdio handles. */
 	spawn(args: {
 		containerId: string;

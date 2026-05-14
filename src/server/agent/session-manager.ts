@@ -490,7 +490,7 @@ export class SessionManager {
 	lspSupervisor: import("../lsp/supervisor.js").LspSupervisor | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
-	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
+	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void> = [];
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
 	 * persisted `agentSessionFile` (and are newer than the most recent
@@ -523,7 +523,7 @@ export class SessionManager {
 	}
 
 	/** Subscribe to session termination events. Listeners are invoked synchronously. */
-	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void): void {
+	addTerminationListener(fn: (sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged"; cwd?: string; worktreePath?: string; repoWorktrees?: Array<{ worktreePath: string }> }) => void): void {
 		this._terminationListeners.push(fn);
 	}
 
@@ -4507,9 +4507,15 @@ export class SessionManager {
 		});
 
 	// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
+		// Pass cwd/worktreePath/repoWorktrees in the info so listeners (e.g. LSP
+		// supervisor release) can't be defeated by the `sessions.delete(id)` above —
+		// `getSession(id)` would return undefined here and refcounts would leak.
 		const projectIdForListeners = session.projectId;
+		const sessionCwd = session.cwd;
+		const sessionWorktreePath = session.worktreePath;
+		const sessionRepoWorktrees = session.repoWorktrees;
 		for (const listener of this._terminationListeners) {
-			try { listener(id, { projectId: projectIdForListeners, reason: "archived" }); } catch (err) {
+			try { listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees }); } catch (err) {
 				console.error(`[session ${id}] termination listener failed:`, err);
 			}
 		}

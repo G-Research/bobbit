@@ -251,10 +251,10 @@ export class LspSupervisor {
 		const langs = detectLanguages(wp);
 		for (const lang of langs) {
 			if (!this.hasFactory(lang)) continue;
-			queueMicrotask(() => {
-				this.ensure({ worktreePath: wp, language: lang }).catch(err => {
-					console.warn(`[lsp] pre-warm failed for ${lang} ${wp}: ${err?.message ?? err}`);
-				});
+			// Call ensure() directly (no queueMicrotask) so the entry exists before
+			// any immediately-following acquire() call can increment its refcount.
+			this.ensure({ worktreePath: wp, language: lang }).catch(err => {
+				console.warn(`[lsp] pre-warm failed for ${lang} ${wp}: ${err?.message ?? err}`);
 			});
 		}
 	}

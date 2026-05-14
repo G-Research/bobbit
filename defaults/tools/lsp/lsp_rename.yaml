@@ -6,6 +6,7 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspRenameRenderer.ts
 docs: |-
   Computes edits only; agent applies them with `edit`/`write`. 0-indexed line/char.
 detail_docs: >-

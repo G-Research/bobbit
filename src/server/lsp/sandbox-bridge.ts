@@ -78,6 +78,13 @@ export class DockerSandboxLspBridge implements SandboxLspBridge {
  * may need refinement — see docs/design/lsp-code-intelligence.md §Sandbox.
  */
 export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
+	/** Tracks the last-resolved per-project bridge so toHostPath can reverse-
+	 *  translate container paths without a separate lookup hint. The supervisor
+	 *  creates one bridge per LSP process and calls bridgeForHostPath
+	 *  consistently for the same worktree, so this reliably reflects the
+	 *  active project for the lifetime of that process. */
+	private lastBridge: DockerSandboxLspBridge | null = null;
+
 	constructor(
 		private sandboxManager: SandboxManager,
 		private projectContextManager: ProjectContextManager,
@@ -85,23 +92,39 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 
 	private bridgeForHostPath(hostPath: string): DockerSandboxLspBridge | null {
 		const abs = path.resolve(hostPath);
-		let best: { projectId: string; root: string } | null = null;
+		let best: { projectId: string; root: string; worktreeRoot: string } | null = null;
 		for (const ctx of this.projectContextManager.all()) {
 			const root = path.resolve(ctx.project.rootPath);
-			if (abs === root || abs.startsWith(root + path.sep)) {
+			// Respect the project's worktree_root config if set; otherwise default
+			// to the conventional <rootPath>-wt sibling directory.
+			const configuredRoot = (ctx.projectConfigStore as any)?.get?.("worktree_root") as string | undefined;
+			const worktreeRoot = configuredRoot ? path.resolve(configuredRoot) : root + "-wt";
+			const matches =
+				abs === root ||
+				abs.startsWith(root + path.sep) ||
+				abs === worktreeRoot ||
+				abs.startsWith(worktreeRoot + path.sep);
+			if (matches) {
 				if (!best || root.length > best.root.length) {
-					best = { projectId: ctx.project.id ?? ctx.project.name, root };
+					best = { projectId: ctx.project.id ?? ctx.project.name, root, worktreeRoot };
 				}
 			}
 		}
 		if (!best) return null;
-		// Worktree root for sessions is `<rootPath>-wt`; bind-mounted at
-		// `/workspace-wt` inside the container.
-		return new DockerSandboxLspBridge(
+		// Worktree root is bind-mounted at `/workspace-wt` inside the container.
+		const bridge = new DockerSandboxLspBridge(
 			this.sandboxManager,
 			best.projectId,
-			`${best.root}-wt`,
+			best.worktreeRoot,
 		);
+		this.lastBridge = bridge;
+		return bridge;
+	}
+
+	/** Return a stable per-project bridge for a specific worktree (avoids
+	 *  shared mutable state for multi-project scenarios). */
+	resolveForWorktree(worktreePath: string): SandboxLspBridge {
+		return this.bridgeForHostPath(worktreePath) ?? this;
 	}
 
 	containerIdForWorktree(hostWorktreePath: string): string | null {
@@ -113,7 +136,14 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 	}
 
 	toHostPath(containerPath: string): string {
-		// Reverse lookup needs a hint of which project; without one, return as-is.
+		// Best-effort: use the most-recently-resolved per-project bridge.
+		// The supervisor holds one bridge instance per LSP process and calls
+		// bridgeForHostPath for the same worktree, so lastBridge reliably
+		// reflects the active project once any outbound call has been made.
+		if (this.lastBridge) {
+			const translated = this.lastBridge.toHostPath(containerPath);
+			if (translated !== containerPath) return translated;
+		}
 		return containerPath;
 	}
 

@@ -670,12 +670,14 @@ export function createGateway(config: GatewayConfig) {
 	// the supervisor exposes a setter rather than taking it via constructor.
 	sessionManager.setLspSupervisor(lspSupervisor);
 	registerWorktreePreCleanupHook(async (wp) => { await lspSupervisor.shutdownForWorktree(wp); });
-	sessionManager.addTerminationListener((sessionId) => {
-		const session = sessionManager.getSession(sessionId);
-		if (!session) return;
-		if (session.cwd) lspSupervisor.release(session.cwd);
-		if (session.worktreePath) lspSupervisor.release(session.worktreePath);
-		for (const r of session.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
+	// Use the info fields directly: the session has already been removed from
+	// the in-memory map by the time listeners fire, so getSession() would
+	// return undefined and refcounts would leak. See session-manager.ts
+	// terminateSession() for the captured fields.
+	sessionManager.addTerminationListener((_sessionId, info) => {
+		if (info.cwd) lspSupervisor.release(info.cwd);
+		if (info.worktreePath) lspSupervisor.release(info.worktreePath);
+		for (const r of info.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
 	});
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,

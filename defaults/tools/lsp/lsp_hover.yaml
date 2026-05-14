@@ -6,6 +6,7 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspHoverRenderer.ts
 docs: |-
   Returns markdown hover content at the cursor position. line/character are 0-indexed.
 detail_docs: >-
