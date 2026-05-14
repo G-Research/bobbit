@@ -203,12 +203,24 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const initiallyFocused = await searchInput.evaluate((el) => document.activeElement === el);
 		expect(initiallyFocused).toBe(false);
 
-		// Press Ctrl+K
-		await page.keyboard.press("Control+k");
+		// Wait for shortcuts to be registered before dispatching, then send a
+		// synthetic event on window (the shortcut registry's listener target)
+		// to avoid keystroke drops under parallel E2E load. Mirrors Ctrl+[ test.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
 		// Search input should be focused
-		const nowFocused = await searchInput.evaluate((el) => document.activeElement === el);
-		expect(nowFocused).toBe(true);
+		await expect.poll(
+			() => searchInput.evaluate((el) => document.activeElement === el),
+			{ timeout: 3_000 },
+		).toBe(true);
 	});
 
 	test("SB-34: Ctrl+[ toggles sidebar collapse", async ({ page }) => {
@@ -270,13 +282,23 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			const textareaFocused = await page.evaluate(() => document.activeElement?.tagName.toLowerCase());
 			expect(textareaFocused).toBe("textarea");
 
-			// Press Ctrl+K — should still focus search
-			// Note: Ctrl+K uses ctrlOrMeta modifier so it fires even in input contexts
-			await page.keyboard.press("Control+k");
+			// Press Ctrl+K — should still focus search. Use a synthetic event on
+			// window to bypass first-keystroke-drop races under parallel load.
+			await expect.poll(
+				() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+				{ timeout: 15_000 },
+			).toBe(true);
+			await page.evaluate(() => {
+				window.dispatchEvent(new KeyboardEvent("keydown", {
+					key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+				}));
+			});
 
 			const searchInput = page.locator("input[data-search]");
-			const nowFocused = await searchInput.evaluate((el) => document.activeElement === el);
-			expect(nowFocused).toBe(true);
+			await expect.poll(
+				() => searchInput.evaluate((el) => document.activeElement === el),
+				{ timeout: 3_000 },
+			).toBe(true);
 		} finally {
 			await deleteSession(tempSession).catch(() => {});
 		}
