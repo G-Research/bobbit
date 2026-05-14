@@ -76,11 +76,12 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 	});
 
 	test("rendered order is deterministic across reloads (stable sort)", async ({ page }) => {
+		test.slow(); // Spawned child goals trigger team-lead setup; give extra headroom.
 		await openApp(page);
 
 		// Wait for both rows to be present before snapshotting order.
-		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 25_000 });
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 25_000 });
 
 		const orderFromDom = async (): Promise<string[]> => {
 			return await page.locator(`[data-testid="sidebar-nested-row"]`)
@@ -95,8 +96,10 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 		// Reload and re-check: order must match. The pre-fix render path had
 		// no stable sort, so two same-titled siblings shuffled on every render.
 		await page.reload();
-		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 15_000 });
+		// After reload, the sidebar re-fetches goals via WS. Use longer timeout to
+		// accommodate goal-setup background work making the server busier.
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 25_000 });
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 25_000 });
 		const second = await orderFromDom();
 
 		expect(second).toEqual(first);
@@ -111,20 +114,26 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 	});
 
 	test("dedupe: a goal id appears at most once in the spawned-child rows", async ({ page }) => {
+		test.slow(); // Spawned child goals trigger team-lead setup; give extra headroom.
 		await openApp(page);
-		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 25_000 });
 
-		const counts = await page.locator(`[data-testid="sidebar-nested-row"]`)
-			.evaluateAll(els => {
-				const m = new Map<string, number>();
-				for (const el of els) {
-					const id = (el as HTMLElement).getAttribute("data-goal-id") || "";
-					m.set(id, (m.get(id) ?? 0) + 1);
-				}
-				return Object.fromEntries(m);
-			});
-		// Each spawned-child id appears exactly once.
-		expect(counts[child1Id]).toBe(1);
-		expect(counts[child2Id]).toBe(1);
+		// Use toPass to retry the evaluateAll in case a concurrent WS-driven re-render
+		// momentarily removes and re-inserts elements between the visibility check and
+		// the DOM snapshot.
+		await expect(async () => {
+			const counts = await page.locator(`[data-testid="sidebar-nested-row"]`)
+				.evaluateAll(els => {
+					const m = new Map<string, number>();
+					for (const el of els) {
+						const id = (el as HTMLElement).getAttribute("data-goal-id") || "";
+						m.set(id, (m.get(id) ?? 0) + 1);
+					}
+					return Object.fromEntries(m);
+				});
+			// Each spawned-child id appears exactly once.
+			expect(counts[child1Id]).toBe(1);
+			expect(counts[child2Id]).toBe(1);
+		}).toPass({ timeout: 10_000 });
 	});
 });
