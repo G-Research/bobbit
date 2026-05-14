@@ -36,15 +36,6 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"`/tool-content/:mi/:bi`.",
 	},
 	{
-		name: "prefetchOnHover",
-		description:
-			"Phase 2C — on `pointerover` / `focusin` of a sidebar session or " +
-			"goal row, kick off `GET /api/sessions/:id` or `GET /api/goals/:id` " +
-			"so the response is already in flight (or cached) by the time the " +
-			"user clicks. Cache is single-use, age-bounded, and bounded in size " +
-			"to avoid staleness.",
-	},
-	{
 		name: "parallelGoalFetches",
 		description:
 			"Phase 2D — include `GET /api/goals/:id/team` in the goal-dashboard " +
@@ -69,9 +60,6 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 /** Convenience canonical flag name for Phase 2B. Imported by call sites so
  *  a typo on the magic string surfaces at build time. */
 export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
-
-/** Convenience canonical flag name for Phase 2C. */
-export const PERF_FLAG_PREFETCH_ON_HOVER = "prefetchOnHover";
 
 /** Convenience canonical flag name for Phase 2D (Opt-D). */
 export const PERF_FLAG_PARALLEL_GOAL_FETCHES = "parallelGoalFetches";
