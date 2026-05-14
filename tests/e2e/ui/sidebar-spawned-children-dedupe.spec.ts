@@ -37,7 +37,7 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 			body: JSON.stringify({
 				planId: "plan-dup-1",
 				title: "AUDIT: SAME TITLE",
-				spec: "first instance — distinct id",
+				spec: "first instance of the duplicate-title child — unique id, dedupe test",
 			}),
 		});
 		expect(r1.status).toBe(201);
@@ -48,7 +48,7 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 			body: JSON.stringify({
 				planId: "plan-dup-2",
 				title: "AUDIT: SAME TITLE",
-				spec: "second instance — distinct id",
+				spec: "second instance of the duplicate-title child — unique id, dedupe test",
 			}),
 		});
 		expect(r2.status).toBe(201);

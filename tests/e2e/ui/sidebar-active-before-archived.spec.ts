@@ -59,7 +59,7 @@ async function createLiveChild(parentId: string, title: string, planId: string):
 	// top-level POST /api/goals endpoint doesn't honour parentGoalId.
 	const resp = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		body: JSON.stringify({ planId, title, spec: "placeholder", autoStartTeam: false }),
+		body: JSON.stringify({ planId, title, spec: `${title}: live child goal for sidebar-active-before-archived ordering test — not a placeholder`, autoStartTeam: false }),
 	});
 	expect(resp.status).toBe(201);
 	const data = await resp.json();

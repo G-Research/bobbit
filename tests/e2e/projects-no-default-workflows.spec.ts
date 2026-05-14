@@ -164,10 +164,11 @@ test.describe("No default workflow scaffold", () => {
 				projectId: project.id,
 				team: false,
 				autoStartTeam: false,
+				workflowId: "feature", // workflowId triggers auto-seeding on empty project
 			}),
 		});
-		// Goal creation should succeed (201) and the project.yaml should now
-		// have workflows seeded into it.
+		// Goal creation with workflowId should succeed and seed default workflows
+		// into project.yaml (only fires when workflowId is given on an empty store).
 		expect([200, 201]).toContain(goalRes.status);
 		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
 	});
