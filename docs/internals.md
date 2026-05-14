@@ -1111,7 +1111,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 Two invariants live in `hasUnseenActivity` and must be preserved by any future refactor:
 
 - **The active session is never "unseen".** Otherwise the user would see a dot on the very session they are looking at.
-- **Team-agent sessions are suppressed unless the goal is complete.** Mid-goal chatter from delegate/reviewer/QA agents would otherwise flood the sidebar with dots the user can't act on. Once the goal completes, normal unread semantics resume.
+- **The dot only surfaces when a human is actually needed.** The shared `needsHumanAttention` predicate in `src/app/notification-policy.ts` is the gate. Team members and delegates never surface; a team lead surfaces only when the goal is `complete` or the lead is stuck (no live downstream work and no in-flight verification). The same predicate also gates the polling beep in `src/app/api.ts` and the active-session `agent_end` beep in `src/app/remote-agent.ts`, so the three surfaces can't drift. See [design/notification-policy.md](design/notification-policy.md).
 
 ### Legacy localStorage migration
 
@@ -1156,6 +1156,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
+| `src/app/notification-policy.ts` | `needsHumanAttention` — shared predicate consulted by the unread dot, the polling beep, and the active-session `agent_end` beep |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
