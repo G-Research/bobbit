@@ -53,6 +53,7 @@ const GOAL_FRONTMATTER_KEYS = [
 	"options",
 	"inlineWorkflow",    // full Workflow object (snapshotted onto goal.workflow, bypasses store)
 	"inlineRoles",       // Record<roleName, Role> (snapshotted onto goal.inlineRoles)
+	"parentGoalId",      // optional parent goal id — when set, the created goal becomes a subgoal
 ] as const;
 
 /**
