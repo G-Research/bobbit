@@ -719,6 +719,14 @@ export function createGateway(config: GatewayConfig) {
 	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+	// Wire the system-scope Subgoals feature gate into the policy cascade.
+	// Without this, getSubgoalsEnabled() returns false unconditionally and
+	// every tool in the `Children` group (goal_spawn_child, goal_merge_child,
+	// goal_pause, goal_resume, goal_plan_propose, goal_set_policy,
+	// goal_archive_child, goal_plan_status, goal_decide_mutation) resolves to
+	// `never` at policy time — silently dropped from every team-lead's tool
+	// surface. See docs/design/subgoals-experimental-toggle.md.
+	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
