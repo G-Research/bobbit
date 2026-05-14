@@ -3640,9 +3640,17 @@ async function handleApiRoute(
 			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
 			let resolvedParentGoal: PersistedGoal | undefined;
 			if (parentGoalId) {
-				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId) ?? getGoalAcrossProjects(parentGoalId);
+				// Parent MUST be in the same project context — cross-project hierarchy
+				// would corrupt the parentGoalId chain because createGoal only walks
+				// its own store. Reject cross-project parents with a clear 422.
+				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId);
 				if (!resolvedParentGoal) {
-					json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
+					const crossProject = getGoalAcrossProjects(parentGoalId);
+					if (crossProject) {
+						json({ error: "Parent goal belongs to a different project. Select a parent in the same project.", code: "PARENT_CROSS_PROJECT" }, 422);
+					} else {
+						json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
+					}
 					return;
 				}
 				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));

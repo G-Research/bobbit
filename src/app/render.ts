@@ -900,7 +900,7 @@ function renderGoalForm(config: GoalFormConfig) {
 					</div>
 				` : ""}
 			</div>
-			${(config.subgoalsEnabled) ? html`
+			${(config.subgoalsEnabled || config.parentGoalId) ? html`
 				<div class="flex items-center gap-2" data-testid="goal-form-parent-row">
 					<label class="${lblCls} w-20 md:w-16">Parent</label>
 					<select
@@ -913,7 +913,7 @@ function renderGoalForm(config: GoalFormConfig) {
 						data-testid="goal-form-parent-picker"
 					>
 						<option value="">— Top-level goal —</option>
-						${state.goals.filter(g => !g.archived).map(g => html`
+						${state.goals.filter(g => !g.archived && (!config.linkedProjectId || g.projectId === config.linkedProjectId)).map(g => html`
 							<option value=${g.id} ?selected=${config.parentGoalId === g.id}>${g.title}</option>
 						`)}
 					</select>
@@ -2551,7 +2551,15 @@ function goalProposalPanel() {
 		onCreate: handleCreateGoal,
 		onDismiss: handleDismiss,
 		saving: _proposalSaving,
-		createDisabled: !_proposalTitle.trim() || _proposalSaving,
+		createDisabled: (() => {
+			if (!_proposalTitle.trim() || _proposalSaving) return true;
+			// Disable Create when parent is selected but at depth cap.
+			if (_proposalParentGoalId && maxNestingDepth !== undefined) {
+				const pDepth = computeGoalDepth(_proposalParentGoalId, state.goals);
+				if (pDepth + 1 > maxNestingDepth) return true;
+			}
+			return false;
+		})(),
 		streaming: isProposalStreaming("goal_proposal"),
 		commentable: true,
 		parentGoalId: _proposalParentGoalId || undefined,
