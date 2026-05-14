@@ -67,16 +67,19 @@ test.describe("dependsOn — state:blocked (not paused)", () => {
 // ─── 2. cascade covers in-progress descendants ──────────────────────────────
 
 test.describe("pause cascade — covers all descendants regardless of state", () => {
-	test("pause cascade sets paused=true on all non-paused children (todo state)", async () => {
+	test("pause cascade sets paused=true on in-progress root and todo children", async () => {
 		// Issue 8: cascade must not skip children based on their `state`.
 		// The only guard in the pause loop must be `if (g.paused) continue`.
-		// Note: the API does not expose a way to force state='in-progress'
-		// externally; the invariant is pinned at the code level by inspecting
-		// that listDescendants filters only on archived and the loop has no
-		// state guard. This test pins that todo children ARE paused by cascade.
+		// The root goal transitions to state='in-progress' when its team starts,
+		// providing behavioral coverage for the in-progress case.
 		const root = await createGoal({ title: `pause-sem-cascade-${Date.now()}`, team: true, worktree: true, cwd: gitCwd() });
 		try {
 			await waitSetupReady(root.id);
+			// Wait for root to become in-progress (team-lead spawns and starts)
+			await pollUntil(async () => {
+				const g = await (await apiFetch(`/api/goals/${root.id}`)).json();
+				return g.state === "in-progress";
+			}, { timeoutMs: 30_000, intervalMs: 300, label: `root ${root.id} in-progress` });
 
 			const rC1 = await apiFetch(`/api/goals/${root.id}/spawn-child`, {
 				method: "POST",
@@ -92,11 +95,13 @@ test.describe("pause cascade — covers all descendants regardless of state", ()
 			expect(rC2.status).toBe(201);
 			const c2Id = (await rC2.json()).id as string;
 
-			// Confirm neither child is paused before cascade
-			const [before1, before2] = await Promise.all([
+			// Confirm root is in-progress and children are unpaused
+			const [beforeRoot, before1, before2] = await Promise.all([
+				(await apiFetch(`/api/goals/${root.id}`)).json(),
 				(await apiFetch(`/api/goals/${c1Id}`)).json(),
 				(await apiFetch(`/api/goals/${c2Id}`)).json(),
 			]);
+			expect(beforeRoot.state).toBe("in-progress"); // key: root is in-progress
 			expect(before1.paused).toBeFalsy();
 			expect(before2.paused).toBeFalsy();
 

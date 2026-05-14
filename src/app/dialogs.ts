@@ -2304,7 +2304,7 @@ export async function showPauseGoalDialog(goal: Goal, descendantCount: number): 
 									<span>Also pause <span class="font-semibold">${descendantCount}</span> descendant goal${descendantCount === 1 ? "" : "s"}</span>
 								</label>
 								<p class="text-xs text-muted-foreground/80 mt-2 italic" data-testid="cascade-pause-limitations">
-									Note: pausing stops new gate verifications but does not interrupt streaming agents. To halt a live team-lead immediately, stop the team first.
+									Note: pausing stops new gate verifications and interrupts any streaming agents (they stay registered, not removed). Paused goals resume from where they left off when you call Resume.
 								</p>
 							`,
 						})}
