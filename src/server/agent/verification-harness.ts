@@ -484,6 +484,17 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Look up the active verification entry for a single signal id. Used by
+	 * the gate_signal REST handler to read back the `startedAt` stamped by
+	 * `beginVerification` so it can emit `gate_verification_started` AFTER
+	 * its own `gate_signal_received` broadcast. See goal
+	 * "Fix WS event ordering: signal_received must precede verification_started".
+	 */
+	getActiveVerification(signalId: string): ActiveVerification | undefined {
+		return this.activeVerifications.get(signalId);
+	}
+
+	/**
 	 * Synchronously enumerate verification steps and seed the activeVerifications
 	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
 	 * caller to write into `signal.verification.steps` *before* invoking
@@ -503,7 +514,12 @@ export class VerificationHarness {
 	 * should still record the signal and `verifyGateSignal` will auto-pass it.
 	 *
 	 * Idempotent: calling twice for the same signal returns the same enumeration
-	 * without re-broadcasting or re-stamping `startedAt`.
+	 * without re-stamping `startedAt`.
+	 *
+	 * Does NOT broadcast `gate_verification_started` — the caller must emit
+	 * that event AFTER its own `gate_signal_received` broadcast to preserve
+	 * WS event ordering. See goal "Fix WS event ordering: signal_received
+	 * must precede verification_started".
 	 */
 	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
 		const steps = gate.verify;
@@ -543,15 +559,6 @@ export class VerificationHarness {
 		};
 		this.activeVerifications.set(signal.id, active);
 		this._persistActive();
-
-		this.broadcastFn(signal.goalId, {
-			type: "gate_verification_started",
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			startedAt: verificationStartedAt,
-			steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
-		});
 
 		return steps.map(s => {
 			const phase = s.phase ?? 0;

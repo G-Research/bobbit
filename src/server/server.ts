@@ -4949,6 +4949,23 @@ async function handleApiRoute(
 		// Broadcast signal received
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
+		// Broadcast verification started AFTER signal received — WS clients
+		// depend on this ordering (see tests/e2e/verification-core.spec.ts
+		// "WS events have correct shape, timestamps, and ordering"). The
+		// `gate_verification_started` event used to be fired synchronously
+		// inside `beginVerification` which inverted the order on the wire.
+		const activeForBroadcast = verificationHarness.getActiveVerification(signal.id);
+		if (activeForBroadcast && initialSteps.length > 0) {
+			broadcastToGoal(goalId, {
+				type: "gate_verification_started",
+				goalId,
+				gateId,
+				signalId: signal.id,
+				startedAt: activeForBroadcast.startedAt,
+				steps: (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+		}
+
 		// Build gate state map for metadata variable resolution + LLM reviewer context
 		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
 		for (const gs of gateStore.getGatesForGoal(goalId)) {
