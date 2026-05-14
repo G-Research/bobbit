@@ -1250,8 +1250,8 @@ export function renderSidebar() {
 							}
 							for (const [pid, rows] of staffRowsByProject) {
 								rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-								const bucket = projectMap.get(pid);
-								if (bucket) bucket.sessions.unshift(...rows);
+								// Staff rendered via renderStaffSidebarSection; do NOT prepend to sessions.
+								void pid; void rows;
 							}
 
 							// Filter + bucket archived goals / standalone archived sessions by project.

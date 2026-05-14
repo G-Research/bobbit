@@ -80,7 +80,7 @@ test.beforeAll(() => { token = readE2EToken(); });
 
 test.describe("base_ref API validation", () => {
 	test("PUT round-trip — set origin/<branch>, GET returns it, empty clears it", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-rt-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-rt-")));
 		gitInit(root);
 		fakeOriginRef(root, "develop");
 		const id = await registerProject(`baseref-rt-${Date.now()}`, root);
@@ -101,7 +101,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("rejects commit SHA shape with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sha-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sha-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-sha-${Date.now()}`, root);
 		const sha = "abc123def";
@@ -112,7 +112,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("rejects tag with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-tag-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-tag-")));
 		gitInit(root);
 		// Create a real tag in the repo so the server's tag-detection path fires.
 		execFileSync("git", ["tag", "v1.2.3"], { cwd: root });
@@ -124,7 +124,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("rejects invalid branch grammar with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-grammar-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-grammar-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-grammar-${Date.now()}`, root);
 		const bad = "feature foo"; // space disallowed
@@ -135,7 +135,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("rejects non-origin remote prefix with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nonorigin-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-nonorigin-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-nonorigin-${Date.now()}`, root);
 		const bad = "upstream/main";
@@ -148,7 +148,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("rejects local ref when sandbox = docker with the exact error string", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sandbox-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-sandbox-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-sandbox-${Date.now()}`, root);
 		// First flip sandbox to docker.
@@ -163,7 +163,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("accepts local branch ref in a non-sandbox project", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-local-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-local-")));
 		gitInit(root, { extraBranches: ["develop"] });
 		const id = await registerProject(`baseref-local-${Date.now()}`, root);
 		const r = await put(id, { base_ref: "develop" });
@@ -173,7 +173,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("multi-repo: missing ref in subset of components returns 400 with structured details[]", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-")));
 		const repoA = path.join(root, "api");
 		const repoB = path.join(root, "web");
 		const repoC = path.join(root, "shared");
@@ -207,7 +207,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("validation only fires when base_ref is in the PUT body", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-skip-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-skip-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-skip-${Date.now()}`, root);
 		// Save an unrelated key — should succeed without consulting git.
@@ -216,7 +216,7 @@ test.describe("base_ref API validation", () => {
 	});
 
 	test("whitespace-only value is treated as unset (200)", async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-ws-"));
+		const root = fs.realpathSync(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-ws-")));
 		gitInit(root);
 		const id = await registerProject(`baseref-ws-${Date.now()}`, root);
 		const r = await put(id, { base_ref: "   " });
