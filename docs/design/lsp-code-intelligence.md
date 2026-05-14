@@ -88,7 +88,7 @@ Hard-capped + LRU-evicted by the supervisor (§3).
 supervisor is the only thing that spawns LSP children; tools never spawn
 their own.
 
-**Tool surface:** `provider: builtin` (§5). We considered an out-of-process
+**Tool surface:** `provider: bobbit-extension` via `defaults/tools/lsp/extension.ts` (§5). We considered an out-of-process
 MCP server (separate `node mcp-lsp-server.js` started per session) and
 rejected it — see §5.3.
 
@@ -249,7 +249,12 @@ this.addTerminationListener((sessionId, info) => {
 
 ## 5. MCP tool surface
 
-### 5.1 Provider choice — `provider: builtin`
+### 5.1 Provider choice — `provider: bobbit-extension`
+
+> **Note:** The YAMLs shipped with `provider.type: builtin` but were silently
+> dropped by `tool-activation.ts` (which only handles `builtin` for `bash` and
+> the six file tools). Fixed in commit `4535a8d9` — all 7 YAMLs now use
+> `provider.type: bobbit-extension` so the extension actually loads in agents.
 
 The 7 tools register as **pi extension tools** through
 `defaults/tools/lsp/extension.ts` (parallel to `defaults/tools/shell/extension.ts`).
@@ -306,8 +311,8 @@ description: "Jump to symbol definition. Returns file path + range; 0-indexed li
 summary: "Go to definition (LSP)"
 params: [path, line, character]
 provider:
-  type: builtin
-  tool: lsp_definition
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 renderer: src/ui/tools/renderers/LspRenderer.ts
 docs: |-
@@ -655,7 +660,7 @@ are complements, not substitutes.
 
 1. Add deps; scaffold `src/server/lsp/` with empty modules and types.
 2. Implement `typescript.ts` adapter + `supervisor.ts` (no sandbox path yet).
-3. Wire `defaults/tools/lsp/` (7 tools, builtin via `/api/lsp/*` endpoint).
+3. Wire `defaults/tools/lsp/` (7 tools, `provider.type: bobbit-extension` via `/api/lsp/*` endpoint).
 4. Extend budget test; unit tests for adapter.
 5. Wire pre-warm + teardown hooks in `session-setup.ts` and
    `session-manager.ts`. Add `release()` to `cleanupWorktree`.

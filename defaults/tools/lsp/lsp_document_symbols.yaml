@@ -3,8 +3,8 @@ description: "List symbols (classes, functions, vars) in a file as a tree."
 summary: "Document symbols (LSP)"
 params: [path]
 provider:
-  type: builtin
-  tool: lsp_document_symbols
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   Returns a hierarchical symbol tree for one file. Use to orient before editing.

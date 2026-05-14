@@ -3,8 +3,8 @@ description: "Hover info (type, signature, doc) for a symbol. 0-indexed line/cha
 summary: "Hover info (LSP)"
 params: [path, line, character]
 provider:
-  type: builtin
-  tool: lsp_hover
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   Returns markdown hover content at the cursor position. line/character are 0-indexed.
