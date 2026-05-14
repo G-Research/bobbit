@@ -214,7 +214,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 ### Staff Agents
 
-Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders inline in the project's Sessions list in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)).
+Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders in a dedicated collapsible **Staff** sub-section under the owning project in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)). The staff-creation **assistant session** (`assistantType: "staff"`) is a normal session and appears in that project's Sessions list while open — it is not a staff agent until `propose_staff` is accepted.
 
 | Method | Path | Description |
 |---|---|---|
