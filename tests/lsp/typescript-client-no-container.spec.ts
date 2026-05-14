@@ -93,11 +93,16 @@ function makeFakeBridge(): SandboxLspBridge & {
 describe("typescript LSP adapter — docker sandbox without running container", skip, () => {
 	let client: LspClient;
 	let fake: ReturnType<typeof makeFakeBridge>;
+	const mathPath = path.join(FIXTURE, "src", "math.ts");
 	const indexPath = path.join(FIXTURE, "src", "index.ts");
 
 	before(async () => {
 		fake = makeFakeBridge();
 		client = await factory.spawn({ worktreePath: FIXTURE, sandbox: fake });
+		// Mirror the base TypeScript adapter integration test: pre-open both files
+		// so the language server has the imported module in its project graph.
+		await client.ensureDocOpen(mathPath);
+		await client.ensureDocOpen(indexPath);
 	});
 
 	after(async () => {
@@ -120,7 +125,7 @@ describe("typescript LSP adapter — docker sandbox without running container", 
 	});
 
 	test("definition() returns a host file path under the fixture (no /workspace-wt/ leak)", async () => {
-		// "const x = add(1, 2);" in index.ts → `add` starts at character 10 on line 2.
+		// "const x = add(1, 2);" — `add` starts at character 10 on line 2 in the existing fixture test.
 		const loc = await client.definition(indexPath, 2, 10);
 		assert.ok(loc, "expected a definition result");
 		assert.ok(

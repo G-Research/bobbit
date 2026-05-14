@@ -153,7 +153,7 @@ The check runs three loopback probes over the gateway's own auth token, each wit
 | --- | --- | --- |
 | 1 | `GET /api/lsp/stats` | HTTP 200 |
 | 2 | `GET /api/lsp/state?cwd=<gateway-cwd>&path=<a real src file>` | HTTP 200 |
-| 3 | `POST /api/lsp/diagnostics` with `{cwd: <gateway-cwd>}` | Any status **except** 404 — 200 with results and 200 with a supervisor-error envelope are both pass |
+| 3 | `POST /api/lsp/diagnostics` with `{cwd: <gateway-cwd>, path: <a real src file>}` | HTTP 200 — diagnostics results or a structured supervisor-error envelope are both pass, but `ENOENT` / `stat '` in the body fails |
 
 All three run concurrently with the pool-init and sweeper tasks, so the worst-case wall-clock cost is ≤6 seconds (2s × 3 sequential timeouts if all three routes are broken). In practice, all three succeed in under 100ms on a healthy boot.
 
@@ -177,7 +177,7 @@ The check is skipped entirely when `lsp_disabled: true` is set in project config
   [lsp] route self-check FAILED: /api/lsp/<route> returned <status> — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.
   ```
 - The gateway continues serving normally — LSP is one feature, the rest of the gateway still works.
-- `routeSelfCheck` is set to `"failed:<route>:<status>"` and remains visible on `/api/lsp/stats` until the process restarts.
+- `routeSelfCheck` is set to `"failed:<route>:<status>"` or `"failed:diagnostics:initialize_failed"` and remains visible on `/api/lsp/stats` until the process restarts.
 
 ### Diagnosing a failure
 
