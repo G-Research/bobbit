@@ -23,9 +23,15 @@ test("GET /api/lsp/stats returns supervisor stats", async () => {
 });
 
 test("POST /api/lsp/diagnostics — clean → dirty → revert", async ({}, testInfo) => {
-	// Bail out cleanly if the LSP binary isn't installed.
+	// Allow CI / local environments without tsserver to opt out explicitly.
+	// SKIP_LSP_E2E=1 is the ONLY legitimate way to skip these tests — not a
+	// non-2xx stats response, which is the very regression we're guarding.
+	if (process.env.SKIP_LSP_E2E) { testInfo.skip(); return; }
+
 	const statsRes = await apiFetch("/api/lsp/stats");
-	if (!statsRes.ok) testInfo.skip();
+	// Hard assertion: a 404 here means /api/lsp/* routes were dropped from
+	// handleApiRoute() — exactly the regression this test exists to catch.
+	expect(statsRes.status).toBe(200);
 
 	const mathPath = path.join(FIXTURE, "src", "math.ts");
 	const original = await fs.readFile(mathPath, "utf-8");
@@ -38,7 +44,9 @@ test("POST /api/lsp/diagnostics — clean → dirty → revert", async ({}, test
 		});
 		expect(clean.status).toBe(200);
 		const cleanBody = await clean.json();
-		if (cleanBody?.error === "lsp_unavailable") testInfo.skip();
+		// lsp_unavailable means tsserver binary not running; let downstream
+		// assertions fail with a clear message rather than silently skipping.
+		// Use SKIP_LSP_E2E=1 to skip the whole test when the binary is absent.
 		expect(Array.isArray(cleanBody)).toBe(true);
 		expect(cleanBody.length).toBe(0);
 
@@ -67,6 +75,9 @@ test("POST /api/lsp/diagnostics — clean → dirty → revert", async ({}, test
 });
 
 test("POST /api/lsp/definition resolves add() across files", async ({}, testInfo) => {
+	// Allow CI / local environments without tsserver to opt out explicitly.
+	if (process.env.SKIP_LSP_E2E) { testInfo.skip(); return; }
+
 	// Warm-up: open math.ts by asking for its diagnostics. This forces
 	// tsserver to add the file to its project, which is a prerequisite for
 	// cross-file definition resolution from a separate file.
@@ -84,7 +95,8 @@ test("POST /api/lsp/definition resolves add() across files", async ({}, testInfo
 	});
 	expect(res.status).toBe(200);
 	const body = await res.json();
-	if (body?.error === "lsp_unavailable") testInfo.skip();
+	// lsp_unavailable means tsserver binary not running; let downstream
+	// assertions fail rather than silently skipping.
 	expect(body).toBeTruthy();
 	if (!body || typeof body.path !== "string") throw new Error(`unexpected body: ${JSON.stringify(body)}`);
 	expect(body.path.endsWith("math.ts")).toBe(true);
