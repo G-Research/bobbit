@@ -2863,7 +2863,7 @@ export function doRenderApp(): void {
 				size: "sm",
 				onClick: () => {
 					if (activeStaffAgent) {
-						window.location.hash = `#/staff/${activeStaffAgent.id}`;
+						setHashRoute("staff-edit", activeStaffAgent.id);
 					} else {
 						showRenameDialog(activeSid, sessionTitle);
 					}
