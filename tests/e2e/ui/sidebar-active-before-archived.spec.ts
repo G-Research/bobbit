@@ -113,36 +113,32 @@ test.describe("Active-before-archived sidebar ordering", () => {
 		// Use addInitScript so localStorage is set BEFORE app scripts run on
 		// the first navigation — eliminates a redundant reload that would
 		// double the navigation budget under load.
-		// Archived load is triggered via the toggle click below — setting
-		// `bobbit-show-archived` directly only flips the initial flag and does
-		// NOT fire `fetchArchivedGoalsPaginated`, so archived child goals never
-		// enter `state.goals`. The toggle click fires the fetch.
+		// Setting `bobbit-show-archived: "true"` makes the initial load
+		// auto-fetch archived sessions + goals (see api.ts: the
+		// `isInitial && state.showArchived` branch). No toggle click needed —
+		// the previous "See Archived" button was replaced by a Filters popover
+		// in commit c2758ec1, so clicking it would hang.
 		await page.addInitScript(() => {
 			try {
 				localStorage.removeItem("bobbit-archived-collapsed-projects");
 				localStorage.removeItem("bobbit-expanded-projects");
-				localStorage.setItem("bobbit-show-archived", "false");
+				localStorage.setItem("bobbit-show-archived", "true");
 			} catch {}
 		});
 		await openApp(page);
 
-		// Click the See Archived toggle so archived goals are fetched into
-		// state.goals and folded into the live forest. The subsequent
-		// `expect(…archivedTitles…).toBeVisible()` calls below gate on the
-		// fetch+render completing, so no separate wait is needed.
-		await page.locator("button").filter({ hasText: "See Archived" }).first().click();
-
+		// No toggle click needed — archived data auto-loaded via initial fetch.
 		// Expand the parent goal so its children render.
 		const parentRow = page.getByText(parentTitle, { exact: false }).first();
-		await expect(parentRow).toBeVisible({ timeout: 15_000 });
+		await expect(parentRow).toBeVisible({ timeout: 10_000 });
 		await parentRow.click();
 
 		// Wait for both live and archived child titles to appear in the sidebar.
 		for (const t of liveTitles) {
-			await expect(page.getByText(t, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(t, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
 		}
 		for (const t of archivedTitles) {
-			await expect(page.getByText(t, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(t, { exact: false }).first()).toBeVisible({ timeout: 10_000 });
 		}
 
 		// Compute DOM order positions for each goal title and the divider.
