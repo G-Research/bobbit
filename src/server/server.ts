@@ -4910,9 +4910,18 @@ async function handleApiRoute(
 			}
 		}
 
-		// Create signal record
+		// Cancel any in-flight verifications for the same gate BEFORE seeding
+		// the new one — otherwise cancelStaleVerifications would observe and
+		// tear down the just-seeded active entry.
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
+		// Create signal record. Step enumeration is performed synchronously
+		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
+		// `activeVerifications` agree on the step list from the very first
+		// persisted state. See goal "Fix verification progress race".
+		const signalId = randomUUID();
 		const signal = {
-			id: randomUUID(),
+			id: signalId,
 			gateId,
 			goalId,
 			sessionId: signalSessionId,
@@ -4921,8 +4930,11 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
-			verification: { status: "running" as const, steps: [] },
+			verification: { status: "running" as const, steps: [] as any[] },
 		};
+
+		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
 
@@ -4948,9 +4960,6 @@ async function handleApiRoute(
 				injectDownstream: def?.injectDownstream,
 			});
 		}
-
-		// Cancel any in-flight verifications for the same gate before starting new ones
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
 
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
