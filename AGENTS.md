@@ -30,7 +30,7 @@ Where things live. Use this to orient, then `rg` for the symbol.
 
 ## Before editing anything non-trivial
 
-1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before writing code. For symbol lookup, prefer `lsp_*` over `grep`; see [docs/lsp.md](docs/lsp.md).
+1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before writing code. For symbol lookup prefer `lsp_*` over `grep` (see `docs/lsp.md`).
 2. **Look for a pinning test.** Tests are how invariants are enforced — not prose. If you break one, fix the bug, not the test. If a regression isn't caught by a test, the missing test IS the bug; add it.
 3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** in source comments around what you're touching.
 4. **`docs/debugging.md`** has full diagnostic walkthroughs indexed by symptom — search there before guessing.

@@ -792,7 +792,7 @@ export async function tryHandleNestedGoalRoute(
 		let targetRoot: PersistedGoal = goal;
 		if (childGoalId !== undefined) {
 			const childGoal = getGoalAcrossProjects(childGoalId);
-			if (!childGoal) { json({ error: "Child goal not found" }, 404); return true; }
+			if (!childGoal || childGoal.archived) { json({ error: "Child goal not found" }, 404); return true; }
 			if (childGoal.parentGoalId !== id) {
 				json({ error: "childGoalId must be a direct child", code: "NOT_DIRECT_CHILD" }, 403);
 				return true;
@@ -860,7 +860,7 @@ export async function tryHandleNestedGoalRoute(
 		let targetRoot: PersistedGoal = goal;
 		if (childGoalId !== undefined) {
 			const childGoal = getGoalAcrossProjects(childGoalId);
-			if (!childGoal) { json({ error: "Child goal not found" }, 404); return true; }
+			if (!childGoal || childGoal.archived) { json({ error: "Child goal not found" }, 404); return true; }
 			if (childGoal.parentGoalId !== id) {
 				json({ error: "childGoalId must be a direct child", code: "NOT_DIRECT_CHILD" }, 403);
 				return true;
