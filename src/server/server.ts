@@ -1,6 +1,6 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -13,27 +13,14 @@ export { isSetupComplete };
 import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
-import { computeTreeCost } from "./agent/cost-tracker.js";
-import { collectDescendants } from "./agent/goal-descendants.js";
-import { listDescendants as nestedListDescendants, tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
-import { looksLikePlaceholder } from "./agent/spawn-child-spec-validation.js";
 import { SessionManager } from "./agent/session-manager.js";
-import { LspSupervisor } from "./lsp/supervisor.js";
-import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
-import { PyrightLspFactory } from "./lsp/clients/pyright.js";
-import { MultiProjectSandboxLspBridge } from "./lsp/sandbox-bridge.js";
-import { registerWorktreePreCleanupHook } from "./lsp/cleanup-hook.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
-import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
-import type { Workflow } from "./agent/workflow-store.js";
-import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
-import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -59,8 +46,19 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+// Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
+// Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
+// without an exec round-trip. See docs/design/base-ref.md.
+function isValidBaseRefBranchGrammar(name: string): boolean {
+	if (!name) return false;
+	if (/\s/.test(name)) return false;
+	if (name.startsWith("-") || name.endsWith(".")) return false;
+	if (name.includes("..") || name.includes("@{")) return false;
+	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
+	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
-import { VerificationHarness } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -76,10 +74,6 @@ import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import {
-	clampMaxDepth as clampMaxNestingDepth,
-	readSubgoalNestingPrefs,
-} from "./agent/subgoal-nesting-limit.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -312,7 +306,7 @@ export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCoun
  *  exercise the TTL/single-flight/coalesce logic deterministically without
  *  spawning Git Bash under CI load (which fails unpredictably). Production
  *  code never sets this. */
-let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean }) => Promise<GitStatusResult | null>) | undefined;
+let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => Promise<GitStatusResult | null>) | undefined;
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
@@ -348,11 +342,18 @@ function evictExpired(now: number): void {
 	}
 }
 
-/** Cached wrapper over runBatchGitStatus with TTL + single-flight. */
+/** Cached wrapper over runBatchGitStatus with TTL + single-flight.
+ *
+ * `opts.configuredBaseRef` (when set) drives the `primaryBranch` used for
+ * `aheadOfPrimary`/`behindPrimary` counters — see
+ * `docs/design/base-ref.md` §5. It's not part of the cache key: each
+ * (cwd, containerId) is a project-scoped worktree so `base_ref` is constant
+ * for the lifetime of an entry, and the 2 s TTL absorbs the corner case of a
+ * mid-flight setting change. */
 async function batchGitStatus(
 	cwd: string,
 	containerId?: string,
-	opts?: { untracked?: boolean },
+	opts?: { untracked?: boolean; configuredBaseRef?: string },
 ): Promise<GitStatusResult | null> {
 	const key = gitStatusCacheKey(cwd, containerId, opts?.untracked);
 	const now = Date.now();
@@ -392,7 +393,7 @@ async function batchGitStatus(
 async function runBatchGitStatus(
 	cwd: string,
 	containerId?: string,
-	opts?: { untracked?: boolean },
+	opts?: { untracked?: boolean; configuredBaseRef?: string },
 ): Promise<GitStatusResult | null> {
 	_runBatchGitStatusCount++;
 	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
@@ -592,19 +593,6 @@ export function createGateway(config: GatewayConfig) {
 	const projectContextManager = new ProjectContextManager(projectRegistry);
 	projectContextManager.initAll();
 
-	// One-shot backfill — stamp `goalId` onto legacy cost-tracker entries
-	// from their session record (if it still exists in the sessionStore).
-	// Lets archived/purged-session tree-cost rollups survive: cost is
-	// addressable by goalId without consulting the session store.
-	// Idempotent — second boot stamps 0. See cost-tracker.ts.
-	for (const ctx of projectContextManager.all()) {
-		const n = ctx.costTracker.backfillGoalIds((sid) => {
-			const ps = ctx.sessionStore.get(sid);
-			return ps?.goalId ?? ps?.teamGoalId;
-		});
-		if (n > 0) console.log(`[cost-tracker] backfilled ${n} goalId entries (project ${ctx.project.id})`);
-	}
-
 	// Migrate inline token values from project.yaml → secrets.json (one-time)
 	for (const p of projectRegistry.list()) {
 		const ctx = projectContextManager.getOrCreate(p.id);
@@ -658,10 +646,6 @@ export function createGateway(config: GatewayConfig) {
 	const toolManager = new ToolManager(configDir);
 	toolManager.generateDetailDocs(stateDir);
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
-	// Wire the system-scope Subgoals feature gate into the policy cascade so
-	// every tool in the `Children` group resolves to `never` when the flag is
-	// off. See docs/design/subgoals-experimental-toggle.md.
-	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(stateDir);
 	const sessionManager = new SessionManager({
@@ -677,39 +661,6 @@ export function createGateway(config: GatewayConfig) {
 		prStatusStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
-
-	// LSP supervisor — singleton, lazy-spawning. Adapters registered eagerly
-	// but no LSP child processes are spawned until first `ensure()`.
-	//
-	// Finding #1: read project config keys for LSP behaviour. Multi-project
-	// resolution is deferred for v1 — we read the default (gateway-global)
-	// project config store. Per-project overrides can be layered later.
-	const lspProjectConfig = projectConfigStore.getWithDefaults();
-	const lspDisabled = String(lspProjectConfig.lsp_disabled ?? "false").toLowerCase() === "true";
-	const lspPreWarm = String(lspProjectConfig.pre_warm_lsp ?? "true").toLowerCase() !== "false";
-	const lspMaxServersRaw = Number(lspProjectConfig.lsp_max_servers ?? 4);
-	const lspIdleTtlRaw = Number(lspProjectConfig.lsp_idle_ttl_ms ?? 600000);
-	const lspMaxServers = Number.isFinite(lspMaxServersRaw) && lspMaxServersRaw > 0 ? lspMaxServersRaw : 4;
-	const lspIdleTtlMs = Number.isFinite(lspIdleTtlRaw) && lspIdleTtlRaw > 0 ? lspIdleTtlRaw : 600000;
-	const lspSupervisor = new LspSupervisor({
-		factories: [new TypescriptLspFactory(), new PyrightLspFactory()],
-		disabled: lspDisabled,
-		preWarmEnabled: lspPreWarm,
-		maxServers: lspMaxServers,
-		idleTtlMs: lspIdleTtlMs,
-	});
-	// Finding #6: install the sandbox bridge once SandboxManager is wired.
-	// SandboxManager is constructed later in start() when sandbox=docker, so
-	// the supervisor exposes a setter rather than taking it via constructor.
-	sessionManager.setLspSupervisor(lspSupervisor);
-	registerWorktreePreCleanupHook(async (wp) => { await lspSupervisor.shutdownForWorktree(wp); });
-	sessionManager.addTerminationListener((sessionId) => {
-		const session = sessionManager.getSession(sessionId);
-		if (!session) return;
-		if (session.cwd) lspSupervisor.release(session.cwd);
-		if (session.worktreePath) lspSupervisor.release(session.worktreePath);
-		for (const r of session.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
-	});
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
@@ -732,7 +683,7 @@ export function createGateway(config: GatewayConfig) {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
 		getToolGroupPolicies: () => groupPolicyStore.getAll(),
-	}, projectContextManager, projectRegistry);
+	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
 	const staffManager = new StaffManager(projectContextManager);
@@ -1100,8 +1051,6 @@ export function createGateway(config: GatewayConfig) {
 		sessionManager,
 		bgProcessManager,
 		projectContextManager,
-		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
-		teamManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -1226,15 +1175,15 @@ export function createGateway(config: GatewayConfig) {
 					toolManager: ctx.toolManager,
 					components,
 					repoUrlByName,
+					// Resolver is invoked at worktree-creation time inside the container, so it always
+					// reads the current project-config-store value rather than a snapshot taken at
+					// sandbox bootstrap. Same shape as the worktree-pool baseRefResolver.
+					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
-			// Finding #6: install LSP sandbox bridge now that SandboxManager exists.
-			lspSupervisor.setSandboxBridge(
-				new MultiProjectSandboxLspBridge(sandboxManager, projectContextManager),
-			);
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
@@ -1350,7 +1299,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"));
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -1382,27 +1331,10 @@ export function createGateway(config: GatewayConfig) {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
-			}
-
-			// Boot-time backfills — see goal-manager.ts. try/catch is non-fatal.
-			for (const ctx of projectContextManager.all()) {
-				try {
-					const result = ctx.goalManager.backfillCompleteState(ctx.gateStore);
-					if (result.backfilled > 0) {
-						console.log(`[goal-manager] backfillCompleteState project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
-					}
-				} catch (err) {
-					console.warn(`[goal-manager] backfillCompleteState failed for project ${ctx.project.id} (non-fatal):`, err);
-				}
-
-				try {
-					const result = ctx.goalManager.backfillSpawnedBySessionId(ctx.teamStore, ctx.sessionStore);
-					if (result.backfilled > 0) {
-						console.log(`[goal-manager] backfillSpawnedBySessionId project=${ctx.project.id} backfilled=${result.backfilled} skipped=${result.skipped}`);
-					}
-				} catch (err) {
-					console.warn(`[goal-manager] backfillSpawnedBySessionId failed for project ${ctx.project.id} (non-fatal):`, err);
-				}
+				ctx.goalManager.setBaseRefResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("base_ref") || undefined;
+				});
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -1468,7 +1400,6 @@ export function createGateway(config: GatewayConfig) {
 			if (sandboxManager) {
 				await sandboxManager.shutdownAll();
 			}
-			await lspSupervisor.shutdownAll();
 			await sessionManager.cleanupSandboxNetwork();
 			server.close();
 		},
@@ -1635,13 +1566,6 @@ async function handleApiRoute(
 		const e = err instanceof Error ? err : new Error(String(err));
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
-
-	/** Subgoals feature gate. 403 SUBGOALS_DISABLED when off. */
-	function requireSubgoalsEnabled(): boolean {
-		if (preferencesStore.get("subgoalsEnabled") === true) return true;
-		json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 403);
-		return false;
-	}
 
 	// ── Cross-project helper functions ─────────────────────────────
 
@@ -1935,51 +1859,6 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── LSP routes — agent-side tool surface ────────────────────────
-	// Finding #2: state probe for the cold-start progress signal.
-	if (url.pathname === "/api/lsp/state" && req.method === "GET") {
-		const supervisor = sessionManager.getLspSupervisor();
-		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
-		if (supervisor.disabled) { json({ state: "disabled" }); return; }
-		const cwd = url.searchParams.get("cwd") || "";
-		const pathArg = url.searchParams.get("path") || undefined;
-		try {
-			const key = supervisor.resolveKey(cwd, pathArg);
-			json({ state: supervisor.stateFor(key), worktreePath: key.worktreePath, language: key.language });
-		} catch (err: any) {
-			json({ state: "unknown", error: String(err?.message ?? err) });
-		}
-		return;
-	}
-	const lspMatch = url.pathname.match(/^\/api\/lsp\/([a-z_]+)$/);
-	if (lspMatch && req.method === "POST") {
-		const method = lspMatch[1];
-		const body = await readBody(req).catch(() => ({}));
-		const supervisor = sessionManager.getLspSupervisor();
-		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
-		// Finding #1: kill switch — every tool call returns lsp_unavailable.
-		if (supervisor.disabled) {
-			json({ error: "lsp_unavailable", message: "disabled by project config" });
-			return;
-		}
-		try {
-			const result = await supervisor.dispatch(method, body || {});
-			json(result);
-		} catch (err: any) {
-			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
-				json({ error: err.code, message: err.message });
-			} else {
-				jsonError(500, err);
-			}
-		}
-		return;
-	}
-	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
-		const supervisor = sessionManager.getLspSupervisor();
-		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
-		return;
-	}
-
 	// ── Project Detection & Browse ────────────────────────────────────
 
 	// GET /api/projects/preflight?path=<absolute>
@@ -2104,7 +1983,8 @@ async function handleApiRoute(
 	}
 
 	// POST /api/projects/scan?path=...  → run repo-scan on a folder.
-	// Returns { repos: DetectedRepo[] }. Used by Add-Project + Re-scan repos.
+	// Returns { repos: DetectedRepo[] }. Used by the Add-Project flow and
+	// Settings → "Re-scan repos". Phase 4b — see docs/design/multi-repo-components.md §8.1.
 	if (url.pathname === "/api/projects/scan" && req.method === "POST") {
 		const body = await readBody(req).catch(() => ({}));
 		const rawPath = url.searchParams.get("path") ?? (body && typeof body.path === "string" ? body.path : "");
@@ -2124,7 +2004,9 @@ async function handleApiRoute(
 	}
 
 	// GET /api/projects/:id/structured  → returns { components, workflows,
-	// worktree_root } in structured shape (Settings → Components).
+	// worktree_root } in their structured (non-string) shape. Used by the
+	// Settings → Components tab so the UI doesn't have to parse YAML.
+	// Phase 4b.
 	const projectStructuredMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/structured$/);
 	if (projectStructuredMatch && req.method === "GET") {
 		const ctx = projectContextManager.getOrCreate(projectStructuredMatch[1]);
@@ -2137,7 +2019,8 @@ async function handleApiRoute(
 	}
 
 	// POST /api/projects/:id/rescan-repos  → re-run repo-scan on the
-	// project's rootPath; same shape as /api/projects/scan.
+	// project's rootPath; returns the same shape as /api/projects/scan.
+	// Settings "Re-scan repos" button. Phase 4b.
 	const projectRescanMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/rescan-repos$/);
 	if (projectRescanMatch && req.method === "POST") {
 		const project = projectRegistry.get(projectRescanMatch[1]);
@@ -2254,6 +2137,10 @@ async function handleApiRoute(
 							const c = projectContextManager.getOrCreate(pid);
 							return c?.projectConfigStore.get("worktree_root") || undefined;
 						});
+						ctx.goalManager.setBaseRefResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c?.projectConfigStore.get("base_ref") || undefined;
+						});
 					}
 					json(existing, 200);
 					return;
@@ -2361,11 +2248,11 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined);
 					}
 				} catch { /* best-effort */ }
 			}
-			// Wire the goal-manager pool resolver for the new project.
+			// Wire the goal-manager pool resolver for the new project (Phase 3 — goals via pool).
 			if (newCtx) {
 				newCtx.goalManager.setPoolResolver(() => sessionManager.getWorktreePool(project.id));
 				newCtx.goalManager.setComponentsResolver((pid: string) => {
@@ -2376,6 +2263,10 @@ async function handleApiRoute(
 				newCtx.goalManager.setWorktreeRootResolver((pid: string) => {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
+				});
+				newCtx.goalManager.setBaseRefResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("base_ref") || undefined;
 				});
 			}
 			json(project, 201);
@@ -2397,16 +2288,13 @@ async function handleApiRoute(
 	// PUT /api/projects/:id
 	if (projectGetMatch && req.method === "PUT") {
 		const body = await readBody(req);
-		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string; parentProjectId?: string | null } = {};
+		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
 		if (typeof body?.rootPath === "string") updates.rootPath = body.rootPath;
 		if (typeof body?.palette === "string" || body?.palette === null || body?.palette === "") updates.palette = body.palette ?? "";
 		if (typeof body?.colorLight === "string") updates.colorLight = body.colorLight;
 		if (typeof body?.colorDark === "string") updates.colorDark = body.colorDark;
-		if (body?.parentProjectId === null || typeof body?.parentProjectId === "string") {
-			updates.parentProjectId = body.parentProjectId;
-		}
 		try {
 			const updated = projectRegistry.update(projectGetMatch[1], updates);
 			json(updated);
@@ -2543,6 +2431,118 @@ async function handleApiRoute(
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
 				if (err) { json({ error: err }, 400); return; }
+			}
+
+			// `base_ref` validation — runs only when the field is present in the PUT body.
+			// On any failure we return HTTP 400 with `{ field: "base_ref", error, details? }`
+			// so the Settings UI can render the error inline. Non-fatal warnings (component
+			// paths that aren't git repos) bubble up via `baseRefWarnings` and are attached
+			// to the success response below. See docs/design/base-ref.md.
+			const baseRefWarnings: string[] = [];
+			if ("base_ref" in (body as Record<string, unknown>)) {
+				const rawBaseRef = (body as Record<string, unknown>).base_ref;
+				const baseRefValue = typeof rawBaseRef === "string" ? rawBaseRef.trim() : "";
+				if (baseRefValue) {
+					// 1. SHA shape (7-40 hex chars). Reject before grammar — a 40-char hex
+					//    string is grammatically valid but is rejected for clarity.
+					if (/^[0-9a-f]{7,40}$/i.test(baseRefValue)) {
+						json({ field: "base_ref", error: `base_ref must be a branch ref, not a commit SHA. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 2. Invalid branch grammar.
+					if (!isValidBaseRefBranchGrammar(baseRefValue)) {
+						json({ field: "base_ref", error: `base_ref must be a valid branch name. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 3. Non-origin remote prefix. Anything matching `<prefix>/<rest>` where
+					//    `<prefix>` is not `origin` is rejected. Local refs (no slash, or
+					//    `feature/foo`) are still accepted — the prefix gate only fires when
+					//    the first segment looks like a remote name and isn't `origin`.
+					//    We treat the first slash-segment as a remote prefix only when the
+					//    full value is exactly `<prefix>/<rest>` AND `<rest>` looks like a
+					//    branch (rather than e.g. `feature/foo` which has no remote prefix at all).
+					//    Practically: if the value starts with anything other than `origin/`
+					//    AND the first segment is a known-remote-shaped token, reject.
+					//    We use a simple heuristic: if it doesn't start with `origin/` and
+					//    its first segment contains no special chars and a slash exists,
+					//    treat it as a remote prefix. The error message names the value
+					//    so users can correct it.
+					//
+					// To avoid false positives on local refs like `feature/foo`, we only
+					// reject values whose first segment matches the set of typical
+					// remote names (upstream/fork/etc.). Today's design says: anything
+					// with a remote-style prefix other than `origin/` is rejected, but
+					// distinguishing local `feature/foo` from remote `upstream/foo`
+					// requires git knowledge we don't have at validate time. The design
+					// doc's error inventory specifically calls out `upstream/main` as the
+					// example to reject — so we use a conservative allowlist: anything
+					// matching a known remote-name pattern that isn't `origin` is rejected.
+					// Known remote-shaped tokens: upstream, fork, mirror, github, gitlab,
+					// bitbucket. Everything else flows through (local branches with slashes).
+					const firstSegment = baseRefValue.split("/")[0];
+					const KNOWN_NON_ORIGIN_REMOTES = new Set(["upstream", "fork", "mirror", "github", "gitlab", "bitbucket", "remote"]);
+					if (baseRefValue.includes("/") && firstSegment !== "origin" && KNOWN_NON_ORIGIN_REMOTES.has(firstSegment)) {
+						json({ field: "base_ref", error: `base_ref only supports the 'origin' remote today. Got: ${baseRefValue}. If you need a different primary remote, configure it as 'origin' in your local clone.` }, 400);
+						return;
+					}
+					// 4. Sandbox + local — when the project runs in a docker sandbox, only
+					//    remote refs work because the container has separate ref visibility
+					//    from the host.
+					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
+					if (sandboxResolved === "docker" && !baseRefValue.startsWith("origin/")) {
+						json({ field: "base_ref", error: `base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 5. Multi-repo ref existence — `git rev-parse --verify` against every
+					//    component repo. Also detect tags up-front: a value that resolves
+					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
+					const componentsForCheck = ctx.projectConfigStore.getComponents();
+					const componentsToCheck = componentsForCheck.length > 0
+						? componentsForCheck
+						: [{ name: ctx.project.name || "default", repo: "." }];
+					const failures: Array<{ component: string; message: string }> = [];
+					let checkedRepoCount = 0;
+					let tagDetected = false;
+					for (const c of componentsToCheck) {
+						const repoPath = path.join(ctx.project.rootPath, c.repo);
+						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
+						if (!gitRepoCheck) {
+							baseRefWarnings.push(`base_ref validation skipped for component '${c.name}': not a git repo at ${repoPath}`);
+							continue;
+						}
+						checkedRepoCount++;
+						// Tag check first — if the value resolves as a tag in any component
+						// repo, fail with the tag-specific message rather than the generic
+						// "not present" error.
+						try {
+							await execFileAsync("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
+							tagDetected = true;
+							break;
+						} catch {
+							// Not a tag in this repo — continue with branch-ref check below.
+						}
+						try {
+							await execFileAsync("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
+						} catch {
+							failures.push({
+								component: c.name,
+								message: `ref not found. Try: cd ${c.repo} && git fetch origin`,
+							});
+						}
+					}
+					if (tagDetected) {
+						json({ field: "base_ref", error: `base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					if (failures.length > 0) {
+						json({
+							field: "base_ref",
+							error: `base_ref '${baseRefValue}' is not present in ${failures.length} of ${checkedRepoCount} component repos`,
+							details: failures,
+						}, 400);
+						return;
+					}
+				}
 			}
 
 			// Extract structured fields (components / workflows) before flat-key validation.
@@ -2727,6 +2727,10 @@ async function handleApiRoute(
 				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
 			}
 
+			if (baseRefWarnings.length > 0) {
+				json({ ok: true, warnings: baseRefWarnings });
+				return;
+			}
 			json({ ok: true });
 			return;
 		}
@@ -3432,7 +3436,7 @@ async function handleApiRoute(
 			if (proj) cwd = proj.rootPath;
 		}
 		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : undefined;
+		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
 		if (!title || typeof title !== "string") {
 			json({ error: "Missing title" }, 400);
 			return;
@@ -3440,23 +3444,6 @@ async function handleApiRoute(
 		try {
 			const sandboxed = body.sandboxed === true;
 			const autoStartTeam = body.autoStartTeam !== false; // default true
-			// Per-goal subgoal-nesting overrides. System prefs are the ceiling.
-			const sysPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-			let bodySubgoalsAllowed: boolean | undefined;
-			if (typeof body.subgoalsAllowed === "boolean") {
-				// System OFF → cannot enable per-goal. Tighten only.
-				bodySubgoalsAllowed = sysPrefs.subgoalsEnabled
-					? body.subgoalsAllowed
-					: false;
-			}
-			let bodyMaxNestingDepth: number | undefined;
-			if (body.maxNestingDepth !== undefined && body.maxNestingDepth !== null) {
-				const n = Number(body.maxNestingDepth);
-				if (Number.isFinite(n)) {
-					// Clamp into the system ceiling.
-					bodyMaxNestingDepth = Math.min(sysPrefs.maxNestingDepth, clampMaxNestingDepth(n));
-				}
-			}
 			let enabledOptionalSteps: string[] | undefined;
 			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
 				enabledOptionalSteps = body.enabledOptionalSteps;
@@ -3482,81 +3469,17 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
-			// See AGENTS.md "Add a project — Auto-seed fallback".
-			let resolvedWorkflow: Workflow | undefined;
-			let resolvedWorkflowId = workflowId;
-			const inlineWorkflow = body?.workflow;
-			if (inlineWorkflow && typeof inlineWorkflow === "object") {
-				resolvedWorkflow = inlineWorkflow as Workflow;
-				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
-			} else {
-				// Layer 1: cascade lookup (only when workflowId given).
-				if (workflowId) {
-					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-					// Layer 1b: cascade miss — fall through to project store directly
-					// (handles transient stale-cascade after archive/create cycles).
-					if (!resolvedWorkflow) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					}
-				}
-				// Layer 2: store is empty → auto-seed defaults (fires for both
-				// explicit-id and no-id cases — the no-id case then falls through
-				// to GoalManager.createGoal's "first workflow in store" fallback).
-				// See e04159ff for the intent; goal-creation-auto-seed.spec.ts pins it.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const projName = resolved.project.name || "project";
-					const seeds = buildDefaultWorkflows(projName);
-					// Always persist defaults to disk (both explicit-id and no-id cases).
-					// Pinned by goal-creation-auto-seed.spec.ts and
-					// projects-no-default-workflows.spec.ts Case C.
-					seeds.parent = buildParentWorkflow();
-					for (const wf of Object.values(seeds)) {
-						targetCtx.workflowStore.put(wf as unknown as Workflow);
-					}
-					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					if (workflowId) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					} else {
-						// No explicit id: fall back to "general" from the newly-seeded store.
-						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						resolvedWorkflowId = resolvedWorkflow?.id || "general";
-					}
-				}
-				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
-				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
-					const available = targetCtx.workflowStore.getAll().map(w => w.id);
-					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
-						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
-						code: "WORKFLOW_NOT_FOUND",
-						workflowId,
-						available,
-					});
-					return;
-				}
-			}
-			// If workflowId is undefined here, fall through — GoalManager.createGoal
-			// picks the first workflow in the project's workflowStore.
-
-			// Optional inline-roles snapshot. See resolveRole() for precedence.
-			const inlineRolesBody = (body as { inlineRoles?: unknown }).inlineRoles;
-			let inlineRoles: Record<string, import("./agent/role-store.js").Role> | undefined;
-			if (inlineRolesBody && typeof inlineRolesBody === "object" && !Array.isArray(inlineRolesBody)) {
-				inlineRoles = inlineRolesBody as Record<string, import("./agent/role-store.js").Role>;
-			}
-
+			// Resolve workflow through the config cascade (builtin → server → project)
+			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
-				workflowId: resolvedWorkflowId,
+				workflowId,
 				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
-				inlineRoles,
-				...(bodySubgoalsAllowed !== undefined ? { subgoalsAllowed: bodySubgoalsAllowed } : {}),
-				...(bodyMaxNestingDepth !== undefined ? { maxNestingDepth: bodyMaxNestingDepth } : {}),
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3640,29 +3563,6 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Nested-goal endpoints ─────────────────────────────────────
-	// REST surface for the team-lead-only `goal_*` tools in
-	// `defaults/tools/children/`. Implementation extracted to
-	// `nested-goal-routes.ts`. Cascade-affecting routes require explicit
-	// `cascade` (422 otherwise). UI is the cascade-policy authority.
-	if (await tryHandleNestedGoalRoute(req, url, {
-		projectContextManager,
-		verificationHarness,
-		teamManager,
-		sessionManager,
-		requireSubgoalsEnabled,
-		getGoalAcrossProjects,
-		getGoalManagerForGoal,
-		readBody,
-		json,
-		jsonError,
-		broadcastToAll,
-		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
-	})) return;
-
-	// The legacy DELETE handler below is extended in-place to support
-	// `?cascade=true|false` (422 if missing).
-
 	// Routes with goal :id parameter
 	const goalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)$/);
 	if (goalMatch) {
@@ -3680,7 +3580,6 @@ async function handleApiRoute(
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
-			const prevSpec = putGoal?.spec ?? "";
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -3693,135 +3592,61 @@ async function handleApiRoute(
 				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
-			// Spec-edit notification: emit a dedicated `goal_spec_changed` WS
-			// event AND nudge the team lead so a running agent learns the spec
-			// they read at startup has changed. No-op skip when the spec field
-			// is absent or identical (mirrors goal-store.update() R-007 behaviour).
-			if (typeof body.spec === "string" && body.spec !== prevSpec) {
-				// Warn when a placeholder spec is being edited shortly after spawn.
-				// This surfaces the placeholder-then-PUT anti-pattern even when the
-				// parent agent has already moved on. The child team-lead already
-				// received the placeholder in its first message — archive + respawn
-				// is the only clean recovery.
-				if (looksLikePlaceholder(prevSpec)) {
-					const teamState = teamManager.getTeamState(id);
-					if (teamState?.teamLeadSessionId) {
-						console.warn(
-							`[server] WARN: goal ${id} had a placeholder spec edited shortly after spawn. ` +
-							`The team-lead's first-message context was the placeholder, not this new content. ` +
-							`If you intended to fix a spawn-time miss, archive and respawn.`,
-						);
-					}
-				}
-				const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
-				broadcastToAll({
-					type: "goal_spec_changed",
-					goalId: id,
-					prevSpecHash: hash(prevSpec),
-					newSpecHash: hash(body.spec),
-					prevLen: prevSpec.length,
-					newLen: body.spec.length,
-					ts: Date.now(),
-				});
-				try { teamManager.notifyTeamLeadOfSpecChange(id, prevSpec.length, body.spec.length); }
-				catch (err) { console.error(`[api] notifyTeamLeadOfSpecChange failed for ${id}:`, err); }
-			}
 			json({ ok: true });
 			return;
 		}
 
 		if (req.method === "DELETE") {
-			// Explicit `cascade` query parameter is required. The UI is
-			// the cascade-policy authority; the server is policy-agnostic.
-			// Missing `cascade` → 422. `cascade=false` with descendants → 409
-			// `{ code: "HAS_DESCENDANTS", count }` so the UI can show a
-			// confirmation dialog.
-			const cascadeParam = url.searchParams.get("cascade");
-			if (cascadeParam !== "true" && cascadeParam !== "false") {
-				json({ error: "cascade query param required (true|false)", code: "CASCADE_REQUIRED" }, 422);
-				return;
+			// Cancel any in-flight gate verifications (terminates reviewer sessions)
+			for (const active of verificationHarness.getActiveVerifications(id)) {
+				try {
+					await verificationHarness.cancelStaleVerifications(id, active.gateId);
+				} catch (err) {
+					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
+				}
 			}
-			const cascade = cascadeParam === "true";
-			// Optional `?mergedManually=true` — the team-lead has already merged
-			// the child's branch outside the auto-merge path. Stamp the target
-			// goal's `state` to "complete" BEFORE archiving (mirrors
-			// `archiveGoalAfterMerge` ordering) so the archived snapshot has
-			// state="complete" on disk and the Plan-tab DAG renders the node
-			// green instead of red. Applies only to the target — cascaded
-			// descendants may have failed for unrelated reasons.
-			const mergedManually = url.searchParams.get("mergedManually") === "true";
-			const targetGoal = getGoalAcrossProjects(id);
-			if (!targetGoal) { json({ error: "Goal not found" }, 404); return; }
-			if (mergedManually && targetGoal.state !== "complete") {
-				const targetCtx = projectContextManager.getContextForGoal(id);
-				targetCtx?.goalStore.update(id, { state: "complete" });
+			// Capture agent branches BEFORE teardown erases the team store entry.
+			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
+			// mutates teamEntry.agents in place via dismissRole(), so we must
+			// snapshot the branch names into a fresh string[] now — reading
+			// teamEntry.agents after teardown returns an empty array.
+			const goalProjectCtx = projectContextManager.getContextForGoal(id);
+			const teamEntry = goalProjectCtx?.teamStore.get(id);
+			const agentBranches: string[] = [];
+			if (teamEntry?.agents) {
+				for (const a of teamEntry.agents) {
+					if (a.branch) agentBranches.push(a.branch);
+				}
 			}
-			// Live descendants (archived ones don't block cascade=false — they're
-			// already archived, no work to do for them). Mirrors the client's
-			// countDescendants which only counts non-archived. If client and
-			// server disagree on archived-status (rare race), the user gets a
-			// 409 they can't satisfy by re-confirming the dialog — that was the
-			// bug behind the user's "Failed to archive goal: HTTP 409" toast.
-			const liveDescendants = nestedListDescendants(projectContextManager, id);
-			if (!cascade && liveDescendants.length > 0) {
-				json({ code: "HAS_DESCENDANTS", count: liveDescendants.length, error: `${liveDescendants.length} descendant(s) — pass cascade=true to archive recursively` }, 409);
-				return;
+			// Include the team-lead's own session branch if it differs from goal.branch.
+			if (teamEntry?.teamLeadSessionId) {
+				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+				if (tl?.branch) agentBranches.push(tl.branch);
 			}
 
-			// For the actual archive walk (when cascade=true), include archived
-			// descendants too — they may need branch cleanup or post-archive
-			// state propagation, and walking through them is cheap.
-			const descendants = cascade ? nestedListDescendants(projectContextManager, id, { includeArchived: true }) : liveDescendants;
-
-			// Archive deepest-first: descendants in BFS order; reverse for
-			// deepest-first traversal. The parent itself is archived last.
-			const archiveOrder: PersistedGoal[] = [...descendants].reverse();
-			archiveOrder.push(targetGoal);
-			let archivedCount = 0;
-			for (const g of archiveOrder) {
-				const gid = g.id;
-				// Cancel any in-flight gate verifications (terminates reviewer sessions)
-				for (const active of verificationHarness.getActiveVerifications(gid)) {
-					try {
-						await verificationHarness.cancelStaleVerifications(gid, active.gateId);
-					} catch (err) {
-						console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
-					}
-				}
-				// Snapshot agent branches BEFORE teardown.
-				const goalProjectCtx = projectContextManager.getContextForGoal(gid);
-				const teamEntry = goalProjectCtx?.teamStore.get(gid);
-				const agentBranches: string[] = [];
-				if (teamEntry?.agents) {
-					for (const a of teamEntry.agents) {
-						if (a.branch) agentBranches.push(a.branch);
-					}
-				}
-				if (teamEntry?.teamLeadSessionId) {
-					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-					if (tl?.branch) agentBranches.push(tl.branch);
-				}
-				// Tear down any active team first.
-				const teamState = teamManager.getTeamState(gid);
-				if (teamState) {
-					try { await teamManager.teardownTeam(gid); }
-					catch (err) { console.error(`[api] Error tearing down team for goal ${gid}:`, err); }
-				}
-				const deleteGoalMgr = getGoalManagerForGoal(gid);
-				const wasArchived = await deleteGoalMgr.archiveGoal(gid);
-				const archivedGoal = deleteGoalMgr.getGoal(gid);
-				if (wasArchived && archivedGoal?.repoPath) {
-					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-						console.warn(`[api] Remote branch cleanup failed for goal ${gid}:`, err);
-					});
-				}
-				if (wasArchived) {
-					prStatusStore.remove(gid);
-					broadcastToAll({ type: "goal_state_changed", goalId: gid });
-					archivedCount++;
+			// Tear down any active team first (dismisses agents, cleans up their worktrees)
+			const teamState = teamManager.getTeamState(id);
+			if (teamState) {
+				try {
+					await teamManager.teardownTeam(id);
+				} catch (err) {
+					console.error(`[api] Error tearing down team for goal ${id}:`, err);
 				}
 			}
-			json({ ok: true, archived: archivedCount });
+			// Archive instead of hard-delete — tasks, gates, team state remain intact
+			const deleteGoalMgr = getGoalManagerForGoal(id);
+			await deleteGoalMgr.archiveGoal(id);
+
+			// Fire-and-forget: clean up remote branches for this goal
+			const archivedGoal = deleteGoalMgr.getGoal(id);
+			if (archivedGoal?.repoPath) {
+				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
+				});
+			}
+
+			prStatusStore.remove(id);
+			json({ ok: true });
 			return;
 		}
 	}
@@ -4081,11 +3906,6 @@ async function handleApiRoute(
 		for (const [key, value] of Object.entries(body)) {
 			if (value === null || value === undefined) {
 				preferencesStore.remove(key);
-			} else if (key === "maxNestingDepth") {
-				// Clamp to 1..10 — see subgoal-nesting-limit.ts.
-				const n = Number(value);
-				if (!Number.isFinite(n)) { json({ error: "maxNestingDepth must be a finite number" }, 400); return; }
-				preferencesStore.set(key, clampMaxNestingDepth(n));
 			} else {
 				preferencesStore.set(key, value);
 			}
@@ -4775,11 +4595,9 @@ async function handleApiRoute(
 			const qProjectId = url.searchParams.get("projectId") || undefined;
 			if (qProjectId) {
 				const ctx = projectContextManager.getOrCreate(qProjectId);
-				if (!ctx) { jsonError(404, "Project not found"); return; }
-				// promote-on-first-edit — fall back to cascade when not yet in project store
-				const resolvedInCascade = configCascade.resolveRoles(qProjectId).find(r => r.item.name === name);
-				if (!resolvedInCascade) { jsonError(404, "Role not found"); return; }
-				const existing = ctx.roleStore.get(name) ?? resolvedInCascade.item;
+				if (!ctx) { json({ error: "Project not found" }, 404); return; }
+				const existing = ctx.roleStore.get(name);
+				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
 				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
 				let toolPolicies = existing.toolPolicies;
 				if (body.toolPolicies !== undefined) {
@@ -5107,10 +4925,6 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-		// Pause-cascade: a paused goal must reject gate signals. This is the
-		// most upstream block for both llm-review-* verifier spawns and
-		// command/qa-step kickoffs in the same handler chain.
-		if (goal.paused) { json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
 		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
@@ -5270,15 +5084,6 @@ async function handleApiRoute(
 			gateStore.updateGateMetadata(goalId, gateId, body.metadata);
 		}
 
-		// On goal-plan signal, freeze parent workflow's execution.verify[].
-		// Subsequent changes route through the mutation classifier.
-		// See docs/nested-goals.md#mutation-classifier.
-		const freezeUpdate = computePlanFreezeUpdate(goal, gateId);
-		if (freezeUpdate.freeze && freezeUpdate.workflow) {
-			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeUpdate.workflow });
-			console.log(`[gate-signal] Plan frozen for goal ${goalId} (execution.verify[] now immutable except via mutation classifier)`);
-		}
-
 		// Broadcast signal received
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
@@ -5300,9 +5105,10 @@ async function handleApiRoute(
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
 		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
-		const primary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
+		const branchContainer = goalBranchContainer(goal);
+		const primary = await detectPrimaryBranch(branchContainer).catch(() => "master");
 		verificationHarness.verifyGateSignal(
-			signal, gateDef, goal.cwd, goal.branch, primary, allGateStates, goal.spec,
+			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
@@ -5525,25 +5331,10 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
-		const startGoal = getGoalAcrossProjects(goalId);
-		const trimmedSpec = (startGoal?.spec ?? "").trim();
-		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec === "placeholder") {
-			json({
-				error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.",
-				code: "SPEC_REQUIRED",
-			}, 400);
-			return;
-		}
 		try {
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
-			// Translate GoalPausedError to the canonical 409 GOAL_PAUSED shape
-			// used by /team/spawn, /spawn-child, /gates/:id/signal.
-			if (err && typeof err === "object" && (err as { code?: string }).code === "GOAL_PAUSED") {
-				json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
-				return;
-			}
 			jsonError(400, err);
 		}
 		return;
@@ -5557,11 +5348,6 @@ async function handleApiRoute(
 		const spawnGoal = getGoalAcrossProjects(goalId);
 		if (spawnGoal?.archived) {
 			json({ error: "Goal is archived" }, 409);
-			return;
-		}
-		// Pause-cascade: refuse to spawn role agents on a paused goal.
-		if (spawnGoal?.paused) {
-			json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
 			return;
 		}
 		// Guard: reject spawn if goal worktree is not ready
@@ -5583,8 +5369,6 @@ async function handleApiRoute(
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
 				jsonError(409, err);
-			} else if (err instanceof GoalPausedError) {
-				json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
 			} else {
 				jsonError(400, err);
 			}
@@ -5644,15 +5428,7 @@ async function handleApiRoute(
 			});
 			json({ commits });
 		} catch (e: any) {
-			// QA-3: parent goals without a worktree (or any goal where the
-			// branch hasn't been created yet) used to surface a 500 here,
-			// which the dashboard rendered as a hard error toast on every
-			// poll cycle. Returning 200 with an empty array matches the
-			// `!fs.existsSync(goal.cwd)` short-circuit above and keeps the
-			// commit panel quietly empty until git actually has something
-			// to show.
-			console.warn(`[api] commits: git log failed for goal ${goalId} (branch=${branch}):`, e?.message ?? e);
-			json({ commits: [] });
+			json({ error: "Failed to read git log", detail: e.message }, 500);
 		}
 		return;
 	}
@@ -5665,15 +5441,21 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 
-		// Resolve container ID for sandboxed goals
+		// Resolve container ID for sandboxed goals + project `base_ref` config
+		// for the `aheadOfPrimary`/`behindPrimary` counter — see
+		// `docs/design/base-ref.md` §5.
 		let cid: string | undefined;
-		if (goal.sandboxed) {
-			try {
-				const goalCtx = projectContextManager.getContextForGoal(goalId);
-				const sandbox = goalCtx ? sessionManager.getSandboxManager()?.get(goalCtx.project.id) : undefined;
-				cid = sandbox ? await sandbox.getContainerId() : undefined;
-			} catch { /* container unavailable — fall through */ }
-		}
+		let goalBaseRef: string | undefined;
+		try {
+			const goalCtx = projectContextManager.getContextForGoal(goalId);
+			if (goalCtx) {
+				goalBaseRef = goalCtx.projectConfigStore.get("base_ref") || undefined;
+				if (goal.sandboxed) {
+					const sandbox = sessionManager.getSandboxManager()?.get(goalCtx.project.id);
+					cid = sandbox ? await sandbox.getContainerId() : undefined;
+				}
+			}
+		} catch { /* container/config unavailable — fall through */ }
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const goalUntracked = url.searchParams.get('untracked') === '1';
@@ -5682,7 +5464,7 @@ async function handleApiRoute(
 			invalidateGitStatusCache(cwd, cid);
 		}
 		try {
-			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked });
+			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 
 			// Multi-repo aware envelope: include `repos` map + `aggregate` for back-compat.
@@ -5692,7 +5474,7 @@ async function handleApiRoute(
 				for (const [repoName, repoPath] of Object.entries(repoWorktrees)) {
 					try {
 						if (cid || fs.existsSync(repoPath)) {
-							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked });
+							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
 							if (r) repos[repoName] = r;
 						}
 					} catch { /* per-repo failure non-fatal */ }
@@ -5897,23 +5679,10 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent OR a direct-child team-lead
+		// Validate target is a team agent
 		const agents = teamManager.listAgents(goalId);
-		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
-		if (!allowed) {
-			const targetSession = sessionManager.getSession(body.sessionId);
-			if (targetSession?.role === "team-lead" && targetSession.goalId) {
-				const targetGoal = getGoalAcrossProjects(targetSession.goalId);
-				if (targetGoal?.parentGoalId === goalId) {
-					allowed = true;
-				}
-			}
-		}
-		if (!allowed) {
-			json({
-				error: "Session is not a member of this team and is not a direct-child team-lead",
-				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
-			}, 403);
+		if (!agents.find(a => a.sessionId === body.sessionId)) {
+			json({ error: "Session is not a member of this team" }, 403);
 			return;
 		}
 		const session = sessionManager.getSession(body.sessionId);
@@ -5997,34 +5766,6 @@ async function handleApiRoute(
 	const teamCompleteMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/complete$/);
 	if (teamCompleteMatch && req.method === "POST") {
 		const goalId = teamCompleteMatch[1];
-		// Guard: refuse to complete a parent goal while non-archived children
-		// remain. Without this, the parent can mark itself complete and walk
-		// away while its 19 subgoals continue running (or sit idle with all
-		// gates passed but unmerged) — exactly the "Audit X" subgoals at
-		// (3/3) that stayed live in the user's image #49. The fix forces
-		// the agent to explicitly resolve each child via goal_merge_child
-		// (clean integration) or goal_archive_child (give-up / read-only).
-		const goalForCheck = getGoalAcrossProjects(goalId);
-		if (goalForCheck) {
-			const liveChildren = nestedListDescendants(projectContextManager, goalId).filter(g => !g.archived);
-			if (liveChildren.length > 0) {
-				const previewItems = liveChildren.slice(0, 5).map(g => ({ id: g.id, title: g.title }));
-				const overflow = liveChildren.length > 5 ? liveChildren.length - 5 : 0;
-				json({
-					code: "HAS_LIVE_CHILDREN",
-					count: liveChildren.length,
-					children: previewItems,
-					overflow,
-					error:
-						`Cannot complete team while ${liveChildren.length} non-archived child goal${liveChildren.length === 1 ? "" : "s"} remain. ` +
-						`For each child either call goal_merge_child (clean local merge → auto-archive) ` +
-						`or goal_archive_child (give up / read-only deliverables). ` +
-						`First few: ${previewItems.map(c => `"${c.title}" (${c.id.slice(0, 8)})`).join(", ")}` +
-						(overflow > 0 ? ` …and ${overflow} more` : "") + ".",
-				}, 409);
-				return;
-			}
-		}
 		try {
 			await teamManager.completeTeam(goalId);
 			json({ ok: true });
@@ -6034,108 +5775,13 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/team/teardown — fully tear down a team
-	// (dismiss agents + terminate team lead). Cascade contract mirrors
-	// pause/archive: explicit cascade required when descendants exist.
-	//
-	// Without `?cascade=true`: tears down only THIS goal's team. If the
-	// goal has any non-archived descendants with live teams, returns
-	// 409 HAS_DESCENDANT_TEAMS so the UI can prompt the user.
-	// With `?cascade=true`: walks descendants (depth-first), tears down
-	// each team, then tears down the parent. Idempotent: missing teams
-	// are silently skipped.
+	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead)
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];
-		// R-008: require an explicit `?cascade=true|false` query param.
-		// Mirrors the `cascade: boolean` body contract on /pause /resume
-		// /:id (delete). Previously a missing param silently meant `false`,
-		// which violates AGENTS.md's documented "every cascade-affecting
-		// REST call requires explicit cascade" rule.
-		const cascadeParam = url.searchParams.get("cascade");
-		if (cascadeParam !== "true" && cascadeParam !== "false") {
-			json({
-				error: "cascade query param is required (?cascade=true|false)",
-				code: "CASCADE_REQUIRED",
-			}, 422);
-			return;
-		}
-		const cascade = cascadeParam === "true";
-		const ctx = projectContextManager.getContextForGoal(goalId);
 		try {
-			if (!cascade) {
-				// Discovery: any descendant goal with a live team?
-				const descendantsWithTeams: Array<{ id: string; title: string }> = [];
-				if (ctx) {
-					const all = ctx.goalStore.getAll();
-					const byParent = new Map<string, typeof all[number][]>();
-					for (const g of all) {
-						if (!g.parentGoalId) continue;
-						const arr = byParent.get(g.parentGoalId) ?? [];
-						arr.push(g);
-						byParent.set(g.parentGoalId, arr);
-					}
-					const queue: string[] = [goalId];
-					const visited = new Set<string>([goalId]);
-					while (queue.length) {
-						const cur = queue.shift()!;
-						for (const child of byParent.get(cur) ?? []) {
-							if (visited.has(child.id) || child.archived) continue;
-							visited.add(child.id);
-							if (teamManager.getTeamState(child.id)) {
-								descendantsWithTeams.push({ id: child.id, title: child.title });
-							}
-							queue.push(child.id);
-						}
-					}
-				}
-				if (descendantsWithTeams.length > 0) {
-					json({
-						code: "HAS_DESCENDANT_TEAMS",
-						count: descendantsWithTeams.length,
-						descendants: descendantsWithTeams,
-						message: `Goal has ${descendantsWithTeams.length} descendant team(s) still running. Re-call with ?cascade=true to stop them all.`,
-					}, 409);
-					return;
-				}
-			}
-
-			// Cascade tear-down: walk descendants depth-first, then this goal.
-			// Each teardown is best-effort — one failure must not stop the rest.
-			const teardownOrder: string[] = [];
-			if (ctx) {
-				const all = ctx.goalStore.getAll();
-				const byParent = new Map<string, typeof all[number][]>();
-				for (const g of all) {
-					if (!g.parentGoalId) continue;
-					const arr = byParent.get(g.parentGoalId) ?? [];
-					arr.push(g);
-					byParent.set(g.parentGoalId, arr);
-				}
-				const visit = (id: string) => {
-					for (const child of byParent.get(id) ?? []) {
-						if (child.archived) continue;
-						visit(child.id);
-						teardownOrder.push(child.id);
-					}
-				};
-				if (cascade) visit(goalId);
-			}
-			teardownOrder.push(goalId);
-
-			let toreDown = 0;
-			const errors: Array<{ goalId: string; error: string }> = [];
-			for (const id of teardownOrder) {
-				try {
-					if (teamManager.getTeamState(id)) {
-						await teamManager.teardownTeam(id);
-						toreDown += 1;
-					}
-				} catch (err) {
-					errors.push({ goalId: id, error: err instanceof Error ? err.message : String(err) });
-				}
-			}
-			json({ ok: true, toreDown, errors });
+			await teamManager.teardownTeam(goalId);
+			json({ ok: true });
 		} catch (err) {
 			jsonError(400, err);
 		}
@@ -6166,27 +5812,11 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const purge = url.searchParams.get("purge") === "true";
-			// Check if it's an archived session.
-			//
-			// Old behaviour (footgun): DELETE on an archived session
-			// IMMEDIATELY purged it — destroying the .jsonl and the session
-			// record without confirmation. That was inconsistent with DELETE
-			// on a live session (which only archives) and combined with the
-			// missing-.jsonl auto-archive path to silently nuke team-lead
-			// sessions whose owning goal was still live (the user's "Audit
-			// subgoals branch" / "Extract generic fixes" data loss).
-			//
-			// New behaviour: DELETE on an archived session is a 200 no-op
-			// (the session is already in the requested state). Callers that
-			// want destruction must pass ?purge=true explicitly — same flag
-			// they'd use to upgrade a terminate into a destroy on a live
-			// session.
+			// Check if it's an archived session — purge immediately
 			const archivedSession = sessionManager.getArchivedSession(id);
 			if (archivedSession) {
-				if (purge) {
-					await sessionManager.purgeArchivedSession(id);
-				}
-				json({ ok: true, alreadyArchived: true, purged: purge });
+				await sessionManager.purgeArchivedSession(id);
+				json({ ok: true });
 				return;
 			}
 			const terminated = await sessionManager.terminateSession(id);
@@ -6211,34 +5841,6 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
-	}
-
-	// POST /api/sessions/:id/notify — enqueue a synthetic user-style message
-	// to a session. Used by the proposal accept-flow to wake the proposing
-	// agent ("[user accepted your role proposal …]") so the team-lead can
-	// continue its task without polling. Live and idle sessions both supported
-	// via enqueuePrompt; archived sessions reject (404 from getSession).
-	const notifyMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/notify$/);
-	if (notifyMatch && req.method === "POST") {
-		const id = notifyMatch[1];
-		const body = await readBody(req);
-		if (!body?.message || typeof body.message !== "string") {
-			json({ error: "Missing or invalid message" }, 400);
-			return;
-		}
-		const session = sessionManager.getSession(id);
-		if (!session) { json({ error: "Session not found" }, 404); return; }
-		if (session.nonInteractive) {
-			json({ error: "Cannot notify a non-interactive session" }, 400);
-			return;
-		}
-		try {
-			await sessionManager.enqueuePrompt(id, body.message);
-			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
-		} catch (err: any) {
-			json({ error: `Failed to enqueue notification: ${err?.message || String(err)}` }, 500);
-		}
-		return;
 	}
 
 	// POST /api/sessions/:id/wait — block until session becomes idle
@@ -6954,6 +6556,14 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 
+		// Resolve project `base_ref` config for the `aheadOfPrimary`/`behindPrimary`
+		// counter — see `docs/design/base-ref.md` §5.
+		let sessionBaseRef: string | undefined;
+		try {
+			const sessCtx = projectContextManager.getContextForSession(id);
+			if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+		} catch { /* config unavailable — fall through */ }
+
 		// Optional: run git fetch first when ?fetch=true is passed
 		const sessUntracked = url.searchParams.get('untracked') === '1';
 		if (url.searchParams.get('fetch') === 'true') {
@@ -6967,7 +6577,7 @@ async function handleApiRoute(
 		// the resilience layer for transient failures.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
 		try {
-			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
 		} catch (err: any) {
 			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
 			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
@@ -7754,70 +7364,6 @@ async function handleApiRoute(
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
 		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
-		return;
-	}
-
-	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree
-	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
-	if (goalTreeCostMatch && req.method === "GET") {
-		if (!requireSubgoalsEnabled()) return;
-		const goalId = goalTreeCostMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) {
-			json({ error: "Goal not found" }, 404);
-			return;
-		}
-		// Determine the rollup root: a child's tree rolls up to its rootGoalId,
-		// a top-level goal is its own root.
-		const rootGoalId = goal.rootGoalId ?? goal.id;
-		if (!goal.projectId) {
-			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
-			return;
-		}
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) {
-			json({ error: "Goal project context not found" }, 404);
-			return;
-		}
-		// All goals (live + archived) — children of an archived root may still
-		// have meaningful cost data attached.
-		const allGoals = ctx.goalStore.getAll();
-		const costTracker = sessionManager.getCostTracker(goal.projectId);
-		const result = computeTreeCost(
-			rootGoalId,
-			allGoals,
-			costTracker,
-			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
-		);
-		json(result);
-		return;
-	}
-
-	// GET /api/goals/:goalId/descendants — full descendant goal records (live + archived)
-	// Powers the Plan tab's data source so archived children remain visible in
-	// the DAG independently of the sidebar's "See Archived" toggle. Not gated
-	// behind requireSubgoalsEnabled() — Plan tab is core dashboard functionality.
-	const goalDescendantsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/descendants$/);
-	if (goalDescendantsMatch && req.method === "GET") {
-		const goalId = goalDescendantsMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) {
-			json({ error: "Goal not found" }, 404);
-			return;
-		}
-		if (!goal.projectId) {
-			json({ goals: [] });
-			return;
-		}
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) {
-			json({ error: "Goal project context not found" }, 404);
-			return;
-		}
-		// All goals (live + archived) — `getAll()` returns both.
-		const allGoals = ctx.goalStore.getAll();
-		const descendants = collectDescendants(goalId, allGoals);
-		json({ goals: descendants });
 		return;
 	}
 

@@ -134,8 +134,8 @@ Use the canonical \`readyToMergeGate()\` shape (see \`seed-default-workflows.ts\
 three verify steps are:
 
 1. \`git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q .\`
-2. \`git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}\`
-3. \`gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q .\`
+2. \`git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}\`
+3. \`gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q \".[0].url\" | grep -q .\`
 
 The third step requires the GitHub CLI (\`gh\`). **Check for \`gh\` during the
 exploration step** (look for \`gh\` on \`PATH\`, or a \`.github/\` directory + a remote

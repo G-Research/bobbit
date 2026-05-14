@@ -19,6 +19,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import type { GitStatusResult } from "../server.js";
+import { parseBaseRef } from "./git.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -27,6 +28,16 @@ export interface BatchGitStatusOpts {
 	untracked?: boolean;
 	/** When set, all git invocations route through `docker exec -w cwd <cid> git ...`. */
 	containerId?: string;
+	/**
+	 * Project-level `base_ref` configuration. When non-empty, drives the
+	 * `primaryBranch` used for `aheadOfPrimary`/`behindPrimary` counters,
+	 * overriding the default `origin/HEAD` resolution. Empty/undefined →
+	 * preserves today's behaviour (`symbolic-ref refs/remotes/origin/HEAD`
+	 * with `master`/`main` fallback).
+	 *
+	 * See `docs/design/base-ref.md`.
+	 */
+	configuredBaseRef?: string;
 }
 
 const PER_CALL_TIMEOUT_MS = 3000;
@@ -117,7 +128,7 @@ function parsePorcelain(raw: string): { status: { file: string; status: string }
 }
 
 /** Host path: parallel native execFile per design §2 (Phase A then Phase B). */
-async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult | null> {
+async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: string): Promise<GitStatusResult | null> {
 	const porcelainArgs = [
 		"-c",
 		"core.filemode=false",
@@ -140,9 +151,14 @@ async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult
 	if (!a1.ok || !a1.stdout) return null;
 	const branch = a1.stdout;
 
-	// primaryBranch from A2 → fallback to local master/main detection.
+	// primaryBranch resolution — honour configured `base_ref` when set, else
+	// fall back to A2 (origin/HEAD) → local master/main detection. See
+	// `docs/design/base-ref.md` §5.
 	let primaryBranch = "master";
-	if (a2.ok && a2.stdout) {
+	const parsedBase = parseBaseRef(configuredBaseRef ?? "");
+	if (parsedBase.branch) {
+		primaryBranch = parsedBase.branch;
+	} else if (a2.ok && a2.stdout) {
 		primaryBranch = a2.stdout.replace("refs/remotes/origin/", "");
 	} else {
 		const masterExists = a3.ok;
@@ -220,10 +236,22 @@ async function runHost(cwd: string, untracked: boolean): Promise<GitStatusResult
 /** Container path: preserve the legacy single-spawn batched script. The
  * Windows tax is host-side only; inside Linux containers `git` is fast and
  * one `docker exec sh -c` round-trip beats 11 parallel `docker exec` calls. */
-async function runContainer(cwd: string, containerId: string, untracked: boolean): Promise<GitStatusResult | null> {
+async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef?: string): Promise<GitStatusResult | null> {
 	const porcelainLine = untracked
 		? "git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null"
 		: "git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null";
+
+	// When `base_ref` is configured, substitute the resolved branch name
+	// directly into the script (saves a `symbolic-ref` round-trip and honours
+	// the configured integration target). When unset, keep today's chain.
+	// See `docs/design/base-ref.md` §5.
+	const parsedBase = parseBaseRef(configuredBaseRef ?? "");
+	const primaryResolutionScript = parsedBase.branch
+		? `PRIMARY=${shellSingleQuote(parsedBase.branch)}`
+		: [
+				'PRIMARY=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed "s|refs/remotes/origin/||")',
+				'if [ -z "$PRIMARY" ]; then PRIMARY=master; fi',
+			].join("\n");
 
 	const batchScript = [
 		"git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__",
@@ -243,8 +271,7 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		'printf "\\0"',
 		"git rev-list --count HEAD..@{u} 2>/dev/null || echo 0",
 		'printf "\\0"',
-		'PRIMARY=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed "s|refs/remotes/origin/||")',
-		'if [ -z "$PRIMARY" ]; then PRIMARY=master; fi',
+		primaryResolutionScript,
 		'if git rev-parse --verify "origin/$PRIMARY" >/dev/null 2>&1; then PREF="origin/$PRIMARY"; else PREF="$PRIMARY"; fi',
 		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
 		'printf "\\0"',
@@ -272,13 +299,17 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 	const branch = branchRaw;
 
 	let primaryBranch = "master";
-	const remoteHeadRaw = sections[1] || "";
-	if (remoteHeadRaw !== "__FAIL__" && remoteHeadRaw) {
-		primaryBranch = remoteHeadRaw.replace("refs/remotes/origin/", "");
+	if (parsedBase.branch) {
+		primaryBranch = parsedBase.branch;
 	} else {
-		const masterExists = (sections[2] || "").startsWith("yes");
-		const mainExists = (sections[3] || "").startsWith("yes");
-		if (!masterExists && mainExists) primaryBranch = "main";
+		const remoteHeadRaw = sections[1] || "";
+		if (remoteHeadRaw !== "__FAIL__" && remoteHeadRaw) {
+			primaryBranch = remoteHeadRaw.replace("refs/remotes/origin/", "");
+		} else {
+			const masterExists = (sections[2] || "").startsWith("yes");
+			const mainExists = (sections[3] || "").startsWith("yes");
+			if (!masterExists && mainExists) primaryBranch = "main";
+		}
 	}
 
 	const isOnPrimary = branch === primaryBranch;
@@ -337,8 +368,14 @@ export async function runBatchGitStatusNative(
 ): Promise<GitStatusResult | null> {
 	const untracked = opts?.untracked === true;
 	if (opts?.containerId) {
-		return runContainer(cwd, opts.containerId, untracked);
+		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef);
 	}
-	return runHost(cwd, untracked);
+	return runHost(cwd, untracked, opts?.configuredBaseRef);
+}
+
+/** Single-quote a string for safe inclusion in an `sh -c` shell script.
+ * Escapes embedded single quotes via the classic `'\''` dance. */
+function shellSingleQuote(s: string): string {
+	return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
