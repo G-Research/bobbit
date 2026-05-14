@@ -61,6 +61,10 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 
 	test("two distinct children with identical titles BOTH render (not merged)", async ({ page }) => {
 		await openApp(page);
+		// Expand parent so its children are visible in nested-goals mode.
+		const parentGoalRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"] [data-testid="sidebar-goal-row"]`).first();
+		await expect(parentGoalRow).toBeVisible({ timeout: 10_000 });
+		await parentGoalRow.click();
 
 		const child1Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first();
 		const child2Row = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first();
@@ -77,23 +81,16 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 
 	test("rendered order is deterministic across reloads (stable sort)", async ({ page }) => {
 		await openApp(page);
+		// Expand parent so its children are visible in nested-goals mode.
+		const parentGoalRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"] [data-testid="sidebar-goal-row"]`).first();
+		await expect(parentGoalRow).toBeVisible({ timeout: 10_000 });
+		await parentGoalRow.click();
 
 		// Wait for both rows to be present before snapshotting order.
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 
 		const orderFromDom = async (): Promise<string[]> => {
-			// Poll until BOTH child ids are present in the snapshot — guards against
-			// a brief DOM gap during a Lit re-render triggered by a WS state update.
-			await page.waitForFunction(
-				([c1, c2]: string[]) => {
-					const els = document.querySelectorAll('[data-testid="sidebar-nested-row"]');
-					const ids = Array.from(els).map(el => el.getAttribute("data-goal-id") || "").filter(Boolean);
-					return ids.includes(c1) && ids.includes(c2);
-				},
-				[child1Id, child2Id] as string[],
-				{ timeout: 15_000 },
-			);
 			return await page.locator(`[data-testid="sidebar-nested-row"]`)
 				.evaluateAll(els =>
 					els
@@ -106,6 +103,9 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 		// Reload and re-check: order must match. The pre-fix render path had
 		// no stable sort, so two same-titled siblings shuffled on every render.
 		await page.reload();
+		// localStorage persists through reload so the parent stays expanded,
+		// but wait for it to reappear before asserting children.
+		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"]`).first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 		const second = await orderFromDom();
@@ -123,6 +123,10 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 
 	test("dedupe: a goal id appears at most once in the spawned-child rows", async ({ page }) => {
 		await openApp(page);
+		// Expand parent so its children are visible in nested-goals mode.
+		const parentGoalRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"] [data-testid="sidebar-goal-row"]`).first();
+		await expect(parentGoalRow).toBeVisible({ timeout: 10_000 });
+		await parentGoalRow.click();
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child1Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 
 		const counts = await page.locator(`[data-testid="sidebar-nested-row"]`)
