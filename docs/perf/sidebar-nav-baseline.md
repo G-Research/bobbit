@@ -960,6 +960,20 @@ History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
 
 ## 7. Shipped wins
 
+### 7.0 Shipped progression — cumulative perf as wins land
+
+The **Shipped Progression** panel at the top of
+[`sidebar-nav-report.html`](sidebar-nav-report.html) plots one point per
+merged optimisation, all measured on the canonical realistic-large
+fixture with n=5 replicates and ALL default-ON wins active up to and
+including that step. The line descends top-right → bottom-left as the
+user-visible latency falls. **Step 0** anchors the chart at the pre-Opt-A
+baseline (`-deferOffscreenRender` to force Opt-A off); each subsequent
+step adds the next shipped flag to the default-on set. Numbers live in
+the regenerated report, not in this prose, so they stay accurate as new
+wins land. Reproduce or extend with `scripts/perf-progression.mjs` (see
+[`HOW-TO-REPEAT.md` §9](HOW-TO-REPEAT.md#9-adding-a-new-progression-step)).
+
 ### 7.1 Opt-A — defer off-screen transcript render (`deferOffscreenRender`, default-ON)
 
 **Status:** **SHIPPED, flag default-ON** at goal-branch merge. Implementation:

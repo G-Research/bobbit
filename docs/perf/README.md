@@ -98,9 +98,13 @@ single lucky sample doesn't masquerade as a win. Schema:
   "msgsPerSession": 50,
   "perfFlags": "lazyToolContent" | null,
   "tag": "opt-b-on-3" | null,                  // includes replicate suffix
-  "kind": "baseline" | "experiment",            // default "baseline"
+  "kind": "baseline" | "experiment" | "progression",   // default "baseline"
   "experimentTag": "opt-b",                     // optional; required to pair A/B
   "experimentCondition": "off" | "on" | ...,   // optional; the leg of the pair
+  "progressionStep": 0,                          // 0-indexed; "progression" only
+  "progressionLabel": "baseline",                // human-readable, e.g. "+Opt-A"
+  "progressionFlags": "-deferOffscreenRender",   // exact BOBBIT_PERF_FLAGS at runtime
+  "progressionShippedSince": ["opt-a"],          // ship-tags included at this point
   "spans": { "<span>": { "p50": ..., "p95": ..., "p99": ..., "n": ..., "mean": ..., "max": ... } }
 }
 ```
@@ -113,6 +117,16 @@ single lucky sample doesn't masquerade as a win. Schema:
   at the same commit with matching `experimentTag` and differing
   `experimentCondition` form an A/B pair; the report computes Δ between
   them and surfaces it on the headlines + pair tables.
+- **`kind: "progression"`** — one data point on the **Shipped Progression**
+  panel. Each point is the harness measured with ALL default-ON shipped
+  flags up to and including that step (n=5 replicates on the canonical
+  realistic-large fixture). Progression runs carry `progressionStep`
+  (0-indexed), `progressionLabel` (human readable, e.g. `baseline`,
+  `+Opt-A`), `progressionFlags` (the exact `BOBBIT_PERF_FLAGS` value the
+  harness used) and `progressionShippedSince` (ship-tags merged at this
+  point). Produced by `scripts/perf-progression.mjs` — the report groups
+  them by step and renders one chart per canonical user-facing span
+  showing the cumulative latency descent as wins land.
 - **Replicates** are detected by filename: `<sha>-<tag-base>-<N>.json`.
   Files sharing a `(commit, tag-base)` are grouped, and the report shows
   median p50 / p95 with **min/max error bars** across replicates.

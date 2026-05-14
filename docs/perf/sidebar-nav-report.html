@@ -146,6 +146,38 @@
 		border: 1px dashed var(--border); border-radius: 8px;
 		padding: 1.25rem; text-align: center; color: var(--muted-foreground); margin: 0.5rem 0 2rem;
 	}
+
+	.progression-panel {
+		background: color-mix(in oklch, var(--chart-1) 4%, var(--card));
+		border: 1px solid var(--border); border-radius: 10px;
+		padding: 1rem 1.1rem 1.2rem; margin: 0 0 2.5rem;
+	}
+	.progression-panel h2 { margin-top: 0.25rem; }
+	.progression-panel .panel-blurb {
+		font-size: 0.85rem; color: var(--muted-foreground); margin: 0.1rem 0 0.9rem;
+	}
+	.progression-panel .panel-blurb code {
+		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+		padding: 0 4px; border-radius: 3px;
+	}
+	.progression-charts {
+		display: grid; grid-template-columns: 1fr; gap: 0.85rem; margin: 0.9rem 0;
+	}
+	@media (min-width: 1000px) { .progression-charts { grid-template-columns: 1fr 1fr; } }
+	.progression-chart {
+		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+		padding: 0.55rem 0.85rem 0.45rem;
+	}
+	.progression-chart header { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.2rem; }
+	.progression-chart h3 { font-family: ui-monospace, monospace; font-size: 0.92rem; font-weight: 600; margin: 0; }
+	.progression-chart .meta { display: flex; gap: 0.6rem; font-size: 0.78rem; color: var(--muted-foreground); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+	.progression-chart svg { display: block; width: 100%; height: auto; }
+	.progression-other { margin-top: 1rem; }
+	.progression-other > summary {
+		cursor: pointer; font-size: 0.85rem; color: var(--muted-foreground);
+		padding: 0.4rem 0;
+	}
+	.progression-other[open] > summary { color: var(--foreground); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -153,7 +185,7 @@
 <header class="page">
 	<h1>Sidebar nav perf — cross-commit report</h1>
 	<div class="meta">
-		<span>Generated <strong>2026-05-14 09:38</strong></span>
+		<span>Generated <strong>2026-05-14 10:14</strong></span>
 		<span><strong>9</strong> groups (2 experiment, 7 baseline) from <strong>17</strong> replicate JSONs</span>
 		<span>Range <span class="mono">999bdc2 → f1699ac</span></span>
 		<span>Latest branch <span class="mono">goal-goal-profile-si-320532b0-coder-f24f3fcd</span></span>
@@ -200,6 +232,8 @@
 			<span class="muted">Δ column fires <strong>only</strong> when two <code>experiment</code> groups at the same commit form an A/B pair. Cross-commit comparisons show <code>n/a — fixture changed</code>.</span>
 		</div>
 	</aside>
+
+
 
 
 		<h2>Headlines <span class="count">A/B pairs, ranked by |Δ p50| — control vs treatment at the same commit</span></h2>
