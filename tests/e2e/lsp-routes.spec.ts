@@ -40,7 +40,57 @@ function methodBody(method: string): Record<string, unknown> {
 
 const BENIGN_ERRORS = new Set(["lsp_unavailable", "lsp_capacity", "lsp_timeout"]);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDERING INVARIANT — DO NOT REORDER THE FIRST /api/lsp/stats TEST
+//
+// The in-process harness fixture is worker-scoped: every test in this file
+// shares ONE booted gateway. The regression test below ("is never 'pending'
+// on immediate post-boot read") pins the contract that the FIRST external
+// /api/lsp/stats call after start() must see a settled routeSelfCheck.
+//
+// If any other /api/lsp/stats call runs first, the supervisor's self-check
+// promise will have already been awaited (or naturally settled by elapsed
+// wall-time), and the regression test becomes a tautology that passes even
+// if the await is removed from the stats handler. That is exactly the
+// review finding that prompted this reorder — see goal fix-routes-1db8c87b,
+// task "Make post-boot test immediate".
+//
+// Keep the immediate-post-boot regression test as the FIRST declared test
+// in this file. The other stats tests (registration, 'ok', cap) must remain
+// AFTER it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("GET /api/lsp/stats is never 'pending' on immediate post-boot read", async () => {
+	// Direct regression for goal fix-routes-1db8c87b: the previous fire-and-forget
+	// boot ordering let /api/lsp/stats return routeSelfCheck === "pending" if the
+	// caller read the route before the background self-check task settled.
+	//
+	// The fix awaits the supervisor's route-self-check promise inside the stats
+	// handler (bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS). A single synchronous
+	// fetch immediately after start() must therefore return a settled value.
+	//
+	// This MUST be the first test in the file — see the ordering banner above.
+	// Status check (200) also subsumes the "not 404" registration assertion for
+	// this route, so no separate /stats registration test runs ahead of it.
+	//
+	// This assertion is intentionally weaker than the 'ok' test below: any settled
+	// state (ok / failed:...) is acceptable here. The point is that the route's
+	// observability contract is honored — callers never see the in-progress sentinel.
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status, "GET /api/lsp/stats must not be 404").not.toBe(404);
+	expect(res.status).toBe(200);
+	const body = await res.json() as Record<string, unknown>;
+	expect(
+		body.routeSelfCheck,
+		"routeSelfCheck must be settled — 'pending' means the stats handler did not await the self-check promise (goal fix-routes-1db8c87b)",
+	).not.toBe("pending");
+	expect(typeof body.routeSelfCheck, "routeSelfCheck must be a string").toBe("string");
+});
+
 test("GET /api/lsp/stats is registered (never 404)", async () => {
+	// Registration check — runs AFTER the immediate-post-boot regression test
+	// (see ordering banner above). By the time this runs the self-check has
+	// settled, but the route registration assertion is independent of that.
 	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
 	expect(res.status, "GET /api/lsp/stats must not be 404").not.toBe(404);
 	expect(res.status).toBe(200);
@@ -60,28 +110,6 @@ test("GET /api/lsp/stats reports routeSelfCheck: 'ok' after clean boot", async (
 	expect(res.status).toBe(200);
 	const body = await res.json() as Record<string, unknown>;
 	expect(body.routeSelfCheck, "routeSelfCheck must be 'ok' — if 'pending' the check did not run; if 'failed:...' a route is missing").toBe("ok");
-});
-
-test("GET /api/lsp/stats is never 'pending' on immediate post-boot read", async () => {
-	// Direct regression for goal fix-routes-1db8c87b: the previous fire-and-forget
-	// boot ordering let /api/lsp/stats return routeSelfCheck === "pending" if the
-	// caller read the route before the background self-check task settled.
-	//
-	// The fix awaits the supervisor's route-self-check promise inside the stats
-	// handler (bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS). A single synchronous
-	// fetch immediately after start() must therefore return a settled value.
-	//
-	// This assertion is intentionally weaker than the 'ok' test above: any settled
-	// state (ok / failed:...) is acceptable here. The point is that the route's
-	// observability contract is honored — callers never see the in-progress sentinel.
-	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
-	expect(res.status).toBe(200);
-	const body = await res.json() as Record<string, unknown>;
-	expect(
-		body.routeSelfCheck,
-		"routeSelfCheck must be settled — 'pending' means the stats handler did not await the self-check promise (goal fix-routes-1db8c87b)",
-	).not.toBe("pending");
-	expect(typeof body.routeSelfCheck, "routeSelfCheck must be a string").toBe("string");
 });
 
 test("GET /api/lsp/state is registered (never 404)", async () => {
