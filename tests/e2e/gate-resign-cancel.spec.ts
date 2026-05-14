@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, type WsConnection } from "./e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal, createSession, deleteSession, connectWs, defaultProjectId, type WsConnection } from "./e2e-setup.js";
 
 /**
  * E2E test for gate re-signal cancellation.
@@ -14,9 +14,10 @@ const SLOW_WORKFLOW_ID = `test-slow-${Date.now()}`;
 
 /** Create a workflow with a slow verification command for testing cancellation. */
 async function createSlowWorkflow(): Promise<void> {
+	const projectId = await defaultProjectId();
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
-		body: JSON.stringify({
+		body: JSON.stringify({ projectId,
 			id: SLOW_WORKFLOW_ID,
 			name: "Test Slow Verification",
 			description: "Workflow with a slow command for testing re-signal cancellation",
