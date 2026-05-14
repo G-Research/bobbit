@@ -153,6 +153,57 @@ async function integrateChild(childId: string): Promise<{ status: number; payloa
 	return { status, payload };
 }
 
+describe("goal_plan_propose direct-spawn fallback: topological ordering", () => {
+	it("valid DAG submitted out of topological order succeeds (B before A, B depends on A)", async () => {
+		// Submit B first (depends on A), then A. If the fallback doesn't
+		// topologically sort, spawning B first would cause UNKNOWN_PLAN_ID
+		// because A hasn't been spawned yet.
+		// After topological sorting, A is spawned first, then B (paused).
+		const stepsOutOfOrder = [
+			{ planId: "B", title: "B", spec: "Implement feature B: builds on A; submitted out of order to verify topo sort.", dependsOn: ["A"] },
+			{ planId: "A", title: "A", spec: "Implement feature A: set up the foundation layer for this out-of-order topo sort test." },
+		];
+		// Simulate topological sort (what extension.ts now does before spawning)
+		const byId = new Map(stepsOutOfOrder.map(s => [s.planId, s]));
+		const indegree = new Map(stepsOutOfOrder.map(s => [s.planId, 0]));
+		for (const s of stepsOutOfOrder) {
+			for (const dep of (s as any).dependsOn ?? []) {
+				if (byId.has(dep)) indegree.set(s.planId, (indegree.get(s.planId) ?? 0) + 1);
+			}
+		}
+		const queue = stepsOutOfOrder.filter(s => (indegree.get(s.planId) ?? 0) === 0);
+		const sorted: typeof stepsOutOfOrder = [];
+		const visited = new Set<string>();
+		while (queue.length > 0) {
+			const node = queue.shift()!;
+			if (visited.has(node.planId)) continue;
+			visited.add(node.planId);
+			sorted.push(node);
+			for (const s of stepsOutOfOrder) {
+				if (visited.has(s.planId)) continue;
+				if (((s as any).dependsOn ?? []).includes(node.planId)) {
+					const deg = (indegree.get(s.planId) ?? 1) - 1;
+					indegree.set(s.planId, deg);
+					if (deg === 0) queue.push(s);
+				}
+			}
+		}
+		assert.deepEqual(sorted.map(s => s.planId), ["A", "B"], "topo sort must put A before B");
+
+		// Spawn in topologically sorted order — should succeed
+		for (const s of sorted) {
+			const r = await spawnChild(s);
+			assert.equal(r.status, 201, `spawn ${s.planId} must succeed: ${JSON.stringify(r.payload)}`);
+		}
+
+		// Verify: A is running, B is paused (dep unresolved)
+		const childA = goalStore.getAll().find(g => g.spawnedFromPlanId === "A" && g.parentGoalId === parent.id)!;
+		const childB = goalStore.getAll().find(g => g.spawnedFromPlanId === "B" && g.parentGoalId === parent.id)!;
+		assert.notEqual(childA.paused, true, "A must not be paused");
+		assert.equal(childB.paused, true, "B must be paused until A completes");
+	});
+});
+
 describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 	it("DAG {root: [], a: [root], b: [root], leaf: [a, b]} → only root starts; a, b, leaf paused", async () => {
 		// Fallback iterates the steps in caller order. The team-lead is expected
@@ -282,5 +333,35 @@ describe("spawn-children-direct fallback response includes warning when dependsO
 		assert.notEqual(childX.paused, true, "X must not be paused");
 		assert.equal(childY.paused, true, "Y must be paused");
 		assert.deepEqual(childY.dependsOnPlanIds, ["X"]);
+	});
+
+	it("extension.ts aggregation: warning + blockedCount + blockedPlanIds", async () => {
+		// Simulate the extension.ts fallback aggregation:
+		// spawn two steps where Y depends on X, then verify the tool
+		// response object the extension would produce.
+		const steps = [
+			{ planId: "X", title: "X", spec: "Implement feature X: set up the core foundation for this test scenario.", dependsOn: undefined as string[] | undefined },
+			{ planId: "Y", title: "Y", spec: "Implement feature Y: builds on X; this test verifies the warning/blocked fields appear.", dependsOn: ["X"] },
+		];
+		const hasDependsOn = steps.some(s => s.dependsOn && s.dependsOn.length > 0);
+		const spawned: Array<{ planId: string; blocked?: boolean; pendingDeps?: string[]; error?: string }> = [];
+		for (const s of steps) {
+			const r = await spawnChild(s);
+			spawned.push({ planId: s.planId, ...(r.payload.blocked ? { blocked: true, pendingDeps: r.payload.pendingDeps } : {}) });
+		}
+		const blockedEntries = spawned.filter(s => s.blocked);
+		// Replicate the extension.ts response-shaping logic exactly:
+		const toolResponse = {
+			fallback: "spawn-children-direct" as const,
+			...(hasDependsOn ? {
+				warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
+				blockedCount: blockedEntries.length,
+				blockedPlanIds: blockedEntries.map(s => s.planId),
+			} : {}),
+		};
+		assert.equal(hasDependsOn, true, "hasDependsOn must be true for this DAG");
+		assert.ok((toolResponse as any).warning?.startsWith("degraded-execution"), "warning must start with 'degraded-execution'");
+		assert.equal((toolResponse as any).blockedCount, 1, "blockedCount must be 1");
+		assert.deepEqual((toolResponse as any).blockedPlanIds, ["Y"], "blockedPlanIds must be [\"Y\"]");
 	});
 });

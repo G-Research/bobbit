@@ -150,8 +150,43 @@ export default function (pi: ExtensionAPI) {
 						);
 					}
 					const hasDependsOn = params.steps.some(s => s.dependsOn && s.dependsOn.length > 0);
+					// Topological sort — spawn deps before dependants so each
+					// spawn-child call finds its dependsOn siblings already present.
+					// This prevents UNKNOWN_PLAN_ID when a valid DAG is submitted
+					// in non-topological order (which is valid per the spec).
+					const stepsInOrder = (() => {
+						const byId = new Map(params.steps.map(s => [s.planId, s]));
+						const indegree = new Map(params.steps.map(s => [s.planId, 0]));
+						for (const s of params.steps) {
+							for (const dep of s.dependsOn ?? []) {
+								if (byId.has(dep)) indegree.set(s.planId, (indegree.get(s.planId) ?? 0) + 1);
+							}
+						}
+						const queue = params.steps.filter(s => (indegree.get(s.planId) ?? 0) === 0);
+						const sorted: typeof params.steps = [];
+						const visited = new Set<string>();
+						while (queue.length > 0) {
+							const node = queue.shift()!;
+							if (visited.has(node.planId)) continue;
+							visited.add(node.planId);
+							sorted.push(node);
+							for (const s of params.steps) {
+								if (visited.has(s.planId)) continue;
+								if ((s.dependsOn ?? []).includes(node.planId)) {
+									const deg = (indegree.get(s.planId) ?? 1) - 1;
+									indegree.set(s.planId, deg);
+									if (deg === 0) queue.push(s);
+								}
+							}
+						}
+						// Append any remaining (shouldn't happen after dependsOn validation)
+						for (const s of params.steps) {
+							if (!visited.has(s.planId)) sorted.push(s);
+						}
+						return sorted;
+					})();
 					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; blocked?: boolean; pendingDeps?: string[]; error?: string }> = [];
-					for (const step of params.steps) {
+					for (const step of stepsInOrder) {
 						try {
 							const result = await api("POST", `/api/goals/${goalId}/spawn-child`, {
 								planId: step.planId,
