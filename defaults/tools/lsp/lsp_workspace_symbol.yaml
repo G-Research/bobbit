@@ -1,5 +1,5 @@
 name: lsp_workspace_symbol
-description: "Search symbols across the worktree by name; returns up to 100 hits."
+description: "Symbol search across worktree. Prefer over grep for 'where is X defined'. Returns up to 100 hits."
 summary: "Workspace symbol search (LSP)"
 params: [query]
 provider:
