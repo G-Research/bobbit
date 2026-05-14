@@ -590,10 +590,14 @@ export function createGateway(config: GatewayConfig) {
 			if (!Array.isArray(arr)) continue;
 			const hasValues = arr.some((e: any) => e.value);
 			if (!hasValues) {
-				// No inline values to migrate, but if the on-disk format is legacy
-				// JSON-string we still want to rewrite to native YAML on next save.
-				// setSandboxTokens() triggers save() which performs the rewrite.
-				ctx.projectConfigStore.setSandboxTokens(tokens);
+				// No inline values to migrate. Only force a rewrite when the
+				// on-disk format was legacy JSON-string (isDirty() is set during
+				// load()). Without this guard we save() on every server start,
+				// which re-flows multi-line workflow strings through
+				// yaml.stringify and produces a noisy diff every restart.
+				if (ctx.projectConfigStore.isDirty()) {
+					ctx.projectConfigStore.setSandboxTokens(tokens);
+				}
 				continue;
 			}
 			// Move values to secrets store
