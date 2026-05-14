@@ -31,7 +31,7 @@ import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, passesSidebarFilters } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -955,8 +955,8 @@ function renderNestedNode(
 	// Active-before-archived divider: when this node's children list mixes
 	// non-archived and archived goals, insert the muted "Archived" divider
 	// at the boundary. The forest sort already groups non-archived first.
-	const firstArchivedIdx = node.children.findIndex(c => c.goal.archived === true);
-	const showChildDivider = firstArchivedIdx > 0;
+	const { active: activeChildren, archived: archivedChildren, needsDivider } =
+		bucketActiveArchived(node.children, c => !!c.goal.archived);
 	return html`
 		<div data-testid="sidebar-nested-row" data-depth="${node.depth}" data-goal-id="${goal.id}" style="padding-left:${indentPx}px;">
 			<div data-testid="sidebar-goal-row">
@@ -964,7 +964,9 @@ function renderNestedNode(
 			</div>
 		</div>
 		${isExpanded ? html`
-			${node.children.map((c, i) => html`${showChildDivider && i === firstArchivedIdx ? archivedDivider() : ""}${renderNestedNode(projectId, c)}`)}
+			${activeChildren.map(c => renderNestedNode(projectId, c))}
+			${needsDivider ? archivedDivider() : ""}
+			${archivedChildren.map(c => renderNestedNode(projectId, c))}
 			${node.truncatedChildrenCount && node.truncatedChildrenCount > 0
 				? renderTruncationRow(projectId, node.truncatedChildrenCount, node.depth + 1)
 				: nothing}
@@ -1016,15 +1018,18 @@ function renderProjectContent(
 	// the previous top-level node was non-archived and the current is
 	// archived, render the muted "Archived" divider in place of the plain
 	// border separator.
+	const { active: activeNodes, archived: archivedNodes, needsDivider: needsBoundaryDivider } =
+		bucketActiveArchived(forest, n => !!n.goal.archived);
 	return html`
-		${forest.map((node, i) => {
-			const prev = i > 0 ? forest[i - 1] : undefined;
-			const crossesBoundary = !!prev && !prev.goal.archived && !!node.goal.archived;
-			return html`
-				${i > 0 ? (crossesBoundary ? archivedDivider() : html`<div class="border-t border-border/30 mx-2"></div>`) : ""}
-				${renderNestedNode(project.id, node)}
-			`;
-		})}
+		${activeNodes.map((node, i) => html`
+			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+			${renderNestedNode(project.id, node)}
+		`)}
+		${needsBoundaryDivider ? archivedDivider() : ""}
+		${archivedNodes.map((node, i) => html`
+			${i > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
+			${renderNestedNode(project.id, node)}
+		`)}
 		${goals.length > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 		<div class="flex flex-col gap-0.5">
 			${(() => { const ungNavId = `ungrouped-header:${project.id}`; const ungActive = getActiveNavId() === ungNavId; return html`

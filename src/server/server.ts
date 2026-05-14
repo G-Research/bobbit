@@ -3508,29 +3508,20 @@ async function handleApiRoute(
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
+					// Always persist defaults to disk (both explicit-id and no-id cases).
+					// Pinned by goal-creation-auto-seed.spec.ts and
+					// projects-no-default-workflows.spec.ts Case C.
+					seeds.parent = buildParentWorkflow();
+					for (const wf of Object.values(seeds)) {
+						targetCtx.workflowStore.put(wf as unknown as Workflow);
+					}
+					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
 					if (workflowId) {
-						// Explicit id given: persist defaults to store and re-resolve.
-						seeds.parent = buildParentWorkflow();
-						for (const wf of Object.values(seeds)) {
-							targetCtx.workflowStore.put(wf as unknown as Workflow);
-						}
-						console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					} else {
-						// No id given: persist all defaults to disk so subsequent goal creations
-						// in the same zero-workflows project also succeed. Then pick "general"
-						// as the resolved workflow for this goal.
-						// See e04159ff and tests/e2e/projects-no-default-workflows.spec.ts Case C.
-						seeds.parent = buildParentWorkflow();
-						for (const wf of Object.values(seeds)) {
-							targetCtx.workflowStore.put(wf as unknown as Workflow);
-						}
-						console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-						const fallback = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						if (fallback) {
-							resolvedWorkflow = fallback;
-							resolvedWorkflowId = fallback.id || "general";
-						}
+						// No explicit id: fall back to "general" from the newly-seeded store.
+						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+						resolvedWorkflowId = resolvedWorkflow?.id || "general";
 					}
 				}
 				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
