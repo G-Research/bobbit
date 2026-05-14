@@ -64,7 +64,7 @@ test.describe("Preview fullscreen header controls (Bug 1)", () => {
 		expect(mountResp.status).toBe(200);
 
 		// Half-panel: Fullscreen button should be visible.
-		const fullscreenBtn = page.locator('button[title="Fullscreen preview"]').first();
+		const fullscreenBtn = page.locator('button[title^="Fullscreen preview"]').first();
 		await expect(fullscreenBtn).toBeVisible({ timeout: 10_000 });
 		await fullscreenBtn.click();
 
