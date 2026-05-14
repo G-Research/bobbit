@@ -48,6 +48,9 @@ setRenderApp(doRenderApp);
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
+// Expose the render trigger too, so tests that patch in-memory state can
+// force a fresh paint without relying on viewport-resize side effects.
+(window as any).__bobbitRenderApp = renderApp;
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
