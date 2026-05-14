@@ -41,7 +41,7 @@ export interface PlanNodeChild {
 	id: string;
 	parentGoalId?: string;
 	spawnedFromPlanId?: string;
-	state: "todo" | "in-progress" | "complete" | "shelved";
+	state: "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 	archived?: boolean;
 	paused?: boolean;
 	createdAt: number;

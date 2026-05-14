@@ -19,7 +19,7 @@ export interface NestableGoal {
 	rootGoalId?: string;
 	archived?: boolean;
 	title: string;
-	state: "todo" | "in-progress" | "complete" | "shelved";
+	state: "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 	paused?: boolean;
 	createdAt: number;
 }
