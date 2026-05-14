@@ -35,11 +35,21 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"placeholders. The renderer loads full content on demand via " +
 			"`/tool-content/:mi/:bi`.",
 	},
+	{
+		name: "parallelGoalFetches",
+		description:
+			"Phase 2D — include `GET /api/goals/:id/team` in the goal-dashboard " +
+			"load-time `Promise.all` bundle instead of awaiting it sequentially " +
+			"after the other fetches. Targets `nav.goal.cold` / `nav.goal.ready`.",
+	},
 ];
 
 /** Convenience canonical flag name for Phase 2B. Imported by call sites so
  *  a typo on the magic string surfaces at build time. */
 export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
+
+/** Convenience canonical flag name for Phase 2D (Opt-D). */
+export const PERF_FLAG_PARALLEL_GOAL_FETCHES = "parallelGoalFetches";
 
 const LS_KEY = "bobbitPerfFlags";
 
