@@ -3,6 +3,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
+import { bucketTeamChildren } from "./team-archived-bucket.js";
 import {
 	state,
 	renderApp,
@@ -963,16 +964,27 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		// then archived team workers + archived spawned-child goals.
 		const activeSpawned = spawnedChildren.filter(g => !g.archived);
 		const archivedSpawned = spawnedChildren.filter(g => !!g.archived);
-		const hasArchivedBelow = archivedForLiveLead.length > 0 || archivedSpawned.length > 0;
-		const hasActiveAbove = teamChildren.length > 0 || activeSpawned.length > 0;
+		// Split teamChildren by status: live members render above the
+		// "Archived" divider, terminated/archived ones merge into the
+		// archived bucket below (deduped against archivedForLiveLead — a
+		// session can appear in both gatewaySessions with
+		// status="terminated" AND in archivedSessions after the purge).
+		// See team-archived-bucket.ts for the pure helper + tests.
+		const { liveTeamChildren, archivedBelow } = bucketTeamChildren(
+			teamChildren,
+			archivedForLiveLead,
+			state.showArchived,
+		);
+		const hasArchivedBelow = archivedBelow.length > 0 || archivedSpawned.length > 0;
+		const hasActiveAbove = liveTeamChildren.length > 0 || activeSpawned.length > 0;
 		return html`
-			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, liveTeamChildren.length + archivedBelow.length, tlExpanded)}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${teamChildren.map(renderSessionRow)}
+					${liveTeamChildren.map(renderSessionRow)}
 					${activeSpawned.map(child => renderSpawnedChildGoalRow(child, ancestors, liveSuffixes.get(child.id)))}
 					${hasActiveAbove && hasArchivedBelow ? archivedDivider() : ""}
-					${archivedForLiveLead.map(s => html`
+					${archivedBelow.map(s => html`
 						${renderArchivedSessionRow(s)}
 						${renderArchivedDelegates(s.id)}
 					`)}
