@@ -3,8 +3,8 @@ description: "Type errors / warnings for a file (or workspace if path omitted)."
 summary: "Diagnostics (LSP)"
 params: [path?]
 provider:
-  type: builtin
-  tool: lsp_diagnostics
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   ~50× faster than `npm run check` for iteration loops. Omit `path` to aggregate all open docs.

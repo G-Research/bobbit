@@ -1029,6 +1029,8 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 				}
 				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {
 					builtinsToRegister.add(provider.tool);
+				} else {
+					console.warn(`[tool-activation] Tool "${entry.name}" has provider.type: builtin with tool: "${provider.tool}" but no handler — extension not loaded; this is likely a misconfigured YAML`);
 				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
 				extensionPaths.add(resolveExtensionPath(provider));

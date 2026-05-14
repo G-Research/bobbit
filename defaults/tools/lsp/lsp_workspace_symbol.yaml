@@ -3,8 +3,8 @@ description: "Search symbols across the worktree by name; returns up to 100 hits
 summary: "Workspace symbol search (LSP)"
 params: [query]
 provider:
-  type: builtin
-  tool: lsp_workspace_symbol
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   Substring/fuzzy symbol search across the worktree. Up to 100 results.

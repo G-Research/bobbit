@@ -3,8 +3,8 @@ description: "Jump to symbol definition; returns file path + range. 0-indexed li
 summary: "Go to definition (LSP)"
 params: [path, line, character]
 provider:
-  type: builtin
-  tool: lsp_definition
+  type: bobbit-extension
+  extension: extension.ts
 group: LSP
 docs: |-
   Cheaper than grep+read for symbol lookups. line/character are 0-indexed (LSP-native; `read` is 1-indexed).
