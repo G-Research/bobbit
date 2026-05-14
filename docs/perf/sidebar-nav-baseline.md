@@ -958,6 +958,77 @@ History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
 
 **Code reverted at `6f330231`** — postmortem retained for historical reference.
 
+### 6.4 Opt-H — virtualise eager-tail (`virtualiseTail` flag)
+
+A/B'd on commit `6edd880cb47b` against the large fixture (200 msgs/session
+× 32 sessions). **Five replicate runs per arm**, interleaved off / on to
+spread CPU/thermal drift.
+
+Hypothesis: Opt-A's fixed eager-tail of 8 messages is still expensive on
+large fixtures where each tool-result blob can be 250 KB (per
+`docs/perf/real-session-profile.md`). Replacing the constant with a
+viewport-driven set — walking items bottom-up and eager-rendering only the
+2–3 messages whose cumulative estimated heights fill `window.innerHeight`
+— should cut `paint.first` further with no visible change (off-screen
+messages get the same placeholder treatment they already do under Opt-A).
+
+Median of replicate p50/p95 with [min..max] range; full data
+`docs/perf/history/6edd880cb47b-opt-h-{off,on}-{1..5}.json`:
+
+| Span                          | metric | OFF med [min..max]    | ON med [min..max]      |   Δmed | Verdict |
+|-------------------------------|--------|----------------------:|-----------------------:|--------:|---------|
+| `paint.first`                 | p50    |    24.8 [22.1..26.1]  |    24.1 [21.8..24.6]   |  −0.7 | noise |
+| `paint.first`                 | p95    |    57.7 [52.8..65.1]  |    56.2 [55.1..62.1]   |  −1.5 | noise |
+| `nav.session.ready`           | p50    |   134.4 [130.7..138.1]|   132.3 [108.9..137.9] |  −2.1 | noise |
+| `nav.session.ready`           | p95    |   182.3 [173.6..844.9]|   188.9 [170.0..219.3] |  +6.6 | noise |
+| `nav.session.cold`            | p50    |   330.6 [274.4..371.3]|   315.1 [276.4..380.8] | −15.5 | noise (overlap) |
+| `rapidnav.keystroke.cached`   | p50    |   136.2 [110.1..138.9]|   129.0 [116.4..144.0] |  −7.2 | noise |
+| `rapidnav.keystroke.cached`   | p95    |   174.9 [161.2..199.1]|   170.0 [150.2..199.4] |  −4.9 | noise |
+| `rapidnav.keystroke.uncached` | p50    |   142.4 [140.1..151.5]|   137.9 [125.7..145.2] |  −4.5 | noise |
+| `rapidnav.keystroke.uncached` | p95    |   180.3 [173.3..200.4]|   183.0 [170.0..191.0] |  +2.7 | noise |
+| `rapidnav.gap`                | p50    |    52.4 [47.0..59.4]  |    58.2 [40.4..61.7]   |  +5.8 | noise |
+| `nav.goal.ready`              | p50    |    29.8 [28.9..31.8]  |    28.6 [21.1..31.9]   |  −1.2 | noise |
+| `api.session.fetch`           | p50    |    49.9 [43.1..64.4]  |    60.5 [51.4..60.5]   | +10.6 | noise (fetch not touched) |
+| `reducer.rehydrate`           | p95    |     0.6 [0.6..0.8]    |     0.6 [0.5..0.7]     |   0.0 | noise |
+
+Decision rule (≥100 ms p50 reduction on a critical span, OR moves a span
+from >100 ms to <100 ms, AND median delta exceeds the range of either
+condition) is **not** met by any span. Largest delta is −1.5 ms on
+`paint.first` p95 (~2%) with fully overlapping ranges, well inside the
+±5 ms jitter floor visible in the OFF replicate-series. Every other span
+is within ±10 ms median and replicate ranges overlap completely.
+
+### Why the theoretical win didn't materialise
+
+Opt-A's eager-tail of 8 messages was chosen as a compromise between
+"render enough that the user sees no pop-in" and "render as few as
+possible to keep `paint.first` cheap". The hypothesis was that 8 was too
+generous on the large fixture and that 2–3 was sufficient. The data says
+otherwise: on the large-fixture corpus the per-message render cost in the
+eager tail is small enough (the tail-8 already excludes the giant
+off-screen tool-result blobs that Opt-A's primary win addressed) that
+shaving it to 2–3 doesn't measurably move `paint.first`. The bottleneck
+is elsewhere — likely the Lit render pass over the wrapper templates
+themselves plus IntersectionObserver bookkeeping for the ~190 placeholders,
+which is invariant to how many of the bottom-8 are eager-resolved.
+
+The Opt-A win came from collapsing the **off-screen 190+ messages** into
+cheap placeholders — going from "render 200" to "render 8" was a step
+change. Going from 8 to 2–3 is rounding-error in comparison; the
+height-estimation pass + IntersectionObserver setup + Lit reconciler
+over 200 wrappers dominates whatever per-message render cost we save.
+
+Flag and code reverted in full. No unit test stays in tree (the eager-set
+selection logic is back to the constant `DEFER_EAGER_TAIL = 8` that
+`tests/defer-offscreen-render.spec.ts` already covers).
+
+History: `docs/perf/history/6edd880cb47b-opt-h-{off,on}-{1..5}.json`.
+
+**Code reverted in this same commit** — postmortem retained as the durable
+record. If a future change makes the eager-render path measurably slow at
+N=8 (e.g. tool blocks become richer / more expensive to render), revisit:
+the viewport-driven set is a 30-line patch in `MessageList.ts`.
+
 ## 7. Shipped wins
 
 ### 7.1 Opt-A — defer off-screen transcript render (`deferOffscreenRender`, default-ON)
