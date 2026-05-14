@@ -139,13 +139,37 @@
 <header class="page">
 	<h1>Sidebar nav perf — cross-commit report</h1>
 	<div class="meta">
-		<span>Generated <strong>2026-05-13 22:20</strong> from <strong>1 commit</strong></span>
-		<span>Range <span class="mono">999bdc2</span></span>
-		<span>Latest branch <span class="mono">goal-goal-profile-si-320532b0-coder-51f8eddc</span></span>
+		<span>Generated <strong>2026-05-14 06:59</strong> from <strong>5 commits</strong></span>
+		<span>Range <span class="mono">999bdc2 → 5309f93</span></span>
+		<span>Latest branch <span class="mono">goal-goal-profile-si-320532b0-coder-36405049</span></span>
 	</div>
 </header>
 
-<div class="empty-state">Only one run on file — first-vs-latest deltas will appear once a second harness run lands. Showing the single run below.</div><div class="table-wrap"><table class="summary">
+<section class="headlines"><div class="headline good">
+			<div class="label">ws.attach (p50)</div>
+			<div class="value"><span class="now">4.70</span><span class="unit">ms</span></div>
+			<div class="delta delta-good">−31.7 ms (−87.1%) vs first</div>
+		</div><div class="headline good">
+			<div class="label">nav.session.ready (p50)</div>
+			<div class="value"><span class="now">60.3</span><span class="unit">ms</span></div>
+			<div class="delta delta-good">−28.5 ms (−32.1%) vs first</div>
+		</div><div class="headline bad">
+			<div class="label">nav.goal.cold (p50)</div>
+			<div class="value"><span class="now">1712</span><span class="unit">ms</span></div>
+			<div class="delta delta-bad">+21.0 ms (+1.2%) vs first</div>
+		</div><div class="headline good">
+			<div class="label">api.goal.agents.fetch (p50)</div>
+			<div class="value"><span class="now">3.10</span><span class="unit">ms</span></div>
+			<div class="delta delta-good">−7.30 ms (−70.2%) vs first</div>
+		</div><div class="headline good">
+			<div class="label">nav.goal.ready (p50)</div>
+			<div class="value"><span class="now">22.8</span><span class="unit">ms</span></div>
+			<div class="delta delta-good">−6.70 ms (−22.7%) vs first</div>
+		</div><div class="headline bad">
+			<div class="label">nav.session.cold (p50)</div>
+			<div class="value"><span class="now">170</span><span class="unit">ms</span></div>
+			<div class="delta delta-bad">+5.00 ms (+3.0%) vs first</div>
+		</div></section><h2>Summary <span class="count">first baseline vs latest, ordered by |Δms| within group</span></h2><div class="table-wrap"><table class="summary">
 		<thead><tr>
 			<th>span</th>
 			<th class="num">first p50</th>
@@ -160,131 +184,131 @@
 		<tbody>
 		<tr class="group"><td colspan="9">Navigation — click → ready</td></tr>
 		<tr>
-			<td class="name">nav.click</td>
-			<td class="num">1.50</td>
-			<td class="num">1.50</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">2.30</td>
-			<td class="num">2.30</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="name">nav.session.ready</td>
+			<td class="num">88.8</td>
+			<td class="num">60.3</td>
+			<td class="delta good"><span class="pill">−28.5 / −32.1%</span></td>
+			<td class="num">193</td>
+			<td class="num">126</td>
+			<td class="delta good"><span class="pill">−67.5 / −35.0%</span></td>
 			<td class="num">20</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,3.0 20.0,12.0 40.0,19.0 60.0,18.6 80.0,11.3"/></svg></td>
+		</tr><tr>
+			<td class="name">nav.goal.cold</td>
+			<td class="num">1691</td>
+			<td class="num">1712</td>
+			<td class="delta bad"><span class="pill">+21.0 / +1.2%</span></td>
+			<td class="num">1691</td>
+			<td class="num">1712</td>
+			<td class="delta bad"><span class="pill">+21.0 / +1.2%</span></td>
+			<td class="num">1</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="60.0,19.0 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">nav.goal.ready</td>
 			<td class="num">29.5</td>
+			<td class="num">22.8</td>
+			<td class="delta good"><span class="pill">−6.70 / −22.7%</span></td>
 			<td class="num">29.5</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">29.5</td>
-			<td class="num">29.5</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">22.8</td>
+			<td class="delta good"><span class="pill">−6.70 / −22.7%</span></td>
 			<td class="num">2</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
-		</tr><tr>
-			<td class="name">nav.session.ready</td>
-			<td class="num">88.8</td>
-			<td class="num">88.8</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">193</td>
-			<td class="num">193</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">18</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
-		</tr><tr>
-			<td class="name">nav.goal.cold</td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">0</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,3.0 20.0,17.2 40.0,15.1 60.0,19.0 80.0,11.8"/></svg></td>
 		</tr><tr>
 			<td class="name">nav.session.cold</td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">0</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="num">165</td>
+			<td class="num">170</td>
+			<td class="delta bad"><span class="pill">+5.00 / +3.0%</span></td>
+			<td class="num">165</td>
+			<td class="num">170</td>
+			<td class="delta bad"><span class="pill">+5.00 / +3.0%</span></td>
+			<td class="num">1</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="60.0,19.0 80.0,3.0"/></svg></td>
+		</tr><tr>
+			<td class="name">nav.click</td>
+			<td class="num">1.50</td>
+			<td class="num">1.40</td>
+			<td class="delta good"><span class="pill">−0.10 / −6.7%</span></td>
+			<td class="num">2.30</td>
+			<td class="num">2.00</td>
+			<td class="delta good"><span class="pill">−0.30 / −13.0%</span></td>
+			<td class="num">22</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,6.2 20.0,3.0 40.0,19.0 60.0,19.0 80.0,9.4"/></svg></td>
 		</tr>
 	
 		<tr class="group"><td colspan="9">API — REST calls on the critical path</td></tr>
 		<tr>
 			<td class="name">api.goal.agents.fetch</td>
 			<td class="num">10.4</td>
-			<td class="num">10.4</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">3.10</td>
+			<td class="delta good"><span class="pill">−7.30 / −70.2%</span></td>
 			<td class="num">14.9</td>
-			<td class="num">14.9</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">10.8</td>
+			<td class="delta good"><span class="pill">−4.10 / −27.5%</span></td>
 			<td class="num">8</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
-		</tr><tr>
-			<td class="name">api.goal.fetch</td>
-			<td class="num">12.1</td>
-			<td class="num">12.1</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">12.1</td>
-			<td class="num">12.1</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">3</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,3.0 20.0,17.2 40.0,18.3 60.0,17.2 80.0,19.0"/></svg></td>
 		</tr><tr>
 			<td class="name">api.goal.gates.fetch</td>
 			<td class="num">12.0</td>
-			<td class="num">12.0</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">7.60</td>
+			<td class="delta good"><span class="pill">−4.40 / −36.7%</span></td>
 			<td class="num">93.8</td>
-			<td class="num">93.8</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">13.3</td>
+			<td class="delta good"><span class="pill">−80.5 / −85.8%</span></td>
 			<td class="num">8</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,3.0 20.0,11.6 40.0,19.0 60.0,10.0 80.0,11.8"/></svg></td>
 		</tr><tr>
 			<td class="name">api.session.fetch</td>
 			<td class="num">10.4</td>
-			<td class="num">10.4</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">11.4</td>
+			<td class="delta bad"><span class="pill">+1.00 / +9.6%</span></td>
 			<td class="num">31.6</td>
-			<td class="num">31.6</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">12</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="num">118</td>
+			<td class="delta bad"><span class="pill">+86.2 / +272.8%</span></td>
+			<td class="num">41</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,19.0 20.0,3.0 40.0,8.9 60.0,8.1 80.0,17.0"/></svg></td>
+		</tr><tr>
+			<td class="name">api.goal.fetch</td>
+			<td class="num">12.1</td>
+			<td class="num">11.5</td>
+			<td class="delta flat"><span class="pill">−0.60 / −5.0%</span></td>
+			<td class="num">12.1</td>
+			<td class="num">11.5</td>
+			<td class="delta flat"><span class="pill">−0.60 / −5.0%</span></td>
+			<td class="num">3</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,10.6 20.0,3.0 40.0,18.4 60.0,19.0 80.0,11.8"/></svg></td>
 		</tr>
 	
 		<tr class="group"><td colspan="9">Render &amp; runtime</td></tr>
 		<tr>
-			<td class="name">paint.first</td>
-			<td class="num">16.8</td>
-			<td class="num">16.8</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">31.2</td>
-			<td class="num">31.2</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">79</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="name">ws.attach</td>
+			<td class="num">36.4</td>
+			<td class="num">4.70</td>
+			<td class="delta good"><span class="pill">−31.7 / −87.1%</span></td>
+			<td class="num">46.9</td>
+			<td class="num">19.4</td>
+			<td class="delta good"><span class="pill">−27.5 / −58.6%</span></td>
+			<td class="num">11</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,3.0 20.0,19.0 40.0,18.9 60.0,18.8 80.0,18.7"/></svg></td>
 		</tr><tr>
 			<td class="name">reducer.rehydrate</td>
 			<td class="num">0.10</td>
+			<td class="num">0.30</td>
+			<td class="delta bad"><span class="pill">+0.20 / +200.0%</span></td>
 			<td class="num">0.10</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">0.10</td>
-			<td class="num">0.10</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
+			<td class="num">0.60</td>
+			<td class="delta bad"><span class="pill">+0.50 / +500.0%</span></td>
 			<td class="num">11</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,19.0 20.0,3.0 40.0,13.7 60.0,19.0 80.0,8.3"/></svg></td>
 		</tr><tr>
-			<td class="name">ws.attach</td>
-			<td class="num">36.4</td>
-			<td class="num">36.4</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">46.9</td>
-			<td class="num">46.9</td>
-			<td class="delta flat"><span class="pill">0.00 / 0.0%</span></td>
-			<td class="num">11</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
+			<td class="name">paint.first</td>
+			<td class="num">16.8</td>
+			<td class="num">16.8</td>
+			<td class="delta flat"><span class="pill">−0.00 / −0.0%</span></td>
+			<td class="num">31.2</td>
+			<td class="num">55.9</td>
+			<td class="delta bad"><span class="pill">+24.7 / +79.2%</span></td>
+			<td class="num">73</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,8.3 20.0,8.3 40.0,3.0 60.0,19.0 80.0,8.3"/></svg></td>
 		</tr><tr>
 			<td class="name">paint.tool-content.lazy</td>
 			<td class="num">—</td>
@@ -297,77 +321,149 @@
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
 		</tr>
 	</tbody>
-	</table></div><h2>Per-span values <span class="count">single commit</span></h2><div class="charts-grid"><article class="chart-card">
+	</table></div><h2>Per-span trend <span class="count">p50 solid · p95 dashed · 5 commits</span></h2><div class="charts-grid"><article class="chart-card">
 					<header>
-						<h3>nav.click</h3>
+						<h3>nav.session.ready</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
+							<span class="pill good">−32.1%</span>
 							<span>n=20</span>
-							<span>1.50 / 2.30 ms</span>
+							<span>60.3 / 126 ms</span>
 						</div>
 					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.click trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">3.00</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2.25</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="44.6" r="2" fill="var(--chart-4)"><title>999bdc2  p95=2.30ms  n=20</title></circle>
-		<circle cx="50.0" cy="75.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=1.50ms  n=20</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">300</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">225</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,98.3 L 125.0,109.9 L 200.0,119.0 L 275.0,118.5 L 350.0,109.1 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,58.7 125.0,52.7 200.0,97.0 275.0,101.8 350.0,84.3"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,98.3 125.0,109.9 200.0,119.0 275.0,118.5 350.0,109.1"/>
+		<circle cx="50.0" cy="58.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=193ms  n=18</title></circle><circle cx="125.0" cy="52.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=209ms  n=20</title></circle><circle cx="200.0" cy="97.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=92.2ms  n=20</title></circle><circle cx="275.0" cy="101.8" r="2" fill="var(--chart-4)"><title>5309f93  p95=79.4ms  n=20</title></circle><circle cx="350.0" cy="84.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=126ms  n=20</title></circle>
+		<circle cx="50.0" cy="98.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=88.8ms  n=18</title></circle><circle cx="125.0" cy="109.9" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=58.2ms  n=20</title></circle><circle cx="200.0" cy="119.0" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=34.1ms  n=20</title></circle><circle cx="275.0" cy="118.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=35.4ms  n=20</title></circle><circle cx="350.0" cy="109.1" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=60.3ms  n=20</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>nav.goal.cold</h3>
+						<div class="meta">
+							<span class="pill bad">+1.2%</span>
+							<span>n=1</span>
+							<span>1712 / 1712 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.cold trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2000</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1500</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1000</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 275.0 132.0 L 275.0,35.6 L 350.0,34.4 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="275.0,35.6 350.0,34.4"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="275.0,35.6 350.0,34.4"/>
+		<circle cx="275.0" cy="35.6" r="2" fill="var(--chart-4)"><title>5309f93  p95=1691ms  n=1</title></circle><circle cx="350.0" cy="34.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=1712ms  n=1</title></circle>
+		<circle cx="275.0" cy="35.6" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1691ms  n=1</title></circle><circle cx="350.0" cy="34.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1712ms  n=1</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
 						<h3>nav.goal.ready</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
+							<span class="pill good">−22.7%</span>
 							<span>n=2</span>
-							<span>29.5 / 29.5 ms</span>
+							<span>22.8 / 22.8 ms</span>
 						</div>
 					</header>
 					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.ready trend">
 		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="64.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=29.5ms  n=2</title></circle>
-		<circle cx="50.0" cy="64.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=29.5ms  n=2</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+		<path d="M 50.0 132.0 L 50.0,64.7 L 125.0,89.4 L 200.0,85.7 L 275.0,92.6 L 350.0,80.0 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,64.7 125.0,89.4 200.0,85.7 275.0,92.6 350.0,80.0"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,64.7 125.0,89.4 200.0,85.7 275.0,92.6 350.0,80.0"/>
+		<circle cx="50.0" cy="64.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=29.5ms  n=2</title></circle><circle cx="125.0" cy="89.4" r="2" fill="var(--chart-4)"><title>c25e40b  p95=18.7ms  n=2</title></circle><circle cx="200.0" cy="85.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=20.3ms  n=2</title></circle><circle cx="275.0" cy="92.6" r="2" fill="var(--chart-4)"><title>5309f93  p95=17.3ms  n=2</title></circle><circle cx="350.0" cy="80.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=22.8ms  n=2</title></circle>
+		<circle cx="50.0" cy="64.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=29.5ms  n=2</title></circle><circle cx="125.0" cy="89.4" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=18.7ms  n=2</title></circle><circle cx="200.0" cy="85.7" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=20.3ms  n=2</title></circle><circle cx="275.0" cy="92.6" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=17.3ms  n=2</title></circle><circle cx="350.0" cy="80.0" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=22.8ms  n=2</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
-						<h3>nav.session.ready</h3>
+						<h3>nav.session.cold</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
-							<span>n=18</span>
-							<span>88.8 / 193 ms</span>
+							<span class="pill bad">+3.0%</span>
+							<span>n=1</span>
+							<span>170 / 170 ms</span>
 						</div>
 					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">300</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">225</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="58.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=193ms  n=18</title></circle>
-		<circle cx="50.0" cy="98.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=88.8ms  n=18</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.cold trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">200</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 275.0 132.0 L 275.0,38.2 L 350.0,35.3 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="275.0,38.2 350.0,35.3"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="275.0,38.2 350.0,35.3"/>
+		<circle cx="275.0" cy="38.2" r="2" fill="var(--chart-4)"><title>5309f93  p95=165ms  n=1</title></circle><circle cx="350.0" cy="35.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=170ms  n=1</title></circle>
+		<circle cx="275.0" cy="38.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=165ms  n=1</title></circle><circle cx="350.0" cy="35.3" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=170ms  n=1</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>nav.click</h3>
+						<div class="meta">
+							<span class="pill good">−6.7%</span>
+							<span>n=22</span>
+							<span>1.40 / 2.00 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.click trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">3.00</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2.25</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,75.0 L 125.0,71.2 L 200.0,90.2 L 275.0,90.2 L 350.0,78.8 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,44.6 125.0,40.8 200.0,71.2 275.0,71.2 350.0,56.0"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,75.0 125.0,71.2 200.0,90.2 275.0,90.2 350.0,78.8"/>
+		<circle cx="50.0" cy="44.6" r="2" fill="var(--chart-4)"><title>999bdc2  p95=2.30ms  n=20</title></circle><circle cx="125.0" cy="40.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=2.40ms  n=22</title></circle><circle cx="200.0" cy="71.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=1.60ms  n=22</title></circle><circle cx="275.0" cy="71.2" r="2" fill="var(--chart-4)"><title>5309f93  p95=1.60ms  n=22</title></circle><circle cx="350.0" cy="56.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=2.00ms  n=22</title></circle>
+		<circle cx="50.0" cy="75.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=1.50ms  n=20</title></circle><circle cx="125.0" cy="71.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=1.60ms  n=22</title></circle><circle cx="200.0" cy="90.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=1.10ms  n=22</title></circle><circle cx="275.0" cy="90.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1.10ms  n=22</title></circle><circle cx="350.0" cy="78.8" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1.40ms  n=22</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
 						<h3>api.goal.agents.fetch</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
+							<span class="pill good">−70.2%</span>
 							<span>n=8</span>
-							<span>10.4 / 14.9 ms</span>
+							<span>3.10 / 10.8 ms</span>
 						</div>
 					</header>
 					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.agents.fetch trend">
 		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">20.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="47.1" r="2" fill="var(--chart-4)"><title>999bdc2  p95=14.9ms  n=8</title></circle>
-		<circle cx="50.0" cy="72.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=8</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+		<path d="M 50.0 132.0 L 50.0,72.7 L 125.0,109.8 L 200.0,112.6 L 275.0,109.8 L 350.0,114.3 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,47.1 125.0,40.8 200.0,87.0 275.0,89.3 350.0,70.4"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,72.7 125.0,109.8 200.0,112.6 275.0,109.8 350.0,114.3"/>
+		<circle cx="50.0" cy="47.1" r="2" fill="var(--chart-4)"><title>999bdc2  p95=14.9ms  n=8</title></circle><circle cx="125.0" cy="40.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.0ms  n=8</title></circle><circle cx="200.0" cy="87.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=7.90ms  n=8</title></circle><circle cx="275.0" cy="89.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=7.50ms  n=8</title></circle><circle cx="350.0" cy="70.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=10.8ms  n=8</title></circle>
+		<circle cx="50.0" cy="72.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=8</title></circle><circle cx="125.0" cy="109.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=3.90ms  n=8</title></circle><circle cx="200.0" cy="112.6" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=3.40ms  n=8</title></circle><circle cx="275.0" cy="109.8" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=3.90ms  n=8</title></circle><circle cx="350.0" cy="114.3" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=3.10ms  n=8</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.goal.gates.fetch</h3>
+						<div class="meta">
+							<span class="pill good">−36.7%</span>
+							<span>n=8</span>
+							<span>7.60 / 13.3 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,122.9 L 125.0,126.1 L 200.0,129.0 L 275.0,125.5 L 350.0,126.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,60.7 125.0,119.7 200.0,116.0 275.0,115.6 350.0,121.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,122.9 125.0,126.1 200.0,129.0 275.0,125.5 350.0,126.2"/>
+		<circle cx="50.0" cy="60.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=93.8ms  n=8</title></circle><circle cx="125.0" cy="119.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.2ms  n=8</title></circle><circle cx="200.0" cy="116.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=21.1ms  n=8</title></circle><circle cx="275.0" cy="115.6" r="2" fill="var(--chart-4)"><title>5309f93  p95=21.6ms  n=9</title></circle><circle cx="350.0" cy="121.9" r="2" fill="var(--chart-4)"><title>5309f93  p95=13.3ms  n=8</title></circle>
+		<circle cx="50.0" cy="122.9" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.0ms  n=8</title></circle><circle cx="125.0" cy="126.1" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=7.70ms  n=8</title></circle><circle cx="200.0" cy="129.0" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.00ms  n=8</title></circle><circle cx="275.0" cy="125.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=8.50ms  n=9</title></circle><circle cx="350.0" cy="126.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=7.60ms  n=8</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
+	</svg>
+				</article><article class="chart-card">
+					<header>
+						<h3>api.session.fetch</h3>
+						<div class="meta">
+							<span class="pill bad">+9.6%</span>
+							<span>n=41</span>
+							<span>11.4 / 118 ms</span>
+						</div>
+					</header>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.session.fetch trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">200</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,126.1 L 125.0,121.4 L 200.0,123.1 L 275.0,122.9 L 350.0,125.5 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,114.0 125.0,76.7 200.0,113.6 275.0,69.6 350.0,64.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,126.1 125.0,121.4 200.0,123.1 275.0,122.9 350.0,125.5"/>
+		<circle cx="50.0" cy="114.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.6ms  n=12</title></circle><circle cx="125.0" cy="76.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=97.1ms  n=41</title></circle><circle cx="200.0" cy="113.6" r="2" fill="var(--chart-4)"><title>c25e40b  p95=32.2ms  n=41</title></circle><circle cx="275.0" cy="69.6" r="2" fill="var(--chart-4)"><title>5309f93  p95=109ms  n=42</title></circle><circle cx="350.0" cy="64.9" r="2" fill="var(--chart-4)"><title>5309f93  p95=118ms  n=41</title></circle>
+		<circle cx="50.0" cy="126.1" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=12</title></circle><circle cx="125.0" cy="121.4" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=18.6ms  n=41</title></circle><circle cx="200.0" cy="123.1" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=15.6ms  n=41</title></circle><circle cx="275.0" cy="122.9" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.0ms  n=42</title></circle><circle cx="350.0" cy="125.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=11.4ms  n=41</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
@@ -375,109 +471,73 @@
 						<div class="meta">
 							<span class="pill ">flat</span>
 							<span>n=3</span>
-							<span>12.1 / 12.1 ms</span>
+							<span>11.5 / 11.5 ms</span>
 						</div>
 					</header>
 					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.fetch trend">
 		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">20.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="63.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=12.1ms  n=3</title></circle>
-		<circle cx="50.0" cy="63.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.1ms  n=3</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+		<path d="M 50.0 132.0 L 50.0,63.0 L 125.0,40.8 L 200.0,85.8 L 275.0,87.5 L 350.0,66.5 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,63.0 125.0,40.8 200.0,85.8 275.0,87.5 350.0,66.5"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,63.0 125.0,40.8 200.0,85.8 275.0,87.5 350.0,66.5"/>
+		<circle cx="50.0" cy="63.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=12.1ms  n=3</title></circle><circle cx="125.0" cy="40.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.0ms  n=3</title></circle><circle cx="200.0" cy="85.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=8.10ms  n=3</title></circle><circle cx="275.0" cy="87.5" r="2" fill="var(--chart-4)"><title>5309f93  p95=7.80ms  n=3</title></circle><circle cx="350.0" cy="66.5" r="2" fill="var(--chart-4)"><title>5309f93  p95=11.5ms  n=3</title></circle>
+		<circle cx="50.0" cy="63.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.1ms  n=3</title></circle><circle cx="125.0" cy="40.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.0ms  n=3</title></circle><circle cx="200.0" cy="85.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=8.10ms  n=3</title></circle><circle cx="275.0" cy="87.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=7.80ms  n=3</title></circle><circle cx="350.0" cy="66.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=11.5ms  n=3</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
-						<h3>api.goal.gates.fetch</h3>
+						<h3>ws.attach</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
-							<span>n=8</span>
-							<span>12.0 / 93.8 ms</span>
+							<span class="pill good">−87.1%</span>
+							<span>n=11</span>
+							<span>4.70 / 19.4 ms</span>
 						</div>
 					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="60.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=93.8ms  n=8</title></circle>
-		<circle cx="50.0" cy="122.9" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.0ms  n=8</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,90.5 L 125.0,127.4 L 200.0,127.1 L 275.0,126.9 L 350.0,126.6 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,78.5 125.0,104.2 200.0,106.6 275.0,110.0 350.0,109.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,90.5 125.0,127.4 200.0,127.1 275.0,126.9 350.0,126.6"/>
+		<circle cx="50.0" cy="78.5" r="2" fill="var(--chart-4)"><title>999bdc2  p95=46.9ms  n=11</title></circle><circle cx="125.0" cy="104.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=24.4ms  n=11</title></circle><circle cx="200.0" cy="106.6" r="2" fill="var(--chart-4)"><title>c25e40b  p95=22.3ms  n=11</title></circle><circle cx="275.0" cy="110.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=19.3ms  n=11</title></circle><circle cx="350.0" cy="109.9" r="2" fill="var(--chart-4)"><title>5309f93  p95=19.4ms  n=11</title></circle>
+		<circle cx="50.0" cy="90.5" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=36.4ms  n=11</title></circle><circle cx="125.0" cy="127.4" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.00ms  n=11</title></circle><circle cx="200.0" cy="127.1" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.30ms  n=11</title></circle><circle cx="275.0" cy="126.9" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=4.50ms  n=11</title></circle><circle cx="350.0" cy="126.6" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=4.70ms  n=11</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
-						<h3>api.session.fetch</h3>
+						<h3>reducer.rehydrate</h3>
 						<div class="meta">
-							<span class="pill ">flat</span>
-							<span>n=12</span>
-							<span>10.4 / 31.6 ms</span>
+							<span class="pill bad">+200.0%</span>
+							<span>n=11</span>
+							<span>0.30 / 0.60 ms</span>
 						</div>
 					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.session.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="60.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.6ms  n=12</title></circle>
-		<circle cx="50.0" cy="108.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=12</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="reducer.rehydrate trend">
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.13</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.38</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,124.4 L 125.0,101.6 L 200.0,116.8 L 275.0,124.4 L 350.0,109.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,124.4 125.0,94.0 200.0,116.8 275.0,116.8 350.0,86.4"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,124.4 125.0,101.6 200.0,116.8 275.0,124.4 350.0,109.2"/>
+		<circle cx="50.0" cy="124.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=0.10ms  n=11</title></circle><circle cx="125.0" cy="94.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=0.50ms  n=11</title></circle><circle cx="200.0" cy="116.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=0.20ms  n=11</title></circle><circle cx="275.0" cy="116.8" r="2" fill="var(--chart-4)"><title>5309f93  p95=0.20ms  n=11</title></circle><circle cx="350.0" cy="86.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=0.60ms  n=11</title></circle>
+		<circle cx="50.0" cy="124.4" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=0.10ms  n=11</title></circle><circle cx="125.0" cy="101.6" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=0.40ms  n=11</title></circle><circle cx="200.0" cy="116.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=0.20ms  n=11</title></circle><circle cx="275.0" cy="124.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=0.10ms  n=11</title></circle><circle cx="350.0" cy="109.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=0.30ms  n=11</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
 				</article><article class="chart-card">
 					<header>
 						<h3>paint.first</h3>
 						<div class="meta">
 							<span class="pill ">flat</span>
-							<span>n=79</span>
-							<span>16.8 / 31.2 ms</span>
+							<span>n=73</span>
+							<span>16.8 / 55.9 ms</span>
 						</div>
 					</header>
 					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="paint.first trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="60.9" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.2ms  n=79</title></circle>
-		<circle cx="50.0" cy="93.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=16.8ms  n=79</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
+		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<path d="M 50.0 132.0 L 50.0,119.2 L 125.0,119.2 L 200.0,119.2 L 275.0,119.4 L 350.0,119.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,108.3 125.0,53.7 200.0,111.1 275.0,111.7 350.0,89.5"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,119.2 125.0,119.2 200.0,119.2 275.0,119.4 350.0,119.2"/>
+		<circle cx="50.0" cy="108.3" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.2ms  n=79</title></circle><circle cx="125.0" cy="53.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=103ms  n=66</title></circle><circle cx="200.0" cy="111.1" r="2" fill="var(--chart-4)"><title>c25e40b  p95=27.5ms  n=66</title></circle><circle cx="275.0" cy="111.7" r="2" fill="var(--chart-4)"><title>5309f93  p95=26.7ms  n=70</title></circle><circle cx="350.0" cy="89.5" r="2" fill="var(--chart-4)"><title>5309f93  p95=55.9ms  n=73</title></circle>
+		<circle cx="50.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=16.8ms  n=79</title></circle><circle cx="125.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.8ms  n=66</title></circle><circle cx="200.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.9ms  n=66</title></circle><circle cx="275.0" cy="119.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.6ms  n=70</title></circle><circle cx="350.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.8ms  n=73</title></circle>
+		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text>
 	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>reducer.rehydrate</h3>
-						<div class="meta">
-							<span class="pill ">flat</span>
-							<span>n=11</span>
-							<span>0.10 / 0.10 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="reducer.rehydrate trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.13</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.38</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="124.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=0.10ms  n=11</title></circle>
-		<circle cx="50.0" cy="124.4" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=0.10ms  n=11</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>ws.attach</h3>
-						<div class="meta">
-							<span class="pill ">flat</span>
-							<span>n=11</span>
-							<span>36.4 / 46.9 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		
-		
-		
-		<circle cx="50.0" cy="78.5" r="2" fill="var(--chart-4)"><title>999bdc2  p95=46.9ms  n=11</title></circle>
-		<circle cx="50.0" cy="90.5" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=36.4ms  n=11</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text>
-	</svg>
-				</article></div><h2>Runs <span class="count">1 commit</span></h2><div class="table-wrap"><table class="runs-table">
+				</article></div><h2>Runs <span class="count">5 commits, oldest first</span></h2><div class="table-wrap"><table class="runs-table">
 		<thead><tr>
 			<th>#</th>
 			<th>commit</th>
@@ -485,12 +545,36 @@
 			<th>timestamp</th>
 			<th class="num">spans</th>
 		</tr></thead>
-		<tbody><tr class="latest">
+		<tbody><tr>
 			<td>1</td>
 			<td class="mono">999bdc2ed47e</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-51f8eddc</td>
 			<td class="mono">2026-05-13 21:08</td>
 			<td class="num">10</td>
+		</tr><tr>
+			<td>2</td>
+			<td class="mono">c25e40be730b</td>
+			<td class="mono">goal-goal-profile-si-320532b0-coder-95006287</td>
+			<td class="mono">2026-05-13 21:46</td>
+			<td class="num">10</td>
+		</tr><tr>
+			<td>3</td>
+			<td class="mono">c25e40be730b</td>
+			<td class="mono">goal-goal-profile-si-320532b0-coder-95006287</td>
+			<td class="mono">2026-05-13 21:48</td>
+			<td class="num">10</td>
+		</tr><tr>
+			<td>4</td>
+			<td class="mono">5309f93c5ee8</td>
+			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
+			<td class="mono">2026-05-14 05:58</td>
+			<td class="num">12</td>
+		</tr><tr class="latest">
+			<td>5</td>
+			<td class="mono">5309f93c5ee8</td>
+			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
+			<td class="mono">2026-05-14 05:59</td>
+			<td class="num">12</td>
 		</tr></tbody>
 	</table></div>
 
