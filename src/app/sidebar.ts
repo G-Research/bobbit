@@ -519,6 +519,9 @@ export function reloadStaffList(): Promise<void> {
 
 async function createStaffAssistantSession(e: Event): Promise<void> {
 	e.stopPropagation();
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	renderApp();
 	const { gatewayFetch } = await import("./api.js");
 	try {
 		const res = await gatewayFetch("/api/sessions", {
@@ -526,11 +529,20 @@ async function createStaffAssistantSession(e: Event): Promise<void> {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ assistantType: "staff" }),
 		});
-		if (!res.ok) throw new Error(`Failed: ${res.status}`);
+		if (!res.ok) {
+			const { errorFromResponse } = await import("./error-helpers.js");
+			throw await errorFromResponse(res, `Session creation failed: ${res.status}`);
+		}
 		const { id } = await res.json();
 		await connectToSession(id, false, { isStaffAssistant: true, assistantType: "staff" });
 	} catch (err) {
-		console.error("[staff] Failed to create staff assistant session:", err);
+		const { showConnectionError } = await import("./dialogs.js");
+		const { errorDetails } = await import("./error-helpers.js");
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to create staff assistant", message, { code, stack });
+	} finally {
+		state.creatingSession = false;
+		renderApp();
 	}
 }
 
