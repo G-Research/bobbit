@@ -101,8 +101,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_plan_propose",
 		label: "Propose Goal Plan",
-		description: "Submit (or re-submit) a plan of subgoal steps. Falls back to direct spawn when the workflow has no execution gate.",
-		promptSnippet: "Propose a (re-)plan for the goal. Auto-falls-back to direct child spawn when the workflow has no execution gate.",
+		description: "Submit (or re-submit) a plan. Call FIRST for multi-step plans. Non-parent workflows: auto-pause enforces dependsOn, returns warning+blockedCount.",
+		promptSnippet: "Propose a (re-)plan for the goal. Always use this before goal_spawn_child for multi-step plans. Falls back to spawn-children-direct with auto-pause enforcement when the workflow has no execution gate.",
 		parameters: Type.Object({
 			steps: Type.Array(Type.Object({
 				planId: Type.String(),
@@ -149,7 +149,8 @@ export default function (pi: ExtensionAPI) {
 							`To use the full freeze/replan flow, recreate the goal with the 'parent' workflow.`,
 						);
 					}
-					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; error?: string }> = [];
+					const hasDependsOn = params.steps.some(s => s.dependsOn && s.dependsOn.length > 0);
+					const spawned: Array<{ planId: string; childGoalId?: string; alreadyExists?: boolean; suggestedRole?: string; blocked?: boolean; pendingDeps?: string[]; error?: string }> = [];
 					for (const step of params.steps) {
 						try {
 							const result = await api("POST", `/api/goals/${goalId}/spawn-child`, {
@@ -159,21 +160,28 @@ export default function (pi: ExtensionAPI) {
 								workflowId: step.workflowId,
 								suggestedRole: step.suggestedRole,
 								...(step.dependsOn !== undefined ? { dependsOn: step.dependsOn } : {}),
-							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string };
+							}) as { id?: string; alreadyExists?: boolean; suggestedRole?: string; blocked?: boolean; pendingDeps?: string[] };
 							spawned.push({
 								planId: step.planId,
 								childGoalId: result.id,
 								alreadyExists: result.alreadyExists,
 								suggestedRole: result.suggestedRole,
+								...(result.blocked ? { blocked: true, pendingDeps: result.pendingDeps } : {}),
 							});
 						} catch (spawnErr: any) {
 							spawned.push({ planId: step.planId, error: spawnErr?.message ?? String(spawnErr) });
 						}
 					}
 					const failed = spawned.filter(s => s.error).length;
+					const blockedEntries = spawned.filter(s => s.blocked);
 					return ok({
 						fallback: "spawn-children-direct",
 						note: "Goal's workflow has no execution gate, so the classifier/freeze flow was skipped. Each step was spawned via goal_spawn_child instead (idempotent on planId). To use the full plan/freeze/replan flow, recreate the goal with the 'parent' workflow.",
+						...(hasDependsOn ? {
+							warning: "degraded-execution: workflow has no execution gate. dependsOn is enforced via auto-pause on spawn — children with unmet deps will be created paused. Consider using the 'parent' workflow for full classifier/freeze flow.",
+							blockedCount: blockedEntries.length,
+							blockedPlanIds: blockedEntries.map(s => s.planId),
+						} : {}),
 						spawned,
 						spawnedCount: spawned.length - failed,
 						failedCount: failed,

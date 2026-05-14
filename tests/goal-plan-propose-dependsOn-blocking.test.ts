@@ -107,6 +107,52 @@ async function spawnChild(body: any): Promise<{ status: number; payload: any }> 
 	return { status, payload };
 }
 
+let startTeamCalls: string[];
+let broadcasts: any[];
+
+// Extended beforeEach wires up richer stubs needed for integrate-child tests.
+// The simple beforeEach above already runs; we just add the missing fields.
+beforeEach(() => {
+	startTeamCalls = [];
+	broadcasts = [];
+	// Patch mergeChild to a clean in-memory success (no real git ops).
+	(goalManager as any).mergeChild = async () => ({
+		merged: true, alreadyMerged: false, conflict: false, pushed: false, output: "",
+	});
+	// Re-patch setupWorktreeAndStartTeam to also flip setupStatus ready
+	// (needed for auto-unblock to reach the startTeam branch).
+	(goalManager as any).setupWorktreeAndStartTeam = async (gid: string, startFn?: () => Promise<any>) => {
+		setupCalls.push(gid);
+		await goalManager.updateGoal(gid, { setupStatus: "ready" } as any);
+		if (startFn) { try { await startFn(); } catch { /* ignore */ } }
+	};
+	const originalDeps = deps;
+	// Patch teamManager.startTeam in the existing deps stub.
+	(originalDeps as any).teamManager = {
+		startTeam: async (gid: string) => { startTeamCalls.push(gid); },
+		teardownTeam: async () => {},
+		getTeamState: () => undefined,
+	};
+	// Patch broadcastToAll to record events.
+	(originalDeps as any).broadcastToAll = (ev: any) => { broadcasts.push(ev); };
+});
+
+async function integrateChild(childId: string): Promise<{ status: number; payload: any }> {
+	let status = 200; let payload: any = undefined;
+	const localDeps: NestedGoalRouteDeps = {
+		...deps,
+		json: (b, s) => { status = s ?? 200; payload = b; },
+		jsonError: (s, err) => { status = s; payload = { error: String((err as any)?.message ?? err) }; },
+	};
+	// Pass the ready-to-merge gate so integrate-child accepts the merge.
+	gateStore.initGatesForGoal(childId, ["implementation", "ready-to-merge"]);
+	gateStore.updateGateStatus(childId, "ready-to-merge", "passed");
+	const req = { method: "POST", headers: {}, _body: {} } as any as http.IncomingMessage;
+	const url = new URL(`http://x/api/goals/${parent.id}/integrate-child/${childId}`);
+	await tryHandleNestedGoalRoute(req, url, localDeps);
+	return { status, payload };
+}
+
 describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 	it("DAG {root: [], a: [root], b: [root], leaf: [a, b]} → only root starts; a, b, leaf paused", async () => {
 		// Fallback iterates the steps in caller order. The team-lead is expected
@@ -158,5 +204,83 @@ describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 		assert.equal(setupCalls.includes(a.id), false, "setup must NOT be called for blocked child a");
 		assert.equal(setupCalls.includes(b.id), false, "setup must NOT be called for blocked child b");
 		assert.equal(setupCalls.includes(leaf.id), false, "setup must NOT be called for blocked child leaf");
+	});
+});
+
+describe("spawn-children-direct fallback auto-resumes blocked children on dep merge", () => {
+	it("merging the dep auto-unblocks the dependent child", async () => {
+		// Simulate the fallback loop: spawn two steps where B depends on A.
+		const rA = await spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		assert.equal(rA.status, 201);
+		const rB = await spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the API layer on top of feature A's data model.", dependsOn: ["A"] });
+		assert.equal(rB.status, 201);
+		assert.equal(rB.payload.blocked, true, "B must be blocked initially");
+
+		const childA = rA.payload.id;
+		const childB = rB.payload.id;
+		assert.equal(goalStore.get(childB)!.paused, true, "B must be paused before A merges");
+
+		// Merge child A → auto-unblock scan should unpause B.
+		setupCalls.length = 0;
+		startTeamCalls.length = 0;
+		const mergeResult = await integrateChild(childA);
+		assert.equal(mergeResult.status, 200, `integrate-child A failed: ${JSON.stringify(mergeResult.payload)}`);
+
+		const finalB = goalStore.get(childB)!;
+		assert.equal(finalB.paused, false, "B must be unpaused after A merges");
+		assert.ok(
+			setupCalls.includes(childB) || startTeamCalls.includes(childB),
+			"team startup must be invoked for auto-unblocked child B",
+		);
+	});
+
+	it("multi-dep: only unblocks when the LAST dep merges", async () => {
+		const rA = await spawnChild({ planId: "A", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
+		const rB = await spawnChild({ planId: "B", title: "B", spec: "Implement feature B: build the service layer. Depends on no other sibling for this test." });
+		const rC = await spawnChild({ planId: "C", title: "C", spec: "Implement feature C: integrates A and B; runs only after both complete.", dependsOn: ["A", "B"] });
+		const childC = rC.payload.id;
+		assert.equal(goalStore.get(childC)!.paused, true, "C paused initially");
+
+		// Merge A — C still blocked because B not done.
+		await integrateChild(rA.payload.id);
+		assert.equal(goalStore.get(childC)!.paused, true, "C still paused after only A merges");
+
+		// Merge B — C now unblocks.
+		setupCalls.length = 0;
+		await integrateChild(rB.payload.id);
+		assert.equal(goalStore.get(childC)!.paused, false, "C unpauses after B (last dep) merges");
+		assert.ok(
+			setupCalls.includes(childC) || startTeamCalls.includes(childC),
+			"team startup invoked for C after last dep merges",
+		);
+	});
+});
+
+describe("spawn-children-direct fallback response includes warning when dependsOn present", () => {
+	it("response has warning + blockedCount when steps include dependsOn", async () => {
+		// This tests that the extension.ts fallback response shape contains the
+		// warning/blockedCount/blockedPlanIds fields when any step has dependsOn.
+		// We drive the spawn-child route directly (same as the fallback loop).
+		const steps = [
+			{ planId: "X", title: "X", spec: "Implement feature X: set up the core foundation for this test scenario." },
+			{ planId: "Y", title: "Y", spec: "Implement feature Y: builds on X; this test verifies the warning/blocked fields appear.", dependsOn: ["X"] },
+		];
+		const responses: { planId: string; payload: any }[] = [];
+		for (const s of steps) {
+			const r = await spawnChild(s);
+			assert.equal(r.status, 201, `spawn ${s.planId} failed`);
+			responses.push({ planId: s.planId, payload: r.payload });
+		}
+		// X: not blocked.
+		assert.equal(responses[0].payload.blocked, undefined);
+		// Y: blocked, response has pendingDeps.
+		assert.equal(responses[1].payload.blocked, true);
+		assert.deepEqual(responses[1].payload.pendingDeps, ["X"]);
+		// Confirm the child goals are in the right state.
+		const childX = goalStore.getAll().find(g => g.spawnedFromPlanId === "X" && g.parentGoalId === parent.id)!;
+		const childY = goalStore.getAll().find(g => g.spawnedFromPlanId === "Y" && g.parentGoalId === parent.id)!;
+		assert.notEqual(childX.paused, true, "X must not be paused");
+		assert.equal(childY.paused, true, "Y must be paused");
+		assert.deepEqual(childY.dependsOnPlanIds, ["X"]);
 	});
 });

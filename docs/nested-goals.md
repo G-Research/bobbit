@@ -304,6 +304,8 @@ between any two means a tier-resolver copy crept back in. Pinned by
 
 ## Mutation classifier
 
+> **Workflow-type requirement.** The full classifier + freeze + approve flow described below requires the `parent` workflow (or any workflow with an `execution` gate). Without an `execution` gate, `goal_plan_propose` falls back to `spawn-children-direct` and the classifier is unavailable. `dependsOn` auto-pause/resume still works on every workflow type — children with unmet deps are created paused and auto-resume when their last dependency merges — but fix-up/expansion/restructure classification and plan mutation approval are not. To use the full flow, create the goal with the `parent` workflow.
+
 Once `goal-plan` is signalled, `execution.verify[]` is **frozen** by
 `computePlanFreezeUpdate()` in
 `src/server/agent/parent-workflow-freeze.ts` — a pure helper called
