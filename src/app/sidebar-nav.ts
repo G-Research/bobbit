@@ -66,14 +66,21 @@ export function navIdToHash(navId: string): string | null {
 }
 
 /** Compute the active nav id from the current route + selected session.
- *  When a keyboard override is set and its hash matches the current URL,
- *  the override wins (so header kinds with ambiguous routes stay sticky). */
+ *  The keyboard override (set synchronously by `openForNavItem`) ALWAYS
+ *  wins when present, even if the URL hash hasn't caught up yet. This
+ *  matters for rapid Ctrl+↑/↓ keystrokes: session navigation goes through
+ *  an async dynamic import + `connectToSession`, so the second keystroke
+ *  fires before the first nav's `setHashRoute` has committed. Trusting
+ *  the override here lets `navigateSidebar` advance off the in-flight
+ *  destination instead of re-deriving from a stale URL/`selectedSessionId`
+ *  and looping back to the same row (the dropped-keystroke bug — Opt-E).
+ *
+ *  Staleness of the override (e.g. user clicks elsewhere) is handled by
+ *  `installKeyboardNavOverrideClearListener` which clears it on any
+ *  hashchange whose final URL doesn't match the override's expected hash. */
 export function getActiveNavId(): string | null {
 	const override = state.keyboardNavActiveId;
-	if (override) {
-		const expected = navIdToHash(override);
-		if (expected && window.location.hash === expected) return override;
-	}
+	if (override) return override;
 	const route = getRouteFromHash();
 	if (route.view === "session" && route.sessionId) return navIdFor("session", route.sessionId);
 	if (route.view === "goal-dashboard" && route.goalId) return navIdFor("goal", route.goalId);

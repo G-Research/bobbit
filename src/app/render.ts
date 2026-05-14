@@ -2660,9 +2660,19 @@ export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
 
-	// Dynamic page title
+	// Dynamic page title.
+	// In a regular browser tab, suffix with " · Bobbit" so the tab tells you which app.
+	// As an installed PWA, the OS already shows "Bobbit" from manifest.name — adding it
+	// to document.title produces a doubled "Bobbit - ScoutPost · Bobbit" taskbar entry.
 	const activeProject = state.projects.find(p => p.id === state.activeProjectId);
-	document.title = activeProject ? `${activeProject.name} · Bobbit` : "Bobbit";
+	const isStandalone = typeof window !== "undefined"
+		&& typeof window.matchMedia === "function"
+		&& window.matchMedia("(display-mode: standalone)").matches;
+	if (activeProject) {
+		document.title = isStandalone ? activeProject.name : `${activeProject.name} · Bobbit`;
+	} else {
+		document.title = "Bobbit";
+	}
 
 
 	// Disconnected state
