@@ -1,7 +1,7 @@
 name: lsp_definition
-description: "Go to symbol definition. Prefer over grep+read for symbol lookups. 0-indexed line/char."
+description: "Go to definition. Pass symbolName OR (path, line, char). Prefer over grep+read. 0-indexed."
 summary: "Go to definition (LSP)"
-params: [path, line, character]
+params: [path?, symbolName?, line?, character?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -23,9 +23,21 @@ detail_docs: >-
 
   | Name | Type | Required | Description |
   |------|------|----------|-------------|
-  | `path` | string | Yes | File path relative to session cwd. |
-  | `line` | number | Yes | **0-indexed** line. |
-  | `character` | number | Yes | **0-indexed** column. |
+  | `path` | string | No | File path relative to session cwd. Required with line/char; otherwise a hint for `symbolName`. |
+  | `symbolName` | string | No | Resolve position via `lsp_workspace_symbol`; alternative to `(line, character)`. |
+  | `line` | number | No | **0-indexed** line. Required when not using `symbolName`. |
+  | `character` | number | No | **0-indexed** column. Required when not using `symbolName`. |
+
+
+  ## Symbol-name shorthand
+
+
+  Pass `symbolName` instead of `(line, character)` to skip the
+  `lsp_workspace_symbol` round-trip. The tool resolves the symbol
+  internally and returns the underlying result decorated with a
+  `resolvedFrom: { symbolName, matched }` field. If multiple symbols
+  share the name, supply `path` as a hint or expect an
+  `{ ambiguous: true, candidates: [...] }` response.
 
 
   ## When to Use

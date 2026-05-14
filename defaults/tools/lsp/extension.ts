@@ -134,56 +134,188 @@ export default function (pi: ExtensionAPI) {
 		details: {},
 	});
 
+	type WsHit = {
+		name: string;
+		kind?: number;
+		path: string;
+		range: { start: { line: number; character: number }; end: { line: number; character: number } };
+		containerName?: string;
+	};
+
+	type ResolveOk = {
+		kind: "ok";
+		args: Record<string, unknown>;
+		resolvedFrom?: { symbolName: string; matched: string };
+	};
+	type ResolveErr = {
+		kind: "error";
+		payload: Record<string, unknown>;
+	};
+	type ResolveResult = ResolveOk | ResolveErr;
+
+	/**
+	 * Shorthand resolver shared by lsp_definition / lsp_references / lsp_hover.
+	 *
+	 * - Explicit (line, character) coordinates pass through unchanged.
+	 * - `symbolName` is resolved via callLsp("workspace_symbol", { query }).
+	 *   Hits are filtered by exact `name === symbolName`, then optionally
+	 *   narrowed by the `path` hint (exact path → same directory → first hit).
+	 * - Returns `{ error: "lsp_symbol_not_found", ... }` when no exact-name
+	 *   hits exist, and `{ ambiguous: true, ... }` when multiple candidates
+	 *   remain after applying the hint.
+	 */
+	async function resolveShorthand(
+		args: Record<string, any>,
+		onUpdate?: (u: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }) => void,
+	): Promise<ResolveResult> {
+		const hasExplicit = typeof args.line === "number" && typeof args.character === "number";
+		if (hasExplicit || !args.symbolName) {
+			return { kind: "ok", args };
+		}
+		const symbolName = String(args.symbolName);
+		const raw = await callLsp("workspace_symbol", { query: symbolName }, onUpdate);
+		if (raw && typeof raw === "object" && !Array.isArray(raw) && "error" in (raw as any)) {
+			// Pass through gateway-level errors (lsp_unavailable, lsp_route_missing, ...).
+			return { kind: "error", payload: raw as Record<string, unknown> };
+		}
+		const allHits: WsHit[] = Array.isArray(raw) ? (raw as WsHit[]) : [];
+		// Exact-name match first; workspace_symbol is fuzzy and would otherwise
+		// surface unrelated names (e.g. query "add" → "addUser").
+		const exact = allHits.filter(h => h && h.name === symbolName && h.range && h.path);
+		const hits = exact.length > 0 ? exact : [];
+
+		if (hits.length === 0) {
+			return {
+				kind: "error",
+				payload: {
+					error: "lsp_symbol_not_found",
+					message: `No symbol matching "${symbolName}" found in workspace`,
+					hint: "Pass (path, line, character) explicitly, or refine the symbolName.",
+				},
+			};
+		}
+
+		const hint = typeof args.path === "string" ? args.path : undefined;
+		let preferred: WsHit | undefined;
+		let ambiguous = false;
+
+		if (hint) {
+			const exactPath = hits.find(h => h.path === hint);
+			if (exactPath) {
+				preferred = exactPath;
+			} else {
+				const hintDir = path.posix.dirname(hint.replace(/\\/g, "/"));
+				const sameDir = hits.filter(h => path.posix.dirname(h.path.replace(/\\/g, "/")) === hintDir);
+				if (sameDir.length === 1) {
+					preferred = sameDir[0];
+				} else if (sameDir.length > 1) {
+					// Multiple in the same directory → still ambiguous.
+					ambiguous = true;
+				} else {
+					// Hint doesn't match any candidate's path or directory — fall
+					// back to first hit (preserves "path is just a hint" semantics).
+					preferred = hits[0];
+				}
+			}
+		} else if (hits.length === 1) {
+			preferred = hits[0];
+		} else {
+			ambiguous = true;
+		}
+
+		if (ambiguous || !preferred) {
+			return {
+				kind: "error",
+				payload: {
+					ambiguous: true,
+					symbol: symbolName,
+					candidates: hits,
+					hint: "Pass `path` to narrow, or use a more specific symbolName.",
+				},
+			};
+		}
+
+		const resolvedArgs: Record<string, unknown> = { ...args };
+		delete resolvedArgs.symbolName;
+		resolvedArgs.path = preferred.path;
+		resolvedArgs.line = preferred.range.start.line;
+		resolvedArgs.character = preferred.range.start.character;
+		return {
+			kind: "ok",
+			args: resolvedArgs,
+			resolvedFrom: {
+				symbolName,
+				matched: `${preferred.path}:${preferred.range.start.line + 1}`,
+			},
+		};
+	}
+
+	/** Decorate a successful shorthand result with `resolvedFrom`. */
+	function decorate(result: unknown, resolvedFrom: { symbolName: string; matched: string }): unknown {
+		if (result && typeof result === "object" && !Array.isArray(result)) {
+			return { resolvedFrom, ...(result as Record<string, unknown>) };
+		}
+		return { resolvedFrom, result };
+	}
+
+	function handleLspError(err: any) {
+		const msg = String(err?.message ?? err);
+		const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
+		return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
+	}
+
 	const pathParam = Type.String({ description: "File path relative to session cwd." });
-	const lineParam = Type.Number({ description: "0-indexed line (LSP-native)." });
-	const charParam = Type.Number({ description: "0-indexed column in the line." });
+	const pathParamOptional = Type.Optional(Type.String({ description: "File path; required with line/char or as hint for symbolName." }));
+	const lineParam = Type.Optional(Type.Number({ description: "0-indexed line (LSP-native). Omit when using symbolName." }));
+	const charParam = Type.Optional(Type.Number({ description: "0-indexed column. Omit when using symbolName." }));
+	const symbolNameParam = Type.Optional(Type.String({ description: "Resolve via workspace_symbol; alternative to (line, character)." }));
 
 	pi.registerTool({
 		name: "lsp_definition",
-		description: "Go to symbol definition. Prefer over grep+read for symbol lookups. 0-indexed line/char.",
+		description: "Go to definition. Pass symbolName OR (path, line, char). Prefer over grep+read. 0-indexed.",
 		parameters: Type.Object({
-			path: pathParam, line: lineParam, character: charParam,
+			path: pathParamOptional, symbolName: symbolNameParam, line: lineParam, character: charParam,
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
-			try { return asText(await callLsp("definition", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			try {
+				const r = await resolveShorthand(args, onUpdate);
+				if (r.kind === "error") return asText(r.payload);
+				const result = await callLsp("definition", r.args, onUpdate);
+				return asText(r.resolvedFrom ? decorate(result, r.resolvedFrom) : result);
+			} catch (err: any) { return handleLspError(err); }
 		},
 	});
 
 	pi.registerTool({
 		name: "lsp_references",
-		description: "Find all symbol references. Prefer over grep for symbol callsites. 0-indexed line/char.",
+		description: "Find references. Pass symbolName OR (path, line, char). Prefer over grep for callsites. 0-indexed.",
 		parameters: Type.Object({
-			path: pathParam, line: lineParam, character: charParam,
+			path: pathParamOptional, symbolName: symbolNameParam, line: lineParam, character: charParam,
 			includeDeclaration: Type.Optional(Type.Boolean({ description: "Include the declaration site (default true)." })),
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
-			try { return asText(await callLsp("references", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			try {
+				const r = await resolveShorthand(args, onUpdate);
+				if (r.kind === "error") return asText(r.payload);
+				const result = await callLsp("references", r.args, onUpdate);
+				return asText(r.resolvedFrom ? decorate(result, r.resolvedFrom) : result);
+			} catch (err: any) { return handleLspError(err); }
 		},
 	});
 
 	pi.registerTool({
 		name: "lsp_hover",
-		description: "Type/signature/docs for a symbol. Prefer over reading the file. 0-indexed line/char.",
+		description: "Type/signature/docs. Pass symbolName OR (path, line, char). Prefer over reading the file. 0-indexed.",
 		parameters: Type.Object({
-			path: pathParam, line: lineParam, character: charParam,
+			path: pathParamOptional, symbolName: symbolNameParam, line: lineParam, character: charParam,
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
-			try { return asText(await callLsp("hover", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			try {
+				const r = await resolveShorthand(args, onUpdate);
+				if (r.kind === "error") return asText(r.payload);
+				const result = await callLsp("hover", r.args, onUpdate);
+				return asText(r.resolvedFrom ? decorate(result, r.resolvedFrom) : result);
+			} catch (err: any) { return handleLspError(err); }
 		},
 	});
 
@@ -195,11 +327,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("diagnostics", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			catch (err: any) { return handleLspError(err); }
 		},
 	});
 
@@ -209,11 +337,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ path: pathParam }),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("document_symbols", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			catch (err: any) { return handleLspError(err); }
 		},
 	});
 
@@ -225,11 +349,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("workspace_symbol", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			catch (err: any) { return handleLspError(err); }
 		},
 	});
 
@@ -237,16 +357,12 @@ export default function (pi: ExtensionAPI) {
 		name: "lsp_rename",
 		description: "Safe rename across files; returns WorkspaceEdit. Prefer over hand-edits. 0-indexed line/char.",
 		parameters: Type.Object({
-			path: pathParam, line: lineParam, character: charParam,
+			path: pathParam, line: Type.Number({ description: "0-indexed line (LSP-native)." }), character: Type.Number({ description: "0-indexed column in the line." }),
 			newName: Type.String({ description: "New symbol name." }),
 		}),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("rename", args, onUpdate)); }
-			catch (err: any) {
-			const msg = String(err?.message ?? err);
-			const isNetworkErr = msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("ENOTFOUND");
-			return asText({ error: isNetworkErr ? "lsp_gateway_unreachable" : "lsp_unavailable", message: msg });
-		}
+			catch (err: any) { return handleLspError(err); }
 		},
 	});
 }

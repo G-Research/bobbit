@@ -1,7 +1,7 @@
 name: lsp_hover
-description: "Type/signature/docs for a symbol. Prefer over reading the file. 0-indexed line/char."
+description: "Type/signature/docs. Pass symbolName OR (path, line, char). Prefer over reading the file. 0-indexed."
 summary: "Hover info (LSP)"
-params: [path, line, character]
+params: [path?, symbolName?, line?, character?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -15,6 +15,12 @@ detail_docs: >-
 
   Return the language-server hover string at `(path, line, character)`:
   type info, function signature, JSDoc, etc. Result is markdown text.
+
+
+  Pass `symbolName` instead of `(line, character)` for the one-shot
+  shorthand; successful shorthand results are decorated with
+  `resolvedFrom: { symbolName, matched }`. Ambiguous matches without a
+  `path` hint return `{ ambiguous: true, candidates: [...] }`.
 
 
   Returns `null` if no hover info is available.
