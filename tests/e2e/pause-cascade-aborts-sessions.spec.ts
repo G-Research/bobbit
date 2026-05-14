@@ -96,6 +96,15 @@ test.describe("pause cascade — aborts sessions + blocks new spawns", () => {
 				return sessions.every(s => s.status !== "streaming");
 			}, { timeoutMs: 5_000, intervalMs: 100, label: "subtree sessions stop streaming" });
 
+			// ─── 2b. Soft-abort: sessions must still be registered ───────
+			// pause-cascade uses abortSessionTurn (interrupt) not forceAbort
+			// (terminate). Sessions remain registered and not archived.
+			const subtreeSessions = await listSubtreeSessions(subtree);
+			for (const s of subtreeSessions) {
+				const detail = await (await apiFetch(`/api/sessions/${s.id}`)).json();
+				expect(detail.archived).toBeFalsy();
+			}
+
 			// ─── 3. 409 GOAL_PAUSED from spawn endpoints ────────────────
 			const teamSpawn = await apiFetch(`/api/goals/${c1Id}/team/spawn`, {
 				method: "POST",

@@ -139,14 +139,45 @@ export async function tryHandleNestedGoalRoute(
 	 * Apply operator-pause semantics to a single goal: set paused=true,
 	 * cancel in-flight verifications, broadcast state change.
 	 *
-	 * THIS IS THE SINGLE WRITE SITE for `goal.paused = true`. Both the
-	 * REST POST /pause handler and the replan-overflow safety circuit
-	 * MUST call this function. No other code may write goal.paused = true.
+	 * THE ONLY CALLER of this function is `executePauseForGoals` below.
+	 * All code that needs to pause a goal (REST handler, replan-overflow)
+	 * MUST go through `executePauseForGoals`, not call this directly.
 	 */
 	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
 		await pauseGoalManager.updateGoal(goalId, { paused: true });
 		await cancelAllVerifications(goalId);
 		broadcastToAll({ type: "goal_state_changed", goalId });
+	}
+
+	/**
+	 * Execute a pause operation: pause all listed goals and abort their
+	 * streaming sessions (excluding the caller's own session).
+	 *
+	 * This is the SINGLE ENTRY POINT for goal-pause operations. Both the
+	 * REST POST /pause handler and the replan-overflow safety circuit
+	 * route through here. `applyOperatorPause` is only called from this
+	 * function — no other code touches goal.paused = true.
+	 */
+	async function executePauseForGoals(
+		targets: PersistedGoal[],
+		callerSessionId: string | undefined,
+	): Promise<number> {
+		const pausedIds = new Set<string>(targets.map(g => g.id));
+		let count = 0;
+		for (const g of targets) {
+			if (g.paused) continue;
+			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
+			count++;
+		}
+		for (const s of sessionManager.getAllSessionsRaw()) {
+			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
+			if (s.status !== "streaming") continue;
+			if (s.id === callerSessionId) continue;
+			sessionManager.abortSessionTurn(s.id).catch((err) => {
+				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
+			});
+		}
+		return count;
 	}
 
 
@@ -813,21 +844,7 @@ export async function tryHandleNestedGoalRoute(
 			}
 			targetRoot = childGoal;
 		}
-		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
-		const pausedIds = new Set<string>([targetRoot.id]);
-		let count = 0;
-		for (const g of targets) {
-			pausedIds.add(g.id);
-			// Pause is out-of-band of lifecycle state. The ONLY guard is
-			// already-paused (skip re-pause); state ('in-progress',
-			// 'blocked', etc.) must NOT short-circuit this loop (Issue 8).
-			if (g.paused) continue;
-			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
-			count++;
-		}
-		// Issue 6: exclude the caller's own streaming session from the
-		// cascade-abort sweep so the coordinator's current turn isn't
-		// killed by its own goal_pause invocation.
+		// Read caller's session to exclude from cascade-abort (Issue 6).
 		const reqHeaders = req.headers as Record<string, string | string[] | undefined>;
 		const readHdr = (n: string): string | undefined => {
 			const v = reqHeaders[n.toLowerCase()];
@@ -835,19 +852,11 @@ export async function tryHandleNestedGoalRoute(
 			return typeof s === "string" && s.trim() ? s.trim() : undefined;
 		};
 		const callerSessionId = readHdr("x-bobbit-spawning-session") ?? readHdr("x-bobbit-session-id");
-		// Pause-cascade: best-effort SOFT abort sweep over every streaming
-		// session whose goalId is in the paused subtree. Soft abort
-		// (abortSessionTurn) interrupts the current LLM turn but does NOT
-		// terminate the session — it stays registered for resume later.
-		// See docs/design/pause-cascade.md §Call-site 1.
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			if (s.id === callerSessionId) continue; // Issue 6: don't self-abort
-			sessionManager.abortSessionTurn(s.id).catch((err) => {
-				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
-		}
+		// Route through executePauseForGoals — the single entry point for all
+		// pause operations. It calls applyOperatorPause per goal and handles
+		// the cascade-abort sweep excluding the caller's session.
+		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
+		const count = await executePauseForGoals(targets, callerSessionId);
 		json({ paused: count });
 		return true;
 	}
@@ -937,9 +946,11 @@ export async function tryHandleNestedGoalRoute(
 			// goal.paused has exactly TWO writers: this path and the REST handler.
 			const autoPaused = newReplanCount > 5 && !goal.paused;
 			if (autoPaused) {
-				// Route through the same applyOperatorPause function used by
-				// the REST pause handler — single write site for goal.paused=true.
-				await applyOperatorPause(goalManager, goal.id);
+				// Route through executePauseForGoals — the canonical entry point
+				// for all pause operations, same as the REST POST /pause handler.
+				// callerSessionId=undefined: no running session to exclude here.
+				const goalRecord = getGoalAcrossProjects(goalId);
+				if (goalRecord) await executePauseForGoals([goalRecord], undefined);
 			}
 			planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
