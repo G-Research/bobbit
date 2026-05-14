@@ -2101,10 +2101,19 @@ async function handleApiRoute(
 		if (!isInternalProbe) {
 			const promise = supervisor.getRouteSelfCheckPromise();
 			if (promise) {
-				await Promise.race([
-					promise.catch(() => {}),
-					new Promise<void>(resolve => setTimeout(resolve, getLspRouteSelfCheckStatsCapMs())),
-				]);
+				// Race the self-check promise against a bounded timeout. The timer is
+				// cleared in finally so a fast-settling promise does not leave a pending
+				// timer per request — without this, every external /api/lsp/stats call
+				// would retain a setTimeout handle until the cap elapsed.
+				let capTimer: ReturnType<typeof setTimeout> | undefined;
+				const capPromise = new Promise<void>(resolve => {
+					capTimer = setTimeout(resolve, getLspRouteSelfCheckStatsCapMs());
+				});
+				try {
+					await Promise.race([promise.catch(() => {}), capPromise]);
+				} finally {
+					if (capTimer) clearTimeout(capTimer);
+				}
 			}
 		}
 		json(supervisor.stats());
