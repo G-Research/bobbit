@@ -153,6 +153,26 @@ export function formatBinding(binding: KeyBinding): string {
 	return parts.join("+");
 }
 
+/**
+ * Tooltip hint for a registered shortcut id, e.g. `" (Ctrl+])"`.
+ *
+ * Pulls the *current* binding (respecting user rebinds) and the right modifier
+ * label for the host platform. Returns an empty string when the shortcut has
+ * no bindings, so call sites can splat it unconditionally:
+ *
+ *   title=${`Collapse preview${shortcutHint("toggle-preview")}`}
+ *
+ * Prefer this over hardcoded `(Ctrl+X)` suffixes — those go stale the moment a
+ * user rebinds via the Ctrl+, settings page.
+ */
+export function shortcutHint(id: string, opts: { prefix?: string; suffix?: string } = {}): string {
+	const entry = shortcuts.get(id);
+	if (!entry || entry.currentBindings.length === 0) return "";
+	const prefix = opts.prefix ?? " (";
+	const suffix = opts.suffix ?? ")";
+	return `${prefix}${formatBinding(entry.currentBindings[0])}${suffix}`;
+}
+
 // ============================================================================
 // BROWSER-RESERVED COMBOS
 // ============================================================================

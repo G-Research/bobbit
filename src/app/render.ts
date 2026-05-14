@@ -8,7 +8,8 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { shortcutHint } from "./shortcut-registry.js";
+import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -318,7 +319,7 @@ function renderMobileLanding() {
 								if (state.projects.length === 0) { showProjectDialog(); return; }
 								startNewGoalFlow(e.currentTarget as HTMLElement);
 							}}
-							title=${state.projects.length === 0 ? "Add a project first" : "New goal (Alt+G)"}>
+							title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}>
 							${icon(GoalIcon, "xs")} New Goal
 						</button>
 					</div>
@@ -341,7 +342,7 @@ function renderMobileLanding() {
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
-									<div class="text-muted-foreground mb-3 empty-state-icon">${icon(Server, "lg")}</div>
+									<div class="text-muted-foreground mb-3 empty-state-icon flex justify-center">${icon(Server, "lg")}</div>
 									<p class="text-muted-foreground mb-4" style="font-size: 1.3333em;">No goals or sessions yet</p>
 									<div class="flex items-center justify-center gap-2">
 										${Button({
@@ -2755,7 +2756,7 @@ export function doRenderApp(): void {
 				onClick: () => terminateSession(activeSid),
 				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">${isTeamLead ? "End Team" : "Terminate"}</span></span>`,
 				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
-				title: isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate session (Ctrl+Shift+D)",
+				title: (isTeamLead ? "End team" : "Terminate session") + shortcutHint("terminate-session"),
 			})}
 		</div>
 	` : "";
@@ -3100,10 +3101,10 @@ export function doRenderApp(): void {
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
 							${icon(Maximize2, "sm")}
 						</button>` : ""}
-						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
+						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 							${icon(PanelRightClose, "sm")}
 						</button>
 					</div>
@@ -3123,7 +3124,7 @@ export function doRenderApp(): void {
 	};
 
 	const previewExpandButton = () => html`
-		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title="Expand preview (Ctrl+])">
+		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand preview${shortcutHint("toggle-sidebar")}`}>
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
@@ -3223,8 +3224,8 @@ export function doRenderApp(): void {
 							<span class="text-xs font-medium text-muted-foreground">Preview</span>
 							<div class="flex items-center gap-0.5">
 								${state.previewPanelEntry ? previewControlButtons() : ""}
-								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
-									${icon(Minimize2, "sm")}
+								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
+									${icon(PanelRightClose, "sm")}
 								</button>
 							</div>
 						</div>
