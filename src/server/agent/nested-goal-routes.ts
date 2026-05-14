@@ -136,6 +136,22 @@ export async function tryHandleNestedGoalRoute(
 	}
 
 	/**
+	 * Apply operator-pause semantics to a single goal: set paused=true,
+	 * cancel in-flight verifications, broadcast state change.
+	 *
+	 * THIS IS THE SINGLE WRITE SITE for `goal.paused = true`. Both the
+	 * REST POST /pause handler and the replan-overflow safety circuit
+	 * MUST call this function. No other code may write goal.paused = true.
+	 */
+	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
+		await pauseGoalManager.updateGoal(goalId, { paused: true });
+		await cancelAllVerifications(goalId);
+		broadcastToAll({ type: "goal_state_changed", goalId });
+	}
+
+
+
+	/**
 	 * Apply a (validated) plan replacement to a parent-workflow goal.
 	 * Updates the goal's workflow snapshot in place, persists, and
 	 * broadcasts a `goal_state_changed` event.
@@ -325,11 +341,9 @@ export async function tryHandleNestedGoalRoute(
 
 		// dependsOn scheduling enforcement — resolve each declared dep planId
 		// to a sibling and check whether it is already merged (state=complete).
-		// Children with unresolved deps are created PAUSED and skip
-		// worktree/team start; integrate-child auto-unblocks them when their
-		// last dependency merges.
-		// TODO: future enhancement — introduce state="blocked" as a distinct
-		// GoalState rather than reusing paused (cleaner UI semantics).
+		// Children with unresolved deps are stamped state='blocked' (not paused)
+		// and skip worktree/team start; integrate-child auto-unblocks them
+		// (blocked → todo) when their last dependency merges.
 		const unresolvedDeps: string[] = [];
 		if (dependsOn && dependsOn.length > 0) {
 			for (const depPlanId of dependsOn) {
@@ -799,7 +813,6 @@ export async function tryHandleNestedGoalRoute(
 			}
 			targetRoot = childGoal;
 		}
-		const goalManager = getGoalManagerForGoal(targetRoot.id);
 		const targets: PersistedGoal[] = [targetRoot, ...(cascade ? listDescendantsLocal(targetRoot.id) : [])];
 		const pausedIds = new Set<string>([targetRoot.id]);
 		let count = 0;
@@ -809,9 +822,7 @@ export async function tryHandleNestedGoalRoute(
 			// already-paused (skip re-pause); state ('in-progress',
 			// 'blocked', etc.) must NOT short-circuit this loop (Issue 8).
 			if (g.paused) continue;
-			await goalManager.updateGoal(g.id, { paused: true });
-			await cancelAllVerifications(g.id);
-			broadcastToAll({ type: "goal_state_changed", goalId: g.id });
+			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
 			count++;
 		}
 		// Issue 6: exclude the caller's own streaming session from the
@@ -926,9 +937,9 @@ export async function tryHandleNestedGoalRoute(
 			// goal.paused has exactly TWO writers: this path and the REST handler.
 			const autoPaused = newReplanCount > 5 && !goal.paused;
 			if (autoPaused) {
-				await goalManager.updateGoal(goal.id, { paused: true });
-				await cancelAllVerifications(goal.id);
-				broadcastToAll({ type: "goal_state_changed", goalId });
+				// Route through the same applyOperatorPause function used by
+				// the REST pause handler — single write site for goal.paused=true.
+				await applyOperatorPause(goalManager, goal.id);
 			}
 			planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
