@@ -19,6 +19,7 @@ import {
 	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
+import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
@@ -425,7 +426,7 @@ export function renderSessionRow(session: GatewaySession) {
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title="${isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate (Ctrl+Shift+D)"}">${icon(Trash2, "xs")}</button>
+			title=${(isTeamLead ? "End team" : "Terminate") + shortcutHint("terminate-session")}>${icon(Trash2, "xs")}</button>
 	`;
 
 	const navId = `session:${session.id}`;
@@ -554,7 +555,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); }}
-			title="End team (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
+			title=${`End team${shortcutHint("terminate-session")}`}>${icon(Trash2, "xs")}</button>
 	`;
 
 	const chevron = html`<span

@@ -31,6 +31,7 @@ import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection } from "./render-helpers.js";
+import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
 import { resetArchivedExpandState } from "./state.js";
 import { isRouteActive, setHashRoute, toggleConfigPage } from "./routing.js";
@@ -885,7 +886,7 @@ export function renderSidebar() {
 							if (state.projects.length === 0) { showProjectDialog(); return; }
 							startNewGoalFlow(e.currentTarget as HTMLElement);
 						}}
-						title=${state.projects.length === 0 ? "Add a project first" : "New goal (Alt+G)"}
+						title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}
 					>
 						${icon(GoalIcon, "xs", "!w-3.5 !h-3.5")}
 						<span>New Goal</span>
@@ -1030,7 +1031,7 @@ export function renderSidebar() {
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
 					class="flex items-center gap-1.5 px-3 py-2 transition-colors ${isSettings ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
 					@click=${() => { import("./settings-page.js").then((m) => m.toggleSettings()); }}
-					title="Settings (Ctrl+,)"
+					title=${`Settings${shortcutHint("show-settings")}`}
 				>
 					${icon(Settings, "sm")}
 					<span>Settings</span>
@@ -1058,7 +1059,7 @@ export function renderSidebar() {
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
 					@click=${toggleSidebar}
-					title="Collapse sidebar (Ctrl+[)"
+					title=${`Collapse sidebar${shortcutHint("toggle-sidebar")}`}
 				>
 					${icon(PanelLeftClose, "sm")}
 				</button>
@@ -1188,7 +1189,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 			<button
 				class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${toggleSidebar}
-				title="Expand sidebar (Ctrl+[)"
+				title=${`Expand sidebar${shortcutHint("toggle-sidebar")}`}
 			>
 				${icon(PanelLeftOpen, "sm")}
 			</button>

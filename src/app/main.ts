@@ -520,6 +520,16 @@ async function initApp() {
 	});
 
 	registerShortcut({
+		id: "focus-search", label: "Focus sidebar search", category: "Navigation",
+		defaultBindings: [{ key: "k", ctrlOrMeta: true, shift: false, alt: false }],
+		allowInInput: true,
+		handler: () => {
+			const input = document.querySelector<HTMLInputElement>("search-box input[data-search]");
+			input?.focus();
+		},
+	});
+
+	registerShortcut({
 		// Ctrl+[ — expand preview panel one level (collapsed → half → full) when a
 		// preview/review/proposal panel is visible. Falls back to toggling the
 		// sidebar when no such panel exists.
