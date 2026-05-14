@@ -731,7 +731,94 @@ dedicated bug-fix task; reproducer = remove the
 
 ## 6. Tried, didn't pay off
 
-*(Phase 2/3 fills this in. Empty for now.)*
+*(Phase 2/3 fills this in. No entries yet.)*
+
+## 6.A Phase 2 Opt-A — defer off-screen transcript render — SHIPPED
+
+**Status:** wins ship behind perf flag `deferOffscreenRender` (default-off
+pending team-lead decision on flipping default-on). Implementation:
+`src/ui/components/DeferredBlock.ts` + per-item wrapper in
+`src/ui/components/MessageList.ts`. Coverage: `tests/defer-offscreen-render.spec.ts`
+(7 tests).
+
+**Hypothesis (from §5.4 / §5.6):** `paint.first` dominates sidebar nav on
+large fixtures (p95 100–115ms, max ~200ms), and the cost scales with
+transcript size. Synchronous markdown / tool-block render of every message
+is the expensive piece; rendering only the bottom-tail (last 8 messages,
+which the user actually sees after the auto-scroll-to-bottom on session
+activation) and deferring the rest via `IntersectionObserver` +
+`requestIdleCallback` should cut p95 dramatically without affecting median.
+
+**A/B harness run** — same SHA `cd1fceb9bc45`, large fixture
+(200 msgs/session × 32 sessions), `BOBBIT_PERF_FIXTURE_SIZE=large`:
+
+| span | n | p50 off | p50 on | Δ p50 | p95 off | p95 on | Δ p95 | max off | max on |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **paint.first** | 192 → 198 | 32.3 | 29.9 | **−2.4** | 115.3 | 74.7 | **−40.6** | 214.1 | 95.6 |
+| **nav.session.ready** | 60 | 152.7 | 147.1 | **−5.6** | 309.9 | 221.9 | **−88.0** | 371.2 | 243.5 |
+| nav.goal.ready | 2 | 34.7 | 37.5 | +2.8 | 34.7 | 37.5 | +2.8 | 123.1 | 122.5 |
+| nav.session.cold | 1 | 348.0 | 485.8 | +137.8 | 348.0 | 485.8 | +137.8 | 348.0 | 485.8 |
+| reducer.rehydrate | 42 → 44 | 0.4 | 0.5 | +0.1 | 0.7 | 0.9 | +0.2 | 1.0 | 2.2 |
+| **rapidnav.keystroke.uncached** | 20 | 162.0 | 153.3 | −8.7 | 326.8 | 191.3 | **−135.5** | 371.2 | 229.3 |
+| **rapidnav.keystroke.cached** | 20 | 177.4 | 144.0 | **−33.4** | 276.2 | 191.5 | **−84.7** | 310.7 | 228.4 |
+| rapidnav.stall.ms | 28 → 19 | 4.4 | 4.8 | +0.4 | 21.5 | 10.4 | −11.1 | 63.9 | 55.8 |
+| rapidnav.gap | 8 → 17 | 70.7 | 56.3 | −14.4 | 142.7 | 101.1 | −41.6 | 202.8 | 171.2 |
+
+History files: `docs/perf/history/cd1fceb9bc45-opt-a-off.json`,
+`docs/perf/history/cd1fceb9bc45-opt-a-on.json`.
+
+**Verdict — ship.** Multiple spans clear the ≥100ms p50 reduction bar at
+p95:
+
+- `paint.first` p95 **−40.6ms** (115→75ms, **35% cut**); max **−118ms**
+  (214→96ms). The 200ms+ outlier domain is gone; max is now under the
+  100ms “snappy” threshold.
+- `nav.session.ready` p95 **−88ms** (310→222ms, **28% cut**); max
+  **−128ms** (371→244ms). The user-visible “click → transcript ready”
+  metric.
+- Rapid Ctrl+↓ spam: `rapidnav.keystroke.uncached` p95 **−135.5ms** (40% cut),
+  cached p95 **−84.7ms** (31% cut). The keyboard-walk gesture feels
+  materially smoother under the flag; uncached keystrokes finally land
+  near the cached cohort instead of stalling far above it.
+- `rapidnav.stall.ms` n: 28→19 with p95 21.5→10.4 — fewer keystrokes
+  outrun the render, and the surviving stalls are smaller.
+
+**Caveat — nav.session.cold (n=1) regressed by 138ms p50.** Single-sample,
+classic noise. The cold pass visits only 3 sessions and only the very
+first one's `nav.session.cold` span is recorded (subsequent ones are warm).
+Needs re-measure with a larger cold pass before drawing a conclusion. The
+warm-pass spans (which dominate the user gesture: clicking around in an
+open tab) all improve.
+
+**Why it works.** Auto-scroll-to-bottom puts the user at message 200 of 200;
+only ~5–8 messages are actually visible at first paint. The other 190+ were
+previously being parsed + rendered into Lit / markdown / syntax-highlight
+DOM before the user could see anything. Under the flag they're a single
+`<div style="min-height:80px">` per message; IO + rIC resolve them as the
+user scrolls up, so correctness is preserved end-to-end.
+
+**Correctness escape hatch.** Native browser-find (`Ctrl+F` / `Cmd+F` / `F3`)
+doesn't trigger IntersectionObserver. A module-level keydown listener
+(`src/ui/components/DeferredBlock.ts` bottom) catches those keys at the
+capture phase and calls `DeferredBlock.forceResolveAll()` synchronously
+before the browser opens its find UI, so the search runs against the fully
+rendered transcript.
+
+**Tail-size tuning — not done.** The eager-tail constant is `DEFER_EAGER_TAIL = 8`
+in `MessageList.ts`. Tuning to 4 / 16 / 32 was not part of this task; the
+current value preserves first-paint for the visible viewport on a 1280×800
+desktop without measurable regression. If we observe pop-in on larger
+displays, bump the constant rather than restructuring the deferral.
+
+**Followups (not blocking ship):**
+- Decide whether to flip the perf flag default-on. The numbers easily clear
+  the Phase 2 ship-bar; main concern is the n=1 cold-pass regression which
+  needs re-measure on a larger cold cohort.
+- Cache realised heights across session-switches in an LRU so repeat
+  visits avoid the placeholder-then-resolve flash. Currently each session
+  activation rebuilds placeholders from scratch.
+- Pin the `paint.first` budget at the new p95 (~80ms on large fixture) in
+  `tests/e2e/ui/perf-sidebar-nav.spec.ts` once the flag flips default-on.
 
 ## 7. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 

@@ -700,14 +700,24 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		}
 	});
 	const appUrl = `${gw.base}/?token=${gw.token}`;
-	await page.addInitScript(() => {
+	// Phase 2 Opt-A: BOBBIT_PERF_FLAGS env var → localStorage.bobbitPerfFlags
+	// passthrough so A/B runs on the same SHA can toggle `deferOffscreenRender`
+	// (and future Phase 2 perf flags) without code changes.
+	const perfFlagsEnv = String(process.env.BOBBIT_PERF_FLAGS ?? "").trim();
+	await page.addInitScript((flags: string) => {
 		try { localStorage.setItem("bobbitPerf", "1"); } catch { /* swallow */ }
 		try { localStorage.setItem("BOBBIT_PERF_LOG", "1"); } catch { /* swallow */ }
 		// Phase 2A: surface archived sessions in the sidebar so we can drive
 		// nav from the keyboard / programmatic openForNavItem path the same
 		// way we would for live rows.
 		try { localStorage.setItem("bobbit-show-archived", "true"); } catch { /* swallow */ }
-	});
+		// Phase 2 Opt-A: seed perf-flag set if the harness env said so.
+		try {
+			if (flags) localStorage.setItem("bobbitPerfFlags", flags);
+			else localStorage.removeItem("bobbitPerfFlags");
+		} catch { /* swallow */ }
+	}, perfFlagsEnv);
+	if (perfFlagsEnv) console.log(`[harness] BOBBIT_PERF_FLAGS=${perfFlagsEnv}`);
 
 	const clientEntries: Array<{ name: string; dur: number; detail?: any; pass: string }> = [];
 
