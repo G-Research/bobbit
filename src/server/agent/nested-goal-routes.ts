@@ -948,9 +948,18 @@ export async function tryHandleNestedGoalRoute(
 			if (autoPaused) {
 				// Route through executePauseForGoals — the canonical entry point
 				// for all pause operations, same as the REST POST /pause handler.
-				// callerSessionId=undefined: no running session to exclude here.
+				// Read the caller session from headers so the cascade-abort loop
+				// excludes the agent that triggered this mutation decision (same
+				// pattern as the REST pause handler's caller-exclusion, Issue 6).
+				const mutHdrs = req.headers as Record<string, string | string[] | undefined>;
+				const readMutHdr = (n: string): string | undefined => {
+					const v = mutHdrs[n.toLowerCase()];
+					const s = Array.isArray(v) ? v[0] : v;
+					return typeof s === "string" && s.trim() ? s.trim() : undefined;
+				};
+				const mutCallerSession = readMutHdr("x-bobbit-spawning-session") ?? readMutHdr("x-bobbit-session-id");
 				const goalRecord = getGoalAcrossProjects(goalId);
-				if (goalRecord) await executePauseForGoals([goalRecord], undefined);
+				if (goalRecord) await executePauseForGoals([goalRecord], mutCallerSession);
 			}
 			planMutationStore.remove(goalId, requestId);
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
