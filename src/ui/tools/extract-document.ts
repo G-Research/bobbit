@@ -9,7 +9,6 @@ import { loadAttachment } from "../utils/attachment-utils.js";
 import { isCorsError } from "../utils/proxy-utils.js";
 import { registerToolRenderer, renderCollapsibleHeader, renderHeader, getToolState } from "./renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
-import { codeBlock } from "../components/syntax-highlight.js";
 
 // ============================================================================
 // TYPES
@@ -229,7 +228,7 @@ export const extractDocumentRenderer: ToolRenderer<ExtractDocumentParams, Extrac
 							}
 							${
 								output && !result.isError
-									? html`${codeBlock(output, "plaintext")}`
+									? html`<code-block .code=${output} language="plaintext"></code-block>`
 									: ""
 							}
 							${

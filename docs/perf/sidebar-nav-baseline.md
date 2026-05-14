@@ -1143,6 +1143,97 @@ History: `docs/perf/history/552fb246b4b4-opt-f-{off,on}-{1..5}.json`.
 
 **Code reverted at branch `goal-goal-profile-si-320532b0-coder-994f91d0`** — postmortem retained for historical reference.
 
+### 6.6 Opt-G — defer syntax highlighting via requestIdleCallback (`deferSyntaxHighlight` flag)
+
+**Hypothesis (from the task spec):** transcript-path `<code-block>`
+elements invoke `hljs.highlight()` synchronously on first paint.
+Wrapping each callsite in a `<deferred-code-block>` that renders plain
+`<pre><code>` synchronously and upgrades to a real `<code-block>` on
+`requestIdleCallback` (200 ms timeout fallback) should free the click
+→ first-paint critical path of hljs work, especially for the eager-tail
+messages painted by Opt-A.
+
+**Implementation (behind the `deferSyntaxHighlight` perf flag, default-OFF)
+landed at `5f0fdebb`:**
+
+- `src/ui/components/syntax-highlight.ts` (new) — owns the
+  `<deferred-code-block>` element and a `codeBlock(code, lang)` helper.
+  Flag OFF emits `<code-block>` directly (byte-identical to before);
+  flag ON emits the deferred wrapper, which renders plain `<pre><code>`
+  synchronously and queues a `requestIdleCallback` (with `setTimeout(0)`
+  fallback if the deadline doesn't fire within 200 ms) to swap in a
+  real `<code-block>`.
+- `src/app/perf-flags.ts` — flag registration.
+- All transcript tool renderers (`Messages.ts`, `extract-document.ts`,
+  `javascript-repl.ts`, `BrowserEvalRenderer`, `DefaultRenderer`,
+  `EditRenderer`, `HtmlRenderer`, `ReadRenderer`, `SvgRenderer`,
+  `WebFetchRenderer`, `WebSearchRenderer`, `WriteRenderer`) switched to
+  the helper.
+- `tests/defer-syntax-highlight.spec.ts` — 4 unit cases covering flag
+  on/off behaviour and the upgrade path.
+
+Artifact viewers (`src/ui/tools/artifacts/*`) were intentionally out
+of scope — they sit on a separate panel off the sidebar-nav critical
+path.
+
+**Methodology**: A/B at SHA `ea634d62dc3b`, large fixture (200
+msgs/session × 32 sessions), 5 replicates per arm. Histories under
+`docs/perf/history/ea634d62dc3b-opt-g-{off,on}-{1..5}.json`.
+
+**Results** (median across replicates / [min..max] of per-replicate
+p50/p95). Critical-span rows only:
+
+| span | OFF p50 med | OFF p50 range | ON p50 med | ON p50 range | Δ p50 med | OFF p95 med | ON p95 med | Δ p95 | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| `nav.session.ready` | 127.0 | 126–144 | 116.4 | 109–126 | −10.6 | 179.6 | 170.4 | −9.2 | within noise |
+| `nav.session.cold` | 332.5 | 257–369 | 318.2 | 256–332 | −14.3 | 332.5 | 318.2 | −14.3 | within noise |
+| `nav.goal.ready` | 31.4 | 30–45 | 32.3 | 19–33 | +0.9 | 31.4 | 32.3 | +0.9 | within noise |
+| `nav.goal.cold` | 1752.8 | 1733–1866 | 1753.2 | 1726–1768 | +0.4 | 1752.8 | 1753.2 | +0.4 | noise |
+| `paint.first` | 23.3 | 23–27 | 22.9 | 21–26 | −0.4 | 58.8 | 56.5 | −2.3 | noise |
+| `rapidnav.keystroke.cached` | 135.4 | 113–150 | 126.0 | 112–136 | −9.4 | 170.7 | 163.7 | −7.0 | within noise |
+| `rapidnav.keystroke.uncached` | 136.6 | 134–160 | 138.4 | 120–154 | +1.8 | 187.6 | 175.2 | −12.4 | within noise |
+
+**Verdict — didn't clear the bar.**
+
+- Largest critical-span p50 move is `nav.session.cold` at −14 ms — an
+  order of magnitude below the **≥100 ms p50 reduction** threshold.
+- Every critical-span Δp50 sits inside the noise floor (max
+  off-range − on-range overlap exceeds the median delta on every row).
+  The report marks all four `opt-g` pair-rows as "within noise".
+- No span moves across the 100 ms snappy threshold under either arm.
+  `nav.session.ready` is already ~116–127 ms in both conditions;
+  `nav.goal.ready` and `paint.first` are well below it in both.
+- Smallest p50 wins (`nav.session.ready` −10.6 ms,
+  `rapidnav.keystroke.cached` −9.4 ms) are directionally encouraging
+  but indistinguishable from the run-to-run jitter floor at n=5.
+
+### Why the theoretical win didn't materialise
+
+Opt-A (the shipped default-ON win) already cuts the critical-path
+render to roughly two viewport-heights of eager-tail messages, with
+off-screen messages held back behind an `IntersectionObserver`. In
+realistic transcripts most code-block density is in the deferred
+off-screen body, not in the eager tail. The hljs work freed by
+Opt-G is therefore work Opt-A *already* deferred — the experiment
+stacked deferral on top of deferral and ran out of marginal wins.
+
+The inputs the tail does render synchronously (the most-recent few
+messages) tend to be short assistant text + tool-call summaries; raw
+code in those last messages is dominated by markdown / DOM layout
+cost, not by hljs tokenisation. The flat `paint.first` numbers
+(±0.4 ms p50, −2 ms p95) confirm there is no measurable hljs
+bottleneck at the moment the harness sentinel fires.
+
+Opt-G's machinery is correct — `tests/defer-syntax-highlight.spec.ts`
+verified the deferred upgrade path, fallback timer, and byte-identical
+flag-off rendering. The semantics work; they just don't move a metric
+the harness measures, and the flag is not worth keeping in tree as
+dead plumbing.
+
+History: `docs/perf/history/ea634d62dc3b-opt-g-{off,on}-{1..5}.json`.
+
+**Code reverted on branch `goal-goal-profile-si-320532b0-coder-f49e71c0`** — postmortem retained for historical reference.
+
 ## 7. Shipped wins
 
 ### 7.0 Shipped progression — cumulative perf as wins land

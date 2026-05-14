@@ -4,7 +4,6 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Image } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface SvgWriteParams {
 	path: string;
@@ -77,7 +76,7 @@ export class SvgRenderer implements ToolRenderer<SvgWriteParams, any> {
 						<div class="max-w-full max-h-[400px] [&>svg]:max-w-full [&>svg]:max-h-[400px] [&>svg]:w-auto [&>svg]:h-auto" .innerHTML=${sanitized}></div>
 					</div>
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-						${codeBlock(svgContent, "xml")}
+						<code-block .code=${svgContent} language="xml"></code-block>
 					</div>
 				</div>
 			`,

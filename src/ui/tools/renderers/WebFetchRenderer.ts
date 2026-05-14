@@ -4,7 +4,6 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Globe } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface WebFetchParams {
 	url: string;
@@ -71,7 +70,7 @@ export class WebFetchRenderer implements ToolRenderer<WebFetchParams, any> {
 							<div class="text-xs text-muted-foreground mt-2 mb-1">${metaText}</div>
 							${result.isError
 								? html`<console-block .content=${output} .variant=${"error"}></console-block>`
-								: html`${codeBlock(output, "text")}`}
+								: html`<code-block .code=${output} language="text"></code-block>`}
 						</div>
 					</div>
 				`,
