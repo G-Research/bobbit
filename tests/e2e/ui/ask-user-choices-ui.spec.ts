@@ -257,40 +257,40 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(letters.first()).toHaveText("A.");
 		await expect(letters.nth(1)).toHaveText("B.");
 
-		// Focus the first tab so keyboard input targets the widget.
-		const tab0 = widget.locator('[role="tab"][data-tab-index="0"]');
-		await tab0.focus();
-		// Wait for focus to settle before pressing keys — under load, focus()
-		// returns before the browser has actually given focus to the element.
+		// Digit-key shortcuts fire on focused .ask-option elements (radio
+		// buttons), NOT on the tab header buttons. Focus the first option in
+		// the current panel, then press the digit key. This matches the
+		// pattern confirmed in tests/ask-user-choices-widget.spec.ts.
+		const firstOptionQ1 = widget.locator('.ask-option').first();
+		await firstOptionQ1.focus();
+		// Wait for focus to settle.
 		await expect.poll(
 			() => page.evaluate(() => {
-				const el = document.querySelector('[role="tab"][data-tab-index="0"]');
-				return el && document.activeElement === el;
+				const el = document.querySelector('.ask-option');
+				return el && (document.activeElement === el || el.contains(document.activeElement));
 			}),
 			{ timeout: 5_000 },
 		).toBe(true);
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
-		// Use locator.press() to dispatch directly on the focused element —
-		// more robust than page.keyboard.press() under load.
-		await tab0.press("1");
+		await page.keyboard.press("1");
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 12_000 });
 
-		// Re-focus for keyboard targeting on the new tab panel.
-		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');
-		await tab1.focus();
+		// Focus the first option in Q2 for keyboard input.
+		const firstOptionQ2 = widget.locator('.ask-option').first();
+		await firstOptionQ2.focus();
 		// Wait for focus to settle.
 		await expect.poll(
 			() => page.evaluate(() => {
-				const el = document.querySelector('[role="tab"][data-tab-index="1"]');
-				return el && document.activeElement === el;
+				const el = document.querySelector('.ask-option');
+				return el && (document.activeElement === el || el.contains(document.activeElement));
 			}),
 			{ timeout: 5_000 },
 		).toBe(true);
 
 		// Press '2' → picks option 2 on Q2 ("medium"). Last tab → no advance.
-		await tab1.press("2");
+		await page.keyboard.press("2");
 		await expect(widget.locator('input[type="radio"][value="medium"]')).toBeChecked();
 
 		// Primary button should now be Submit (last tab) and enabled.
