@@ -76,7 +76,15 @@ class TypescriptLspClient implements LspClient {
 	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
-		this.bridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
+		// Only attach the bridge when a sandbox container is actually running for
+		// this worktree; otherwise spawnLspChild() falls back to a host process and
+		// bridge.toUri() would translate host paths to container paths (e.g.
+		// /workspace-wt/<branch>) that don't exist on the host, breaking
+		// `initialize` with ENOENT. Do not simplify back to an unconditional cache
+		// — bug surfaced by coder sessions 03afb128 / 9150a1de on 2026-05-14.
+		const resolvedBridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
+		const containerId = resolvedBridge?.containerIdForWorktree?.(this.worktreePath) ?? null;
+		this.bridge = containerId ? resolvedBridge : undefined;
 		this.onClose = onClose;
 		const resolved = resolveTypescriptLanguageServer();
 		if (!resolved) throw new Error("typescript-language-server not installed");

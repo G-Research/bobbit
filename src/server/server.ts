@@ -1370,7 +1370,7 @@ export function createGateway(config: GatewayConfig) {
 					const cwd = config.defaultCwd || getProjectRoot();
 					// Use server.ts itself as the "real src file" for the /state probe.
 					const srcFile = path.resolve(getProjectRoot(), "src/server/server.ts");
-					const probes: Array<{ route: string; url: string; method: string; body?: string; failOn404Only: boolean }> = [
+					const probes: Array<{ route: string; url: string; method: string; body?: string; failOn404Only: boolean; inspectBody?: boolean }> = [
 						{
 							route: "/api/lsp/stats",
 							url: `${base}/api/lsp/stats`,
@@ -1384,11 +1384,16 @@ export function createGateway(config: GatewayConfig) {
 							failOn404Only: false,
 						},
 						{
+							// POST probe catches the "bridge attached without a running container"
+							// regression: a GET on /stats or /state wouldn't initialize tsserver,
+							// so only a real diagnostics call surfaces the ENOENT from a misrouted
+							// /workspace-wt/... rootUri. See sessions 03afb128 / 9150a1de (2026-05-14).
 							route: "/api/lsp/diagnostics",
 							url: `${base}/api/lsp/diagnostics`,
 							method: "POST",
-							body: JSON.stringify({ cwd }),
-							failOn404Only: true,
+							body: JSON.stringify({ cwd, path: srcFile }),
+							failOn404Only: false,
+							inspectBody: true,
 						},
 					];
 					for (const probe of probes) {
@@ -1401,13 +1406,27 @@ export function createGateway(config: GatewayConfig) {
 								body: probe.body,
 								signal: ac.signal,
 							});
-							clearTimeout(timer);
 							const failed = probe.failOn404Only ? res.status === 404 : res.status !== 200;
 							if (failed) {
+								clearTimeout(timer);
 								const checkResult = `failed:${probe.route}:${res.status}`;
 								lspSupervisor.setRouteSelfCheck(checkResult);
 								console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
 								return;
+							}
+							if (probe.inspectBody) {
+								// Body should be either real diagnostics or a structured supervisor
+								// envelope ({error: lsp_unavailable|lsp_capacity|lsp_timeout, ...}).
+								// ENOENT or "stat '" indicate the bridge mis-attaching bug — fail loudly.
+								const text = await res.text();
+								clearTimeout(timer);
+								if (text.includes("ENOENT") || text.includes("stat '")) {
+									lspSupervisor.setRouteSelfCheck("failed:diagnostics:initialize_failed");
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned 200 but body contained ENOENT/stat ' — the TypeScript LSP bridge is likely attached without a running sandbox container (see sessions 03afb128 / 9150a1de). Agents will see lsp_unavailable for every diagnostics call. Body snippet: ${text.slice(0, 400)}`);
+									return;
+								}
+							} else {
+								clearTimeout(timer);
 							}
 						} catch (err: any) {
 							clearTimeout(timer);
