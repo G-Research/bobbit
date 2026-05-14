@@ -46,11 +46,11 @@
     "pyright": "^1.1.409"
   },
   "dependencies": {
+    "@lmstudio/sdk": "^1.5.0",
+    "@mariozechner/mini-lit": "^0.2.0",
     "@earendil-works/pi-agent-core": "^0.74.0",
     "@earendil-works/pi-ai": "^0.74.0",
     "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@lmstudio/sdk": "^1.5.0",
-    "@mariozechner/mini-lit": "^0.2.0",
     "@recogito/text-annotator": "^3.4.9",
     "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",
@@ -80,5 +80,5 @@
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
     "vite": "^7.1.6"
-  },
+  }
 }
