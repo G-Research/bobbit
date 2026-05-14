@@ -6,6 +6,7 @@ import { i18n } from "../../utils/i18n.js";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { HtmlRenderer } from "./HtmlRenderer.js";
+import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface EditParams {
 	path: string;
@@ -130,7 +131,7 @@ export class EditRenderer implements ToolRenderer<EditParams, EditDetails> {
 						<div>
 							${renderCollapsibleHeader(state, FileCode2, headerText, contentRef, chevronRef, false)}
 							<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-								<code-block .code=${diff} language="diff"></code-block>
+								${codeBlock(diff, "diff")}
 							</div>
 						</div>
 					`,

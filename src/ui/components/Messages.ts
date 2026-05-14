@@ -11,6 +11,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { marked } from "marked";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
+import { codeBlock } from "./syntax-highlight.js";
 import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
@@ -472,14 +473,14 @@ export class ToolMessageDebugView extends LitElement {
 			<div class="mt-3 flex flex-col gap-2">
 				<div>
 					<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Call")}</div>
-					<code-block .code=${this.pretty(this.callArgs).content} language="json"></code-block>
+					${codeBlock(this.pretty(this.callArgs).content, "json")}
 				</div>
 				<div>
 					<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Result")}</div>
 					${
 						this.hasResult
-							? html`<code-block .code=${output.content} language="${output.isJson ? "json" : "text"}"></code-block>
-								<code-block .code=${details.content} language="${details.isJson ? "json" : "text"}"></code-block>`
+							? html`${codeBlock(output.content, output.isJson ? "json" : "text")}
+								${codeBlock(details.content, details.isJson ? "json" : "text")}`
 							: html`<div class="text-xs text-muted-foreground">${i18n("(no result)")}</div>`
 					}
 				</div>

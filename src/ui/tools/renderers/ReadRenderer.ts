@@ -6,6 +6,7 @@ import { i18n } from "../../utils/i18n.js";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
+import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface ReadParams {
 	path: string;
@@ -67,7 +68,7 @@ export class ReadRenderer implements ToolRenderer<ReadParams, any> {
 					<div>
 						${renderCollapsibleHeader(state, FileText, headerText, contentRef, chevronRef, false)}
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-							<code-block .code=${output} language="text"></code-block>
+							${codeBlock(output, "text")}
 						</div>
 					</div>
 				`,

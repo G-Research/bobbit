@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Code } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface BrowserEvalParams {
 	expression: string;
@@ -42,7 +43,7 @@ export class BrowserEvalRenderer implements ToolRenderer<BrowserEvalParams, any>
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 							${result.isError
 								? html`<console-block .content=${output} .variant=${"error"}></console-block>`
-								: html`<code-block .code=${output} language="text"></code-block>`}
+								: html`${codeBlock(output, "text")}`}
 						</div>
 					</div>
 				`,

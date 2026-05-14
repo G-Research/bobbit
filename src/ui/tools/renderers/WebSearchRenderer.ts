@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Search } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface WebSearchParams {
 	query: string;
@@ -102,7 +103,7 @@ export class WebSearchRenderer implements ToolRenderer<WebSearchParams, any> {
 								? html`<console-block .content=${output} .variant=${"error"}></console-block>`
 								: parsed.length > 0
 									? renderResultsList(parsed)
-									: html`<code-block .code=${output} language="text"></code-block>`}
+									: html`${codeBlock(output, "text")}`}
 						</div>
 					</div>
 				`,
