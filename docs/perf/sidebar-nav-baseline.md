@@ -705,29 +705,43 @@ everything, including the cached path the cache was supposed to save.
    sequential gate-content reads on the dashboard.
 5. **`reducer.rehydrate` 0.3 ms.** Still not a hotspot. Reconfirmed.
 
-### Known bug surfaced by this work (NOT fixed here)
+### Known bug surfaced by this work — fixed in Opt-E
 
 **Rapid Ctrl+↓ keystrokes hitting a live session at the top of the
-sidebar get dropped.** The harness's first attempt at
+sidebar used to get dropped.** The harness's first attempt at
 `rapid-150-uncached` (without an anchor) landed the first keystroke
 on a live team-lead session that took 200 ms to attach. During that
 200 ms window, the next 3–4 keystrokes fired through the shortcut
-registry but produced no `nav.session.ready` spans — they were
-either no-ops (`openForNavItem` called for the same id repeatedly
-because `state.activeSessionId` hadn't yet committed from the
-in-flight attach) or aborted in the pending-span cascade without
-actually advancing the row. The user-visible effect is that **a fast
-Ctrl+↓ hold over a live session row pauses for ~200 ms and may
-"eat" up to 3 keystrokes** before the walk resumes.
+registry but produced no `nav.session.ready` spans — every press
+re-opened the same row because `getActiveNavId()` discarded the
+`keyboardNavActiveId` override whenever the URL hash hadn't yet
+caught up to the override's expected hash, and `navigateSidebar`
+fell back to a cold start (top of the sidebar = L) on each press.
+The user-visible effect was that **a fast Ctrl+↓ hold over a live
+session row paused for ~200 ms and ate up to 3 keystrokes** before
+the walk resumed.
 
-This is a `src/` bug — either `openForNavItem` should debounce
-repeated same-id calls cleanly, or `navigateSidebar` should advance
-off the `keyboardNavOverride` rather than `state.activeSessionId`
-while a nav is in flight. Fix is out of scope for this fixture-tuning
-task (task constraints: no `src/` edits). Worth picking up as a
-dedicated bug-fix task; reproducer = remove the
+**Fix (task `8a2ab532`, Opt-E).** `getActiveNavId()` now trusts the
+keyboard override unconditionally when set. The override is
+installed synchronously by `openForNavItem` and reflects the most
+recent user intent; `installKeyboardNavOverrideClearListener`
+already clears it on any subsequent hashchange whose URL doesn't
+match, so staleness is bounded. Behavioural mirror + source-level
+pinning lives in `tests/rapid-keystroke-nav.spec.ts`.
+
+| Scenario (6 presses, 50 ms cadence, L attach=200 ms) | Before | After |
+|---|---:|---:|
+| Distinct rows opened | 2–3 | **6** |
+| Dropped keystrokes  | 3–4 | **0** |
+| First keystroke still selects L (top, live) | yes | yes |
+
+Reproducer (without the harness anchor): remove the
 `startFromSessionId` anchor from `runRapidPass("rapid-150-uncached",
-…)` and observe the keystroke loss.
+…)` and observe a clean 10-for-10 ready-span pass. The harness's
+existing anchored layout continues to give 10/10 spans per pass
+regardless of the fix — the anchor sidesteps the bug rather than
+relying on it being absent. Both paths now work; the anchored
+harness stays in place so the canonical numbers stay comparable.
 
 ## 6. Tried, didn't pay off
 
