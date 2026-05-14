@@ -5,7 +5,7 @@
  *   SB-16: "New Goal" button on project header → goal assistant opens
  *   SB-22: Re-attempt archived goal → goal assistant opens
  *   SB-23: Archive goal lifecycle (live → archive → appears in archived section)
- *   SB-31: Staff section not visible when no staff configured
+ *   SB-31: Dedicated Staff sub-section visible per-project (zero or more staff)
  */
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
@@ -153,7 +153,7 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("SB-31: No dedicated Staff section header in the sidebar (folded into Sessions)", async ({ page }) => {
+	test("SB-31: dedicated Staff section header in the sidebar (per-project)", async ({ page }) => {
 		await openApp(page);
 
 		// Wait for the sidebar to fully load
@@ -161,15 +161,15 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
 
-		// Post surface-staff-in-sessions: there is NO dedicated "Staff" section
-		// header inside a project bucket — staff render as rows inside the
-		// project's Sessions list, and the entry points live on the project
-		// header. Assert no "STAFF" subheader is rendered inside the sidebar.
+		// Each project bucket has a dedicated "Staff" sub-section header — even
+		// when zero staff exist — so users can create their first staff agent
+		// from inside the project bucket.
 		const staffSubheader = page.locator("[data-testid='sidebar-expanded'] span.uppercase")
-			.filter({ hasText: /^STAFF$/i });
-		await expect(staffSubheader).toHaveCount(0, { timeout: 5_000 });
+			.filter({ hasText: /^Staff$/i })
+			.first();
+		await expect(staffSubheader).toBeVisible({ timeout: 5_000 });
 
-		// The "+ New staff agent" button now lives on the project header.
+		// The "+ New staff agent" button is reachable on the staff sub-section header.
 		await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 5_000 });
 	});
 });

@@ -31,7 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, synthStaffSessionRow, filterStaffByQuery } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -381,24 +381,14 @@ function renderMobileLanding() {
 											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
-										// Bucket staff and prepend their synthesised session rows to the project's
-										// Sessions list in stable alphabetical order (surface-staff-in-sessions §2).
-										const mobileStaffRowsByProject = new Map<string, typeof ungroupedSessions>();
+										// Bucket staff per project for the dedicated Staff sub-section
+										// (rendered via renderStaffSidebarSection in the project's expanded
+										// body) — staff are NOT merged into the Sessions list.
 										for (const s of staffList) {
-											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
+											if (!s.projectId) continue;
 											const bucket = projectMap.get(s.projectId);
-											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
+											if (!bucket) continue;
 											bucket.staff.push(s);
-											const synth = synthStaffSessionRow(s);
-											if (!synth) continue;
-											let rows = mobileStaffRowsByProject.get(s.projectId);
-											if (!rows) { rows = []; mobileStaffRowsByProject.set(s.projectId, rows); }
-											rows.push(synth);
-										}
-										for (const [pid, rows] of mobileStaffRowsByProject) {
-											rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-											const bucket = projectMap.get(pid);
-											if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
 										}
 										// Bucket archived goals + standalone archived sessions per project.
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
@@ -484,6 +474,7 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
+													${renderStaffSidebarSection(data.staff, project.id)}
 													${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";

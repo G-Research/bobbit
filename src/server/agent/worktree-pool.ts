@@ -29,7 +29,7 @@ import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { createWorktree, cleanupWorktree, shouldSkipRemotePush, createWorktreeSet, type WorktreeResult } from "../skills/git.js";
+import { createWorktree, cleanupWorktree, shouldSkipRemotePush, createWorktreeSet, resolveBaseRef, type WorktreeResult } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
@@ -139,6 +139,14 @@ export class WorktreePool {
 	 */
 	private componentsResolver?: () => Component[];
 
+	/**
+	 * Live resolver for the project's `base_ref` setting — called fresh on every
+	 * `_fill()` and `freshenInBackground()` so pool entries auto-adopt the
+	 * current configured integration target without a server restart. See
+	 * `docs/design/base-ref.md` §7.
+	 */
+	private baseRefResolver?: () => string | undefined;
+
 	/** Project-level worktree_root override (sibling of <rootPath>-wt by default). */
 	private worktreeRoot?: string;
 
@@ -152,10 +160,11 @@ export class WorktreePool {
 	 * construction, `this.repoPath` is always the git root (or, when the
 	 * supplied path isn't a git working tree at all, the original input).
 	 */
-	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; worktreeRoot?: string }) {
+	constructor(opts: { repoPath: string; targetSize?: number; componentsResolver?: () => Component[]; baseRefResolver?: () => string | undefined; worktreeRoot?: string }) {
 		this.repoPath = resolveRepoToplevel(opts.repoPath);
 		this.targetSize = opts.targetSize ?? 2;
 		this.componentsResolver = opts.componentsResolver;
+		this.baseRefResolver = opts.baseRefResolver;
 		this.worktreeRoot = opts.worktreeRoot;
 	}
 
@@ -362,42 +371,38 @@ export class WorktreePool {
 		};
 	}
 
-	/** Resolve the remote primary branch (e.g. origin/master). */
-	private async resolveRemotePrimary(): Promise<string> {
-		try {
-			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
-				cwd: this.repoPath,
-				timeout: 5_000,
-			});
-			const ref = stdout.trim().replace("refs/remotes/", "");
-			if (ref) return ref;
-		} catch {
-			// Fall back if origin/HEAD is not set
-		}
-		return "origin/master";
-	}
-
 	/**
-	 * Background freshen: fetch origin + reset --hard <primary> + push -u.
+	 * Background freshen: fetch origin + reset --hard <base> + push -u.
+	 * Resolves the base via `resolveBaseRef(repoPath, baseRefResolver())` so
+	 * pool entries adopt the project's currently-configured `base_ref` at the
+	 * moment they're freshened — no drain / no recorded-base needed.
 	 * Errors are non-fatal and logged — the worktree is still usable.
 	 */
 	private freshenInBackground(worktreePath: string, branch: string): void {
-		(async () => {
+		this.freshen(worktreePath, branch).catch(() => { /* swallow — already logged */ });
+	}
+
+	/**
+	 * Internal async freshen. Exposed (package-private via `as any` access) for
+	 * unit tests that need to await freshen completion before asserting HEAD.
+	 * Not part of the public API.
+	 */
+	private async freshen(worktreePath: string, branch: string): Promise<void> {
+		try {
+			await execFile("git", ["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
+			const configured = this.baseRefResolver?.();
+			const { ref: remotePrimary } = await resolveBaseRef(this.repoPath, configured);
+			await execFile("git", ["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
+		} catch (err) {
+			console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
+		}
+		if (!shouldSkipRemotePush()) {
 			try {
-				await execFile("git", ["fetch", "origin"], { cwd: worktreePath, timeout: 30_000 });
-				const remotePrimary = await this.resolveRemotePrimary();
-				await execFile("git", ["reset", "--hard", remotePrimary], { cwd: worktreePath, timeout: 10_000 });
-			} catch (err) {
-				console.warn(`[worktree-pool] Background reset failed for ${branch}:`, err instanceof Error ? err.message : err);
+				await execFile("git", ["push", "-u", "origin", branch], { cwd: worktreePath, timeout: 30_000 });
+			} catch {
+				// Push failure is non-fatal (offline, auth issues, etc.)
 			}
-			if (!shouldSkipRemotePush()) {
-				try {
-					await execFile("git", ["push", "-u", "origin", branch], { cwd: worktreePath, timeout: 30_000 });
-				} catch {
-					// Push failure is non-fatal (offline, auth issues, etc.)
-				}
-			}
-		})().catch(() => { /* swallow — already logged */ });
+		}
 	}
 
 	/**
@@ -466,6 +471,10 @@ export class WorktreePool {
 			// the very next pool entry without a server restart.
 			const components = this.componentsResolver?.() ?? [];
 			const multi = this.isMultiRepo(components);
+			// Resolve base_ref fresh on every fill so config edits land on the next
+			// pool entry without restart. Empty/undefined preserves today's
+			// `resolveRemotePrimary` fallback (see `createWorktree`/`createWorktreeSet`).
+			const configuredBaseRef = this.baseRefResolver?.();
 			const uuid8 = randomUUID().slice(0, 8);
 			const branchName = `${POOL_BRANCH_PREFIX}${uuid8}`;
 			try {
@@ -473,7 +482,10 @@ export class WorktreePool {
 				let entry: PoolEntry;
 				if (multi) {
 					// Multi-repo prebuild via createWorktreeSet — entry carries per-repo paths.
-					const set = await createWorktreeSet(this.repoPath, components, branchName, undefined, { worktreeRoot: this.worktreeRoot });
+					const set = await createWorktreeSet(this.repoPath, components, branchName, undefined, {
+						worktreeRoot: this.worktreeRoot,
+						configuredBaseRef,
+					});
 					container = set.container;
 					entry = {
 						branchName,
@@ -489,6 +501,7 @@ export class WorktreePool {
 					const result = await createWorktree(this.repoPath, branchName, {
 						skipPush: true,
 						worktreeRoot: this.worktreeRoot,
+						configuredBaseRef,
 					});
 					container = result.worktreePath;
 					entry = {
