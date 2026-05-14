@@ -125,11 +125,11 @@ test.describe("No default workflow scaffold", () => {
 		expect(wf["quick-fix"]).toBeUndefined();
 	});
 
-	test("Case C — goal-creation in a zero-workflows project succeeds without persisting workflows", async () => {
-		// When a goal is created without an explicit workflowId, the server uses
-		// 'general' in-memory without persisting to project.yaml (so the yaml
-		// remains unchanged). Goal creation still succeeds (201). This preserves
-		// the user's intentional zero-workflows project configuration.
+	test("Case C — goal-creation in a zero-workflows project auto-seeds default workflows", async () => {
+		// Auto-seeding always persists to disk (7b75dca4): when a goal is first
+		// created in a project with no workflows, the server seeds the canonical
+		// defaults (general, feature, bug-fix, parent) so the goal can succeed.
+		// Pinned by goal-creation-auto-seed.spec.ts and this test.
 		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
@@ -161,9 +161,8 @@ test.describe("No default workflow scaffold", () => {
 				autoStartTeam: false,
 			}),
 		});
-		// Goal creation succeeds; project.yaml is left unchanged (no seeding for
-		// no-workflowId goal creation — see server.ts Layer 2 else branch).
+		// Goal creation should succeed and project.yaml should now have workflows.
 		expect([200, 201]).toContain(goalRes.status);
-		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
+		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
 	});
 });
