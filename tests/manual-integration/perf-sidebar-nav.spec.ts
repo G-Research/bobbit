@@ -840,7 +840,7 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// Phase 2C: when measuring prefetch-on-hover, hover the sidebar row first
 	// so the prefetch listener fires before the programmatic nav. Gated on
 	// the flag so it doesn't distort other A/B runs.
-	const wantHoverWarmup = perfFlagsArg.split(",").map(s => s.trim()).includes("prefetchOnHover");
+	const wantHoverWarmup = perfFlagsCsv.split(",").map(s => s.trim()).includes("prefetchOnHover");
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of clickIds) {
 			if (wantHoverWarmup) {
