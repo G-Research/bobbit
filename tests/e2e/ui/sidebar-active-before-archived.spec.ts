@@ -110,21 +110,21 @@ test.describe("Active-before-archived sidebar ordering", () => {
 
 	test("live children render before archived; Archived divider sits between them", async ({ page }) => {
 		test.slow();
-		await openApp(page);
-		// Clear collapse state. Archived load is triggered via the toggle
-		// click below — setting `bobbit-show-archived` directly only flips the
-		// initial flag and does NOT fire `fetchArchivedGoalsPaginated`, so
-		// archived child goals never enter `state.goals`. The toggle click
-		// fires the fetch.
-		await page.evaluate(() => {
+		// Use addInitScript so localStorage is set BEFORE app scripts run on
+		// the first navigation — eliminates a redundant reload that would
+		// double the navigation budget under load.
+		// Archived load is triggered via the toggle click below — setting
+		// `bobbit-show-archived` directly only flips the initial flag and does
+		// NOT fire `fetchArchivedGoalsPaginated`, so archived child goals never
+		// enter `state.goals`. The toggle click fires the fetch.
+		await page.addInitScript(() => {
 			try {
 				localStorage.removeItem("bobbit-archived-collapsed-projects");
 				localStorage.removeItem("bobbit-expanded-projects");
 				localStorage.setItem("bobbit-show-archived", "false");
 			} catch {}
 		});
-		await page.reload();
-		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await openApp(page);
 
 		// Click the See Archived toggle so archived goals are fetched into
 		// state.goals and folded into the live forest. The subsequent
