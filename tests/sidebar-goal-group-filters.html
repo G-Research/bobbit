@@ -76,33 +76,28 @@ function passesSidebarFilters(session, isActive, bypass, flags) {
  *
  * Output: the ordered list of sessions that SHOULD appear in the sidebar.
  *
- * ---------------------------------------------------------------------------
- *  CURRENT MASTER BEHAVIOUR (BUG):
- *    `renderGoalGroup` builds `goalSessions`, partitions it into
- *    teamLead / teamChildren / nonTeamSessions, and renders EVERY entry
- *    unconditionally.  No call to `passesSidebarFilters`.  That is why the
- *    fixture below returns the unfiltered list verbatim — to reproduce the
- *    bug.  The spec asserts the EXPECTED post-fix output, so every filter
- *    case fails on master.
- *
- *  EXPECTED POST-FIX BEHAVIOUR (what the spec pins):
- *    1. Apply `passesSidebarFilters(s, s.id === activeId, bypass)` to each
- *       session in `goalSessions`.
- *    2. `bypass = searchQuery.trim().length > 0`.
- *    3. Team-lead-sticky (only when isTeamGoal && a team-lead exists):
- *       if the lead would be filtered out but at least one team child
- *       survived, keep the lead.
- *    4. Active session is always exempt (already handled inside
- *       `passesSidebarFilters` via the `isActive` param).
- * ---------------------------------------------------------------------------
+ * Mirrors the FIXED `renderGoalGroup` behaviour:
+ *   1. `passesSidebarFilters(s, s.id === activeId, bypass)` is applied to each
+ *      session in `goalSessions`.
+ *   2. `bypass = searchQuery.trim().length > 0`.
+ *   3. Team-lead-sticky (only when isTeamGoal && a team-lead exists in the
+ *      unfiltered list): if the lead would be filtered out but at least one
+ *      team child survived, the lead is re-inserted at its natural
+ *      createdAt position.
+ *   4. Active session is always exempt (handled inside `passesSidebarFilters`).
  */
 function computeGoalGroupDisplaySessions(goalSessions, opts) {
-  // ----- CURRENT (BUGGY) BEHAVIOUR — verbatim mirror of master --------------
-  // No filtering whatsoever; every session in the unfiltered goal list is
-  // rendered.  See src/app/render-helpers.ts ~line 836 (`renderTeamGroup`)
-  // which simply consumes `teamLead`, `teamChildren`, and `nonTeamSessions`.
-  // -------------------------------------------------------------------------
-  return goalSessions.slice();
+  const flags = { showBusy: opts.showBusy, showRead: opts.showRead };
+  const bypass = (opts.searchQuery || "").trim().length > 0;
+  const filtered = goalSessions.filter(s =>
+    passesSidebarFilters(s, s.id === opts.activeId, bypass, flags));
+  if (!opts.isTeamGoal) return filtered;
+  const naturalLead = goalSessions.find(s => s.role === "team-lead");
+  if (naturalLead && !filtered.includes(naturalLead) && filtered.length > 0) {
+    // Re-insert lead at its natural createdAt position.
+    return [naturalLead, ...filtered].sort((a, b) => a.createdAt - b.createdAt);
+  }
+  return filtered;
 }
 
 window.computeGoalGroupDisplaySessions = computeGoalGroupDisplaySessions;
