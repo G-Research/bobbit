@@ -135,6 +135,27 @@ details.wf-proposal-workflow .wf-proposal-gates {
 }
 
 /* ============================================================================
+ * SIDEBAR — enlarge hit boxes for small icon buttons
+ * ============================================================================
+ * Icon-only sidebar buttons (Settings, New goal, New session, Manage staff,
+ * New staff, role-picker chevron, etc.) are visually compact (~12–16px) but
+ * frustrating to click. A transparent ::after pseudo-element extends each
+ * button's hit area by 6px on all sides without changing layout or visuals.
+ *
+ * Excluded: `.flex-1` tab buttons (Roles / Tools / Skills / Workflows /
+ * New Goal in the top tab strip) — they already fill their row.
+ */
+.sidebar-root button:not(.flex-1) {
+	position: relative;
+}
+.sidebar-root button:not(.flex-1)::after {
+	content: '';
+	position: absolute;
+	inset: -6px;
+	/* no background — invisible click target */
+}
+
+/* ============================================================================
  * SIDEBAR — right edge border + glow
  * ============================================================================ */
 .sidebar-edge {
@@ -656,7 +677,7 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	height: 5px;
 	border-radius: 50%;
 	background: var(--muted-foreground);
-	opacity: 0.7;
+	opacity: 0.85;
 	animation: sidebar-heartbeat 9s ease-in-out infinite var(--dot-delay, 0s);
 	vertical-align: middle;
 	flex-shrink: 0;
@@ -677,7 +698,7 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	border-radius: 50%;
 	background: conic-gradient(from 0deg, transparent 0%, var(--muted-foreground) 30%, transparent 60%);
 	animation: sidebar-conic-spin 1.8s linear infinite var(--dot-delay, 0s), sidebar-counter-pulse 9s ease-in-out infinite var(--dot-delay, 0s);
-	opacity: 0.4;
+	opacity: 0.6;
 	-webkit-mask: radial-gradient(circle, transparent 55%, black 56%);
 	mask: radial-gradient(circle, transparent 55%, black 56%);
 }

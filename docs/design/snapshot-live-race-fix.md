@@ -213,3 +213,149 @@ Tests:
 - `tests/message-reducer.test.ts`
 - `tests/session-manager-getmessages-splice.test.ts`
 - `tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts`
+
+---
+
+## 9. Steer continuity splice (companion fix)
+
+The H3 splice (§4.1) covers in-flight **assistant** `message_update` rows.
+A symmetric race exists on the **user** side for steers, and is fixed by an
+analogous helper `spliceInFlightSteers()` in the same module.
+
+### 9.1 The race window
+
+`SessionManager._dispatchSteer()` (`src/server/agent/session-manager.ts`) is
+ordered as:
+
+1. `session.promptQueue.remove(r.id)` — pending row removed.
+2. `broadcastQueue(session)` — clients told the queue is empty (the pill
+   disappears from the UI).
+3. Push the batch text onto `session.inFlightSteerTexts` (the shadow
+   ledger — see [`steer-subsystem-rewrite.md`](./steer-subsystem-rewrite.md)).
+4. `await session.rpcClient.steer(batchText)` — the SDK echoes the text
+   back later as `message_end(role:user)`; the agent only flushes that
+   echo to `.jsonl` at that point.
+
+Between step 2 and the echo landing in `.jsonl`, a client snapshot
+(`get_messages` from visibility resync, WS reconnect resume-fallback, or a
+second tab attaching) reads from `rpcClient.getMessages()` and sees the
+steer text in **neither** channel — no queue pill (step 2 cleared it) and
+no user-message row (echo not yet flushed). The text appears to vanish
+until the echo lands seconds later.
+
+This is the user-side mirror of §3.1: the `.jsonl` lags real in-process
+state, and the snapshot is authoritative about a row the gateway already
+knows is coming.
+
+### 9.2 The fix shape
+
+A pure helper alongside `spliceInFlightMessage`:
+
+```
+spliceInFlightSteers(messages, session.inFlightSteerTexts) → messages
+```
+
+For every ledger entry whose plain text is not already present as a
+user-role row in the snapshot, append a synthetic user row with:
+
+- `id: "inflight-steer:<idx>:<text-prefix>"` — stable, content-derived
+  so repeated `get_messages` during the same dispatch→echo window
+  produce the same synthetic id. Agent-assigned echo ids (uuid-shaped)
+  cannot collide with this prefix.
+- `role: "user"`, `content: [{ type: "text", text }]`.
+- `_inFlightSteer: true` — diagnostic marker, not load-bearing.
+
+The defensive plain-text dedup (snapshot already contains a matching user
+row) covers the brief window where the echo has flushed but the ledger
+entry hasn't been consumed by `_consumeSteerEcho` yet — no double row.
+
+Wired at every WS-facing snapshot-return site:
+
+- `src/server/ws/handler.ts::case "get_messages"` — the primary path
+  (visibility resync, reconnect resume-fallback, multi-tab).
+- `src/server/agent/session-manager.ts::refreshAfterCompaction` — so a
+  post-compaction broadcast doesn't drop in-flight steers.
+- `src/server/agent/session-manager.ts` post-respawn
+  `broadcast({type:"messages"})` — same reason, on the respawn path.
+
+Title-generation snapshot reads (`generateTitleForAnySession`,
+`autoGenerateTitle`) are deliberately **not** spliced. Title content has
+no continuity invariant and we want minimum blast radius.
+
+### 9.3 Interaction with the client reducer
+
+The synthetic row's full lifecycle is handled by the existing reducer
+machinery from §4 — no reducer changes are required. Sequence for a
+client that polls during the gap and again after the echo:
+
+1. **Snapshot N** during the gap → splice appends a synthetic
+   `inflight-steer:*` row. Stamped server-origin with negative `_order`
+   like every other snapshot row.
+2. **Live `message_end(role:user)` echo** arrives → server-origin row
+   with positive `_order` (post-snapshot). Survives via the
+   `_order > snapshotMaxOrder` guard from §4.3.
+3. **Snapshot N+1** (post-echo, real user row now in `.jsonl`) → the
+   multiset plain-text dedup from §4.2 consumes the synthetic row's
+   text budget against the real echo row, and the
+   `_origin: "server" && _order <= 0` prior-snapshot artifact drop from
+   §4.4 sweeps the leftover synthetic.
+
+Net: exactly one user row remains, with the real agent-assigned id.
+No reducer code knows or cares that the row was ever synthetic.
+
+### 9.4 Bounded ledger guarantee
+
+`session.inFlightSteerTexts` cannot grow without bound. Every push is
+paired with exactly one of:
+
+- **Happy path**: `_consumeSteerEcho()` splices the entry on the
+  matching `message_end(role:user)` echo.
+- **Abort path**: `_reconcileAfterAbort()` drains the ledger and
+  re-enqueues entries at the front of `promptQueue` with
+  `isSteered=true` (graceful `agent_end while wasAborting`, or
+  `forceAbort` after `rpcClient.stop()`).
+- **RPC failure**: `_dispatchSteer` rolls the entry back to the front of
+  `promptQueue` and removes the ledger push.
+
+See [`steer-subsystem-rewrite.md`](./steer-subsystem-rewrite.md) for the
+full ledger lifecycle. The splice helper consults the ledger; it does
+not own it.
+
+### 9.5 Tests
+
+- **Unit (`tests/session-manager-getmessages-splice.test.ts`)** — 8 new
+  cases in a `spliceInFlightSteers` describe block: empty/undefined
+  ledger no-op; appends synthetic rows with stable position-encoded ids;
+  defensive dedup vs already-present user text (array content, string
+  content, and `user-with-attachments` role); mixed dedup-and-append
+  for partial overlap; non-array messages defensive path.
+- **E2E (`tests/e2e/steer-snapshot-continuity.spec.ts`)** — 3 cases:
+  (1) `steer_queued`: text always visible in queue OR snapshot across
+  dispatch→echo, with a sanity counter that the test polls landed in
+  the gap so it can't vacuously pass; (2) direct `{type:"steer"}`: at
+  least one snapshot in the gap carries the text; (3) WS reconnect
+  mid-gap: reconnected client requesting `get_messages` sees the steer
+  text via the splice, and the echo arrives exactly once.
+- **Mock instrumentation (`tests/e2e/mock-agent-core.mjs`)** — new
+  `MOCK_STEER_ECHO_DELAY_MS` env var parks the mock's steered
+  `handlePrompt` for N ms after the steer RPC resolves, widening the
+  race window to be reliably observable. Follows the existing
+  `MOCK_STEER_QUEUE_DROP` / `MOCK_ABORT_BUSY` instrumentation pattern.
+
+### 9.6 Files touched (steer continuity pass)
+
+Production:
+
+- `src/server/agent/splice-inflight-message.ts` — new `spliceInFlightSteers`
+  helper plus `extractUserText` utility.
+- `src/server/agent/session-manager.ts` — re-export + 3 splice call sites
+  (`refreshAfterCompaction` array/object branches, post-respawn
+  `broadcast({type:"messages"})` array/object branches).
+- `src/server/ws/handler.ts` — `get_messages` splice site (both array
+  and `{messages:[]}` branches).
+
+Tests:
+
+- `tests/session-manager-getmessages-splice.test.ts` (+8 cases).
+- `tests/e2e/steer-snapshot-continuity.spec.ts` (new spec, 3 cases).
+- `tests/e2e/mock-agent-core.mjs` (instrumentation knob).

@@ -60,15 +60,15 @@ export function readyToMergeGate(): SeededGate {
 		depends_on: ["documentation"],
 		verify: [
 			{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." },
-			{ name: "Master merged into branch", type: "command", run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}" },
-			{ name: "PR raised", type: "command", run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ." },
+			{ name: "Base ref merged into branch", type: "command", run: "git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}" },
+			{ name: "PR raised", type: "command", run: "gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q \".[0].url\" | grep -q ." },
 		],
 	};
 }
 
-export const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{master}}.
+export const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{baseBranch}}.
 
-Run \`git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see all changes.
+Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see all changes.
 Read the key documentation files: AGENTS.md, README.md, and files in docs/.
 
 The goal spec is:
@@ -132,7 +132,7 @@ export const GAP_ANALYSIS_IMPL_PROMPT = `Compare the goal specification and desi
 The goal spec is:
 {{goal_spec}}
 
-Run \`git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation diff.
+Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation diff.
 Read the design document content from upstream gates.
 
 Identify:
@@ -142,10 +142,10 @@ Identify:
 
 IMPORTANT: Ignore documentation gaps. This gap analysis runs during the implementation phase, BEFORE the documentation gate. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts as gaps — those are addressed by the dedicated documentation gate later in the workflow. Focus exclusively on code/behavior gaps relative to the spec and design.`;
 
-export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{master}} for quality.
+export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality.
 
-Start with \`git diff --stat origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
-Then use \`git diff origin/{{master}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
+Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
+Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
 For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
 
 Check:
@@ -155,9 +155,9 @@ Check:
 4. Code style — consistent naming, no dead code, clear intent
 5. Test coverage — are new behaviors tested?`;
 
-export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{master}}.
+export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
 
-Run \`git diff origin/{{master}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
+Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
 
 Check:
 1. Injection risks — command injection, path traversal, template injection

@@ -38,3 +38,86 @@ export function spliceInFlightMessage(
 	}
 	return [...messages, latest.message];
 }
+
+/** Extract a user-message body as plain text (string or text-block array). */
+function extractUserText(message: any): string {
+	if (!message) return "";
+	if (typeof message.content === "string") return message.content;
+	if (Array.isArray(message.content)) {
+		const block = message.content.find((c: any) => c?.type === "text");
+		return block?.text ?? "";
+	}
+	return "";
+}
+
+/**
+ * Splice synthetic user-role messages for every entry in the steer shadow
+ * ledger (`session.inFlightSteerTexts`) that is NOT already represented as
+ * a user message in the snapshot.
+ *
+ * Companion to `spliceInFlightMessage` (which handles in-flight assistant
+ * `message_update`). Solves a steer-specific continuity race:
+ *
+ *   `_dispatchSteer()` removes the queue row and broadcasts the empty
+ *   queue *before* awaiting `rpcClient.steer()`. The SDK only echoes the
+ *   text back as `message_end(role:user)` after a roundtrip, and the
+ *   agent only flushes that echo to `.jsonl` at that point. Between
+ *   queue-removal and echo, a client `get_messages` (visibility resync,
+ *   WS reconnect resume-fallback, second tab) sees a snapshot with
+ *   neither the pill nor the transcript row — the steer text appears
+ *   to vanish, only to reappear seconds later when the echo lands.
+ *
+ * The ledger is the in-process record of "steer texts the SDK has but
+ * `.jsonl` doesn't yet". Splicing them into snapshot responses closes
+ * the gap. Synthetic rows carry a stable id prefix `inflight-steer:` so
+ * the client reducer can route them through the normal server-snapshot
+ * dedup paths (multiset plain-text match against the real echo when a
+ * later snapshot arrives, plus the `_origin: "server" && _order <= 0`
+ * prior-snapshot drop for any leftover).
+ *
+ * Bounded by construction: the ledger only ever contains entries that
+ * are paired with a future echo (which clears them) or an abort-drain
+ * (which moves them back into `promptQueue`). It cannot grow without
+ * bound.
+ */
+export function spliceInFlightSteers(
+	messages: any[],
+	inFlightSteerTexts?: string[],
+): any[] {
+	if (!Array.isArray(messages)) return messages;
+	if (!inFlightSteerTexts || inFlightSteerTexts.length === 0) return messages;
+
+	// Collect every user-role plain text already present in the snapshot so we
+	// don't double-up if the echo has already flushed to `.jsonl` by the time
+	// this splice runs (and the ledger hasn't been cleared yet — a race we
+	// don't try to reason about precisely, we just dedupe defensively).
+	const presentUserTexts = new Set<string>();
+	for (const m of messages) {
+		if (!m) continue;
+		if (m.role !== "user" && m.role !== "user-with-attachments") continue;
+		const t = extractUserText(m);
+		if (t) presentUserTexts.add(t);
+	}
+
+	const additions: any[] = [];
+	let i = 0;
+	for (const text of inFlightSteerTexts) {
+		if (!text || presentUserTexts.has(text)) {
+			i++;
+			continue;
+		}
+		additions.push({
+			// Stable, content-derived id so repeated `get_messages` calls during
+			// the same dispatch→echo window produce the same synthetic row. The
+			// real echo's id won't collide (agents use uuid-shaped ids).
+			id: `inflight-steer:${i}:${text.slice(0, 32)}`,
+			role: "user",
+			content: [{ type: "text", text }],
+			_inFlightSteer: true,
+		});
+		presentUserTexts.add(text);
+		i++;
+	}
+	if (additions.length === 0) return messages;
+	return [...messages, ...additions];
+}

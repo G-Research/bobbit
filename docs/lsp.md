@@ -141,11 +141,55 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
 
+## Route post-boot self-check
+
+The gateway runs a lightweight self-check once, immediately after `server.listen()` completes, to verify that all `/api/lsp/*` routes are reachable. This catches a class of silent regression where a bad merge drops the LSP dispatch block from `handleApiRoute()` — the supervisor and tools are intact, but every agent call returns `lsp_route_missing` because the HTTP handler is gone.
+
+### What it probes
+
+The check runs three loopback probes over the gateway's own auth token, each with a 2-second `AbortController` timeout:
+
+| # | Request | Pass condition |
+| --- | --- | --- |
+| 1 | `GET /api/lsp/stats` | HTTP 200 |
+| 2 | `GET /api/lsp/state?cwd=<gateway-cwd>&path=<a real src file>` | HTTP 200 |
+| 3 | `POST /api/lsp/diagnostics` with `{cwd: <gateway-cwd>}` | Any status **except** 404 — 200 with results and 200 with a supervisor-error envelope are both pass |
+
+All three run concurrently with the pool-init and sweeper tasks, so the worst-case wall-clock cost is ≤6 seconds (2s × 3 sequential timeouts if all three routes are broken). In practice, all three succeed in under 100ms on a healthy boot.
+
+The check is skipped entirely when `lsp_disabled: true` is set in project config.
+
+### The `routeSelfCheck` field
+
+`GET /api/lsp/stats` exposes the self-check outcome in its response body:
+
+| Value | Meaning |
+| --- | --- |
+| `"pending"` | Check has not completed yet (gateway just started; only visible in a very tight polling window). |
+| `"ok"` | All three probes passed — routes are wired correctly. |
+| `"failed:<route>:<status>"` | One of the probes returned a bad status. `<route>` is the URL fragment (e.g. `stats`, `state`, `diagnostics`) and `<status>` is the HTTP status code (typically `404`). |
+
+### What happens on failure
+
+- A single loud `console.error` line is written to the boot log:
+  ```
+  [lsp] route self-check FAILED: /api/lsp/<route> returned <status> — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.
+  ```
+- The gateway continues serving normally — LSP is one feature, the rest of the gateway still works.
+- `routeSelfCheck` is set to `"failed:<route>:<status>"` and remains visible on `/api/lsp/stats` until the process restarts.
+
+### Diagnosing a failure
+
+1. Check the gateway boot log for the `[lsp] route self-check FAILED` line — it identifies which route is broken and what status it returned.
+2. Confirm with `curl http://localhost:<port>/api/lsp/stats | jq .routeSelfCheck`.
+3. If the value is `"failed:...:404"`, the `/api/lsp/*` dispatch block was dropped from `src/server/server.ts::handleApiRoute()`. Restore it (a `git diff origin/master` against the LSP route block is the fastest way to see what changed).
+4. After fixing and restarting, verify `routeSelfCheck` returns `"ok"`.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `{ error: "lsp_route_missing" }` on every LSP call | `handleApiRoute()` in `server.ts` is missing the `/api/lsp/<method>` dispatch block — typically a merge regression that dropped route wiring while leaving the supervisor, YAMLs, and extension intact | Run `npx playwright test tests/e2e/lsp-routes.spec.ts` — if any `POST /api/lsp/<method>` returns 404, the route block was dropped. Restore the `/api/lsp/<method>` handler block in `src/server/server.ts::handleApiRoute()`. |
+| `{ error: "lsp_route_missing" }` on every LSP call | `handleApiRoute()` in `server.ts` is missing the `/api/lsp/<method>` dispatch block — typically a merge regression that dropped route wiring while leaving the supervisor, YAMLs, and extension intact | Check `GET /api/lsp/stats` — if `routeSelfCheck` starts with `"failed:"`, the route was dropped at boot. Run `npx playwright test tests/e2e/lsp-routes.spec.ts` to confirm. Restore the `/api/lsp/<method>` handler block in `src/server/server.ts::handleApiRoute()`. |
 | `lsp_diagnostics` reports a stale type — you edited `tsconfig.json` and the new path mapping isn't picked up | `fs.watch` debounce hasn't fired yet, or your editor wrote a temp file rather than touching `tsconfig.json` | `touch tsconfig.json` (or any matching `tsconfig.*.json`) — within 1.5s the supervisor gracefully shuts the entry down and the next LSP call respawns against the new config. |
 | Every LSP call returns `{ error: "lsp_unavailable" }` | Server not installed, disabled by config, or crash-cooldown active | Check `GET /api/lsp/stats` — look at `entries[].crashCount` and `disabledUntil`; if it's the cooldown, wait 5 min. If `disabled: true`, set `lsp_disabled: false` in `project.yaml`. If `entries` is empty and no factory error, install the relevant language server (Docker image ships it; on host installs `npm i` in the project pulls `typescript-language-server` via deps). |
 | `{ error: "lsp_capacity" }` under load | All `lsp_max_servers` entries have in-flight calls; no LRU victim available to evict | Retry once. If persistent, raise `lsp_max_servers` (default `4`) in `project.yaml`. Each warm server costs ~300–800MB RSS — size accordingly. |

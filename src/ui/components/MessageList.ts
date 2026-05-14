@@ -12,7 +12,44 @@ import "./ErrorMessage.js";
 import "./ToolGroup.js";
 import "./ToolPermissionCard.js";
 import "./PreCompactionHistory.js";
+import "./DeferredBlock.js";
 import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
+import {
+	isPerfFlagEnabled,
+	PERF_FLAG_DEFER_OFFSCREEN_RENDER,
+} from "../../app/perf-flags.js";
+
+/** Number of items at the bottom of the transcript that render eagerly
+ *  even when the defer-offscreen perf flag is on. The transcript auto-scrolls
+ *  to the bottom on session activation, so the tail is what the user sees at
+ *  first paint — deferring it would cause visible pop-in. Older messages
+ *  (above index `items.length - DEFER_EAGER_TAIL`) start as placeholders and
+ *  resolve via IntersectionObserver as the user scrolls up. */
+const DEFER_EAGER_TAIL = 8;
+
+/** Per-message height heuristic for placeholder `min-height`. Rough — a
+ *  10–20px mismatch causes a tiny layout shift when the block resolves, but
+ *  resolution fires 500px outside the viewport so the shift is invisible. */
+function estimateMessageHeight(msg: any): number {
+	if (!msg || typeof msg !== "object") return 80;
+	if (msg.role === "user" || msg.role === "user-with-attachments") return 60;
+	if (msg.role === "assistant") {
+		let textChars = 0;
+		let toolBlocks = 0;
+		const content = Array.isArray(msg.content) ? msg.content : [];
+		for (const block of content) {
+			if (block && block.type === "text" && typeof block.text === "string") {
+				textChars += block.text.length;
+			} else if (block && block.type === "toolCall") {
+				toolBlocks++;
+			}
+		}
+		// ~80 chars / wrapped line, ~24px line-height, 48px chrome + 60px per tool block.
+		return 48 + Math.ceil(textChars / 80) * 24 + toolBlocks * 60;
+	}
+	if (msg.role === "toolResult") return 80;
+	return 100;
+}
 
 /** Detect a compaction-summary synthetic assistant message and pull out
  *  the sidecar id. The arguments payload is whatever
@@ -280,11 +317,47 @@ export class MessageList extends LitElement {
 
 	override render() {
 		const items = this.buildRenderItems();
+		const defer = isPerfFlagEnabled(PERF_FLAG_DEFER_OFFSCREEN_RENDER);
+
+		// Perf flag OFF — render every item synchronously (the historical path).
+		// Zero overhead: no <deferred-block> wrapper, no observer machinery.
+		if (!defer) {
+			return html`<div class="flex flex-col gap-3">
+				${repeat(
+					items,
+					(it) => it.key,
+					(it) => it.template,
+				)}
+			</div>`;
+		}
+
+		// Perf flag ON — wrap each item in <deferred-block>. The bottom
+		// DEFER_EAGER_TAIL items render eagerly (visible at first paint after
+		// scroll-to-bottom); older items render a placeholder and resolve when
+		// IntersectionObserver fires.
+		const tailStart = Math.max(0, items.length - DEFER_EAGER_TAIL);
+		// Align deferral with the message-source array so per-item est-heights
+		// match the underlying message. `items.length` can differ from
+		// `msgs.length` because of tool-grouping / synthetic precompact rows;
+		// the heuristic only needs to be roughly right.
+		const msgs = this.messages;
 		return html`<div class="flex flex-col gap-3">
 			${repeat(
 				items,
 				(it) => it.key,
-				(it) => it.template,
+				(it, idx) => {
+					const eager = idx >= tailStart;
+					const srcIdx = Math.min(
+						msgs.length - 1,
+						Math.max(0, Math.round((idx / Math.max(1, items.length - 1)) * (msgs.length - 1))),
+					);
+					const estHeight = estimateMessageHeight(msgs[srcIdx]);
+					return html`<deferred-block
+						.template=${it.template}
+						.eager=${eager}
+						est-height=${estHeight}
+					></deferred-block>`;
+				},
 			)}
 		</div>`;
 	}

@@ -60,7 +60,7 @@ A hidden, synthetic project with id `system` is registered at server startup by 
 
 **Iteration contract: `visible()` vs `all()`.** `ProjectContextManager` exposes two iterators. `all()` returns **every** context including the hidden system project — use this for callers that legitimately need it (`getContextForSession`, `findStoreForStaff`, MCP discovery, system-scope tool authoring resolution). `visible()` skips `hidden: true` contexts — use this for worktree sweepers, worktree-pool init, goal-manager pool-resolver wiring, the `/api/maintenance/orphaned-worktrees` endpoints, and the `/api/sessions` + `/api/goals` listing aggregations that back the UI. The cross-project aggregation methods on the manager (`getAllLiveGoals`, `getAllLiveSessions`, `getAllGoals`, `getAllSessions`, `searchAll`) filter hidden internally for the same reason. Iterating hidden via `all()` for worktree/pool flows was the root cause of `pool/_pool-*` branches being allocated in unrelated host repos when the bobbit state dir was nested inside one (pinned by `tests/system-project-pool-leak.test.ts`).
 
-**Which UI surfaces produce sessions here.** Any server-scope config-editing assistant lands here when no project is selected: the Tools page "New Tool" with scope = System (passes `projectId: "system"` explicitly), and the Roles / Tools / Staff pages' "+ New …" buttons when their scope picker is at the server level (post the bare `{ assistantType: "role" | "tool" | "staff" }` and let the server anchor them). The server side of this is the `isServerScopeAssistant` branch in `POST /api/sessions` (see [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs)): when `assistantType ∈ {role, tool, staff}` and no `projectId` is supplied, the handler sets `resolvedProjectId = SYSTEM_PROJECT_ID` and skips `resolveProjectForRequest`. Explicit `projectId` from a project-scoped Roles/Tools/Staff page is still honoured. Splash-screen "New Session" / "Quick Session" never lands here — those flows are gated on `state.projects.length` and either prompt for project creation, bind to the sole project, or open the splash project picker (`state.splashProjectPickerOpen` in `src/app/render.ts`). The 400 "projectId required" failure mode for those buttons is closed by gating, not by the system project.
+**Which UI surfaces produce sessions here.** Any server-scope config-editing assistant lands here when no project is selected: the Tools page "New Tool" with scope = System (passes `projectId: "system"` explicitly), and the Roles / Tools pages' "+ New …" buttons when their scope picker is at the server level (post the bare `{ assistantType: "role" | "tool" }` and let the server anchor them). The server side of this is the `isServerScopeAssistant` branch in `POST /api/sessions` (see [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs)): when `assistantType ∈ {role, tool}` and no `projectId` is supplied, the handler sets `resolvedProjectId = SYSTEM_PROJECT_ID` and skips `resolveProjectForRequest`. Explicit `projectId` from a project-scoped Roles/Tools page is still honoured. **Staff assistants are not included in this carve-out** — they are project-scoped permanent sessions (see [Staff agents in the sidebar](#staff-agents-in-the-sidebar)) and must resolve a real project the same way `goal` assistants do. Splash-screen "New Session" / "Quick Session" never lands here — those flows are gated on `state.projects.length` and either prompt for project creation, bind to the sole project, or open the splash project picker (`state.splashProjectPickerOpen` in `src/app/render.ts`). The 400 "projectId required" failure mode for those buttons is closed by gating, not by the system project.
 
 ### Per-project state isolation
 
@@ -199,6 +199,10 @@ The pattern is now applied at all four reminder sites in `verification-harness.t
 The live llm-review path is not actually affected by the bug (the kickoff prompt has already pushed the session into `streaming` before any race begins), but it carries the same `waitForStreaming` call for symmetry. Future reminder sites must follow the same pattern.
 
 Key files: `src/server/agent/session-manager.ts` (`waitForStreaming`), `src/server/agent/verification-harness.ts`. Tests: `tests/verification-reminder-race.test.ts` (unit), `tests/e2e/gate-verification-resume.spec.ts` (API E2E that drives a full restart cycle).
+
+#### Atomic step enumeration on `gate_signal`
+
+The `gate_signal` REST handler enumerates the verification step list **synchronously** before recording the signal, so the persisted `signal.verification.steps[]` and the in-memory `activeVerifications` entry agree from the very first state any consumer can observe. Pre-fix the gate-store wrote `steps: []` and the harness populated the entry several `await`s later — a 15-30 s race window on multi-step gates during which the dashboard rendered no progress. Split via `VerificationHarness.beginVerification(signal, gate)` (synchronous enumeration + active-map seed, no WS broadcast) and `getActiveVerification(signalId)` (lookup for ordered broadcast). The handler order is `cancelStaleVerifications` → `beginVerification` → `recordSignal` → `gate_signal_received` → `gate_verification_started` → fire-and-forget `verifyGateSignal`. Full design and the symbol-level map are in [docs/gate-signal-step-enumeration.md](gate-signal-step-enumeration.md); symptom→fix lookup in [debugging.md — Empty `verification.steps[]` after `gate_signal`](debugging.md#empty-verificationsteps-after-gate_signal). Pinned by `tests/gate-signal-step-enumeration.test.ts`, `tests/e2e/gate-signal-progress.spec.ts`, and `tests/e2e/ui/verification-progress-indicator.spec.ts`.
 
 #### Command-step restart survival
 
@@ -345,6 +349,8 @@ The marker is `.bobbit/config/project.yaml` rather than the mere presence of a `
 ### Per-project config
 
 Each registered project can override system-level settings (from `project.yaml`). This allows different projects to use different build commands, default models, sandbox settings, etc., while inheriting everything they don't explicitly override.
+
+A notable config key is `base_ref` — the branch ref new worktrees branch off, used as upstream and as the `{{baseBranch}}` template variable. Empty/unset preserves today's `resolveRemotePrimary()` behaviour. PUT-time validation rejects tags, SHAs, invalid grammar, non-`origin` prefixes, and (for sandboxed projects) local refs, with a structured `{ field, error, details? }` payload. See [design/base-ref.md](design/base-ref.md).
 
 **Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
 
@@ -659,6 +665,30 @@ This exists specifically because the source-of-truth migration regressed silentl
 
 **`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
 
+#### Branch container vs agent cwd
+
+Projects whose `rootPath` points at a subdirectory of a larger git repo (e.g. `rootPath: /persist/code/monorepo/agentic-fluyt-experiments`) need two different paths at runtime: a worktree-root path for git operations and component-step resolution, and an offset path for the agent process itself. `goal-manager.createGoal()` resolves both and stores them on the goal so downstream code can pick the right one — but the two paths are easy to confuse, and forwarding the wrong one into step resolution layers the offset twice and fails verification with `ENOENT`.
+
+**The two fields on a goal:**
+
+- **`goal.worktreePath`** — the un-offset *branch container*. Equal to the worktree root (`<rootPath>-wt/<branch>/` for single-repo, or the container holding sibling repo worktrees for multi-repo). Always at the git repo root level.
+- **`goal.cwd`** — what agent sessions actually run in. For sub-rooted projects this is `worktreePath + relativeOffset`, where `relativeOffset = path.relative(repoPath, project.rootPath)`. For projects rooted at the git repo root (and for legacy / pre-worktree goals where no worktree was created), `cwd` and `worktreePath` are the same value.
+
+**Which one to use:**
+
+- **Agent session cwd** — the directory the agent process boots into, what tools like `bash`/`Read` see — is **`goal.cwd`**. This is the offset path; sessions want to land at the user's project root, not at the surrounding repo root.
+- **`componentRoot()` / `resolveStep()` `branchContainer` argument** — must be **`goal.worktreePath ?? goal.cwd`**. These helpers layer `repo + relativePath` themselves to derive a component's working directory. Passing an already-offset `goal.cwd` here doubles the `relativePath` segment (e.g. `…/sub/sub/…`) and the resulting command runs in a path that does not exist.
+
+**Use the exported helper.** `goalBranchContainer(goal)` in `src/server/agent/verification-harness.ts` returns the un-offset container with the correct legacy fallback. Any new call site that forwards a goal into step resolution — verification, sandbox exec, or any future caller — should route through this helper rather than picking a field directly:
+
+```ts
+export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string;
+```
+
+The `?? goal.cwd` fallback inside the helper handles legacy / non-worktree goals where `worktreePath` is undefined; in that case no offset was ever applied to `cwd`, so the fallback is safe.
+
+**Pinning test.** `tests/verify-step-resolution.test.ts` pins the call-site contract with four cases: single-repo with `relativePath` (the original bug), single-repo with no `relativePath`, multi-repo with both `repo` and `relativePath`, and the legacy fallback when `worktreePath` is undefined. An agent investigating step-resolution paths in verification should start there.
+
 #### Remote branch cleanup
 
 Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
@@ -802,7 +832,19 @@ When only one project is registered, its folder row defaults to expanded so ther
 
 The per-project "+ goal" button on each project row bypasses the popover - the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
 
-**Collapse state is per-project**: The Sessions and Staff section collapse toggles are stored per-project, not globally. Collapsing Sessions in Project A does not affect Project B. State is persisted as collapsed-project-ID sets in localStorage (`bobbit-collapsed-ungrouped`, `bobbit-collapsed-staff`). Default state is expanded for all projects. Access via `isUngroupedExpanded(projectId)` / `setUngroupedExpanded(projectId, value)` and `isStaffExpanded(projectId)` / `setStaffSectionExpanded(projectId, value)` in `state.ts`.
+#### Staff agents in the sidebar
+
+Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and owns a long-lived worktree on a `staff-<name>-<id>` branch. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
+
+The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows get the same active / unread / last-activity treatment as ordinary sessions, plus a hover-action pencil that opens `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
+
+**Staff are not merged into Sessions.** Created staff agents live exclusively in the Staff sub-section. The staff-creation **assistant session** (`assistantType: "staff"`) is a transient normal session and shows up in the project's Sessions list while open — only the persisted staff record that results from accepting `propose_staff` moves into Staff. This split was the point of restoring the sub-section: a previous experiment that synthesised staff rows into Sessions made staff feel like ordinary disposable sessions and hid the fact that they are long-lived, profile-backed agents.
+
+The collapsed (icon-only) sidebar buckets staff under their owning project group alongside goals and ungrouped sessions; there is no global staff tail list. The project header retains the same **Manage staff** / **New staff** quick-action buttons (redundant with the sub-section header but useful when the sub-section is collapsed) — **New staff** calls `createStaffAssistantSession({ projectId, cwd })` so the creation assistant always lands in the right project context, no second project picker and no `propose_staff(cwd)` re-link dance after the fact.
+
+**Orphan handling.** Legacy records can land in two broken states: missing `projectId` outright, or persisted under `SYSTEM_PROJECT_ID` (from the pre-change server-scope carve-out). `StaffManager.listOrphaned()` returns both kinds on startup and the sidebar surfaces them in a one-off orphan banner above the project list, with a one-click **Assign to project…** action that calls `PATCH /api/staff/:id { projectId }`. The handler moves the persisted record between per-project stores, re-indexes search, and preserves the existing worktree branch (the next wake rebases against the new project's primary branch). Orphaned staff are never silently dropped from the UI. See [rest-api.md — Staff Agents](rest-api.md#staff-agents) for the endpoint contract.
+
+**Collapse state is per-project**: The Sessions section collapse toggle is stored per-project, not globally. Collapsing Sessions in Project A does not affect Project B. State is persisted as a collapsed-project-ID set in localStorage (`bobbit-collapsed-ungrouped`). Default state is expanded for all projects. Access via `isUngroupedExpanded(projectId)` / `setUngroupedExpanded(projectId, value)` in `state.ts`. The Staff sub-section uses the same per-project pattern: `isStaffExpanded(projectId)` / `setStaffSectionExpanded(projectId, value)` backed by localStorage key `bobbit-collapsed-staff`, also consulted by the keyboard-navigation expand/collapse helpers in `src/app/sidebar-nav.ts` (kind `staff-header`).
 
 **Per-project Archived subsections**: Each project group ends with its own collapsible Archived subsection (rendered by `renderProjectArchivedSection` in `src/app/render-helpers.ts`, shared between desktop `renderSidebar` (`src/app/sidebar.ts`) and mobile `renderMobileLanding` (`src/app/render.ts`) so both breakpoints render identically). Bucketing is currently split: desktop uses an inline loop in `sidebar.ts` that emits `console.warn` for orphaned items, while mobile uses the `bucketArchivedByProject` helper in `render-helpers.ts` which silently drops unmatched items. The global Archived block that used to sit at the bottom of the sidebar is gone.
 
@@ -1069,7 +1111,7 @@ The trade-off is that there is no real-time push of read-state changes between o
 Two invariants live in `hasUnseenActivity` and must be preserved by any future refactor:
 
 - **The active session is never "unseen".** Otherwise the user would see a dot on the very session they are looking at.
-- **Team-agent sessions are suppressed unless the goal is complete.** Mid-goal chatter from delegate/reviewer/QA agents would otherwise flood the sidebar with dots the user can't act on. Once the goal completes, normal unread semantics resume.
+- **The dot only surfaces when a human is actually needed.** The shared `needsHumanAttention` predicate in `src/app/notification-policy.ts` is the gate. Team members and delegates never surface; a team lead surfaces only when the goal is `complete` or the lead is stuck (no live downstream work and no in-flight verification). The same predicate also gates the polling beep in `src/app/api.ts` and the active-session `agent_end` beep in `src/app/remote-agent.ts`, so the three surfaces can't drift. See [design/notification-policy.md](design/notification-policy.md).
 
 ### Legacy localStorage migration
 
@@ -1114,6 +1156,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 | `src/server/server.ts` | `POST /api/sessions/:id/mark-read` route |
 | `src/app/state.ts` | `GatewaySession.lastReadAt` |
 | `src/app/render-helpers.ts` | `markSessionVisited`, `hasUnseenActivity`, `migrateLegacyVisitedMap` |
+| `src/app/notification-policy.ts` | `needsHumanAttention` — shared predicate consulted by the unread dot, the polling beep, and the active-session `agent_end` beep |
 | `src/app/main.ts` | One-shot migration trigger post-auth |
 | `tests/session-store.test.ts` | Disk round-trip for `lastReadAt` |
 | `tests/session-manager-restore.test.ts` | Replay events don't bump `lastActivity`; post-restore events do |
@@ -1917,7 +1960,7 @@ Sandboxed agents use standard git worktrees inside the project container - the s
 
 **Worktree pool** (host-side, `worktree-pool.ts`): The worktree pool pre-creates worktrees in the background so sessions and goals start faster. Pool entries use the `pool/_pool-<id>` branch namespace (was `session/_pool-*` pre-Phase 3); claim atomically renames the branch and moves the worktree to the target name. **Goal creation also routes through the pool** as of Phase 3 - it no longer calls `createWorktree()` directly. Multi-repo pool entries are sets of N worktrees (one per configured repo, including data-only) sharing a single branch name across repos. See [Session worktrees](#session-worktrees) for the full pool claim sequence (single rename at claim time, no first-prompt rename - see [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md)). Pools are **per-project** - `SessionManager` maintains a `Map<string, WorktreePool>` keyed by project ID, so each project's worktrees are rooted in the correct repo. On startup, a pool is initialized for every registered project whose `rootPath` is a git repo, using that project's `worktree_pool_size` and `worktree_setup_command` config. When a session is created, the pool claim looks up the pool by the session's `projectId` - sessions only claim from their own project's pool. New projects registered at runtime (`POST /api/projects`) get a pool auto-initialized if they're git repos. Deleted projects (`DELETE /api/projects/:id`) get their pool drained via `removeWorktreePool(projectId)`. The pool status API (`GET /api/worktree-pool`) returns per-project data: `{ pools: { [projectId]: { enabled, ready, target, filling } } }` without a query param, or flat status for a single project with `?projectId=<id>`. Settings UI shows per-project pool status when viewing a project's settings, and aggregated status in system scope.
 
-**Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the remote primary branch before being assigned to a session. This prevents stale worktrees when the primary branch has advanced since the pool entry was created. The remote primary branch is resolved dynamically via `git symbolic-ref refs/remotes/origin/HEAD` (falls back to `origin/master` if the ref is not set). The fetch+reset is non-fatal - if it fails, the worktree is still usable but may be behind.
+**Pool freshness**: When a pooled worktree is acquired, it is fetched from origin and hard-reset to the configured base ref (project `base_ref`, falling back to the dynamically-resolved remote primary via `git symbolic-ref refs/remotes/origin/HEAD`, then `origin/master`). This prevents stale worktrees when the base has advanced since the pool entry was created. The pool reads the current `base_ref` on every fill/claim via a live `baseRefResolver` (sibling of `componentsResolver`) — pool entries auto-adopt the new value when the setting changes, no drain needed. The fetch+reset is non-fatal: if it fails, the worktree is still usable but may be behind. Full design: [design/base-ref.md](design/base-ref.md).
 
 **Inter-agent coordination:** Because all agents share the same `/workspace` clone, they can fetch each other's branches directly (`git fetch origin <branch>`). The team lead merges agent branches locally, same as non-sandboxed teams.
 

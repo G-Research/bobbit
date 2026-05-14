@@ -1,13 +1,15 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import "../ui/components/CommentableMarkdown.js";
+import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { shortcutHint } from "./shortcut-registry.js";
+import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -17,7 +19,6 @@ import {
 	isUngroupedExpanded,
 	setUngroupedExpanded,
 
-	resetArchivedExpandState,
 	getSidebarData,
 	isProposalStreaming,
 } from "./state.js";
@@ -30,7 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -40,7 +41,7 @@ import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
@@ -251,6 +252,8 @@ function renderMobileLanding() {
 	let { ungroupedSessions, liveGoals } = sidebarData;
 	let { archivedGoals } = sidebarData;
 
+	const bypassFilters = !!state.searchQuery.trim();
+
 	// Client-side title filtering for mobile
 	if (state.searchQuery) {
 		const q = state.searchQuery.toLowerCase();
@@ -263,6 +266,10 @@ function renderMobileLanding() {
 		ungroupedSessions = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 		archivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 	}
+
+	// Apply Show Busy / Show Read filters to standalone live sessions.
+	ungroupedSessions = ungroupedSessions.filter(s =>
+		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root">
@@ -312,7 +319,7 @@ function renderMobileLanding() {
 								if (state.projects.length === 0) { showProjectDialog(); return; }
 								startNewGoalFlow(e.currentTarget as HTMLElement);
 							}}
-							title=${state.projects.length === 0 ? "Add a project first" : "New goal (Alt+G)"}>
+							title=${state.projects.length === 0 ? "Add a project first" : `New goal${shortcutHint("new-goal")}`}>
 							${icon(GoalIcon, "xs")} New Goal
 						</button>
 					</div>
@@ -335,7 +342,7 @@ function renderMobileLanding() {
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
-									<div class="text-muted-foreground mb-3 empty-state-icon">${icon(Server, "lg")}</div>
+									<div class="text-muted-foreground mb-3 empty-state-icon flex justify-center">${icon(Server, "lg")}</div>
 									<p class="text-muted-foreground mb-4" style="font-size: 1.3333em;">No goals or sessions yet</p>
 									<div class="flex items-center justify-center gap-2">
 										${Button({
@@ -358,7 +365,7 @@ function renderMobileLanding() {
 									let staffList = (state.staffList || []).filter(s => s.state !== "retired");
 									if (state.searchQuery) {
 										const q = state.searchQuery.toLowerCase();
-										staffList = staffList.filter(s => s.name?.toLowerCase().includes(q));
+										staffList = filterStaffByQuery(staffList, q);
 									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
@@ -374,10 +381,13 @@ function renderMobileLanding() {
 											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
+										// Bucket staff per project for the dedicated Staff sub-section
+										// (rendered via renderStaffSidebarSection in the project's expanded
+										// body) — staff are NOT merged into the Sessions list.
 										for (const s of staffList) {
-											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
+											if (!s.projectId) continue;
 											const bucket = projectMap.get(s.projectId);
-											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
+											if (!bucket) continue;
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.
@@ -429,10 +439,18 @@ function renderMobileLanding() {
 															<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 1.1667em;">Sessions</span>
 															<div class="flex items-center relative">
 																<button
-																	class="p-2 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
+																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors relative shrink-0"
+																	style="line-height:0;"
 																	@click=${(e: Event) => { e.stopPropagation(); createAndConnectSession(undefined, undefined, project.rootPath, undefined, undefined, project.id); }}
 																	title="New session in ${project.name}"
-																>${icon(Plus, "sm")}</button>
+																>
+																	<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
+																		${icon(MessagesSquare, "sm")}
+																		<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+																			<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+																		</svg>
+																	</span>
+																</button>
 																<button
 																	class="p-1.5 rounded text-muted-foreground active:bg-secondary/50 transition-colors"
 																	@click=${(e: Event) => { e.stopPropagation(); toggleRolePicker(e, undefined, { projectId: project.id, projectName: project.name, projectCwd: project.rootPath }); }}
@@ -480,22 +498,7 @@ function renderMobileLanding() {
 				${icon(FolderPlus, "sm")}
 				<span>Add Project</span>
 			</button>` : ""}
-			<button class="flex items-center gap-1.5 px-2 py-2.5 text-xs ${state.showArchived ? "text-primary bg-primary/10 font-medium" : "text-muted-foreground"} active:bg-secondary/50 rounded transition-colors"
-				@click=${() => {
-					state.showArchived = !state.showArchived;
-					localStorage.setItem("bobbit-show-archived", String(state.showArchived));
-					if (state.showArchived) {
-						import("./api.js").then(m => { m.fetchArchivedSessions(); m.fetchArchivedGoalsPaginated(); });
-					} else {
-						resetArchivedExpandState();
-						import("./api.js").then(m => m.clearArchivedSessionsState());
-					}
-					renderApp();
-				}}
-				title="${state.showArchived ? "Hide archived sessions" : "Show archived sessions"}">
-				${icon(Archive, "sm")}
-				<span>See Archived</span>
-			</button>
+			${renderFiltersButton("mobile")}
 		</div>
 	`;
 }
@@ -2639,9 +2642,19 @@ export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
 
-	// Dynamic page title
+	// Dynamic page title.
+	// In a regular browser tab, suffix with " · Bobbit" so the tab tells you which app.
+	// As an installed PWA, the OS already shows "Bobbit" from manifest.name — adding it
+	// to document.title produces a doubled "Bobbit - ScoutPost · Bobbit" taskbar entry.
 	const activeProject = state.projects.find(p => p.id === state.activeProjectId);
-	document.title = activeProject ? `${activeProject.name} · Bobbit` : "Bobbit";
+	const isStandalone = typeof window !== "undefined"
+		&& typeof window.matchMedia === "function"
+		&& window.matchMedia("(display-mode: standalone)").matches;
+	if (activeProject) {
+		document.title = isStandalone ? activeProject.name : `${activeProject.name} · Bobbit`;
+	} else {
+		document.title = "Bobbit";
+	}
 
 
 	// Disconnected state
@@ -2764,7 +2777,7 @@ export function doRenderApp(): void {
 				onClick: () => terminateSession(activeSid),
 				children: html`<span class="inline-flex items-center gap-1">${icon(Trash2, "xs")}<span class="text-xs hidden sm:inline">${isTeamLead ? "End Team" : "Terminate"}</span></span>`,
 				className: "h-7 px-2 text-muted-foreground hover:text-destructive",
-				title: isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate session (Ctrl+Shift+D)",
+				title: (isTeamLead ? "End team" : "Terminate session") + shortcutHint("terminate-session"),
 			})}
 		</div>
 	` : "";
@@ -3109,10 +3122,10 @@ export function doRenderApp(): void {
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
 							${icon(Maximize2, "sm")}
 						</button>` : ""}
-						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
+						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 							${icon(PanelRightClose, "sm")}
 						</button>
 					</div>
@@ -3132,7 +3145,7 @@ export function doRenderApp(): void {
 	};
 
 	const previewExpandButton = () => html`
-		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title="Expand preview (Ctrl+])">
+		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title=${`Expand preview${shortcutHint("toggle-sidebar")}`}>
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
@@ -3232,8 +3245,8 @@ export function doRenderApp(): void {
 							<span class="text-xs font-medium text-muted-foreground">Preview</span>
 							<div class="flex items-center gap-0.5">
 								${state.previewPanelEntry ? previewControlButtons() : ""}
-								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
-									${icon(Minimize2, "sm")}
+								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
+									${icon(PanelRightClose, "sm")}
 								</button>
 							</div>
 						</div>
