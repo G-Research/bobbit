@@ -422,7 +422,7 @@ function renderListView(): TemplateResult {
 				${staffList.length === 0
 					? html`
 						<div class="text-center py-12">
-							<div class="text-muted-foreground mb-3">${icon(UserCheck, "lg")}</div>
+							<div class="text-muted-foreground mb-3 flex justify-center empty-state-icon">${icon(UserCheck, "lg")}</div>
 							<p class="text-sm text-muted-foreground mb-4">No staff agents yet</p>
 							<p class="text-xs text-muted-foreground max-w-sm mx-auto">
 								Create a staff agent from the sidebar using the + button next to "Staff",

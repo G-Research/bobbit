@@ -335,7 +335,7 @@ function renderMobileLanding() {
 							</div>`
 						: state.goals.length === 0 && state.gatewaySessions.length === 0
 							? html`<div class="text-center py-12">
-									<div class="text-muted-foreground mb-3 empty-state-icon">${icon(Server, "lg")}</div>
+									<div class="text-muted-foreground mb-3 empty-state-icon flex justify-center">${icon(Server, "lg")}</div>
 									<p class="text-muted-foreground mb-4" style="font-size: 1.3333em;">No goals or sessions yet</p>
 									<div class="flex items-center justify-center gap-2">
 										${Button({
