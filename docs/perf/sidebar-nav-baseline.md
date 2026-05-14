@@ -317,6 +317,418 @@ Phase 2B. **But** `nav.session.ready` p95 clears 100 ms at the large
 fixture size, and the underlying driver is `paint.first` scaling with
 transcript length — that is where the real perceived-snappiness wins are.
 
+## 5.5 Realistic-profile re-baseline (Phase 2A.1)
+
+The Phase 2A fixture (§5.1 / §5.2) shipped a richer transcript but didn't
+match the real-corpus shape: every other line was `user/assistant` chatter,
+tool pairs were under-represented, `bash_bg` (the heavy-tail blob producer)
+was absent, no `thinking` blocks, no session-header / model-change /
+compaction lines, and tool-result bodies were a uniform ~3×5-line dump
+instead of the real long-tail distribution. That mismatch risked steering
+the four Opt-A/B/C/D agents toward optimisations that wouldn't land in
+production — wrong workload ⇒ wrong wins.
+
+Task `f2e18b1e` reshapes `buildRealisticJsonl()` to match
+`docs/perf/real-session-profile.md §5`: 6% user / 45% assistant / 49%
+toolResult line share, ~1 tool pair per 2 messages, weighted tool mix
+(bash 35 / read 29 / bash_bg 12 / edit 9 / grep 7 / write 3 / ls 1 /
+find 1), `thinking` block on ~1 in 3 assistant turns, result bodies
+sampled from the §5.5 size buckets (30% ≤500B · 40% 1–2KB · 20% 5–10KB ·
+7% 30–60KB · ~2% 100–250KB · ≤1 2 MB outlier on `large` only), and
+lifecycle records (`type:"session"`, `type:"model_change"`, and 1–3
+`type:"compaction"` ≈20 KB markers on `large`). The PRNG is mulberry32
+seeded from `sessionIndex` so runs on the same SHA are bit-identical and
+the baseline is reproducible. The harness also now honours
+`BOBBIT_PERF_HISTORY_TAG` (referenced by `docs/perf/README.md` §Env vars
+but not yet wired) so this re-baseline lands as
+`docs/perf/history/<sha>-realistic-{medium,large}.json` instead of
+clobbering the canonical timeline.
+
+### What this means for the user
+
+The target user gesture is **`ctrl+↓` to walk the sidebar of goals and
+sessions**. Per ctrl+↓ the visible cost is
+`nav.click` (input handler) → `nav.session.ready` / `nav.goal.ready`
+(REST/WS + first paint). Below we report both *cached* (re-visit, same
+row already loaded once this session — equivalent to ctrl+↓ then
+ctrl+↑ then ctrl+↓ again) and *uncached* (first time this session
+row has been opened this run — the dominant case for a user scanning
+their list).
+
+The harness drives this exact pattern: lap 1 of the warm pass is
+uncached (10 fresh archived rows, each opened once); lap 2 is cached
+(same 10 rows immediately opened again, ~50 ms apart, no other work in
+between). `nav.session.cold` and `nav.goal.cold` measure the *very first*
+load from a page navigation (`page.goto` cold-start), not a click — they
+represent what a user sees opening Bobbit fresh on a deep link.
+
+### Per-ctrl+↓ wall-time — medium fixture (50 msgs/session)
+
+Commit `5309f93c5ee8` on `goal-goal-profile-si-320532b0-coder-36405049`,
+2026-05-14T05:58Z. All durations in milliseconds.
+
+| Gesture | Span | n | p50 | p95 | max |
+|---|---|---:|---:|---:|---:|
+| ctrl+↓ to session (**uncached**, lap 1) | `nav.session.ready` | 10 | **62.8** | 79.4 | 94.5 |
+| ctrl+↓ to session (**cached**, lap 2)   | `nav.session.ready` | 10 | **26.9** | 31.8 | 35.4 |
+| ctrl+↓ to goal (warm)                   | `nav.goal.ready`    |  2 | 17.3 | 17.3 | 45.5 |
+| First-ever session deep-link             | `nav.session.cold`  |  1 | 164.6 | 164.6 | 164.6 |
+| First-ever goal-dashboard deep-link      | `nav.goal.cold`     |  1 | **1690.8** | 1690.8 | 1690.8 |
+| Click handler itself                     | `nav.click`         | 22 | 1.1 | 1.6 | 3.4 |
+
+Sub-span breakdown (combined across passes):
+
+| Span | n | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| `api.session.fetch` | 42 | 16.0 | 109.4 | 109.5 | 109.6 |
+| `api.goal.fetch`    |  3 |  7.8 |   7.8 |   7.8 |  22.0 |
+| `api.goal.gates.fetch`  | 9 |  8.5 | 21.6 | 21.6 | 23.1 |
+| `api.goal.agents.fetch` | 8 |  3.9 |  7.5 |  7.5 | 21.9 |
+| `ws.attach`         | 11 |  4.5 | 19.3 | 19.3 | 44.5 |
+| `paint.first`       | 70 | 16.6 | 26.7 | 32.8 | 41.0 |
+| `reducer.rehydrate` | 11 |  0.1 |  0.2 |  0.2 |  0.2 |
+
+### Per-ctrl+↓ wall-time — large fixture (200 msgs/session)
+
+Same commit, `BOBBIT_PERF_FIXTURE_SIZE=large`. Stored under
+`docs/perf/history/5309f93c5ee8-realistic-large.json`.
+
+| Gesture | Span | n | p50 | p95 | max |
+|---|---|---:|---:|---:|---:|
+| ctrl+↓ to session (**uncached**, lap 1) | `nav.session.ready` | 10 | **103.1** 🔴 | 125.5 | 173.5 |
+| ctrl+↓ to session (**cached**, lap 2)   | `nav.session.ready` | 10 | **32.9** | 60.3 | 61.8 |
+| ctrl+↓ to goal (warm)                   | `nav.goal.ready`    |  2 | 22.8 | 22.8 | 48.0 |
+| First-ever session deep-link             | `nav.session.cold`  |  1 | 169.6 | 169.6 | 169.6 |
+| First-ever goal-dashboard deep-link      | `nav.goal.cold`     |  1 | **1711.8** 🔴 | 1711.8 | 1711.8 |
+| Click handler itself                     | `nav.click`         | 22 | 1.4 | 2.0 | 4.8 |
+
+Sub-span breakdown:
+
+| Span | n | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| `api.session.fetch` | 41 | 11.4 | 117.8 | 118.8 | 119.3 |
+| `api.goal.fetch`    |  3 | 11.5 |  11.5 |  11.5 |  24.2 |
+| `api.goal.gates.fetch`  | 8 |  7.6 | 13.3 | 13.3 | 24.4 |
+| `api.goal.agents.fetch` | 8 |  3.1 | 10.8 | 10.8 | 23.8 |
+| `ws.attach`         | 11 |  4.7 | 19.4 | 19.4 | 19.6 |
+| `paint.first`       | 73 | 16.8 | 55.9 | 61.8 | 122.0 |
+| `reducer.rehydrate` | 11 |  0.3 |  0.6 |  0.6 |  0.7 |
+
+### Does ctrl+↓-spam feel smooth?
+
+**Yes for cached, no for uncached on large transcripts, very-no for the
+first goal dashboard.** Three sub-answers:
+
+1. **Input handler is not the bottleneck.** `nav.click` p50 ≈1.1–1.4 ms,
+   max <5 ms. The keyboard path through
+   `openForNavItem` is well below the 16 ms frame budget, so the
+   *gesture itself* is always registered — a user mashing ctrl+↓ won't
+   drop events. What they see is the **previous** ctrl+↓'s render
+   still finishing when the next one fires.
+2. **Cached re-visit is smooth.** Lap-2 p50 27 ms (medium) / 33 ms
+   (large), p95 32 ms (medium) / 60 ms (large). Both p50 and p95 sit
+   under the 100 ms "snappy" threshold even on `large`, so walking
+   back-and-forth through recently-visited rows feels instant.
+3. **Uncached first-visit on large transcripts breaks snappy.**
+   `nav.session.ready` p50 **103 ms** on large — the median first-visit
+   misses the threshold. p95 126 ms, max 174 ms. A user holding ctrl+↓
+   through a goal team's session list (typically 5–20 long-running
+   sessions, the kind that *have* 200+ msg transcripts) will perceive a
+   ~100 ms hitch on each new row. The driver is `paint.first` p95
+   jumping from 27 ms → 56 ms with transcript size (the synchronous
+   transcript render dominates), plus `api.session.fetch` p95 ≈118 ms
+   under the rapid-fire HTTP/1.1 contention the harness creates by
+   queueing fetches every ~50 ms.
+4. **The goal dashboard is in a different league.** `nav.goal.cold`
+   p50 **1.7 seconds** for the first-ever goal-dashboard load.
+   Sub-span attribution shows `api.session.fetch` against the goal's
+   sessions taking p50 **108–116 ms** during the goal-warm pass
+   (versus 8–16 ms elsewhere), which is the goal dashboard issuing
+   sequential session-info fetches per team agent. This is the single
+   biggest perceived-sluggishness win available, and is exactly what
+   Opt-D (parallelise goal-dashboard fetches) targets.
+
+### Snappy-threshold call-out for Opt-A/B/C/D
+
+Budget = 100 ms p50, 200 ms p95 (the "snappy / under user attention
+threshold" rule from the goal spec). Status as of this re-baseline:
+
+| Span | medium p50 | medium p95 | large p50 | large p95 | Verdict |
+|---|---:|---:|---:|---:|---|
+| `nav.session.ready` (uncached) |  62.8 |  79.4 | **103.1** 🔴 | 125.5 | **Fails** on large — Opt-A / Opt-B / Opt-C target |
+| `nav.session.ready` (cached)   |  26.9 |  31.8 |  32.9 |  60.3 | Passes |
+| `nav.goal.ready` (warm)        |  17.3 |  17.3 |  22.8 |  22.8 | Passes |
+| `nav.session.cold` (deep link) | 164.6 | 164.6 | 169.6 | 169.6 | **Fails p50 — Opt-A / Opt-B target** |
+| `nav.goal.cold` (deep link)    | **1690.8** 🔴 | 1690.8 | **1711.8** 🔴 | 1711.8 | **Fails 17×** — Opt-D target |
+| `paint.first`                  |  16.6 |  26.7 |  16.8 |  55.9 | Passes p50; p95 climbs with transcript size |
+| `api.session.fetch`            |  16.0 | 109.4 |  11.4 | 117.8 | p95 over budget under contention — Opt-B / Opt-C target |
+| `reducer.rehydrate`            |   0.1 |   0.2 |   0.3 |   0.6 | Decisively not a hotspot (confirmed §5.3) |
+
+### Re-ranked hotspots (re-baselined)
+
+This is the canonical ranking the four Opt-A/B/C/D agents measure
+against. Lower-rank spans either already pass budget or are downstream
+of higher-rank causes.
+
+1. **`nav.goal.cold` 1.7 s.** The biggest single perceived-sluggishness
+   wart in the whole product. Driven by sequential
+   `api.session.fetch` calls (108–116 ms each) issued by the dashboard
+   for each team session. Opt-D's target.
+2. **`nav.session.ready` uncached p50 103 ms on large.** First-visit
+   ctrl+↓ to a 200-msg session clears the snappy threshold. Driven by
+   `paint.first` scaling with transcript size (synchronous markdown /
+   highlight render) plus a contended `api.session.fetch`. Opt-A's
+   target (defer off-screen paint) and Opt-C's target (sidebar prefetch
+   on hover — turns uncached into cached for the row the user is
+   about to land on).
+3. **`api.session.fetch` p95 ≥110 ms under rapid-fire ctrl+↓.**
+   Server-side timing logs show the endpoint at 0.5–1 ms; the wall
+   clock is browser HTTP/1.1 head-of-line blocking as the harness
+   queues ~10 fetches in quick succession. Real users *do* hit this if
+   they hold ctrl+↓ — the lazy-tool-content flag (Opt-B) shrinks each
+   response and reduces parse cost, easing the contention.
+4. **`paint.first` p95 56 ms on large.** Single biggest sub-cost on
+   the click-path under transcript load. Opt-A's primary target.
+5. **`reducer.rehydrate` 0.3 ms.** Confirmed not a hotspot at any
+   fixture size. Anyone tempted to LRU-cache reducer state should
+   spend the time elsewhere.
+
+### What shifted vs Phase 2A (§5.1 / §5.2)
+
+- **Tool-result body sizes grew the tail.** Previous fixture had one
+  fixed 60 KB blob per session; the realistic mix now produces 6–7
+  blobs ≥30 KB and 2–3 ≥100 KB per `large` session, with a 2 MB
+  outlier on roughly 1-in-3 large sessions. That is what pushed
+  `api.session.fetch` p95 from 97 ms (Phase 2A) to ~118 ms here and
+  `paint.first` p95 from 103 ms to 56 ms (the latter dropped because
+  the previous 60 KB blob was rendered synchronously every time;
+  the new distribution has only some sessions hit that bucket).
+- **`nav.goal.cold` 1.7 s is new.** Not present in the Phase 2A
+  baseline because that pass didn't drive a fresh goal deep-link.
+  Now exposed and confirmed by the sub-span data — it dominates the
+  perceived-sluggishness story.
+- **Cached lap-2 p50 dropped** from 89 ms (Phase 1, live rows) to
+  ~27–33 ms (archived rows + realistic transcript). Once the row is
+  in the gateway's cache, transcript size doesn't move the needle
+  much: the fast-path render is reusing the previously hydrated state.
+- **Hotspot ranking re-shuffled** to put `nav.goal.cold` first, demote
+  `reducer.rehydrate` permanently, and elevate `paint.first` /
+  `api.session.fetch` p95 as the things the Opt-A/B/C/D agents should
+  measure their deltas against.
+
+## 5.6 Rapid Ctrl+↓ navigation (task `f2e18b1e` follow-up)
+
+The user's primary gesture is **holding Ctrl+↓ to walk the sidebar of
+goals and sessions**. §5.5 measured single-click cached vs uncached but
+never fired keystrokes back-to-back — the question "does it feel smooth
+when you hold the keys down?" was unanswered. §5.6 closes that gap.
+
+Four new sub-passes drive the canonical Ctrl+ArrowDown shortcut
+(`main.ts` "next-session" → `navigateSidebar("down")` → `openForNavItem`)
+at a fixed cadence WITHOUT awaiting the previous nav's sentinel:
+
+| Pass | Cadence | Rows visited | Cache state |
+|---|---|---|---|
+| `rapid-150-uncached` | 150 ms | 10 fresh fixture rows | run-wide unvisited |
+| `rapid-150-cached`   | 150 ms | same 10 rows, lap 2 | warm from previous pass |
+| `rapid-50-uncached`  |  50 ms | 10 different fresh rows | run-wide unvisited |
+| `rapid-50-cached`    |  50 ms | same 10 rows, lap 2 | warm from previous pass |
+
+The Ctrl+↓ shortcut already exists (`main.ts:557`) and routes through
+`openForNavItem` — the canonical instrumentation hook — so the existing
+`nav.session.ready` / `nav.goal.ready` spans fire for free. The harness
+derives four new spans per pass:
+
+- `rapidnav.keystroke.cached` / `rapidnav.keystroke.uncached` —
+  keystroke → sentinel-flip latency, partitioned by run-wide visited
+  state. (Run-wide = seeded from every `nav.*.ready` entry in the cold,
+  warm, and goal passes; an id is "uncached" the first time it appears
+  anywhere in the run.)
+- `rapidnav.gap` — idle ms between previous nav's sentinel-flip and the
+  next keystroke (positive only).
+- `rapidnav.stall.ms` — overlap ms when a keystroke fires while the
+  previous nav's sentinel hasn't flipped yet. Surfaces "keystroke landed
+  in the middle of a paint" — the bobbit-specific equivalent of a
+  dropped frame.
+
+### Harness layout change
+
+To give the rapid-nav pass real fresh rows to walk, the fixture-seed
+count went from 10 to 32, split into disjoint zones:
+
+```
+  warm-cached      indices  0–9    (10 rows, bottom of sidebar  — warm pass)
+  rapid-50 zone    indices 11–20   (10 rows, mid                — rapid-50)
+  rapid-150 zone   indices 21–30   (10 rows, upper-mid          — rapid-150)
+  anchor rows      indices 21, 31  (pre-positioning targets)
+```
+
+The rapid passes pre-position the active row via
+`__bobbitOpenForNavItem` before the first keystroke so the first
+Ctrl+↓ deterministically lands on a fresh fixture row, regardless of
+any live team-lead session or goal-group row sitting at the top of the
+sidebar. **Without anchoring, the first rapid-150 attempt lost 4 of 10
+keystrokes** to a 200 ms live-session attach at the top — the
+shortcut-registry fires while focus is held by the still-loading
+session and the navigateSidebar walk stalls. The anchored harness
+delivers 10-for-10 ready spans per pass; the lost-keystroke effect
+itself is documented below as a real bug.
+
+### Numbers — medium fixture (50 msgs/session)
+
+Commit `294bd68da3c8` on the goal branch, 2026-05-14T06:18Z. All
+durations in milliseconds. p50 highlighted in **bold** if it fails the
+100 ms snappy threshold.
+
+| Pass | Span | n | p50 | p95 | max |
+|---|---|---:|---:|---:|---:|
+| `rapid-150-uncached` | `rapidnav.keystroke.uncached` | 10 | **123.1** 🔴 | 134.0 | 142.2 |
+| `rapid-150-uncached` | `rapidnav.gap`                |  9 |  65.6 |  89.4 | 110.9 |
+| `rapid-150-cached`   | `rapidnav.keystroke.cached`   | 10 | **113.0** 🔴 | 131.4 | 143.9 |
+| `rapid-150-cached`   | `rapidnav.gap`                |  9 |  72.4 |  84.1 |  86.1 |
+| `rapid-50-uncached`  | `rapidnav.keystroke.uncached` | 10 | **103.9** 🔴 | 129.3 | 137.4 |
+| `rapid-50-uncached`  | `rapidnav.stall.ms`           |  9 |   2.9 |   4.4 |  62.6 |
+| `rapid-50-cached`    | `rapidnav.keystroke.cached`   | 10 | **118.1** 🔴 | 145.4 | 173.0 |
+| `rapid-50-cached`    | `rapidnav.stall.ms`           |  9 |   2.6 |  17.9 |  63.2 |
+
+Total stall time at 50 ms cadence: 84.7 ms (uncached) + 101.5 ms
+(cached) = 186 ms across 18 keystrokes, max single-keystroke stall 63 ms.
+
+### Numbers — large fixture (200 msgs/session)
+
+Same commit, `BOBBIT_PERF_FIXTURE_SIZE=large`. Stored under
+`docs/perf/history/294bd68da3c8-realistic-large-rapid.json`.
+
+| Pass | Span | n | p50 | p95 | max |
+|---|---|---:|---:|---:|---:|
+| `rapid-150-uncached` | `rapidnav.keystroke.uncached` | 10 | **166.9** 🔴 | 206.7 | 217.2 |
+| `rapid-150-uncached` | `rapidnav.gap`                |  7 |  26.2 |  79.5 | 102.5 |
+| `rapid-150-uncached` | `rapidnav.stall.ms`           |  2 |   1.6 |   1.6 |   2.4 |
+| `rapid-150-cached`   | `rapidnav.keystroke.cached`   | 10 | **128.2** 🔴 | 196.9 | 197.4 |
+| `rapid-150-cached`   | `rapidnav.gap`                |  8 |  74.0 |  98.5 | 103.7 |
+| `rapid-50-uncached`  | `rapidnav.keystroke.uncached` | 10 | **114.5** 🔴 | 160.4 | 168.0 |
+| `rapid-50-uncached`  | `rapidnav.stall.ms`           |  8 |   4.5 |   9.1 |  82.6 |
+| `rapid-50-cached`    | `rapidnav.keystroke.cached`   | 10 |  86.0  | 133.2 | 168.4 |
+| `rapid-50-cached`    | `rapidnav.stall.ms`           |  9 |   3.3 |   7.5 |  13.0 |
+
+Total stall time at 50 ms cadence (large): 119.7 + 42.1 = 162 ms
+across 17 keystrokes, max single-keystroke stall 82.6 ms.
+
+### Verdict on smoothness
+
+**Walking the sidebar with Ctrl+↓ does not feel smooth on this build.**
+
+1. **One-frame budget (16.7 ms): comprehensively failed.** Every
+   single keystroke→ready measurement — medium and large, cached and
+   uncached, both cadences — sits 5–10× above one frame. There is no
+   path to making this feel instant without addressing the underlying
+   work; the gesture is currently "press, wait a beat, press again".
+2. **100 ms snappy threshold: failed in 7 of 8 cells.** The only cell
+   that clears 100 ms p50 is `rapid-50-cached` on large (p50 86 ms), and
+   even that is within run-to-run noise of failing. Every other
+   cached/uncached × cadence × fixture-size cell is between **104 ms
+   and 167 ms p50** — plainly under user attention as a discrete hitch
+   per keystroke.
+3. **Cached vs uncached delta is small** (~10–40 ms at p50). That tells
+   us the dominant cost is *not* the REST/WS round-trip (which the
+   cache eliminates) but the **synchronous render and paint** of the
+   destination view. Hitting the back button in your head and pressing
+   Ctrl+↓ again doesn't save you a frame.
+4. **Cadence-vs-cadence delta is small**. p50 at 50 ms cadence is
+   roughly the same as p50 at 150 ms cadence (±10–20 ms) — the inherent
+   per-keystroke work doesn't shorten when you press faster, you just
+   pile up stalls. Total stall time at 50 ms cadence: ~160–190 ms per
+   10 keystrokes, with worst-case individual stalls of 60–80 ms.
+5. **At 50 ms cadence, ~9 of 10 keystrokes overrun the next one**
+   (`rapidnav.stall.ms` n=8–9 per pass). The user can press faster
+   than the UI can ready a row. Despite this the input handler itself
+   (`nav.click` p50 1–2 ms) registers every press — nothing is dropped
+   at the keyboard layer, the queue just outpaces the renderer.
+
+### Reproducing
+
+```bash
+BOBBIT_TIMING_LOG=1 BOBBIT_PERF_FIXTURE_SIZE=medium \
+BOBBIT_PERF_HISTORY_TAG=realistic-medium-rapid \
+  npx playwright test --config playwright-manual.config.ts \
+  --grep "perf-sidebar-nav"
+```
+
+(Same with `large` for the stress fixture.) Outputs:
+`tests/manual-integration/.perf-out/sidebar-nav-<ts>.{json,html}` and
+`docs/perf/history/294bd68da3c8-realistic-{medium,large}-rapid.json`.
+
+### Side-effect on §5.5 numbers
+
+Bumping FIXTURE_COUNT from 10 to 32 also lengthens the sidebar that
+`paint.first` has to re-render on every nav. The Phase 2A warm-pass
+numbers in §5.5 are NOT directly comparable to the new run; the same
+build with the new harness layout produces:
+
+| Pass / lap | §5.5 (10-row sidebar) | §5.6 (32-row sidebar) | Δ |
+|---|---:|---:|---:|
+| Warm lap 1 (uncached) medium | 62.8 | **90.7** | +28 ms |
+| Warm lap 2 (cached)   medium | 26.9 | **45.3** | +18 ms |
+| Warm lap 1 (uncached) large  | 103.1 | **152.8** | +50 ms |
+| Warm lap 2 (cached)   large  |  32.9 | **54.8** | +22 ms |
+
+The per-row sidebar-render cost has roughly doubled the warm-pass
+latencies. **This is itself an Opt-A target**: a 32-row sidebar costing
+~20–50 ms more per click than a 10-row sidebar is exactly the
+synchronous-paint scaling the user feels when they switch between a
+few sessions vs an active project with dozens. For the optimisation
+coders measuring deltas, **use §5.6 numbers** — they are the
+realistic baseline. §5.5 stands as the historical narrower-fixture
+reference.
+
+### Re-ranked hotspots for Opt-A/B/C/D (updated)
+
+The ctrl+↓ evidence shifts the ranking: render-side cost dominates
+everything, including the cached path the cache was supposed to save.
+
+1. **`paint.first` on every nav.** Medium p50 21.8 ms, p95 47.3 ms;
+   large p95 82.2 ms, max 109 ms. Repeated on every keystroke. Doubles
+   when the sidebar grows from 10 to 32 rows (this run vs §5.5).
+   **Opt-A's primary target.** Wins here directly drop
+   `rapidnav.keystroke.*` p50 below the 100 ms threshold.
+2. **`nav.goal.cold` 1.7 s.** Untouched by this re-baseline (the
+   first-ever goal deep-link is still slow). **Opt-D's target.**
+3. **`api.session.fetch` p95 ≥170 ms under rapid-fire contention.**
+   `rapid-50-uncached` queues 10 fetches inside 500 ms; HTTP/1.1 head-
+   of-line blocking compounds with per-response parse cost.
+   **Opt-B (lazy tool content)** shrinks each payload and reduces
+   queue depth; **Opt-C (prefetch on hover)** turns hovered rows
+   into the cached path before the user releases the modifier.
+4. **`api.goal.gates.fetch` p95 256–303 ms.** Newly visible at the
+   32-row sidebar size — the goal pass's gates-fetch p95 jumped from
+   ~21 ms (§5.5) to ~280 ms. Worth investigation; may indicate
+   sequential gate-content reads on the dashboard.
+5. **`reducer.rehydrate` 0.3 ms.** Still not a hotspot. Reconfirmed.
+
+### Known bug surfaced by this work (NOT fixed here)
+
+**Rapid Ctrl+↓ keystrokes hitting a live session at the top of the
+sidebar get dropped.** The harness's first attempt at
+`rapid-150-uncached` (without an anchor) landed the first keystroke
+on a live team-lead session that took 200 ms to attach. During that
+200 ms window, the next 3–4 keystrokes fired through the shortcut
+registry but produced no `nav.session.ready` spans — they were
+either no-ops (`openForNavItem` called for the same id repeatedly
+because `state.activeSessionId` hadn't yet committed from the
+in-flight attach) or aborted in the pending-span cascade without
+actually advancing the row. The user-visible effect is that **a fast
+Ctrl+↓ hold over a live session row pauses for ~200 ms and may
+"eat" up to 3 keystrokes** before the walk resumes.
+
+This is a `src/` bug — either `openForNavItem` should debounce
+repeated same-id calls cleanly, or `navigateSidebar` should advance
+off the `keyboardNavOverride` rather than `state.activeSessionId`
+while a nav is in flight. Fix is out of scope for this fixture-tuning
+task (task constraints: no `src/` edits). Worth picking up as a
+dedicated bug-fix task; reproducer = remove the
+`startFromSessionId` anchor from `runRapidPass("rapid-150-uncached",
+…)` and observe the keystroke loss.
+
 ## 6. Tried, didn't pay off
 
 *(Phase 2/3 fills this in. Empty for now.)*

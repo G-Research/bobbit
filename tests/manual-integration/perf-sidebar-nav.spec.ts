@@ -90,6 +90,11 @@ const ALL_SPANS = [
 	"reducer.rehydrate",
 	"paint.first",
 	"paint.tool-content.lazy",
+	// Derived in post-processing from the rapid Ctrl+↓ nav pass.
+	"rapidnav.keystroke.cached",
+	"rapidnav.keystroke.uncached",
+	"rapidnav.gap",
+	"rapidnav.stall.ms",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -641,7 +646,18 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// Stop the gateway, seed sessions.json + JSONL files on disk, then
 	// restart. See header comment + `seedArchivedFixtures` for the mechanism.
 	const { name: fixtureSizeName, msgsPerSession } = resolveFixtureSize();
-	const FIXTURE_COUNT = 10;
+	// Total seeded = 32. Layout (sidebar order newest-first; warm pass uses
+	// indices 0..WARM_PASS_COUNT-1 which sort to the BOTTOM):
+	//   warm-cached      indices  0–9   (10 rows, visited by the warm pass)
+	//   rapid-50 zone    indices 11–20 (10 rows, fresh for rapid-50)
+	//   rapid-150 zone   indices 21–30 (10 rows, fresh for rapid-150)
+	//   anchor row       index   31    (rapid-150 pre-position target)
+	//   anchor row       index   21    (rapid-50  pre-position target)
+	// The disjoint zones guarantee each cadence pass gets 10 truly run-wide-
+	// uncached samples on lap 1 and 10 cached samples on lap 2, no boundary
+	// rows contaminating the classification.
+	const FIXTURE_COUNT = 32;
+	const WARM_PASS_COUNT = 10;
 	const projectStateDir = join(dir, ".bobbit", "state");
 	const capturedProjectId = gw.defaultProjectId!;
 	console.log(`[harness] fixture size = ${fixtureSizeName} (${msgsPerSession} msgs/session × ${FIXTURE_COUNT} sessions)`);
@@ -805,7 +821,7 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	// produce zero `nav.session.ready` samples and trip the canonical-span
 	// invariant.
 	await page.waitForFunction(() => !!(window as any).__bobbitOpenForNavItem, undefined, { timeout: 10_000 });
-	const clickIds = warmSessionIds.length > 0 ? warmSessionIds : sessionIds;
+	const clickIds = (warmSessionIds.length > 0 ? warmSessionIds : sessionIds).slice(0, WARM_PASS_COUNT);
 	for (let lap = 0; lap < 2; lap++) {
 		for (const sid of clickIds) {
 			await page.evaluate((id) => {
@@ -895,6 +911,153 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 		await dumpClientEntries("goal-cold");
 	} else {
 		console.warn("[harness] goal creation failed \u2014 goal pass skipped");
+	}
+
+	// ── Rapid Ctrl+↓ nav pass ────────────────────────────────────────
+	//
+	// Drive the canonical Ctrl+ArrowDown sidebar shortcut
+	// (main.ts "next-session" → navigateSidebar("down") → openForNavItem)
+	// at a fixed cadence WITHOUT awaiting the previous nav's sentinel.
+	// This surfaces the user's "hold ctrl-down to walk the sidebar" gesture
+	// and exposes any frame-budget stalls when keystrokes outpace the render.
+	//
+	// Sidebar ordering is newest-first by `lastActivity`. Our 30 fixtures get
+	// `createdAt: now - (count - i) * 60_000` and `lastActivity: now - (count - i)
+	// * 30_000`, so `sessionIds[29]` is the newest (top of the sidebar) and
+	// `sessionIds[0]` is the oldest (bottom). The warm pass visited indices
+	// 0–9, which sit at the *bottom* of the sidebar; the top 20 rows are run-
+	// wide fresh and give us uncached samples to measure.
+	//
+	// Four sub-passes get us a clean 2×2 (cached × cadence) matrix:
+	//   rapid-150-uncached  10 × ctrl+↓ from top  → sessions 29–20, fresh
+	//   rapid-150-cached    10 × ctrl+↓ from top  → sessions 29–20, revisit
+	//   rapid-50-uncached   pre-position to idx 20, 10 × ctrl+↓ → 19–10 fresh
+	//   rapid-50-cached     same pre-position, 10 × ctrl+↓  → 19–10 revisit
+	const rapidNavKeystrokes: Array<{ label: string; cadenceMs: number; presses: number; keystrokes: number[] }> = [];
+
+	async function runRapidPass(label: string, cadenceMs: number, presses: number, opts: {
+		startFromSessionId?: string | null;
+	} = {}): Promise<void> {
+		// Re-land at home so the sidebar focus + active row are unambiguous.
+		await page.goto(appUrl);
+		try {
+			await page.waitForFunction(() => !!(window as any).__bobbitRefreshSessions, undefined, { timeout: 10_000 });
+			await page.evaluate(async () => { await (window as any).__bobbitRefreshSessions(); });
+		} catch { /* swallow */ }
+		// Sidebar must be populated AND the keyboard shortcut must be registered
+		// (main.ts dynamically imports sidebar-nav.js then registers shortcuts).
+		try { await page.waitForSelector('[data-nav-id^="session:"]', { timeout: 15_000 }); } catch { /* swallow */ }
+		try { await page.waitForFunction(() => !!(window as any).__bobbitOpenForNavItem, undefined, { timeout: 10_000 }); } catch { /* swallow */ }
+		// Drop any keyboard focus + ensure body is the focus target so the
+		// global shortcut-registry handler sees the keystroke.
+		await page.evaluate(() => {
+			(document.activeElement as HTMLElement | null)?.blur?.();
+			document.body.focus?.();
+		});
+
+		// Optional silent pre-positioning. Uses the same window surface the
+		// warm pass uses; the resulting `nav.session.ready` span gets dropped
+		// on the floor by clear() below so it doesn't pollute rapid-nav stats.
+		if (opts.startFromSessionId) {
+			await page.evaluate((id) => {
+				(window as any).__bobbitOpenForNavItem({ kind: "session", id });
+			}, opts.startFromSessionId);
+			try { await page.waitForSelector('#app[data-perf-ready="session"]', { timeout: 5_000 }); } catch { /* swallow */ }
+			await page.waitForTimeout(100);
+		}
+
+		// Clear leftover entries so we can attribute the rapid spans cleanly.
+		await page.evaluate(() => (window as any).__bobbitPerf?.clear?.());
+
+		// Record keystroke timestamps in the page's `performance.now()` domain
+		// so they're comparable to perf-trace span `t0`s.
+		const keystrokes: number[] = [];
+		await page.keyboard.down("Control");
+		for (let k = 0; k < presses; k++) {
+			const t = await page.evaluate(() => performance.now());
+			await page.keyboard.press("ArrowDown");
+			keystrokes.push(t);
+			if (k < presses - 1) await page.waitForTimeout(cadenceMs);
+		}
+		await page.keyboard.up("Control");
+		// Let the last few navs settle (the 50ms cadence can leave the final
+		// 2–3 navs still in-flight when the loop exits).
+		await page.waitForTimeout(Math.max(1_500, cadenceMs * 6));
+
+		const entries = await page.evaluate(() => (window as any).__bobbitPerf?.entries?.() ?? []);
+		for (const e of entries) clientEntries.push({ ...e, pass: label });
+		// Attach the keystroke log to the harness so post-processing can
+		// derive gap/stall spans for this pass.
+		rapidNavKeystrokes.push({ label, cadenceMs, presses, keystrokes });
+		await page.evaluate(() => (window as any).__bobbitPerf?.clear?.());
+		console.log(`[harness] rapid-pass ${label}: ${entries.filter((e: any) => e.name === "nav.session.ready" || e.name === "nav.goal.ready").length} ready span(s) from ${presses} keystrokes`);
+	}
+
+	// Anchor rows: pre-positioning makes the first Ctrl+↓ land on a
+	// deterministic fresh fixture row, regardless of any live team-lead
+	// session or goal-group row sitting at the top of the sidebar.
+	const rapid150Anchor = sessionIds[31] ?? sessionIds[sessionIds.length - 1] ?? null;
+	const rapid50Anchor  = sessionIds[21] ?? sessionIds[Math.min(21, sessionIds.length - 1)] ?? null;
+
+	await runRapidPass("rapid-150-uncached", 150, 10, { startFromSessionId: rapid150Anchor });
+	await runRapidPass("rapid-150-cached",   150, 10, { startFromSessionId: rapid150Anchor });
+	await runRapidPass("rapid-50-uncached",   50, 10, { startFromSessionId: rapid50Anchor });
+	await runRapidPass("rapid-50-cached",     50, 10, { startFromSessionId: rapid50Anchor });
+
+	// ── Derive rapidnav.* spans from canonical nav.*.ready entries ─────
+	// Cached vs uncached is classified by run-wide visited state: an id is
+	// uncached the first time it appears in any `nav.session.ready` /
+	// `nav.goal.ready` entry across the entire run (including non-rapid passes),
+	// cached on every subsequent appearance. Gap/stall are computed from the
+	// per-pass keystroke timestamps vs the matching ready span's t0+dur, with
+	// negative gaps recorded as `rapidnav.stall.ms`.
+	{
+		const RAPID_LABELS = new Set(["rapid-150-uncached", "rapid-150-cached", "rapid-50-uncached", "rapid-50-cached"]);
+		const visitedRunWide = new Set<string>();
+		// Seed run-wide visited from non-rapid passes (cold/warm/goal-*).
+		for (const e of clientEntries as any[]) {
+			if (RAPID_LABELS.has(e.pass)) continue;
+			if (e.name === "nav.session.ready" && e.detail?.sessionId) visitedRunWide.add(`session:${e.detail.sessionId}`);
+			else if (e.name === "nav.goal.ready" && e.detail?.goalId) visitedRunWide.add(`goal:${e.detail.goalId}`);
+		}
+		for (const ks of rapidNavKeystrokes) {
+			const readys = (clientEntries as any[])
+				.filter((e) => e.pass === ks.label && (e.name === "nav.session.ready" || e.name === "nav.goal.ready"))
+				.sort((a, b) => a.t0 - b.t0);
+			for (let i = 0; i < readys.length; i++) {
+				const r = readys[i];
+				const key = r.name === "nav.session.ready"
+					? `session:${r.detail?.sessionId}`
+					: `goal:${r.detail?.goalId}`;
+				const wasVisited = visitedRunWide.has(key);
+				visitedRunWide.add(key);
+				const spanName = wasVisited ? "rapidnav.keystroke.cached" : "rapidnav.keystroke.uncached";
+				(clientEntries as any[]).push({
+					name: spanName, t0: r.t0, dur: r.dur,
+					detail: { sourceName: r.name, cadenceMs: ks.cadenceMs, key, label: ks.label },
+					pass: ks.label,
+				});
+				// Gap / stall vs the *next* keystroke. Stall = next keystroke fired
+				// while this nav was still rendering; gap = idle time the UI had
+				// to spare before the next keystroke landed.
+				const nextKt = ks.keystrokes[i + 1];
+				if (typeof nextKt === "number") {
+					const endOfThis = r.t0 + r.dur;
+					if (nextKt >= endOfThis) {
+						(clientEntries as any[]).push({
+							name: "rapidnav.gap", t0: endOfThis, dur: nextKt - endOfThis,
+							detail: { cadenceMs: ks.cadenceMs, label: ks.label }, pass: ks.label,
+						});
+					} else {
+						(clientEntries as any[]).push({
+							name: "rapidnav.stall.ms", t0: nextKt, dur: endOfThis - nextKt,
+							detail: { cadenceMs: ks.cadenceMs, label: ks.label }, pass: ks.label,
+						});
+					}
+				}
+			}
+			console.log(`[harness] derived rapidnav.* for ${ks.label}: ${readys.length} keystrokes → ready samples`);
+		}
 	}
 
 	// ── Emit raw JSON + HTML report ────────────────────────────────
