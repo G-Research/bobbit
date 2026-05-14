@@ -149,6 +149,41 @@ export default function (pi: ExtensionAPI) {
 							`To use the full freeze/replan flow, recreate the goal with the 'parent' workflow.`,
 						);
 					}
+					// Validate the full dependency graph BEFORE spawning anything.
+					// An invalid graph (unknown planId, self-dep, cycle, duplicate planId)
+					// must be rejected atomically — no partial state.
+					{
+						const planIdSet = new Set<string>();
+						const dupErrors: string[] = [];
+						for (const s of params.steps) {
+							if (planIdSet.has(s.planId)) dupErrors.push(`duplicate planId "${s.planId}"`);
+							planIdSet.add(s.planId);
+						}
+						if (dupErrors.length > 0) return err(`spawn-children-direct: ${dupErrors.join("; ")}`);
+						const depErrors: string[] = [];
+						for (const s of params.steps) {
+							for (const dep of s.dependsOn ?? []) {
+								if (dep === s.planId) depErrors.push(`self-dependency on "${s.planId}"`);
+								else if (!planIdSet.has(dep)) depErrors.push(`"${s.planId}" dependsOn unknown planId "${dep}"`);
+							}
+						}
+						if (depErrors.length > 0) return err(`spawn-children-direct: ${depErrors.join("; ")}`);
+						// Cycle detection via Kahn's topo sort — any unvisited node after the sort is part of a cycle.
+						const indeg = new Map(params.steps.map(s => [s.planId, 0]));
+						for (const s of params.steps) for (const d of s.dependsOn ?? []) indeg.set(s.planId, (indeg.get(s.planId) ?? 0) + 1);
+						const q: string[] = params.steps.filter(s => (indeg.get(s.planId) ?? 0) === 0).map(s => s.planId);
+						const visited = new Set<string>();
+						while (q.length > 0) {
+							const n = q.shift()!; visited.add(n);
+							for (const s of params.steps) {
+								if (visited.has(s.planId) || !(s.dependsOn ?? []).includes(n)) continue;
+								const d = (indeg.get(s.planId) ?? 1) - 1; indeg.set(s.planId, d);
+								if (d === 0) q.push(s.planId);
+							}
+						}
+						const cycleNodes = params.steps.filter(s => !visited.has(s.planId)).map(s => s.planId);
+						if (cycleNodes.length > 0) return err(`spawn-children-direct: dependency cycle detected among: ${cycleNodes.join(", ")}`);
+					}
 					const hasDependsOn = params.steps.some(s => s.dependsOn && s.dependsOn.length > 0);
 					// Topological sort — spawn deps before dependants so each
 					// spawn-child call finds its dependsOn siblings already present.

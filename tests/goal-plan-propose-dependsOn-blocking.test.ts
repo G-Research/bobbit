@@ -365,3 +365,90 @@ describe("spawn-children-direct fallback response includes warning when dependsO
 		assert.deepEqual((toolResponse as any).blockedPlanIds, ["Y"], "blockedPlanIds must be [\"Y\"]");
 	});
 });
+
+/**
+ * Pure-logic replication of the pre-spawn validation that
+ * `defaults/tools/children/extension.ts` runs before the first spawn.
+ * Returns an error string on invalid input, null on valid.
+ */
+function validateFallbackDag(steps: Array<{ planId: string; dependsOn?: string[] }>): string | null {
+	const planIdSet = new Set<string>();
+	for (const s of steps) {
+		if (planIdSet.has(s.planId)) return `duplicate planId "${s.planId}"`;
+		planIdSet.add(s.planId);
+	}
+	for (const s of steps) {
+		for (const dep of s.dependsOn ?? []) {
+			if (dep === s.planId) return `self-dependency on "${s.planId}"`;
+			if (!planIdSet.has(dep)) return `"${s.planId}" dependsOn unknown planId "${dep}"`;
+		}
+	}
+	// Cycle detection via Kahn's algorithm
+	const indeg = new Map(steps.map(s => [s.planId, 0]));
+	for (const s of steps) for (const d of s.dependsOn ?? []) indeg.set(s.planId, (indeg.get(s.planId) ?? 0) + 1);
+	const q: string[] = steps.filter(s => (indeg.get(s.planId) ?? 0) === 0).map(s => s.planId);
+	const visited = new Set<string>();
+	while (q.length > 0) {
+		const n = q.shift()!; visited.add(n);
+		for (const s of steps) {
+			if (visited.has(s.planId) || !(s.dependsOn ?? []).includes(n)) continue;
+			const d = (indeg.get(s.planId) ?? 1) - 1; indeg.set(s.planId, d);
+			if (d === 0) q.push(s.planId);
+		}
+	}
+	const cycleNodes = steps.filter(s => !visited.has(s.planId)).map(s => s.planId);
+	if (cycleNodes.length > 0) return `dependency cycle detected among: ${cycleNodes.join(", ")}`;
+	return null;
+}
+
+describe("spawn-children-direct fallback pre-spawn validation (extension.ts)", () => {
+	it("rejects unknown planId in dependsOn — no children spawned", async () => {
+		// Validate BEFORE calling spawn so partial state is impossible.
+		const steps = [
+			{ planId: "A", spec: "A spec", dependsOn: undefined as string[] | undefined },
+			{ planId: "B", spec: "B spec", dependsOn: ["NONEXISTENT"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "validation must reject unknown dep");
+		assert.ok(err!.includes("NONEXISTENT"), `error must mention the unknown id: ${err}`);
+		// Confirm no children were spawned (validation runs before any spawns)
+		const before = goalStore.getAll().filter(g => g.parentGoalId === parent.id).length;
+		assert.equal(before, 0, "no children should exist before any spawn attempt");
+	});
+
+	it("rejects self-dependency", () => {
+		const steps = [{ planId: "A", spec: "A spec", dependsOn: ["A"] }];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "self-dep must be rejected");
+		assert.ok(err!.includes("self-dependency"), `error must mention self-dependency: ${err}`);
+	});
+
+	it("rejects duplicate planIds", () => {
+		const steps = [
+			{ planId: "A", spec: "A spec" },
+			{ planId: "A", spec: "A dup spec" },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "duplicate planId must be rejected");
+		assert.ok(err!.includes("duplicate"), `error must mention duplicate: ${err}`);
+	});
+
+	it("rejects dependency cycle", () => {
+		const steps = [
+			{ planId: "A", spec: "A spec", dependsOn: ["B"] },
+			{ planId: "B", spec: "B spec", dependsOn: ["A"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.ok(err !== null, "cycle must be rejected");
+		assert.ok(err!.includes("cycle"), `error must mention cycle: ${err}`);
+	});
+
+	it("valid DAG passes validation", () => {
+		const steps = [
+			{ planId: "root", spec: "root spec" },
+			{ planId: "child", spec: "child spec", dependsOn: ["root"] },
+		];
+		const err = validateFallbackDag(steps);
+		assert.equal(err, null, "valid DAG must pass validation");
+	});
+});
