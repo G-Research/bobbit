@@ -29,7 +29,7 @@ The adapter interface (`LspClient` / `LspClientFactory` in `src/server/lsp/clien
 
 ## The seven tools
 
-All tools register as built-in MCP tools under `defaults/tools/lsp/` and POST to `/api/lsp/<method>` on the gateway. Paths are **relative to session `cwd`** on both input and output. `line` and `character` are **0-indexed** (LSP-native), which differs from `read`'s 1-indexed `offset` — be careful when round-tripping.
+All seven tools are registered via the pi-extension loader from `defaults/tools/lsp/extension.ts`, which POSTs to `/api/lsp/<method>` on the gateway — the same pattern used by `bash_bg`, `browser_*`, `web_*`, and other extension-backed tool groups. Paths are **relative to session `cwd`** on both input and output. `line` and `character` are **0-indexed** (LSP-native), which differs from `read`'s 1-indexed `offset` — be careful when round-tripping.
 
 | Tool | Params | Result | Typical use |
 | --- | --- | --- | --- |
@@ -104,7 +104,7 @@ When a project runs sessions inside Docker, the supervisor accepts a `SandboxLsp
 - Reverses container paths back to host paths on return values (definition `path`, references, diagnostics) so the agent only ever sees paths relative to its `cwd`.
 - Spawns the LSP child via `docker exec` inside the project's pool container, mirroring how `rpc-bridge.ts::spawnDockerExec` reaches into the sandbox for other processes.
 
-The Bobbit Docker sandbox image ships with `typescript-language-server` pre-installed (see `docker/`). Hosts running sessions without a container — e.g. host-only sessions, the unit-test fixture project — get a **host spawn fallback**: when the bridge cannot resolve a container id for the worktree, the supervisor invokes the factory's plain `spawn()` path against the host filesystem. This is the path that ships today (HEAD 5e1819af).
+The Bobbit Docker sandbox image ships with `typescript-language-server` pre-installed (see `docker/`). Hosts running sessions without a container — e.g. host-only sessions, the unit-test fixture project — get a **host spawn fallback**: when the bridge cannot resolve a container id for the worktree, the supervisor invokes the factory's plain `spawn()` path against the host filesystem. This is the path that ships today (added in the host-spawn-fallback fix).
 
 > **Scope honesty.** The container ↔ host path translation is wired and exercised by the dispatch helper, but cross-sandbox path round-trips have not been hardened against every edge case (Windows host with Linux container, multi-mount worktrees, etc.). If you see absolute container paths leaking into agent output, that's the area to look at.
 
