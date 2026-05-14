@@ -120,3 +120,6 @@ When the agent finishes a turn, the browser client notifies the user via:
 1. **Browser Notification API** — Shows session title and elapsed time
 2. **Title flash** — Alternates document title with "Done (Xm)" until tab regains focus
 3. **Audio beep** — Two-tone sine wave (880 Hz, 1046 Hz) via Web Audio API
+4. **Favicon badge + sidebar unread dot** — Persists until the user opens the session
+
+These cues are scoped to **human attention**: standalone sessions notify on idle (as before), team members and delegates stay silent (they escalate to their team lead, not the user), and a team lead notifies only when the goal is `complete` or when it is stuck (no live downstream work and no in-flight verification). All three surfaces (polling beep, active-session beep, sidebar dot) consult the single predicate in `src/app/notification-policy.ts`. See [design/notification-policy.md](design/notification-policy.md).

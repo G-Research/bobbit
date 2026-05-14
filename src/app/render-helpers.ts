@@ -28,6 +28,7 @@ import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import { needsHumanAttention } from "./notification-policy.js";
 
 // ============================================================================
 // FORMATTING
@@ -223,21 +224,19 @@ export function markSessionVisited(sessionId: string): void {
 }
 
 /** Returns true if the session has activity the user hasn't seen yet.
- *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt.
- *  For team agents (team leads and members), the dot only shows when the
- *  associated goal is complete — humans don't need to check on agents mid-work. */
+ *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt
+ *  AND the session warrants human attention (see `needsHumanAttention` —
+ *  team members never surface, team leads only when goal is complete or stuck). */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
 
-	// Team agents: suppress the unseen dot unless the goal is complete
-	const teamGoal = session.teamGoalId || (session.role === "team-lead" ? session.goalId : undefined);
-	if (teamGoal) {
-		const goal = state.goals.find(g => g.id === teamGoal);
-		if (!goal || goal.state !== "complete") return false;
-	}
+	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
+	const goalId = session.teamGoalId || session.goalId;
+	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+	if (!needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)) return false;
 
 	const mirror = _readMirror.get(session.id) ?? 0;
 	const lastRead = Math.max(session.lastReadAt ?? 0, mirror);

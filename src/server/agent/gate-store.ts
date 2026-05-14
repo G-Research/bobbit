@@ -17,6 +17,16 @@ export interface GateSignalStep {
 		contentType: string;
 		metadata?: Record<string, string>;
 	};
+	/**
+	 * Lifecycle status for in-flight rows. Set on initial enumeration by
+	 * `VerificationHarness.beginVerification()` so the gate-store signal
+	 * carries useful progress information from the moment it is recorded
+	 * (eliminating the gate-store ↔ activeVerifications race). Omitted on
+	 * fully-completed rows where `passed`/`skipped` already carry the verdict.
+	 */
+	status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+	/** Optional phase number, mirrored from the workflow VerifyStep for ordering. */
+	phase?: number;
 }
 
 export interface GateSignal {
