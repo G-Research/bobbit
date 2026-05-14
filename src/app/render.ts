@@ -9,7 +9,7 @@ import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Bot, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, List, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -31,7 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -409,6 +409,23 @@ function renderMobileLanding() {
 															title="Project settings"
 														>${icon(Settings, "sm")}</button>
 														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
+															title="Manage staff agents"
+														>${icon(List, "sm")}</button>
+														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); void startNewStaffFlow(e, project.id); }}
+															title="New staff agent in ${project.name}"
+														>
+															<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
+																${icon(Bot, "sm")}
+																<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+																	<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+																</svg>
+															</span>
+														</button>
+														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
 															@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
 															title="New goal in ${project.name}"
@@ -454,8 +471,7 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
-													${renderStaffSidebarSection(data.staff, project.id)}
-													${(() => {
+																										${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");

@@ -454,10 +454,17 @@ export function renderSessionRow(session: GatewaySession) {
 	const isTeamLead = session.role === "team-lead";
 
 	// Desktop: hover-revealed gradient overlay. Mobile: always-visible inline buttons.
+	// Staff-backed sessions: route pencil to the staff editor instead of the
+	// rename dialog (per surface-staff-in-sessions design).
+	const staffId = session.staffId;
+	const pencilTitle = staffId ? "Edit staff" : "Modify";
+	const pencilHandler = staffId
+		? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
+		: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); };
 	const buttons = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
-			title="Modify">${icon(Pencil, "xs")}</button>
+			@click=${pencilHandler}
+			title=${pencilTitle}>${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
 			title=${(isTeamLead ? "End team" : "Terminate") + shortcutHint("terminate-session")}>${icon(Trash2, "xs")}</button>
