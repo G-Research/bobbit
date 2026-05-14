@@ -50,15 +50,19 @@ docker volume rm bobbit-nm-cache-<hash> bobbit-npm-cache-<hash>
 
 ## Design
 
-The agent CLI (`@mariozechner/pi-coding-agent`) is **not** installed in the image. It is bind-mounted from the host at runtime:
+The agent CLI (`@earendil-works/pi-coding-agent`) is installed **inside** the image — bind-mounting `node_modules` from a Windows/macOS host into a Linux container is ~20× slower than a native layer. The version is pinned to a build-arg and stamped onto the image as a `bobbit.pi-agent-version` label:
 
+```dockerfile
+ARG PI_AGENT_VERSION=0.74.0
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} ...
+LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 ```
--v <hostNodeModules>:/node_modules:ro
-```
+
+At startup the gateway reads its own `pi-coding-agent` version from `node_modules`, compares it to the image's `bobbit.pi-agent-version` label, and rebuilds automatically when they drift — passing `--build-arg PI_AGENT_VERSION=<host-version>` so the image always matches the gateway. See `src/server/agent/sandbox-status.ts::ensureImageAgentVersion`.
 
 This ensures:
 - The container always uses the **same agent version** as the gateway
-- The image stays lightweight and doesn't need rebuilding on agent updates
+- Fast filesystem access for the agent runtime (no cross-OS bridge)
 - No version drift between sandboxed and non-sandboxed sessions
 
 Project `node_modules` (the project's own dependencies used for builds and tests) are handled separately by the entrypoint's cross-platform cache.
