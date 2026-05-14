@@ -63,6 +63,96 @@ test("GET /api/lsp/state is registered (never 404)", async () => {
 	expect(res.status).toBe(200);
 });
 
+// ---------------------------------------------------------------------------
+// Telemetry: adoption counters on /api/lsp/stats
+//
+// Design: docs/design (Goal: LSP adoption telemetry). LspSupervisor maintains
+// process-local counters incremented on every dispatch() and via an internal
+// hint-emitted endpoint called by grep/bash hint extensions. /api/lsp/stats
+// exposes them under `counters`. Boot self-check may have already incremented
+// `diagnostics` and `lspCallsTotal`, so all assertions use deltas.
+// ---------------------------------------------------------------------------
+
+interface TelemetryCounters {
+	lspCallsTotal: number;
+	lspCallsByMethod: Record<string, number>;
+	lspCallsByStatus: Record<string, number>;
+	grepLspHintEmittedTotal: number;
+}
+
+async function getCounters(): Promise<TelemetryCounters> {
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status).toBe(200);
+	const body = await res.json() as { counters?: TelemetryCounters };
+	expect(body.counters, "/api/lsp/stats must expose a `counters` object").toBeDefined();
+	return body.counters as TelemetryCounters;
+}
+
+test("GET /api/lsp/stats exposes telemetry counters with stable shape", async () => {
+	const counters = await getCounters();
+	expect(typeof counters.lspCallsTotal).toBe("number");
+	expect(counters.lspCallsByMethod, "lspCallsByMethod must be an object").toBeTruthy();
+	expect(counters.lspCallsByStatus, "lspCallsByStatus must be an object").toBeTruthy();
+	expect(typeof counters.grepLspHintEmittedTotal).toBe("number");
+	// Known method keys are pre-initialized so the shape is stable before any calls.
+	for (const m of LSP_METHODS) {
+		expect(typeof counters.lspCallsByMethod[m], `lspCallsByMethod.${m} must be initialized to a number`).toBe("number");
+	}
+	for (const s of ["ok", "lsp_unavailable", "lsp_capacity", "lsp_timeout", "lsp_route_missing", "error"]) {
+		expect(typeof counters.lspCallsByStatus[s], `lspCallsByStatus.${s} must be initialized to a number`).toBe("number");
+	}
+});
+
+test("POST /api/lsp/diagnostics increments lspCallsTotal and lspCallsByMethod.diagnostics", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/diagnostics", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ path: "src/math.ts", cwd: FIXTURE }),
+	});
+	expect(res.status).toBe(200);
+	// Drain body so the request fully completes before re-reading stats.
+	await res.json();
+	const after = await getCounters();
+	expect(after.lspCallsTotal - before.lspCallsTotal, "lspCallsTotal must increment by 1").toBe(1);
+	expect((after.lspCallsByMethod.diagnostics ?? 0) - (before.lspCallsByMethod.diagnostics ?? 0), "lspCallsByMethod.diagnostics must increment by 1").toBe(1);
+});
+
+test("POST /api/lsp/diagnostics with path outside worktree increments lspCallsByStatus.lsp_unavailable", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/diagnostics", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		// Absolute path well outside the fixture's worktree triggers the
+		// supervisor's path-containment guard → lsp_unavailable.
+		body: JSON.stringify({ path: "/etc/hostname", cwd: FIXTURE }),
+	});
+	expect(res.status).toBe(200);
+	await res.json();
+	const after = await getCounters();
+	expect(
+		(after.lspCallsByStatus.lsp_unavailable ?? 0) - (before.lspCallsByStatus.lsp_unavailable ?? 0),
+		"lspCallsByStatus.lsp_unavailable must increment by 1",
+	).toBe(1);
+});
+
+test("POST /api/lsp/_internal/hint-emitted increments grepLspHintEmittedTotal", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/_internal/hint-emitted", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: "{}",
+	});
+	expect(res.status, "/api/lsp/_internal/hint-emitted must be a registered route").not.toBe(404);
+	expect(res.status).toBe(200);
+	await res.json().catch(() => undefined);
+	const after = await getCounters();
+	expect(
+		after.grepLspHintEmittedTotal - before.grepLspHintEmittedTotal,
+		"grepLspHintEmittedTotal must increment by 1",
+	).toBe(1);
+});
+
 for (const method of LSP_METHODS) {
 	test(`POST /api/lsp/${method} is registered (never 404)`, async () => {
 		const res = await apiFetch(`/api/lsp/${method}`, {
