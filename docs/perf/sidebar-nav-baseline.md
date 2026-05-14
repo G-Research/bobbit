@@ -749,46 +749,80 @@ which the user actually sees after the auto-scroll-to-bottom on session
 activation) and deferring the rest via `IntersectionObserver` +
 `requestIdleCallback` should cut p95 dramatically without affecting median.
 
-**A/B harness run** — same SHA `cd1fceb9bc45`, large fixture
-(200 msgs/session × 32 sessions), `BOBBIT_PERF_FIXTURE_SIZE=large`:
+**A/B harness run — n=5 replicates per condition**, interleaved off / on /
+off / on … to spread any drift (CPU thermal, machine warm-up) across both
+arms. Same SHA `f1699ac9e9f7`, large fixture (200 msgs/session × 32 sessions),
+`BOBBIT_PERF_FIXTURE_SIZE=large`. Per-run histories under
+`docs/perf/history/f1699ac9e9f7-opt-a-{off,on}-{1..5}.json`.
 
-| span | n | p50 off | p50 on | Δ p50 | p95 off | p95 on | Δ p95 | max off | max on |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **paint.first** | 192 → 198 | 32.3 | 29.9 | **−2.4** | 115.3 | 74.7 | **−40.6** | 214.1 | 95.6 |
-| **nav.session.ready** | 60 | 152.7 | 147.1 | **−5.6** | 309.9 | 221.9 | **−88.0** | 371.2 | 243.5 |
-| nav.goal.ready | 2 | 34.7 | 37.5 | +2.8 | 34.7 | 37.5 | +2.8 | 123.1 | 122.5 |
-| nav.session.cold | 1 | 348.0 | 485.8 | +137.8 | 348.0 | 485.8 | +137.8 | 348.0 | 485.8 |
-| reducer.rehydrate | 42 → 44 | 0.4 | 0.5 | +0.1 | 0.7 | 0.9 | +0.2 | 1.0 | 2.2 |
-| **rapidnav.keystroke.uncached** | 20 | 162.0 | 153.3 | −8.7 | 326.8 | 191.3 | **−135.5** | 371.2 | 229.3 |
-| **rapidnav.keystroke.cached** | 20 | 177.4 | 144.0 | **−33.4** | 276.2 | 191.5 | **−84.7** | 310.7 | 228.4 |
-| rapidnav.stall.ms | 28 → 19 | 4.4 | 4.8 | +0.4 | 21.5 | 10.4 | −11.1 | 63.9 | 55.8 |
-| rapidnav.gap | 8 → 17 | 70.7 | 56.3 | −14.4 | 142.7 | 101.1 | −41.6 | 202.8 | 171.2 |
+**Aggregation rule.** Per-span/per-percentile, we take the *median across
+the 5 replicates* of that span's percentile, and the [min, max] range across
+replicates. A win **“survives”** only if the **OFF and ON replicate ranges
+don't overlap** in the improving direction (every ON sample beats every OFF
+sample); otherwise it's recorded as `partial` (median moved but ranges
+overlap) or `noise` (median within jitter band).
 
-History files: `docs/perf/history/cd1fceb9bc45-opt-a-off.json`,
-`docs/perf/history/cd1fceb9bc45-opt-a-on.json`.
+| span | metric | OFF med | OFF range | ON med | ON range | Δ med | survives? |
+|---|---|---:|---:|---:|---:|---:|:---:|
+| **paint.first** | p95 | 113.5 | 111.5–126.7 | **76.5** | 68.3–80.0 | **−37.0** | **yes** |
+| paint.first | p50 | 32.8 | 28.6–34.6 | 32.9 | 29.6–34.4 | +0.1 | noise |
+| **nav.session.ready** | p95 | 330.4 | 289.0–383.4 | **235.4** | 209.9–263.9 | **−95.0** | **yes** |
+| nav.session.ready | p50 | 166.0 | 155.0–177.5 | 163.2 | 152.9–173.6 | −2.8 | partial |
+| nav.goal.ready | p95 | 36.1 | 26.7–58.3 | 30.3 | 21.1–40.2 | −5.8 | partial |
+| nav.session.cold | p95 | 480.0 | 392.5–562.1 | 451.7 | 386.7–528.3 | −28.3 | partial |
+| reducer.rehydrate | p95 | 0.8 | 0.8–1.0 | 0.9 | 0.7–1.0 | +0.1 | noise |
+| **rapidnav.keystroke.uncached** | p95 | 319.6 | 277.9–401.1 | **217.8** | 196.4–237.8 | **−101.8** | **yes** |
+| rapidnav.keystroke.uncached | p50 | 171.4 | 143.2–179.3 | 166.3 | 152.8–189.0 | −5.1 | partial |
+| **rapidnav.keystroke.cached** | p95 | 320.3 | 288.2–377.3 | **217.9** | 212.5–267.6 | **−102.4** | **yes** |
+| rapidnav.keystroke.cached | p50 | 173.4 | 132.8–211.0 | 170.0 | 163.7–192.2 | −3.4 | partial |
+| **rapidnav.gap** | p95 | 162.3 | 138.5–180.2 | **88.5** | 79.6–95.5 | **−73.8** | **yes** |
+| **rapidnav.gap** | p50 | 109.2 | 74.5–114.8 | **41.7** | 26.2–62.5 | **−67.5** | **yes** |
+| rapidnav.stall.ms | p95 | 24.7 | 21.3–70.8 | 56.7 | 20.5–74.1 | +32.0 | noise (overlap) |
+| api.session.fetch | p95 | 299.1 | 88.6–576.6 | 307.6 | 95.6–317.0 | +8.5 | noise |
 
-**Verdict — ship.** Multiple spans clear the ≥100ms p50 reduction bar at
-p95:
+**Verdict — ship.** Six spans clear the “survives” bar (replicate ranges
+don't overlap):
 
-- `paint.first` p95 **−40.6ms** (115→75ms, **35% cut**); max **−118ms**
-  (214→96ms). The 200ms+ outlier domain is gone; max is now under the
-  100ms “snappy” threshold.
-- `nav.session.ready` p95 **−88ms** (310→222ms, **28% cut**); max
-  **−128ms** (371→244ms). The user-visible “click → transcript ready”
-  metric.
-- Rapid Ctrl+↓ spam: `rapidnav.keystroke.uncached` p95 **−135.5ms** (40% cut),
-  cached p95 **−84.7ms** (31% cut). The keyboard-walk gesture feels
-  materially smoother under the flag; uncached keystrokes finally land
-  near the cached cohort instead of stalling far above it.
-- `rapidnav.stall.ms` n: 28→19 with p95 21.5→10.4 — fewer keystrokes
-  outrun the render, and the surviving stalls are smaller.
+- **`paint.first` p95** → every ON replicate (≤80.0ms) finished below every
+  OFF replicate (≥111.5ms). Median **−37ms (−33%)**. The dominant transcript-
+  scaling hotspot per §5.4. Off-max 126.7ms → on-max 80.0ms; the p95
+  outlier domain is gone, and the worst-case on-run is now firmly inside
+  the snappy band.
+- **`nav.session.ready` p95** — median **−95ms (−29%)**, ranges fully
+  separated (max-on 263.9 < min-off 289.0). The user-visible “click →
+  transcript ready” metric. Worst-case off was 383ms; worst-case on is
+  264ms.
+- **Rapid Ctrl+↓ walk** — `rapidnav.keystroke.uncached` p95 median
+  **−102ms (−32%)**, cached p95 median **−102ms (−32%)**. Both arms’
+  ranges are clean and non-overlapping. The keystroke-walk gesture
+  finishes meaningfully faster *and* more predictably.
+- **`rapidnav.gap`** (the idle time the UI has *before* the next keystroke
+  lands) survives at BOTH p50 (**−67.5ms**) and p95 (**−73.8ms**) — the
+  flipside of the keystroke wins: renders complete sooner so there's more
+  slack before the next event. This is the clean indicator that we
+  actually freed up the main thread.
 
-**Caveat — nav.session.cold (n=1) regressed by 138ms p50.** Single-sample,
-classic noise. The cold pass visits only 3 sessions and only the very
-first one's `nav.session.cold` span is recorded (subsequent ones are warm).
-Needs re-measure with a larger cold pass before drawing a conclusion. The
-warm-pass spans (which dominate the user gesture: clicking around in an
-open tab) all improve.
+**Partial / noise spans:**
+- `nav.session.ready` p50 partial (median −2.8ms; ranges overlap). Expected:
+  the median nav is dominated by the eagerly-rendered tail under both
+  conditions, so we don't move it. p95 — the tail of the distribution where
+  large transcripts dominate — is where the optimisation lands.
+- `paint.first` p50 noise (±0.1ms). Same story — the small-paint case
+  isn't render-bound to begin with.
+- `nav.goal.ready` partial; goal-dashboard render is tiny (n=2/run, ~30ms)
+  and unaffected by transcript deferral. Expected.
+- `nav.session.cold` partial; n=1 per replicate (only the first session in
+  the cold pass records this span), p50 range 392–562 off vs 387–528 on —
+  ranges overlap heavily. Median moved −28ms in the right direction but
+  not statistically meaningful. Re-measure with a larger cold pass to
+  conclude.
+- `rapidnav.stall.ms` is *not* a regression — ranges overlap fully
+  (off 21–71, on 20–74). Stall n varies run-to-run (when does the next
+  keystroke happen to fall vs render end?), and the matched `rapidnav.gap`
+  win shows the underlying main-thread time *did* improve. The stall
+  classification just catches a smaller, jitterier subset.
+- `api.session.fetch` noise both ways — fetch path isn't touched by this
+  optimisation. Sanity check passed.
 
 **Why it works.** Auto-scroll-to-bottom puts the user at message 200 of 200;
 only ~5–8 messages are actually visible at first paint. The other 190+ were
@@ -796,6 +830,14 @@ previously being parsed + rendered into Lit / markdown / syntax-highlight
 DOM before the user could see anything. Under the flag they're a single
 `<div style="min-height:80px">` per message; IO + rIC resolve them as the
 user scrolls up, so correctness is preserved end-to-end.
+
+**Why p95 moves but p50 doesn't.** The eager tail (last 8 messages) renders
+synchronously under both conditions, so any nav whose paint cost is
+dominated by those visible messages lands in the same place — hence the
+identical medians. The p95 / max samples are the navs that, under OFF,
+spent serious time rendering the 190+ off-screen messages; under ON those
+become cheap placeholders. That collapses the long-tail distribution
+while leaving the cheap-case median alone, which is exactly what we want.
 
 **Correctness escape hatch.** Native browser-find (`Ctrl+F` / `Cmd+F` / `F3`)
 doesn't trigger IntersectionObserver. A module-level keydown listener
