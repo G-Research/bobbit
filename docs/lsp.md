@@ -153,7 +153,7 @@ The check runs three loopback probes over the gateway's own auth token, each wit
 | --- | --- | --- |
 | 1 | `GET /api/lsp/stats` | HTTP 200 |
 | 2 | `GET /api/lsp/state?cwd=<gateway-cwd>&path=<a real src file>` | HTTP 200 |
-| 3 | `POST /api/lsp/diagnostics` with `{cwd: <gateway-cwd>, path: <a real src file>}` | HTTP 200 — diagnostics results or a structured supervisor-error envelope are both pass, but `ENOENT` / `stat '` in the body fails |
+| 3 | `POST /api/lsp/diagnostics` with `{cwd: <gateway-project-root>, path: <cwd-relative src file>}` | HTTP 200 — diagnostics results or a structured supervisor-error envelope are both pass, but `ENOENT` / `stat '` in the body fails. Skipped when the gateway is running from a synthetic project root that doesn't contain `src/server/server.ts` (e.g. in-process e2e harness), because there is no real source to feed tsserver. `LspSupervisor.dispatch()` rejects absolute `args.path` (clamp finding #7), so the probe sends a cwd-relative path rooted at `getProjectRoot()` rather than `config.defaultCwd` — otherwise the route returns `lsp_unavailable` without ever initialising tsserver and the ENOENT bridge-bug check is silently skipped. |
 
 All three run concurrently with the pool-init and sweeper tasks, so the worst-case wall-clock cost is ≤6 seconds (2s × 3 sequential timeouts if all three routes are broken). In practice, all three succeed in under 100ms on a healthy boot.
 

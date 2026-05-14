@@ -1370,6 +1370,20 @@ export function createGateway(config: GatewayConfig) {
 					const cwd = config.defaultCwd || getProjectRoot();
 					// Use server.ts itself as the "real src file" for the /state probe.
 					const srcFile = path.resolve(getProjectRoot(), "src/server/server.ts");
+					// LspSupervisor.dispatch() rejects absolute `args.path` (clamp finding #7),
+					// so the diagnostics probe must send a cwd-relative path rooted at a
+					// directory that actually contains the file. We pin cwd to the gateway
+					// worktree root (where server.ts lives in dev/prod) so the relative
+					// path resolves regardless of what config.defaultCwd happens to be —
+					// otherwise the route returns lsp_unavailable without ever initialising
+					// tsserver and the ENOENT bridge-bug check is silently skipped.
+					// When the gateway root is a synthetic test fixture without real source
+					// (in-process e2e harness, ad-hoc bobbit invocation in an empty dir),
+					// the diagnostics probe is skipped — the /stats and /state GET probes
+					// still verify route registration.
+					const diagCwd = getProjectRoot();
+					const diagPath = path.relative(diagCwd, srcFile);
+					const diagnosticsProbeViable = fs.existsSync(srcFile);
 					const probes: Array<{ route: string; url: string; method: string; body?: string; failOn404Only: boolean; inspectBody?: boolean }> = [
 						{
 							route: "/api/lsp/stats",
@@ -1383,7 +1397,7 @@ export function createGateway(config: GatewayConfig) {
 							method: "GET",
 							failOn404Only: false,
 						},
-						{
+						...(diagnosticsProbeViable ? [{
 							// POST probe catches the "bridge attached without a running container"
 							// regression: a GET on /stats or /state wouldn't initialize tsserver,
 							// so only a real diagnostics call surfaces the ENOENT from a misrouted
@@ -1391,10 +1405,10 @@ export function createGateway(config: GatewayConfig) {
 							route: "/api/lsp/diagnostics",
 							url: `${base}/api/lsp/diagnostics`,
 							method: "POST",
-							body: JSON.stringify({ cwd, path: srcFile }),
+							body: JSON.stringify({ cwd: diagCwd, path: diagPath }),
 							failOn404Only: false,
 							inspectBody: true,
-						},
+						}] : []),
 					];
 					for (const probe of probes) {
 						const ac = new AbortController();
