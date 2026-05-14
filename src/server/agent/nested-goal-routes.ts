@@ -917,6 +917,13 @@ export async function tryHandleNestedGoalRoute(
 			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
 			const newReplanCount = (goal.replanCount ?? 0) + 1;
 			const updates: { replanCount: number; paused?: boolean } = { replanCount: newReplanCount };
+			// Replan-overflow safety circuit: auto-pause after 5 replans so the
+			// operator can review before the goal runs further. This is the ONE
+			// intentional exception to the operator-only `paused` discipline —
+			// it behaves exactly like `goal_pause` (sticky, cleared only by
+			// `goal_resume`). The scheduler (spawn-child / integrate-child) never
+			// reads or writes `paused`, so this write does not reintroduce the
+			// scheduler conflation fixed by this subgoal.
 			if (newReplanCount > 5 && !goal.paused) updates.paused = true;
 			await goalManager.updateGoal(goal.id, updates);
 			planMutationStore.remove(goalId, requestId);

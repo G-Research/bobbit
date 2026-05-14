@@ -67,11 +67,13 @@ test.describe("dependsOn — state:blocked (not paused)", () => {
 // ─── 2. cascade covers in-progress descendants ──────────────────────────────
 
 test.describe("pause cascade — covers all descendants regardless of state", () => {
-	test("pause cascade sets paused=true on all non-paused children", async () => {
+	test("pause cascade sets paused=true on all non-paused children (todo state)", async () => {
 		// Issue 8: cascade must not skip children based on their `state`.
 		// The only guard in the pause loop must be `if (g.paused) continue`.
-		// We verify by spawning two children and asserting both are paused
-		// after a cascade from the parent.
+		// Note: the API does not expose a way to force state='in-progress'
+		// externally; the invariant is pinned at the code level by inspecting
+		// that listDescendants filters only on archived and the loop has no
+		// state guard. This test pins that todo children ARE paused by cascade.
 		const root = await createGoal({ title: `pause-sem-cascade-${Date.now()}`, team: true, worktree: true, cwd: gitCwd() });
 		try {
 			await waitSetupReady(root.id);
@@ -126,23 +128,45 @@ test.describe("pause cascade — covers all descendants regardless of state", ()
 // ─── 3. cascade excludes caller's own session ────────────────────────────────
 
 test.describe("pause cascade — caller session excluded from abort", () => {
-	test("pause handler returns 200 when called with x-bobbit-spawning-session header", async () => {
+	test("pause handler skips sessions matching the caller-session header", async () => {
+		// Spin up a real session so we can check it wasn't aborted when its
+		// session id is claimed as the caller via x-bobbit-spawning-session.
 		const root = await createGoal({ title: `pause-sem-selfskip-${Date.now()}`, team: true, worktree: true, cwd: gitCwd() });
 		try {
 			await waitSetupReady(root.id);
 
-			// Call pause with the header. If caller-exclusion is broken the
-			// request itself would be aborted mid-flight — but since this is
-			// in-process, the abort would manifest as a 500 or connection error.
-			// We just assert 200 is returned normally.
-			const pauseResp = await apiFetch(`/api/goals/${root.id}/pause`, {
-				method: "POST",
-				headers: { "x-bobbit-spawning-session": "fake-session-id-for-exclusion-test" },
-				body: JSON.stringify({ cascade: false }),
-			});
-			expect(pauseResp.status).toBe(200);
-			const data = await pauseResp.json();
-			expect(typeof data.paused).toBe("number");
+			// Fetch live sessions for this goal; pick the team-lead session if any.
+			const sessionsResp = await apiFetch("/api/sessions");
+			const sessions = (await sessionsResp.json()).sessions as Array<{ id: string; goalId?: string; status: string; role?: string }>;
+			const tlSession = sessions.find(s => s.goalId === root.id && s.role === "team-lead");
+
+			if (tlSession) {
+				// Pause with the team-lead's own session id as the claimed caller.
+				// The abort loop must skip this session — it should remain registered
+				// (not terminated/archived) after the pause.
+				const pauseResp = await apiFetch(`/api/goals/${root.id}/pause`, {
+					method: "POST",
+					headers: { "x-bobbit-spawning-session": tlSession.id },
+					body: JSON.stringify({ cascade: true }),
+				});
+				expect(pauseResp.status).toBe(200);
+
+				// The session must still be registered (not terminated/archived).
+				const afterResp = await apiFetch(`/api/sessions/${tlSession.id}`);
+				expect(afterResp.status).toBe(200);
+				const afterSession = await afterResp.json();
+				expect(afterSession.archived).toBeFalsy();
+			} else {
+				// No team-lead yet (setup still in progress); just verify pause
+				// with the header returns 200 and does not throw.
+				const pauseResp = await apiFetch(`/api/goals/${root.id}/pause`, {
+					method: "POST",
+					headers: { "x-bobbit-spawning-session": "no-session-yet" },
+					body: JSON.stringify({ cascade: false }),
+				});
+				expect(pauseResp.status).toBe(200);
+				expect(typeof (await pauseResp.json()).paused).toBe("number");
+			}
 		} finally {
 			await deleteGoal(root.id, true);
 		}
