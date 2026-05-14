@@ -1151,7 +1151,8 @@ function goalPreviewPanel() {
 
 		// If this is a re-attempt, archive the old goal and link the new one
 		if (reattemptGoalId) {
-			await gatewayFetch(`/api/goals/${reattemptGoalId}`, { method: "DELETE" });
+			// cascade=true — the reattempted goal's tree (if any) goes with it.
+			await gatewayFetch(`/api/goals/${reattemptGoalId}?cascade=true`, { method: "DELETE" });
 			await gatewayFetch(`/api/goals/${goal.id}`, {
 				method: "PUT",
 				body: JSON.stringify({ reattemptOf: reattemptGoalId }),

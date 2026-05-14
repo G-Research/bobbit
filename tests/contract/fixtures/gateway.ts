@@ -235,7 +235,7 @@ export async function createTestGateway(opts?: {
 		},
 
 		async deleteGoal(id) {
-			await doFetch(`/api/goals/${id}`, { method: "DELETE" }).catch(() => {});
+			await doFetch(`/api/goals/${id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		},
 
 		async createSession(opts) {

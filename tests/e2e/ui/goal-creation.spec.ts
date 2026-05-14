@@ -74,7 +74,7 @@ async function findGoalByTitle(title: string) {
 
 /** Helper: delete a goal by ID (best-effort). */
 async function deleteGoal(goalId: string) {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" }).catch(() => {});
+	await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 }
 
 /**

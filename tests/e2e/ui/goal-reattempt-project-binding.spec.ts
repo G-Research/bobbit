@@ -190,9 +190,9 @@ test.describe("Re-attempt goal proposal project binding @repro", () => {
 			(g) => g.id !== origGoal.id && g.title === "E2E Test Goal",
 		);
 		if (fresh?.id) {
-			await apiFetch(`/api/goals/${fresh.id}`, { method: "DELETE" }).catch(() => {});
+			await apiFetch(`/api/goals/${fresh.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 		}
 		await deleteSession(sessionId).catch(() => {});
-		await apiFetch(`/api/goals/${origGoal.id}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/goals/${origGoal.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
 });
