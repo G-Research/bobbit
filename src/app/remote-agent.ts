@@ -3,7 +3,9 @@ import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
-import { refreshGateStatusForGoal } from "./api.js";
+import { refreshGateStatusForGoal, refreshSessions } from "./api.js";
+import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
+import { loadSavedBindings } from "./shortcut-registry.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
@@ -1401,7 +1403,7 @@ export class RemoteAgent {
 				// goal list so the sidebar nesting + tree-cost reflect the change.
 				// Throttling lives inside the dashboard (`schedulePlanRerender`).
 				import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
-				import("./api.js").then(m => m.refreshSessions()).catch(() => {});
+				refreshSessions();
 				// Fan out to any renderer-level subscribers (e.g. <children-goal-state-pill>).
 				notifyGoalStateSubscribers({ goalId: (msg as any).goalId, type: msg.type });
 				break;
@@ -1414,7 +1416,7 @@ export class RemoteAgent {
 					.catch(() => {});
 				// Also bump the regular goal-event path so the goal list re-fetches
 				// (spec is part of the goal record).
-				import("./api.js").then(m => m.refreshSessions()).catch(() => {});
+				refreshSessions();
 				break;
 			}
 
@@ -1422,13 +1424,13 @@ export class RemoteAgent {
 				// Phase 5b: synthesise a chat-bubble card asking the user to
 				// approve / reject the pending plan mutation. The UI surfaces it
 				// via a dedicated proposal-style entry in state.activeProposals.
-				import("./session-manager.js").then(m => m.handleMutationPendingEvent?.(msg as any)).catch(() => {});
+				try { handleMutationPendingEvent(msg as any); } catch { /* ignore */ }
 				break;
 			}
 
 			case "mutation_decided": {
 				// Cleanup: drop any pending mutation card for this requestId.
-				import("./session-manager.js").then(m => m.handleMutationDecidedEvent?.(msg as any)).catch(() => {});
+				try { handleMutationDecidedEvent(msg as any); } catch { /* ignore */ }
 				break;
 			}
 
@@ -1887,7 +1889,7 @@ export class RemoteAgent {
 
 		// Apply shortcuts
 		if ("shortcuts" in prefs) {
-			import("./shortcut-registry.js").then((m) => m.loadSavedBindings());
+			loadSavedBindings();
 		}
 
 	}

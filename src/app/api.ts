@@ -21,6 +21,18 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 export { errorFromResponse, errorDetails };
+// Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
+// but neither module references the other at module-init time, so ESM's
+// live-binding semantics resolve it correctly at runtime.
+import {
+	showConnectionError,
+	confirmAction,
+	countDescendants,
+	showArchiveGoalDialog,
+	showPauseGoalDialog,
+	showResumeGoalDialog,
+	showStopTeamDialog,
+} from "./dialogs.js";
 
 /** Track previous session statuses to detect streaming→idle transitions. */
 const _prevSessionStatus = new Map<string, string>();
@@ -33,12 +45,6 @@ const PR_POLL_INTERVAL_MS = 60_000;
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
 export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
-}
-
-// dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
-async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
-	const { showConnectionError: show } = await import("./dialogs.js");
-	show(title, message, opts);
 }
 
 /**
@@ -501,7 +507,6 @@ export async function registerProject(name: string, rootPath: string, color?: st
     return await res.json();
   } catch (err) {
     if (err instanceof SymlinkRootError) throw err;
-    const { showConnectionError } = await import("./dialogs.js");
     const msg = err instanceof Error ? err.message : String(err);
     const code = err && typeof err === "object" ? (err as any).code : undefined;
     const stack = err instanceof Error ? err.stack : undefined;
@@ -519,7 +524,6 @@ export async function updateProject(id: string, updates: { name?: string; color?
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to update project", message, { code, stack });
     return null;
@@ -532,7 +536,6 @@ export async function removeProject(id: string): Promise<boolean> {
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return true;
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to remove project", message, { code, stack });
     return false;
@@ -575,7 +578,6 @@ export async function promoteProject(id: string, name?: string): Promise<Project
     if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
     return await res.json();
   } catch (err) {
-    const { showConnectionError } = await import("./dialogs.js");
     const { message, code, stack } = errorDetails(err);
     showConnectionError("Failed to promote project", message, { code, stack });
     return null;
@@ -935,7 +937,6 @@ export async function deleteGoal(id: string): Promise<void> {
 	);
 
 	// descendants > 0 routes through cascade-confirm dialog; else single-goal confirm.
-	const { countDescendants, showArchiveGoalDialog, confirmAction } = await import("./dialogs.js");
 	const descendants = countDescendants(id);
 
 	if (descendants > 0) {
@@ -1021,7 +1022,6 @@ function eagerMarkArchived(ids: string[]): void {
 export async function pauseGoalWithDialog(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;
-	const { countDescendants, showPauseGoalDialog } = await import("./dialogs.js");
 	const descendants = countDescendants(id);
 	const result = await showPauseGoalDialog(goal, descendants);
 	if (result.paused > 0) {
@@ -1033,7 +1033,6 @@ export async function pauseGoalWithDialog(id: string): Promise<void> {
 export async function resumeGoalWithDialog(id: string): Promise<void> {
 	const goal = state.goals.find((g) => g.id === id);
 	if (!goal) return;
-	const { countDescendants, showResumeGoalDialog } = await import("./dialogs.js");
 	const descendants = countDescendants(id);
 	const result = await showResumeGoalDialog(goal, descendants);
 	if (result.resumed > 0) {
@@ -1141,7 +1140,6 @@ export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
 		if (probe.status === 409) {
 			const body = await probe.json().catch(() => null) as { code?: string; count?: number; descendants?: Array<{ id: string; title: string }> } | null;
 			if (body?.code === "HAS_DESCENDANT_TEAMS") {
-				const dialogModule = await import("./dialogs.js");
 				// R-024 + R-040: the descendant-count-zero short-circuit lives
 				// here so the dialog only ever returns "cascade" | "cancel".
 				// In practice the 409 path always implies count > 0, but we
@@ -1153,12 +1151,11 @@ export async function teardownTeamWithDialog(goalId: string): Promise<boolean> {
 				// R-041: resolve the goal title from live client state. The
 				// historical `window.__goalCache` fallback is gone — if the
 				// goal isn't in state yet we use the raw goalId as the title.
-				const stateModule = await import("./state.js");
-				const liveGoal = stateModule.state.goals.find(g => g.id === goalId);
+				const liveGoal = state.goals.find(g => g.id === goalId);
 				const goal = liveGoal
 					? { id: liveGoal.id, title: liveGoal.title }
 					: { id: goalId, title: goalId };
-				const decision = await dialogModule.showStopTeamDialog(goal, body.count ?? 0, body.descendants ?? []);
+				const decision = await showStopTeamDialog(goal, body.count ?? 0, body.descendants ?? []);
 				if (decision === "cancel") return false;
 				if (decision === "cascade") {
 					const r = await gatewayFetch(`/api/goals/${goalId}/team/teardown?cascade=true`, { method: "POST" });
