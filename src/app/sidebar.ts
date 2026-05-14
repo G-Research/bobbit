@@ -1200,6 +1200,11 @@ export function renderSidebar() {
 // ============================================================================
 
 function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
+	// Trigger the staff fetch (no-op after first call) so the collapsed STAFF
+	// bucket appears even when the user first loads the app with the sidebar
+	// already collapsed. Without this, only the expanded sidebar (which calls
+	// ensureStaffLoaded via renderStaffSidebarSection) would populate the list.
+	ensureStaffLoaded();
 	const allSessions = state.gatewaySessions;
 	const { ungroupedSessions: ungroupedBare } = getSidebarData();
 	// Bucket goals + ungrouped sessions + staff by project so the collapsed
