@@ -665,6 +665,9 @@ export function createGateway(config: GatewayConfig) {
 		maxServers: lspMaxServers,
 		idleTtlMs: lspIdleTtlMs,
 	});
+	if (!lspDisabled) {
+		console.log("[lsp] supervisor ready; routes /api/lsp/{state,stats,definition,references,hover,diagnostics,document_symbols,workspace_symbol,rename} registered, 2 factories");
+	}
 	// Finding #6: install the sandbox bridge once SandboxManager is wired.
 	// SandboxManager is constructed later in start() when sandbox=docker, so
 	// the supervisor exposes a setter rather than taking it via constructor.
