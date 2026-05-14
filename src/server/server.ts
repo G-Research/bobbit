@@ -46,6 +46,17 @@ import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
 import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+// Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
+// Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
+// without an exec round-trip. See docs/design/base-ref.md.
+function isValidBaseRefBranchGrammar(name: string): boolean {
+	if (!name) return false;
+	if (/\s/.test(name)) return false;
+	if (name.startsWith("-") || name.endsWith(".")) return false;
+	if (name.includes("..") || name.includes("@{")) return false;
+	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
+	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -1309,6 +1320,10 @@ export function createGateway(config: GatewayConfig) {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
 				});
+				ctx.goalManager.setBaseRefResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("base_ref") || undefined;
+				});
 			}
 
 			// Now that sessions are live, re-subscribe to team events
@@ -2111,6 +2126,10 @@ async function handleApiRoute(
 							const c = projectContextManager.getOrCreate(pid);
 							return c?.projectConfigStore.get("worktree_root") || undefined;
 						});
+						ctx.goalManager.setBaseRefResolver((pid: string) => {
+							const c = projectContextManager.getOrCreate(pid);
+							return c?.projectConfigStore.get("base_ref") || undefined;
+						});
 					}
 					json(existing, 200);
 					return;
@@ -2233,6 +2252,10 @@ async function handleApiRoute(
 				newCtx.goalManager.setWorktreeRootResolver((pid: string) => {
 					const c = projectContextManager.getOrCreate(pid);
 					return c?.projectConfigStore.get("worktree_root") || undefined;
+				});
+				newCtx.goalManager.setBaseRefResolver((pid: string) => {
+					const c = projectContextManager.getOrCreate(pid);
+					return c?.projectConfigStore.get("base_ref") || undefined;
 				});
 			}
 			json(project, 201);
@@ -2397,6 +2420,118 @@ async function handleApiRoute(
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
 				if (err) { json({ error: err }, 400); return; }
+			}
+
+			// `base_ref` validation — runs only when the field is present in the PUT body.
+			// On any failure we return HTTP 400 with `{ field: "base_ref", error, details? }`
+			// so the Settings UI can render the error inline. Non-fatal warnings (component
+			// paths that aren't git repos) bubble up via `baseRefWarnings` and are attached
+			// to the success response below. See docs/design/base-ref.md.
+			const baseRefWarnings: string[] = [];
+			if ("base_ref" in (body as Record<string, unknown>)) {
+				const rawBaseRef = (body as Record<string, unknown>).base_ref;
+				const baseRefValue = typeof rawBaseRef === "string" ? rawBaseRef.trim() : "";
+				if (baseRefValue) {
+					// 1. SHA shape (7-40 hex chars). Reject before grammar — a 40-char hex
+					//    string is grammatically valid but is rejected for clarity.
+					if (/^[0-9a-f]{7,40}$/i.test(baseRefValue)) {
+						json({ field: "base_ref", error: `base_ref must be a branch ref, not a commit SHA. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 2. Invalid branch grammar.
+					if (!isValidBaseRefBranchGrammar(baseRefValue)) {
+						json({ field: "base_ref", error: `base_ref must be a valid branch name. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 3. Non-origin remote prefix. Anything matching `<prefix>/<rest>` where
+					//    `<prefix>` is not `origin` is rejected. Local refs (no slash, or
+					//    `feature/foo`) are still accepted — the prefix gate only fires when
+					//    the first segment looks like a remote name and isn't `origin`.
+					//    We treat the first slash-segment as a remote prefix only when the
+					//    full value is exactly `<prefix>/<rest>` AND `<rest>` looks like a
+					//    branch (rather than e.g. `feature/foo` which has no remote prefix at all).
+					//    Practically: if the value starts with anything other than `origin/`
+					//    AND the first segment is a known-remote-shaped token, reject.
+					//    We use a simple heuristic: if it doesn't start with `origin/` and
+					//    its first segment contains no special chars and a slash exists,
+					//    treat it as a remote prefix. The error message names the value
+					//    so users can correct it.
+					//
+					// To avoid false positives on local refs like `feature/foo`, we only
+					// reject values whose first segment matches the set of typical
+					// remote names (upstream/fork/etc.). Today's design says: anything
+					// with a remote-style prefix other than `origin/` is rejected, but
+					// distinguishing local `feature/foo` from remote `upstream/foo`
+					// requires git knowledge we don't have at validate time. The design
+					// doc's error inventory specifically calls out `upstream/main` as the
+					// example to reject — so we use a conservative allowlist: anything
+					// matching a known remote-name pattern that isn't `origin` is rejected.
+					// Known remote-shaped tokens: upstream, fork, mirror, github, gitlab,
+					// bitbucket. Everything else flows through (local branches with slashes).
+					const firstSegment = baseRefValue.split("/")[0];
+					const KNOWN_NON_ORIGIN_REMOTES = new Set(["upstream", "fork", "mirror", "github", "gitlab", "bitbucket", "remote"]);
+					if (baseRefValue.includes("/") && firstSegment !== "origin" && KNOWN_NON_ORIGIN_REMOTES.has(firstSegment)) {
+						json({ field: "base_ref", error: `base_ref only supports the 'origin' remote today. Got: ${baseRefValue}. If you need a different primary remote, configure it as 'origin' in your local clone.` }, 400);
+						return;
+					}
+					// 4. Sandbox + local — when the project runs in a docker sandbox, only
+					//    remote refs work because the container has separate ref visibility
+					//    from the host.
+					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
+					if (sandboxResolved === "docker" && !baseRefValue.startsWith("origin/")) {
+						json({ field: "base_ref", error: `base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					// 5. Multi-repo ref existence — `git rev-parse --verify` against every
+					//    component repo. Also detect tags up-front: a value that resolves
+					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
+					const componentsForCheck = ctx.projectConfigStore.getComponents();
+					const componentsToCheck = componentsForCheck.length > 0
+						? componentsForCheck
+						: [{ name: ctx.project.name || "default", repo: "." }];
+					const failures: Array<{ component: string; message: string }> = [];
+					let checkedRepoCount = 0;
+					let tagDetected = false;
+					for (const c of componentsToCheck) {
+						const repoPath = path.join(ctx.project.rootPath, c.repo);
+						const gitRepoCheck = await isGitRepo(repoPath).catch(() => false);
+						if (!gitRepoCheck) {
+							baseRefWarnings.push(`base_ref validation skipped for component '${c.name}': not a git repo at ${repoPath}`);
+							continue;
+						}
+						checkedRepoCount++;
+						// Tag check first — if the value resolves as a tag in any component
+						// repo, fail with the tag-specific message rather than the generic
+						// "not present" error.
+						try {
+							await execFileAsync("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
+							tagDetected = true;
+							break;
+						} catch {
+							// Not a tag in this repo — continue with branch-ref check below.
+						}
+						try {
+							await execFileAsync("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
+						} catch {
+							failures.push({
+								component: c.name,
+								message: `ref not found. Try: cd ${c.repo} && git fetch origin`,
+							});
+						}
+					}
+					if (tagDetected) {
+						json({ field: "base_ref", error: `base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: ${baseRefValue}` }, 400);
+						return;
+					}
+					if (failures.length > 0) {
+						json({
+							field: "base_ref",
+							error: `base_ref '${baseRefValue}' is not present in ${failures.length} of ${checkedRepoCount} component repos`,
+							details: failures,
+						}, 400);
+						return;
+					}
+				}
 			}
 
 			// Extract structured fields (components / workflows) before flat-key validation.
@@ -2581,6 +2716,10 @@ async function handleApiRoute(
 				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
 			}
 
+			if (baseRefWarnings.length > 0) {
+				json({ ok: true, warnings: baseRefWarnings });
+				return;
+			}
 			json({ ok: true });
 			return;
 		}

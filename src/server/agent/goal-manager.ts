@@ -81,6 +81,14 @@ export class GoalManager {
 		this.worktreeRootResolver = resolver;
 	}
 
+	/** Wire a project base_ref resolver — the configured branch ref (`base_ref` setting)
+	 *  used as the worktree start-point and branch upstream. Empty/undefined falls back
+	 *  to today's `resolveRemotePrimary`. See docs/design/base-ref.md. */
+	private baseRefResolver?: (projectId: string) => string | undefined;
+	setBaseRefResolver(resolver: (projectId: string) => string | undefined): void {
+		this.baseRefResolver = resolver;
+	}
+
 	/**
 	 * On startup, scan for goals stuck in setupStatus === "preparing"
 	 * and mark them as "error" (setup was interrupted by server restart).
@@ -271,8 +279,10 @@ export class GoalManager {
 			try {
 				const worktreeRootOverride = goal.projectId && this.worktreeRootResolver
 					? this.worktreeRootResolver(goal.projectId) : undefined;
+				const configuredBaseRef = goal.projectId && this.baseRefResolver
+					? this.baseRefResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
-					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride });
+					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
 					try {
@@ -305,7 +315,7 @@ export class GoalManager {
 					console.log(`[goal-manager] Multi-repo worktree set ready for goal "${goal.title}" at ${set.container}`);
 					return;
 				}
-				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride });
+				const result = await createWorktree(goal.repoPath!, goal.branch!, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
 				// Per-component setup — non-fatal on failure. Mirrors the multi-repo
 				// branch above so component.relativePath is honored.
 				if (components && components.length > 0) {
@@ -436,8 +446,11 @@ export class GoalManager {
 				const repoRoot = await getRepoRoot(cwd);
 				const title = updates.title ?? existing.title;
 				const branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
+				const projectIdForBase = updates.projectId ?? existing.projectId;
+				const configuredBaseRef = projectIdForBase && this.baseRefResolver
+					? this.baseRefResolver(projectIdForBase) : undefined;
 				try {
-					const result = await createWorktree(repoRoot, branch);
+					const result = await createWorktree(repoRoot, branch, { configuredBaseRef });
 					updates.repoPath = repoRoot;
 					updates.branch = branch;
 					// Also update cwd to the worktree
