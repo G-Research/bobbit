@@ -74,6 +74,7 @@ let error = "";
 interface GoalRepoEntry {
 	branch?: string;
 	primaryBranch?: string;
+	primaryRef?: string;
 	isOnPrimary?: boolean;
 	clean?: boolean;
 	aheadOfPrimary?: number;
@@ -88,6 +89,7 @@ interface GoalRepoEntry {
 interface GoalGitStatus {
 	branch: string;
 	primaryBranch: string;
+	primaryRef?: string;
 	isOnPrimary: boolean;
 	clean: boolean;
 	aheadOfPrimary: number;
@@ -170,12 +172,26 @@ interface TreeCostBreakdown {
 	tokensIn: number;
 	tokensOut: number;
 }
+interface TreeCostUnattributableLegacy {
+	goalId: "__unattributable__";
+	title: string;
+	costUsd: number;
+	tokensIn: number;
+	tokensOut: number;
+}
 interface TreeCost {
 	rootGoalId: string;
 	totalCostUsd: number;
 	totalTokensIn: number;
 	totalTokensOut: number;
 	breakdown: TreeCostBreakdown[];
+	/**
+	 * Optional residual bucket for cost entries whose `goalId` could not be
+	 * recovered by the boot-time backfill. Rendered as a muted bottom row in
+	 * the tree-cost panel; NOT a child of any goal and NOT included in
+	 * `totalCostUsd` / subtree breakdown totals.
+	 */
+	unattributableLegacy?: TreeCostUnattributableLegacy;
 }
 let treeCost: TreeCost | null = null;
 let treeCostExpanded = false;
@@ -1583,6 +1599,24 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 									<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
 								</tr>
 							`)}
+							${(() => {
+								// Residual bucket: cost entries whose goalId couldn't be
+								// recovered by the boot-time backfill. Rendered as a muted
+								// bottom row when non-empty; NOT a child of the root goal
+								// and NOT part of subtree totals — see backfill design doc.
+								const u = treeCost!.unattributableLegacy;
+								if (!u) return nothing;
+								const tokens = u.tokensIn + u.tokensOut;
+								if (u.costUsd <= 0 && tokens <= 0) return nothing;
+								return html`
+									<tr data-testid="tree-cost-row-unattributable-legacy"
+										style="border-top:1px solid var(--border);color:var(--muted-foreground);font-style:italic;">
+										<td style="padding:3px 8px;">${u.title}</td>
+										<td style="text-align:right;padding:3px 8px;">$${u.costUsd.toFixed(4)}</td>
+										<td style="text-align:right;padding:3px 8px;">${formatTokens(tokens)}</td>
+									</tr>
+								`;
+							})()}
 						</tbody>
 					</table>
 				</div>
@@ -1627,6 +1661,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.token=${localStorage.getItem("gateway.token") || ""}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
+						.primaryRef=${gs?.primaryRef ?? `origin/${gs?.primaryBranch ?? "master"}`}
 						.isOnPrimary=${gs?.isOnPrimary ?? false}
 						.summary=${gs?.summary ?? ''}
 						.clean=${gs?.clean ?? true}

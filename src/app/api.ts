@@ -779,6 +779,14 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 export interface GitStatusData {
 	branch: string;
 	primaryBranch: string;
+	/**
+	 * Actual ref used for ahead/behind-primary calculations. Equals
+	 * `origin/<primaryBranch>` when the remote ref exists, else the bare
+	 * local branch `<primaryBranch>`. Display this verbatim instead of
+	 * synthesising `origin/<primaryBranch>` — a configured `base_ref` may
+	 * be a local branch with no `origin/` counterpart.
+	 */
+	primaryRef: string;
 	isOnPrimary: boolean;
 	summary: string;
 	clean: boolean;

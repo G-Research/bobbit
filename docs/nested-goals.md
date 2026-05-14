@@ -1140,31 +1140,62 @@ one-arg/two-arg overloads), `tests/cost-tracker-backfill.test.ts`
 
 ### Boot-time backfill
 
-Cost entries written before this fix landed have `goalId === undefined`.
-`CostTracker.backfillGoalIds(resolver)` is a one-shot lazy migration
-that walks the in-memory cost map and, for each unstamped entry, calls
-`resolver(sessionId)` to recover the goalId from any source the caller
-knows about. If the resolver returns a string, it's stamped; otherwise
-the entry is left alone (its session has already been purged and the
-mapping is gone — those dollars are unrecoverable, but no new entry
-will ever lose its mapping again).
+Cost entries recorded before goalId stamping existed have
+`goalId === undefined`. Even after the forward fix landed, entries from
+sessions that were **purged before the fix** remain unstamped: the live
+`sessionStore` no longer has a record, so the simple
+`sessionStore`-only resolver can't recover the mapping.
 
-Server boot wires this up in `src/server/server.ts`, per project
-context, using the still-populated `sessionStore` as the resolver:
+The boot-time backfill is implemented in
+`src/server/agent/cost-backfill.ts` (`backfillLegacyCostGoalIds`). It
+runs once after all session state is restored and tries two paths in
+order for each unstamped entry:
 
-```ts
-for (const ctx of projectContextManager.all()) {
-    const n = ctx.costTracker.backfillGoalIds((sid) => {
-        const ps = ctx.sessionStore.get(sid);
-        return ps?.goalId ?? ps?.teamGoalId;
-    });
-    if (n > 0) console.log(`[cost-tracker] backfilled ${n} goalId entries …`);
+1. **Live persisted session record** — `sessionManager.getPersistedSession(sessionId)`, preferring `teamGoalId` then `goalId`. If the record exists but has neither field, the sidecar next to its `.jsonl` file is read as a sub-step.
+2. **Sidecar index scan** — if the session record is gone entirely, `buildSidecarGoalIdIndex` walks the agent sessions root two levels deep (`<slug>/<id>.bobbit.json`), parses every sidecar, and builds a `bobbitSessionId → teamGoalId` map. This path recovers goals for sessions purged after the session-sidecar feature landed (`a71963d9`).
+
+Entries that survive both passes (no live record, no sidecar, or sidecar predates the sidecar feature) are left unstamped. The backfill is
+idempotent — already-stamped entries are skipped — and bumps the
+generation tick only when at least one entry is actually updated.
+Boot log:
+
+```
+[cost-backfill] stamped goalId on N entries; M still unattributable
+```
+
+Pinned by `tests/cost-backfill.test.ts` and `tests/e2e/cost-backfill-on-boot.spec.ts`.
+
+### Unattributable legacy bucket
+
+Entries that remain unstamped after the backfill are **not silently
+absorbed into the parent goal's total**. Instead they are accumulated
+into a separate bucket via `CostTracker.getUnattributableLegacyCost()`
+(all entries where `goalId` is unset) and stored under the sentinel
+`UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__"`.
+
+The `/tree-cost` endpoint appends an optional `unattributableLegacy`
+field to the response when the bucket is non-empty:
+
+```json
+{
+  "rootGoalId": "...",
+  "totalCostUsd": 1.234,
+  "...": "...",
+  "unattributableLegacy": {
+    "goalId": "__unattributable__",
+    "title": "Unattributable (legacy)",
+    "costUsd": 0.0056,
+    "tokensIn": 1200,
+    "tokensOut": 300
+  }
 }
 ```
 
-Idempotent — entries already carrying a `goalId` are skipped, so a
-second boot stamps zero. The generation tick is bumped if any entries
-were stamped, invalidating cached tree-cost rollups.
+This bucket is **not** included in `totalCostUsd` — it is informational
+only. The tree-cost panel renders it as a muted italic row at the
+bottom of the breakdown table when non-empty (testid
+`tree-cost-row-unattributable-legacy`), labelled _Unattributable
+(legacy)_.
 
 ### On-disk schema
 
