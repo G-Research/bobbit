@@ -51,6 +51,8 @@ When the supervisor cannot serve a call, the tool returns a structured error rat
 
 - `lsp_unavailable` — server not installed, disabled by project config, crashed (3-in-60s cooldown), or unsupported language. Agent should fall back to `grep` / `read`.
 - `lsp_capacity` — every supervisor slot is in-flight and a new call cannot evict an LRU victim. Retry; raise `lsp_max_servers` if persistent.
+- `lsp_route_missing` — the `/api/lsp/<method>` route is not registered in the gateway (`handleApiRoute()` regression). This is a deployment bug, not a missing binary. The extension caches this per-method for the process lifetime to avoid repeated 404 round-trips. Notify the operator.
+- `lsp_gateway_unreachable` — the extension could not connect to the gateway at all (ECONNREFUSED / network error). Check that the gateway process is running.
 
 Path inputs are clamped to live inside `cwd` — absolute or upward-traversing paths are rejected with `lsp_unavailable`.
 
@@ -143,6 +145,7 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| `{ error: "lsp_route_missing" }` on every LSP call | `handleApiRoute()` in `server.ts` is missing the `/api/lsp/<method>` dispatch block — typically a merge regression that dropped route wiring while leaving the supervisor, YAMLs, and extension intact | Run `npx playwright test tests/e2e/lsp-routes.spec.ts` — if any `POST /api/lsp/<method>` returns 404, the route block was dropped. Restore the `/api/lsp/<method>` handler block in `src/server/server.ts::handleApiRoute()`. |
 | `lsp_diagnostics` reports a stale type — you edited `tsconfig.json` and the new path mapping isn't picked up | `fs.watch` debounce hasn't fired yet, or your editor wrote a temp file rather than touching `tsconfig.json` | `touch tsconfig.json` (or any matching `tsconfig.*.json`) — within 1.5s the supervisor gracefully shuts the entry down and the next LSP call respawns against the new config. |
 | Every LSP call returns `{ error: "lsp_unavailable" }` | Server not installed, disabled by config, or crash-cooldown active | Check `GET /api/lsp/stats` — look at `entries[].crashCount` and `disabledUntil`; if it's the cooldown, wait 5 min. If `disabled: true`, set `lsp_disabled: false` in `project.yaml`. If `entries` is empty and no factory error, install the relevant language server (Docker image ships it; on host installs `npm i` in the project pulls `typescript-language-server` via deps). |
 | `{ error: "lsp_capacity" }` under load | All `lsp_max_servers` entries have in-flight calls; no LRU victim available to evict | Retry once. If persistent, raise `lsp_max_servers` (default `4`) in `project.yaml`. Each warm server costs ~300–800MB RSS — size accordingly. |
