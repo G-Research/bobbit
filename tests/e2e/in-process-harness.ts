@@ -20,7 +20,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";

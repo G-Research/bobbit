@@ -489,6 +489,7 @@ export class SessionManager {
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
+	lspSupervisor: import("../lsp/supervisor.js").LspSupervisor | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
@@ -530,6 +531,14 @@ export class SessionManager {
 
 	setSandboxManager(manager: SandboxManager | null): void {
 		this.sandboxManager = manager;
+	}
+
+	setLspSupervisor(supervisor: import("../lsp/supervisor.js").LspSupervisor): void {
+		this.lspSupervisor = supervisor;
+	}
+
+	getLspSupervisor(): import("../lsp/supervisor.js").LspSupervisor | null {
+		return this.lspSupervisor;
 	}
 
 	/**
@@ -890,6 +899,7 @@ export class SessionManager {
 			projectConfigStore: resolvedProjectConfigStore,
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
+			lspSupervisor: this.lspSupervisor,
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			costTracker: resolvedCostTracker,

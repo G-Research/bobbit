@@ -306,6 +306,12 @@ export async function cleanupWorktree(
 		return;
 	}
 
+	// Pre-cleanup hooks (e.g. LSP supervisor releases child fds) — best-effort.
+	try {
+		const { runWorktreePreCleanupHooks } = await import("../lsp/cleanup-hook.js");
+		await runWorktreePreCleanupHooks(worktreePath);
+	} catch { /* ignore */ }
+
 	try {
 		await execFile("git", ["worktree", "remove", worktreePath, "--force"], {
 			cwd: repoPath,

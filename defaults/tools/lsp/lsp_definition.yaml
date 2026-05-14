@@ -1,0 +1,45 @@
+name: lsp_definition
+description: "Jump to symbol definition; returns file path + range. 0-indexed line/char."
+summary: "Go to definition (LSP)"
+params: [path, line, character]
+provider:
+  type: builtin
+  tool: lsp_definition
+group: LSP
+docs: |-
+  Cheaper than grep+read for symbol lookups. line/character are 0-indexed (LSP-native; `read` is 1-indexed).
+detail_docs: >-
+  ## Purpose
+
+
+  Resolve the declaration site of the symbol at `(path, line, character)`
+  using the worktree's language server. For TypeScript, this follows
+  re-exports and type-alias chains.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | `path` | string | Yes | File path relative to session cwd. |
+  | `line` | number | Yes | **0-indexed** line. |
+  | `character` | number | Yes | **0-indexed** column. |
+
+
+  ## When to Use
+
+
+  - Finding a function's signature before calling it.
+  - Following `import` chains without manual grep.
+
+
+  ## When NOT to Use
+
+
+  - To find *callers* — use `lsp_references`.
+  - Pure text/regex search — use `grep`.
+
+
+  Returns `null` when no definition is found, or `{ error: "lsp_unavailable", ... }`
+  when the language server cannot be started; fall back to grep in that case.

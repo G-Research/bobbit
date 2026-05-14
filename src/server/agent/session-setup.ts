@@ -175,6 +175,7 @@ export interface PipelineContext {
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
 	sandboxManager: SandboxManager | null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
+	lspSupervisor?: import("../lsp/supervisor.js").LspSupervisor | null;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	costTracker: CostTracker;
@@ -620,6 +621,20 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 10: post-spawn setup (model, thinking level)
 	await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
 
+	// Step 11: LSP pre-warm (best-effort, never throws).
+	// Finding #6: removed the `!plan.sandboxed` gate — sandboxed sessions now
+	// pre-warm too, the supervisor picks up the sandbox bridge if configured.
+	// Finding #4: acquire() raises refcount so the supervisor does not
+	// idle-shutdown while a session is attached.
+	try {
+		if (ctx.lspSupervisor && session.cwd) {
+			ctx.lspSupervisor.preWarm(session.cwd, plan.projectId);
+			ctx.lspSupervisor.acquire(session.cwd);
+		}
+	} catch (err) {
+		console.warn(`[session-setup] LSP pre-warm failed for ${session.id}:`, err);
+	}
+
 	return session;
 }
 
@@ -729,6 +744,22 @@ export async function executeWorktreeAsync(
 	}
 	ctx.store.update(session.id, persistFields);
 	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
+
+	// LSP pre-warm against the freshly-built worktree.
+	// Finding #6: drop the `!plan.sandboxed` gate so sandboxed sessions can
+	// pre-warm via the SandboxLspBridge.  Finding #4: acquire() per worktree.
+	try {
+		if (ctx.lspSupervisor) {
+			ctx.lspSupervisor.preWarm(worktreeCwd, plan.projectId);
+			ctx.lspSupervisor.acquire(worktreeCwd);
+			for (const r of session.repoWorktrees ?? []) {
+				ctx.lspSupervisor.preWarm(r.worktreePath, plan.projectId);
+				ctx.lspSupervisor.acquire(r.worktreePath);
+			}
+		}
+	} catch (err) {
+		console.warn(`[session-setup] LSP pre-warm (worktree) failed for ${session.id}:`, err);
+	}
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
@@ -1082,6 +1113,10 @@ export function handleSetupFailure(
 
 	// 4. Background worktree cleanup (slow, non-blocking)
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
+		// Release LSP supervisor before tearing down the worktree.
+		if (ctx.lspSupervisor) {
+			ctx.lspSupervisor.shutdownForWorktree(plan.worktreePath).catch(() => {});
+		}
 		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});
 	}
 

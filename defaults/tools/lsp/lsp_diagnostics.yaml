@@ -1,0 +1,30 @@
+name: lsp_diagnostics
+description: "Type errors / warnings for a file (or workspace if path omitted)."
+summary: "Diagnostics (LSP)"
+params: [path?]
+provider:
+  type: builtin
+  tool: lsp_diagnostics
+group: LSP
+docs: |-
+  ~50× faster than `npm run check` for iteration loops. Omit `path` to aggregate all open docs.
+detail_docs: >-
+  ## Purpose
+
+
+  Return diagnostics (errors, warnings, info, hints) the language server
+  produced for the given file, or aggregated across all currently-open docs
+  when `path` is omitted.
+
+
+  Each diagnostic: `{ path, range, severity, message, source?, code? }`.
+  Severity is one of `error | warning | info | hint`.
+
+
+  ## Notes
+
+
+  - First call against a file opens it in the server — expect a brief settle
+    (≤ 1s) before diagnostics stabilise.
+  - For release gating, prefer `npm run check` (slow but authoritative across
+    the monorepo); `lsp_diagnostics` is for the inner edit loop.

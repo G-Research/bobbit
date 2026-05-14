@@ -121,7 +121,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 		});
 		if (!resp.ok) {
 			throw new Error(`project register failed: ${resp.status} ${await resp.text()}`);

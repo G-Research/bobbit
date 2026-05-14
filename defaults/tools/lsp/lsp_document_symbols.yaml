@@ -1,0 +1,20 @@
+name: lsp_document_symbols
+description: "List symbols (classes, functions, vars) in a file as a tree."
+summary: "Document symbols (LSP)"
+params: [path]
+provider:
+  type: builtin
+  tool: lsp_document_symbols
+group: LSP
+docs: |-
+  Returns a hierarchical symbol tree for one file. Use to orient before editing.
+detail_docs: >-
+  ## Purpose
+
+
+  Return the hierarchical `DocumentSymbol[]` produced by the language server
+  for `path`: classes, functions, methods, variables, with `range` and
+  `selectionRange` for each.
+
+
+  Useful for orienting in a large file before reading specific sections.

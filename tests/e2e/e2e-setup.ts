@@ -232,22 +232,22 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 		if (newBody === opts.body) return opts;
 		return { ...opts, body: newBody as BodyInit };
 	}
-	// POST /api/projects: auto-inject acceptCanonical:true so tests using
-	// tmpdir()-derived rootPaths (which on macOS are symlinks /var/folders ->
-	// /private/var/folders) don't 400 with code:"symlink_root". Tests can opt
-	// out by setting acceptCanonical:false explicitly in their body, or by
-	// using rawApiFetch() / fetch() directly when they need to exercise the
-	// rejection path.
-	// NOTE: this only affects test-side `apiFetch` calls. Tests that POST via
-	// raw fetch() (e.g. projects-no-default-workflows.spec.ts, multi-repo-
-	// project.spec.ts) bypass this entirely and must canonicalize the path
-	// themselves — see mkCanonTmp() helpers in those specs.
+	// POST /api/projects: canonicalize rootPath via realpathSync so tests
+	// using tmpdir()-derived paths (which on macOS are symlinks /var/folders
+	// -> /private/var/folders) don't 400 with code:"symlink_root", AND so
+	// the value stored in the registry matches what the test compares
+	// against in subsequent GETs. Tests that deliberately exercise the
+	// symlink-rejection path use rawApiFetch() or page-driven UI and bypass
+	// this entirely.
 	if (method === "POST" && path === "/api/projects" && typeof opts.body === "string") {
 		try {
 			const parsed = JSON.parse(opts.body) as Record<string, unknown>;
-			if (typeof parsed === "object" && parsed !== null && parsed.rootPath !== undefined && parsed.acceptCanonical === undefined) {
-				parsed.acceptCanonical = true;
-				return { ...opts, body: JSON.stringify(parsed) };
+			if (typeof parsed === "object" && parsed !== null && typeof parsed.rootPath === "string") {
+				let rp = parsed.rootPath;
+				try { const fs = await import("node:fs"); rp = fs.realpathSync(rp); } catch { /* path may not exist yet */ }
+				if (rp !== parsed.rootPath) {
+					return { ...opts, body: JSON.stringify({ ...parsed, rootPath: rp }) };
+				}
 			}
 		} catch { /* not JSON, leave alone */ }
 	}

@@ -45,17 +45,11 @@ function isWorkflowsAbsentOrEmpty(parsed: Record<string, unknown> | null): boole
 	return Object.keys(wf as Record<string, unknown>).length === 0;
 }
 
-/** mkdtempSync + realpathSync — canonical path so POST /api/projects
- * doesn't reject the symlinked /var/folders path on macOS. */
-function mkCanonTmp(prefix: string): string {
-	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-}
-
 test.beforeAll(() => { token = readE2EToken(); });
 
 test.describe("No default workflow scaffold", () => {
 	test("Case A — POST /api/projects without workflows persists with zero workflows", async () => {
-		const root = mkCanonTmp("bobbit-nodef-a-");
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-a-")));
 		gitInit(root);
 
 		const projName = `nodef-a-${Date.now()}`;
@@ -92,7 +86,7 @@ test.describe("No default workflow scaffold", () => {
 	});
 
 	test("Case B — workflows in proposal are kept exactly, no defaults merged", async () => {
-		const root = mkCanonTmp("bobbit-nodef-b-");
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-b-")));
 		gitInit(root);
 
 		const projName = `nodef-b-${Date.now()}`;
@@ -131,14 +125,8 @@ test.describe("No default workflow scaffold", () => {
 		expect(wf["quick-fix"]).toBeUndefined();
 	});
 
-	// Pre-existing master regression: commit 39d8fed7 ("Fix: goal creation 400s on
-	// projects with no workflows seeded") added an auto-seed-on-first-goal
-	// branch in POST /api/goals that contradicts this test's invariant. The
-	// design intent ("project assistant is responsible for workflows") still
-	// holds for explicit project-creation, but bare goal-creation now seeds.
-	// Out-of-scope for the subgoals retro-audit — file as a separate goal.
-	test.fixme("Case C — goal-creation side-effects do not seed workflows into a zero-workflows project", async () => {
-		const root = mkCanonTmp("bobbit-nodef-c-");
+	test("Case C — goal-creation side-effects do not seed workflows into a zero-workflows project", async () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-c-")));
 		gitInit(root);
 
 		const projName = `nodef-c-${Date.now()}`;

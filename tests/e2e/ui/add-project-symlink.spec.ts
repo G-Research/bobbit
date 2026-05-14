@@ -37,9 +37,12 @@ function uniqueDir(label: string): string {
  *  symlinks requires elevated privileges (Windows non-admin). */
 function makeSymlinkPair(label: string): { canonical: string; link: string } | null {
 	const root = uniqueDir(label);
-	const canonical = join(root, "canonical");
+	let canonical = join(root, "canonical");
 	const link = join(root, "link");
 	mkdirSync(canonical, { recursive: true });
+	// Canonicalize via realpath so the value we compare against matches what
+	// the server stores (the server resolves symlinks during register).
+	canonical = realpathSync(canonical);
 	// Write a sentinel file so directory has content.
 	writeFileSync(join(canonical, "marker.txt"), "x");
 	try {
@@ -83,9 +86,9 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
 		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
-		// Without it, /api/projects/detect returns hasBobbit=false and doContinue takes
-		// Path B (project assistant), so the symlink check in registerProject never runs.
-		// project.yaml is the source of truth for hasBobbit since commit 54d5b710.
+		// Without it, /api/projects/detect returns hasBobbit=false (since commit 54d5b710
+		// project.yaml is the source of truth) and doContinue takes Path B (project assistant),
+		// so the symlink check in registerProject never runs.
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
 		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
@@ -108,15 +111,11 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });
 
 		// Verify via API: project stored under the canonical path.
-		// macOS tmpdir returns /var/folders/... which itself symlinks to
-		// /private/var/folders/... — server canonicalises through that, so
-		// we compare against realpathSync(canonical) here too.
-		const canonicalReal = realpathSync(canonical);
 		await expect(async () => {
 			const res = await apiFetch("/api/projects");
 			const data = await res.json();
 			const projects = data.projects || data || [];
-			const stored = projects.find((p: any) => p.rootPath === canonicalReal);
+			const stored = projects.find((p: any) => p.rootPath === canonical);
 			expect(stored).toBeTruthy();
 			// And no row stored under the symlink path.
 			const linkRow = projects.find((p: any) => p.rootPath === link);
@@ -129,7 +128,7 @@ test.describe("Add Project — symlink confirm flow", () => {
 		const res2 = await apiFetch("/api/projects");
 		const data2 = await res2.json();
 		const projects2 = data2.projects || data2 || [];
-		const stored2 = projects2.find((p: any) => p.rootPath === canonicalReal);
+		const stored2 = projects2.find((p: any) => p.rootPath === canonical);
 		expect(stored2).toBeTruthy();
 	});
 
@@ -143,8 +142,7 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Add .bobbit/config/project.yaml so Path A (auto-import) is taken.
-		// See: hasBobbit requires project.yaml, not just .bobbit/ presence (commit 54d5b710).
+		// Add .bobbit/config/project.yaml so Path A is taken (hasBobbit=true).
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
 		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");

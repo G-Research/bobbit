@@ -144,6 +144,8 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		repoDir = join(tmpdir(), `bobbit-e2e-subrepo-${Date.now()}`);
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
+		repoDir = realpathSync(repoDir);
+		subdirPath = realpathSync(subdirPath);
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
 		writeFileSync(join(repoDir, "README.md"), "# Monorepo\n");
 

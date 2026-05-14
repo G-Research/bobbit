@@ -22,7 +22,7 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -134,9 +134,8 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Canonicalize bobbitDir so callers downstream (process.env.BOBBIT_DIR,
 		// bobbitDir() helper, project rootPaths derived from it) see the real
 		// path. On macOS, /var/folders is a symlink to /private/var/folders,
-		// which causes POST /api/projects to 400 with code:"symlink_root"
-		// unless acceptCanonical:true is set. Canonicalizing once at the
-		// boundary eliminates the entire class of failure for derived paths.
+		// which causes POST /api/projects to 400 with code:"symlink_root".
+		// Canonicalizing once at the boundary eliminates the entire class.
 		try {
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);

@@ -17,6 +17,11 @@ import { computeTreeCost } from "./agent/cost-tracker.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { listDescendants as nestedListDescendants, tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
 import { SessionManager } from "./agent/session-manager.js";
+import { LspSupervisor } from "./lsp/supervisor.js";
+import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
+import { PyrightLspFactory } from "./lsp/clients/pyright.js";
+import { MultiProjectSandboxLspBridge } from "./lsp/sandbox-bridge.js";
+import { registerWorktreePreCleanupHook } from "./lsp/cleanup-hook.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -671,6 +676,39 @@ export function createGateway(config: GatewayConfig) {
 		prStatusStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+
+	// LSP supervisor — singleton, lazy-spawning. Adapters registered eagerly
+	// but no LSP child processes are spawned until first `ensure()`.
+	//
+	// Finding #1: read project config keys for LSP behaviour. Multi-project
+	// resolution is deferred for v1 — we read the default (gateway-global)
+	// project config store. Per-project overrides can be layered later.
+	const lspProjectConfig = projectConfigStore.getWithDefaults();
+	const lspDisabled = String(lspProjectConfig.lsp_disabled ?? "false").toLowerCase() === "true";
+	const lspPreWarm = String(lspProjectConfig.pre_warm_lsp ?? "true").toLowerCase() !== "false";
+	const lspMaxServersRaw = Number(lspProjectConfig.lsp_max_servers ?? 4);
+	const lspIdleTtlRaw = Number(lspProjectConfig.lsp_idle_ttl_ms ?? 600000);
+	const lspMaxServers = Number.isFinite(lspMaxServersRaw) && lspMaxServersRaw > 0 ? lspMaxServersRaw : 4;
+	const lspIdleTtlMs = Number.isFinite(lspIdleTtlRaw) && lspIdleTtlRaw > 0 ? lspIdleTtlRaw : 600000;
+	const lspSupervisor = new LspSupervisor({
+		factories: [new TypescriptLspFactory(), new PyrightLspFactory()],
+		disabled: lspDisabled,
+		preWarmEnabled: lspPreWarm,
+		maxServers: lspMaxServers,
+		idleTtlMs: lspIdleTtlMs,
+	});
+	// Finding #6: install the sandbox bridge once SandboxManager is wired.
+	// SandboxManager is constructed later in start() when sandbox=docker, so
+	// the supervisor exposes a setter rather than taking it via constructor.
+	sessionManager.setLspSupervisor(lspSupervisor);
+	registerWorktreePreCleanupHook(async (wp) => { await lspSupervisor.shutdownForWorktree(wp); });
+	sessionManager.addTerminationListener((sessionId) => {
+		const session = sessionManager.getSession(sessionId);
+		if (!session) return;
+		if (session.cwd) lspSupervisor.release(session.cwd);
+		if (session.worktreePath) lspSupervisor.release(session.worktreePath);
+		for (const r of session.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
+	});
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
@@ -1192,6 +1230,10 @@ export function createGateway(config: GatewayConfig) {
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
+			// Finding #6: install LSP sandbox bridge now that SandboxManager exists.
+			lspSupervisor.setSandboxBridge(
+				new MultiProjectSandboxLspBridge(sandboxManager, projectContextManager),
+			);
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
@@ -1425,6 +1467,7 @@ export function createGateway(config: GatewayConfig) {
 			if (sandboxManager) {
 				await sandboxManager.shutdownAll();
 			}
+			await lspSupervisor.shutdownAll();
 			await sessionManager.cleanupSandboxNetwork();
 			server.close();
 		},
@@ -1888,6 +1931,51 @@ async function handleApiRoute(
 	if (url.pathname === "/api/sandbox/host-tokens" && req.method === "GET") {
 		const tokens = detectHostTokens(preferencesStore);
 		json(tokens);
+		return;
+	}
+
+	// ── LSP routes — agent-side tool surface ────────────────────────
+	// Finding #2: state probe for the cold-start progress signal.
+	if (url.pathname === "/api/lsp/state" && req.method === "GET") {
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		if (supervisor.disabled) { json({ state: "disabled" }); return; }
+		const cwd = url.searchParams.get("cwd") || "";
+		const pathArg = url.searchParams.get("path") || undefined;
+		try {
+			const key = supervisor.resolveKey(cwd, pathArg);
+			json({ state: supervisor.stateFor(key), worktreePath: key.worktreePath, language: key.language });
+		} catch (err: any) {
+			json({ state: "unknown", error: String(err?.message ?? err) });
+		}
+		return;
+	}
+	const lspMatch = url.pathname.match(/^\/api\/lsp\/([a-z_]+)$/);
+	if (lspMatch && req.method === "POST") {
+		const method = lspMatch[1];
+		const body = await readBody(req).catch(() => ({}));
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		// Finding #1: kill switch — every tool call returns lsp_unavailable.
+		if (supervisor.disabled) {
+			json({ error: "lsp_unavailable", message: "disabled by project config" });
+			return;
+		}
+		try {
+			const result = await supervisor.dispatch(method, body || {});
+			json(result);
+		} catch (err: any) {
+			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
+				json({ error: err.code, message: err.message });
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
+		const supervisor = sessionManager.getLspSupervisor();
+		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
 		return;
 	}
 

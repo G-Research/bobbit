@@ -62,7 +62,6 @@ test("50 × 100 KB mount calls → snapshot blocks sum bounded; each ≤ 320 B",
 		expect(typeof body.path).toBe("string");
 
 		const block = buildPreviewSnapshotV3Block(body.url, body.path);
-		// v3 contract: ≤ 250 bytes per block.
 		expect(
 			block.length,
 			`iteration ${i}: v3 block must be ≤ ${PER_BLOCK_CAP} bytes, got ${block.length}`,

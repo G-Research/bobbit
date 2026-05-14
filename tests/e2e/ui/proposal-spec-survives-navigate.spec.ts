@@ -102,11 +102,11 @@ test.describe("Goal proposal spec survives navigate-away/back", () => {
 		await waitForHealth();
 	});
 
-	// FIXME: regressed somewhere in the subgoals/master merge — rendered
+	// FIXME: regressed somewhere in the master-merge pipeline — rendered
 	// spec body comes back as "_No spec content yet_" after a nav-away/back.
 	// The rehydrate path appears to drop the spec field. Out of scope for
-	// the subgoals retro-audit; tracked separately. The original behaviour
-	// is covered by tests/proposal-rehydrate.test.ts at the unit layer.
+	// the LSP goal; original behaviour is covered by
+	// tests/proposal-rehydrate.test.ts at the unit layer.
 	test.fixme("@repro spec body persists after sidebar nav + return", async ({ page }) => {
 		await openGoalAssistantWithProposal(page);
 

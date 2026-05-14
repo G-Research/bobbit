@@ -29,8 +29,6 @@ function gitInit(dir: string): void {
 test.beforeAll(() => { token = readE2EToken(); });
 
 test("multi-repo goal creates per-repo worktrees", async () => {
-	// macOS tmpdir is a symlink (/var → /private/var); canonicalise so the
-	// project rootPath registers without tripping the symlink_root guard.
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-goal-")));
 	gitInit(path.join(root, "api"));
 	gitInit(path.join(root, "web"));
