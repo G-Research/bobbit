@@ -795,7 +795,6 @@ delivers the transcript over REST instead of WS would change this
 conclusion, but until then there is no win to ship.
 History: `docs/perf/history/d6585b472604-opt-b-{off,on}.json`.
 
-<<<<<<< HEAD
 ### 6.2 Opt-C — sidebar prefetch on hover (`prefetchOnHover` flag)
 
 **Hypothesis**: fire `GET /api/sessions/:id` / `GET /api/goals/:id` on
