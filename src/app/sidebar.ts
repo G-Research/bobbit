@@ -970,7 +970,7 @@ function renderProjectContent(
 	project: Project,
 	goals: Goal[],
 	sessions: GatewaySession[],
-	staff?: typeof state.staffList,
+	staff: typeof state.staffList = [],
 	archivedGoals: Goal[] = [],
 	standaloneArchivedSessions: GatewaySession[] = [],
 ) {
