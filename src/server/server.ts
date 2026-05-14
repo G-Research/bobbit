@@ -3714,6 +3714,9 @@ async function handleApiRoute(
 			const inheritedNesting = (parentGoalId && resolvedParentGoal)
 				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
 				: undefined;
+			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
+				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
+				: undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -3723,6 +3726,7 @@ async function handleApiRoute(
 				enabledOptionalSteps,
 				projectId: targetProjectId,
 				parentGoalId,
+				inlineRoles: bodyInlineRoles,
 				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
 				maxNestingDepth: inheritedNesting?.maxNestingDepth,
 			});
