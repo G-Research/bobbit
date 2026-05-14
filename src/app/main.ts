@@ -630,6 +630,36 @@ async function initApp() {
 	});
 
 	registerShortcut({
+		id: "ui.toggle-show-archived", label: "Toggle Show Archived", category: "UI",
+		defaultBindings: [{ key: "a", ctrlOrMeta: false, shift: true, alt: true }],
+		allowInInput: true,
+		handler: async () => {
+			const { toggleShowArchived } = await import("../ui/components/sidebar-filters.js");
+			toggleShowArchived();
+		},
+	});
+
+	registerShortcut({
+		id: "ui.toggle-show-busy", label: "Toggle Show Busy", category: "UI",
+		defaultBindings: [{ key: "b", ctrlOrMeta: false, shift: true, alt: true }],
+		allowInInput: true,
+		handler: async () => {
+			const { toggleShowBusy } = await import("../ui/components/sidebar-filters.js");
+			toggleShowBusy();
+		},
+	});
+
+	registerShortcut({
+		id: "ui.toggle-show-read", label: "Toggle Show Read", category: "UI",
+		defaultBindings: [{ key: "r", ctrlOrMeta: false, shift: true, alt: true }],
+		allowInInput: true,
+		handler: async () => {
+			const { toggleShowRead } = await import("../ui/components/sidebar-filters.js");
+			toggleShowRead();
+		},
+	});
+
+	registerShortcut({
 		id: "show-settings", label: "Settings", category: "UI",
 		defaultBindings: [{ key: ",", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
