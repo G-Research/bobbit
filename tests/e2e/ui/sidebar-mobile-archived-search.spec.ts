@@ -48,7 +48,7 @@ async function createArchivedGoal(projectId: string, title: string): Promise<str
 	});
 	expect(resp.status).toBe(201);
 	const goal = await resp.json();
-	await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
+	await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 	return goal.id;
 }
 

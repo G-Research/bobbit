@@ -129,6 +129,6 @@ test("inline workflows from project.yaml drive goal creation @smoke", async ({ g
 	});
 
 	// Cleanup
-	await api(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
-	await api(`/api/goals/${goalB.id}`, { method: "DELETE" }).catch(() => {});
+	await api(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	await api(`/api/goals/${goalB.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 });

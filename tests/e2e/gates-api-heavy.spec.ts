@@ -18,7 +18,7 @@ async function createGoalWithWorkflow(workflowId: string): Promise<string> {
 }
 
 async function deleteGoal(goalId: string): Promise<void> {
-	await apiFetch(`/api/goals/${goalId}`, { method: "DELETE" });
+	await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
 }
 
 test.describe("Gates API (verification)", () => {

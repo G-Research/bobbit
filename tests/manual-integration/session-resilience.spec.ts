@@ -640,15 +640,15 @@ test.describe.serial("Integration — sessions, goals, sandboxed goals", () => {
 		// Best-effort goal cleanup
 		if (gw && goalId) {
 			try { await api(gw, `/api/goals/${goalId}/team/teardown`, { method: "POST" }); } catch {}
-			try { await api(gw, `/api/goals/${goalId}`, { method: "DELETE" }); } catch {}
+			try { await api(gw, `/api/goals/${goalId}?cascade=true`, { method: "DELETE" }); } catch {}
 		}
 		if (gw && sbxGoalId) {
 			try { await api(gw, `/api/goals/${sbxGoalId}/team/teardown`, { method: "POST" }); } catch {}
-			try { await api(gw, `/api/goals/${sbxGoalId}`, { method: "DELETE" }); } catch {}
+			try { await api(gw, `/api/goals/${sbxGoalId}?cascade=true`, { method: "DELETE" }); } catch {}
 		}
 		if (gw && proj2GoalId) {
 			try { await api(gw, `/api/goals/${proj2GoalId}/team/teardown`, { method: "POST" }); } catch {}
-			try { await api(gw, `/api/goals/${proj2GoalId}`, { method: "DELETE" }); } catch {}
+			try { await api(gw, `/api/goals/${proj2GoalId}?cascade=true`, { method: "DELETE" }); } catch {}
 		}
 		if (gw) await stopGW(gw);
 		cleanTestDockerContainers();

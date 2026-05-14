@@ -841,6 +841,14 @@ Root cause class: a caller passes the hook through the legacy `setupCommand` par
 
 See [internals.md — Per-component `worktree_setup_command`](internals.md#session-worktrees) for the full call-site table.
 
+## `goal_spawn_child` (or other Children-group tools) returns "Tool not found" in a team-lead session
+
+- **Symptom**: a team-lead that could call `goal_spawn_child`, `goal_merge_child`, `goal_pause`, etc. earlier in its session suddenly gets `Tool not found` — no role edit, no session restart, no policy change by the user.
+- **Root cause**: `groupPolicyStore.setSubgoalsEnabledGetter` was not called at server boot. Without it, `groupPolicyStore.getSubgoalsEnabled()` returns `false` unconditionally. Step-0 of `resolveGrantPolicy` (`src/server/agent/tool-activation.ts`) short-circuits every `Children`-group tool to `never`, so they are never registered with the agent. The extension `defaults/tools/children/extension.ts` is never loaded.
+- **Fix**: confirm `groupPolicyStore.setSubgoalsEnabledGetter(...)` is called in `server.ts`'s boot block, alongside `roleStore.setBuiltins(...)` and `groupPolicyStore.setBuiltins(...)`. The getter must delegate to `preferencesStore.get("subgoalsEnabled") === true`.
+- **Distinguishing from a policy edit**: if the tools were truly policy-denied the agent would never have seen them in the first session turn. A mid-session disappearance that coincides with a server restart or config reload points to a missing wiring call, not a user policy change.
+- **Pinning test**: the unit test that covers this regression asserts that `resolveGrantPolicy` returns `never` for Children tools when the getter is absent/returns false, and returns the configured policy when the getter returns true.
+
 ## Tool-guard extension ParseError (new sessions crash)
 
 - Symptom: every new session for a role with at least one `never`-policy tool fails to start with a TypeScript `ParseError` from the generated tool-guard extension.

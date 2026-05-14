@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { walkGoalSubtree } from "./goal-subtree.js";
+import type { PersistedGoal } from "./goal-store.js";
+
 export interface SessionCost {
 	inputTokens: number;
 	outputTokens: number;
@@ -373,12 +376,15 @@ export function computeTreeCost(
 		return empty;
 	}
 
-	// BFS — goals belong to this tree iff their rootGoalId === rootGoalId
-	// OR their id === rootGoalId (root itself, which may have rootGoalId
-	// undefined or self-equal depending on Phase 1 lazy migration).
-	const treeMembers = allGoals.filter(
-		(g) => g.id === rootGoalId || g.rootGoalId === rootGoalId,
-	);
+	// Walk the subtree via the shared cascade helper. Equivalent to the
+	// legacy `id === rootGoalId || rootGoalId === rootGoalId` filter
+	// because the `rootGoalId` stamp on every persisted goal is consistent
+	// with its `parentGoalId` chain (see goal-manager.createGoal). Include
+	// archived nodes — their cost survives archival.
+	const treeMembers = walkGoalSubtree(rootGoalId, allGoals as PersistedGoal[], {
+		includeRoot: true,
+		includeArchived: true,
+	}) as unknown as TreeCostGoal[];
 
 	// Compute depth via parent chain. Cap at 32 to defend against cycles
 	// (Phase 1 already rejects cycles at createGoal, but persisted state

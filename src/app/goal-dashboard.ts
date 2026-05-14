@@ -1578,46 +1578,48 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 				<span class="meta-label">${formatTokens(treeCost.totalTokensIn + treeCost.totalTokensOut)} tokens</span>
 			</div>
 			${treeCostExpanded ? html`
-				<table data-testid="tree-cost-breakdown" style="width:100%;margin-top:6px;border-collapse:collapse;font-size:11px;">
-					<thead>
-						<tr style="border-bottom:1px solid var(--border);color:var(--muted-foreground);">
-							<th style="text-align:left;padding:4px 8px;font-weight:500;">Goal</th>
-							<th style="text-align:right;padding:4px 8px;font-weight:500;">Cost</th>
-							<th style="text-align:right;padding:4px 8px;font-weight:500;">Tokens</th>
-						</tr>
-					</thead>
-					<tbody>
-						${treeCost.breakdown.map(b => html`
-							<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
-								<td style="padding:3px 8px;">
-									<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
-									<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
-										@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
-								</td>
-								<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
-								<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
+				<div data-testid="tree-cost-breakdown-scroll" style="width:100%;max-height:min(60vh, 480px);overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:4px;">
+					<table data-testid="tree-cost-breakdown" style="width:100%;border-collapse:collapse;font-size:11px;">
+						<thead style="position:sticky;top:0;background:var(--background);z-index:1;">
+							<tr style="border-bottom:1px solid var(--border);color:var(--muted-foreground);">
+								<th style="text-align:left;padding:4px 8px;font-weight:500;">Goal</th>
+								<th style="text-align:right;padding:4px 8px;font-weight:500;">Cost</th>
+								<th style="text-align:right;padding:4px 8px;font-weight:500;">Tokens</th>
 							</tr>
-						`)}
-						${(() => {
-							// Residual bucket: cost entries whose goalId couldn't be
-							// recovered by the boot-time backfill. Rendered as a muted
-							// bottom row when non-empty; NOT a child of the root goal
-							// and NOT part of subtree totals — see backfill design doc.
-							const u = treeCost!.unattributableLegacy;
-							if (!u) return nothing;
-							const tokens = u.tokensIn + u.tokensOut;
-							if (u.costUsd <= 0 && tokens <= 0) return nothing;
-							return html`
-								<tr data-testid="tree-cost-row-unattributable-legacy"
-									style="border-top:1px solid var(--border);color:var(--muted-foreground);font-style:italic;">
-									<td style="padding:3px 8px;">${u.title}</td>
-									<td style="text-align:right;padding:3px 8px;">$${u.costUsd.toFixed(4)}</td>
-									<td style="text-align:right;padding:3px 8px;">${formatTokens(tokens)}</td>
+						</thead>
+						<tbody>
+							${treeCost.breakdown.map(b => html`
+								<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
+									<td style="padding:3px 8px;">
+										<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
+										<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
+											@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
+									</td>
+									<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
+									<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
 								</tr>
-							`;
-						})()}
-					</tbody>
-				</table>
+							`)}
+							${(() => {
+								// Residual bucket: cost entries whose goalId couldn't be
+								// recovered by the boot-time backfill. Rendered as a muted
+								// bottom row when non-empty; NOT a child of the root goal
+								// and NOT part of subtree totals — see backfill design doc.
+								const u = treeCost!.unattributableLegacy;
+								if (!u) return nothing;
+								const tokens = u.tokensIn + u.tokensOut;
+								if (u.costUsd <= 0 && tokens <= 0) return nothing;
+								return html`
+									<tr data-testid="tree-cost-row-unattributable-legacy"
+										style="border-top:1px solid var(--border);color:var(--muted-foreground);font-style:italic;">
+										<td style="padding:3px 8px;">${u.title}</td>
+										<td style="text-align:right;padding:3px 8px;">$${u.costUsd.toFixed(4)}</td>
+										<td style="text-align:right;padding:3px 8px;">${formatTokens(tokens)}</td>
+									</tr>
+								`;
+							})()}
+						</tbody>
+					</table>
+				</div>
 			` : nothing}
 		</div>
 	`;

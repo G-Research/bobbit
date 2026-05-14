@@ -274,7 +274,7 @@ test.describe("Multi-repo & components — integration", () => {
 		ti.setTimeout(60_000);
 		if (gw && goalId) {
 			try { await api(gw, `/api/goals/${goalId}/team/teardown`, { method: "POST" }); } catch {}
-			try { await api(gw, `/api/goals/${goalId}`, { method: "DELETE" }); } catch {}
+			try { await api(gw, `/api/goals/${goalId}?cascade=true`, { method: "DELETE" }); } catch {}
 		}
 		if (gw) await stopGW(gw);
 		try { rmSync(gwDir, { recursive: true, force: true }); } catch {}

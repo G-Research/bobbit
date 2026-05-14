@@ -6,16 +6,18 @@
  */
 
 import type { PersistedGoal } from "./goal-store.js";
+import { walkGoalSubtree } from "./goal-subtree.js";
 
 /**
- * paused-children-not-in-flight rule — Paused children must NOT count as in-flight.
+ * paused-children-not-in-flight rule — Paused descendants must NOT count as in-flight.
  *
  * `anyInFlightChild(parentGoalId, allGoals)` returns true iff any non-archived
- * child goal of `parentGoalId` is actively making progress (or could without
- * external action). A child counts as in-flight when ALL of:
+ * DESCENDANT of `parentGoalId` (full subtree, not just direct children) is
+ * actively making progress (or could without external action). A descendant
+ * counts as in-flight when ALL of:
  *   - It is not archived.
- *   - Its `state` is `"in-progress"` (children in `todo`, `complete`, or
- *     `shelved` are not in flight).
+ *   - Its `state` is `"in-progress"` (descendants in `todo`, `complete`,
+ *     `blocked`, or `shelved` are not in flight).
  *   - It is NOT paused (`paused !== true`).
  *
  * The `paused` exclusion is the load-bearing rule. A paused child cannot
@@ -24,33 +26,26 @@ import type { PersistedGoal } from "./goal-store.js";
  * indefinitely, which on PR #409 manifested as a root team-lead sitting
  * idle for hours despite a v0.2 child being paused with execution=failed.
  *
- * Mixed-progress is preserved: if any sibling is non-paused and
+ * Mixed-progress is preserved: if any descendant is non-paused and
  * `state=in-progress`, the parent IS still in-flight even when other
- * siblings are paused — at least one sibling is making forward progress.
+ * descendants are paused — at least one descendant is making forward
+ * progress.
  *
- * @param parentGoalId The goal whose children we're inspecting.
+ * Subtree (not direct-children) semantics are intentional: a grandchild
+ * making progress under a passive intermediate parent must still nudge
+ * the root. Walk goes through archived intermediates (their live
+ * descendants still count).
+ *
+ * @param parentGoalId The goal whose subtree we're inspecting.
  * @param goals The full goal collection (typically `goalStore.getAll()`).
- *              `parentGoalId` membership is determined by the
- *              `parentGoalId` field on each child (added in Phase 1).
  */
 export function anyInFlightChild(
 	parentGoalId: string,
 	goals: ReadonlyArray<PersistedGoal>,
 ): boolean {
-	for (const child of goals) {
-		// Guard against the parent itself appearing in the list.
-		if (child.id === parentGoalId) continue;
-		// `parentGoalId` is a Phase 1 field — narrow type-cast to avoid
-		// coupling this helper to Phase 1's exact PersistedGoal shape.
-		const childParentId = (child as { parentGoalId?: string }).parentGoalId;
-		if (childParentId !== parentGoalId) continue;
-
-		if (child.archived) continue;
-		if (child.state !== "in-progress") continue;
-		if (child.paused === true) continue;
-
-		// At least one in-flight non-paused child — parent is in-flight.
-		return true;
-	}
-	return false;
+	const subtree = walkGoalSubtree(parentGoalId, goals as PersistedGoal[], {
+		includeRoot: false,
+		includeArchived: false,
+	});
+	return subtree.some(g => g.state === "in-progress" && g.paused !== true);
 }

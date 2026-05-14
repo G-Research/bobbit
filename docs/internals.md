@@ -1316,6 +1316,7 @@ This replaces the old `ask-once` / `always-ask` distinction, which conflated "sh
 
 Resolution order is unchanged (first non-null wins):
 
+0. **Subgoals feature gate (Children group only)** — if the group is `Children` and `groupPolicyStore.getSubgoalsEnabled()` returns false, the policy is forced to `never` and the cascade short-circuits. This check is Step-0 in `resolveGrantPolicy` (`src/server/agent/tool-activation.ts`). The getter is wired at server boot via `groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true)` in `server.ts`, alongside `roleStore.setBuiltins(...)` and `groupPolicyStore.setBuiltins(...)`. If that call is missing, the getter returns false unconditionally, all Children-group tools (`goal_spawn_child`, `goal_merge_child`, `goal_pause`, etc.) resolve to `never` on every turn, and `defaults/tools/children/extension.ts` is never loaded. See [docs/debugging.md — goal_spawn_child returns "Tool not found"](debugging.md#goal_spawn_child-or-other-children-group-tools-returns-tool-not-found-in-a-team-lead-session).
 1. `role.toolPolicies["<tool-name>"]` - per-tool override on role
 2. `role.toolPolicies["<group>"]` - per-group override on role
 3. `tool.grantPolicy` - tool YAML default
