@@ -91,6 +91,69 @@ test("GET /api/lsp/state is registered (never 404)", async () => {
 	expect(res.status).toBe(200);
 });
 
+test("GET /api/lsp/stats returns within cap when self-check promise never settles", async ({ gateway }) => {
+	// Hang-safety regression for goal fix-routes-1db8c87b: the stats handler awaits
+	// the supervisor's routeSelfCheck promise, but bounds the wait with
+	// LSP_ROUTE_SELF_CHECK_STATS_CAP_MS so a pathological never-settling probe cannot
+	// hang /api/lsp/stats indefinitely. When the cap fires before the promise settles,
+	// the route returns whatever the supervisor's current routeSelfCheck value is —
+	// here we force it back to "pending" so the assertion is meaningful.
+	// Import the SAME compiled server module the in-process harness booted, so the
+	// cap override mutates the live module state. A static import from src/server
+	// would be a *different* module instance and the override would be a no-op.
+	const { __setLspRouteSelfCheckStatsCapMsForTesting } = await import("../../dist/server/server.js");
+
+	const supervisor = gateway.sessionManager.getLspSupervisor();
+	expect(supervisor, "supervisor must exist on the in-process gateway").toBeTruthy();
+
+	const SHORT_CAP_MS = 150;
+	// Wide upper bound — we just need to prove the route is bounded, not that it's
+	// tight. CI scheduling jitter on slow runners can add tens of ms; 2000ms is
+	// generous while still catching a regression that drops the cap entirely (which
+	// would block on the never-settling promise and eventually time the test out).
+	const MAX_OBSERVED_MS = 2000;
+
+	// IMPORTANT: the boot self-check IIFE writes setRouteSelfCheck("ok") directly
+	// when it succeeds, independently of which promise is published via
+	// setRouteSelfCheckPromise(). If we install our hang before that IIFE finishes,
+	// it can overwrite our "pending" sentinel mid-test. Wait for the boot probe to
+	// fully settle, THEN install the hang.
+	const priorPromise = supervisor.getRouteSelfCheckPromise();
+	if (priorPromise) await priorPromise.catch(() => { /* boot probe already failed — fine, we're about to overwrite the sentinel */ });
+
+	const neverSettles = new Promise<void>(() => { /* intentionally never resolves */ });
+	supervisor.setRouteSelfCheckPromise(neverSettles);
+	supervisor.setRouteSelfCheck("pending");
+	__setLspRouteSelfCheckStatsCapMsForTesting(SHORT_CAP_MS);
+
+	try {
+		const startedAt = Date.now();
+		const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+		const elapsed = Date.now() - startedAt;
+
+		expect(res.status).toBe(200);
+		const body = await res.json() as Record<string, unknown>;
+		expect(
+			body.routeSelfCheck,
+			"routeSelfCheck must remain 'pending' when the bounded wait expires before the promise settles",
+		).toBe("pending");
+		expect(
+			elapsed,
+			`/api/lsp/stats must return within the cap (${SHORT_CAP_MS}ms) when the self-check promise hangs — observed ${elapsed}ms`,
+		).toBeLessThan(MAX_OBSERVED_MS);
+		expect(
+			elapsed,
+			"if the route returned faster than the cap, the bounded await may not be running at all",
+		).toBeGreaterThanOrEqual(SHORT_CAP_MS - 20); // tiny slack for timer rounding
+	} finally {
+		__setLspRouteSelfCheckStatsCapMsForTesting(undefined);
+		supervisor.setRouteSelfCheckPromise(priorPromise);
+		// Restore the supervisor's settled sentinel so later tests in this file (and any
+		// retry) still observe the post-boot "ok" value.
+		supervisor.setRouteSelfCheck("ok");
+	}
+});
+
 for (const method of LSP_METHODS) {
 	test(`POST /api/lsp/${method} is registered (never 404)`, async () => {
 		const res = await apiFetch(`/api/lsp/${method}`, {
