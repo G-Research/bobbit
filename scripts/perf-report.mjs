@@ -330,8 +330,8 @@ function sparkline(values) {
 }
 
 function chartSvg(span, groups) {
-	const W = 380, H = 170;
-	const PAD_L = 50, PAD_R = 12, PAD_T = 18, PAD_B = 28;
+	const W = 380, H = 180;
+	const PAD_L = 50, PAD_R = 12, PAD_T = 28, PAD_B = 28;
 	const plotW = W - PAD_L - PAD_R;
 	const plotH = H - PAD_T - PAD_B;
 
@@ -383,6 +383,10 @@ function chartSvg(span, groups) {
 			`<text x="${(PAD_L - 6).toFixed(1)}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">${fmt(yv)}</text>`,
 		);
 	}
+	// Y-axis label: "latency (ms)" above the leftmost tick. Single-line, small,
+	// matches the muted-foreground style of the tick numbers.
+	const yAxisLabel = `<text x="${PAD_L.toFixed(1)}" y="14" text-anchor="start" font-family="ui-monospace, monospace" font-size="10" fill="var(--muted-foreground)" font-weight="600">latency (ms) — lower is better</text>`;
+	gridLines.push(yAxisLabel);
 
 	// Connecting line between medians (gaps over missing groups).
 	const segments = (key) => {
@@ -470,6 +474,20 @@ function renderLegend() {
 		<div class="legend-row">
 			<svg width="16" height="10" viewBox="0 0 16 10" aria-hidden="true"><circle cx="8" cy="5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"/></svg>
 			<span><strong>baseline</strong> — fixture or harness change; not comparable to other commits as a code-perf signal.</span>
+		</div>
+		<div class="legend-row">
+			<svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
+				<line x1="2" x2="30" y1="5" y2="5" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7"/>
+				<circle cx="16" cy="5" r="3" fill="var(--chart-1)"/>
+			</svg>
+			<span><strong>p50 (median)</strong> — solid line + filled dots. The typical-case latency.</span>
+		</div>
+		<div class="legend-row">
+			<svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
+				<line x1="2" x2="30" y1="5" y2="5" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6"/>
+				<circle cx="16" cy="5" r="2" fill="var(--chart-4)"/>
+			</svg>
+			<span><strong>p95 (slow tail)</strong> — dashed line + smaller dots. The 1-in-20 worst case; what a frustrated user sees.</span>
 		</div>
 		<div class="legend-row">
 			<svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true">
