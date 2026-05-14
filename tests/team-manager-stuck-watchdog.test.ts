@@ -256,10 +256,22 @@ describe("TeamManager.stuck-team watchdog", () => {
 		assert.equal(sm.enqueuePrompt.mock.callCount(), 0);
 	});
 
-	it("does not nudge a paused goal (delegates to shouldSkipNudge)", async () => {
+	it("does not nudge a shelved goal", async () => {
 		const T0 = 1_000_000;
 		const { tm, sm, goal } = await buildIdleTeam(1, T0);
-		goal.state = "shelved"; // shouldSkipNudge skips shelved/complete/archived
+		goal.state = "shelved";
+
+		(tm as any)._stuckSweepTick(T0 + 10 * 60_000);
+		assert.equal(sm.enqueuePrompt.mock.callCount(), 0);
+	});
+
+	it("does not nudge a paused goal (goal.paused === true)", async () => {
+		// Regression: paused goals are sticky-by-operator-intent. The watchdog
+		// must not resume a paused goal via idle-nudge; the operator explicitly
+		// stopped progress.
+		const T0 = 1_000_000;
+		const { tm, sm, goal } = await buildIdleTeam(1, T0);
+		goal.paused = true;
 
 		(tm as any)._stuckSweepTick(T0 + 10 * 60_000);
 		assert.equal(sm.enqueuePrompt.mock.callCount(), 0);
