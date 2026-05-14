@@ -976,9 +976,13 @@ export class TeamManager {
 		if (!tl || tl.status !== "idle") return true;
 		if (this.verificationHarness?.getActiveVerifications(goalId).length) return true;
 		if (this.nudgePending.get(goalId)) return true;
-		// Don't nudge a team lead whose goal has already finished (complete/shelved/archived).
+		// Don't nudge a team lead whose goal has already finished or is paused.
+		// Paused goals are sticky-by-operator-intent (see goal-paused-guard.ts):
+		// the operator explicitly stopped progress, so the watchdog must not
+		// resume it via an idle-nudge. The team-lead's pause cascade already
+		// terminated its workers; nudging would re-enter the workflow loop.
 		const goal = this.resolveGoal(goalId);
-		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved") return true;
+		if (!goal || goal.archived || goal.state === "complete" || goal.state === "shelved" || goal.paused) return true;
 		// Skip if any subgoal is in-flight — the parent-notification path
 		// will wake the parent on RTM/fail/pause. paused children DO count
 		// as in-flight=false (a paused child can't progress without parent
