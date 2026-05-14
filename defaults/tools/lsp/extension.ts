@@ -105,7 +105,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_definition",
-		description: "Jump to symbol definition; returns file path + range. 0-indexed line/char.",
+		description: "Go to symbol definition. Prefer over grep+read for symbol lookups. 0-indexed line/char.",
 		parameters: Type.Object({
 			path: pathParam, line: lineParam, character: charParam,
 		}),
@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_references",
-		description: "Find all references to a symbol; returns Location[]. 0-indexed line/char.",
+		description: "Find all symbol references. Prefer over grep for symbol callsites. 0-indexed line/char.",
 		parameters: Type.Object({
 			path: pathParam, line: lineParam, character: charParam,
 			includeDeclaration: Type.Optional(Type.Boolean({ description: "Include the declaration site (default true)." })),
@@ -130,7 +130,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_hover",
-		description: "Hover info (type, signature, doc) for a symbol. 0-indexed line/char.",
+		description: "Type/signature/docs for a symbol. Prefer over reading the file. 0-indexed line/char.",
 		parameters: Type.Object({
 			path: pathParam, line: lineParam, character: charParam,
 		}),
@@ -142,7 +142,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_diagnostics",
-		description: "Type errors / warnings for a file (or workspace if path omitted).",
+		description: "Type errors for a file or workspace. Prefer over npm run check in the edit loop.",
 		parameters: Type.Object({
 			path: Type.Optional(Type.String({ description: "File path relative to cwd; omit for workspace." })),
 		}),
@@ -154,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_document_symbols",
-		description: "List symbols (classes, functions, vars) in a file as a tree.",
+		description: "List symbols (classes, functions, vars) in a file as a tree. Prefer over read+scan to orient.",
 		parameters: Type.Object({ path: pathParam }),
 		async execute(_id, args: any, _abort: any, onUpdate: any) {
 			try { return asText(await callLsp("document_symbols", args, onUpdate)); }
@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_workspace_symbol",
-		description: "Search symbols across the worktree by name; returns up to 100 hits.",
+		description: "Symbol search across worktree. Prefer over grep for 'where is X defined'. Returns up to 100 hits.",
 		parameters: Type.Object({
 			query: Type.String({ description: "Symbol name substring; fuzzy where supported." }),
 		}),
@@ -176,7 +176,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "lsp_rename",
-		description: "Compute a safe rename across files; returns a WorkspaceEdit to apply.",
+		description: "Safe rename across files; returns WorkspaceEdit. Prefer over hand-edits. 0-indexed line/char.",
 		parameters: Type.Object({
 			path: pathParam, line: lineParam, character: charParam,
 			newName: Type.String({ description: "New symbol name." }),

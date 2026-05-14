@@ -1,5 +1,5 @@
 name: lsp_document_symbols
-description: "List symbols (classes, functions, vars) in a file as a tree."
+description: "List symbols (classes, functions, vars) in a file as a tree. Prefer over read+scan to orient."
 summary: "Document symbols (LSP)"
 params: [path]
 provider:

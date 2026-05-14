@@ -1,5 +1,5 @@
 name: lsp_diagnostics
-description: "Type errors / warnings for a file (or workspace if path omitted)."
+description: "Type errors for a file or workspace. Prefer over npm run check in the edit loop."
 summary: "Diagnostics (LSP)"
 params: [path?]
 provider:
