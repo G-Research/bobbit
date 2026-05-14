@@ -10,6 +10,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 test.describe("Sidebar goal actions & staff @quarantine", () => {
 	const goalIds: string[] = [];
@@ -57,10 +58,10 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 
 		await openApp(page);
 
-		// Toggle "Show archived" using the button's title attribute (text is "See Archived")
-		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
+		// Open the Filters popover and toggle Show Archived ON
+		const archivedToggle = filtersButton(page);
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
-		await archivedToggle.click();
+		await clickShowArchivedToggle(page);
 
 		// Wait for archived goals to load asynchronously — title is rendered uppercase via CSS
 		const goalTitle = page.getByText("SB22 Reattempt Test", { exact: false }).first();
@@ -143,10 +144,10 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		// Goal should NOT be visible in live section
 		await expect(page.getByText("SB23 Archive Test")).toHaveCount(0, { timeout: 5_000 });
 
-		// Toggle "Show archived"
-		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
+		// Toggle "Show Archived" on via the Filters popover
+		const archivedToggle = filtersButton(page);
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
-		await archivedToggle.click();
+		await clickShowArchivedToggle(page);
 
 		// Now the archived goal should be visible (title rendered uppercase via CSS)
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });

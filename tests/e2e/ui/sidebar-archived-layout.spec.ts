@@ -17,6 +17,7 @@ import {
 	nonGitCwd,
 } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 // ---------------------------------------------------------------------------
 // SB-27: Toggle "Show archived"
@@ -37,10 +38,10 @@ test.describe("SB-27: Toggle Show archived", () => {
 		// Archived section should not be visible initially
 		const archivedHeader = page.locator("span.uppercase").filter({ hasText: "Archived" });
 
-		// Click "See Archived" button in sidebar footer
-		const seeArchivedBtn = page.locator("button").filter({ hasText: "See Archived" }).first();
+		// Open Filters popover and toggle Show Archived
+		const seeArchivedBtn = filtersButton(page);
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 
 		// Archived section should appear
 		await expect(archivedHeader.first()).toBeVisible({ timeout: 10_000 });
@@ -60,8 +61,8 @@ test.describe("SB-27: Toggle Show archived", () => {
 		await expect(archivedHeader.first()).toBeVisible({ timeout: 10_000 });
 
 		// Toggle off
-		const seeArchivedBtnAfter = page.locator("button").filter({ hasText: "See Archived" }).first();
-		await seeArchivedBtnAfter.click();
+		const seeArchivedBtnAfter = filtersButton(page);
+		await clickShowArchivedToggle(page);
 
 		// Archived section content should disappear — the "Load more" buttons and
 		// archived session/goal sublists should be hidden.
@@ -105,10 +106,10 @@ test.describe("SB-28: Archived team structure", () => {
 
 		await openApp(page);
 
-		// Enable archived view
-		const seeArchivedBtn = page.locator("button").filter({ hasText: "See Archived" }).first();
+		// Enable archived view via the Filters popover
+		const seeArchivedBtn = filtersButton(page);
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 
 		// Wait for the See-Archived toggle to activate. The goal here is LIVE
 		// (not archived) — only its team sessions were archived via teardown.
@@ -164,10 +165,10 @@ test.describe("SB-29: Archived goals visible", () => {
 
 		await openApp(page);
 
-		// Toggle "Show archived" on
-		const seeArchivedBtn = page.locator("button").filter({ hasText: "See Archived" }).first();
+		// Toggle "Show archived" on via the Filters popover
+		const seeArchivedBtn = filtersButton(page);
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 
 		// Wait for archived section
 		await expect(
