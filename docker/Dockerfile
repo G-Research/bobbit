@@ -22,8 +22,13 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 # Install pi-coding-agent and its dependencies inside the image.
 # This avoids bind-mounting node_modules from the host, which is 20x slower
 # on Docker Desktop (Windows/macOS) due to cross-OS filesystem bridging.
-ARG PI_AGENT_VERSION=0.57.1
-RUN npm install -g @mariozechner/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
+#
+# NOTE: package scope is @earendil-works (renamed from @mariozechner). The host
+# detects its own pi-coding-agent version from node_modules and passes it in via
+# --build-arg PI_AGENT_VERSION=<host-version>; the ARG default below is only a
+# fallback for manual `docker build docker/` invocations.
+ARG PI_AGENT_VERSION=0.74.0
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 

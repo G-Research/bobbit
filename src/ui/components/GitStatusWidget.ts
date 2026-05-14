@@ -423,12 +423,15 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderMergePrimaryButton() {
+        // Label uses the bare branch name to stay compact ("Rebase on dev");
+        // tooltip carries the full resolved ref (`origin/dev` or local `dev`)
+        // so the user can see exactly what the rebase will target.
         return html`<button
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.mergingPrimary}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
-            title="Rebase this branch on top of origin/master"
-        >${this.mergingPrimary ? 'Rebasing\u2026' : 'Rebase on master'}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
+            title="Rebase this branch on top of ${this.primaryRef}"
+        >${this.mergingPrimary ? 'Rebasing\u2026' : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
     }
 
     private _handleMergePrimary() {
@@ -467,7 +470,7 @@ export class GitStatusWidget extends LitElement {
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.squashPushing}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleSquashPush(); }}
-            title="Squash all branch commits into one and push directly to master"
+            title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
         >${this.squashPushing ? 'Pushing\u2026' : 'Squash push'}</button>${this.squashPushError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : nothing}`;
     }
 
