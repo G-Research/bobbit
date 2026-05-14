@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import { SYSTEM_PROJECT_ID } from "./project-registry.js";
 import { createWorktree, cleanupWorktree } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
@@ -19,6 +20,73 @@ export class StaffManager {
 
 	constructor(pcm: ProjectContextManager) {
 		this.pcm = pcm;
+		this.logOrphansOnce();
+	}
+
+	/**
+	 * Log any orphaned staff (missing projectId or persisted under the synthetic
+	 * system project) one time during construction. This surfaces legacy records
+	 * that won't render under any real project's Sessions bucket until the user
+	 * re-homes them via the orphan banner.
+	 */
+	private logOrphansOnce(): void {
+		try {
+			for (const s of this.listOrphaned()) {
+				console.log(`[staff-manager] orphaned staff: id=${s.id} name=${s.name}${s.projectId ? ` (projectId=${s.projectId})` : " (no projectId)"}`);
+			}
+		} catch (err) {
+			console.warn("[staff-manager] orphan scan failed:", err);
+		}
+	}
+
+	/**
+	 * Return staff records that are not anchored to a real project: either
+	 * missing `projectId` outright, or persisted under the synthetic system
+	 * project. The sidebar surfaces these in an orphan banner with a one-click
+	 * re-assignment flow.
+	 */
+	listOrphaned(): PersistedStaff[] {
+		const orphans: PersistedStaff[] = [];
+		for (const ctx of this.pcm.all()) {
+			for (const staff of ctx.staffStore.getAll()) {
+				if (!staff.projectId || staff.projectId === SYSTEM_PROJECT_ID || ctx.project.id === SYSTEM_PROJECT_ID) {
+					orphans.push(staff);
+				}
+			}
+		}
+		return orphans;
+	}
+
+	/**
+	 * Re-home a staff record to a different project. Moves the persisted record
+	 * between per-project stores, updates `staff.projectId`, and re-indexes
+	 * search under the new project. Used by the orphan banner's "Assign to
+	 * project…" flow.
+	 *
+	 * Note: worktree path and branch are preserved as-is — those live on disk
+	 * under the original project's worktree root. Refreshing the worktree on
+	 * the next wake will rebase against whatever primary branch is canonical
+	 * for the new project.
+	 */
+	reassignProject(staffId: string, newProjectId: string): PersistedStaff | null {
+		const found = this.findStoreForStaff(staffId);
+		if (!found) return null;
+		if (found.projectId === newProjectId && found.staff.projectId === newProjectId) {
+			return found.staff;
+		}
+		const newCtx = this.pcm.getOrCreate(newProjectId);
+		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+
+		// Pull from old search index, drop from old store.
+		const oldCtx = this.pcm.getOrCreate(found.projectId);
+		oldCtx?.searchIndex?.removeStaff(staffId);
+		found.store.remove(staffId);
+
+		// Re-home: clone with updated projectId and put into the new project's store.
+		const moved: PersistedStaff = { ...found.staff, projectId: newProjectId, updatedAt: Date.now() };
+		newCtx.staffStore.put(moved);
+		newCtx.searchIndex?.indexStaff(moved, newProjectId);
+		return moved;
 	}
 
 	private getStore(projectId: string): StaffStore {

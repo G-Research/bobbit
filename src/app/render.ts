@@ -9,7 +9,7 @@ import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Bot, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, List, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -31,7 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, renderStaffSidebarSection, isProjectExpanded, toggleProjectExpanded } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, synthStaffSessionRow, filterStaffByQuery } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -365,7 +365,7 @@ function renderMobileLanding() {
 									let staffList = (state.staffList || []).filter(s => s.state !== "retired");
 									if (state.searchQuery) {
 										const q = state.searchQuery.toLowerCase();
-										staffList = staffList.filter(s => s.name?.toLowerCase().includes(q));
+										staffList = filterStaffByQuery(staffList, q);
 									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
@@ -381,11 +381,24 @@ function renderMobileLanding() {
 											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
+										// Bucket staff and prepend their synthesised session rows to the project's
+										// Sessions list in stable alphabetical order (surface-staff-in-sessions §2).
+										const mobileStaffRowsByProject = new Map<string, typeof ungroupedSessions>();
 										for (const s of staffList) {
 											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
 											const bucket = projectMap.get(s.projectId);
 											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.staff.push(s);
+											const synth = synthStaffSessionRow(s);
+											if (!synth) continue;
+											let rows = mobileStaffRowsByProject.get(s.projectId);
+											if (!rows) { rows = []; mobileStaffRowsByProject.set(s.projectId, rows); }
+											rows.push(synth);
+										}
+										for (const [pid, rows] of mobileStaffRowsByProject) {
+											rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+											const bucket = projectMap.get(pid);
+											if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
 										}
 										// Bucket archived goals + standalone archived sessions per project.
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
@@ -408,6 +421,23 @@ function renderMobileLanding() {
 															@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
 															title="Project settings"
 														>${icon(Settings, "sm")}</button>
+														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
+															title="Manage staff agents"
+														>${icon(List, "sm")}</button>
+														<button
+															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
+															@click=${(e: Event) => { e.stopPropagation(); void startNewStaffFlow(e, project.id); }}
+															title="New staff agent in ${project.name}"
+														>
+															<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
+																${icon(Bot, "sm")}
+																<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
+																	<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+																</svg>
+															</span>
+														</button>
 														<button
 															class="p-0.5 rounded-md active:bg-secondary/50 text-muted-foreground transition-colors relative flex items-center justify-center"
 															@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
@@ -454,7 +484,6 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
-													${renderStaffSidebarSection(data.staff, project.id)}
 													${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";
