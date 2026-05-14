@@ -1175,6 +1175,10 @@ export function createGateway(config: GatewayConfig) {
 					toolManager: ctx.toolManager,
 					components,
 					repoUrlByName,
+					// Resolver is invoked at worktree-creation time inside the container, so it always
+					// reads the current project-config-store value rather than a snapshot taken at
+					// sandbox bootstrap. Same shape as the worktree-pool baseRefResolver.
+					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
@@ -1295,7 +1299,7 @@ export function createGateway(config: GatewayConfig) {
 								// Single-repo: resolve nested rootPath to the actual git toplevel so
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath);
-								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot);
+								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"));
 								console.log(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								console.log(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -2244,7 +2248,7 @@ async function handleApiRoute(
 						// Single-repo: resolve nested rootPath to the actual git toplevel so
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath);
-						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot);
+						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined);
 					}
 				} catch { /* best-effort */ }
 			}
