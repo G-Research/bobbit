@@ -168,6 +168,7 @@ The check is skipped entirely when `lsp_disabled: true` is set in project config
 | `"pending"` | Check has not completed yet (gateway just started; only visible in a very tight polling window). |
 | `"ok"` | All three probes passed — routes are wired correctly. |
 | `"failed:<route>:<status>"` | One of the probes returned a bad status. `<route>` is the URL fragment (e.g. `stats`, `state`, `diagnostics`) and `<status>` is the HTTP status code (typically `404`). |
+| `"failed:diagnostics:initialize_failed"` | The `POST /api/lsp/diagnostics` probe returned HTTP 200 but the body contained `ENOENT` or `stat '` — the language server failed to initialize, most likely because a sandbox bridge translated host paths to container paths even though no container is running (bridge-attached-without-container bug). |
 
 ### What happens on failure
 
@@ -197,6 +198,7 @@ The check is skipped entirely when `lsp_disabled: true` is set in project config
 | Warm-call latency >500ms (design target) | Cold-start race — pre-warm scheduled but not yet completed when the agent's first call lands | Expected on session attach. Pre-warm runs on a microtask, so a very early tool call can overtake it. Subsequent calls hit the warm path. If warm-state calls (verify via `GET /api/lsp/state`) still exceed 500ms, profile the adapter — `typescript.ts::diagnostics` settles via `publishDiagnostics` notifications and may wait briefly on a recently-opened file. |
 | `[lsp] config change in …` log spam during a `git checkout` | `fs.watch` is firing once per touched config file in the branch swap | Harmless — the debounce coalesces within 1.5s and the entry restarts lazily. If the churn is disruptive, raise `configChangeDebounceMs` (constructor option). |
 | Container-path leak — agent sees `/workspace-wt/...` in a result | The sandbox bridge's reverse-translation missed an edge case | File a bug with the originating call and `GET /api/lsp/stats` output. Workaround: rerun with `lsp_disabled: true` and fall back to grep. |
+| `ENOENT … stat '/workspace-wt/…'` in an LSP error, or `routeSelfCheck: "failed:diagnostics:initialize_failed"` | Bridge-attached-without-container bug: a `DockerSandboxLspBridge` was attached even though no sandbox container is running, so `tsserver` was spawned on the host but initialised with container-side paths it cannot stat. Fixed in commit that introduced `containerIdForWorktree` gating in `typescript.ts` (sessions `03afb128`/`9150a1de`, 2026-05-14). | Should not recur; if it does, file a bug and use `lsp_disabled: true` as a temporary workaround. |
 | Server keeps crashing — `crashCount` climbs to 3 and the 5-min cooldown trips | The language server hit a project it can't load (corrupt `tsconfig.json`, missing `node_modules/typescript`, OOM) | Inspect the gateway log — the adapter writes the child's stderr ring buffer on exit. Fix the underlying project; the cooldown self-clears after 5 min, or restart the gateway to reset crash state. |
 
 ## UI renderers
