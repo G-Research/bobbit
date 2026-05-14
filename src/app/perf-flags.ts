@@ -35,11 +35,24 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"placeholders. The renderer loads full content on demand via " +
 			"`/tool-content/:mi/:bi`.",
 	},
+	{
+		name: "deferOffscreenRender",
+		description:
+			"Phase 2 Opt-A — defer markdown / tool-call rendering of off-screen " +
+			"transcript messages. The bottom tail renders eagerly; older messages " +
+			"render a cheap height-preserving placeholder until an " +
+			"`IntersectionObserver` (rootMargin: 500px) sees them approach the " +
+			"viewport, at which point they swap in via `requestIdleCallback`. " +
+			"Targets `paint.first` p95 on large transcripts.",
+	},
 ];
 
 /** Convenience canonical flag name for Phase 2B. Imported by call sites so
  *  a typo on the magic string surfaces at build time. */
 export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
+
+/** Convenience canonical flag name for Phase 2 Opt-A. */
+export const PERF_FLAG_DEFER_OFFSCREEN_RENDER = "deferOffscreenRender";
 
 const LS_KEY = "bobbitPerfFlags";
 
