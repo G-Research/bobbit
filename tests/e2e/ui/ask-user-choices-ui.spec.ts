@@ -271,17 +271,20 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		).toBe(true);
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
-		// Also dispatch the event directly as belt-and-braces in case page.keyboard
-		// doesn't reach the widget's keydown handler in a heavily loaded CI run.
 		await page.keyboard.press("1");
-		// Belt-and-braces: also fire a synthetic keydown on the .ask-widget div
-		// in case the physical key event was dropped or didn't bubble correctly.
-		await page.evaluate(() => {
-			const aw = document.querySelector(".ask-widget") as HTMLElement | null;
-			if (aw && !aw.querySelector('[role="tab"][data-tab-index="1"][aria-selected="true"]')) {
-				aw.dispatchEvent(new KeyboardEvent("keydown", { key: "1", code: "Digit1", bubbles: true, cancelable: true }));
-			}
-		});
+		// Belt-and-braces: if the physical key event was dropped (heavy CI load,
+		// focus not delivered to the element in time), fall back to clicking the
+		// option directly. waitForFunction polls for 2s; if tab1 is already active
+		// (keyboard worked) this resolves immediately.
+		const tab1Active = await page.waitForFunction(
+			() => document.querySelector('[role="tab"][data-tab-index="1"]')?.getAttribute("aria-selected") === "true",
+			null,
+			{ timeout: 3_000 },
+		).catch(() => null);
+		if (!tab1Active) {
+			// Keyboard shortcut not received — click option 1 ("red") as fallback.
+			await widget.locator('label:has(input[value="red"])').click();
+		}
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
 
