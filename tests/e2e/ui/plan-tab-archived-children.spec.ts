@@ -31,7 +31,7 @@ test.describe("Plan tab — archived children", () => {
 		parentId = parent.id as string;
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Child A", spec: "child a spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Child A", spec: "child a spec: plan-tab archived-children UI test, padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);
 		childId = (await r1.json()).id as string;

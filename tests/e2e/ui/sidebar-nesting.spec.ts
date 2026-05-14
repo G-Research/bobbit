@@ -55,20 +55,20 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		// are set server-side from the spawn-child path).
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "plan-A", title: "Child A", spec: "Child A spec" }),
+			body: JSON.stringify({ planId: "plan-A", title: "Child A", spec: "Child A spec: sidebar-nesting UI test first child, padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);
 		child1Id = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "plan-B", title: "Child B", spec: "Child B spec" }),
+			body: JSON.stringify({ planId: "plan-B", title: "Child B", spec: "Child B spec: sidebar-nesting UI test second child, padded to meet spec validator minimum length." }),
 		});
 		expect(r2.status).toBe(201);
 		child2Id = (await r2.json()).id as string;
 		// Grandchild — child1 → grandchild
 		const r3 = await apiFetch(`/api/goals/${child1Id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "plan-A1", title: "Grandchild A1", spec: "Grandchild spec" }),
+			body: JSON.stringify({ planId: "plan-A1", title: "Grandchild A1", spec: "Grandchild spec: sidebar-nesting UI test grandchild, padded to meet spec validator minimum length." }),
 		});
 		expect(r3.status).toBe(201);
 		grandchildId = (await r3.json()).id as string;

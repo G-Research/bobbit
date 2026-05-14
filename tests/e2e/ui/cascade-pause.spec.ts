@@ -28,12 +28,12 @@ test.describe("Phase 5b — cascade pause", () => {
 		parentId = parent.id as string;
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Child 1", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Child 1", spec: "cascade-pause UI test: first child goal padded to meet spec validator minimum length." }),
 		});
 		child1Id = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Child 2", spec: "spec" }),
+			body: JSON.stringify({ planId: "p2", title: "Child 2", spec: "cascade-pause UI test: second child goal padded to meet spec validator minimum length." }),
 		});
 		child2Id = (await r2.json()).id as string;
 	});

@@ -50,7 +50,7 @@ async function waitForTeamLead(goalId: string): Promise<string> {
 async function spawnChild(parentId: string, planId: string, title: string): Promise<string> {
 	const r = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 		method: "POST",
-		body: JSON.stringify({ planId, title, spec: `${title} spec` }),
+		body: JSON.stringify({ planId, title, spec: `${title} spec: helper-spawned child goal padded to meet the spawn-child spec validator minimum length.` }),
 	});
 	expect(r.status).toBe(201);
 	const data = await r.json();

@@ -17,18 +17,18 @@ test.describe("Phase 5b — cascade archive", () => {
 		const parent = await createGoal({ title: "Cascade parent", projectId, team: false });
 		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Child 1", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Child 1", spec: "cascade-archive UI test: first child goal padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);
 		const c1 = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Child 2", spec: "spec" }),
+			body: JSON.stringify({ planId: "p2", title: "Child 2", spec: "cascade-archive UI test: second child goal padded to meet spec validator minimum length." }),
 		});
 		expect(r2.status).toBe(201);
 		const r3 = await apiFetch(`/api/goals/${c1}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1g", title: "Grandchild", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1g", title: "Grandchild", spec: "cascade-archive UI test: grandchild goal padded to meet spec validator minimum length." }),
 		});
 		expect(r3.status).toBe(201);
 

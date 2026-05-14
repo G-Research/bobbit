@@ -64,7 +64,7 @@ test.describe("propose_goal — inlineWorkflow + inlineRoles round-trip", () => 
 			body: JSON.stringify({
 				args: {
 					title: "Inline e2e goal",
-					spec: "## Mission\n\nTest the inline-fields round-trip.",
+					spec: "## Mission\n\nTest the inline-fields round-trip through propose.",
 					workflow: "feature",
 					inlineWorkflow: SAMPLE_INLINE_WORKFLOW,
 					inlineRoles: SAMPLE_INLINE_ROLES,

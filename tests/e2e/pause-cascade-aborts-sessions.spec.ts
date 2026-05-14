@@ -53,14 +53,14 @@ test.describe("pause cascade — aborts sessions + blocks new spawns", () => {
 		// Spawn two direct children via spawn-child (auto-starts their teams).
 		const c1Resp = await apiFetch(`/api/goals/${rootId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p-c1", title: "pause-c1", spec: "c1 spec" }),
+			body: JSON.stringify({ planId: "p-c1", title: "pause-c1", spec: "c1 spec: first direct child for pause-cascade test, padded to meet spec validator minimum length." }),
 		});
 		expect(c1Resp.status).toBe(201);
 		const c1Id = (await c1Resp.json()).id as string;
 
 		const c2Resp = await apiFetch(`/api/goals/${rootId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p-c2", title: "pause-c2", spec: "c2 spec" }),
+			body: JSON.stringify({ planId: "p-c2", title: "pause-c2", spec: "c2 spec: second direct child for pause-cascade test, padded to meet spec validator minimum length." }),
 		});
 		expect(c2Resp.status).toBe(201);
 		const c2Id = (await c2Resp.json()).id as string;
@@ -108,7 +108,7 @@ test.describe("pause cascade — aborts sessions + blocks new spawns", () => {
 
 			const spawnChild = await apiFetch(`/api/goals/${c1Id}/spawn-child`, {
 				method: "POST",
-				body: JSON.stringify({ planId: "p-blocked", title: "blocked", spec: "should-not-spawn" }),
+				body: JSON.stringify({ planId: "p-blocked", title: "blocked", spec: "should-not-spawn: this spawn must be rejected with GOAL_PAUSED because the parent is paused." }),
 			});
 			expect(spawnChild.status).toBe(409);
 			const spawnChildBody = await spawnChild.json();
