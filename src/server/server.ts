@@ -295,7 +295,7 @@ export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCoun
  *  exercise the TTL/single-flight/coalesce logic deterministically without
  *  spawning Git Bash under CI load (which fails unpredictably). Production
  *  code never sets this. */
-let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean }) => Promise<GitStatusResult | null>) | undefined;
+let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => Promise<GitStatusResult | null>) | undefined;
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
@@ -331,11 +331,18 @@ function evictExpired(now: number): void {
 	}
 }
 
-/** Cached wrapper over runBatchGitStatus with TTL + single-flight. */
+/** Cached wrapper over runBatchGitStatus with TTL + single-flight.
+ *
+ * `opts.configuredBaseRef` (when set) drives the `primaryBranch` used for
+ * `aheadOfPrimary`/`behindPrimary` counters — see
+ * `docs/design/base-ref.md` §5. It's not part of the cache key: each
+ * (cwd, containerId) is a project-scoped worktree so `base_ref` is constant
+ * for the lifetime of an entry, and the 2 s TTL absorbs the corner case of a
+ * mid-flight setting change. */
 async function batchGitStatus(
 	cwd: string,
 	containerId?: string,
-	opts?: { untracked?: boolean },
+	opts?: { untracked?: boolean; configuredBaseRef?: string },
 ): Promise<GitStatusResult | null> {
 	const key = gitStatusCacheKey(cwd, containerId, opts?.untracked);
 	const now = Date.now();
@@ -375,7 +382,7 @@ async function batchGitStatus(
 async function runBatchGitStatus(
 	cwd: string,
 	containerId?: string,
-	opts?: { untracked?: boolean },
+	opts?: { untracked?: boolean; configuredBaseRef?: string },
 ): Promise<GitStatusResult | null> {
 	_runBatchGitStatusCount++;
 	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
@@ -5290,15 +5297,21 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		const cwd = goal.cwd;
 
-		// Resolve container ID for sandboxed goals
+		// Resolve container ID for sandboxed goals + project `base_ref` config
+		// for the `aheadOfPrimary`/`behindPrimary` counter — see
+		// `docs/design/base-ref.md` §5.
 		let cid: string | undefined;
-		if (goal.sandboxed) {
-			try {
-				const goalCtx = projectContextManager.getContextForGoal(goalId);
-				const sandbox = goalCtx ? sessionManager.getSandboxManager()?.get(goalCtx.project.id) : undefined;
-				cid = sandbox ? await sandbox.getContainerId() : undefined;
-			} catch { /* container unavailable — fall through */ }
-		}
+		let goalBaseRef: string | undefined;
+		try {
+			const goalCtx = projectContextManager.getContextForGoal(goalId);
+			if (goalCtx) {
+				goalBaseRef = goalCtx.projectConfigStore.get("base_ref") || undefined;
+				if (goal.sandboxed) {
+					const sandbox = sessionManager.getSandboxManager()?.get(goalCtx.project.id);
+					cid = sandbox ? await sandbox.getContainerId() : undefined;
+				}
+			}
+		} catch { /* container/config unavailable — fall through */ }
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const goalUntracked = url.searchParams.get('untracked') === '1';
@@ -5307,7 +5320,7 @@ async function handleApiRoute(
 			invalidateGitStatusCache(cwd, cid);
 		}
 		try {
-			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked });
+			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
 			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 
 			// Multi-repo aware envelope: include `repos` map + `aggregate` for back-compat.
@@ -5317,7 +5330,7 @@ async function handleApiRoute(
 				for (const [repoName, repoPath] of Object.entries(repoWorktrees)) {
 					try {
 						if (cid || fs.existsSync(repoPath)) {
-							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked });
+							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
 							if (r) repos[repoName] = r;
 						}
 					} catch { /* per-repo failure non-fatal */ }
@@ -6399,6 +6412,14 @@ async function handleApiRoute(
 
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 
+		// Resolve project `base_ref` config for the `aheadOfPrimary`/`behindPrimary`
+		// counter — see `docs/design/base-ref.md` §5.
+		let sessionBaseRef: string | undefined;
+		try {
+			const sessCtx = projectContextManager.getContextForSession(id);
+			if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+		} catch { /* config unavailable — fall through */ }
+
 		// Optional: run git fetch first when ?fetch=true is passed
 		const sessUntracked = url.searchParams.get('untracked') === '1';
 		if (url.searchParams.get('fetch') === 'true') {
@@ -6412,7 +6433,7 @@ async function handleApiRoute(
 		// the resilience layer for transient failures.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
 		try {
-			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked });
+			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
 		} catch (err: any) {
 			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
 			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
