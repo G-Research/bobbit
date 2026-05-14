@@ -970,7 +970,7 @@ function renderProjectContent(
 	project: Project,
 	goals: Goal[],
 	sessions: GatewaySession[],
-	_staff?: typeof state.staffList,
+	staff?: typeof state.staffList,
 	archivedGoals: Goal[] = [],
 	standaloneArchivedSessions: GatewaySession[] = [],
 ) {
@@ -1064,6 +1064,7 @@ function renderProjectContent(
 			` : ""}
 			`; })()}
 		</div>
+		${!isProvisional ? renderStaffSidebarSection(staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(
 			project,
 			// Bottom-section archived goals: only those whose parent is NOT
