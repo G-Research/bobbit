@@ -45,7 +45,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -6966,7 +6966,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to master
+	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to project primary
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
 		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
@@ -6976,23 +6976,37 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			// Detect primary branch
-			let primaryBranch = "master";
+			// Honour project `base_ref` config. Squash-push fundamentally needs an
+			// `origin/<primary>` (it pushes a single commit to that remote ref) —
+			// if the configured base_ref points at a local-only branch with no
+			// origin counterpart, fail loudly rather than push to the wrong place.
+			let sessionBaseRef: string | undefined;
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
-				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
+				const sessCtx = projectContextManager.getContextForSession(id);
+				if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+			} catch { /* config unavailable — fall through */ }
+
+			const parsedBase = parseBaseRef(sessionBaseRef ?? "");
+			let primaryBranch = parsedBase.branch;
+			if (!primaryBranch) {
+				try {
+					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
+					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+				} catch {
+					try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { primaryBranch = "master"; } }
+				}
 			}
 
-			// Fetch latest master
-			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
+			// Fetch the remote primary; if origin has no such ref, refuse — squash
+			// push only makes sense for a remote primary.
+			try { await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid); }
+			catch { json({ error: `origin has no "${primaryBranch}" branch — squash push needs a remote primary. Check the project's base_ref configuration.` }, 400); return; }
 			const primaryRef = `origin/${primaryBranch}`;
 
 			// Check we have commits ahead
 			const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd, 5000, cid), 10) || 0;
-			if (aheadCount === 0) { json({ error: "No commits ahead of master" }, 400); return; }
+			if (aheadCount === 0) { json({ error: `No commits ahead of ${primaryRef}` }, 400); return; }
 
 			// Build commit message from branch commits
 			const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd, 5000, cid);
@@ -7034,7 +7048,7 @@ async function handleApiRoute(
 			const msg = err instanceof Error ? err.message : String(err);
 			// Check for merge conflicts from merge-tree
 			if (msg.includes("CONFLICT") || msg.includes("merge-tree")) {
-				json({ error: "Merge conflicts with master. Use 'Merge master' first to resolve." }, 409);
+				json({ error: "Merge conflicts with primary. Use 'Rebase on primary' first to resolve." }, 409);
 			} else {
 				json({ error: msg }, 500);
 			}
@@ -7042,7 +7056,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/git-merge-primary — merge origin/master into current branch
+	// POST /api/sessions/:id/git-merge-primary — rebase current branch onto project's primary ref
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-merge-primary')) {
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
@@ -7051,27 +7065,49 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			// Detect primary branch
-			let primaryBranch = "master";
+			// Honour project `base_ref` config when set (mirrors the git-status
+			// handler at line ~6598). A local-only base_ref (e.g. "MyUpstream")
+			// must rebase against the LOCAL branch, not `origin/MyUpstream` which
+			// may not exist.
+			let sessionBaseRef: string | undefined;
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
-				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
+				const sessCtx = projectContextManager.getContextForSession(id);
+				if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+			} catch { /* config unavailable — fall through */ }
+
+			const parsedBase = parseBaseRef(sessionBaseRef ?? "");
+			let primaryBranch = parsedBase.branch;
+			if (!primaryBranch) {
+				try {
+					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
+					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+				} catch {
+					try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { primaryBranch = "master"; } }
+				}
 			}
-			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
-			const output = await execGit(`git rebase origin/${primaryBranch}`, cwd, 30000, cid);
+
+			// Resolve actual ref: prefer `origin/<primary>` when origin has it,
+			// else fall back to the bare local branch (matches `pref` semantics
+			// in `git-status-native.ts`).
+			let primaryRef = primaryBranch;
+			try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+
+			// Only fetch when we're actually targeting the remote.
+			if (primaryRef.startsWith("origin/")) {
+				await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
+			}
+			const output = await execGit(`git rebase ${primaryRef}`, cwd, 30000, cid);
 
 			// After rebase, check if orphaned commits remain (common after squash-merge PRs).
-			// If the tree is identical to origin/primary (no diff), the commits are redundant —
-			// reset to origin/primary to clean them up.
-			const aheadAfter = parseInt(await execGitSafe(`git rev-list --count origin/${primaryBranch}..HEAD`, cwd, "0", cid), 10) || 0;
+			// If the tree is identical to the primary ref (no diff), the commits are redundant —
+			// reset to the primary ref to clean them up.
+			const aheadAfter = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0", cid), 10) || 0;
 			if (aheadAfter > 0) {
-				const diff = await execGitSafe(`git diff origin/${primaryBranch}..HEAD`, cwd, "", cid);
+				const diff = await execGitSafe(`git diff ${primaryRef}..HEAD`, cwd, "", cid);
 				if (diff.trim() === "") {
 					// Tree is identical — these are orphaned commits from a squash merge
-					await execGit(`git reset --hard origin/${primaryBranch}`, cwd, 10000, cid);
+					await execGit(`git reset --hard ${primaryRef}`, cwd, 10000, cid);
 					invalidateGitStatusCache(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
