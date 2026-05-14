@@ -601,3 +601,87 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 	});
 });
 
+/**
+ * Route-level spec validation — POST /api/goals/:id/spawn-child.
+ *
+ * Pins the HTTP 400 contract so a wiring regression in nested-goal-routes.ts
+ * is caught here, not just in the unit tests for the pure helper.
+ */
+test.describe("POST /spawn-child spec validation (route-level)", () => {
+	test(`spec: 'placeholder' → 400 SPEC_PLACEHOLDER @smoke`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-ph", title: "T", spec: "placeholder" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_PLACEHOLDER");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec: 'todo' → 400 SPEC_PLACEHOLDER`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-td", title: "T", spec: "todo" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_PLACEHOLDER");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec shorter than 50 chars → 400 SPEC_TOO_SHORT`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-sh", title: "T", spec: "too short" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_TOO_SHORT");
+			expect(body.actualLength).toBeLessThan(50);
+			expect(body.minLength).toBe(50);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec missing → 400 (spec required, no regression)`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-ms", title: "T" },
+			});
+			expect(status).toBe(400);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`valid spec (≥50 chars) → 201 success`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: {
+					planId: "plan-valid",
+					title: "Valid child",
+					spec: "Implement the feature described in the parent goal spec (this spec is exactly fifty-one characters).",
+				},
+			});
+			expect(status).toBe(201);
+			expect(body.id).toBeTruthy();
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+});
+

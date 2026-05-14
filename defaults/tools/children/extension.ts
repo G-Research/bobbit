@@ -54,7 +54,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "goal_spawn_child",
 		label: "Spawn Child Goal",
-		description: "Spawn a child goal under this one. Idempotent on planId. Inherits parent inlineRoles + workflow by default.",
+		description: "Spawn a child goal under this one. The spec is injected into the child team-lead's first user message at spawn time — pass the complete task description now (\u226550 chars). Placeholder specs and PUT-after-spawn are rejected by the server. Idempotent on planId. Inherits parent inlineRoles + workflow by default.",
 		promptSnippet: "Spawn a child goal idempotently (keyed by planId). Inherits parent's inlineRoles; inherits parent's workflow only for non-meta workflows. Keep spec focused on the child's own scope.",
 		parameters: Type.Object({
 			planId: Type.String({ description: "Stable plan-node id; stamped on the child as spawnedFromPlanId." }),
