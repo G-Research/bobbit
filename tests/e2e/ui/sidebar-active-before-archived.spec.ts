@@ -18,6 +18,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -109,7 +110,6 @@ test.describe("Active-before-archived sidebar ordering", () => {
 	});
 
 	test("live children render before archived; Archived divider sits between them", async ({ page }) => {
-		test.setTimeout(60_000);
 		await openApp(page);
 		// Clear collapse state. Archived load is triggered via the toggle
 		// click below — setting `bobbit-show-archived` directly only flips the
@@ -126,11 +126,10 @@ test.describe("Active-before-archived sidebar ordering", () => {
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
-		// Click the See Archived toggle so archived goals are fetched into
-		// state.goals and folded into the live forest. The subsequent
-		// `expect(…archivedTitles…).toBeVisible()` calls below gate on the
-		// fetch+render completing, so no separate wait is needed.
-		await page.locator("button").filter({ hasText: "See Archived" }).first().click();
+		// Open Filters popover and toggle Show Archived — loads archived goals
+		// into state.goals. The c2758ec1 commit replaced the legacy 'See Archived'
+		// button with a Filters popover; use the shared helper to reach it.
+		await clickShowArchivedToggle(page);
 
 		// Expand the parent goal so its children render.
 		const parentRow = page.getByText(parentTitle, { exact: false }).first();
