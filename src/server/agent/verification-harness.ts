@@ -82,9 +82,13 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
  * Pinned by `tests/verify-step-resolution.test.ts`.
  */
 export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string {
-	// BUG: should be `goal.worktreePath ?? goal.cwd`. Pinned by the regression test;
-	// the Implementation gate flips this to the correct expression.
-	return goal.cwd;
+	// Return the un-offset branch container. `goal.cwd` may carry the project's
+	// rootPath offset (see goal-manager.createGoal); `goal.worktreePath` is always
+	// the worktree root. resolveStep() layers repo + relativePath itself, so passing
+	// the offset `cwd` here would apply the offset twice (e.g. /wt/branch/sub/sub).
+	// The `?? goal.cwd` fallback covers legacy / non-worktree goals where no
+	// worktreePath was created and `cwd` carries no offset.
+	return goal.worktreePath ?? goal.cwd;
 }
 
 /**
