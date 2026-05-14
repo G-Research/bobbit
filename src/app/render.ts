@@ -639,6 +639,20 @@ function streamingBadge() {
  *  while streaming. Pulsing left border. */
 const STREAMING_BORDER = "border-l-2 border-l-primary/70 animate-pulse";
 
+/** Walk the goal parentGoalId chain to compute 1-based depth (root=1). Capped at 20. */
+function computeGoalDepth(goalId: string, goals: ReadonlyArray<{ id: string; parentGoalId?: string }>): number {
+	let depth = 1;
+	let cur: { id: string; parentGoalId?: string } | undefined = goals.find(g => g.id === goalId);
+	const seen = new Set<string>();
+	while (cur?.parentGoalId && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		cur = goals.find(g => g.id === cur!.parentGoalId);
+		depth++;
+		if (depth >= 20) break;
+	}
+	return depth;
+}
+
 // Module-scoped refs (one per scroll-target). Refs are singletons because at
 // most one of each panel is mounted at a time (the assistant preview pane is
 // not virtualised).
@@ -789,6 +803,15 @@ interface GoalFormConfig {
 	 * proposal-panel call site — the goal-dashboard view stays read-only.
 	 */
 	commentable?: boolean;
+
+	/** If set, this goal will be created as a subgoal of the given parent goal ID. */
+	parentGoalId?: string;
+	/** Callback to update the selected parent goal. Pass undefined to clear (top-level). */
+	onParentGoalChange?: (id: string | undefined) => void;
+	/** Whether subgoals are enabled at the system level. */
+	subgoalsEnabled?: boolean;
+	/** Maximum nesting depth from system prefs. */
+	maxNestingDepth?: number;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -877,6 +900,49 @@ function renderGoalForm(config: GoalFormConfig) {
 					</div>
 				` : ""}
 			</div>
+			${(config.subgoalsEnabled) ? html`
+				<div class="flex items-center gap-2" data-testid="goal-form-parent-row">
+					<label class="${lblCls} w-20 md:w-16">Parent</label>
+					<select
+						class="flex-1 text-sm px-2 py-1.5 rounded-md border border-border bg-background text-foreground h-9"
+						.value=${config.parentGoalId || ""}
+						@change=${(e: Event) => {
+							const v = (e.target as HTMLSelectElement).value;
+							config.onParentGoalChange?.(v || undefined);
+						}}
+						data-testid="goal-form-parent-picker"
+					>
+						<option value="">— Top-level goal —</option>
+						${state.goals.filter(g => !g.archived).map(g => html`
+							<option value=${g.id} ?selected=${config.parentGoalId === g.id}>${g.title}</option>
+						`)}
+					</select>
+				</div>
+			` : ""}
+			${config.parentGoalId ? (() => {
+				const parentGoal = state.goals.find(g => g.id === config.parentGoalId);
+				const project = config.linkedProjectId ? state.projects.find(p => p.id === config.linkedProjectId) : null;
+				const parentDepth = config.parentGoalId ? computeGoalDepth(config.parentGoalId, state.goals) : 0;
+				const childDepth = parentDepth + 1;
+				const atCap = config.maxNestingDepth !== undefined && childDepth >= config.maxNestingDepth;
+				return html`
+					<div class="flex flex-col gap-1 text-xs text-muted-foreground">
+						<div class="truncate" data-testid="goal-form-breadcrumb">
+							${project ? html`<span class="font-medium text-foreground/70">${project.name}</span><span class="mx-1 opacity-50">›</span>` : ""}
+							${parentGoal ? html`<span>${parentGoal.title}</span><span class="mx-1 opacity-50">›</span>` : ""}
+							<span class="font-medium text-foreground/80">${config.title || "New Goal"}</span>
+						</div>
+						<div class="${atCap ? "text-destructive font-medium" : ""}" data-testid="goal-form-depth-indicator">
+							depth ${childDepth} of ${config.maxNestingDepth ?? 3}${atCap ? " — cap reached" : ""}
+						</div>
+						<div class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary self-start" data-testid="goal-form-subgoal-badge">
+							Subgoal of ${parentGoal?.title ?? config.parentGoalId}
+						</div>
+					</div>
+				`;
+			})() : (config.subgoalsEnabled ? html`
+				<div class="text-xs text-muted-foreground self-start px-2 py-0.5 rounded-full bg-secondary/60" data-testid="goal-form-toplevel-badge">Top-level goal</div>
+			` : "")}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
 					<span class="${lblCls} w-20 md:w-16">Worktree</span>
@@ -2303,6 +2369,7 @@ function getAssistantPreviewPanel(type: string) {
 /** Module-level form state for the goal proposal panel. */
 let _proposalTitle = "";
 let _proposalCwd = "";
+let _proposalParentGoalId: string = "";
 let _proposalSpec = "";
 let _proposalWorkflowId = "";
 let _proposalSpecEditMode = false;
@@ -2316,14 +2383,15 @@ let _proposalInitializedFrom: string | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string; parentGoalId?: string };
 	if (!proposal) return;
 	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
+	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
 	_proposalSpec = proposal.spec;
+	_proposalParentGoalId = proposal.parentGoalId || "";
 	// Preserve project rootPath when proposal doesn't specify cwd
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
@@ -2363,6 +2431,8 @@ function goalProposalPanel() {
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	const subgoalsEnabled = document.documentElement.dataset.subgoalsEnabled === "true";
+	const maxNestingDepth = parseInt(document.documentElement.dataset.maxNestingDepth || "3", 10);
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = _proposalTitle.trim();
@@ -2400,6 +2470,7 @@ function goalProposalPanel() {
 					projectId,
 					enabledOptionalSteps,
 					autoStartTeam,
+					parentGoalId: _proposalParentGoalId || undefined,
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -2414,6 +2485,7 @@ function goalProposalPanel() {
 			_proposalInitializedFrom = null;
 			_proposalSandboxed = false;
 			_proposalAutoStartTeam = true;
+			_proposalParentGoalId = "";
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2436,6 +2508,7 @@ function goalProposalPanel() {
 		_proposalInitializedFrom = null;
 		_proposalEnabledOptionalSteps = [];
 		_proposalAutoStartTeam = true;
+		_proposalParentGoalId = "";
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
 		if (sid && dismissed) markProposalDismissed(sid, dismissed);
@@ -2480,6 +2553,10 @@ function goalProposalPanel() {
 		createDisabled: !_proposalTitle.trim() || _proposalSaving,
 		streaming: isProposalStreaming("goal_proposal"),
 		commentable: true,
+		parentGoalId: _proposalParentGoalId || undefined,
+		onParentGoalChange: (id) => { _proposalParentGoalId = id || ""; renderApp(); },
+		subgoalsEnabled,
+		maxNestingDepth,
 	});
 }
 
