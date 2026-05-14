@@ -28,7 +28,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
@@ -497,29 +497,37 @@ function ensureStaffLoaded(): void {
 	if (!archivedSessionsLoaded()) {
 		fetchArchivedSessions();
 	}
-	fetchStaff().then((list) => {
-		state.staffList = list.map((s) => ({
-			id: s.id, name: s.name, description: s.description, state: s.state,
-			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
-			projectId: s.projectId,
-		}));
-		renderApp();
-	});
+	void reloadStaffList();
 }
 
-/** Reload staff list (e.g. after creating one). */
+/** Reload staff list (e.g. after creating one). Also pulls the orphan list. */
 export function reloadStaffList(): Promise<void> {
-	return fetchStaff().then((list) => {
+	const staffP = fetchStaff().then((list) => {
 		state.staffList = list.map((s) => ({
 			id: s.id, name: s.name, description: s.description, state: s.state,
 			lastWakeAt: s.lastWakeAt, currentSessionId: s.currentSessionId, triggers: s.triggers,
 			projectId: s.projectId,
 		}));
-		renderApp();
 	});
+	const orphanP = fetchOrphanedStaff().then((list) => {
+		state.orphanedStaff = list.map((s) => ({
+			id: s.id, name: s.name, description: s.description, state: s.state, projectId: s.projectId,
+		}));
+	}).catch(() => { /* endpoint may not exist on older server */ });
+	return Promise.all([staffP, orphanP]).then(() => { renderApp(); });
 }
 
-async function createStaffAssistantSession(e: Event): Promise<void> {
+/**
+ * Open a new staff-creation assistant session, anchored to the given project.
+ *
+ * Always supplies `projectId` + `cwd` so the server's POST /api/sessions can
+ * resolve a real project context (see surface-staff-in-sessions design §5).
+ * For callers outside a project bucket use {@link startNewStaffFlow}.
+ */
+export async function createStaffAssistantSession(
+	e: Event,
+	opts: { projectId: string; cwd: string },
+): Promise<void> {
 	e.stopPropagation();
 	if (state.creatingSession) return;
 	state.creatingSession = true;
@@ -529,7 +537,7 @@ async function createStaffAssistantSession(e: Event): Promise<void> {
 		const res = await gatewayFetch("/api/sessions", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ assistantType: "staff" }),
+			body: JSON.stringify({ assistantType: "staff", projectId: opts.projectId, cwd: opts.cwd }),
 		});
 		if (!res.ok) {
 			const { errorFromResponse } = await import("./error-helpers.js");
@@ -546,6 +554,35 @@ async function createStaffAssistantSession(e: Event): Promise<void> {
 		state.creatingSession = false;
 		renderApp();
 	}
+}
+
+/**
+ * Open the staff-creation assistant for the right project.
+ *  - 1 project (and a projectId hint): use it directly.
+ *  - 0 projects: bounce to the Add Project dialog.
+ *  - ≥1 projects, no hint: open the project picker popover.
+ */
+export async function startNewStaffFlow(e: Event, projectIdHint?: string): Promise<void> {
+	e.stopPropagation();
+	const anchor = (e.currentTarget as HTMLElement) ?? null;
+	if (projectIdHint) {
+		const proj = state.projects.find(p => p.id === projectIdHint);
+		if (proj) {
+			return createStaffAssistantSession(e, { projectId: proj.id, cwd: proj.rootPath });
+		}
+	}
+	const projects = state.projects;
+	if (projects.length === 0) { showProjectDialog(); return; }
+	if (projects.length === 1) {
+		const only = projects[0];
+		return createStaffAssistantSession(e, { projectId: only.id, cwd: only.rootPath });
+	}
+	const { showProjectPickerPopover } = await import("./goal-entry.js");
+	showProjectPickerPopover(anchor, (pickedId: string) => {
+		const picked = state.projects.find(p => p.id === pickedId);
+		if (!picked) return;
+		void createStaffAssistantSession(e, { projectId: picked.id, cwd: picked.rootPath });
+	});
 }
 
 async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void> {
@@ -595,7 +632,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 					>${icon(List, mobile ? "sm" : "xs")}</button>
 					<button
 						class="${mobile ? "p-2 rounded" : "p-0.5 rounded-md"} text-muted-foreground active:bg-secondary/50 hover:bg-secondary/50 transition-colors"
-						@click=${createStaffAssistantSession}
+						@click=${(e: Event) => startNewStaffFlow(e, projectId)}
 						title="New staff agent"
 					>${icon(Plus, mobile ? "sm" : "xs")}</button>
 				</div>
@@ -727,6 +764,57 @@ function _handleFullSearchClick(query: string): void {
 	window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : "#/search";
 }
 
+/**
+ * Synthesise a session row for a staff agent.
+ *
+ * Returns the existing live GatewaySession with title/staffId overrides so
+ * `renderSessionRow` picks up active/unread/last-activity treatment for free.
+ * Returns `null` if the staff has no current live session, or if the staff's
+ * session is owned by a goal (the goal-team list already renders it).
+ */
+function synthStaffSessionRow(agent: typeof state.staffList[0]): GatewaySession | null {
+	if (!agent.currentSessionId) return null;
+	const archived = state.archivedSessions.find(s => s.id === agent.currentSessionId);
+	if (archived?.teamGoalId) return null;
+	const live = state.gatewaySessions.find(s => s.id === agent.currentSessionId);
+	if (!live) return null;
+	return { ...live, title: agent.name, staffId: agent.id };
+}
+
+/** Banner above the project list listing orphaned staff (missing/system projectId). */
+function renderOrphanedStaffBanner() {
+	const orphans = state.orphanedStaff || [];
+	if (orphans.length === 0) return "";
+	return html`
+		<div class="mx-2 my-2 p-2 rounded-md" style="background: var(--secondary); border: 1px solid var(--border);">
+			<div class="flex items-center gap-1.5 mb-1.5 text-foreground/80" style="font-size: 0.8333em;">
+				<span class="shrink-0">${icon(Bot, "xs")}</span>
+				<span class="font-medium">Orphaned staff (${orphans.length})</span>
+			</div>
+			<div class="flex flex-col gap-1">
+				${orphans.map((agent) => html`
+					<div class="flex items-center gap-1 text-muted-foreground" style="font-size: 0.8333em;">
+						<span class="flex-1 truncate" title=${agent.description || agent.name}>${agent.name}</span>
+						<button class="px-1.5 py-0.5 rounded hover:bg-secondary/80 text-primary" style="font-size: 1em;"
+							@click=${(e: Event) => {
+								e.stopPropagation();
+								const anchor = e.currentTarget as HTMLElement;
+								void import("./goal-entry.js").then(({ showProjectPickerPopover }) => {
+									showProjectPickerPopover(anchor, async (projectId: string) => {
+										const ok = await reassignStaffProject(agent.id, projectId);
+										if (ok) await reloadStaffList();
+									});
+								});
+							}}
+							title="Assign to project…"
+						>Assign…</button>
+					</div>
+				`)}
+			</div>
+		</div>
+	`;
+}
+
 /** Render a collapsible project section header. */
 function renderProjectHeader(project: Project, expanded: boolean) {
 	const color = getProjectAccentColor(project);
@@ -742,6 +830,25 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
+			<button
+				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
+				style="padding:0;line-height:0;"
+				@click=${(e: Event) => { e.stopPropagation(); import("./staff-page.js").then((m) => m.loadStaffPageData()); setHashRoute("staff"); }}
+				title="Manage staff agents"
+			>${icon(List, "xs")}</button>
+			<button
+				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0 ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
+				style="padding:0 2px;line-height:0;"
+				@click=${(e: Event) => { e.stopPropagation(); ensureStaffLoaded(); void startNewStaffFlow(e, project.id); }}
+				title="New staff agent in ${project.name}"
+			>
+				<span class="relative inline-flex" style="width:12px;height:12px;">
+					${icon(Bot, "xs")}
+					<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:7px;height:7px;filter:drop-shadow(0 0 1.5px var(--background));">
+						<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+					</svg>
+				</span>
+			</button>
 			<button
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
@@ -780,7 +887,7 @@ function renderProjectContent(
 	project: Project,
 	goals: Goal[],
 	sessions: GatewaySession[],
-	staff?: typeof state.staffList,
+	_staff?: typeof state.staffList,
 	archivedGoals: Goal[] = [],
 	standaloneArchivedSessions: GatewaySession[] = [],
 ) {
@@ -826,7 +933,6 @@ function renderProjectContent(
 			` : ""}
 			`; })()}
 		</div>
-		${!isProvisional && staff ? renderStaffSidebarSection(staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(project, archivedGoals, standaloneArchivedSessions) : ""}
 	`;
 }
@@ -913,6 +1019,7 @@ export function renderSidebar() {
 				<search-status-dot></search-status-dot>
 			</div>
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
+				${renderOrphanedStaffBanner()}
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
 					: state.sessionsError
@@ -921,7 +1028,10 @@ export function renderSidebar() {
 								<button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${refreshSessions}>Retry</button>
 							</div>`
 						: (() => {
-							// Apply search filtering
+							// Apply search filtering. Staff render as rows inside each project's
+							// Sessions bucket (see surface-staff-in-sessions design §2) — so we
+							// synthesise GatewaySession rows from each project's staff list and
+							// merge them in below.
 							const staffList = state.staffList || [];
 							let filteredGoals = liveGoals;
 							let filteredUngrouped = ungroupedSessions;
@@ -938,7 +1048,16 @@ export function renderSidebar() {
 									return goal;
 								}).filter(Boolean);
 								filteredUngrouped = ungroupedSessions.filter(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
-								filteredStaff = filteredStaff.filter(s => s.name?.toLowerCase().includes(q));
+								// Match staff against staff.name OR the underlying session title/role.
+								filteredStaff = filteredStaff.filter(s => {
+									if (s.name?.toLowerCase().includes(q)) return true;
+									if (s.currentSessionId) {
+										const sess = state.gatewaySessions.find(g => g.id === s.currentSessionId);
+										if (sess?.title?.toLowerCase().includes(q)) return true;
+										if (sess?.role?.toLowerCase().includes(q)) return true;
+									}
+									return false;
+								});
 							}
 							// No longer need to filter out pending project sessions — they have real projectIds now
 
@@ -965,10 +1084,13 @@ export function renderSidebar() {
 								bucket.sessions.push(s);
 							}
 							for (const s of filteredStaff) {
-								if (!s.projectId) { console.warn("[sidebar] orphaned staff with no projectId — skipping", s.id); continue; }
+								if (!s.projectId) { /* orphan — surfaced in the banner */ continue; }
 								const bucket = projectMap.get(s.projectId);
-								if (!bucket) { console.warn("[sidebar] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
+								if (!bucket) { /* orphan — surfaced in the banner */ continue; }
 								bucket.staff.push(s);
+								// Synthesise a session row so the staff appears in the project's Sessions list.
+								const synth = synthStaffSessionRow(s);
+								if (synth) bucket.sessions.unshift(synth);
 							}
 
 							// Filter + bucket archived goals / standalone archived sessions by project.
@@ -1065,7 +1187,16 @@ export function renderSidebar() {
 
 function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: GatewaySession[], archivedGoals: Goal[] = []) {
 	const allSessions = state.gatewaySessions;
-	const { ungroupedSessions: ungrouped } = getSidebarData();
+	const { ungroupedSessions: ungroupedBare } = getSidebarData();
+	// Surface staff as rows in the SES bucket alongside ungrouped sessions — no
+	// flat per-global tail list (surface-staff-in-sessions design §3).
+	const staffSessionRows: GatewaySession[] = [];
+	for (const agent of state.staffList) {
+		if (agent.state === "retired") continue;
+		const row = synthStaffSessionRow(agent);
+		if (row) staffSessionRows.push(row);
+	}
+	const ungrouped = [...staffSessionRows, ...ungroupedBare].sort((a, b) => a.createdAt - b.createdAt);
 
 	const renderCollapsedSession = (s: GatewaySession) => {
 		const active = activeSessionId() === s.id;
@@ -1073,6 +1204,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 		return html`
 			<button
 				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
+				title=${displayTitle}
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
 				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s))}</span>
@@ -1137,25 +1269,6 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 					</button>
 					${_collapsedUngroupedExp ? ungrouped.map(renderCollapsedSession) : ""}`; })()}
 				` : ungrouped.map(renderCollapsedSession)}
-				<div class="w-7 border-t border-border/50 my-1.5"></div>
-				${state.staffList.filter(s => s.state !== "retired").map((agent) => {
-					const session = agent.currentSessionId ? state.gatewaySessions.find(s => s.id === agent.currentSessionId) : undefined;
-					const active = activeSessionId() === agent.currentSessionId;
-					const sessionStatus = session?.status || "terminated";
-					const isCompacting = session?.isCompacting || false;
-					const isAborting = session?.isAborting || false;
-					const accessory = session?.accessory;
-					return html`
-						<button
-							class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"}"
-							title=${agent.name}
-							@click=${() => handleStaffClick(agent)}
-						>
-							<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session))}</span>
-							<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(agent.name)}</span>
-						</button>
-					`;
-				})}
 				${state.showArchived && archivedGoals.length > 0 ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
 					${archivedGoals.map((goal) => {
