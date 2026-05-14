@@ -23,6 +23,8 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
+import { collectDescendants } from "./agent/goal-descendants.js";
+import { computeTreeCost } from "./agent/cost-tracker.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -714,6 +716,14 @@ export function createGateway(config: GatewayConfig) {
 	// scoped only — no system layer, no builtin layer.
 	roleStore.setBuiltins(builtinConfigProvider.getRoles());
 	groupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+	// Wire the system-scope Subgoals feature gate into the policy cascade.
+	// Without this, getSubgoalsEnabled() returns false unconditionally and
+	// every tool in the `Children` group (goal_spawn_child, goal_merge_child,
+	// goal_pause, goal_resume, goal_plan_propose, goal_set_policy,
+	// goal_archive_child, goal_plan_status, goal_decide_mutation) resolves to
+	// `never` at policy time — silently dropped from every team-lead's tool
+	// surface. See docs/design/subgoals-experimental-toggle.md.
+	groupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
@@ -3462,6 +3472,50 @@ async function handleApiRoute(
 		broadcastToAll,
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
 	})) return;
+
+	// GET /api/goals/:goalId/descendants — live + archived descendants for the Plan tab.
+	// Feeds dashboardDescendants in goal-dashboard.ts so archived children render in the DAG
+	// and contribute to tree-cost rollups. Without this route, the Plan tab silently drops
+	// every archived/completed child.
+	const goalDescendantsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/descendants$/);
+	if (goalDescendantsMatch && req.method === "GET") {
+		const goalId = goalDescendantsMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!goal.projectId) { json({ goals: [] }); return; }
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
+		// getAll() returns both live and archived.
+		const allGoals = ctx.goalStore.getAll();
+		json({ goals: collectDescendants(goalId, allGoals) });
+		return;
+	}
+
+	// GET /api/goals/:goalId/tree-cost — cost rollup across descendant tree (live + archived).
+	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
+	if (goalTreeCostMatch && req.method === "GET") {
+		if (!requireSubgoalsEnabled()) return;
+		const goalId = goalTreeCostMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const rootGoalId = goal.rootGoalId ?? goal.id;
+		if (!goal.projectId) {
+			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
+		const allGoals = ctx.goalStore.getAll();
+		const costTracker = sessionManager.getCostTracker(goal.projectId);
+		const result = computeTreeCost(
+			rootGoalId,
+			allGoals,
+			costTracker,
+			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
+		);
+		json(result);
+		return;
+	}
 
 	// ── Goal endpoints ─────────────────────────────────────────────
 
