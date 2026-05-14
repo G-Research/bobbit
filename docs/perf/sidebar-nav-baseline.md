@@ -958,6 +958,120 @@ History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
 
 **Code reverted at `6f330231`** — postmortem retained for historical reference.
 
+### 6.4 Opt-F — defer WS attach off the critical path (`deferWsAttach` flag)
+
+**Hypothesis (from the task spec):** `nav.session.ready` p50 ≈ 163 ms
+after Opt-A, of which `ws.attach` median is ~75 ms (blocking). If we
+render the session UI from the cached `state.gatewaySessions` snapshot
+synchronously and kick off `RemoteAgent.connect()` asynchronously —
+buffering pre-`auth_ok` sends — the click → first paint should drop to
+~88 ms (just render).
+
+**Implementation (behind the `deferWsAttach` perf flag, default-OFF):**
+
+- `src/app/perf-flags.ts` — flag registration + canonical name constant.
+- `src/app/remote-agent.ts` — when the flag is on, `connect()` returns a
+  resolved promise immediately and `_connectWs(true)` runs in the
+  background. `send()` queues frames in `_preAttachQueue` while
+  `_attachInProgress` is true; the `auth_ok` branch of `_connectWs`
+  flushes the queue in registration order. `auth_failed` / `error` /
+  pre-open `close` drain the queue without flushing onto a dead socket.
+- `src/app/session-manager.ts` — appends a small inline “Live in a
+  moment…” indicator span on the chat panel when the flag is on,
+  removed by the existing `onConnectionStatusChange` handler once
+  `"connected"` arrives. A race guard fires the status handler manually
+  if `remote.connected` is already true at callback-wire time (the
+  background handshake can win the race against the synchronous
+  callback assignments).
+- `tests/defer-ws-attach.spec.ts` — 9 sub-tests (mirroring-Fake style
+  matching `remote-agent-seq-dedup`): flag-off awaits `auth_ok`; flag-on
+  resolves before the handshake; pre-attach sends buffer and flush in
+  order; `auth_failed` / `error` / pre-open close drain the buffer;
+  flag re-read at connect time.
+
+**Methodology**: A/B at SHA `552fb246b4b4`, medium fixture (50
+msgs/session × 32 sessions), 5 replicates per arm. Histories under
+`docs/perf/history/552fb246b4b4-opt-f-{off,on}-{1..5}.json`.
+
+**Results** (median across replicates / [min..max] of per-replicate
+p50/p95). Critical-span rows only; full table in the bench output.
+
+| span | metric | OFF med | OFF range | ON med | ON range | Δ med | verdict |
+|---|---|---:|---:|---:|---:|---:|:---:|
+| `nav.session.ready` | p50 | 115.1 | 107.5–124.0 | 106.8 | 95.0–118.2 | −8.3 | within noise |
+| `nav.session.ready` | p95 | 156.2 | 148.3–329.4 | 171.4 | 159.9–179.6 | +15.2 | within noise |
+| `paint.first` | p50 | 24.7 | 21.4–24.9 | 23.0 | 22.5–24.1 | −1.7 | noise |
+| `paint.first` | p95 | 48.1 | 45.0–52.1 | 48.1 | 44.2–54.6 | +0.0 | noise |
+| `ws.attach` | p50 | 46.2 | 44.9–48.8 | 59.1 | 52.8–65.0 | +12.9 | within noise |
+| `ws.attach` | p95 | 59.0 | 57.4–145.0 | 72.0 | 70.2–127.2 | +13.0 | within noise |
+| `rapidnav.keystroke.cached` | p50 | 130.9 | 120.2–138.0 | 117.5 | 108.9–121.4 | −13.4 | partial |
+| `rapidnav.keystroke.cached` | p95 | 165.4 | 148.5–329.4 | 165.7 | 159.9–174.6 | +0.3 | noise |
+| `rapidnav.keystroke.uncached` | p50 | 122.7 | 112.8–181.2 | 124.2 | 95.0–138.3 | +1.5 | noise |
+| `rapidnav.gap` | p50 | 68.4 | 54.8–70.5 | 64.6 | 56.3–77.4 | −3.8 | noise |
+| `nav.session.cold` | p50 | 309.1 | 244.5–375.0 | 316.4 | 280.6–622.0 | +7.3 | within noise |
+| `nav.goal.cold` | p50 | 1771.5 | 1744.3–1798.7 | 1804.0 | 1755.5–2556.7 | +32.5 | within noise |
+
+**Verdict — didn't clear the bar.**
+
+- `nav.session.ready` p50: −8 ms median move. Well below the **≥100 ms
+  p50 reduction** threshold; ranges overlap (every ON sample is matched
+  by an OFF sample of similar magnitude); and the span is already below
+  the 100 ms snappy threshold under both arms, so the secondary clause
+  (“moves a span from >100 ms to <100 ms”) doesn't apply.
+- `nav.session.ready` p95: small regress (+15 ms median, within noise;
+  one OFF outlier at 329 ms inflates the OFF range).
+- `rapidnav.keystroke.cached` p50: −13 ms; same story — noise, far
+  below the threshold.
+- No span clears the “median delta exceeds run range of either
+  condition” clause.
+
+### Why the theoretical win didn't materialise
+
+The hypothesis assumed `ws.attach` was on the click → first-paint
+critical path. It isn't: tracing `connectToSession()` in
+`src/app/session-manager.ts`, the chat panel is constructed and
+`renderApp()` is called *before* `await remote.connect(…)`:
+
+```
+state.chatPanel = new ChatPanel();
+renderApp();                        // ← closes nav.session.ready here
+// … setup …
+await remote.connect(…);             // ← only blocks transcript replay
+```
+
+The `nav.session.ready` span's sentinel in `render.ts` (`pi-chat-panel`
+element committed to DOM + `state.appView === "authenticated"`) is
+satisfied at that first `renderApp()`. Removing the `await` on the
+subsequent WS attach therefore can't move this span — the chat shell
+is already painted before the await even begins. The actual transcript
+*does* depend on `auth_ok` (it arrives in the `messages` WS frame after
+`get_messages`), but the harness sentinel measures shell-paint, not
+transcript-paint, so the deferral is invisible to the metric the
+decision rule is keyed on.
+
+A secondary observation: `ws.attach` itself ticked up slightly (+13 ms
+median) under the flag, plausibly because the background WS handshake
+now contends for the main thread with the immediately-following
+synchronous setup work (callback wiring, `setAgent`, `requestMessages`),
+whereas in the flag-off path the synchronous setup finished after the
+`await` returned. The effect is within noise but is the *opposite*
+direction from the hypothesis.
+
+### Buffering machinery is correct
+
+The unit-test mirror (`tests/defer-ws-attach.spec.ts`) verified all
+nine deferred-attach invariants (resolve-before-handshake, buffered
+flush order, error/close drain, race-guard for late callback wiring).
+The semantics work; they just don't move the metric the harness
+measures. If a future architectural change makes the *first paint*
+depend on WS-replayed messages (rather than synchronous shell render),
+this machinery would become relevant — but until then there is no
+span whose budget it improves.
+
+History: `docs/perf/history/552fb246b4b4-opt-f-{off,on}-{1..5}.json`.
+
+**Code reverted at branch `goal-goal-profile-si-320532b0-coder-994f91d0`** — postmortem retained for historical reference.
+
 ## 7. Shipped wins
 
 ### 7.1 Opt-A — defer off-screen transcript render (`deferOffscreenRender`, default-ON)
