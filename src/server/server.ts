@@ -1619,7 +1619,10 @@ async function handleApiRoute(
 	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
-		json({ error: e.message, stack: e.stack, ...extra }, status);
+		// Log stack trace server-side only; do not send it to clients to avoid
+		// leaking host paths, source line numbers, and implementation details.
+		console.error(`[api] ${status} error:`, e.stack ?? e.message);
+		json({ error: e.message, ...extra }, status);
 	};
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
