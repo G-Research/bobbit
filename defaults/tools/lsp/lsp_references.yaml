@@ -6,6 +6,7 @@ provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspReferencesRenderer.ts
 docs: |-
   100× cheaper than grep when you need every caller of a symbol. line/character are 0-indexed.
 detail_docs: >-
