@@ -97,6 +97,29 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
+
+	// Seed inline test workflows BEFORE the gateway boots — direct file write
+	// mirrors in-process-harness.ts. Without this, POST /api/goals would 400
+	// with "no workflows configured" since builtin workflow YAMLs were removed
+	// in the multi-repo & components follow-up.
+	if (opts.freshDir) {
+		try {
+			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+			const yaml = await import("yaml");
+			const yamlContent = yaml.stringify({
+				name: "default",
+				components: [TEST_DEFAULT_COMPONENT],
+				workflows: testWorkflows(),
+			});
+			const serverConfigDir = join(bobbitDir, "config");
+			mkdirSync(serverConfigDir, { recursive: true });
+			writeFileSync(join(serverConfigDir, "project.yaml"), yamlContent);
+			const projectConfigDir = join(bobbitDir, ".bobbit", "config");
+			mkdirSync(projectConfigDir, { recursive: true });
+			writeFileSync(join(projectConfigDir, "project.yaml"), yamlContent);
+		} catch { /* best-effort */ }
+	}
+
 	const token = loadOrCreateToken();
 
 	// Capture console.log output so the test can assert the
@@ -272,11 +295,20 @@ test.describe("cost backfill at gateway boot (E2E)", () => {
 
 			// Boot-time log line — pinned by the design ("log exactly:
 			// `[cost-backfill] stamped goalId on N entries; M still unattributable`").
-			const summary = gw.consoleLogs.find((l) => l.includes("[cost-backfill] stamped goalId on "));
-			expect(summary, `expected boot log line from cost-backfill helper; got logs:\n${gw.consoleLogs.join("\n")}`).toBeTruthy();
-			// Numbers must match: 1 stamped, 1 unattributable.
-			expect(summary).toMatch(/stamped goalId on\s+1\s+entries/);
-			expect(summary).toMatch(/1\s+still unattributable/);
+			// Boot wiring runs backfill once per project context, so multiple
+			// summary lines are emitted (system project + default project).
+			// Find the one for the project we seeded — it must report exactly
+			// 1 stamped + 1 unattributable, matching the seeded costs.
+			const summaries = gw.consoleLogs.filter((l) => l.includes("[cost-backfill] stamped goalId on "));
+			expect(
+				summaries.length,
+				`expected at least one cost-backfill summary line; got logs:\n${gw.consoleLogs.join("\n")}`,
+			).toBeGreaterThan(0);
+			const seededSummary = summaries.find((l) => /stamped goalId on\s+1\s+entries.*1\s+still unattributable/.test(l));
+			expect(
+				seededSummary,
+				`expected a backfill summary reporting 1 stamped / 1 unattributable for the seeded project; got summaries:\n${summaries.join("\n")}`,
+			).toBeTruthy();
 
 			// Endpoint assertion — tree-cost surfaces the ghost under
 			// `unattributableLegacy`, and the bucket is NOT folded into
