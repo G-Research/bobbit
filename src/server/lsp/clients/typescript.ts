@@ -45,16 +45,19 @@ class TypescriptLspClient implements LspClient {
 	readonly worktreePath: string;
 	state: ClientState = "starting";
 	private proc!: LspProcess;
-	private sandbox?: SandboxLspBridge;
+	/** Stable per-client bridge (never overwritten after start). Resolved from
+	 *  the multi-project bridge at startup so concurrent clients don't share
+	 *  mutable path-translation state. */
+	private bridge?: SandboxLspBridge;
 
 	/** Host absolute path → URI for sending to the LSP server (container-translated when sandboxed). */
 	private toUri(absPath: string): string {
-		return this.sandbox ? pathToUri(this.sandbox.toContainerPath(absPath)) : pathToUri(absPath);
+		return this.bridge ? pathToUri(this.bridge.toContainerPath(absPath)) : pathToUri(absPath);
 	}
 	/** URI from LSP server → host absolute path (container-translated back when sandboxed). */
 	private fromUri(uri: string): string {
 		const p = uriToPath(uri);
-		return this.sandbox ? this.sandbox.toHostPath(p) : p;
+		return this.bridge ? this.bridge.toHostPath(p) : p;
 	}
 
 	private openDocs = new Map<string, DocState>(); // absPath → state
@@ -71,7 +74,9 @@ class TypescriptLspClient implements LspClient {
 	}
 
 	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
-		this.sandbox = sandbox;
+		// Resolve a stable per-client bridge to avoid shared mutable state
+		// (lastBridge) when multiple projects have concurrent LSP processes.
+		this.bridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
 		this.onClose = onClose;
 		const resolved = resolveTypescriptLanguageServer();
 		if (!resolved) throw new Error("typescript-language-server not installed");
@@ -99,10 +104,15 @@ class TypescriptLspClient implements LspClient {
 		});
 
 		this.proc.connection.onNotification("textDocument/publishDiagnostics", (p: any) => {
-			const uri = p?.uri as string;
-			if (!uri) return;
+			const rawUri = p?.uri as string;
+			if (!rawUri) return;
+			// Translate container URI → host path, then re-serialise as host URI
+			// so diagnosticsByUri is always keyed by host-side URIs (matching
+			// the pathToUri(absPath) used in diagnostics() lookup).
+			const hostPath = this.fromUri(rawUri);
+			const uri = pathToUri(hostPath);
 			const list: Diagnostic[] = (p.diagnostics as any[]).map(d => ({
-				path: uriToPath(uri),
+				path: hostPath,
 				range: d.range as Range,
 				severity: lspSeverity(d.severity),
 				message: String(d.message ?? ""),
@@ -116,7 +126,7 @@ class TypescriptLspClient implements LspClient {
 		});
 
 		// initialize
-		const rootUri = pathToUri(this.worktreePath);
+		const rootUri = this.toUri(this.worktreePath);
 		await this.proc.connection.sendRequest("initialize", {
 			processId: process.pid,
 			rootUri,

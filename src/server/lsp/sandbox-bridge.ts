@@ -121,6 +121,12 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 		return bridge;
 	}
 
+	/** Return a stable per-project bridge for a specific worktree (avoids
+	 *  shared mutable state for multi-project scenarios). */
+	resolveForWorktree(worktreePath: string): SandboxLspBridge {
+		return this.bridgeForHostPath(worktreePath) ?? this;
+	}
+
 	containerIdForWorktree(hostWorktreePath: string): string | null {
 		return this.bridgeForHostPath(hostWorktreePath)?.containerIdForWorktree(hostWorktreePath) ?? null;
 	}
