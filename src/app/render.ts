@@ -7,7 +7,7 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
-import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, Minimize2, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
+import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -3109,7 +3109,7 @@ export function doRenderApp(): void {
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview">
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Fullscreen preview (Ctrl+[)">
 							${icon(Maximize2, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title="Collapse preview (Ctrl+])">
@@ -3132,7 +3132,7 @@ export function doRenderApp(): void {
 	};
 
 	const previewExpandButton = () => html`
-		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title="Expand preview (Ctrl+])">
+		<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:6px 4px;border-left:1px solid var(--border);align-self:stretch;display:flex;align-items:center;" title="Expand preview (Ctrl+[)">
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
@@ -3232,8 +3232,8 @@ export function doRenderApp(): void {
 							<span class="text-xs font-medium text-muted-foreground">Preview</span>
 							<div class="flex items-center gap-0.5">
 								${state.previewPanelEntry ? previewControlButtons() : ""}
-								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Exit fullscreen (Esc)">
-									${icon(Minimize2, "sm")}
+								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title="Collapse preview (Ctrl+])">
+									${icon(PanelRightClose, "sm")}
 								</button>
 							</div>
 						</div>

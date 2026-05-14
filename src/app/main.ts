@@ -520,10 +520,30 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "toggle-sidebar", label: "Toggle sidebar", category: "UI",
+		// Ctrl+[ — expand preview panel one level (collapsed → half → full) when a
+		// preview/review/proposal panel is visible. Falls back to toggling the
+		// sidebar when no such panel exists.
+		id: "toggle-sidebar", label: "Expand preview / toggle sidebar", category: "UI",
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
+			const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
+			if (hasPanel) {
+				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+				const collapsed = localStorage.getItem(key) === "true";
+				if (collapsed) {
+					// level 0 → 1: uncollapse to half view
+					localStorage.setItem(key, "false");
+				} else if (!state.previewPanelFullscreen && canFullscreen) {
+					// level 1 → 2: enter fullscreen
+					sessionStorage.setItem("bobbit-pre-fullscreen-collapsed", "false");
+					state.previewPanelFullscreen = true;
+				}
+				// already at level 2 — no-op
+				renderApp();
+				return;
+			}
 			state.sidebarCollapsed = !state.sidebarCollapsed;
 			localStorage.setItem("bobbit-sidebar-collapsed", String(state.sidebarCollapsed));
 			renderApp();
@@ -562,26 +582,32 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "toggle-preview", label: "Collapse/expand preview panel", category: "UI",
+		// Ctrl+] — collapse preview panel one level (full → half → collapsed).
+		id: "toggle-preview", label: "Collapse preview panel", category: "UI",
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
-			if (hasPanel) {
-				// If fullscreen, exit fullscreen and collapse in one step
-				if (state.previewPanelFullscreen) {
-					state.previewPanelFullscreen = false;
-				}
-				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
-				const collapsed = localStorage.getItem(key) === "true";
-				localStorage.setItem(key, String(!collapsed));
-				renderApp();
+			if (!hasPanel) return;
+			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+			if (state.previewPanelFullscreen) {
+				// level 2 → 1: exit fullscreen, keep half view
+				state.previewPanelFullscreen = false;
+				localStorage.setItem(key, "false");
+				sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
+			} else if (localStorage.getItem(key) !== "true") {
+				// level 1 → 0: collapse
+				localStorage.setItem(key, "true");
 			}
+			// already at level 0 — no-op
+			renderApp();
 		},
 	});
 
 	registerShortcut({
-		id: "toggle-fullscreen-preview", label: "Toggle fullscreen preview", category: "UI",
+		// Ctrl+# — jump straight to fullscreen (level 2). If already fullscreen,
+		// jump straight to collapsed (level 0).
+		id: "toggle-fullscreen-preview", label: "Fullscreen ↔ collapsed preview", category: "UI",
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
@@ -589,17 +615,12 @@ async function initApp() {
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {
-					// Exiting fullscreen — restore whatever state we saved on entry
+					// level 2 → 0: exit fullscreen and collapse
 					state.previewPanelFullscreen = false;
-					const restore = sessionStorage.getItem("bobbit-pre-fullscreen-collapsed");
-					if (restore === "true") {
-						localStorage.setItem(key, "true");
-					}
+					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
 				} else {
-					// Entering fullscreen — remember current collapsed state
-					const wasCollapsed = localStorage.getItem(key) === "true";
-					sessionStorage.setItem("bobbit-pre-fullscreen-collapsed", String(wasCollapsed));
+					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;
 				}
