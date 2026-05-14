@@ -54,6 +54,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) gitStatus?: {
 		branch: string;
 		primaryBranch: string;
+		primaryRef?: string;
 		isOnPrimary: boolean;
 		summary: string;
 		clean: boolean;
@@ -1612,6 +1613,7 @@ export class AgentInterface extends LitElement {
 								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 								.primaryBranch=${this.gitStatus?.primaryBranch ?? 'master'}
+								.primaryRef=${this.gitStatus?.primaryRef ?? `origin/${this.gitStatus?.primaryBranch ?? 'master'}`}
 								.isOnPrimary=${this.gitStatus?.isOnPrimary ?? true}
 								.summary=${this.gitStatus?.summary ?? ''}
 								.clean=${this.gitStatus?.clean ?? true}

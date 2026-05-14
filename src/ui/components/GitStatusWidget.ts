@@ -6,6 +6,15 @@ import './DiffBlock.js';
 export class GitStatusWidget extends LitElement {
     @property() branch = '';
     @property() primaryBranch = 'master';
+    /**
+     * Display-ready ref name used for ahead/behind-primary comparisons.
+     * `origin/<primaryBranch>` when origin has the ref, else the bare local
+     * branch (e.g. when a configured `base_ref` points at a local-only branch).
+     * Always render this verbatim — do NOT synthesise `origin/${primaryBranch}`.
+     * Default mirrors today's behaviour for the bootstrap render before the
+     * server payload lands.
+     */
+    @property() primaryRef = 'origin/master';
     @property({ type: Boolean }) isOnPrimary = true;
     @property() summary = '';
     @property({ type: Boolean }) clean = true;
@@ -271,24 +280,27 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderPrimaryStatus() {
+        // Render the actual ref name (`primaryRef`) rather than synthesising
+        // `origin/${primaryBranch}` — the project may have `base_ref` pointed
+        // at a local-only branch with no origin counterpart.
         if (this.isOnPrimary) {
-            return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+            return html`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
         }
         if (this.mergedIntoPrimary && this.behindPrimary === 0) {
-            return html`<div class="text-green-600 dark:text-green-400">Merged into origin/${this.primaryBranch}</div>`;
+            return html`<div class="text-green-600 dark:text-green-400">Merged into ${this.primaryRef}</div>`;
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
                 <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
-                of origin/${this.primaryBranch}
+                of ${this.primaryRef}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : nothing}
             </div>`;
@@ -296,11 +308,11 @@ export class GitStatusWidget extends LitElement {
         if (this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
-        return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+        return html`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
     }
 
     /** Small PR status icon + number for the pill */
