@@ -14,6 +14,7 @@ import {
 	nonGitCwd,
 } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 /**
  * Create a delegate session for a parent session via the REST API.
@@ -92,10 +93,10 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await expect(page.getByText(PARENT_TITLE, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });
 
-		// 6. Toggle "Show Archived" on
-		const seeArchivedBtn = page.locator("button").filter({ hasText: "See Archived" }).first();
+		// 6. Toggle "Show Archived" on via the Filters popover
+		const seeArchivedBtn = filtersButton(page);
 		await expect(seeArchivedBtn).toBeVisible({ timeout: 10_000 });
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 
 		// 7. Wait for the toggle to take effect. After #328 (per-project Archived
 		// subsections), no span.uppercase "Archived" header renders in this
@@ -162,7 +163,7 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await expect(delegateLocator).toBeVisible({ timeout: 10_000 });
 
 		// 10. Toggle OFF then ON — delegate should survive the cycle
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 		// Wait for button to leave active state, then assert delegate is gone.
 		await expect.poll(
 			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
@@ -171,7 +172,7 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });
 
 		// Toggle back on
-		await seeArchivedBtn.click();
+		await clickShowArchivedToggle(page);
 		await expect.poll(
 			async () => seeArchivedBtn.evaluate((el) => el.className.includes("text-primary")),
 			{ timeout: 10_000 },

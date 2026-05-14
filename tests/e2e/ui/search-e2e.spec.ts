@@ -169,8 +169,11 @@ test.describe("Search (UI)", () => {
 
 		await openApp(page);
 
-		// The "Archived" header should be visible (always rendered)
-		await expect(page.getByText(/Archived/i).first()).toBeVisible({ timeout: 10_000 });
+		// Sidebar is loaded — the Filters button is the stable sentinel here.
+		// (The legacy "See Archived" button — which used to satisfy a generic
+		// `text=/Archived/` match — no longer exists.)
+		await expect(page.locator("[data-testid='sidebar-filters-button']:visible").first())
+			.toBeVisible({ timeout: 10_000 });
 
 		// The archived session should NOT be visible yet (section collapsed by default)
 		await expect(page.getByText("ArchivedSearchTest999")).not.toBeVisible({ timeout: 3_000 });

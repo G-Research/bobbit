@@ -1325,6 +1325,32 @@ export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
 	}
 }
 
+export async function fetchOrphanedStaff(): Promise<StaffAgent[]> {
+	try {
+		const res = await gatewayFetch("/api/staff/orphaned");
+		if (!res.ok) return [];
+		const data = await res.json();
+		return data.staff || data || [];
+	} catch {
+		return [];
+	}
+}
+
+export async function reassignStaffProject(id: string, projectId: string): Promise<boolean> {
+	try {
+		const res = await gatewayFetch(`/api/staff/${encodeURIComponent(id)}`, {
+			method: "PATCH",
+			body: JSON.stringify({ projectId }),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+		return true;
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to re-assign staff agent", message, { code, stack });
+		return false;
+	}
+}
+
 export async function fetchStaffAgent(id: string): Promise<StaffAgent | null> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`);

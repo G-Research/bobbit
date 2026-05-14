@@ -10,6 +10,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 test.describe("Sidebar goal actions & staff @quarantine", () => {
 	const goalIds: string[] = [];
@@ -57,10 +58,10 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 
 		await openApp(page);
 
-		// Toggle "Show archived" using the button's title attribute (text is "See Archived")
-		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
+		// Open the Filters popover and toggle Show Archived ON
+		const archivedToggle = filtersButton(page);
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
-		await archivedToggle.click();
+		await clickShowArchivedToggle(page);
 
 		// Wait for archived goals to load asynchronously — title is rendered uppercase via CSS
 		const goalTitle = page.getByText("SB22 Reattempt Test", { exact: false }).first();
@@ -143,16 +144,16 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		// Goal should NOT be visible in live section
 		await expect(page.getByText("SB23 Archive Test")).toHaveCount(0, { timeout: 5_000 });
 
-		// Toggle "Show archived"
-		const archivedToggle = page.locator("button[title='Show archived sessions']").first();
+		// Toggle "Show Archived" on via the Filters popover
+		const archivedToggle = filtersButton(page);
 		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
-		await archivedToggle.click();
+		await clickShowArchivedToggle(page);
 
 		// Now the archived goal should be visible (title rendered uppercase via CSS)
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("SB-31: No Staff section visible when no staff configured", async ({ page }) => {
+	test("SB-31: No dedicated Staff section header in the sidebar (folded into Sessions)", async ({ page }) => {
 		await openApp(page);
 
 		// Wait for the sidebar to fully load
@@ -160,12 +161,15 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 15_000 });
 
-		// The Staff section header should still be present (it's always rendered
-		// so users can create their first staff agent), but verify there are
-		// no staff agent rows with active sessions
-		// Look for any staff row with a session status indicator — there shouldn't be one
-		// since no staff agents are configured in the E2E test environment
-		const staffRows = page.locator("[class*='staff']").filter({ hasText: /streaming|idle|busy/ });
-		await expect(staffRows).toHaveCount(0, { timeout: 5_000 });
+		// Post surface-staff-in-sessions: there is NO dedicated "Staff" section
+		// header inside a project bucket — staff render as rows inside the
+		// project's Sessions list, and the entry points live on the project
+		// header. Assert no "STAFF" subheader is rendered inside the sidebar.
+		const staffSubheader = page.locator("[data-testid='sidebar-expanded'] span.uppercase")
+			.filter({ hasText: /^STAFF$/i });
+		await expect(staffSubheader).toHaveCount(0, { timeout: 5_000 });
+
+		// The "+ New staff agent" button now lives on the project header.
+		await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 5_000 });
 	});
 });

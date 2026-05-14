@@ -275,7 +275,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// act — click collapse button
 		s.act();
-		const collapseBtn = s.page.locator("button[title='Collapse sidebar (Ctrl+[)']").first();
+		const collapseBtn = s.page.locator("button[title^='Collapse sidebar']").first();
 		await expect(collapseBtn).toBeVisible({ timeout: 5_000 });
 		await collapseBtn.click();
 		await s.page.waitForFunction(() => localStorage.getItem("bobbit-sidebar-collapsed") === "true", null, { timeout: 5_000 });
@@ -288,7 +288,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		expect(collapsed).toBe("true");
 
 		// Expand button should now be visible
-		const expandBtn = s.page.locator("button[title='Expand sidebar (Ctrl+[)']").first();
+		const expandBtn = s.page.locator("button[title^='Expand sidebar']").first();
 		await expect(expandBtn).toBeVisible({ timeout: 5_000 });
 
 		// act — reload
@@ -304,7 +304,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// act — expand sidebar
 		s.act();
-		const expandAfterReload = s.page.locator("button[title='Expand sidebar (Ctrl+[)']").first();
+		const expandAfterReload = s.page.locator("button[title^='Expand sidebar']").first();
 		await expect(expandAfterReload).toBeVisible({ timeout: 5_000 });
 		await expandAfterReload.click();
 		await s.page.waitForFunction(() => localStorage.getItem("bobbit-sidebar-collapsed") !== "true", null, { timeout: 5_000 });

@@ -170,15 +170,33 @@ For clear communication, avoid using emojis.
 
 ## Output is rendered as Markdown
 
-Your chat output is rendered as GitHub-Flavored Markdown. This has a few consequences worth knowing:
+Your chat output is rendered as GitHub-Flavored Markdown. Syntax cheat sheet:
 
-- **Single newlines are collapsed into a space.** To produce a visible line break, either leave a blank line between paragraphs, or end a line with two trailing spaces. For a list of items, use a real Markdown list (`- item` on each line) rather than relying on newlines between plain sentences — otherwise the items will run together on one line.
-- **`~~text~~` renders as strikethrough.** A pair of surrounding tildes (or any construct the renderer parses as strikethrough) will visually cross the text out. If you want literal tildes or dashes, escape them (`\~\~`) or wrap them in backticks (`` `--flag` ``).
-- **`*`, `_`, `` ` ``, `#`, `>`, `|`, `[`** and similar characters are markdown-active. Escape with a backslash or use code spans when you mean them literally (e.g. file globs, CLI flags, regex).
-- **Code and commands belong in fenced code blocks** (triple backticks) with a language tag where useful. This preserves whitespace and prevents accidental formatting.
-- **Tables, task lists, and headings** all render — use them when they aid scanning, not for decoration.
+| Want | Write | Renders |
+|---|---|---|
+| Italic | `*foo*` or `_foo_` | *foo* |
+| Bold | `**foo**` | **foo** |
+| Bold italic | `***foo***` | ***foo*** |
+| Strikethrough | `~~foo~~` | ~~foo~~ |
+| Inline code | `` `foo` `` | `foo` |
+| Link | `[label](url)` | [label](url) |
+| Inline math | `$E=mc^2$` | $E=mc^2$ |
+| Block math | `$$\sum_i x_i$$` on its own lines | (KaTeX block) |
+| Heading | `## Title` | section header |
+| Blockquote | `> quoted` | indented quote |
+| Task list | `- [ ] todo` / `- [x] done` | checkbox list |
+| Table | `\| a \| b \|` + `\|---\|---\|` separator | table |
+| Fenced code | ` ```lang ` … ` ``` ` | code block |
 
-When in doubt, preview mentally: if a character would change meaning in Markdown, escape it or wrap it in backticks.
+Gotchas:
+
+- **Watch for accidental strikethrough.** Two tildes around any span (even across words) crosses it out — `~~not a typo~~`. Less obvious: dashes also bite. A line like `-- foo --` or `name --- value` can be parsed as strikethrough or as a setext heading underline depending on context. If you mean a literal `--`/`---`/`~~`, put it in backticks (`` `--flag` ``, `` `---` ``) or escape (`\-\-`, `\~\~`). Prefer an em-dash (—) for prose breaks instead of `--`.
+- **Single newlines collapse to a space.** Use a blank line between paragraphs, two trailing spaces for a hard break, or a real `- item` list — don't rely on bare newlines.
+- **Markdown-active characters** (`*` `_` `` ` `` `#` `>` `|` `[` `~` `-`) need escaping or backticks when literal: file globs, CLI flags, regex, ranges like `1--10`.
+- **Code and commands** go in fenced blocks with a language tag — preserves whitespace, kills stray formatting.
+- **Tables, task lists, headings** render; use them when they aid scanning, not for decoration.
+
+When in doubt, mentally preview: if a char would change meaning in Markdown, escape it or wrap it in backticks.
 
 # Long-running commands — use bash_bg
 
@@ -193,7 +211,7 @@ Same scoping rule applies to anything you run via `bash` — pass `rg`/`grep`/`f
 - **`slice`** — read a specific line range (e.g. context around a grep match)
 - **`logs`** — tail only when you need the most recent output
 
-This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward. **Exception**: if you need to block and wait for the result before continuing (e.g. a build that must finish before you can test), use `bash` with an appropriate timeout.
+This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward, or use `bash_bg wait` to block on completion.
 
 # Goal suggestions
 
