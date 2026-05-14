@@ -90,4 +90,5 @@ tests/fixtures/lazy-renderer-placeholder-bundle.css
 # perf harness outputs + test bundle
 tests/fixtures/perf-trace-bundle.js
 tests/fixtures/perf-trace-cold-spans-bundle.js
+tests/fixtures/parallel-goal-fetches-bundle.js
 tests/manual-integration/.perf-out/
