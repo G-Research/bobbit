@@ -83,6 +83,17 @@ test.describe("sidebar spawned-children — dedupe + stable sort", () => {
 		await expect(page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${child2Id}"]`).first()).toBeVisible({ timeout: 15_000 });
 
 		const orderFromDom = async (): Promise<string[]> => {
+			// Poll until BOTH child ids are present in the snapshot — guards against
+			// a brief DOM gap during a Lit re-render triggered by a WS state update.
+			await page.waitForFunction(
+				([c1, c2]: string[]) => {
+					const els = document.querySelectorAll('[data-testid="sidebar-nested-row"]');
+					const ids = Array.from(els).map(el => el.getAttribute("data-goal-id") || "").filter(Boolean);
+					return ids.includes(c1) && ids.includes(c2);
+				},
+				[child1Id, child2Id] as string[],
+				{ timeout: 15_000 },
+			);
 			return await page.locator(`[data-testid="sidebar-nested-row"]`)
 				.evaluateAll(els =>
 					els
