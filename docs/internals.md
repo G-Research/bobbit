@@ -661,6 +661,30 @@ This exists specifically because the source-of-truth migration regressed silentl
 
 **`BOBBIT_SKIP_NPM_CI=1`** continues to bypass setup at the `git.ts` layer; `runComponentSetups()` honours it transparently.
 
+#### Branch container vs agent cwd
+
+Projects whose `rootPath` points at a subdirectory of a larger git repo (e.g. `rootPath: /persist/code/monorepo/agentic-fluyt-experiments`) need two different paths at runtime: a worktree-root path for git operations and component-step resolution, and an offset path for the agent process itself. `goal-manager.createGoal()` resolves both and stores them on the goal so downstream code can pick the right one — but the two paths are easy to confuse, and forwarding the wrong one into step resolution layers the offset twice and fails verification with `ENOENT`.
+
+**The two fields on a goal:**
+
+- **`goal.worktreePath`** — the un-offset *branch container*. Equal to the worktree root (`<rootPath>-wt/<branch>/` for single-repo, or the container holding sibling repo worktrees for multi-repo). Always at the git repo root level.
+- **`goal.cwd`** — what agent sessions actually run in. For sub-rooted projects this is `worktreePath + relativeOffset`, where `relativeOffset = path.relative(repoPath, project.rootPath)`. For projects rooted at the git repo root (and for legacy / pre-worktree goals where no worktree was created), `cwd` and `worktreePath` are the same value.
+
+**Which one to use:**
+
+- **Agent session cwd** — the directory the agent process boots into, what tools like `bash`/`Read` see — is **`goal.cwd`**. This is the offset path; sessions want to land at the user's project root, not at the surrounding repo root.
+- **`componentRoot()` / `resolveStep()` `branchContainer` argument** — must be **`goal.worktreePath ?? goal.cwd`**. These helpers layer `repo + relativePath` themselves to derive a component's working directory. Passing an already-offset `goal.cwd` here doubles the `relativePath` segment (e.g. `…/sub/sub/…`) and the resulting command runs in a path that does not exist.
+
+**Use the exported helper.** `goalBranchContainer(goal)` in `src/server/agent/verification-harness.ts` returns the un-offset container with the correct legacy fallback. Any new call site that forwards a goal into step resolution — verification, sandbox exec, or any future caller — should route through this helper rather than picking a field directly:
+
+```ts
+export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string;
+```
+
+The `?? goal.cwd` fallback inside the helper handles legacy / non-worktree goals where `worktreePath` is undefined; in that case no offset was ever applied to `cwd`, so the fallback is safe.
+
+**Pinning test.** `tests/verify-step-resolution.test.ts` pins the call-site contract with four cases: single-repo with `relativePath` (the original bug), single-repo with no `relativePath`, multi-repo with both `repo` and `relativePath`, and the legacy fallback when `worktreePath` is undefined. An agent investigating step-resolution paths in verification should start there.
+
 #### Remote branch cleanup
 
 Bobbit creates four classes of remote branch and is responsible for deleting each when its owning entity is archived. **Why eager delete instead of one global purge:** the remote accumulates branches faster than any single timer can drain it (~30 sessions/day churn, dev restarts reset the 24h purge interval), so cleanup must be tied to the archive event itself.
