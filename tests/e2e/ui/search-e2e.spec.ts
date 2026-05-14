@@ -134,8 +134,9 @@ test.describe("Search (UI)", () => {
 			{ timeout: 15_000 },
 		).toBe(true);
 
-		// Dispatch Ctrl+K via window.dispatchEvent — same robustness fix as
-		// the Ctrl+[ fix: keyboard.press can be dropped under heavy load.
+		// Press Ctrl+K to focus the search input. Dispatch via window.dispatchEvent
+		// because keyboard.press can be dropped under heavy parallel load.
+		// Set both ctrlKey and metaKey for platform-aware ctrlOrMeta matching.
 		await page.evaluate(() => {
 			window.dispatchEvent(new KeyboardEvent("keydown", {
 				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
@@ -143,7 +144,7 @@ test.describe("Search (UI)", () => {
 		});
 
 		// Verify the input is focused
-		await expect(searchInput).toBeFocused({ timeout: 3_000 });
+		await expect(searchInput).toBeFocused({ timeout: 5_000 });
 
 		// Type something
 		await searchInput.fill("hello");

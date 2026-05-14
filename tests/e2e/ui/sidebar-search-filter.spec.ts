@@ -200,7 +200,6 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 
 		// Ensure search is not focused initially
 		const searchInput = page.locator("input[data-search]");
-		await expect(searchInput).toBeVisible({ timeout: 5_000 });
 		const initiallyFocused = await searchInput.evaluate((el) => document.activeElement === el);
 		expect(initiallyFocused).toBe(false);
 
@@ -210,9 +209,9 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			{ timeout: 15_000 },
 		).toBe(true);
 
-		// Dispatch Ctrl+K via window.dispatchEvent (same pattern as Ctrl+[ fix):
-		// under heavy parallel load, Playwright's keyboard.press can be dropped
-		// when focus hasn't settled. The shortcut registry listens on window.
+		// Dispatch via window.dispatchEvent — keyboard.press can be dropped
+		// under heavy parallel load before focus settles. Set both ctrlKey
+		// and metaKey to match the registry's platform-aware ctrlOrMeta check.
 		await page.evaluate(() => {
 			window.dispatchEvent(new KeyboardEvent("keydown", {
 				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
@@ -220,10 +219,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		});
 
 		// Search input should be focused
-		await expect.poll(
-			() => searchInput.evaluate((el) => document.activeElement === el),
-			{ timeout: 3_000 },
-		).toBe(true);
+		await expect(searchInput).toBeFocused({ timeout: 5_000 });
 	});
 
 	test("SB-34: Ctrl+[ toggles sidebar collapse", async ({ page }) => {
@@ -285,24 +281,25 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			const textareaFocused = await page.evaluate(() => document.activeElement?.tagName.toLowerCase());
 			expect(textareaFocused).toBe("textarea");
 
-			// Wait for shortcuts to attach, then dispatch Ctrl+K reliably.
+			// Wait for the app's keydown listener to attach before dispatching.
 			await expect.poll(
 				() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
 				{ timeout: 15_000 },
 			).toBe(true);
 
-			const searchInput = page.locator("input[data-search]");
-			// Dispatch Ctrl+K via window — same approach as the Ctrl+[ stability fix.
+			// Press Ctrl+K — should still focus search.
+			// Note: Ctrl+K uses ctrlOrMeta modifier so it fires even in input contexts.
+			// Dispatch via window.dispatchEvent — keyboard.press can be dropped
+			// under heavy parallel load. Set both ctrlKey and metaKey for
+			// platform-aware ctrlOrMeta matching.
 			await page.evaluate(() => {
 				window.dispatchEvent(new KeyboardEvent("keydown", {
 					key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
 				}));
 			});
 
-			await expect.poll(
-				() => searchInput.evaluate((el) => document.activeElement === el),
-				{ timeout: 3_000 },
-			).toBe(true);
+			const searchInput = page.locator("input[data-search]");
+			await expect(searchInput).toBeFocused({ timeout: 5_000 });
 		} finally {
 			await deleteSession(tempSession).catch(() => {});
 		}

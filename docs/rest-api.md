@@ -235,12 +235,16 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 ### Staff Agents
 
+Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders inline in the project's Sessions list in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)).
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/staff` | List all staff agent definitions. Each entry includes a `sandboxed` boolean (inherited from project config). |
+| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes a `sandboxed` boolean (inherited from project config). Returns `{ staff: PersistedStaff[] }`. |
+| `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }`. Consumed by the sidebar's orphan banner. |
 | `GET` | `/api/staff/:id` | Get a single staff agent definition (includes `sandboxed` boolean) |
-| `POST` | `/api/staff` | Create a staff agent (`{ name, description, triggers, skillId?, prompt? }`) |
+| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). Subject to the [project resolution contract](#project-resolution-contract). |
 | `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`) |
+| `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, and re-indexes search; the existing worktree branch is preserved (the next wake rebases against the new project's primary branch). Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing or not a non-empty string; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |
 | `GET` | `/api/staff/:id/sessions` | **Deprecated (410)**. Use `GET /api/staff/:id` instead. |
@@ -281,9 +285,10 @@ The helper implementing this is `resolveProjectForRequest` in `src/server/agent/
 |---|---|---|
 | _(unset)_, `goal` | project | Standard contract above — `projectId` or matching `cwd` required, else 400. |
 | `project`, `project-scaffolding` | project (new) | The server creates a provisional project registration so the session persists under its own context. |
-| `role`, `tool`, `staff` | server | `projectId` is **optional**. When omitted, the server anchors the session at the synthetic `system` project (see [internals.md — Synthetic system project](internals.md#synthetic-system-project)). When the caller _does_ pass a `projectId` (e.g. the Roles/Tools/Staff pages when scoped to a project), it is honoured normally. |
+| `role`, `tool` | server | `projectId` is **optional**. When omitted, the server anchors the session at the synthetic `system` project (see [internals.md — Synthetic system project](internals.md#synthetic-system-project)). When the caller _does_ pass a `projectId` (e.g. the Roles/Tools pages when scoped to a project), it is honoured normally. |
+| `staff` | project | Standard project resolution — `projectId` or matching `cwd` required, else 400. Staff agents are project-scoped permanent sessions (they own a `projectId`, a `staff.json` entry under that project, and a long-lived worktree), so the creation assistant must land in a real project context. The UI's **New staff** button passes `projectId` + `cwd` directly from the project header. |
 
-Why: `role` / `tool` / `staff` assistants edit project-independent config (custom roles, custom tools, staff agents) that lives at server scope. Forcing them through the project-resolution gate would make `npx bobbit` from a non-project directory return 400 just for opening the Roles page's "+ New Role" button. The system-project anchor gives those sessions a valid persistence store without requiring the user to register a real project first.
+Why: `role` / `tool` assistants edit server-level config (custom roles, custom tools) that does not belong to any project. Forcing them through the project-resolution gate would make `npx bobbit` from a non-project directory return 400 just for opening the Roles page's "+ New Role" button. The system-project anchor gives those sessions a valid persistence store without requiring the user to register a real project first. `staff` is excluded from the carve-out because a staff agent is not server-level config — it is a long-lived agent that operates inside a specific project — so anchoring its creation assistant at the system project would orphan the record and force a `propose_staff(cwd)` re-link later.
 
 ### Project Config
 

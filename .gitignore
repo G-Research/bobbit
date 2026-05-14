@@ -85,4 +85,6 @@ tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
 tests/fixtures/children-tool-renderers-bundle.js
 tests/fixtures/children-tool-renderers-bundle.css
+tests/fixtures/defer-offscreen-render-bundle.js
+tests/fixtures/defer-offscreen-render-bundle.css
 .qa-test-state/

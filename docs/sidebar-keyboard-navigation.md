@@ -55,8 +55,9 @@ row, computed from:
    - `#/goal/<id>` → `goal:<id>`
    - `#/settings/<projectId>/<tab>` → `project:<projectId>`
 2. `state.selectedSessionId` as a fallback.
-3. A thin override field, `state.keyboardNavActiveId`, that wins when its
-   expected hash matches the current URL.
+3. A thin override field, `state.keyboardNavActiveId`, that wins
+   unconditionally when set. Staleness is bounded by the `hashchange`
+   listener (see below), so trusting it without an extra URL check is safe.
 
 ### Why the override exists
 
@@ -71,11 +72,18 @@ routes carry the row's id. It does **not** work for header kinds:
 Without an override, navigating onto any header would highlight every header
 of the same kind. `state.keyboardNavActiveId` is the minimal pragmatic
 deviation: it stores the most recently keyboard-touched `data-nav-id` and is
-consulted only when its expected hash still matches the current URL. The
-override is **cleared automatically** by a `hashchange` listener
-(`installKeyboardNavOverrideClearListener`) whenever the URL changes to
-something that does not correspond to it — clicking another row, opening
-settings, etc. — so it never goes stale.
+trusted unconditionally while set. The override is **cleared automatically**
+by a `hashchange` listener (`installKeyboardNavOverrideClearListener`)
+whenever the URL changes to something that does not correspond to it —
+clicking another row, opening settings, etc. — so it never goes stale.
+
+**Why trust the override unconditionally?** Session navigation goes through
+an async dynamic import + `connectToSession`, so during the ~200 ms
+attach the override is set but the hash has not yet committed. The earlier
+"only trust if hash matches" guard caused `getActiveNavId()` to fall back
+to the cold start during attach, which made `openForNavItem` re-fire with
+the same id and silently dropped 3–4 of every 6 rapid Ctrl+↓ keystrokes.
+Pinned by `tests/rapid-keystroke-nav.spec.ts`.
 
 ## DOM-driven order — single source of truth
 
@@ -89,7 +97,7 @@ document.querySelector(".sidebar-edge")
 …and returns the ids in document order. This is deliberate. The sidebar's
 visibility rules are non-trivial — they depend on `state.searchQuery`,
 `state.showArchived`, per-project expansion state for projects, goals, the
-ungrouped section, the staff section, and the archived section. Re-deriving
+ungrouped section, and the archived section. Re-deriving
 that order in a separate model helper would mean keeping two implementations
 in sync forever.
 
