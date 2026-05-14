@@ -22,7 +22,6 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
-import { stripLargeToolContentInMessages, parseStripThreshold } from "./agent/strip-tool-content.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
@@ -2871,14 +2870,6 @@ async function handleApiRoute(
 		// Perf: route is one of the five hot endpoints tracked by BOBBIT_TIMING_LOG.
 		(req as any).__perfBumpIo?.();
 		const id = singleSessionMatch[1];
-		// Phase 2B opt-in lazy tool content. When `?stripToolContent=1` (or any
-		// truthy/integer value) is passed, the response includes a `messages`
-		// array with large tool-call content blobs replaced by lazy placeholders
-		// — the existing renderer / `fetchToolContent` flow handles loading the
-		// full content on demand via `/tool-content/:mi/:bi`. Default behaviour
-		// (no query param) is unchanged: no `messages` field is included.
-		const stripToolContentRaw = url.searchParams.get("stripToolContent");
-		const stripToolContent = stripToolContentRaw !== null && stripToolContentRaw !== "0" && stripToolContentRaw !== "false";
 		const session = sessionManager.getSession(id);
 		if (!session) {
 			// Check if it's an archived session
@@ -2956,33 +2947,6 @@ async function handleApiRoute(
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
 		};
-		// Phase 2B: lazy tool content opt-in. When `?stripToolContent=1` is set,
-		// include the transcript with large tool blocks replaced by lazy
-		// placeholders. Hot path is unchanged when the param is absent.
-		if (stripToolContent) {
-			try {
-				(req as any).__perfBumpIo?.();
-				const msgsResp = await session.rpcClient.getMessages();
-				const messages = msgsResp?.data?.messages || msgsResp?.data;
-				if (Array.isArray(messages)) {
-					const threshold = parseStripThreshold(stripToolContentRaw);
-					const stats = { stripped: 0, bytes: 0 };
-					const stripped = stripLargeToolContentInMessages(messages, threshold, stats);
-					payload.messages = stripped;
-					payload.stripToolContent = {
-						threshold,
-						strippedBlocks: stats.stripped,
-						strippedBytes: stats.bytes,
-					};
-				}
-			} catch (err) {
-				// Non-fatal: the strip is a perf experiment, not a correctness
-				// requirement. If the agent's get_messages RPC fails (e.g. the
-				// session is mid-restart), fall back to the metadata-only response
-				// so clients still get the existing fields.
-				payload.stripToolContent = { error: String(err) };
-			}
-		}
 		json(payload);
 		return;
 	}
