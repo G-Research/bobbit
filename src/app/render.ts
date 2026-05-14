@@ -31,7 +31,7 @@ import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraf
 import { deleteProposalFile } from "./proposal-helpers.js";
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, startNewStaffFlow, synthStaffSessionRow, filterStaffByQuery } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -365,7 +365,7 @@ function renderMobileLanding() {
 									let staffList = (state.staffList || []).filter(s => s.state !== "retired");
 									if (state.searchQuery) {
 										const q = state.searchQuery.toLowerCase();
-										staffList = staffList.filter(s => s.name?.toLowerCase().includes(q));
+										staffList = filterStaffByQuery(staffList, q);
 									}
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
 										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
@@ -381,11 +381,24 @@ function renderMobileLanding() {
 											if (!bucket) { console.warn("[mobile] session has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.sessions.push(s);
 										}
+										// Bucket staff and prepend their synthesised session rows to the project's
+										// Sessions list in stable alphabetical order (surface-staff-in-sessions §2).
+										const mobileStaffRowsByProject = new Map<string, typeof ungroupedSessions>();
 										for (const s of staffList) {
 											if (!s.projectId) { console.warn("[mobile] orphaned staff with no projectId — skipping", s.id); continue; }
 											const bucket = projectMap.get(s.projectId);
 											if (!bucket) { console.warn("[mobile] staff has no matching project bucket — skipping", s.id, s.projectId); continue; }
 											bucket.staff.push(s);
+											const synth = synthStaffSessionRow(s);
+											if (!synth) continue;
+											let rows = mobileStaffRowsByProject.get(s.projectId);
+											if (!rows) { rows = []; mobileStaffRowsByProject.set(s.projectId, rows); }
+											rows.push(synth);
+										}
+										for (const [pid, rows] of mobileStaffRowsByProject) {
+											rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+											const bucket = projectMap.get(pid);
+											if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
 										}
 										// Bucket archived goals + standalone archived sessions per project.
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
@@ -471,7 +484,7 @@ function renderMobileLanding() {
 															</div>
 														` : ""}
 													</div>`; })()}
-																										${(() => {
+													${(() => {
 														const ab = archivedByProject.get(project.id);
 														if (!ab) return "";
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");

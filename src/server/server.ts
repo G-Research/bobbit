@@ -7862,7 +7862,7 @@ async function handleApiRoute(
 				return;
 			}
 			const targetProject = projectRegistry.get(body.projectId);
-			if (!targetProject) { json({ error: `Project not found: ${body.projectId}` }, 404); return; }
+			if (!targetProject) { json({ error: "Project not found" }, 404); return; }
 			try {
 				const staff = staffManager.reassignProject(id, body.projectId);
 				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
