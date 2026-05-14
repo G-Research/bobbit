@@ -1,6 +1,6 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -22,7 +22,10 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt } from "./skills/slash-skills.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute } from "./agent/nested-goal-routes.js";
+import type { Workflow } from "./agent/workflow-store.js";
+import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
+import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
@@ -1100,6 +1103,8 @@ export function createGateway(config: GatewayConfig) {
 		sessionManager,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
+		teamManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -3697,17 +3702,63 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Resolve workflow through the config cascade (builtin → server → project)
-			const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-			const resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
+			let resolvedWorkflow: Workflow | undefined;
+			let resolvedWorkflowId = workflowId;
+			const inlineWorkflow = body?.workflow;
+			if (inlineWorkflow && typeof inlineWorkflow === "object") {
+				resolvedWorkflow = inlineWorkflow as Workflow;
+				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
+			} else {
+				// Layer 1: cascade lookup (only when workflowId given).
+				if (workflowId) {
+					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
+					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
+					// Layer 1b: cascade miss — fall through to project store directly.
+					if (!resolvedWorkflow) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					}
+				}
+				// Layer 2: store is empty → auto-seed defaults.
+				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
+					const projName = resolved.project.name || "project";
+					const seeds = buildDefaultWorkflows(projName);
+					seeds.parent = buildParentWorkflow();
+					for (const wf of Object.values(seeds)) {
+						targetCtx.workflowStore.put(wf as unknown as Workflow);
+					}
+					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
+					if (workflowId) {
+						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
+					} else {
+						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+						resolvedWorkflowId = resolvedWorkflow?.id || "general";
+					}
+				}
+				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
+				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
+					const available = targetCtx.workflowStore.getAll().map(w => w.id);
+					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
+						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
+						code: "WORKFLOW_NOT_FOUND",
+						workflowId,
+						available,
+					});
+					return;
+				}
+			}
+			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
+				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
+				: undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
-				workflowId,
+				workflowId: resolvedWorkflowId,
 				workflowStore: targetCtx.workflowStore,
 				resolvedWorkflow,
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				inlineRoles: bodyInlineRoles,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3808,6 +3859,7 @@ async function handleApiRoute(
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const prevSpec = putGoal?.spec ?? "";
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -3820,61 +3872,110 @@ async function handleApiRoute(
 				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
+			// Spec-edit notification: emit goal_spec_changed WS event and nudge the team lead.
+			if (typeof body.spec === "string" && body.spec !== prevSpec) {
+				const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+				broadcastToAll({
+					type: "goal_spec_changed",
+					goalId: id,
+					prevSpecHash: hash(prevSpec),
+					newSpecHash: hash(body.spec),
+					prevLen: prevSpec.length,
+					newLen: (body.spec as string).length,
+					ts: Date.now(),
+				});
+				try { teamManager.notifyTeamLeadOfSpecChange(id, prevSpec.length, (body.spec as string).length); }
+				catch (err) { console.error(`[api] notifyTeamLeadOfSpecChange failed for ${id}:`, err); }
+			}
 			json({ ok: true });
 			return;
 		}
 
 		if (req.method === "DELETE") {
-			// Cancel any in-flight gate verifications (terminates reviewer sessions)
-			for (const active of verificationHarness.getActiveVerifications(id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(id, active.gateId);
-				} catch (err) {
-					console.error(`[api] Error cancelling verification for gate ${active.gateId}:`, err);
-				}
-			}
-			// Capture agent branches BEFORE teardown erases the team store entry.
-			// Bug 1 (docs/design/orphan-remote-branch-cleanup.md): teardownTeam
-			// mutates teamEntry.agents in place via dismissRole(), so we must
-			// snapshot the branch names into a fresh string[] now — reading
-			// teamEntry.agents after teardown returns an empty array.
-			const goalProjectCtx = projectContextManager.getContextForGoal(id);
-			const teamEntry = goalProjectCtx?.teamStore.get(id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
-				}
-			}
-			// Include the team-lead's own session branch if it differs from goal.branch.
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
+			const rootGoal = getGoalAcrossProjects(id);
+			if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
+
+			// `cascade` is REQUIRED — mirrors pause/resume. The UI is the cascade-policy
+			// authority; api.ts always sends ?cascade=true|false.
+			const cascadeParam = url.searchParams.get("cascade");
+			const mergedManually = url.searchParams.get("mergedManually") === "true";
+			if (cascadeParam !== "true" && cascadeParam !== "false") {
+				// Legacy path (no cascade param): archive just this goal (backward compat).
+				// Falls through to single-goal archive below.
 			}
 
-			// Tear down any active team first (dismisses agents, cleans up their worktrees)
-			const teamState = teamManager.getTeamState(id);
-			if (teamState) {
-				try {
-					await teamManager.teardownTeam(id);
-				} catch (err) {
-					console.error(`[api] Error tearing down team for goal ${id}:`, err);
+			const cascade = cascadeParam === "true";
+
+			// cascade=false + live descendants → 409 HAS_DESCENDANTS. The UI dialog
+			// (showArchiveGoalDialog) uses this preflight to decide whether to show
+			// the cascade-confirm dialog.
+			if (cascadeParam === "false") {
+				const liveDescendants = collectDescendants(id,
+					projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? []
+				).filter(g => !g.archived);
+				if (liveDescendants.length > 0) {
+					json({
+						error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
+						code: "HAS_DESCENDANTS",
+						count: liveDescendants.length,
+					}, 409);
+					return;
 				}
 			}
-			// Archive instead of hard-delete — tasks, gates, team state remain intact
-			const deleteGoalMgr = getGoalManagerForGoal(id);
-			await deleteGoalMgr.archiveGoal(id);
 
-			// Fire-and-forget: clean up remote branches for this goal
-			const archivedGoal = deleteGoalMgr.getGoal(id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
-					console.warn(`[api] Remote branch cleanup failed for goal ${id}:`, err);
-				});
+			/** Per-goal archive action (idempotent). */
+			const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+				if (g.archived) return false;
+				if (mergedManually && g.id === id && g.state !== "complete") {
+					await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
+				}
+				for (const active of verificationHarness.getActiveVerifications(g.id)) {
+					try { await verificationHarness.cancelStaleVerifications(g.id, active.gateId); }
+					catch (err) { console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err); }
+				}
+				const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
+				const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+				const agentBranches: string[] = [];
+				if (teamEntry?.agents) {
+					for (const a of teamEntry.agents) { if (a.branch) agentBranches.push(a.branch); }
+				}
+				if (teamEntry?.teamLeadSessionId) {
+					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+					if (tl?.branch) agentBranches.push(tl.branch);
+				}
+				if (teamManager.getTeamState(g.id)) {
+					try { await teamManager.teardownTeam(g.id); }
+					catch (err) { console.error(`[api] archive: teardownTeam ${g.id} failed:`, err); }
+				}
+				const gm = getGoalManagerForGoal(g.id);
+				await gm.archiveGoal(g.id);
+				prStatusStore.remove(g.id);
+				const archivedGoal = gm.getGoal(g.id);
+				if (archivedGoal?.repoPath) {
+					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath).catch(err => {
+						console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
+					});
+				}
+				return true;
+			};
+
+			if (!cascade) {
+				// Archive just this goal (no descendants or cascade=false with none).
+				await archiveOne(rootGoal);
+				json({ ok: true, archived: 1 });
+				return;
 			}
 
-			prStatusStore.remove(id);
-			json({ ok: true });
+			// cascade=true: archive root + all live descendants (bottom-up).
+			const allGoals = projectContextManager.getContextForGoal(id)?.goalStore.getAll() ?? [];
+			const descendants = collectDescendants(id, allGoals).filter(g => !g.archived);
+			// Bottom-up: children before parents.
+			const toArchive = [...descendants.reverse(), rootGoal];
+			let archived = 0;
+			for (const g of toArchive) {
+				if (await archiveOne(g)) archived++;
+			}
+			json({ ok: true, archived });
 			return;
 		}
 	}
@@ -5153,6 +5254,10 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		// Pause-cascade: a paused goal must reject gate signals. This is the
+		// most upstream block for both llm-review-* verifier spawns and
+		// command/qa-step kickoffs in the same handler chain.
+		if (goal.paused) { json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
 		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateSignalCtx) { json({ error: "Goal not found in any project" }, 404); return; }
@@ -5585,6 +5690,13 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
+		// Guard: goal spec must be set before starting the team.
+		const startGoal = getGoalAcrossProjects(goalId);
+		const trimmedSpec = (startGoal?.spec ?? "").trim();
+		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
+			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
+			return;
+		}
 		try {
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
@@ -5602,6 +5714,11 @@ async function handleApiRoute(
 		const spawnGoal = getGoalAcrossProjects(goalId);
 		if (spawnGoal?.archived) {
 			json({ error: "Goal is archived" }, 409);
+			return;
+		}
+		// Pause-cascade: refuse to spawn role agents on a paused goal.
+		if (spawnGoal?.paused) {
+			json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409);
 			return;
 		}
 		// Guard: reject spawn if goal worktree is not ready
@@ -5623,6 +5740,8 @@ async function handleApiRoute(
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
 				jsonError(409, err);
+			} else if (err instanceof GoalPausedError) {
+				json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
 			} else {
 				jsonError(400, err);
 			}
@@ -5933,10 +6052,23 @@ async function handleApiRoute(
 			json({ error: "Missing sessionId or message" }, 400);
 			return;
 		}
-		// Validate target is a team agent
+		// Validate target is a team agent OR a direct-child team-lead
 		const agents = teamManager.listAgents(goalId);
-		if (!agents.find(a => a.sessionId === body.sessionId)) {
-			json({ error: "Session is not a member of this team" }, 403);
+		let allowed = !!agents.find(a => a.sessionId === body.sessionId);
+		if (!allowed) {
+			const targetSession = sessionManager.getSession(body.sessionId);
+			if (targetSession?.role === "team-lead" && targetSession.goalId) {
+				const targetGoal = getGoalAcrossProjects(targetSession.goalId);
+				if (targetGoal?.parentGoalId === goalId) {
+					allowed = true;
+				}
+			}
+		}
+		if (!allowed) {
+			json({
+				error: "Session is not a member of this team and is not a direct-child team-lead",
+				code: "NOT_TEAM_MEMBER_OR_DIRECT_CHILD",
+			}, 403);
 			return;
 		}
 		const session = sessionManager.getSession(body.sessionId);
@@ -8207,22 +8339,14 @@ async function handleApiRoute(
 
 	// GET /api/staff/orphaned — staff with missing projectId or stuck on the system project
 	if (url.pathname === "/api/staff/orphaned" && req.method === "GET") {
-		const list = staffManager.listOrphaned().map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listOrphaned() });
 		return;
 	}
 
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const list = staffManager.listStaff(projectId).map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listStaff(projectId) });
 		return;
 	}
 
@@ -8269,8 +8393,7 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const staff = staffManager.getStaff(id);
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-			const sandboxed = staff.projectId ? (projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			json({ ...staff, sandboxed });
+			json(staff);
 			return;
 		}
 

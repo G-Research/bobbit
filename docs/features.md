@@ -89,7 +89,7 @@ A unified registry (`assistant-registry.ts`) maps assistant types to their promp
 - `goal` — Goal creation assistant
 - `role` — Role creation assistant
 - `tool` — Tool management assistant
-- `staff` — Staff agent creation assistant
+- `staff` — Staff agent creation assistant (see [staff-agents.md](staff-agents.md) for the staff lifecycle and the immutable-at-creation sandbox model)
 
 Sessions created with an `assistantType` get the corresponding system prompt automatically. Assistant prompts can be edited via their YAML files and are reloaded on change.
 
