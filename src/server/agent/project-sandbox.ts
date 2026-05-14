@@ -532,13 +532,30 @@ export class ProjectSandbox {
 	// ── Private: Container lifecycle ───────────────────────────────────
 
 	private async _initContainer(): Promise<void> {
-		const { projectId } = this.options;
+		const { projectId, image } = this.options;
 		const label = `bobbit-project=${projectId}`;
 
 		// 1. Find existing container by label
 		const existingId = await this._findContainerByLabel(label);
 
 		if (existingId) {
+			// Stale-image check: if the container was created from an older image
+			// than the current tag (e.g. host upgraded pi-coding-agent and
+			// `ensureImageAgentVersion` rebuilt the image), the container still
+			// has the old binaries installed. Reconnecting would fail at first
+			// RPC invocation (MODULE_NOT_FOUND for pi-coding-agent cli.js, or
+			// version drift between host bridge and container agent). Recreate
+			// the container — named volumes preserve /workspace and /workspace-wt
+			// so worktrees survive.
+			const stale = await this._isContainerImageStale(existingId, image);
+			if (stale) {
+				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} was created from a stale image (image "${image}" has been rebuilt since); recreating`);
+				await this._removeContainer(existingId);
+				await this._createContainer();
+				await this._runInitSequence();
+				return;
+			}
+
 			// Check if running
 			const running = await this._isContainerRunning(existingId);
 			if (running) {
@@ -835,6 +852,30 @@ export class ProjectSandbox {
 			return ids[0] ?? null;
 		} catch {
 			return null;
+		}
+	}
+
+	/**
+	 * Returns true if the container was created from an image whose ID no
+	 * longer matches the current image tag — i.e. the image has been rebuilt
+	 * (or retagged) since the container was created. Such containers still
+	 * have the *old* layers installed (e.g. older pi-coding-agent version),
+	 * so reconnecting would fail at first RPC invocation. Conservative: on
+	 * any inspect error, returns false (stick with reconnect attempt rather
+	 * than nuking a possibly-working container).
+	 */
+	private async _isContainerImageStale(containerId: string, imageTag: string): Promise<boolean> {
+		try {
+			const [containerImg, currentImg] = await Promise.all([
+				execFileAsync("docker", ["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
+				execFileAsync("docker", ["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
+			]);
+			const a = containerImg.stdout.trim();
+			const b = currentImg.stdout.trim();
+			if (!a || !b) return false; // can't determine — don't nuke
+			return a !== b;
+		} catch {
+			return false;
 		}
 	}
 
