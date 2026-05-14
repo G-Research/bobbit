@@ -954,6 +954,8 @@ rewrite. Until then, there is nothing to ship.
 
 History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
 
+**Code reverted at `6f330231`** — postmortem retained for historical reference.
+
 ## 7. Shipped wins
 
 ### 7.1 Opt-A — defer off-screen transcript render (`deferOffscreenRender`, default-ON)

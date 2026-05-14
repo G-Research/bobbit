@@ -8,8 +8,6 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
-import { runDashboardFetchBundle } from "./goal-dashboard-fetches.js";
-import { isPerfFlagEnabled, PERF_FLAG_PARALLEL_GOAL_FETCHES } from "./perf-flags.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { setHashRoute } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
@@ -255,30 +253,15 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	startTaskPolling(goalId);
 
 	try {
-		// Phase 2 Opt-D: when `parallelGoalFetches` is on, include the team-state
-		// fetch in the bundle so all eight independent calls fire concurrently.
-		// When off, preserve the legacy seven-parallel-then-sequential-team
-		// ordering. See `goal-dashboard-fetches.ts` and §5.6 of
-		// `docs/perf/sidebar-nav-baseline.md`.
-		const parallel = isPerfFlagEnabled(PERF_FLAG_PARALLEL_GOAL_FETCHES);
-		const bundle = await runDashboardFetchBundle({
-			fetchGoal: () => gatewayFetch(`/api/goals/${goalId}`),
-			fetchTasks: () => gatewayFetch(`/api/goals/${goalId}/tasks`),
-			fetchCommits: () => gatewayFetch(`/api/goals/${goalId}/commits?limit=20`),
-			fetchGates: () => fetchGoalGates(goalId),
-			fetchGitStatus: () => gatewayFetch(`/api/goals/${goalId}/git-status`),
-			fetchCost: () => gatewayFetch(`/api/goals/${goalId}/cost`),
-			fetchPrStatus: () => gatewayFetch(`/api/goals/${goalId}/pr-status`),
-			fetchTeam: () => getTeamState(goalId),
-		}, parallel);
-		const goalRes = bundle.goal;
-		const tasksRes = bundle.tasks;
-		const commitsRes = bundle.commits;
-		const fetchedGates = bundle.gates;
-		const gitStatusRes = bundle.gitStatus;
-		const costRes = bundle.cost;
-		const prStatusRes = bundle.prStatus;
-		const bundledTeamState = bundle.team;
+		const [goalRes, tasksRes, commitsRes, fetchedGates, gitStatusRes, costRes, prStatusRes] = await Promise.all([
+			gatewayFetch(`/api/goals/${goalId}`),
+			gatewayFetch(`/api/goals/${goalId}/tasks`),
+			gatewayFetch(`/api/goals/${goalId}/commits?limit=20`).catch(() => null),
+			fetchGoalGates(goalId),
+			gatewayFetch(`/api/goals/${goalId}/git-status`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/cost`).catch(() => null),
+			gatewayFetch(`/api/goals/${goalId}/pr-status`).catch(() => null),
+		]);
 
 		if (!goalRes.ok) throw new Error(`Goal not found (${goalRes.status})`);
 
@@ -331,10 +314,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 			if (prStatus && currentGoalId) state.prStatusCache.set(currentGoalId, prStatus);
 		}
 
-		// When `parallelGoalFetches` is on, team state already came back in the
-		// bundle above — no extra round-trip needed. Otherwise fall back to a
-		// sequential fetch to preserve pre-Opt-D ordering.
-		const teamState = parallel ? bundledTeamState : await getTeamState(goalId);
+		const teamState = await getTeamState(goalId);
 		teamActive = teamState != null;
 
 		startGatePolling(goalId);
