@@ -4,6 +4,7 @@
   "branch": "goal-goal-profile-si-320532b0-coder-51f8eddc",
   "timestamp": "2026-05-13T21:08:35.653Z",
   "seededSessions": 10,
+  "kind": "baseline",
   "spans": {
     "nav.session.ready": {
       "p50": 88.79999999981374,

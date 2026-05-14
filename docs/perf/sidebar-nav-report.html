@@ -6,8 +6,6 @@
 <style>
 	:root {
 		color-scheme: light dark;
-		/* Defensive fallbacks for the preview-bridge HMR race; the parent's
-		   tokens always win when present. See defaults/docs/html-rendering.md. */
 		--chart-1: oklch(0.58 0.16 250);
 		--chart-2: oklch(0.62 0.16 65);
 		--chart-3: oklch(0.55 0.16 145);
@@ -21,15 +19,13 @@
 	* { box-sizing: border-box; }
 	body {
 		font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-		margin: 0;
-		padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
-		background: var(--background);
-		color: var(--foreground);
-		line-height: 1.45;
-		font-size: 14px;
+		margin: 0; padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
+		background: var(--background); color: var(--foreground);
+		line-height: 1.45; font-size: 14px;
 	}
 	a { color: var(--chart-1); }
 	code, .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.92em; }
+	.muted { color: var(--muted-foreground); }
 
 	header.page {
 		display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.75rem 1.25rem;
@@ -39,16 +35,24 @@
 	header.page .meta { color: var(--muted-foreground); font-size: 0.85rem; display: flex; gap: 0.5rem 1rem; flex-wrap: wrap; }
 	header.page .meta strong { color: var(--foreground); font-weight: 500; }
 
+	.legend {
+		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+		padding: 0.75rem 0.9rem; margin-bottom: 1.5rem;
+		display: grid; gap: 0.45rem; font-size: 0.82rem;
+	}
+	.legend-row { display: flex; align-items: center; gap: 0.6rem; }
+	.legend-row svg { flex-shrink: 0; }
+
 	.headlines {
-		display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 		gap: 0.75rem; margin-bottom: 2rem;
 	}
 	.headline {
 		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-		padding: 0.7rem 0.9rem; display: flex; flex-direction: column; gap: 0.15rem;
+		padding: 0.7rem 0.9rem; display: flex; flex-direction: column; gap: 0.18rem;
 	}
 	.headline .label {
-		font-family: ui-monospace, monospace; font-size: 0.78rem;
+		font-family: ui-monospace, monospace; font-size: 0.76rem;
 		color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 	}
 	.headline .value { display: flex; align-items: baseline; gap: 0.4rem; font-variant-numeric: tabular-nums; }
@@ -61,32 +65,40 @@
 	.headline.good { border-top: 2px solid var(--positive); }
 	.headline.bad  { border-top: 2px solid var(--negative); }
 	.headline.flat { border-top: 2px solid var(--border); }
+	.sig { font-family: ui-monospace, monospace; font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; margin-left: 0.3rem; background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); color: var(--muted-foreground); }
+	.sig.good { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
+	.sig.warn { background: color-mix(in oklch, var(--warning) 14%, transparent); color: var(--warning); }
 
 	h2 { font-size: 1rem; margin: 2.25rem 0 0.6rem; font-weight: 600; letter-spacing: -0.005em; }
 	h2 .count { color: var(--muted-foreground); font-weight: 400; font-size: 0.85em; margin-left: 0.4rem; }
 
+	.pair { margin: 1.25rem 0; }
+	.pair-title { font-size: 0.92rem; margin: 0 0 0.4rem; font-weight: 600; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+	.pair-title .exp-tag { background: color-mix(in oklch, var(--chart-1) 14%, transparent); color: var(--chart-1); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+
 	.table-wrap { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card); }
-	table.summary { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-	table.summary th, table.summary td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+	table.summary { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+	table.summary th, table.summary td { padding: 6px 11px; text-align: left; border-bottom: 1px solid var(--border); }
 	table.summary tbody tr:last-child td { border-bottom: none; }
 	table.summary thead th {
 		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
-		font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
-		color: var(--muted-foreground); position: sticky; top: 0;
+		font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
+		color: var(--muted-foreground);
 	}
 	table.summary tbody tr.group td {
 		background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
-		font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
-		color: var(--muted-foreground); padding: 5px 12px;
+		font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+		color: var(--muted-foreground); padding: 4px 11px;
 	}
 	td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
-	td.name { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+	td.name { font-family: ui-monospace, monospace; font-size: 0.84rem; }
+	td.band { color: var(--muted-foreground); font-size: 0.78rem; }
 	td.delta { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: 0.82rem; }
 	td.delta .pill { display: inline-block; min-width: 4.6em; padding: 1px 6px; border-radius: 4px; text-align: right; }
 	td.delta.good .pill { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
 	td.delta.bad  .pill { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
 	td.delta.flat .pill { background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); color: var(--muted-foreground); }
-	td.spark { width: 90px; padding: 4px 12px; }
+	td.spark { width: 90px; padding: 3px 11px; }
 	td.spark svg { display: block; }
 
 	.charts-grid { display: grid; grid-template-columns: 1fr; gap: 0.85rem; margin-top: 0.6rem; }
@@ -99,20 +111,20 @@
 	}
 	.chart-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
 	.chart-card h3 { font-family: ui-monospace, monospace; font-size: 0.85rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-	.chart-card .meta { font-size: 0.72rem; color: var(--muted-foreground); display: flex; gap: 0.5rem; font-variant-numeric: tabular-nums; }
-	.chart-card .meta .pill { padding: 0 6px; border-radius: 3px; background: color-mix(in oklch, var(--muted-foreground) 10%, transparent); }
-	.chart-card .meta .pill.good { background: color-mix(in oklch, var(--positive) 14%, transparent); color: var(--positive); }
-	.chart-card .meta .pill.bad  { background: color-mix(in oklch, var(--negative) 14%, transparent); color: var(--negative); }
+	.chart-card .meta { font-size: 0.72rem; color: var(--muted-foreground); display: flex; gap: 0.5rem; font-variant-numeric: tabular-nums; align-items: baseline; }
+	.chart-card .meta .pill { padding: 0 6px; border-radius: 3px; background: color-mix(in oklch, var(--chart-1) 14%, transparent); color: var(--chart-1); }
+	.chart-card .meta .pill.open { background: transparent; border: 1px solid var(--chart-1); color: var(--chart-1); }
+	.chart-card .meta .warn { color: var(--warning); }
 	.chart-card svg { display: block; width: 100%; height: auto; }
 	.chart-empty {
 		font-size: 0.82rem; color: var(--muted-foreground); font-style: italic;
 		padding: 0.75rem; text-align: center;
 	}
 
-	.runs-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-family: ui-monospace, monospace; }
-	.runs-table th, .runs-table td { padding: 5px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+	.runs-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; font-family: ui-monospace, monospace; }
+	.runs-table th, .runs-table td { padding: 5px 11px; text-align: left; border-bottom: 1px solid var(--border); }
 	.runs-table thead th {
-		font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+		font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em;
 		color: var(--muted-foreground); font-weight: 600; font-family: system-ui, sans-serif;
 		background: color-mix(in oklch, var(--chart-1) 6%, transparent);
 	}
@@ -120,17 +132,19 @@
 	.runs-table .latest td { background: color-mix(in oklch, var(--chart-1) 6%, transparent); }
 	.runs-table .latest td:nth-child(2)::after {
 		content: "← latest"; font-family: system-ui, sans-serif; color: var(--chart-1);
-		margin-left: 0.5rem; font-size: 0.75rem;
+		margin-left: 0.5rem; font-size: 0.72rem;
 	}
+	.kind { font-family: ui-monospace, monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 3px; }
+	.kind.exp { background: color-mix(in oklch, var(--chart-1) 14%, transparent); color: var(--chart-1); }
+	.kind.base { background: transparent; border: 1px solid var(--border); color: var(--muted-foreground); }
 
 	footer.page {
 		margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border);
 		color: var(--muted-foreground); font-size: 0.78rem;
 	}
-
 	.empty-state {
 		border: 1px dashed var(--border); border-radius: 8px;
-		padding: 2rem; text-align: center; color: var(--muted-foreground); margin: 2rem 0;
+		padding: 1.25rem; text-align: center; color: var(--muted-foreground); margin: 0.5rem 0 2rem;
 	}
 </style>
 </head>
@@ -139,37 +153,491 @@
 <header class="page">
 	<h1>Sidebar nav perf — cross-commit report</h1>
 	<div class="meta">
-		<span>Generated <strong>2026-05-14 07:45</strong> from <strong>9 commits</strong></span>
+		<span>Generated <strong>2026-05-14 08:07</strong></span>
+		<span><strong>9</strong> groups (2 experiment, 7 baseline) from <strong>9</strong> replicate JSONs</span>
 		<span>Range <span class="mono">999bdc2 → d6585b4</span></span>
 		<span>Latest branch <span class="mono">goal-goal-profile-si-320532b0-coder-ca587069</span></span>
 	</div>
 </header>
 
-<section class="headlines"><div class="headline bad">
-			<div class="label">nav.session.cold (p50)</div>
-			<div class="value"><span class="now">480</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+316 ms (+191.7%) vs first</div>
+<aside class="legend">
+		<div class="legend-row">
+			<svg width="16" height="10" viewBox="0 0 16 10" aria-hidden="true"><circle cx="8" cy="5" r="3" fill="var(--chart-1)"/></svg>
+			<span><strong>experiment</strong> — code-change A/B run; comparable to its pair at the same commit.</span>
+		</div>
+		<div class="legend-row">
+			<svg width="16" height="10" viewBox="0 0 16 10" aria-hidden="true"><circle cx="8" cy="5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"/></svg>
+			<span><strong>baseline</strong> — fixture or harness change; not comparable to other commits as a code-perf signal.</span>
+		</div>
+		<div class="legend-row">
+			<svg width="22" height="12" viewBox="0 0 22 12" aria-hidden="true">
+				<line x1="11" x2="11" y1="1" y2="11" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.6"/>
+				<line x1="7" x2="15" y1="1" y2="1" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.6"/>
+				<line x1="7" x2="15" y1="11" y2="11" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.6"/>
+				<circle cx="11" cy="6" r="3" fill="var(--chart-1)"/>
+			</svg>
+			<span>error bar = min ↔ max across replicates (median dot in the middle).</span>
+		</div>
+		<div class="legend-row">
+			<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="7" cy="7" r="3" fill="var(--chart-1)"/></svg>
+			<span><strong>n=1</strong> halo — single replicate, no noise floor. Treat as low-confidence; re-run with <code>scripts/perf-bench.mjs --n 5</code>.</span>
+		</div>
+		<div class="legend-row">
+			<span class="muted">Δ column fires <strong>only</strong> when two <code>experiment</code> groups at the same commit form an A/B pair. Cross-commit comparisons show <code>n/a — fixture changed</code>.</span>
+		</div>
+	</aside>
+
+
+		<h2>Headlines <span class="count">A/B pairs, ranked by |Δ p50| — control vs treatment at the same commit</span></h2>
+		<section class="headlines"><div class="headline bad">
+			<div class="label">nav.session.cold · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">480</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+184 ms (+62.3%) vs off 296</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
 		</div><div class="headline bad">
-			<div class="label">nav.goal.cold (p50)</div>
-			<div class="value"><span class="now">1863</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+172 ms (+10.2%) vs first</div>
+			<div class="label">nav.goal.cold · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">1863</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+127 ms (+7.3%) vs off 1736</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
 		</div><div class="headline bad">
-			<div class="label">rapidnav.keystroke.uncached (p50)</div>
-			<div class="value"><span class="now">183</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+74.2 ms (+68.3%) vs first</div>
+			<div class="label">api.session.fetch · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">74.7</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+28.4 ms (+61.3%) vs off 46.3</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
 		</div><div class="headline bad">
-			<div class="label">nav.session.ready (p50)</div>
-			<div class="value"><span class="now">155</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+66.4 ms (+74.8%) vs first</div>
+			<div class="label">ws.attach · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">62.1</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+17.3 ms (+38.6%) vs off 44.8</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
 		</div><div class="headline bad">
-			<div class="label">api.session.fetch (p50)</div>
-			<div class="value"><span class="now">74.7</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+64.3 ms (+618.3%) vs first</div>
+			<div class="label">api.goal.agents.fetch · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">14.1</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+10.0 ms (+243.9%) vs off 4.10</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
 		</div><div class="headline bad">
-			<div class="label">rapidnav.gap (p50)</div>
-			<div class="value"><span class="now">102</span><span class="unit">ms</span></div>
-			<div class="delta delta-bad">+36.1 ms (+55.0%) vs first</div>
-		</div></section><h2>Summary <span class="count">first baseline vs latest, ordered by |Δms| within group</span></h2><div class="table-wrap"><table class="summary">
+			<div class="label">paint.first · opt-b @ d6585b4</div>
+			<div class="value"><span class="now">30.2</span><span class="unit">ms <span class="sig warn">n=1 — inconclusive</span></span></div>
+			<div class="delta delta-bad">+8.20 ms (+37.3%) vs off 22.0</div>
+			<div class="delta delta-flat">range: off n=1 · on n=1</div>
+		</div></section>
+
+		<h2>A/B comparisons <span class="count">paired experiment groups, full span table</span></h2>
+		<section class="pair">
+			<h3 class="pair-title">
+				<span class="exp-tag">opt-b</span>
+				<span class="mono">@d6585b4</span>
+				<span class="muted">— off vs on · 1+1 replicate(s)</span>
+			</h3>
+			<div class="table-wrap"><table class="summary">
+				<thead><tr>
+					<th>span</th>
+					<th class="num">off p50</th>
+					<th class="num">range</th>
+					<th class="num">on p50</th>
+					<th class="num">range</th>
+					<th class="num">Δ p50</th>
+					<th class="num">Δ p95</th>
+					<th>signal</th>
+					<th class="num">n_rep</th>
+				</tr></thead>
+				<tbody>
+			<tr class="group"><td colspan="9">Navigation — click → ready</td></tr>
+			<tr>
+		<td class="name">nav.session.cold</td>
+		<td class="num">296</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">480</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+184</span></td>
+		<td class="delta bad"><span class="pill">+184</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">nav.goal.cold</td>
+		<td class="num">1736</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">1863</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+127</span></td>
+		<td class="delta bad"><span class="pill">+127</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">nav.session.ready</td>
+		<td class="num">149</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">155</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+6.30</span></td>
+		<td class="delta bad"><span class="pill">+119</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">nav.goal.ready</td>
+		<td class="num">30.7</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">28.0</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta good"><span class="pill">−2.70</span></td>
+		<td class="delta good"><span class="pill">−2.70</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">nav.click</td>
+		<td class="num">2.20</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">3.50</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+1.30</span></td>
+		<td class="delta bad"><span class="pill">+1.90</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr>
+		
+			<tr class="group"><td colspan="9">API — REST calls on the critical path</td></tr>
+			<tr>
+		<td class="name">api.session.fetch</td>
+		<td class="num">46.3</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">74.7</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+28.4</span></td>
+		<td class="delta bad"><span class="pill">+245</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">api.goal.agents.fetch</td>
+		<td class="num">4.10</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">14.1</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+10.0</span></td>
+		<td class="delta good"><span class="pill">−4.50</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">api.goal.fetch</td>
+		<td class="num">25.2</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">20.5</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta good"><span class="pill">−4.70</span></td>
+		<td class="delta good"><span class="pill">−4.70</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">api.goal.gates.fetch</td>
+		<td class="num">10.2</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">14.2</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+4.00</span></td>
+		<td class="delta good"><span class="pill">−15.1</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr>
+		
+			<tr class="group"><td colspan="9">Render &amp; runtime</td></tr>
+			<tr>
+		<td class="name">ws.attach</td>
+		<td class="num">44.8</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">62.1</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+17.3</span></td>
+		<td class="delta bad"><span class="pill">+43.8</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">paint.first</td>
+		<td class="num">22.0</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">30.2</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+8.20</span></td>
+		<td class="delta bad"><span class="pill">+14.7</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr><tr>
+		<td class="name">reducer.rehydrate</td>
+		<td class="num">0.40</td>
+		<td class="num band">(n=1)</td>
+		<td class="num">0.50</td>
+		<td class="num band">(n=1)</td>
+		<td class="delta bad"><span class="pill">+0.10</span></td>
+		<td class="delta bad"><span class="pill">+0.20</span></td>
+		<td class="sig warn">n=1 — inconclusive</td>
+		<td class="num">1+1</td>
+	</tr>
+		</tbody>
+			</table></div>
+		</section>
+
+		<h2>Per-span timeline <span class="count">median dots · min/max bands · 9 groups</span></h2>
+		<div class="charts-grid"><article class="chart-card">
+			<header>
+				<h3>nav.session.ready</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>155 / 320 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,94.1 89.8,90.3 129.5,119.1 169.3,122.3 209.0,110.9 248.8,106.7 288.5,93.2 328.3,92.2 368.0,62.7"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,120.0 89.8,127.6 129.5,133.5 169.3,133.2 209.0,127.0 248.8,115.7 288.5,113.3 328.3,105.1 368.0,103.5"/>
+		
+		<circle cx="50.0" cy="94.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=193ms</title></circle><circle cx="89.8" cy="90.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=209ms</title></circle><circle cx="129.5" cy="119.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=92.2ms</title></circle><circle cx="169.3" cy="122.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=79.4ms</title></circle><circle cx="209.0" cy="110.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=126ms</title></circle><circle cx="248.8" cy="106.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=142ms</title></circle><circle cx="288.5" cy="93.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=197ms</title></circle><circle cx="328.3" cy="92.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=201ms</title></circle><circle cx="368.0" cy="62.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=320ms</title></circle>
+		<circle cx="50.0" cy="120.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="120.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=88.8ms  n_rep=1  n=18</title></circle><circle cx="89.8" cy="127.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="127.6" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=58.2ms  n_rep=1  n=20</title></circle><circle cx="129.5" cy="133.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="133.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=34.1ms  n_rep=1  n=20</title></circle><circle cx="169.3" cy="133.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="133.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=35.4ms  n_rep=1  n=20</title></circle><circle cx="209.0" cy="127.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="127.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=60.3ms  n_rep=1  n=20</title></circle><circle cx="248.8" cy="115.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="115.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=106ms  n_rep=1  n=60</title></circle><circle cx="288.5" cy="113.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="113.3" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=116ms  n_rep=1  n=60</title></circle><circle cx="328.3" cy="105.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="105.1" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=149ms  n_rep=1  n=60</title></circle><circle cx="368.0" cy="103.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="103.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=155ms  n_rep=1  n=60</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>nav.goal.ready</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>28.0 / 28.0 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.ready trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,68.8 89.8,95.6 129.5,91.7 169.3,99.1 209.0,85.5 248.8,55.7 288.5,54.0 328.3,65.9 368.0,72.6"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,68.8 89.8,95.6 129.5,91.7 169.3,99.1 209.0,85.5 248.8,55.7 288.5,54.0 328.3,65.9 368.0,72.6"/>
+		
+		<circle cx="50.0" cy="68.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=29.5ms</title></circle><circle cx="89.8" cy="95.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=18.7ms</title></circle><circle cx="129.5" cy="91.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=20.3ms</title></circle><circle cx="169.3" cy="99.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=17.3ms</title></circle><circle cx="209.0" cy="85.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=22.8ms</title></circle><circle cx="248.8" cy="55.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=34.8ms</title></circle><circle cx="288.5" cy="54.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=35.5ms</title></circle><circle cx="328.3" cy="65.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=30.7ms</title></circle><circle cx="368.0" cy="72.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=28.0ms</title></circle>
+		<circle cx="50.0" cy="68.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="68.8" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=29.5ms  n_rep=1  n=2</title></circle><circle cx="89.8" cy="95.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="95.6" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=18.7ms  n_rep=1  n=2</title></circle><circle cx="129.5" cy="91.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="91.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=20.3ms  n_rep=1  n=2</title></circle><circle cx="169.3" cy="99.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="99.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=17.3ms  n_rep=1  n=2</title></circle><circle cx="209.0" cy="85.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="85.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=22.8ms  n_rep=1  n=2</title></circle><circle cx="248.8" cy="55.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="55.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=34.8ms  n_rep=1  n=2</title></circle><circle cx="288.5" cy="54.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="54.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=35.5ms  n_rep=1  n=2</title></circle><circle cx="328.3" cy="65.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="65.9" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=30.7ms  n_rep=1  n=2</title></circle><circle cx="368.0" cy="72.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="72.6" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=28.0ms  n_rep=1  n=2</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>nav.session.cold</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>480 / 480 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.cold trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1000</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">750</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="169.3,121.6 209.0,121.0 248.8,110.9 288.5,105.0 328.3,105.3 368.0,82.5"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="169.3,121.6 209.0,121.0 248.8,110.9 288.5,105.0 328.3,105.3 368.0,82.5"/>
+		
+		<circle cx="169.3" cy="121.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=165ms</title></circle><circle cx="209.0" cy="121.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=170ms</title></circle><circle cx="248.8" cy="110.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=251ms</title></circle><circle cx="288.5" cy="105.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=298ms</title></circle><circle cx="328.3" cy="105.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=296ms</title></circle><circle cx="368.0" cy="82.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=480ms</title></circle>
+		<circle cx="169.3" cy="121.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="121.6" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=165ms  n_rep=1  n=1</title></circle><circle cx="209.0" cy="121.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="121.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=170ms  n_rep=1  n=1</title></circle><circle cx="248.8" cy="110.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="110.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=251ms  n_rep=1  n=1</title></circle><circle cx="288.5" cy="105.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="105.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=298ms  n_rep=1  n=1</title></circle><circle cx="328.3" cy="105.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="105.3" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=296ms  n_rep=1  n=1</title></circle><circle cx="368.0" cy="82.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="82.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=480ms  n_rep=1  n=1</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>nav.goal.cold</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>1863 / 1863 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.cold trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">3000</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2250</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1500</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">750</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="169.3,72.1 209.0,71.2 248.8,70.1 288.5,70.5 328.3,70.3 368.0,65.0"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="169.3,72.1 209.0,71.2 248.8,70.1 288.5,70.5 328.3,70.3 368.0,65.0"/>
+		
+		<circle cx="169.3" cy="72.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=1691ms</title></circle><circle cx="209.0" cy="71.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=1712ms</title></circle><circle cx="248.8" cy="70.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=1739ms</title></circle><circle cx="288.5" cy="70.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=1730ms</title></circle><circle cx="328.3" cy="70.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=1736ms</title></circle><circle cx="368.0" cy="65.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=1863ms</title></circle>
+		<circle cx="169.3" cy="72.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="72.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=1691ms  n_rep=1  n=1</title></circle><circle cx="209.0" cy="71.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="71.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=1712ms  n_rep=1  n=1</title></circle><circle cx="248.8" cy="70.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="70.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=1739ms  n_rep=1  n=1</title></circle><circle cx="288.5" cy="70.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="70.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=1730ms  n_rep=1  n=1</title></circle><circle cx="328.3" cy="70.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="70.3" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=1736ms  n_rep=1  n=1</title></circle><circle cx="368.0" cy="65.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="65.0" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=1863ms  n_rep=1  n=1</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>nav.click</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>3.50 / 4.90 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.click trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2.50</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,113.5 89.8,112.2 129.5,122.2 169.3,122.2 209.0,117.2 248.8,114.7 288.5,97.4 328.3,104.8 368.0,81.2"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,123.4 89.8,122.2 129.5,128.4 169.3,128.4 209.0,124.6 248.8,124.6 288.5,117.2 328.3,114.7 368.0,98.6"/>
+		
+		<circle cx="50.0" cy="113.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=2.30ms</title></circle><circle cx="89.8" cy="112.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=2.40ms</title></circle><circle cx="129.5" cy="122.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=1.60ms</title></circle><circle cx="169.3" cy="122.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=1.60ms</title></circle><circle cx="209.0" cy="117.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=2.00ms</title></circle><circle cx="248.8" cy="114.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=2.20ms</title></circle><circle cx="288.5" cy="97.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=3.60ms</title></circle><circle cx="328.3" cy="104.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=3.00ms</title></circle><circle cx="368.0" cy="81.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=4.90ms</title></circle>
+		<circle cx="50.0" cy="123.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="123.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=1.50ms  n_rep=1  n=20</title></circle><circle cx="89.8" cy="122.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="122.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=1.60ms  n_rep=1  n=22</title></circle><circle cx="129.5" cy="128.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="128.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=1.10ms  n_rep=1  n=22</title></circle><circle cx="169.3" cy="128.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="128.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=1.10ms  n_rep=1  n=22</title></circle><circle cx="209.0" cy="124.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="124.6" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=1.40ms  n_rep=1  n=22</title></circle><circle cx="248.8" cy="124.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="124.6" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=1.40ms  n_rep=1  n=62</title></circle><circle cx="288.5" cy="117.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="117.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=2.00ms  n_rep=1  n=62</title></circle><circle cx="328.3" cy="114.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="114.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=2.20ms  n_rep=1  n=62</title></circle><circle cx="368.0" cy="98.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="98.6" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=3.50ms  n_rep=1  n=62</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>api.session.fetch</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>74.7 / 444 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.session.fetch trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,134.2 89.8,117.9 129.5,134.0 169.3,114.9 209.0,112.8 248.8,99.9 288.5,97.9 328.3,92.8 368.0,31.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,139.4 89.8,137.4 129.5,138.1 169.3,138.0 209.0,139.2 248.8,131.1 288.5,130.8 328.3,130.5 368.0,123.5"/>
+		
+		<circle cx="50.0" cy="134.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=31.6ms</title></circle><circle cx="89.8" cy="117.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=97.1ms</title></circle><circle cx="129.5" cy="134.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=32.2ms</title></circle><circle cx="169.3" cy="114.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=109ms</title></circle><circle cx="209.0" cy="112.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=118ms</title></circle><circle cx="248.8" cy="99.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=170ms</title></circle><circle cx="288.5" cy="97.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=178ms</title></circle><circle cx="328.3" cy="92.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=199ms</title></circle><circle cx="368.0" cy="31.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=444ms</title></circle>
+		<circle cx="50.0" cy="139.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="139.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=10.4ms  n_rep=1  n=12</title></circle><circle cx="89.8" cy="137.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="137.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=18.6ms  n_rep=1  n=41</title></circle><circle cx="129.5" cy="138.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="138.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=15.6ms  n_rep=1  n=41</title></circle><circle cx="169.3" cy="138.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="138.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=16.0ms  n_rep=1  n=42</title></circle><circle cx="209.0" cy="139.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="139.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=11.4ms  n_rep=1  n=41</title></circle><circle cx="248.8" cy="131.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="131.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=44.1ms  n_rep=1  n=129</title></circle><circle cx="288.5" cy="130.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="130.8" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=45.2ms  n_rep=1  n=129</title></circle><circle cx="328.3" cy="130.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="130.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=46.3ms  n_rep=1  n=130</title></circle><circle cx="368.0" cy="123.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="123.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=74.7ms  n_rep=1  n=130</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>api.goal.fetch</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>20.5 / 20.5 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.fetch trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">30.0</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">22.5</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,92.0 89.8,75.9 129.5,108.5 169.3,109.8 209.0,94.5 248.8,71.7 288.5,49.4 328.3,37.8 368.0,57.3"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,92.0 89.8,75.9 129.5,108.5 169.3,109.8 209.0,94.5 248.8,71.7 288.5,49.4 328.3,37.8 368.0,57.3"/>
+		
+		<circle cx="50.0" cy="92.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=12.1ms</title></circle><circle cx="89.8" cy="75.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=16.0ms</title></circle><circle cx="129.5" cy="108.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=8.10ms</title></circle><circle cx="169.3" cy="109.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=7.80ms</title></circle><circle cx="209.0" cy="94.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=11.5ms</title></circle><circle cx="248.8" cy="71.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=17.0ms</title></circle><circle cx="288.5" cy="49.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=22.4ms</title></circle><circle cx="328.3" cy="37.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=25.2ms</title></circle><circle cx="368.0" cy="57.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=20.5ms</title></circle>
+		<circle cx="50.0" cy="92.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="92.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=12.1ms  n_rep=1  n=3</title></circle><circle cx="89.8" cy="75.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="75.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=16.0ms  n_rep=1  n=3</title></circle><circle cx="129.5" cy="108.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="108.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=8.10ms  n_rep=1  n=3</title></circle><circle cx="169.3" cy="109.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="109.8" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=7.80ms  n_rep=1  n=3</title></circle><circle cx="209.0" cy="94.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="94.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=11.5ms  n_rep=1  n=3</title></circle><circle cx="248.8" cy="71.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="71.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=17.0ms  n_rep=1  n=3</title></circle><circle cx="288.5" cy="49.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="49.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=22.4ms  n_rep=1  n=3</title></circle><circle cx="328.3" cy="37.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="37.8" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=25.2ms  n_rep=1  n=3</title></circle><circle cx="368.0" cy="57.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="57.3" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=20.5ms  n_rep=1  n=3</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>api.goal.gates.fetch</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>14.2 / 21.5 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,118.7 89.8,138.0 129.5,136.8 169.3,136.6 209.0,138.7 248.8,78.6 288.5,66.7 328.3,132.9 368.0,136.7"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,139.0 89.8,140.1 129.5,141.0 169.3,139.9 209.0,140.1 248.8,135.0 288.5,73.0 328.3,139.5 368.0,138.5"/>
+		
+		<circle cx="50.0" cy="118.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=93.8ms</title></circle><circle cx="89.8" cy="138.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=16.2ms</title></circle><circle cx="129.5" cy="136.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=21.1ms</title></circle><circle cx="169.3" cy="136.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=21.6ms</title></circle><circle cx="209.0" cy="138.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=13.3ms</title></circle><circle cx="248.8" cy="78.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=256ms</title></circle><circle cx="288.5" cy="66.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=304ms</title></circle><circle cx="328.3" cy="132.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=36.6ms</title></circle><circle cx="368.0" cy="136.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=21.5ms</title></circle>
+		<circle cx="50.0" cy="139.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="139.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=12.0ms  n_rep=1  n=8</title></circle><circle cx="89.8" cy="140.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="140.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=7.70ms  n_rep=1  n=8</title></circle><circle cx="129.5" cy="141.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="141.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=4.00ms  n_rep=1  n=8</title></circle><circle cx="169.3" cy="139.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="139.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=8.50ms  n_rep=1  n=9</title></circle><circle cx="209.0" cy="140.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="140.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=7.60ms  n_rep=1  n=8</title></circle><circle cx="248.8" cy="135.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="135.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=28.4ms  n_rep=1  n=32</title></circle><circle cx="288.5" cy="73.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="73.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=278ms  n_rep=1  n=41</title></circle><circle cx="328.3" cy="139.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="139.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=10.2ms  n_rep=1  n=9</title></circle><circle cx="368.0" cy="138.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="138.5" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=14.2ms  n_rep=1  n=9</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>api.goal.agents.fetch</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>14.1 / 20.8 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.agents.fetch trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">30.0</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">22.5</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,80.4 89.8,75.9 129.5,109.3 169.3,111.0 209.0,97.4 248.8,71.3 288.5,48.6 328.3,37.4 368.0,56.0"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,99.0 89.8,125.9 129.5,127.9 169.3,125.9 209.0,129.2 248.8,125.9 288.5,125.9 328.3,125.1 368.0,83.7"/>
+		
+		<circle cx="50.0" cy="80.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=14.9ms</title></circle><circle cx="89.8" cy="75.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=16.0ms</title></circle><circle cx="129.5" cy="109.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=7.90ms</title></circle><circle cx="169.3" cy="111.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=7.50ms</title></circle><circle cx="209.0" cy="97.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=10.8ms</title></circle><circle cx="248.8" cy="71.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=17.1ms</title></circle><circle cx="288.5" cy="48.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=22.6ms</title></circle><circle cx="328.3" cy="37.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=25.3ms</title></circle><circle cx="368.0" cy="56.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=20.8ms</title></circle>
+		<circle cx="50.0" cy="99.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="99.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=10.4ms  n_rep=1  n=8</title></circle><circle cx="89.8" cy="125.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="125.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=3.90ms  n_rep=1  n=8</title></circle><circle cx="129.5" cy="127.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="127.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=3.40ms  n_rep=1  n=8</title></circle><circle cx="169.3" cy="125.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="125.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=3.90ms  n_rep=1  n=8</title></circle><circle cx="209.0" cy="129.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="129.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=3.10ms  n_rep=1  n=8</title></circle><circle cx="248.8" cy="125.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="125.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=3.90ms  n_rep=1  n=8</title></circle><circle cx="288.5" cy="125.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="125.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=3.90ms  n_rep=1  n=8</title></circle><circle cx="328.3" cy="125.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="125.1" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=4.10ms  n_rep=1  n=8</title></circle><circle cx="368.0" cy="83.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="83.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=14.1ms  n_rep=1  n=8</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>ws.attach</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>62.1 / 97.4 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,103.2 89.8,121.8 129.5,123.6 169.3,126.0 209.0,126.0 248.8,88.8 288.5,90.1 328.3,97.7 368.0,61.5"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,111.9 89.8,138.7 129.5,138.4 169.3,138.3 209.0,138.1 248.8,105.7 288.5,104.9 328.3,105.0 368.0,90.7"/>
+		
+		<circle cx="50.0" cy="103.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=46.9ms</title></circle><circle cx="89.8" cy="121.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=24.4ms</title></circle><circle cx="129.5" cy="123.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=22.3ms</title></circle><circle cx="169.3" cy="126.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=19.3ms</title></circle><circle cx="209.0" cy="126.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=19.4ms</title></circle><circle cx="248.8" cy="88.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=64.3ms</title></circle><circle cx="288.5" cy="90.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=62.8ms</title></circle><circle cx="328.3" cy="97.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=53.6ms</title></circle><circle cx="368.0" cy="61.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=97.4ms</title></circle>
+		<circle cx="50.0" cy="111.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="111.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=36.4ms  n_rep=1  n=11</title></circle><circle cx="89.8" cy="138.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="138.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=4.00ms  n_rep=1  n=11</title></circle><circle cx="129.5" cy="138.4" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="138.4" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=4.30ms  n_rep=1  n=11</title></circle><circle cx="169.3" cy="138.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="138.3" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=4.50ms  n_rep=1  n=11</title></circle><circle cx="209.0" cy="138.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="138.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=4.70ms  n_rep=1  n=11</title></circle><circle cx="248.8" cy="105.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="105.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=43.9ms  n_rep=1  n=51</title></circle><circle cx="288.5" cy="104.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="104.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=44.9ms  n_rep=1  n=51</title></circle><circle cx="328.3" cy="105.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="105.0" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=44.8ms  n_rep=1  n=51</title></circle><circle cx="368.0" cy="90.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="90.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=62.1ms  n_rep=1  n=51</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>paint.first</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>30.2 / 103 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="paint.first trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,116.2 89.8,56.9 129.5,119.3 169.3,119.9 209.0,95.8 248.8,102.9 288.5,74.0 328.3,69.0 368.0,56.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,128.1 89.8,128.1 129.5,128.0 169.3,128.3 209.0,128.1 248.8,124.0 288.5,123.9 328.3,123.8 368.0,117.0"/>
+		
+		<circle cx="50.0" cy="116.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=31.2ms</title></circle><circle cx="89.8" cy="56.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=103ms</title></circle><circle cx="129.5" cy="119.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=27.5ms</title></circle><circle cx="169.3" cy="119.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=26.7ms</title></circle><circle cx="209.0" cy="95.8" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=55.9ms</title></circle><circle cx="248.8" cy="102.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=47.3ms</title></circle><circle cx="288.5" cy="74.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=82.2ms</title></circle><circle cx="328.3" cy="69.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=88.3ms</title></circle><circle cx="368.0" cy="56.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=103ms</title></circle>
+		<circle cx="50.0" cy="128.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="128.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=16.8ms  n_rep=1  n=79</title></circle><circle cx="89.8" cy="128.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="128.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=16.8ms  n_rep=1  n=66</title></circle><circle cx="129.5" cy="128.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="128.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=16.9ms  n_rep=1  n=66</title></circle><circle cx="169.3" cy="128.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="128.3" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=16.6ms  n_rep=1  n=70</title></circle><circle cx="209.0" cy="128.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="128.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=16.8ms  n_rep=1  n=73</title></circle><circle cx="248.8" cy="124.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="124.0" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=21.8ms  n_rep=1  n=183</title></circle><circle cx="288.5" cy="123.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="123.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=21.9ms  n_rep=1  n=187</title></circle><circle cx="328.3" cy="123.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="123.8" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=22.0ms  n_rep=1  n=192</title></circle><circle cx="368.0" cy="117.0" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="117.0" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=30.2ms  n_rep=1  n=215</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header>
+				<h3>reducer.rehydrate</h3>
+				<div class="meta">
+					<span class="pill ">exp</span>
+					<span class="warn">n_rep=1 (?)</span>
+					<span>0.50 / 0.80 ms</span>
+				</div>
+			</header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="reducer.rehydrate trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.13</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.38</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="50.0,133.7 89.8,100.7 129.5,125.5 169.3,125.5 209.0,92.4 248.8,125.5 288.5,92.4 328.3,92.4 368.0,75.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="50.0,133.7 89.8,108.9 129.5,125.5 169.3,133.7 209.0,117.2 248.8,125.5 288.5,108.9 328.3,108.9 368.0,100.7"/>
+		
+		<circle cx="50.0" cy="133.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>999bdc2  p95=0.10ms</title></circle><circle cx="89.8" cy="100.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=0.50ms</title></circle><circle cx="129.5" cy="125.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>c25e40b  p95=0.20ms</title></circle><circle cx="169.3" cy="125.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=0.20ms</title></circle><circle cx="209.0" cy="92.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>5309f93  p95=0.60ms</title></circle><circle cx="248.8" cy="125.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=0.20ms</title></circle><circle cx="288.5" cy="92.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=0.60ms</title></circle><circle cx="328.3" cy="92.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=0.60ms</title></circle><circle cx="368.0" cy="75.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=0.80ms</title></circle>
+		<circle cx="50.0" cy="133.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="50.0" cy="133.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>999bdc2  baseline  p50=0.10ms  n_rep=1  n=11</title></circle><circle cx="89.8" cy="108.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="89.8" cy="108.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=0.40ms  n_rep=1  n=11</title></circle><circle cx="129.5" cy="125.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="129.5" cy="125.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>c25e40b  baseline  p50=0.20ms  n_rep=1  n=11</title></circle><circle cx="169.3" cy="133.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="169.3" cy="133.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=0.10ms  n_rep=1  n=11</title></circle><circle cx="209.0" cy="117.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="209.0" cy="117.2" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>5309f93  baseline  p50=0.30ms  n_rep=1  n=11</title></circle><circle cx="248.8" cy="125.5" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="125.5" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=0.20ms  n_rep=1  n=47</title></circle><circle cx="288.5" cy="108.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="108.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=0.40ms  n_rep=1  n=50</title></circle><circle cx="328.3" cy="108.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="108.9" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=0.40ms  n_rep=1  n=47</title></circle><circle cx="368.0" cy="100.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="100.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=0.50ms  n_rep=1  n=37</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header><h3>rapidnav.gap</h3><div class="meta"><span>102 / 169 ms</span></div></header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.gap trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">200</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="248.8,86.6 288.5,78.5 328.3,76.3 368.0,37.0"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="248.8,101.3 288.5,125.8 328.3,120.2 368.0,78.9"/>
+		
+		<circle cx="248.8" cy="86.6" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=89.4ms</title></circle><circle cx="288.5" cy="78.5" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=103ms</title></circle><circle cx="328.3" cy="76.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=106ms</title></circle><circle cx="368.0" cy="37.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=169ms</title></circle>
+		<circle cx="248.8" cy="101.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="101.3" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=65.6ms  n_rep=1  n=18</title></circle><circle cx="288.5" cy="125.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="125.8" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=26.2ms  n_rep=1  n=16</title></circle><circle cx="328.3" cy="120.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="120.2" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=35.2ms  n_rep=1  n=14</title></circle><circle cx="368.0" cy="78.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="78.9" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=102ms  n_rep=1  n=8</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header><h3>rapidnav.keystroke.cached</h3><div class="meta"><span>151 / 301 ms</span></div></header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.keystroke.cached trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="248.8,105.9 288.5,93.2 328.3,95.4 368.0,67.3"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="248.8,112.7 288.5,114.7 328.3,111.6 368.0,104.6"/>
+		
+		<circle cx="248.8" cy="105.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=145ms</title></circle><circle cx="288.5" cy="93.2" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=197ms</title></circle><circle cx="328.3" cy="95.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=188ms</title></circle><circle cx="368.0" cy="67.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=301ms</title></circle>
+		<circle cx="248.8" cy="112.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="112.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=118ms  n_rep=1  n=20</title></circle><circle cx="288.5" cy="114.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="114.7" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=110ms  n_rep=1  n=20</title></circle><circle cx="328.3" cy="111.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="111.6" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=123ms  n_rep=1  n=20</title></circle><circle cx="368.0" cy="104.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="104.6" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=151ms  n_rep=1  n=20</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header><h3>rapidnav.keystroke.uncached</h3><div class="meta"><span>183 / 323 ms</span></div></header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.keystroke.uncached trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="248.8,107.9 288.5,90.7 328.3,93.0 368.0,61.9"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="248.8,115.1 288.5,103.3 328.3,104.7 368.0,96.7"/>
+		
+		<circle cx="248.8" cy="107.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=137ms</title></circle><circle cx="288.5" cy="90.7" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=207ms</title></circle><circle cx="328.3" cy="93.0" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=198ms</title></circle><circle cx="368.0" cy="61.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=323ms</title></circle>
+		<circle cx="248.8" cy="115.1" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="115.1" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=109ms  n_rep=1  n=20</title></circle><circle cx="288.5" cy="103.3" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="103.3" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=156ms  n_rep=1  n=20</title></circle><circle cx="328.3" cy="104.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="104.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=151ms  n_rep=1  n=20</title></circle><circle cx="368.0" cy="96.7" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="96.7" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=183ms  n_rep=1  n=20</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article><article class="chart-card">
+			<header><h3>rapidnav.stall.ms</h3><div class="meta"><span>6.80 / 32.2 ms</span></div></header>
+			<svg viewBox="0 0 380 170" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.stall.ms trend">
+		<line x1="50" x2="368" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="368" y1="49.0" y2="49.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="52.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="368" y1="80.0" y2="80.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="83.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="368" y1="111.0" y2="111.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="114.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="368" y1="142.0" y2="142.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="145.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
+		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.25" stroke-dasharray="5 3" opacity="0.6" points="248.8,64.4 288.5,125.9 328.3,91.3 368.0,102.1"/>
+		<polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" opacity="0.7" points="248.8,138.8 288.5,137.9 328.3,137.2 368.0,133.6"/>
+		
+		<circle cx="248.8" cy="64.4" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=62.6ms</title></circle><circle cx="288.5" cy="125.9" r="2" fill="var(--chart-4)" opacity="0.85"><title>294bd68  p95=13.0ms</title></circle><circle cx="328.3" cy="91.3" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=40.9ms</title></circle><circle cx="368.0" cy="102.1" r="2" fill="var(--chart-4)" opacity="0.85"><title>d6585b4  p95=32.2ms</title></circle>
+		<circle cx="248.8" cy="138.8" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="248.8" cy="138.8" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=2.60ms  n_rep=1  n=18</title></circle><circle cx="288.5" cy="137.9" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="288.5" cy="137.9" r="3" fill="var(--background)" stroke="var(--chart-1)" stroke-width="1.5"><title>294bd68  baseline  p50=3.30ms  n_rep=1  n=20</title></circle><circle cx="328.3" cy="137.2" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="328.3" cy="137.2" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-off)  experiment  p50=3.90ms  n_rep=1  n=22</title></circle><circle cx="368.0" cy="133.6" r="5" fill="none" stroke="var(--warning)" stroke-width="0.8" stroke-dasharray="1 2"/><circle cx="368.0" cy="133.6" r="3" fill="var(--chart-1)"><title>d6585b4 (opt-b-on)  experiment  p50=6.80ms  n_rep=1  n=28</title></circle>
+		<text x="50.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="129.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="209.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="288.5" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="368.0" y="162.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
+	</svg>
+		</article></div>
+
+		<h2>Cross-group trend table <span class="count">first vs latest measurement per span (Δ gated by kind/commit)</span></h2>
+		<div class="table-wrap"><table class="summary">
 		<thead><tr>
 			<th>span</th>
 			<th class="num">first p50</th>
@@ -177,485 +645,164 @@
 			<th class="num">Δ p50</th>
 			<th class="num">first p95</th>
 			<th class="num">latest p95</th>
-			<th class="num">Δ p95</th>
-			<th class="num">n</th>
-			<th>trend p50</th>
+			<th class="num">n_rep × n</th>
+			<th>trend</th>
 		</tr></thead>
-		<tbody>
-		<tr class="group"><td colspan="9">Navigation — click → ready</td></tr>
-		<tr>
+		<tbody><tr class="group"><td colspan="8">Navigation — click → ready</td></tr><tr>
+			<td class="name">nav.session.ready</td>
+			<td class="num">88.8</td>
+			<td class="num">155</td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
+			<td class="num">193</td>
+			<td class="num">320</td>
+			<td class="num">1×60</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,11.8 10.0,15.8 20.0,19.0 30.0,18.8 40.0,15.5 50.0,9.5 60.0,8.2 70.0,3.8 80.0,3.0"/></svg></td>
+		</tr><tr>
+			<td class="name">nav.goal.ready</td>
+			<td class="num">29.5</td>
+			<td class="num">28.0</td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
+			<td class="num">29.5</td>
+			<td class="num">28.0</td>
+			<td class="num">1×2</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,8.3 10.0,17.8 20.0,16.4 30.0,19.0 40.0,14.2 50.0,3.6 60.0,3.0 70.0,7.2 80.0,9.6"/></svg></td>
+		</tr><tr>
 			<td class="name">nav.session.cold</td>
 			<td class="num">165</td>
 			<td class="num">480</td>
-			<td class="delta bad"><span class="pill">+316 / +191.7%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">165</td>
 			<td class="num">480</td>
-			<td class="delta bad"><span class="pill">+316 / +191.7%</span></td>
-			<td class="num">1</td>
+			<td class="num">1×1</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="30.0,19.0 40.0,18.7 50.0,14.6 60.0,12.2 70.0,12.3 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">nav.goal.cold</td>
 			<td class="num">1691</td>
 			<td class="num">1863</td>
-			<td class="delta bad"><span class="pill">+172 / +10.2%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">1691</td>
 			<td class="num">1863</td>
-			<td class="delta bad"><span class="pill">+172 / +10.2%</span></td>
-			<td class="num">1</td>
+			<td class="num">1×1</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="30.0,19.0 40.0,17.0 50.0,14.5 60.0,15.3 70.0,14.8 80.0,3.0"/></svg></td>
-		</tr><tr>
-			<td class="name">nav.session.ready</td>
-			<td class="num">88.8</td>
-			<td class="num">155</td>
-			<td class="delta bad"><span class="pill">+66.4 / +74.8%</span></td>
-			<td class="num">193</td>
-			<td class="num">320</td>
-			<td class="delta bad"><span class="pill">+127 / +65.6%</span></td>
-			<td class="num">60</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,11.8 10.0,15.8 20.0,19.0 30.0,18.8 40.0,15.5 50.0,9.5 60.0,8.2 70.0,3.8 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">nav.click</td>
 			<td class="num">1.50</td>
 			<td class="num">3.50</td>
-			<td class="delta bad"><span class="pill">+2.00 / +133.3%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">2.30</td>
 			<td class="num">4.90</td>
-			<td class="delta bad"><span class="pill">+2.60 / +113.0%</span></td>
-			<td class="num">62</td>
+			<td class="num">1×62</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,16.3 10.0,15.7 20.0,19.0 30.0,19.0 40.0,17.0 50.0,17.0 60.0,13.0 70.0,11.7 80.0,3.0"/></svg></td>
-		</tr><tr>
-			<td class="name">nav.goal.ready</td>
-			<td class="num">29.5</td>
-			<td class="num">28.0</td>
-			<td class="delta good"><span class="pill">−1.50 / −5.1%</span></td>
-			<td class="num">29.5</td>
-			<td class="num">28.0</td>
-			<td class="delta good"><span class="pill">−1.50 / −5.1%</span></td>
-			<td class="num">2</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,8.3 10.0,17.8 20.0,16.4 30.0,19.0 40.0,14.2 50.0,3.6 60.0,3.0 70.0,7.2 80.0,9.6"/></svg></td>
-		</tr>
-	
-		<tr class="group"><td colspan="9">API — REST calls on the critical path</td></tr>
-		<tr>
+		</tr><tr class="group"><td colspan="8">API — REST calls on the critical path</td></tr><tr>
 			<td class="name">api.session.fetch</td>
 			<td class="num">10.4</td>
 			<td class="num">74.7</td>
-			<td class="delta bad"><span class="pill">+64.3 / +618.3%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">31.6</td>
 			<td class="num">444</td>
-			<td class="delta bad"><span class="pill">+412 / +1304.7%</span></td>
-			<td class="num">130</td>
+			<td class="num">1×130</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,19.0 10.0,17.0 20.0,17.7 30.0,17.6 40.0,18.8 50.0,10.6 60.0,10.3 70.0,10.1 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">api.goal.fetch</td>
 			<td class="num">12.1</td>
 			<td class="num">20.5</td>
-			<td class="delta bad"><span class="pill">+8.40 / +69.4%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">12.1</td>
 			<td class="num">20.5</td>
-			<td class="delta bad"><span class="pill">+8.40 / +69.4%</span></td>
-			<td class="num">3</td>
+			<td class="num">1×3</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,15.0 10.0,11.5 20.0,18.7 30.0,19.0 40.0,15.6 50.0,10.5 60.0,5.6 70.0,3.0 80.0,7.3"/></svg></td>
-		</tr><tr>
-			<td class="name">api.goal.agents.fetch</td>
-			<td class="num">10.4</td>
-			<td class="num">14.1</td>
-			<td class="delta bad"><span class="pill">+3.70 / +35.6%</span></td>
-			<td class="num">14.9</td>
-			<td class="num">20.8</td>
-			<td class="delta bad"><span class="pill">+5.90 / +39.6%</span></td>
-			<td class="num">8</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,8.4 10.0,17.8 20.0,18.6 30.0,17.8 40.0,19.0 50.0,17.8 60.0,17.8 70.0,17.5 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">api.goal.gates.fetch</td>
 			<td class="num">12.0</td>
 			<td class="num">14.2</td>
-			<td class="delta bad"><span class="pill">+2.20 / +18.3%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">93.8</td>
 			<td class="num">21.5</td>
-			<td class="delta good"><span class="pill">−72.3 / −77.1%</span></td>
-			<td class="num">9</td>
+			<td class="num">1×9</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,18.5 10.0,18.8 20.0,19.0 30.0,18.7 40.0,18.8 50.0,17.6 60.0,3.0 70.0,18.6 80.0,18.4"/></svg></td>
-		</tr>
-	
-		<tr class="group"><td colspan="9">Render &amp; runtime</td></tr>
-		<tr>
+		</tr><tr>
+			<td class="name">api.goal.agents.fetch</td>
+			<td class="num">10.4</td>
+			<td class="num">14.1</td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
+			<td class="num">14.9</td>
+			<td class="num">20.8</td>
+			<td class="num">1×8</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,8.4 10.0,17.8 20.0,18.6 30.0,17.8 40.0,19.0 50.0,17.8 60.0,17.8 70.0,17.5 80.0,3.0"/></svg></td>
+		</tr><tr class="group"><td colspan="8">Render &amp; runtime</td></tr><tr>
 			<td class="name">ws.attach</td>
 			<td class="num">36.4</td>
 			<td class="num">62.1</td>
-			<td class="delta bad"><span class="pill">+25.7 / +70.6%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">46.9</td>
 			<td class="num">97.4</td>
-			<td class="delta bad"><span class="pill">+50.5 / +107.7%</span></td>
-			<td class="num">51</td>
+			<td class="num">1×51</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,10.1 10.0,19.0 20.0,18.9 30.0,18.9 40.0,18.8 50.0,8.0 60.0,7.7 70.0,7.8 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">paint.first</td>
 			<td class="num">16.8</td>
 			<td class="num">30.2</td>
-			<td class="delta bad"><span class="pill">+13.4 / +79.8%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">31.2</td>
 			<td class="num">103</td>
-			<td class="delta bad"><span class="pill">+71.8 / +230.1%</span></td>
-			<td class="num">215</td>
+			<td class="num">1×215</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,18.8 10.0,18.8 20.0,18.6 30.0,19.0 40.0,18.8 50.0,12.9 60.0,12.8 70.0,12.6 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">reducer.rehydrate</td>
 			<td class="num">0.10</td>
 			<td class="num">0.50</td>
-			<td class="delta bad"><span class="pill">+0.40 / +400.0%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">0.10</td>
 			<td class="num">0.80</td>
-			<td class="delta bad"><span class="pill">+0.70 / +700.0%</span></td>
-			<td class="num">37</td>
+			<td class="num">1×37</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="0.0,19.0 10.0,7.0 20.0,15.0 30.0,19.0 40.0,11.0 50.0,15.0 60.0,7.0 70.0,7.0 80.0,3.0"/></svg></td>
-		</tr><tr>
-			<td class="name">paint.tool-content.lazy</td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">—</td>
-			<td class="num">—</td>
-			<td class="delta flat"><span class="pill">—</span></td>
-			<td class="num">0</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"></svg></td>
-		</tr>
-	
-		<tr class="group"><td colspan="9">Other spans</td></tr>
-		<tr>
-			<td class="name">rapidnav.keystroke.uncached</td>
-			<td class="num">109</td>
-			<td class="num">183</td>
-			<td class="delta bad"><span class="pill">+74.2 / +68.3%</span></td>
-			<td class="num">137</td>
-			<td class="num">323</td>
-			<td class="delta bad"><span class="pill">+186 / +135.0%</span></td>
-			<td class="num">20</td>
-			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="50.0,19.0 60.0,8.8 70.0,9.9 80.0,3.0"/></svg></td>
-		</tr><tr>
+		</tr><tr class="group"><td colspan="8">Other spans</td></tr><tr>
 			<td class="name">rapidnav.gap</td>
 			<td class="num">65.6</td>
 			<td class="num">102</td>
-			<td class="delta bad"><span class="pill">+36.1 / +55.0%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">89.4</td>
 			<td class="num">169</td>
-			<td class="delta bad"><span class="pill">+80.0 / +89.5%</span></td>
-			<td class="num">8</td>
+			<td class="num">1×8</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="50.0,10.7 60.0,19.0 70.0,17.1 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">rapidnav.keystroke.cached</td>
 			<td class="num">118</td>
 			<td class="num">151</td>
-			<td class="delta bad"><span class="pill">+32.7 / +27.7%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">145</td>
 			<td class="num">301</td>
-			<td class="delta bad"><span class="pill">+156 / +107.1%</span></td>
-			<td class="num">20</td>
+			<td class="num">1×20</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="50.0,15.8 60.0,19.0 70.0,14.1 80.0,3.0"/></svg></td>
+		</tr><tr>
+			<td class="name">rapidnav.keystroke.uncached</td>
+			<td class="num">109</td>
+			<td class="num">183</td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
+			<td class="num">137</td>
+			<td class="num">323</td>
+			<td class="num">1×20</td>
+			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="50.0,19.0 60.0,8.8 70.0,9.9 80.0,3.0"/></svg></td>
 		</tr><tr>
 			<td class="name">rapidnav.stall.ms</td>
 			<td class="num">2.60</td>
 			<td class="num">6.80</td>
-			<td class="delta bad"><span class="pill">+4.20 / +161.5%</span></td>
+			<td class="delta flat"><span class="pill" title="cross-commit or baseline — code Δ undefined">n/a · fixture</span></td>
 			<td class="num">62.6</td>
 			<td class="num">32.2</td>
-			<td class="delta good"><span class="pill">−30.4 / −48.6%</span></td>
-			<td class="num">28</td>
+			<td class="num">1×28</td>
 			<td class="spark"><svg viewBox="0 0 80 22" width="80" height="22" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="var(--chart-1)" stroke-width="1.5" points="50.0,19.0 60.0,16.3 70.0,14.0 80.0,3.0"/></svg></td>
-		</tr>
-	</tbody>
-	</table></div><h2>Per-span trend <span class="count">p50 solid · p95 dashed · 9 commits</span></h2><div class="charts-grid"><article class="chart-card">
-					<header>
-						<h3>nav.session.cold</h3>
-						<div class="meta">
-							<span class="pill bad">+191.7%</span>
-							<span>n=1</span>
-							<span>480 / 480 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.cold trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1000</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">750</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 162.5 132.0 L 162.5,113.2 L 200.0,112.7 L 237.5,103.4 L 275.0,98.0 L 312.5,98.3 L 350.0,77.3 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="162.5,113.2 200.0,112.7 237.5,103.4 275.0,98.0 312.5,98.3 350.0,77.3"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="162.5,113.2 200.0,112.7 237.5,103.4 275.0,98.0 312.5,98.3 350.0,77.3"/>
-		<circle cx="162.5" cy="113.2" r="2" fill="var(--chart-4)"><title>5309f93  p95=165ms  n=1</title></circle><circle cx="200.0" cy="112.7" r="2" fill="var(--chart-4)"><title>5309f93  p95=170ms  n=1</title></circle><circle cx="237.5" cy="103.4" r="2" fill="var(--chart-4)"><title>294bd68  p95=251ms  n=1</title></circle><circle cx="275.0" cy="98.0" r="2" fill="var(--chart-4)"><title>294bd68  p95=298ms  n=1</title></circle><circle cx="312.5" cy="98.3" r="2" fill="var(--chart-4)"><title>d6585b4  p95=296ms  n=1</title></circle><circle cx="350.0" cy="77.3" r="2" fill="var(--chart-4)"><title>d6585b4  p95=480ms  n=1</title></circle>
-		<circle cx="162.5" cy="113.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=165ms  n=1</title></circle><circle cx="200.0" cy="112.7" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=170ms  n=1</title></circle><circle cx="237.5" cy="103.4" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=251ms  n=1</title></circle><circle cx="275.0" cy="98.0" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=298ms  n=1</title></circle><circle cx="312.5" cy="98.3" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=296ms  n=1</title></circle><circle cx="350.0" cy="77.3" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=480ms  n=1</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>nav.goal.cold</h3>
-						<div class="meta">
-							<span class="pill bad">+10.2%</span>
-							<span>n=1</span>
-							<span>1863 / 1863 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.cold trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">3000</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2250</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1500</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">750</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 162.5 132.0 L 162.5,67.7 L 200.0,67.0 L 237.5,65.9 L 275.0,66.3 L 312.5,66.0 L 350.0,61.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="162.5,67.7 200.0,67.0 237.5,65.9 275.0,66.3 312.5,66.0 350.0,61.2"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="162.5,67.7 200.0,67.0 237.5,65.9 275.0,66.3 312.5,66.0 350.0,61.2"/>
-		<circle cx="162.5" cy="67.7" r="2" fill="var(--chart-4)"><title>5309f93  p95=1691ms  n=1</title></circle><circle cx="200.0" cy="67.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=1712ms  n=1</title></circle><circle cx="237.5" cy="65.9" r="2" fill="var(--chart-4)"><title>294bd68  p95=1739ms  n=1</title></circle><circle cx="275.0" cy="66.3" r="2" fill="var(--chart-4)"><title>294bd68  p95=1730ms  n=1</title></circle><circle cx="312.5" cy="66.0" r="2" fill="var(--chart-4)"><title>d6585b4  p95=1736ms  n=1</title></circle><circle cx="350.0" cy="61.2" r="2" fill="var(--chart-4)"><title>d6585b4  p95=1863ms  n=1</title></circle>
-		<circle cx="162.5" cy="67.7" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1691ms  n=1</title></circle><circle cx="200.0" cy="67.0" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1712ms  n=1</title></circle><circle cx="237.5" cy="65.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=1739ms  n=1</title></circle><circle cx="275.0" cy="66.3" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=1730ms  n=1</title></circle><circle cx="312.5" cy="66.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=1736ms  n=1</title></circle><circle cx="350.0" cy="61.2" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=1863ms  n=1</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>nav.session.ready</h3>
-						<div class="meta">
-							<span class="pill bad">+74.8%</span>
-							<span>n=60</span>
-							<span>155 / 320 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.session.ready trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,111.8 L 87.5,118.7 L 125.0,124.2 L 162.5,123.9 L 200.0,118.3 L 237.5,107.9 L 275.0,105.6 L 312.5,98.1 L 350.0,96.6 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,88.0 87.5,84.4 125.0,111.0 162.5,113.9 200.0,103.4 237.5,99.6 275.0,87.1 312.5,86.2 350.0,59.1"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,111.8 87.5,118.7 125.0,124.2 162.5,123.9 200.0,118.3 237.5,107.9 275.0,105.6 312.5,98.1 350.0,96.6"/>
-		<circle cx="50.0" cy="88.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=193ms  n=18</title></circle><circle cx="87.5" cy="84.4" r="2" fill="var(--chart-4)"><title>c25e40b  p95=209ms  n=20</title></circle><circle cx="125.0" cy="111.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=92.2ms  n=20</title></circle><circle cx="162.5" cy="113.9" r="2" fill="var(--chart-4)"><title>5309f93  p95=79.4ms  n=20</title></circle><circle cx="200.0" cy="103.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=126ms  n=20</title></circle><circle cx="237.5" cy="99.6" r="2" fill="var(--chart-4)"><title>294bd68  p95=142ms  n=60</title></circle><circle cx="275.0" cy="87.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=197ms  n=60</title></circle><circle cx="312.5" cy="86.2" r="2" fill="var(--chart-4)"><title>d6585b4  p95=201ms  n=60</title></circle><circle cx="350.0" cy="59.1" r="2" fill="var(--chart-4)"><title>d6585b4  p95=320ms  n=60</title></circle>
-		<circle cx="50.0" cy="111.8" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=88.8ms  n=18</title></circle><circle cx="87.5" cy="118.7" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=58.2ms  n=20</title></circle><circle cx="125.0" cy="124.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=34.1ms  n=20</title></circle><circle cx="162.5" cy="123.9" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=35.4ms  n=20</title></circle><circle cx="200.0" cy="118.3" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=60.3ms  n=20</title></circle><circle cx="237.5" cy="107.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=106ms  n=60</title></circle><circle cx="275.0" cy="105.6" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=116ms  n=60</title></circle><circle cx="312.5" cy="98.1" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=149ms  n=60</title></circle><circle cx="350.0" cy="96.6" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=155ms  n=60</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>nav.click</h3>
-						<div class="meta">
-							<span class="pill bad">+133.3%</span>
-							<span>n=62</span>
-							<span>3.50 / 4.90 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.click trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">10.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5.00</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">2.50</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,114.9 L 87.5,113.8 L 125.0,119.5 L 162.5,119.5 L 200.0,116.0 L 237.5,116.0 L 275.0,109.2 L 312.5,106.9 L 350.0,92.1 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,105.8 87.5,104.6 125.0,113.8 162.5,113.8 200.0,109.2 237.5,106.9 275.0,91.0 312.5,97.8 350.0,76.1"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,114.9 87.5,113.8 125.0,119.5 162.5,119.5 200.0,116.0 237.5,116.0 275.0,109.2 312.5,106.9 350.0,92.1"/>
-		<circle cx="50.0" cy="105.8" r="2" fill="var(--chart-4)"><title>999bdc2  p95=2.30ms  n=20</title></circle><circle cx="87.5" cy="104.6" r="2" fill="var(--chart-4)"><title>c25e40b  p95=2.40ms  n=22</title></circle><circle cx="125.0" cy="113.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=1.60ms  n=22</title></circle><circle cx="162.5" cy="113.8" r="2" fill="var(--chart-4)"><title>5309f93  p95=1.60ms  n=22</title></circle><circle cx="200.0" cy="109.2" r="2" fill="var(--chart-4)"><title>5309f93  p95=2.00ms  n=22</title></circle><circle cx="237.5" cy="106.9" r="2" fill="var(--chart-4)"><title>294bd68  p95=2.20ms  n=62</title></circle><circle cx="275.0" cy="91.0" r="2" fill="var(--chart-4)"><title>294bd68  p95=3.60ms  n=62</title></circle><circle cx="312.5" cy="97.8" r="2" fill="var(--chart-4)"><title>d6585b4  p95=3.00ms  n=62</title></circle><circle cx="350.0" cy="76.1" r="2" fill="var(--chart-4)"><title>d6585b4  p95=4.90ms  n=62</title></circle>
-		<circle cx="50.0" cy="114.9" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=1.50ms  n=20</title></circle><circle cx="87.5" cy="113.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=1.60ms  n=22</title></circle><circle cx="125.0" cy="119.5" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=1.10ms  n=22</title></circle><circle cx="162.5" cy="119.5" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1.10ms  n=22</title></circle><circle cx="200.0" cy="116.0" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=1.40ms  n=22</title></circle><circle cx="237.5" cy="116.0" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=1.40ms  n=62</title></circle><circle cx="275.0" cy="109.2" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=2.00ms  n=62</title></circle><circle cx="312.5" cy="106.9" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=2.20ms  n=62</title></circle><circle cx="350.0" cy="92.1" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=3.50ms  n=62</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>nav.goal.ready</h3>
-						<div class="meta">
-							<span class="pill good">−5.1%</span>
-							<span>n=2</span>
-							<span>28.0 / 28.0 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="nav.goal.ready trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">12.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,64.7 L 87.5,89.4 L 125.0,85.7 L 162.5,92.6 L 200.0,80.0 L 237.5,52.7 L 275.0,51.1 L 312.5,62.0 L 350.0,68.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,64.7 87.5,89.4 125.0,85.7 162.5,92.6 200.0,80.0 237.5,52.7 275.0,51.1 312.5,62.0 350.0,68.2"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,64.7 87.5,89.4 125.0,85.7 162.5,92.6 200.0,80.0 237.5,52.7 275.0,51.1 312.5,62.0 350.0,68.2"/>
-		<circle cx="50.0" cy="64.7" r="2" fill="var(--chart-4)"><title>999bdc2  p95=29.5ms  n=2</title></circle><circle cx="87.5" cy="89.4" r="2" fill="var(--chart-4)"><title>c25e40b  p95=18.7ms  n=2</title></circle><circle cx="125.0" cy="85.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=20.3ms  n=2</title></circle><circle cx="162.5" cy="92.6" r="2" fill="var(--chart-4)"><title>5309f93  p95=17.3ms  n=2</title></circle><circle cx="200.0" cy="80.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=22.8ms  n=2</title></circle><circle cx="237.5" cy="52.7" r="2" fill="var(--chart-4)"><title>294bd68  p95=34.8ms  n=2</title></circle><circle cx="275.0" cy="51.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=35.5ms  n=2</title></circle><circle cx="312.5" cy="62.0" r="2" fill="var(--chart-4)"><title>d6585b4  p95=30.7ms  n=2</title></circle><circle cx="350.0" cy="68.2" r="2" fill="var(--chart-4)"><title>d6585b4  p95=28.0ms  n=2</title></circle>
-		<circle cx="50.0" cy="64.7" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=29.5ms  n=2</title></circle><circle cx="87.5" cy="89.4" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=18.7ms  n=2</title></circle><circle cx="125.0" cy="85.7" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=20.3ms  n=2</title></circle><circle cx="162.5" cy="92.6" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=17.3ms  n=2</title></circle><circle cx="200.0" cy="80.0" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=22.8ms  n=2</title></circle><circle cx="237.5" cy="52.7" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=34.8ms  n=2</title></circle><circle cx="275.0" cy="51.1" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=35.5ms  n=2</title></circle><circle cx="312.5" cy="62.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=30.7ms  n=2</title></circle><circle cx="350.0" cy="68.2" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=28.0ms  n=2</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>api.session.fetch</h3>
-						<div class="meta">
-							<span class="pill bad">+618.3%</span>
-							<span>n=130</span>
-							<span>74.7 / 444 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.session.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,129.6 L 87.5,127.8 L 125.0,128.4 L 162.5,128.4 L 200.0,129.4 L 237.5,121.9 L 275.0,121.7 L 312.5,121.4 L 350.0,115.0 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,124.8 87.5,109.9 125.0,124.7 162.5,107.1 200.0,105.1 237.5,93.3 275.0,91.4 312.5,86.7 350.0,30.8"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,129.6 87.5,127.8 125.0,128.4 162.5,128.4 200.0,129.4 237.5,121.9 275.0,121.7 312.5,121.4 350.0,115.0"/>
-		<circle cx="50.0" cy="124.8" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.6ms  n=12</title></circle><circle cx="87.5" cy="109.9" r="2" fill="var(--chart-4)"><title>c25e40b  p95=97.1ms  n=41</title></circle><circle cx="125.0" cy="124.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=32.2ms  n=41</title></circle><circle cx="162.5" cy="107.1" r="2" fill="var(--chart-4)"><title>5309f93  p95=109ms  n=42</title></circle><circle cx="200.0" cy="105.1" r="2" fill="var(--chart-4)"><title>5309f93  p95=118ms  n=41</title></circle><circle cx="237.5" cy="93.3" r="2" fill="var(--chart-4)"><title>294bd68  p95=170ms  n=129</title></circle><circle cx="275.0" cy="91.4" r="2" fill="var(--chart-4)"><title>294bd68  p95=178ms  n=129</title></circle><circle cx="312.5" cy="86.7" r="2" fill="var(--chart-4)"><title>d6585b4  p95=199ms  n=130</title></circle><circle cx="350.0" cy="30.8" r="2" fill="var(--chart-4)"><title>d6585b4  p95=444ms  n=130</title></circle>
-		<circle cx="50.0" cy="129.6" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=12</title></circle><circle cx="87.5" cy="127.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=18.6ms  n=41</title></circle><circle cx="125.0" cy="128.4" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=15.6ms  n=41</title></circle><circle cx="162.5" cy="128.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.0ms  n=42</title></circle><circle cx="200.0" cy="129.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=11.4ms  n=41</title></circle><circle cx="237.5" cy="121.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=44.1ms  n=129</title></circle><circle cx="275.0" cy="121.7" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=45.2ms  n=129</title></circle><circle cx="312.5" cy="121.4" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=46.3ms  n=130</title></circle><circle cx="350.0" cy="115.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=74.7ms  n=130</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>api.goal.fetch</h3>
-						<div class="meta">
-							<span class="pill bad">+69.4%</span>
-							<span>n=3</span>
-							<span>20.5 / 20.5 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">30.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">22.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,86.0 L 87.5,71.2 L 125.0,101.2 L 162.5,102.4 L 200.0,88.3 L 237.5,67.4 L 275.0,46.9 L 312.5,36.2 L 350.0,54.1 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,86.0 87.5,71.2 125.0,101.2 162.5,102.4 200.0,88.3 237.5,67.4 275.0,46.9 312.5,36.2 350.0,54.1"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,86.0 87.5,71.2 125.0,101.2 162.5,102.4 200.0,88.3 237.5,67.4 275.0,46.9 312.5,36.2 350.0,54.1"/>
-		<circle cx="50.0" cy="86.0" r="2" fill="var(--chart-4)"><title>999bdc2  p95=12.1ms  n=3</title></circle><circle cx="87.5" cy="71.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.0ms  n=3</title></circle><circle cx="125.0" cy="101.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=8.10ms  n=3</title></circle><circle cx="162.5" cy="102.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=7.80ms  n=3</title></circle><circle cx="200.0" cy="88.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=11.5ms  n=3</title></circle><circle cx="237.5" cy="67.4" r="2" fill="var(--chart-4)"><title>294bd68  p95=17.0ms  n=3</title></circle><circle cx="275.0" cy="46.9" r="2" fill="var(--chart-4)"><title>294bd68  p95=22.4ms  n=3</title></circle><circle cx="312.5" cy="36.2" r="2" fill="var(--chart-4)"><title>d6585b4  p95=25.2ms  n=3</title></circle><circle cx="350.0" cy="54.1" r="2" fill="var(--chart-4)"><title>d6585b4  p95=20.5ms  n=3</title></circle>
-		<circle cx="50.0" cy="86.0" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.1ms  n=3</title></circle><circle cx="87.5" cy="71.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.0ms  n=3</title></circle><circle cx="125.0" cy="101.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=8.10ms  n=3</title></circle><circle cx="162.5" cy="102.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=7.80ms  n=3</title></circle><circle cx="200.0" cy="88.3" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=11.5ms  n=3</title></circle><circle cx="237.5" cy="67.4" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=17.0ms  n=3</title></circle><circle cx="275.0" cy="46.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=22.4ms  n=3</title></circle><circle cx="312.5" cy="36.2" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=25.2ms  n=3</title></circle><circle cx="350.0" cy="54.1" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=20.5ms  n=3</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>api.goal.agents.fetch</h3>
-						<div class="meta">
-							<span class="pill bad">+35.6%</span>
-							<span>n=8</span>
-							<span>14.1 / 20.8 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.agents.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">30.0</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">22.5</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">15.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">7.50</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,92.5 L 87.5,117.2 L 125.0,119.1 L 162.5,117.2 L 200.0,120.2 L 237.5,117.2 L 275.0,117.2 L 312.5,116.4 L 350.0,78.4 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,75.4 87.5,71.2 125.0,102.0 162.5,103.5 200.0,91.0 237.5,67.0 275.0,46.1 312.5,35.9 350.0,53.0"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,92.5 87.5,117.2 125.0,119.1 162.5,117.2 200.0,120.2 237.5,117.2 275.0,117.2 312.5,116.4 350.0,78.4"/>
-		<circle cx="50.0" cy="75.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=14.9ms  n=8</title></circle><circle cx="87.5" cy="71.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.0ms  n=8</title></circle><circle cx="125.0" cy="102.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=7.90ms  n=8</title></circle><circle cx="162.5" cy="103.5" r="2" fill="var(--chart-4)"><title>5309f93  p95=7.50ms  n=8</title></circle><circle cx="200.0" cy="91.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=10.8ms  n=8</title></circle><circle cx="237.5" cy="67.0" r="2" fill="var(--chart-4)"><title>294bd68  p95=17.1ms  n=8</title></circle><circle cx="275.0" cy="46.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=22.6ms  n=8</title></circle><circle cx="312.5" cy="35.9" r="2" fill="var(--chart-4)"><title>d6585b4  p95=25.3ms  n=8</title></circle><circle cx="350.0" cy="53.0" r="2" fill="var(--chart-4)"><title>d6585b4  p95=20.8ms  n=8</title></circle>
-		<circle cx="50.0" cy="92.5" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=10.4ms  n=8</title></circle><circle cx="87.5" cy="117.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=3.90ms  n=8</title></circle><circle cx="125.0" cy="119.1" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=3.40ms  n=8</title></circle><circle cx="162.5" cy="117.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=3.90ms  n=8</title></circle><circle cx="200.0" cy="120.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=3.10ms  n=8</title></circle><circle cx="237.5" cy="117.2" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=3.90ms  n=8</title></circle><circle cx="275.0" cy="117.2" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=3.90ms  n=8</title></circle><circle cx="312.5" cy="116.4" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=4.10ms  n=8</title></circle><circle cx="350.0" cy="78.4" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=14.1ms  n=8</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>api.goal.gates.fetch</h3>
-						<div class="meta">
-							<span class="pill bad">+18.3%</span>
-							<span>n=9</span>
-							<span>14.2 / 21.5 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="api.goal.gates.fetch trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,129.3 L 87.5,130.2 L 125.0,131.1 L 162.5,130.1 L 200.0,130.3 L 237.5,125.5 L 275.0,68.6 L 312.5,129.7 L 350.0,128.8 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,110.6 87.5,128.3 125.0,127.2 162.5,127.1 200.0,129.0 237.5,73.7 275.0,62.8 312.5,123.7 350.0,127.1"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,129.3 87.5,130.2 125.0,131.1 162.5,130.1 200.0,130.3 237.5,125.5 275.0,68.6 312.5,129.7 350.0,128.8"/>
-		<circle cx="50.0" cy="110.6" r="2" fill="var(--chart-4)"><title>999bdc2  p95=93.8ms  n=8</title></circle><circle cx="87.5" cy="128.3" r="2" fill="var(--chart-4)"><title>c25e40b  p95=16.2ms  n=8</title></circle><circle cx="125.0" cy="127.2" r="2" fill="var(--chart-4)"><title>c25e40b  p95=21.1ms  n=8</title></circle><circle cx="162.5" cy="127.1" r="2" fill="var(--chart-4)"><title>5309f93  p95=21.6ms  n=9</title></circle><circle cx="200.0" cy="129.0" r="2" fill="var(--chart-4)"><title>5309f93  p95=13.3ms  n=8</title></circle><circle cx="237.5" cy="73.7" r="2" fill="var(--chart-4)"><title>294bd68  p95=256ms  n=32</title></circle><circle cx="275.0" cy="62.8" r="2" fill="var(--chart-4)"><title>294bd68  p95=304ms  n=41</title></circle><circle cx="312.5" cy="123.7" r="2" fill="var(--chart-4)"><title>d6585b4  p95=36.6ms  n=9</title></circle><circle cx="350.0" cy="127.1" r="2" fill="var(--chart-4)"><title>d6585b4  p95=21.5ms  n=9</title></circle>
-		<circle cx="50.0" cy="129.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=12.0ms  n=8</title></circle><circle cx="87.5" cy="130.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=7.70ms  n=8</title></circle><circle cx="125.0" cy="131.1" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.00ms  n=8</title></circle><circle cx="162.5" cy="130.1" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=8.50ms  n=9</title></circle><circle cx="200.0" cy="130.3" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=7.60ms  n=8</title></circle><circle cx="237.5" cy="125.5" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=28.4ms  n=32</title></circle><circle cx="275.0" cy="68.6" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=278ms  n=41</title></circle><circle cx="312.5" cy="129.7" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=10.2ms  n=9</title></circle><circle cx="350.0" cy="128.8" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=14.2ms  n=9</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>ws.attach</h3>
-						<div class="meta">
-							<span class="pill bad">+70.6%</span>
-							<span>n=51</span>
-							<span>62.1 / 97.4 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="ws.attach trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,104.3 L 87.5,129.0 L 125.0,128.7 L 162.5,128.6 L 200.0,128.4 L 237.5,98.6 L 275.0,97.9 L 312.5,98.0 L 350.0,84.8 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,96.4 87.5,113.5 125.0,115.1 162.5,117.3 200.0,117.3 237.5,83.1 275.0,84.3 312.5,91.3 350.0,58.0"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,104.3 87.5,129.0 125.0,128.7 162.5,128.6 200.0,128.4 237.5,98.6 275.0,97.9 312.5,98.0 350.0,84.8"/>
-		<circle cx="50.0" cy="96.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=46.9ms  n=11</title></circle><circle cx="87.5" cy="113.5" r="2" fill="var(--chart-4)"><title>c25e40b  p95=24.4ms  n=11</title></circle><circle cx="125.0" cy="115.1" r="2" fill="var(--chart-4)"><title>c25e40b  p95=22.3ms  n=11</title></circle><circle cx="162.5" cy="117.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=19.3ms  n=11</title></circle><circle cx="200.0" cy="117.3" r="2" fill="var(--chart-4)"><title>5309f93  p95=19.4ms  n=11</title></circle><circle cx="237.5" cy="83.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=64.3ms  n=51</title></circle><circle cx="275.0" cy="84.3" r="2" fill="var(--chart-4)"><title>294bd68  p95=62.8ms  n=51</title></circle><circle cx="312.5" cy="91.3" r="2" fill="var(--chart-4)"><title>d6585b4  p95=53.6ms  n=51</title></circle><circle cx="350.0" cy="58.0" r="2" fill="var(--chart-4)"><title>d6585b4  p95=97.4ms  n=51</title></circle>
-		<circle cx="50.0" cy="104.3" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=36.4ms  n=11</title></circle><circle cx="87.5" cy="129.0" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.00ms  n=11</title></circle><circle cx="125.0" cy="128.7" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=4.30ms  n=11</title></circle><circle cx="162.5" cy="128.6" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=4.50ms  n=11</title></circle><circle cx="200.0" cy="128.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=4.70ms  n=11</title></circle><circle cx="237.5" cy="98.6" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=43.9ms  n=51</title></circle><circle cx="275.0" cy="97.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=44.9ms  n=51</title></circle><circle cx="312.5" cy="98.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=44.8ms  n=51</title></circle><circle cx="350.0" cy="84.8" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=62.1ms  n=51</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>paint.first</h3>
-						<div class="meta">
-							<span class="pill bad">+79.8%</span>
-							<span>n=215</span>
-							<span>30.2 / 103 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="paint.first trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">113</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">37.5</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,119.2 L 87.5,119.2 L 125.0,119.2 L 162.5,119.4 L 200.0,119.2 L 237.5,115.4 L 275.0,115.4 L 312.5,115.3 L 350.0,109.0 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,108.3 87.5,53.7 125.0,111.1 162.5,111.7 200.0,89.5 237.5,96.1 275.0,69.5 312.5,64.9 350.0,53.7"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,119.2 87.5,119.2 125.0,119.2 162.5,119.4 200.0,119.2 237.5,115.4 275.0,115.4 312.5,115.3 350.0,109.0"/>
-		<circle cx="50.0" cy="108.3" r="2" fill="var(--chart-4)"><title>999bdc2  p95=31.2ms  n=79</title></circle><circle cx="87.5" cy="53.7" r="2" fill="var(--chart-4)"><title>c25e40b  p95=103ms  n=66</title></circle><circle cx="125.0" cy="111.1" r="2" fill="var(--chart-4)"><title>c25e40b  p95=27.5ms  n=66</title></circle><circle cx="162.5" cy="111.7" r="2" fill="var(--chart-4)"><title>5309f93  p95=26.7ms  n=70</title></circle><circle cx="200.0" cy="89.5" r="2" fill="var(--chart-4)"><title>5309f93  p95=55.9ms  n=73</title></circle><circle cx="237.5" cy="96.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=47.3ms  n=183</title></circle><circle cx="275.0" cy="69.5" r="2" fill="var(--chart-4)"><title>294bd68  p95=82.2ms  n=187</title></circle><circle cx="312.5" cy="64.9" r="2" fill="var(--chart-4)"><title>d6585b4  p95=88.3ms  n=192</title></circle><circle cx="350.0" cy="53.7" r="2" fill="var(--chart-4)"><title>d6585b4  p95=103ms  n=215</title></circle>
-		<circle cx="50.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=16.8ms  n=79</title></circle><circle cx="87.5" cy="119.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.8ms  n=66</title></circle><circle cx="125.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=16.9ms  n=66</title></circle><circle cx="162.5" cy="119.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.6ms  n=70</title></circle><circle cx="200.0" cy="119.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=16.8ms  n=73</title></circle><circle cx="237.5" cy="115.4" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=21.8ms  n=183</title></circle><circle cx="275.0" cy="115.4" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=21.9ms  n=187</title></circle><circle cx="312.5" cy="115.3" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=22.0ms  n=192</title></circle><circle cx="350.0" cy="109.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=30.2ms  n=215</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>reducer.rehydrate</h3>
-						<div class="meta">
-							<span class="pill bad">+400.0%</span>
-							<span>n=37</span>
-							<span>0.50 / 0.80 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="reducer.rehydrate trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.50</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">1.13</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.75</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.38</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 50.0 132.0 L 50.0,124.4 L 87.5,101.6 L 125.0,116.8 L 162.5,124.4 L 200.0,109.2 L 237.5,116.8 L 275.0,101.6 L 312.5,101.6 L 350.0,94.0 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="50.0,124.4 87.5,94.0 125.0,116.8 162.5,116.8 200.0,86.4 237.5,116.8 275.0,86.4 312.5,86.4 350.0,71.2"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="50.0,124.4 87.5,101.6 125.0,116.8 162.5,124.4 200.0,109.2 237.5,116.8 275.0,101.6 312.5,101.6 350.0,94.0"/>
-		<circle cx="50.0" cy="124.4" r="2" fill="var(--chart-4)"><title>999bdc2  p95=0.10ms  n=11</title></circle><circle cx="87.5" cy="94.0" r="2" fill="var(--chart-4)"><title>c25e40b  p95=0.50ms  n=11</title></circle><circle cx="125.0" cy="116.8" r="2" fill="var(--chart-4)"><title>c25e40b  p95=0.20ms  n=11</title></circle><circle cx="162.5" cy="116.8" r="2" fill="var(--chart-4)"><title>5309f93  p95=0.20ms  n=11</title></circle><circle cx="200.0" cy="86.4" r="2" fill="var(--chart-4)"><title>5309f93  p95=0.60ms  n=11</title></circle><circle cx="237.5" cy="116.8" r="2" fill="var(--chart-4)"><title>294bd68  p95=0.20ms  n=47</title></circle><circle cx="275.0" cy="86.4" r="2" fill="var(--chart-4)"><title>294bd68  p95=0.60ms  n=50</title></circle><circle cx="312.5" cy="86.4" r="2" fill="var(--chart-4)"><title>d6585b4  p95=0.60ms  n=47</title></circle><circle cx="350.0" cy="71.2" r="2" fill="var(--chart-4)"><title>d6585b4  p95=0.80ms  n=37</title></circle>
-		<circle cx="50.0" cy="124.4" r="2.5" fill="var(--chart-1)"><title>999bdc2  p50=0.10ms  n=11</title></circle><circle cx="87.5" cy="101.6" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=0.40ms  n=11</title></circle><circle cx="125.0" cy="116.8" r="2.5" fill="var(--chart-1)"><title>c25e40b  p50=0.20ms  n=11</title></circle><circle cx="162.5" cy="124.4" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=0.10ms  n=11</title></circle><circle cx="200.0" cy="109.2" r="2.5" fill="var(--chart-1)"><title>5309f93  p50=0.30ms  n=11</title></circle><circle cx="237.5" cy="116.8" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=0.20ms  n=47</title></circle><circle cx="275.0" cy="101.6" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=0.40ms  n=50</title></circle><circle cx="312.5" cy="101.6" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=0.40ms  n=47</title></circle><circle cx="350.0" cy="94.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=0.50ms  n=37</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>rapidnav.keystroke.uncached</h3>
-						<div class="meta">
-							<span class="pill bad">+68.3%</span>
-							<span>n=20</span>
-							<span>183 / 323 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.keystroke.uncached trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 237.5 132.0 L 237.5,107.2 L 275.0,96.4 L 312.5,97.7 L 350.0,90.3 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="237.5,100.7 275.0,84.9 312.5,87.0 350.0,58.4"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="237.5,107.2 275.0,96.4 312.5,97.7 350.0,90.3"/>
-		<circle cx="237.5" cy="100.7" r="2" fill="var(--chart-4)"><title>294bd68  p95=137ms  n=20</title></circle><circle cx="275.0" cy="84.9" r="2" fill="var(--chart-4)"><title>294bd68  p95=207ms  n=20</title></circle><circle cx="312.5" cy="87.0" r="2" fill="var(--chart-4)"><title>d6585b4  p95=198ms  n=20</title></circle><circle cx="350.0" cy="58.4" r="2" fill="var(--chart-4)"><title>d6585b4  p95=323ms  n=20</title></circle>
-		<circle cx="237.5" cy="107.2" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=109ms  n=20</title></circle><circle cx="275.0" cy="96.4" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=156ms  n=20</title></circle><circle cx="312.5" cy="97.7" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=151ms  n=20</title></circle><circle cx="350.0" cy="90.3" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=183ms  n=20</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>rapidnav.gap</h3>
-						<div class="meta">
-							<span class="pill bad">+55.0%</span>
-							<span>n=8</span>
-							<span>102 / 169 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.gap trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">200</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">150</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 237.5 132.0 L 237.5,94.6 L 275.0,117.1 L 312.5,111.9 L 350.0,74.0 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="237.5,81.0 275.0,73.6 312.5,71.6 350.0,35.4"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="237.5,94.6 275.0,117.1 312.5,111.9 350.0,74.0"/>
-		<circle cx="237.5" cy="81.0" r="2" fill="var(--chart-4)"><title>294bd68  p95=89.4ms  n=18</title></circle><circle cx="275.0" cy="73.6" r="2" fill="var(--chart-4)"><title>294bd68  p95=103ms  n=16</title></circle><circle cx="312.5" cy="71.6" r="2" fill="var(--chart-4)"><title>d6585b4  p95=106ms  n=14</title></circle><circle cx="350.0" cy="35.4" r="2" fill="var(--chart-4)"><title>d6585b4  p95=169ms  n=8</title></circle>
-		<circle cx="237.5" cy="94.6" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=65.6ms  n=18</title></circle><circle cx="275.0" cy="117.1" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=26.2ms  n=16</title></circle><circle cx="312.5" cy="111.9" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=35.2ms  n=14</title></circle><circle cx="350.0" cy="74.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=102ms  n=8</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>rapidnav.keystroke.cached</h3>
-						<div class="meta">
-							<span class="pill bad">+27.7%</span>
-							<span>n=20</span>
-							<span>151 / 301 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.keystroke.cached trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">500</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">375</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">250</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">125</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 237.5 132.0 L 237.5,105.1 L 275.0,106.9 L 312.5,104.0 L 350.0,97.6 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="237.5,98.8 275.0,87.1 312.5,89.1 350.0,63.3"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="237.5,105.1 275.0,106.9 312.5,104.0 350.0,97.6"/>
-		<circle cx="237.5" cy="98.8" r="2" fill="var(--chart-4)"><title>294bd68  p95=145ms  n=20</title></circle><circle cx="275.0" cy="87.1" r="2" fill="var(--chart-4)"><title>294bd68  p95=197ms  n=20</title></circle><circle cx="312.5" cy="89.1" r="2" fill="var(--chart-4)"><title>d6585b4  p95=188ms  n=20</title></circle><circle cx="350.0" cy="63.3" r="2" fill="var(--chart-4)"><title>d6585b4  p95=301ms  n=20</title></circle>
-		<circle cx="237.5" cy="105.1" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=118ms  n=20</title></circle><circle cx="275.0" cy="106.9" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=110ms  n=20</title></circle><circle cx="312.5" cy="104.0" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=123ms  n=20</title></circle><circle cx="350.0" cy="97.6" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=151ms  n=20</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article><article class="chart-card">
-					<header>
-						<h3>rapidnav.stall.ms</h3>
-						<div class="meta">
-							<span class="pill bad">+161.5%</span>
-							<span>n=28</span>
-							<span>6.80 / 32.2 ms</span>
-						</div>
-					</header>
-					<svg viewBox="0 0 360 160" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="rapidnav.stall.ms trend">
-		<line x1="50" x2="350" y1="18.0" y2="18.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="21.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100</text><line x1="50" x2="350" y1="46.5" y2="46.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="49.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">75.0</text><line x1="50" x2="350" y1="75.0" y2="75.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="78.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">50.0</text><line x1="50" x2="350" y1="103.5" y2="103.5" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="106.5" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">25.0</text><line x1="50" x2="350" y1="132.0" y2="132.0" stroke="var(--border)" opacity="0.4"/><text x="44.0" y="135.0" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">0.00</text>
-		<path d="M 237.5 132.0 L 237.5,129.0 L 275.0,128.2 L 312.5,127.6 L 350.0,124.2 L 350.0 132.0 Z" fill="color-mix(in oklch, var(--chart-1) 12%, transparent)"/>
-		<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.75" stroke-dasharray="5 3" points="237.5,60.6 275.0,117.2 312.5,85.4 350.0,95.3"/>
-		<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="237.5,129.0 275.0,128.2 312.5,127.6 350.0,124.2"/>
-		<circle cx="237.5" cy="60.6" r="2" fill="var(--chart-4)"><title>294bd68  p95=62.6ms  n=18</title></circle><circle cx="275.0" cy="117.2" r="2" fill="var(--chart-4)"><title>294bd68  p95=13.0ms  n=20</title></circle><circle cx="312.5" cy="85.4" r="2" fill="var(--chart-4)"><title>d6585b4  p95=40.9ms  n=22</title></circle><circle cx="350.0" cy="95.3" r="2" fill="var(--chart-4)"><title>d6585b4  p95=32.2ms  n=28</title></circle>
-		<circle cx="237.5" cy="129.0" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=2.60ms  n=18</title></circle><circle cx="275.0" cy="128.2" r="2.5" fill="var(--chart-1)"><title>294bd68  p50=3.30ms  n=20</title></circle><circle cx="312.5" cy="127.6" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=3.90ms  n=22</title></circle><circle cx="350.0" cy="124.2" r="2.5" fill="var(--chart-1)"><title>d6585b4  p50=6.80ms  n=28</title></circle>
-		<text x="50.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">999bdc2</text><text x="125.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">c25e40b</text><text x="200.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">5309f93</text><text x="275.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">294bd68</text><text x="350.0" y="152.0" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">d6585b4</text>
-	</svg>
-				</article></div><h2>Runs <span class="count">9 commits, oldest first</span></h2><div class="table-wrap"><table class="runs-table">
+		</tr></tbody>
+	</table></div>
+
+		<h2>Groups <span class="count">9 groups · 9 replicate JSONs, oldest first</span></h2>
+		<div class="table-wrap"><table class="runs-table">
 		<thead><tr>
 			<th>#</th>
 			<th>commit</th>
+			<th>kind</th>
+			<th>tag</th>
+			<th class="num">n_rep</th>
 			<th>branch</th>
 			<th>timestamp</th>
 			<th class="num">spans</th>
@@ -663,65 +810,92 @@
 		<tbody><tr>
 			<td>1</td>
 			<td class="mono">999bdc2ed47e</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-51f8eddc</td>
 			<td class="mono">2026-05-13 21:08</td>
 			<td class="num">10</td>
 		</tr><tr>
 			<td>2</td>
 			<td class="mono">c25e40be730b</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-95006287</td>
 			<td class="mono">2026-05-13 21:46</td>
 			<td class="num">10</td>
 		</tr><tr>
 			<td>3</td>
 			<td class="mono">c25e40be730b</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-95006287</td>
 			<td class="mono">2026-05-13 21:48</td>
 			<td class="num">10</td>
 		</tr><tr>
 			<td>4</td>
 			<td class="mono">5309f93c5ee8</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
 			<td class="mono">2026-05-14 05:58</td>
 			<td class="num">12</td>
 		</tr><tr>
 			<td>5</td>
 			<td class="mono">5309f93c5ee8</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
 			<td class="mono">2026-05-14 05:59</td>
 			<td class="num">12</td>
 		</tr><tr>
 			<td>6</td>
 			<td class="mono">294bd68da3c8</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
 			<td class="mono">2026-05-14 06:18</td>
 			<td class="num">16</td>
 		</tr><tr>
 			<td>7</td>
 			<td class="mono">294bd68da3c8</td>
+			<td><span class="kind base">baseline</span></td>
+			<td>—</td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-36405049</td>
 			<td class="mono">2026-05-14 06:21</td>
 			<td class="num">16</td>
 		</tr><tr>
 			<td>8</td>
 			<td class="mono">d6585b472604</td>
+			<td><span class="kind exp">exp · off</span></td>
+			<td><span class="mono">opt-b-off</span></td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-ca587069</td>
 			<td class="mono">2026-05-14 06:29</td>
 			<td class="num">16</td>
 		</tr><tr class="latest">
 			<td>9</td>
 			<td class="mono">d6585b472604</td>
+			<td><span class="kind exp">exp · on</span></td>
+			<td><span class="mono">opt-b-on</span></td>
+			<td class="num">1</td>
 			<td class="mono">goal-goal-profile-si-320532b0-coder-ca587069</td>
 			<td class="mono">2026-05-14 06:40</td>
 			<td class="num">16</td>
 		</tr></tbody>
 	</table></div>
+	
 
 <footer class="page">
 	Generated by <code>scripts/perf-report.mjs</code> from <code>docs/perf/history/*.json</code>.
-	Re-run the manual harness (<code>npx playwright test --config playwright-manual.config.ts --grep perf-sidebar-nav</code>) to refresh.
-	See <a href="./sidebar-nav-baseline.md"><code>sidebar-nav-baseline.md</code></a> for repro instructions
-	and <a href="./mockups/sidebar-nav-report.html">the static mockup</a> for the canonical visual reference.
+	Run replicates with <code>node scripts/perf-bench.mjs --tag &lt;name&gt; --n 5 ...</code>; the harness will land 5 JSONs which this report groups automatically.
+	See <a href="./README.md"><code>README.md</code></a> for the schema and the decision rule (≥100 ms p50 reduction AND delta &gt; noise floor).
 </footer>
 
 </body>
