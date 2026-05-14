@@ -845,6 +845,19 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 - **Search**: The `_archivedBySearch` / `_ensureArchivedForSearch` auto-open behaviour is unchanged - a search match inside any archived item still forces `state.showArchived` on globally. When a search query is active, each project's subsection only renders matching items; projects with no matches render no Archived subsection at all.
 - **Collapsed sidebar**: `renderCollapsedSidebar` is unchanged - archived goals continue to render inline with live goals in the icon-only rail.
 
+#### Team-member row bucketing
+
+Within a live team-lead's expanded block, team-member sessions are split into two buckets:
+
+- **Above the divider** (`liveTeamChildren`): sessions with `status !== "terminated"` and `archived !== true`. These are coders, reviewers, and QA agents that are still active or idle.
+- **Below the divider** (`archivedBelow`): sessions that are terminated-but-not-yet-purged (present in `state.gatewaySessions` with `status === "terminated"`) OR fully-purged (present in `state.archivedSessions`). The two sets are deduped by `id` so a session that appears in both is shown only once.
+
+The divider renders only when `state.showArchived` is `true` AND `archivedBelow` is non-empty. When `showArchived` is off, both the divider and the archived list are hidden.
+
+**Why a separate helper?** `gatewaySessions` intentionally retains terminated sessions for other consumers (e.g. claim-exclusion in `computeSpawnedClaim`). Filtering them out at the data layer would break those consumers. Instead, `bucketTeamChildren` in `src/app/team-archived-bucket.ts` does the bucketing at render time, keeping the data layer unchanged.
+
+The bucketing is pure and has no dependency on render state, making it unit-testable in isolation. See `tests/render-helpers-team-archived.test.ts` and [docs/debugging.md — Archived team-member sessions appear above the divider](debugging.md#archived-team-member-sessions-appear-above-the-archived-divider).
+
 #### Sub-goal sidebar placement
 
 Sub-goals stamped with `spawnedBySessionId` (a `PersistedGoal` field — see [docs/goals-workflows-tasks.md — Nested goals](goals-workflows-tasks.md#nested-goals-phase-1-data-model)) render INSIDE the spawning team-lead's expanded block in the sidebar, not at the parent-goal forest level. Collapsing the team-lead chevron hides workers AND spawned sub-goals as one unit — matches the "this team-lead OWNS this work" mental model.

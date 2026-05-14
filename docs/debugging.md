@@ -502,6 +502,22 @@ Debugging checklist:
 - Children appear briefly then vanish? The client must merge (not replace) archived sessions — check `fetchArchivedSessionsPaginated()` uses additive merge on first page, not `state.archivedSessions = []`
 - Edge case: goal loaded via "Load more goals" has no children? The on-demand fallback in `renderGoalGroup` should fire a one-shot fetch to `GET /api/goals/:id/team/agents?include=archived`. Check the `_goalChildrenFetched` guard Set isn't stale — it's cleared by `clearGoalChildrenFetchedCache()` when toggling archived off
 
+## Archived team-member sessions appear above the "Archived" divider
+
+Symptom: under a live team-lead's expanded block, terminated or recently-archived team-member sessions (coders, reviewers, QA agents) render above the "Archived" divider with dimmed styling instead of below it.
+
+Root cause: `renderTeamGroup` in `src/app/render-helpers.ts` used to emit all non-lead entries from `goalSessions` as active rows, regardless of status. The `archivedForLiveLead` bucket below the divider only pulled from `state.archivedSessions` — the fully-purged collection. Recently-terminated members still present in `gatewaySessions` (status = `"terminated"`, not yet swept by the 7-day purge) slipped past both filters and rendered in the wrong bucket.
+
+Fix: `bucketTeamChildren` in `src/app/team-archived-bucket.ts` splits `teamChildren` into:
+- `liveTeamChildren` — `status !== "terminated" && !archived` — rendered above the divider
+- `archivedBelow` — deduped merge of recently-terminated entries from `gatewaySessions` and fully-purged entries from `archivedSessions` — rendered below the divider
+
+`renderTeamGroup` delegates bucketing to this helper; the divider only renders when `archivedBelow` is non-empty and `state.showArchived` is on.
+
+Unit test: `tests/render-helpers-team-archived.test.ts`.
+
+See [docs/internals.md — Team-member row bucketing](internals.md#team-member-row-bucketing).
+
 ## Sub-goal renders at parent-forest level instead of nested under its team-lead
 
 Symptom: a sub-goal that was spawned by a team-lead session shows up at the top-level goal forest in the sidebar instead of inside the spawning team-lead's expanded block. Collapsing the team-lead doesn't hide it.
