@@ -916,22 +916,26 @@ export async function tryHandleNestedGoalRoute(
 		try {
 			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
 			const newReplanCount = (goal.replanCount ?? 0) + 1;
-			const updates: { replanCount: number; paused?: boolean } = { replanCount: newReplanCount };
-			// Replan-overflow safety circuit: auto-pause after 5 replans so the
-			// operator can review before the goal runs further. This is the ONE
-			// intentional exception to the operator-only `paused` discipline —
-			// it behaves exactly like `goal_pause` (sticky, cleared only by
-			// `goal_resume`). The scheduler (spawn-child / integrate-child) never
-			// reads or writes `paused`, so this write does not reintroduce the
-			// scheduler conflation fixed by this subgoal.
-			if (newReplanCount > 5 && !goal.paused) updates.paused = true;
+			const updates: { replanCount: number } = { replanCount: newReplanCount };
 			await goalManager.updateGoal(goal.id, updates);
+			// Replan-overflow safety circuit: pause the goal after too many
+			// replans via the same mechanism as POST /pause — operator-style
+			// pause that is sticky and cleared only by goal_resume. This mirrors
+			// the loop body in the REST pause handler (paused: true +
+			// cancelAllVerifications + goal_state_changed broadcast) so that
+			// goal.paused has exactly TWO writers: this path and the REST handler.
+			const autoPaused = newReplanCount > 5 && !goal.paused;
+			if (autoPaused) {
+				await goalManager.updateGoal(goal.id, { paused: true });
+				await cancelAllVerifications(goal.id);
+				broadcastToAll({ type: "goal_state_changed", goalId });
+			}
 			planMutationStore.remove(goalId, requestId);
-			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused: !!updates.paused });
+			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
 			// Cross-team propagation: when a child goal is auto-paused,
 			// notify the PARENT's team-lead — without this the parent sits
 			// idle indefinitely after the replan-overflow tripwire fires.
-			if (updates.paused) {
+			if (autoPaused) {
 				try {
 					const { buildParentPausedNotification } = await import("./notify-team-lead-child-passed.js");
 					const parentNotify = buildParentPausedNotification(goal, "replan-overflow");
@@ -952,7 +956,7 @@ export async function tryHandleNestedGoalRoute(
 					console.warn("[plan-mutation] Failed to notify parent of auto-pause:", err);
 				}
 			}
-			json({ applied: true, replanCount: newReplanCount, autoPaused: !!updates.paused });
+			json({ applied: true, replanCount: newReplanCount, autoPaused });
 		} catch (err) {
 			jsonError(500, err);
 		}
