@@ -72,6 +72,22 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 }
 
 /**
+ * Returns the **un-offset** branch container path for a goal — the directory
+ * that `resolveStep()` / `componentRoot()` expect as their `branchContainer`
+ * argument. Component step resolution layers `repo + relativePath` on top of
+ * this value; if you pass `goal.cwd` (which may already include the project's
+ * `rootPath` offset relative to the git repo root), the offset is applied
+ * twice and verification fails with ENOENT on a doubled path segment.
+ *
+ * Pinned by `tests/verify-step-resolution.test.ts`.
+ */
+export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string {
+	// BUG: should be `goal.worktreePath ?? goal.cwd`. Pinned by the regression test;
+	// the Implementation gate flips this to the correct expression.
+	return goal.cwd;
+}
+
+/**
  * Compute the absolute working directory for a component, given a per-branch
  * container root. For single-repo projects, components have `repo: "."` and
  * (typically) no `relativePath`, collapsing to `branchContainer`. For
