@@ -30,10 +30,19 @@
  * History JSON shape (v2):
  *   { commit, parentCommit, branch, timestamp,
  *     seededSessions, fixtureSize, msgsPerSession, perfFlags, tag,
- *     kind: "baseline" | "experiment",          (default "baseline")
+ *     kind: "baseline" | "experiment" | "progression",   (default "baseline")
  *     experimentTag?: string,                    (e.g. "opt-b")
  *     experimentCondition?: "off"|"on"|string,   (the A/B leg)
+ *     progressionStep?: number,                  (0-indexed; "progression" only)
+ *     progressionLabel?: string,                 (e.g. "baseline", "+Opt-A")
+ *     progressionFlags?: string,                 (exact BOBBIT_PERF_FLAGS value)
+ *     progressionShippedSince?: string[],        (ship-tags included in this point)
  *     spans: { name: { p50, p95, p99, n, mean, max } } }
+ *
+ * The "progression" kind drives the "Shipped Progression" top-of-report
+ * panel — one data point per merged optimisation, n=5 replicates each,
+ * showing the cumulative latency descent as wins land. See
+ * `scripts/perf-progression.mjs` for the wrapper that produces these.
  *
  * Plain Node, no deps. Inline SVG. Uses Bobbit CSS custom-property tokens.
  *
@@ -147,12 +156,292 @@ function loadHistory() {
 			j.__stem = stem;
 			j.__replicate = replicate;
 			j.kind = j.kind || "baseline"; // default per schema
+			// Progression runs (kind:"progression") are not A/B pairs and not
+			// cross-commit baselines — they are handled by aggregateProgression
+			// below and excluded from aggregateGroups / findABPairs by main().
 			runs.push(j);
 		} catch (err) {
 			console.warn(`[perf-report] skipping malformed ${f}: ${err.message}`);
 		}
 	}
 	return runs;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Progression panel — cumulative wins as they ship
+// ─────────────────────────────────────────────────────────────────────────
+
+// Canonical user-facing spans to surface above the fold in the progression
+// panel. Everything else lives in a collapsible "all spans" details below.
+const PROGRESSION_HEADLINE_SPANS = [
+	"nav.session.ready",
+	"paint.first",
+	"rapidnav.keystroke.cached",
+	"rapidnav.gap",
+];
+
+// Group progression runs by `progressionStep`. Returns an ordered array of
+// { step, label, flags, shippedSince, commit, replicates, spans } where
+// spans is the same shape aggregateGroups produces (median + min/max).
+function aggregateProgression(runs) {
+	const byStep = new Map();
+	for (const r of runs) {
+		if (r.kind !== "progression") continue;
+		const step = Number(r.progressionStep);
+		if (!Number.isFinite(step)) continue;
+		if (!byStep.has(step)) byStep.set(step, []);
+		byStep.get(step).push(r);
+	}
+	const steps = [];
+	for (const [step, reps] of byStep) {
+		reps.sort((a, b) => (a.__replicate ?? 0) - (b.__replicate ?? 0));
+		const first = reps[0];
+		const spanNames = new Set();
+		for (const r of reps) for (const k of Object.keys(r.spans || {})) spanNames.add(k);
+		const spans = {};
+		for (const name of spanNames) {
+			const p50s = reps.map((r) => r.spans?.[name]?.p50).filter((v) => v != null);
+			const p95s = reps.map((r) => r.spans?.[name]?.p95).filter((v) => v != null);
+			const ns = reps.map((r) => r.spans?.[name]?.n ?? 0);
+			spans[name] = {
+				p50: median(p50s), p95: median(p95s),
+				p50Min: minOf(p50s), p50Max: maxOf(p50s),
+				p95Min: minOf(p95s), p95Max: maxOf(p95s),
+				nReplicates: p50s.length,
+				nSamples: ns.reduce((s, v) => s + v, 0),
+			};
+		}
+		steps.push({
+			step,
+			label: first.progressionLabel ?? `step ${step}`,
+			flags: first.progressionFlags ?? "",
+			shippedSince: Array.isArray(first.progressionShippedSince) ? first.progressionShippedSince : [],
+			commit: first.commit,
+			replicates: reps.length,
+			spans,
+		});
+	}
+	steps.sort((a, b) => a.step - b.step);
+	return steps;
+}
+
+function progressionChartSvg(span, steps) {
+	const W = 720, H = 220;
+	const PAD_L = 60, PAD_R = 18, PAD_T = 32, PAD_B = 56;
+	const plotW = W - PAD_L - PAD_R;
+	const plotH = H - PAD_T - PAD_B;
+
+	const pts = steps.map((g, i) => {
+		const s = g.spans?.[span];
+		return { i, g, ...(s ?? {}) };
+	});
+	const present50 = pts.filter((p) => p.p50 != null);
+	const present95 = pts.filter((p) => p.p95 != null);
+	if (present50.length === 0 && present95.length === 0) {
+		return `<div class="chart-empty">No progression samples for <code>${esc(span)}</code> yet.</div>`;
+	}
+
+	const ys = [
+		...present50.flatMap((p) => [p.p50, p.p50Max].filter((v) => v != null)),
+		...present95.flatMap((p) => [p.p95, p.p95Max].filter((v) => v != null)),
+		100, // ensure the snappy guideline is visible.
+	];
+	let yMax = Math.max(1, ...ys);
+	const niceCeil = (v) => {
+		if (v <= 1) return 1;
+		const pow = Math.pow(10, Math.floor(Math.log10(v)));
+		const norm = v / pow;
+		const step = norm <= 1.2 ? 1.5 : norm <= 2 ? 2 : norm <= 3 ? 3 : norm <= 5 ? 5 : 10;
+		return step * pow;
+	};
+	yMax = niceCeil(yMax * 1.1);
+
+	const xMax = Math.max(1, steps.length - 1);
+	const x = (i) => PAD_L + (steps.length <= 1 ? plotW / 2 : (plotW * i) / xMax);
+	const y = (v) => PAD_T + plotH * (1 - v / yMax);
+
+	const gridLines = [];
+	for (let k = 0; k <= 4; k++) {
+		const yv = (yMax * (4 - k)) / 4;
+		const yy = PAD_T + (plotH * k) / 4;
+		gridLines.push(
+			`<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="var(--border)" opacity="0.4"/>`,
+			`<text x="${(PAD_L - 6).toFixed(1)}" y="${(yy + 3).toFixed(1)}" text-anchor="end" font-family="ui-monospace, monospace" font-size="10" fill="var(--muted-foreground)">${fmt(yv)}</text>`,
+		);
+	}
+	if (100 <= yMax) {
+		const yy = y(100).toFixed(1);
+		gridLines.push(
+			`<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${yy}" y2="${yy}" stroke="var(--muted-foreground)" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>`,
+			`<text x="${(W - PAD_R - 4).toFixed(1)}" y="${(Number(yy) - 4).toFixed(1)}" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">100ms snappy threshold</text>`,
+		);
+	}
+	gridLines.push(`<text x="${PAD_L.toFixed(1)}" y="16" text-anchor="start" font-family="ui-monospace, monospace" font-size="11" fill="var(--muted-foreground)" font-weight="600">latency (ms) — lower is better</text>`);
+
+	const seg = (key) => {
+		const out = []; let cur = [];
+		pts.forEach((p) => {
+			const v = p[key];
+			if (v != null) cur.push(`${x(p.i).toFixed(1)},${y(v).toFixed(1)}`);
+			else if (cur.length) { out.push(cur); cur = []; }
+		});
+		if (cur.length) out.push(cur);
+		return out.filter((s) => s.length >= 2);
+	};
+	const p50Paths = seg("p50").map((s) =>
+		`<polyline fill="none" stroke="var(--chart-1)" stroke-width="2" points="${s.join(" ")}"/>`).join("");
+	const p95Paths = seg("p95").map((s) =>
+		`<polyline fill="none" stroke="var(--chart-4)" stroke-width="1.5" stroke-dasharray="5 3" opacity="0.7" points="${s.join(" ")}"/>`).join("");
+
+	const errBars50 = present50.filter((p) => p.nReplicates >= 2 && p.p50Min != null && p.p50Max != null).map((p) => {
+		const cx = x(p.i).toFixed(1);
+		const yHi = y(p.p50Max).toFixed(1);
+		const yLo = y(p.p50Min).toFixed(1);
+		return `<g stroke="var(--chart-1)" stroke-width="1.5" opacity="0.6">
+			<line x1="${cx}" x2="${cx}" y1="${yHi}" y2="${yLo}"/>
+			<line x1="${(Number(cx) - 4).toFixed(1)}" x2="${(Number(cx) + 4).toFixed(1)}" y1="${yHi}" y2="${yHi}"/>
+			<line x1="${(Number(cx) - 4).toFixed(1)}" x2="${(Number(cx) + 4).toFixed(1)}" y1="${yLo}" y2="${yLo}"/>
+		</g>`;
+	}).join("");
+	const errBars95 = present95.filter((p) => p.nReplicates >= 2 && p.p95Min != null && p.p95Max != null).map((p) => {
+		const cx = x(p.i).toFixed(1);
+		const yHi = y(p.p95Max).toFixed(1);
+		const yLo = y(p.p95Min).toFixed(1);
+		return `<line x1="${cx}" x2="${cx}" y1="${yHi}" y2="${yLo}" stroke="var(--chart-4)" stroke-width="1" opacity="0.45"/>`;
+	}).join("");
+
+	const dots50 = present50.map((p) => {
+		const cx = x(p.i).toFixed(1);
+		const cy = y(p.p50).toFixed(1);
+		const title = `${p.g.label} (step ${p.g.step}) p50=${fmt(p.p50)}ms n_rep=${p.nReplicates}${p.nReplicates>=2?` [${fmt(p.p50Min)}–${fmt(p.p50Max)}]`:""}`;
+		return `<circle cx="${cx}" cy="${cy}" r="4" fill="var(--chart-1)" stroke="var(--background)" stroke-width="1.5"><title>${esc(title)}</title></circle>`;
+	}).join("");
+	const dots95 = present95.map((p) => {
+		const cx = x(p.i).toFixed(1);
+		const cy = y(p.p95).toFixed(1);
+		const title = `${p.g.label} (step ${p.g.step}) p95=${fmt(p.p95)}ms`;
+		return `<circle cx="${cx}" cy="${cy}" r="3" fill="var(--chart-4)" opacity="0.85"><title>${esc(title)}</title></circle>`;
+	}).join("");
+
+	const xLabels = pts.map((p) => {
+		const sha = String(p.g.commit || "").slice(0, 7);
+		return `<g>
+			<text x="${x(p.i).toFixed(1)}" y="${(H - 32).toFixed(1)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="var(--foreground)" font-weight="600">step ${p.g.step}</text>
+			<text x="${x(p.i).toFixed(1)}" y="${(H - 18).toFixed(1)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="var(--foreground)">${esc(p.g.label)}</text>
+			<text x="${x(p.i).toFixed(1)}" y="${(H - 5).toFixed(1)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="var(--muted-foreground)">${esc(sha)}</text>
+		</g>`;
+	}).join("");
+
+	return `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${esc(span)} progression">
+		${gridLines.join("")}
+		${errBars95}
+		${errBars50}
+		${p95Paths}
+		${p50Paths}
+		${dots95}
+		${dots50}
+		${xLabels}
+	</svg>`;
+}
+
+function renderProgressionPanel(steps) {
+	if (steps.length === 0) return "";
+	const baseline = steps[0];
+	const latest = steps[steps.length - 1];
+
+	const seen = new Set();
+	for (const s of steps) for (const k of Object.keys(s.spans || {})) seen.add(k);
+	const headlineSpans = PROGRESSION_HEADLINE_SPANS.filter((sp) => seen.has(sp));
+	const otherSpans = [...seen].filter((sp) => !PROGRESSION_HEADLINE_SPANS.includes(sp)).sort();
+
+	const summaryRow = (sp) => {
+		const b = baseline.spans?.[sp];
+		const l = latest.spans?.[sp];
+		if (!b || !l || b.p50 == null || l.p50 == null) {
+			return `<tr><td class="name">${esc(sp)}</td><td class="num">${fmt(b?.p50)}</td><td class="num">${fmt(l?.p50)}</td><td class="delta flat"><span class="pill">—</span></td><td class="delta flat"><span class="pill">—</span></td></tr>`;
+		}
+		const dms = l.p50 - b.p50;
+		const pct = b.p50 === 0 ? 0 : (dms / b.p50) * 100;
+		const cls = classify(b.p50, l.p50);
+		const tdCls = cls === "good" ? "good" : cls === "bad" ? "bad" : "flat";
+		// We report Δ with the user-facing sign convention: a faster latest is a
+		// positive improvement ("+"). dms is negative when latest < baseline, so
+		// flip the sign for the user-visible value.
+		return `<tr>
+			<td class="name">${esc(sp)}</td>
+			<td class="num">${fmt(b.p50)}</td>
+			<td class="num">${fmt(l.p50)}</td>
+			<td class="delta ${tdCls}"><span class="pill">${fmtSigned(-dms)}</span></td>
+			<td class="delta ${tdCls}"><span class="pill">${fmtPctSigned(-pct)}</span></td>
+		</tr>`;
+	};
+
+	const summaryBody = headlineSpans.map(summaryRow).join("");
+	const summaryTable = `<div class="table-wrap"><table class="summary">
+		<thead><tr>
+			<th>span</th>
+			<th class="num">baseline p50 (step ${baseline.step})</th>
+			<th class="num">latest p50 (step ${latest.step})</th>
+			<th class="num">Δ (ms, + = faster)</th>
+			<th class="num">Δ % (+ = faster)</th>
+		</tr></thead>
+		<tbody>${summaryBody}</tbody>
+	</table></div>`;
+
+	const headlineCharts = headlineSpans.map((sp) => {
+		const l = latest.spans?.[sp];
+		const b = baseline.spans?.[sp];
+		const lp = l?.p50, bp = b?.p50;
+		const deltaStr = (bp != null && lp != null)
+			? `${fmtSigned(-(lp - bp))} ms (${fmtPctSigned(bp === 0 ? 0 : -((lp - bp) / bp) * 100)})`
+			: "—";
+		const cls = (bp != null && lp != null) ? classify(bp, lp) : "flat";
+		const deltaCls = cls === "good" ? "delta-good" : cls === "bad" ? "delta-bad" : "delta-flat";
+		return `<article class="progression-chart">
+			<header>
+				<h3>${esc(sp)}</h3>
+				<div class="meta">
+					<span>${fmt(bp)} → ${fmt(lp)} ms</span>
+					<span class="${deltaCls}">${deltaStr}</span>
+				</div>
+			</header>
+			${progressionChartSvg(sp, steps)}
+		</article>`;
+	}).join("");
+
+	const stepsTable = `<div class="table-wrap"><table class="runs-table">
+		<thead><tr>
+			<th>step</th>
+			<th>label</th>
+			<th>commit</th>
+			<th class="num">n_rep</th>
+			<th>flags</th>
+			<th>shipped since baseline</th>
+		</tr></thead>
+		<tbody>${steps.map((s) => {
+			const sha = String(s.commit || "").slice(0, 12);
+			const flags = s.flags === "" ? `<span class="muted">(default)</span>` : `<code>${esc(s.flags)}</code>`;
+			const shipped = s.shippedSince.length === 0 ? `<span class="muted">— (baseline)</span>` : s.shippedSince.map((t) => `<code>${esc(t)}</code>`).join(", ");
+			return `<tr><td>${s.step}</td><td>${esc(s.label)}</td><td class="mono">${esc(sha)}</td><td class="num">${s.replicates}</td><td>${flags}</td><td>${shipped}</td></tr>`;
+		}).join("")}</tbody>
+	</table></div>`;
+
+	const otherCharts = otherSpans.length === 0 ? "" : `<details class="progression-other">
+		<summary>Other spans — full progression chart per span (${otherSpans.length})</summary>
+		<div class="progression-charts">${otherSpans.map((sp) => `<article class="progression-chart">
+			<header><h3>${esc(sp)}</h3></header>
+			${progressionChartSvg(sp, steps)}
+		</article>`).join("")}</div>
+	</details>`;
+
+	return `<section class="progression-panel">
+		<h2>Shipped Progression <span class="count">cumulative perf as wins land — ${steps.length} point${steps.length === 1 ? "" : "s"}, canonical realistic-large fixture, n=5 each</span></h2>
+		<p class="panel-blurb">Each point is the harness measured with ALL default-ON shipped flags up to and including that step. The line descends top-right → bottom-left as wins land. Reproducing or extending: <code>node scripts/perf-progression.mjs --step N --label "+OptX" --flags "" --shipped "opt-a,opt-x" --n 5 --fixture-size large</code>.</p>
+		${summaryTable}
+		<div class="progression-charts">${headlineCharts}</div>
+		${stepsTable}
+		${otherCharts}
+	</section>`;
 }
 
 // Build groups keyed by (commit, stem-minus-commit). Replicates within a
@@ -793,7 +1082,7 @@ function fmtNow() {
 	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function render(groups, runs, pairs) {
+function render(groups, runs, pairs, progressionSteps = []) {
 	const first = groups[0];
 	const latest = groups[groups.length - 1];
 	const firstSha = String(first?.commit || "").slice(0, 7);
@@ -952,6 +1241,38 @@ function render(groups, runs, pairs) {
 		border: 1px dashed var(--border); border-radius: 8px;
 		padding: 1.25rem; text-align: center; color: var(--muted-foreground); margin: 0.5rem 0 2rem;
 	}
+
+	.progression-panel {
+		background: color-mix(in oklch, var(--chart-1) 4%, var(--card));
+		border: 1px solid var(--border); border-radius: 10px;
+		padding: 1rem 1.1rem 1.2rem; margin: 0 0 2.5rem;
+	}
+	.progression-panel h2 { margin-top: 0.25rem; }
+	.progression-panel .panel-blurb {
+		font-size: 0.85rem; color: var(--muted-foreground); margin: 0.1rem 0 0.9rem;
+	}
+	.progression-panel .panel-blurb code {
+		background: color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+		padding: 0 4px; border-radius: 3px;
+	}
+	.progression-charts {
+		display: grid; grid-template-columns: 1fr; gap: 0.85rem; margin: 0.9rem 0;
+	}
+	@media (min-width: 1000px) { .progression-charts { grid-template-columns: 1fr 1fr; } }
+	.progression-chart {
+		background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+		padding: 0.55rem 0.85rem 0.45rem;
+	}
+	.progression-chart header { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.2rem; }
+	.progression-chart h3 { font-family: ui-monospace, monospace; font-size: 0.92rem; font-weight: 600; margin: 0; }
+	.progression-chart .meta { display: flex; gap: 0.6rem; font-size: 0.78rem; color: var(--muted-foreground); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+	.progression-chart svg { display: block; width: 100%; height: auto; }
+	.progression-other { margin-top: 1rem; }
+	.progression-other > summary {
+		cursor: pointer; font-size: 0.85rem; color: var(--muted-foreground);
+		padding: 0.4rem 0;
+	}
+	.progression-other[open] > summary { color: var(--foreground); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -967,6 +1288,8 @@ function render(groups, runs, pairs) {
 </header>
 
 ${renderLegend()}
+
+${renderProgressionPanel(progressionSteps)}
 
 ${groups.length === 0
 	? `<div class="empty-state">No history under <code>docs/perf/history/</code> yet. Run the manual perf harness to produce the first baseline.</div>`
@@ -1000,15 +1323,17 @@ ${groups.length === 0
 
 function main() {
 	const runs = loadHistory();
-	const groups = aggregateGroups(runs);
+	const nonProgression = runs.filter((r) => r.kind !== "progression");
+	const progressionSteps = aggregateProgression(runs);
+	const groups = aggregateGroups(nonProgression);
 	const pairs = findABPairs(groups);
 	if (runs.length === 0) {
 		console.warn(`[perf-report] no history under ${HISTORY_DIR} — writing empty placeholder`);
 	}
 	mkdirSync(dirname(OUT), { recursive: true });
-	const html = render(groups, runs, pairs);
+	const html = render(groups, nonProgression, pairs, progressionSteps);
 	writeFileSync(OUT, html);
-	console.log(`[perf-report] wrote ${OUT} (${groups.length} group(s), ${runs.length} replicate(s), ${pairs.length} A/B pair(s))`);
+	console.log(`[perf-report] wrote ${OUT} (${groups.length} group(s), ${runs.length} replicate(s), ${pairs.length} A/B pair(s), ${progressionSteps.length} progression step(s))`);
 }
 
 main();
