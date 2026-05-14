@@ -59,7 +59,8 @@ test.describe("sandbox container recovery", () => {
 		try {
 			await sandboxManager.ensureForProject(projectId);
 		} catch (err) {
-			// If init fails (e.g., no git remote configured for sandbox), skip
+			// SKIP_OK: sandbox init fails when git remote isn't configured — Docker
+			// container recovery (the test subject) can't be tested without it.
 			test.skip();
 			return;
 		}
@@ -75,6 +76,8 @@ test.describe("sandbox container recovery", () => {
 		try {
 			containerId = await sandbox.getContainerId();
 		} catch {
+			// SKIP_OK: container not running in this environment; Docker recovery
+			// tests require a live container as a precondition.
 			test.skip();
 			return;
 		}
@@ -144,17 +147,21 @@ test.describe("sandbox container recovery", () => {
 		try {
 			await sandboxManager.ensureForProject(projectId);
 		} catch {
+			// SKIP_OK: sandbox init failed (no git remote / Docker config); the
+			// test subject (session recovery) can't run without it.
 			test.skip();
 			return;
 		}
 
 		const sandbox = sandboxManager.get(projectId);
+		// SKIP_OK: sandbox object unavailable — Docker not configured.
 		if (!sandbox) { test.skip(); return; }
 
 		let containerId: string;
 		try {
 			containerId = await sandbox.getContainerId();
 		} catch {
+			// SKIP_OK: container not running in this environment.
 			test.skip();
 			return;
 		}
@@ -243,15 +250,15 @@ test.describe("sandbox container recovery", () => {
 		const projectId = await defaultProjectId();
 		try {
 			await sandboxManager.ensureForProject(projectId);
-		} catch { test.skip(); return; }
+		} catch { /* SKIP_OK: sandbox init failed — Docker not configured */ test.skip(); return; }
 
 		const sandbox = sandboxManager.get(projectId);
-		if (!sandbox) { test.skip(); return; }
+		/* SKIP_OK: sandbox unavailable — Docker not configured */ if (!sandbox) { test.skip(); return; }
 
 		let containerId: string;
 		try {
 			containerId = await sandbox.getContainerId();
-		} catch { test.skip(); return; }
+		} catch { /* SKIP_OK: container not running — Docker not configured */ test.skip(); return; }
 
 		// 2. Create a sandboxed session (which gets a worktree)
 		const createResp = await apiFetch("/api/sessions", {
@@ -340,16 +347,16 @@ test.describe("sandbox container recovery", () => {
 		const projectId = await defaultProjectId();
 		try {
 			await sandboxManager.ensureForProject(projectId);
-		} catch { test.skip(); return; }
+		} catch { /* SKIP_OK: sandbox init failed — Docker not configured */ test.skip(); return; }
 
 		const sandbox = sandboxManager.get(projectId);
-		if (!sandbox) { test.skip(); return; }
+		/* SKIP_OK: sandbox unavailable — Docker not configured */ if (!sandbox) { test.skip(); return; }
 
 		// --- First kill/recovery cycle ---
 		let containerId: string;
 		try {
 			containerId = await sandbox.getContainerId();
-		} catch { test.skip(); return; }
+		} catch { /* SKIP_OK: container not running — Docker not configured */ test.skip(); return; }
 
 		const firstRecovery = new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error("First recovery timeout")), 90_000);
