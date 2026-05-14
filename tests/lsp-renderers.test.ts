@@ -220,9 +220,9 @@ describe("LspDiagnosticsRenderer", () => {
 	});
 	it("summarises error + warning counts (omitting zeros)", () => {
 		const text = renderText(r, { path: "src/x.ts" }, mkResult([
-			{ path: "src/x.ts", range: { start: { line: 0, character: 0 } }, severity: 1, message: "broken" },
-			{ path: "src/x.ts", range: { start: { line: 1, character: 0 } }, severity: 1, message: "still broken" },
-			{ path: "src/x.ts", range: { start: { line: 2, character: 0 } }, severity: 2, message: "iffy" },
+			{ path: "src/x.ts", range: { start: { line: 0, character: 0 } }, severity: "error", message: "broken" },
+			{ path: "src/x.ts", range: { start: { line: 1, character: 0 } }, severity: "error", message: "still broken" },
+			{ path: "src/x.ts", range: { start: { line: 2, character: 0 } }, severity: "warning", message: "iffy" },
 		]));
 		assert.match(text, /2 errors/);
 		assert.match(text, /1 warning/);
@@ -232,7 +232,7 @@ describe("LspDiagnosticsRenderer", () => {
 	});
 	it("renders source chip when present", () => {
 		const text = renderText(r, { path: "src/x.ts" }, mkResult([
-			{ path: "src/x.ts", range: { start: { line: 0, character: 0 } }, severity: 1, message: "m", source: "ts" },
+			{ path: "src/x.ts", range: { start: { line: 0, character: 0 } }, severity: "error", message: "m", source: "ts" },
 		]));
 		assert.match(text, /\bts\b/);
 	});

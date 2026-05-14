@@ -61,16 +61,19 @@ export function symbolKindLabel(n: number): { label: string; icon: any } {
 }
 
 // ── Diagnostic severity ──────────────────────────────────────────────
+// Server wire format: string severity (typescript.ts converts numeric LSP severity to string)
 
-const SEVERITY: Record<number, { label: string; color: string; icon: any }> = {
-	1: { label: "Error", color: "text-destructive", icon: CircleAlert },
-	2: { label: "Warning", color: "text-amber-600 dark:text-amber-500", icon: AlertTriangle },
-	3: { label: "Info", color: "text-blue-600 dark:text-blue-400", icon: Info },
-	4: { label: "Hint", color: "text-muted-foreground", icon: Lightbulb },
+export type DiagnosticSeverity = "error" | "warning" | "info" | "hint";
+
+const SEVERITY: Record<DiagnosticSeverity, { label: string; color: string; icon: any }> = {
+	error: { label: "Error", color: "text-destructive", icon: CircleAlert },
+	warning: { label: "Warning", color: "text-amber-600 dark:text-amber-500", icon: AlertTriangle },
+	info: { label: "Info", color: "text-blue-600 dark:text-blue-400", icon: Info },
+	hint: { label: "Hint", color: "text-muted-foreground", icon: Lightbulb },
 };
 
-export function severityLabel(n: 1 | 2 | 3 | 4): { label: string; color: string; icon: any } {
-	return SEVERITY[n] || SEVERITY[3];
+export function severityLabel(s: DiagnosticSeverity | string): { label: string; color: string; icon: any } {
+	return SEVERITY[s as DiagnosticSeverity] ?? SEVERITY.info;
 }
 
 // ── Location rendering ───────────────────────────────────────────────
@@ -149,21 +152,24 @@ export function renderPathLineCol(path: string, line: number, character: number)
 export interface Diagnostic {
 	path: string;
 	range: { start: { line: number; character: number } };
-	severity: 1 | 2 | 3 | 4;
+	severity: DiagnosticSeverity | string;
 	message: string;
 	source?: string;
 }
 
+const SEV_ORDER: Record<string, number> = { error: 0, warning: 1, info: 2, hint: 3 };
+export function sevOrder(s: string): number { return SEV_ORDER[s] ?? 2; }
+
 export function summariseDiagnostics(diags: Diagnostic[]): string {
-	const counts: Record<number, number> = {};
+	const counts: Record<string, number> = {};
 	for (const d of diags) counts[d.severity] = (counts[d.severity] || 0) + 1;
 	const parts: string[] = [];
-	const labels: Record<number, [string, string]> = {
-		1: ["error", "errors"], 2: ["warning", "warnings"], 3: ["info", "info"], 4: ["hint", "hints"],
+	const plural: Record<string, [string, string]> = {
+		error: ["error", "errors"], warning: ["warning", "warnings"], info: ["info", "info"], hint: ["hint", "hints"],
 	};
-	for (const sev of [1, 2, 3, 4] as const) {
+	for (const sev of ["error", "warning", "info", "hint"] as const) {
 		const c = counts[sev];
-		if (c) parts.push(`${c} ${c === 1 ? labels[sev][0] : labels[sev][1]}`);
+		if (c) parts.push(`${c} ${c === 1 ? plural[sev][0] : plural[sev][1]}`);
 	}
 	return parts.join(", ") || "0 diagnostics";
 }

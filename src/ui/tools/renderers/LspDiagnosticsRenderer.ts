@@ -5,7 +5,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { CheckCircle2, ShieldAlert } from "lucide";
 import { getToolState, isSkippedToolResult, renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { type Diagnostic, normalisePath, parseLspResult, renderLspErrorEnvelope, severityLabel, summariseDiagnostics } from "./LspShared.js";
+import { type Diagnostic, normalisePath, parseLspResult, renderLspErrorEnvelope, severityLabel, sevOrder, summariseDiagnostics } from "./LspShared.js";
 
 export class LspDiagnosticsRenderer implements ToolRenderer {
 	render(params: { path?: string } | undefined, result: ToolResultMessage<any> | undefined, isStreaming?: boolean): ToolRenderResult {
@@ -39,7 +39,7 @@ export class LspDiagnosticsRenderer implements ToolRenderer {
 			arr.push(d);
 			groups.set(k, arr);
 		}
-		for (const arr of groups.values()) arr.sort((a, b) => a.severity - b.severity);
+		for (const arr of groups.values()) arr.sort((a, b) => sevOrder(a.severity) - sevOrder(b.severity));
 
 		const contentRef = createRef<HTMLDivElement>();
 		const chevronRef = createRef<HTMLSpanElement>();
