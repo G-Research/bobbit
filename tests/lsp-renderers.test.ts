@@ -85,18 +85,18 @@ describe("symbolKindLabel", () => {
 // ── severityLabel ────────────────────────────────────────────────────
 
 describe("severityLabel", () => {
-	it("error=1 uses destructive color", () => {
-		assert.match(severityLabel(1).color, /destructive/);
-		assert.equal(severityLabel(1).label, "Error");
+	it("error uses destructive color", () => {
+		assert.match(severityLabel("error").color, /destructive/);
+		assert.equal(severityLabel("error").label, "Error");
 	});
-	it("warning=2 uses amber color", () => {
-		assert.match(severityLabel(2).color, /amber/);
+	it("warning uses amber color", () => {
+		assert.match(severityLabel("warning").color, /amber/);
 	});
-	it("info=3 uses blue color", () => {
-		assert.match(severityLabel(3).color, /blue/);
+	it("info uses blue color", () => {
+		assert.match(severityLabel("info").color, /blue/);
 	});
-	it("hint=4 uses muted color", () => {
-		assert.match(severityLabel(4).color, /muted/);
+	it("hint uses muted color", () => {
+		assert.match(severityLabel("hint").color, /muted/);
 	});
 });
 
