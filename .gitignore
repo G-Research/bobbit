@@ -86,6 +86,8 @@ tests/fixtures/streaming-message-container-bundle.js
 tests/fixtures/streaming-message-container-bundle.css
 tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
+tests/fixtures/defer-offscreen-render-bundle.js
+tests/fixtures/defer-offscreen-render-bundle.css
 
 # perf harness outputs + test bundle
 tests/fixtures/perf-trace-bundle.js

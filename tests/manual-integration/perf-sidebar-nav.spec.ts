@@ -702,8 +702,7 @@ test("perf-sidebar-nav: warm + goal + cold passes", async ({ page }) => {
 	const appUrl = `${gw.base}/?token=${gw.token}`;
 	// `BOBBIT_PERF_FLAGS` is the canonical A/B switch — comma-separated list
 	// of `KNOWN_PERF_FLAGS` names piped into `localStorage.bobbitPerfFlags`
-	// before any app code runs. Used by Opt-B (lazyToolContent), Opt-C
-	// (prefetchOnHover), and any future flag-gated experiment.
+	// before any app code runs. Used by every Phase 2 A/B experiment.
 	const perfFlagsRaw = (process.env.BOBBIT_PERF_FLAGS ?? "").trim();
 	const perfFlagsCsv = perfFlagsRaw
 		.split(",")

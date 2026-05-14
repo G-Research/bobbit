@@ -952,7 +952,137 @@ rewrite. Until then, there is nothing to ship.
 
 History: `docs/perf/history/606833ce8450-opt-d-{off,on}-{1..5}.json`.
 
-## 7. Implementation notes (Phase 1 only — not for prose-pinning invariants)
+## 7. Shipped wins
+
+### 7.1 Opt-A — defer off-screen transcript render (`deferOffscreenRender`, default-ON)
+
+**Status:** **SHIPPED, flag default-ON** at goal-branch merge. Implementation:
+`src/ui/components/DeferredBlock.ts` + per-item wrapper in
+`src/ui/components/MessageList.ts`. Coverage: `tests/defer-offscreen-render.spec.ts`
+(7 tests).
+
+**Hypothesis (from §5.4 / §5.6):** `paint.first` dominates sidebar nav on
+large fixtures (p95 100–115ms, max ~200ms), and the cost scales with
+transcript size. Synchronous markdown / tool-block render of every message
+is the expensive piece; rendering only the bottom-tail (last 8 messages,
+which the user actually sees after the auto-scroll-to-bottom on session
+activation) and deferring the rest via `IntersectionObserver` +
+`requestIdleCallback` should cut p95 dramatically without affecting median.
+
+**A/B harness run — n=5 replicates per condition**, interleaved off / on /
+off / on … to spread any drift (CPU thermal, machine warm-up) across both
+arms. Same SHA `f1699ac9e9f7`, large fixture (200 msgs/session × 32 sessions),
+`BOBBIT_PERF_FIXTURE_SIZE=large`. Per-run histories under
+`docs/perf/history/f1699ac9e9f7-opt-a-{off,on}-{1..5}.json`.
+
+**Aggregation rule.** Per-span/per-percentile, we take the *median across
+the 5 replicates* of that span's percentile, and the [min, max] range across
+replicates. A win **“survives”** only if the **OFF and ON replicate ranges
+don't overlap** in the improving direction (every ON sample beats every OFF
+sample); otherwise it's recorded as `partial` (median moved but ranges
+overlap) or `noise` (median within jitter band).
+
+| span | metric | OFF med | OFF range | ON med | ON range | Δ med | survives? |
+|---|---|---:|---:|---:|---:|---:|:---:|
+| **paint.first** | p95 | 113.5 | 111.5–126.7 | **76.5** | 68.3–80.0 | **−37.0** | **yes** |
+| paint.first | p50 | 32.8 | 28.6–34.6 | 32.9 | 29.6–34.4 | +0.1 | noise |
+| **nav.session.ready** | p95 | 330.4 | 289.0–383.4 | **235.4** | 209.9–263.9 | **−95.0** | **yes** |
+| nav.session.ready | p50 | 166.0 | 155.0–177.5 | 163.2 | 152.9–173.6 | −2.8 | partial |
+| nav.goal.ready | p95 | 36.1 | 26.7–58.3 | 30.3 | 21.1–40.2 | −5.8 | partial |
+| nav.session.cold | p95 | 480.0 | 392.5–562.1 | 451.7 | 386.7–528.3 | −28.3 | partial |
+| reducer.rehydrate | p95 | 0.8 | 0.8–1.0 | 0.9 | 0.7–1.0 | +0.1 | noise |
+| **rapidnav.keystroke.uncached** | p95 | 319.6 | 277.9–401.1 | **217.8** | 196.4–237.8 | **−101.8** | **yes** |
+| rapidnav.keystroke.uncached | p50 | 171.4 | 143.2–179.3 | 166.3 | 152.8–189.0 | −5.1 | partial |
+| **rapidnav.keystroke.cached** | p95 | 320.3 | 288.2–377.3 | **217.9** | 212.5–267.6 | **−102.4** | **yes** |
+| rapidnav.keystroke.cached | p50 | 173.4 | 132.8–211.0 | 170.0 | 163.7–192.2 | −3.4 | partial |
+| **rapidnav.gap** | p95 | 162.3 | 138.5–180.2 | **88.5** | 79.6–95.5 | **−73.8** | **yes** |
+| **rapidnav.gap** | p50 | 109.2 | 74.5–114.8 | **41.7** | 26.2–62.5 | **−67.5** | **yes** |
+| rapidnav.stall.ms | p95 | 24.7 | 21.3–70.8 | 56.7 | 20.5–74.1 | +32.0 | noise (overlap) |
+| api.session.fetch | p95 | 299.1 | 88.6–576.6 | 307.6 | 95.6–317.0 | +8.5 | noise |
+
+**Verdict — ship.** Six spans clear the “survives” bar (replicate ranges
+don't overlap):
+
+- **`paint.first` p95** → every ON replicate (≤80.0ms) finished below every
+  OFF replicate (≥111.5ms). Median **−37ms (−33%)**. The dominant transcript-
+  scaling hotspot per §5.4. Off-max 126.7ms → on-max 80.0ms; the p95
+  outlier domain is gone, and the worst-case on-run is now firmly inside
+  the snappy band.
+- **`nav.session.ready` p95** — median **−95ms (−29%)**, ranges fully
+  separated (max-on 263.9 < min-off 289.0). The user-visible “click →
+  transcript ready” metric. Worst-case off was 383ms; worst-case on is
+  264ms.
+- **Rapid Ctrl+↓ walk** — `rapidnav.keystroke.uncached` p95 median
+  **−102ms (−32%)**, cached p95 median **−102ms (−32%)**. Both arms’
+  ranges are clean and non-overlapping. The keystroke-walk gesture
+  finishes meaningfully faster *and* more predictably.
+- **`rapidnav.gap`** (the idle time the UI has *before* the next keystroke
+  lands) survives at BOTH p50 (**−67.5ms**) and p95 (**−73.8ms**) — the
+  flipside of the keystroke wins: renders complete sooner so there's more
+  slack before the next event. This is the clean indicator that we
+  actually freed up the main thread.
+
+**Partial / noise spans:**
+- `nav.session.ready` p50 partial (median −2.8ms; ranges overlap). Expected:
+  the median nav is dominated by the eagerly-rendered tail under both
+  conditions, so we don't move it. p95 — the tail of the distribution where
+  large transcripts dominate — is where the optimisation lands.
+- `paint.first` p50 noise (±0.1ms). Same story — the small-paint case
+  isn't render-bound to begin with.
+- `nav.goal.ready` partial; goal-dashboard render is tiny (n=2/run, ~30ms)
+  and unaffected by transcript deferral. Expected.
+- `nav.session.cold` partial; n=1 per replicate (only the first session in
+  the cold pass records this span), p50 range 392–562 off vs 387–528 on —
+  ranges overlap heavily. Median moved −28ms in the right direction but
+  not statistically meaningful. Re-measure with a larger cold pass to
+  conclude.
+- `rapidnav.stall.ms` is *not* a regression — ranges overlap fully
+  (off 21–71, on 20–74). Stall n varies run-to-run (when does the next
+  keystroke happen to fall vs render end?), and the matched `rapidnav.gap`
+  win shows the underlying main-thread time *did* improve. The stall
+  classification just catches a smaller, jitterier subset.
+- `api.session.fetch` noise both ways — fetch path isn't touched by this
+  optimisation. Sanity check passed.
+
+**Why it works.** Auto-scroll-to-bottom puts the user at message 200 of 200;
+only ~5–8 messages are actually visible at first paint. The other 190+ were
+previously being parsed + rendered into Lit / markdown / syntax-highlight
+DOM before the user could see anything. Under the flag they're a single
+`<div style="min-height:80px">` per message; IO + rIC resolve them as the
+user scrolls up, so correctness is preserved end-to-end.
+
+**Why p95 moves but p50 doesn't.** The eager tail (last 8 messages) renders
+synchronously under both conditions, so any nav whose paint cost is
+dominated by those visible messages lands in the same place — hence the
+identical medians. The p95 / max samples are the navs that, under OFF,
+spent serious time rendering the 190+ off-screen messages; under ON those
+become cheap placeholders. That collapses the long-tail distribution
+while leaving the cheap-case median alone, which is exactly what we want.
+
+**Correctness escape hatch.** Native browser-find (`Ctrl+F` / `Cmd+F` / `F3`)
+doesn't trigger IntersectionObserver. A module-level keydown listener
+(`src/ui/components/DeferredBlock.ts` bottom) catches those keys at the
+capture phase and calls `DeferredBlock.forceResolveAll()` synchronously
+before the browser opens its find UI, so the search runs against the fully
+rendered transcript.
+
+**Tail-size tuning — not done.** The eager-tail constant is `DEFER_EAGER_TAIL = 8`
+in `MessageList.ts`. Tuning to 4 / 16 / 32 was not part of this task; the
+current value preserves first-paint for the visible viewport on a 1280×800
+desktop without measurable regression. If we observe pop-in on larger
+displays, bump the constant rather than restructuring the deferral.
+
+**Followups (not blocking ship):**
+- Decide whether to flip the perf flag default-on. The numbers easily clear
+  the Phase 2 ship-bar; main concern is the n=1 cold-pass regression which
+  needs re-measure on a larger cold cohort.
+- Cache realised heights across session-switches in an LRU so repeat
+  visits avoid the placeholder-then-resolve flash. Currently each session
+  activation rebuilds placeholders from scratch.
+- Pin the `paint.first` budget at the new p95 (~80ms on large fixture) in
+  `tests/e2e/ui/perf-sidebar-nav.spec.ts` (follow-up task scheduled).
+
+## 8. Implementation notes (Phase 1 only — not for prose-pinning invariants)
 
 - Client trace primitive: `src/app/perf-trace.ts`. Cost-when-disabled
   pinned by `tests/perf-trace.spec.ts`.
