@@ -17,6 +17,7 @@ import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
 import {
 	isPerfFlagEnabled,
 	PERF_FLAG_DEFER_OFFSCREEN_RENDER,
+	PERF_FLAG_VIRTUALISE_TAIL,
 } from "../../app/perf-flags.js";
 
 /** Number of items at the bottom of the transcript that render eagerly
@@ -335,27 +336,59 @@ export class MessageList extends LitElement {
 		// DEFER_EAGER_TAIL items render eagerly (visible at first paint after
 		// scroll-to-bottom); older items render a placeholder and resolve when
 		// IntersectionObserver fires.
-		const tailStart = Math.max(0, items.length - DEFER_EAGER_TAIL);
-		// Align deferral with the message-source array so per-item est-heights
-		// match the underlying message. `items.length` can differ from
-		// `msgs.length` because of tool-grouping / synthetic precompact rows;
-		// the heuristic only needs to be roughly right.
+		//
+		// Opt-H (`virtualiseTail`) refines the eager set: instead of a fixed
+		// constant tail count, the eager set is the bottom-most items whose
+		// cumulative estimated heights fill `window.innerHeight`. On a 1280×800
+		// desktop with chunky messages this is typically 2–3 items, vs 8
+		// constant — fewer eager renders means cheaper paint.first.
+		// All placeholders use est-heights as `min-height`, so the placeholder
+		// scrollHeight equals what `getBoundingClientRect` would report. We can
+		// therefore compute the in-viewport set analytically without rendering
+		// a measurement pass.
 		const msgs = this.messages;
+		const virtualise = isPerfFlagEnabled(PERF_FLAG_VIRTUALISE_TAIL);
+
+		const estHeights: number[] = new Array(items.length);
+		const srcIdxFor = (idx: number): number => Math.min(
+			msgs.length - 1,
+			Math.max(0, Math.round((idx / Math.max(1, items.length - 1)) * (msgs.length - 1))),
+		);
+		for (let idx = 0; idx < items.length; idx++) {
+			estHeights[idx] = estimateMessageHeight(msgs[srcIdxFor(idx)]);
+		}
+
+		let eagerStart: number;
+		if (virtualise) {
+			const viewportH = (typeof window !== "undefined" && window.innerHeight)
+				? window.innerHeight
+				: 800;
+			// Walk bottom-up, accumulating est-heights. The eager set is every
+			// item whose cumulative-height-from-bottom hasn't yet reached the
+			// viewport, *plus* the first item that pushes us at-or-over (the
+			// partially-visible top edge of the viewport). Short transcripts
+			// whose total fits in the viewport: all items eager.
+			eagerStart = 0;
+			let cum = 0;
+			for (let idx = items.length - 1; idx >= 0; idx--) {
+				cum += estHeights[idx];
+				eagerStart = idx;
+				if (cum >= viewportH) break;
+			}
+		} else {
+			eagerStart = Math.max(0, items.length - DEFER_EAGER_TAIL);
+		}
+
 		return html`<div class="flex flex-col gap-3">
 			${repeat(
 				items,
 				(it) => it.key,
 				(it, idx) => {
-					const eager = idx >= tailStart;
-					const srcIdx = Math.min(
-						msgs.length - 1,
-						Math.max(0, Math.round((idx / Math.max(1, items.length - 1)) * (msgs.length - 1))),
-					);
-					const estHeight = estimateMessageHeight(msgs[srcIdx]);
+					const eager = idx >= eagerStart;
 					return html`<deferred-block
 						.template=${it.template}
 						.eager=${eager}
-						est-height=${estHeight}
+						est-height=${estHeights[idx]}
 					></deferred-block>`;
 				},
 			)}

@@ -40,10 +40,24 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"rapidnav.keystroke p95 -102ms (-32%), rapidnav.gap p50 -67ms. Set " +
 			"`bobbitPerfFlags=-deferOffscreenRender` to disable.",
 	},
+	{
+		name: "virtualiseTail",
+		description:
+			"Phase 2 Opt-H (experiment, default-OFF) — refines Opt-A by replacing " +
+			"the fixed eager-tail of 8 with a viewport-driven eager set: only the " +
+			"bottom-most messages whose cumulative estimated heights fill " +
+			"`window.innerHeight` render eagerly. Older messages keep the same " +
+			"`IntersectionObserver` + `requestIdleCallback` placeholder treatment. " +
+			"Requires `deferOffscreenRender` to also be on (the wrapper machinery). " +
+			"Set `bobbitPerfFlags=virtualiseTail` to enable.",
+	},
 ];
 
 /** Convenience canonical flag name for Phase 2 Opt-A. SHIPPED default-ON. */
 export const PERF_FLAG_DEFER_OFFSCREEN_RENDER = "deferOffscreenRender";
+
+/** Convenience canonical flag name for Phase 2 Opt-H. */
+export const PERF_FLAG_VIRTUALISE_TAIL = "virtualiseTail";
 
 /** Flags that default to ON. Listed here so the runtime check (
  *  `isPerfFlagEnabled`) treats absence-of-explicit-localStorage-entry as
