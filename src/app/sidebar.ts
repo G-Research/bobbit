@@ -1354,9 +1354,9 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 	const { ungroupedSessions: ungroupedBare } = getSidebarData();
 	// Bucket goals + ungrouped sessions + staff by project so the collapsed
 	// sidebar mirrors the expanded structure (surface-staff-in-sessions design §3).
-	interface CollapsedBucket { goals: Goal[]; sessions: GatewaySession[] }
+	interface CollapsedBucket { goals: Goal[]; sessions: GatewaySession[]; staff: GatewaySession[] }
 	const byProject = new Map<string, CollapsedBucket>();
-	for (const p of state.projects) byProject.set(p.id, { goals: [], sessions: [] });
+	for (const p of state.projects) byProject.set(p.id, { goals: [], sessions: [], staff: [] });
 	for (const g of sortedGoals) {
 		if (!g.projectId) continue;
 		const bucket = byProject.get(g.projectId);
@@ -1367,24 +1367,18 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 		const bucket = byProject.get(s.projectId);
 		if (bucket) bucket.sessions.push(s);
 	}
-	// Surface staff as rows in each project's bucket — no flat global tail list.
-	const staffRowsByProject = new Map<string, GatewaySession[]>();
+	// Staff gets its own dedicated STAFF bucket in the collapsed sidebar.
 	for (const agent of state.staffList) {
 		if (agent.state === "retired") continue;
 		if (!agent.projectId) continue;
 		const row = synthStaffSessionRow(agent);
 		if (!row) continue;
-		let rows = staffRowsByProject.get(agent.projectId);
-		if (!rows) { rows = []; staffRowsByProject.set(agent.projectId, rows); }
-		rows.push(row);
+		const bucket = byProject.get(agent.projectId);
+		if (bucket) bucket.staff.push(row);
 	}
-	for (const [pid, rows] of staffRowsByProject) {
-		rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
-		const bucket = byProject.get(pid);
-		if (bucket) bucket.sessions = [...rows, ...bucket.sessions];
+	for (const [, bucket] of byProject) {
+		bucket.staff.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
 	}
-	// Stable date ordering for non-staff ungrouped, with staff already at the front above.
-	// (Don't resort because that would interleave staff with sessions.)
 
 	const renderCollapsedSession = (s: GatewaySession) => {
 		const active = activeSessionId() === s.id;
@@ -1430,9 +1424,10 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
 			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${state.projects.map((project, pi) => {
-					const bucket = byProject.get(project.id) || { goals: [], sessions: [] };
-					if (bucket.goals.length === 0 && bucket.sessions.length === 0) return "";
+					const bucket = byProject.get(project.id) || { goals: [], sessions: [], staff: [] };
+					if (bucket.goals.length === 0 && bucket.sessions.length === 0 && bucket.staff.length === 0) return "";
 					const _collapsedUngroupedExp = isUngroupedExpanded(project.id);
+					const _collapsedStaffExp = isStaffExpanded(project.id);
 					return html`
 						${pi > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 						${bucket.goals.map((goal, i) => {
@@ -1461,6 +1456,18 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">SES</span>
 						</button>
 						${_collapsedUngroupedExp ? bucket.sessions.map(renderCollapsedSession) : ""}` : bucket.sessions.map(renderCollapsedSession)}
+					${bucket.staff.length > 0 ? html`
+						<div class="w-7 border-t border-border/50 my-1.5"></div>
+						<button
+							class="flex items-center py-0.5 w-full rounded-md hover:bg-secondary/50 transition-colors" style="gap:0.225rem;"
+							title="Staff in ${project.name}"
+							@click=${() => { setStaffSectionExpanded(project.id, !_collapsedStaffExp); renderApp(); }}
+						>
+							<span class="text-muted-foreground shrink-0 select-none" style="width:${CHEVRON_W}px;text-align:center;font-size: 0.9167em;">${_collapsedStaffExp ? "▾" : "▸"}</span>
+							<span class="font-extrabold tracking-wider text-muted-foreground" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.75em;">STAFF</span>
+						</button>
+						${_collapsedStaffExp ? bucket.staff.map(renderCollapsedSession) : ""}
+					` : ""}
 					`;
 				})}
 				${state.showArchived && archivedGoals.length > 0 ? html`
