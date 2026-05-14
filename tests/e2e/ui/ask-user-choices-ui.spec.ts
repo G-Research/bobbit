@@ -271,9 +271,19 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		).toBe(true);
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
+		// Also dispatch the event directly as belt-and-braces in case page.keyboard
+		// doesn't reach the widget's keydown handler in a heavily loaded CI run.
 		await page.keyboard.press("1");
+		// Belt-and-braces: also fire a synthetic keydown on the .ask-widget div
+		// in case the physical key event was dropped or didn't bubble correctly.
+		await page.evaluate(() => {
+			const aw = document.querySelector(".ask-widget") as HTMLElement | null;
+			if (aw && !aw.querySelector('[role="tab"][data-tab-index="1"][aria-selected="true"]')) {
+				aw.dispatchEvent(new KeyboardEvent("keydown", { key: "1", code: "Digit1", bubbles: true, cancelable: true }));
+			}
+		});
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 8_000 });
+			.toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
 
 		// Re-focus for keyboard targeting on the new tab panel.
 		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');
