@@ -1,11 +1,12 @@
 name: lsp_document_symbols
-description: "List symbols (classes, functions, vars) in a file as a tree."
+description: "List symbols (classes, functions, vars) in a file as a tree. Prefer over read+scan to orient."
 summary: "Document symbols (LSP)"
 params: [path]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspDocumentSymbolsRenderer.ts
 docs: |-
   Returns a hierarchical symbol tree for one file. Use to orient before editing.
 detail_docs: >-

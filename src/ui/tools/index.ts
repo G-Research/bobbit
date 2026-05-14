@@ -35,6 +35,12 @@ import { GoalArchiveChildRenderer } from "./renderers/GoalArchiveChildRenderer.j
 import { GoalDecideMutationRenderer } from "./renderers/GoalDecideMutationRenderer.js";
 import { GoalSetPolicyRenderer } from "./renderers/GoalSetPolicyRenderer.js";
 import { CompactionSummaryRenderer } from "./renderers/CompactionSummaryRenderer.js";
+import { LspDefinitionRenderer } from "./renderers/LspDefinitionRenderer.js";
+import { LspReferencesRenderer } from "./renderers/LspReferencesRenderer.js";
+import { LspDiagnosticsRenderer } from "./renderers/LspDiagnosticsRenderer.js";
+import { LspDocumentSymbolsRenderer } from "./renderers/LspDocumentSymbolsRenderer.js";
+import { LspWorkspaceSymbolRenderer } from "./renderers/LspWorkspaceSymbolRenderer.js";
+import { LspRenameRenderer } from "./renderers/LspRenameRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -77,6 +83,19 @@ registerToolRenderer("review_open", new ReviewOpenRenderer());
 registerToolRenderer("review_close", new ReviewCloseRenderer());
 registerToolRenderer("ask_user_choices", new AskUserChoicesRenderer());
 registerToolRenderer("activate_skill", new ActivateSkillRenderer());
+
+// LSP tool renderers — all eager except hover, which transitively pulls
+// the heavy `<markdown-block>` element graph (KaTeX/marked/highlight.js).
+registerToolRenderer("lsp_definition", new LspDefinitionRenderer());
+registerToolRenderer("lsp_references", new LspReferencesRenderer());
+registerToolRenderer("lsp_diagnostics", new LspDiagnosticsRenderer());
+registerToolRenderer("lsp_document_symbols", new LspDocumentSymbolsRenderer());
+registerToolRenderer("lsp_workspace_symbol", new LspWorkspaceSymbolRenderer());
+registerToolRenderer("lsp_rename", new LspRenameRenderer());
+registerLazyToolRenderer("lsp_hover", async () => {
+	const { LspHoverRenderer } = await import("./renderers/LspHoverRenderer.js");
+	return new LspHoverRenderer();
+});
 
 // ── Heavy renderers — lazy-loaded on first encounter of each tool. ──
 // These pull MarkdownBlock/KaTeX/pdfjs/docx-preview transitively, so keeping

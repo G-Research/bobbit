@@ -1,11 +1,12 @@
 name: lsp_references
-description: "Find all references to a symbol; returns Location[]. 0-indexed line/char."
+description: "Find all symbol references. Prefer over grep for symbol callsites. 0-indexed line/char."
 summary: "Find references (LSP)"
 params: [path, line, character, includeDeclaration?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspReferencesRenderer.ts
 docs: |-
   100× cheaper than grep when you need every caller of a symbol. line/character are 0-indexed.
 detail_docs: >-

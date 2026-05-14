@@ -238,10 +238,12 @@ this.lspSupervisor = new LspSupervisor({
   sandbox: sandboxManager ? new SandboxLspBridge(sandboxManager) : undefined,
 });
 this.addTerminationListener((sessionId, info) => {
-  const session = this.store.get(sessionId);
-  if (!session?.cwd) return;
-  this.lspSupervisor.release(session.cwd);
-  for (const r of session.repoWorktrees ?? []) this.lspSupervisor.release(r.worktreePath);
+  // NOTE: terminateSession() deletes the session from the map *before*
+  // firing listeners, so we must read cwd/repoWorktrees from the listener
+  // info object (captured before deletion), not from this.store.get().
+  if (!info.cwd) return;
+  this.lspSupervisor.release(info.cwd);
+  for (const r of info.repoWorktrees ?? []) this.lspSupervisor.release(r.worktreePath);
 });
 ```
 
@@ -401,28 +403,67 @@ UI shows progress instead of an apparent hang.
 
 ## 6. Sandbox awareness
 
-In Docker mode (`sandbox: docker`), the gateway already exposes a generic
-`SandboxBridge` that runs commands inside the project's pool container
-(see `src/server/agent/project-sandbox.ts`).
+In Docker mode (`sandbox: docker`), the gateway exposes a `SandboxLspBridge`
+(`src/server/lsp/sandbox-bridge.ts`) that the supervisor uses when configured
+with `{ sandbox }`. The bridge runs the LSP child inside the project's pool
+container via `docker exec`, with stdin/stdout piped back to the gateway.
 
-The supervisor accepts a `sandbox?: SandboxBridge` option. When present:
+### Path translation
 
-- `spawn()` for an LSP child runs **inside the container** via the same
-  `docker exec` codepath that `rpc-bridge.ts::spawnDockerExec` uses, with
-  stdin/stdout piped back to the host gateway process.
-- Worktree paths are remapped from host (`/Users/aj/.../wt/...`) to container
-  (`/workspace-wt/...`) via the existing `toDockerPath()` helper in
-  `docker-args.ts`.
-- The path-rewrite on **return** values from the server (definition `path`,
-  reference list, etc.) must rewrite the container path back to the host path
-  via a reverse map — the supervisor maintains it from the same mount table
-  `rpc-bridge` already builds. The tool result then re-relativises against
-  `session.cwd` so the agent never sees absolute paths.
+The bridge performs two-way path translation between host and container paths:
 
-`typescript-language-server` and `pyright` must be installed **inside the
-sandbox image**. We extend `docker/Dockerfile` (sandbox image) to
-`npm i -g typescript-language-server pyright` and pin them in
-`docker/package.json`.
+- **Host → container:** `toContainerPath(hostPath)` strips the host worktree-root
+  prefix and replaces it with `/workspace-wt`, producing a path the language
+  server inside the container can open. The mapping is purely lexical — no
+  filesystem I/O — using `path.relative(hostWorktreeRoot, hostPath)`.
+- **Container → host:** `toHostPath(containerPath)` reverses the same prefix
+  substitution. Results from the language server (`definition.path`,
+  `references[].path`, etc.) pass through this reverse map before being
+  re-relativised against `session.cwd`, so the agent only ever sees cwd-relative
+  paths.
+
+The TypeScript adapter holds a **stable per-client bridge reference** (bound at
+`spawn()` time) and applies `toHostPath` consistently to:
+- `textDocument/definition` results
+- `textDocument/references` results
+- `textDocument/publishDiagnostics` URIs (which arrive as `file://` URIs from
+  the language server and must be stripped and reverse-translated)
+- `workspace/symbol` results
+- `textDocument/rename` `WorkspaceEdit` keys
+
+### `BOBBIT_HOST_CWD`
+
+The LSP extension (`defaults/tools/lsp/extension.ts`) reads the agent's
+current working directory from `BOBBIT_HOST_CWD` (injected by
+`session-setup.ts`) rather than `process.cwd()`. Inside a sandbox,
+`process.cwd()` returns the container path; the gateway endpoint expects
+the host path so it can normalise file arguments correctly.
+
+### Refcount leak fix
+
+The termination listener in `session-manager.ts` used to re-look up the
+session by ID to find its `cwd`. Because `terminateSession()` removes the
+session from the in-memory map *before* firing listeners, the lookup returned
+`undefined` and `lspSupervisor.release()` never ran — leaking language-server
+processes. The fix captures `cwd`, `worktreePath`, and `repoWorktrees` from
+the session *before* deletion and passes them through the listener info object.
+
+### `sandboxCmd` support in server-process.ts
+
+`src/server/lsp/server-process.ts` accepts an optional `sandboxCmd` option.
+When present, the child process is spawned as `sandboxCmd.cmd(binaryAndArgs)`
+(a function supplied by `DockerSandboxLspBridge`) rather than calling the
+binary directly. This is how `docker exec` is injected into the spawn path
+without the bridge having to know about the JSON-RPC framing.
+
+### Current limitations
+
+- Cross-sandbox path round-trips have not been hardened against every edge
+  case (Windows host with Linux container, multi-mount worktrees). If absolute
+  container paths leak into agent output, the bridge's `toHostPath` is the
+  area to investigate.
+- `typescript-language-server` must be installed inside the sandbox image.
+  The Docker image (`docker/`) ships it pre-installed.
 
 ---
 

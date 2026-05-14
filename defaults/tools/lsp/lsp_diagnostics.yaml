@@ -1,11 +1,12 @@
 name: lsp_diagnostics
-description: "Type errors / warnings for a file (or workspace if path omitted)."
+description: "Type errors for a file or workspace. Prefer over npm run check in the edit loop."
 summary: "Diagnostics (LSP)"
 params: [path?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspDiagnosticsRenderer.ts
 docs: |-
   ~50× faster than `npm run check` for iteration loops. Omit `path` to aggregate all open docs.
 detail_docs: >-

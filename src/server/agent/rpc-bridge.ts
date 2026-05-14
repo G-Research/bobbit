@@ -47,6 +47,10 @@ export interface RpcBridgeOptions {
 	gatewayToken?: string;
 	/** Container ID to use with docker exec (from sandbox pool) */
 	containerId?: string;
+	/** Host-side cwd before sandbox path translation. Injected as
+	 *  BOBBIT_HOST_CWD inside the container so tool extensions can pass
+	 *  the correct host path to gateway APIs that run on the host. */
+	hostCwd?: string;
 	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
 	toolManager?: ToolManager;
 	/**
@@ -488,6 +492,9 @@ export class RpcBridge {
 		}
 		execArgs.push("-e", "NODE_TLS_REJECT_UNAUTHORIZED=0");
 		execArgs.push("-e", "NODE_OPTIONS=--no-warnings");
+		if (this.options.hostCwd) {
+			execArgs.push("-e", `BOBBIT_HOST_CWD=${this.options.hostCwd}`);
+		}
 
 		// Pass sandbox credentials (API keys, etc.) via docker exec env vars
 		if (this.options.sandboxCredentials) {

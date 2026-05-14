@@ -1,5 +1,7 @@
 # LSP Code Intelligence
 
+> All coding-role agents receive a short symbol-lookup hint in their system prompt summarising when to use `lsp_*` vs `grep` — see also AGENTS.md for project-specific nuance.
+
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
 > Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md). This page is the operator/agent-facing reference; the design doc is the architectural source of truth.
@@ -149,6 +151,44 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 | `[lsp] config change in …` log spam during a `git checkout` | `fs.watch` is firing once per touched config file in the branch swap | Harmless — the debounce coalesces within 1.5s and the entry restarts lazily. If the churn is disruptive, raise `configChangeDebounceMs` (constructor option). |
 | Container-path leak — agent sees `/workspace-wt/...` in a result | The sandbox bridge's reverse-translation missed an edge case | File a bug with the originating call and `GET /api/lsp/stats` output. Workaround: rerun with `lsp_disabled: true` and fall back to grep. |
 | Server keeps crashing — `crashCount` climbs to 3 and the 5-min cooldown trips | The language server hit a project it can't load (corrupt `tsconfig.json`, missing `node_modules/typescript`, OOM) | Inspect the gateway log — the adapter writes the child's stderr ring buffer on exit. Fix the underlying project; the cooldown self-clears after 5 min, or restart the gateway to reset crash state. |
+
+## UI renderers
+
+Every `lsp_*` tool has a custom UI renderer that replaces the raw JSON dump with IDE-style output. Without renderers, results from tools like `lsp_document_symbols` (which can return deeply nested trees) fell through to `DefaultRenderer.ts` and were nearly unreadable. The renderers make the output scannable at a glance — the same information a human would see in an IDE sidebar or problems pane.
+
+### Renderer files
+
+All renderers live in `src/ui/tools/renderers/` and are registered in `src/ui/tools/index.ts`. Each tool's YAML (`defaults/tools/lsp/*.yaml`) declares a `renderer:` field pointing at its file.
+
+| Tool | Renderer | What it shows |
+| --- | --- | --- |
+| `lsp_definition` | `LspDefinitionRenderer.ts` | `path:line` for each definition location. Handles both `Location` and `Location[]` from the server. Null result: "No definition found." |
+| `lsp_references` | `LspReferencesRenderer.ts` | Collapsible list grouped by file with per-file count badges. Header: `N references in M files`. |
+| `lsp_hover` | `LspHoverRenderer.ts` | `contents` rendered as markdown via `<markdown-block>` in a scrollable card. Loaded lazily via `ensureMarkdownBlock()` to avoid bundle bloat. Null result: "No hover info." |
+| `lsp_diagnostics` | `LspDiagnosticsRenderer.ts` | Collapsible list grouped by file, sorted error → warning → info → hint. Each row: severity icon + colour + `:line:col` + message + optional source chip. Empty result: green "No diagnostics — file is clean." |
+| `lsp_document_symbols` | `LspDocumentSymbolsRenderer.ts` | Collapsible symbol tree (max 3 levels deep). Top level expanded; nested children collapse per parent. Beyond depth 3: "(N more nested symbols)" with collapsed JSON fallback for power users. |
+| `lsp_workspace_symbol` | `LspWorkspaceSymbolRenderer.ts` | Collapsible flat list in server-relevance order. Each row: kind icon + name + grey `path:line`. Header: `N symbols matching "<query>"`. |
+| `lsp_rename` | `LspRenameRenderer.ts` | Summary card: `Rename → <newName>` + `in N files (M total edits)` + per-file edit count. Footer: "Preview only — agent applies via `edit`." |
+
+### Shared module — LspShared.ts
+
+`src/ui/tools/renderers/LspShared.ts` consolidates helpers reused across all seven renderers:
+
+- **`symbolKindLabel(n)`** — maps LSP `SymbolKind` integer to `{ label, icon }` using lucide icons.
+- **`severityLabel(s)`** / **`normaliseSeverity(s)`** — maps diagnostic severity (string or numeric) to `{ label, color, icon }`. Numeric severities from some servers (1=error … 4=hint per LSP spec) are normalised to strings before styling.
+- **`renderLocationRow(loc)`** — renders a `path:line` span (1-indexed for display) with monospace font.
+- **`renderLspErrorEnvelope(body)`** / **`isLspErrorEnvelope(body)`** — renders `lsp_unavailable`, `lsp_capacity`, and `lsp_timeout` errors as a calm amber warning box with a one-line fallback hint ("LSP unavailable — try grep."), not a destructive error.
+- **`parseLspResult(result)`** — extracts and JSON-parses the text content from a `ToolResultMessage`.
+- **`normalisePath(p)`** — strips `file://` URI prefixes (including Windows `file:///C:/…` form) that the rename tool can leak through.
+- **`summariseDiagnostics(diags)`** — produces a human-readable summary string like "2 errors, 1 warning".
+- **`renderSymbolTree(syms, depth)`** / **`renderSymbolRow(s)`** — recursive lit `html` symbol tree with depth cap and collapsed JSON fallback.
+
+### Registration
+
+Renderers are wired in two places:
+
+1. **`src/ui/tools/index.ts`** — `registerToolRenderer("lsp_definition", new LspDefinitionRenderer())` (and six more). This is where the renderer is actually active at runtime.
+2. **`defaults/tools/lsp/<name>.yaml`** — `renderer: src/ui/tools/renderers/<Name>.ts` field. This is informational (used by docs and the config UI); the `index.ts` registration is authoritative.
 
 ## See also
 

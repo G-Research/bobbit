@@ -1,11 +1,12 @@
 name: lsp_definition
-description: "Jump to symbol definition; returns file path + range. 0-indexed line/char."
+description: "Go to symbol definition. Prefer over grep+read for symbol lookups. 0-indexed line/char."
 summary: "Go to definition (LSP)"
 params: [path, line, character]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: LSP
+renderer: src/ui/tools/renderers/LspDefinitionRenderer.ts
 docs: |-
   Cheaper than grep+read for symbol lookups. line/character are 0-indexed (LSP-native; `read` is 1-indexed).
 detail_docs: >-

@@ -14,7 +14,7 @@ import {
 	spawnLspChild,
 	type LspProcess,
 } from "../server-process.js";
-import type { LspClient, LspClientFactory, SpawnOpts, ClientState } from "../client.js";
+import type { LspClient, LspClientFactory, SpawnOpts, ClientState, SandboxLspBridge } from "../client.js";
 import type {
 	Diagnostic, DocumentSymbol, HoverResult, Language, Location,
 	Range, SymbolInformation, WorkspaceEdit,
@@ -45,6 +45,21 @@ class TypescriptLspClient implements LspClient {
 	readonly worktreePath: string;
 	state: ClientState = "starting";
 	private proc!: LspProcess;
+	/** Stable per-client bridge (never overwritten after start). Resolved from
+	 *  the multi-project bridge at startup so concurrent clients don't share
+	 *  mutable path-translation state. */
+	private bridge?: SandboxLspBridge;
+
+	/** Host absolute path → URI for sending to the LSP server (container-translated when sandboxed). */
+	private toUri(absPath: string): string {
+		return this.bridge ? pathToUri(this.bridge.toContainerPath(absPath)) : pathToUri(absPath);
+	}
+	/** URI from LSP server → host absolute path (container-translated back when sandboxed). */
+	private fromUri(uri: string): string {
+		const p = uriToPath(uri);
+		return this.bridge ? this.bridge.toHostPath(p) : p;
+	}
+
 	private openDocs = new Map<string, DocState>(); // absPath → state
 	private diagnosticsByUri = new Map<string, Diagnostic[]>();
 	private diagVersionByUri = new Map<string, number>();
@@ -59,6 +74,9 @@ class TypescriptLspClient implements LspClient {
 	}
 
 	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
+		// Resolve a stable per-client bridge to avoid shared mutable state
+		// (lastBridge) when multiple projects have concurrent LSP processes.
+		this.bridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
 		this.onClose = onClose;
 		const resolved = resolveTypescriptLanguageServer();
 		if (!resolved) throw new Error("typescript-language-server not installed");
@@ -66,6 +84,9 @@ class TypescriptLspClient implements LspClient {
 			worktreePath: this.worktreePath,
 			command: resolved.node,
 			args: [resolved.cliMjs, "--stdio"],
+			// In a sandbox container, use the globally-installed binary from PATH
+			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
+			sandboxCmd: ["typescript-language-server", "--stdio"],
 			sandbox,
 		});
 
@@ -83,10 +104,15 @@ class TypescriptLspClient implements LspClient {
 		});
 
 		this.proc.connection.onNotification("textDocument/publishDiagnostics", (p: any) => {
-			const uri = p?.uri as string;
-			if (!uri) return;
+			const rawUri = p?.uri as string;
+			if (!rawUri) return;
+			// Translate container URI → host path, then re-serialise as host URI
+			// so diagnosticsByUri is always keyed by host-side URIs (matching
+			// the pathToUri(absPath) used in diagnostics() lookup).
+			const hostPath = this.fromUri(rawUri);
+			const uri = pathToUri(hostPath);
 			const list: Diagnostic[] = (p.diagnostics as any[]).map(d => ({
-				path: uriToPath(uri),
+				path: hostPath,
 				range: d.range as Range,
 				severity: lspSeverity(d.severity),
 				message: String(d.message ?? ""),
@@ -100,7 +126,7 @@ class TypescriptLspClient implements LspClient {
 		});
 
 		// initialize
-		const rootUri = pathToUri(this.worktreePath);
+		const rootUri = this.toUri(this.worktreePath);
 		await this.proc.connection.sendRequest("initialize", {
 			processId: process.pid,
 			rootUri,
@@ -138,7 +164,7 @@ class TypescriptLspClient implements LspClient {
 			const state = this.openDocs.get(absPath)!;
 			state.version++;
 			this.proc.connection.sendNotification("textDocument/didChange", {
-				textDocument: { uri: pathToUri(absPath), version: state.version },
+				textDocument: { uri: this.toUri(absPath), version: state.version },
 				contentChanges: [{ text }],
 			});
 			return;
@@ -147,7 +173,7 @@ class TypescriptLspClient implements LspClient {
 		this.openDocs.set(absPath, { version: 1 });
 		this.proc.connection.sendNotification("textDocument/didOpen", {
 			textDocument: {
-				uri: pathToUri(absPath),
+				uri: this.toUri(absPath),
 				languageId: absPath.endsWith(".tsx") || absPath.endsWith(".jsx") ? "typescriptreact" : "typescript",
 				version: 1,
 				text,
@@ -158,7 +184,7 @@ class TypescriptLspClient implements LspClient {
 	async definition(absPath: string, line: number, character: number): Promise<Location | null> {
 		await this.ensureDocOpen(absPath);
 		const res: any = await this.proc.connection.sendRequest("textDocument/definition", {
-			textDocument: { uri: pathToUri(absPath) },
+			textDocument: { uri: this.toUri(absPath) },
 			position: { line, character },
 		});
 		const first = Array.isArray(res) ? res[0] : res;
@@ -166,23 +192,23 @@ class TypescriptLspClient implements LspClient {
 		const uri = first.uri ?? first.targetUri;
 		const range = first.range ?? first.targetSelectionRange ?? first.targetRange;
 		if (!uri || !range) return null;
-		return { path: uriToPath(uri), range };
+		return { path: this.fromUri(uri), range };
 	}
 
 	async references(absPath: string, line: number, character: number, includeDecl: boolean): Promise<Location[]> {
 		await this.ensureDocOpen(absPath);
 		const res: any[] = await this.proc.connection.sendRequest("textDocument/references", {
-			textDocument: { uri: pathToUri(absPath) },
+			textDocument: { uri: this.toUri(absPath) },
 			position: { line, character },
 			context: { includeDeclaration: includeDecl },
 		}) ?? [];
-		return res.map(r => ({ path: uriToPath(r.uri), range: r.range }));
+		return res.map(r => ({ path: this.fromUri(r.uri), range: r.range }));
 	}
 
 	async hover(absPath: string, line: number, character: number): Promise<HoverResult | null> {
 		await this.ensureDocOpen(absPath);
 		const res: any = await this.proc.connection.sendRequest("textDocument/hover", {
-			textDocument: { uri: pathToUri(absPath) },
+			textDocument: { uri: this.toUri(absPath) },
 			position: { line, character },
 		});
 		if (!res?.contents) return null;
@@ -244,7 +270,7 @@ class TypescriptLspClient implements LspClient {
 	async documentSymbols(absPath: string): Promise<DocumentSymbol[]> {
 		await this.ensureDocOpen(absPath);
 		const res: any[] = await this.proc.connection.sendRequest("textDocument/documentSymbol", {
-			textDocument: { uri: pathToUri(absPath) },
+			textDocument: { uri: this.toUri(absPath) },
 		}) ?? [];
 		// Could be DocumentSymbol[] (hierarchical) or SymbolInformation[] (flat). Pass through.
 		return res as DocumentSymbol[];
@@ -255,7 +281,7 @@ class TypescriptLspClient implements LspClient {
 		return res.slice(0, 100).map(s => ({
 			name: s.name,
 			kind: s.kind,
-			path: uriToPath(s.location?.uri ?? s.location),
+			path: this.fromUri(s.location?.uri ?? s.location),
 			range: s.location?.range ?? s.range,
 			containerName: s.containerName,
 		}));
@@ -264,7 +290,7 @@ class TypescriptLspClient implements LspClient {
 	async rename(absPath: string, line: number, character: number, newName: string): Promise<WorkspaceEdit> {
 		await this.ensureDocOpen(absPath);
 		const res: any = await this.proc.connection.sendRequest("textDocument/rename", {
-			textDocument: { uri: pathToUri(absPath) },
+			textDocument: { uri: this.toUri(absPath) },
 			position: { line, character },
 			newName,
 		});
@@ -272,7 +298,7 @@ class TypescriptLspClient implements LspClient {
 		const changes = res?.changes;
 		if (changes) {
 			for (const [uri, edits] of Object.entries(changes)) {
-				out.changes[uriToPath(uri)] = edits as any;
+				out.changes[this.fromUri(uri)] = edits as any;
 			}
 		}
 		// documentChanges variant
@@ -280,7 +306,7 @@ class TypescriptLspClient implements LspClient {
 		if (docChanges) {
 			for (const dc of docChanges) {
 				if (dc.textDocument && Array.isArray(dc.edits)) {
-					const p = uriToPath(dc.textDocument.uri);
+					const p = this.fromUri(dc.textDocument.uri);
 					out.changes[p] = (out.changes[p] ?? []).concat(dc.edits);
 				}
 			}

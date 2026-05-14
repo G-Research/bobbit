@@ -23,6 +23,12 @@ export interface LspProcessOpts {
 	command: string;       // resolved absolute binary or node script
 	args: string[];
 	sandbox?: SandboxLspBridge;
+	/** Command line to use when launching inside a sandbox container.
+	 *  Host-resolved paths in `command`/`args` (gateway `process.execPath`,
+	 *  host `node_modules` scripts) do not exist inside the container.
+	 *  Callers should supply the container-installed equivalents here.
+	 *  Defaults to `[command, ...args]` when omitted (host-only fallback). */
+	sandboxCmd?: string[];
 }
 
 export interface LspProcess {
@@ -69,9 +75,12 @@ export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
 	if (opts.sandbox && cid) {
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
+		// Use sandboxCmd when provided; host-resolved paths (process.execPath,
+		// gateway node_modules scripts) do not exist inside the container.
+		const containerCmd = opts.sandboxCmd ?? [opts.command, ...opts.args];
 		child = opts.sandbox.spawn({
 			containerId: cid,
-			cmd: [opts.command, ...opts.args],
+			cmd: containerCmd,
 			cwd: containerCwd,
 		});
 	} else {
@@ -116,8 +125,14 @@ export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 		}
 		try { connection.dispose(); } catch { /* ignore */ }
 		try { child.kill("SIGTERM"); } catch { /* ignore */ }
-		await new Promise(r => setTimeout(r, 50));
-		if (!child.killed) {
+		// Wait up to 500 ms for the process to actually exit before escalating.
+		// child.killed is set by child.kill() immediately — not on process exit —
+		// so we check child.exitCode (null = still running) instead.
+		await Promise.race([
+			new Promise<void>(r => child.once("exit", () => r())),
+			new Promise<void>(r => setTimeout(r, 500)),
+		]);
+		if (child.exitCode === null) {
 			try { child.kill("SIGKILL"); } catch { /* ignore */ }
 		}
 	};

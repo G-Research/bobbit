@@ -106,6 +106,11 @@ import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/m
 import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade } from "./agent/config-cascade.js";
+import { LspSupervisor } from "./lsp/supervisor.js";
+import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
+import { PyrightLspFactory } from "./lsp/clients/pyright.js";
+import { MultiProjectSandboxLspBridge } from "./lsp/sandbox-bridge.js";
+import { registerWorktreePreCleanupHook } from "./lsp/cleanup-hook.js";
 
 import { initAssistantRegistry } from "./agent/assistant-registry.js";
 import {
@@ -661,6 +666,35 @@ export function createGateway(config: GatewayConfig) {
 		prStatusStore,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+
+	// LSP supervisor — singleton, lazy-spawning. Adapters registered eagerly
+	// but no LSP child processes are spawned until first `ensure()`.
+	const lspProjectConfig = projectConfigStore.getWithDefaults();
+	const lspDisabled = String(lspProjectConfig.lsp_disabled ?? "false").toLowerCase() === "true";
+	const lspPreWarm = String(lspProjectConfig.pre_warm_lsp ?? "true").toLowerCase() !== "false";
+	const lspMaxServersRaw = Number(lspProjectConfig.lsp_max_servers ?? 4);
+	const lspIdleTtlRaw = Number(lspProjectConfig.lsp_idle_ttl_ms ?? 600000);
+	const lspMaxServers = Number.isFinite(lspMaxServersRaw) && lspMaxServersRaw > 0 ? lspMaxServersRaw : 4;
+	const lspIdleTtlMs = Number.isFinite(lspIdleTtlRaw) && lspIdleTtlRaw > 0 ? lspIdleTtlRaw : 600000;
+	const lspSupervisor = new LspSupervisor({
+		factories: [new TypescriptLspFactory(), new PyrightLspFactory()],
+		disabled: lspDisabled,
+		preWarmEnabled: lspPreWarm,
+		maxServers: lspMaxServers,
+		idleTtlMs: lspIdleTtlMs,
+	});
+	// SandboxManager is wired later when sandbox=docker, so the supervisor
+	// exposes a setter rather than taking it via constructor.
+	sessionManager.setLspSupervisor(lspSupervisor);
+	registerWorktreePreCleanupHook(async (wp) => { await lspSupervisor.shutdownForWorktree(wp); });
+	// Use the info fields directly: the session has already been removed from
+	// the in-memory map by the time listeners fire, so getSession() would
+	// return undefined and refcounts would leak.
+	sessionManager.addTerminationListener((_sessionId, info) => {
+		if (info.cwd) lspSupervisor.release(info.cwd);
+		if (info.worktreePath) lspSupervisor.release(info.worktreePath);
+		for (const r of info.repoWorktrees ?? []) lspSupervisor.release(r.worktreePath);
+	});
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
@@ -1184,6 +1218,10 @@ export function createGateway(config: GatewayConfig) {
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
+			// Install LSP sandbox bridge now that SandboxManager exists.
+			lspSupervisor.setSandboxBridge(
+				new MultiProjectSandboxLspBridge(sandboxManager, projectContextManager),
+			);
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
