@@ -131,12 +131,12 @@ test.describe("Phase 5b — sidebar nested goals", () => {
 		// localStorage-backed expansion state.
 		await expandGoalsAndReload(page, [parentId, child1Id]);
 		const grandchildRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
-		await expect(grandchildRow).toBeVisible({ timeout: 15_000 });
-		await expect(grandchildRow).toHaveAttribute("data-depth", "2");
+		// Wait for both visibility AND correct depth — the element may briefly
+		// render at depth 0 while the parent-chain goals are still loading.
+		await expect(grandchildRow).toHaveAttribute("data-depth", "2", { timeout: 20_000 });
 
 		await page.reload();
 		const grandchildRow2 = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${grandchildId}"]`).first();
-		await expect(grandchildRow2).toBeVisible({ timeout: 15_000 });
-		await expect(grandchildRow2).toHaveAttribute("data-depth", "2");
+		await expect(grandchildRow2).toHaveAttribute("data-depth", "2", { timeout: 20_000 });
 	});
 });
