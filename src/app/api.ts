@@ -19,6 +19,7 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
+import { needsHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 export { errorFromResponse, errorDetails };
 // Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
@@ -150,10 +151,13 @@ export async function refreshSessions(): Promise<void> {
 			const activeId = state.remoteAgent?.gatewaySessionId;
 			for (const s of newSessions) {
 				const prev = _prevSessionStatus.get(s.id);
-				const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
-				if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
-					RemoteAgent.playNotificationBeep();
-					showFaviconBadge();
+				if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
+					const goalId = s.teamGoalId || s.goalId;
+					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)) {
+						RemoteAgent.playNotificationBeep();
+						showFaviconBadge();
+					}
 				}
 			}
 			for (const s of newSessions) {
@@ -1343,6 +1347,12 @@ export interface GateSignal {
 				contentType: string;
 				metadata?: Record<string, string>;
 			};
+			/** Lifecycle status for in-flight rows seeded by beginVerification. */
+			status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+			/** Optional phase number, mirrored from the workflow VerifyStep. */
+			phase?: number;
+			/** True when the step was skipped (optional step or phase abort). */
+			skipped?: boolean;
 		}>;
 	};
 }

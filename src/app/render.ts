@@ -447,7 +447,7 @@ function renderMobileLanding() {
 																	<span class="relative inline-flex items-center justify-center" style="width:16px;height:16px;">
 																		${icon(MessagesSquare, "sm")}
 																		<svg viewBox="0 0 10 10" style="position:absolute;bottom:0px;right:-1px;width:9px;height:9px;filter:drop-shadow(0 0 1.5px var(--background));">
-																			<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+																			<path d="M5 1V9M1 5H9" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
 																		</svg>
 																	</span>
 																</button>
@@ -1987,20 +1987,18 @@ function staffPreviewPanel() {
 						},
 					})}
 				</div>
-				${state.sandboxStatus?.configured ? html`
 				<div>
-					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
+					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists) ? "opacity-40 pointer-events-none" : ""}">
 						<input type="checkbox" class="toggle-switch" .checked=${_staffSandboxed}
-							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+							?disabled=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)}
 							@change=${(e: Event) => { _staffSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
 						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
-						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+						<span title=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)
 							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
 							: "Runs this staff agent in an isolated Docker container with restricted filesystem and network access"}
 							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 					</label>
 				</div>
-				` : ""}
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>

@@ -3,6 +3,7 @@ import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { needsHumanAttention } from "./notification-policy.js";
 import { refreshGateStatusForGoal, refreshSessions } from "./api.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./session-manager.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
@@ -1950,9 +1951,26 @@ export class RemoteAgent {
 					state.proposalStreamingByTag[k] = false;
 				}
 
-				// Notify: beep + favicon badge
-				RemoteAgent.playNotificationBeep();
-				showFaviconBadge();
+				// Notify: beep + favicon badge — only when the human is actually needed.
+				// Team members/delegates escalate to their parent silently; team leads
+				// only ping when the goal is complete or they're stuck (no live downstream).
+				{
+					const sess = state.gatewaySessions.find(gs => gs.id === this._sessionId);
+					if (sess) {
+						const goalId = sess.teamGoalId || sess.goalId;
+						const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+						if (needsHumanAttention(sess, goal, state.gatewaySessions, state.gateStatusCache)) {
+							RemoteAgent.playNotificationBeep();
+							showFaviconBadge();
+						}
+					} else {
+						// Session not in the cache yet — fall back to today's behaviour
+						// (notify) so we never *silently swallow* a standalone session's
+						// finish cue during the brief window before the poll lands.
+						RemoteAgent.playNotificationBeep();
+						showFaviconBadge();
+					}
+				}
 
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;

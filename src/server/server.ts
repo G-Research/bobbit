@@ -5379,9 +5379,18 @@ async function handleApiRoute(
 			}
 		}
 
-		// Create signal record
+		// Cancel any in-flight verifications for the same gate BEFORE seeding
+		// the new one — otherwise cancelStaleVerifications would observe and
+		// tear down the just-seeded active entry.
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
+		// Create signal record. Step enumeration is performed synchronously
+		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
+		// `activeVerifications` agree on the step list from the very first
+		// persisted state. See goal "Fix verification progress race".
+		const signalId = randomUUID();
 		const signal = {
-			id: randomUUID(),
+			id: signalId,
 			gateId,
 			goalId,
 			sessionId: signalSessionId,
@@ -5390,8 +5399,11 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
-			verification: { status: "running" as const, steps: [] },
+			verification: { status: "running" as const, steps: [] as any[] },
 		};
+
+		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
 
@@ -5406,6 +5418,23 @@ async function handleApiRoute(
 		// Broadcast signal received
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
+		// Broadcast verification started AFTER signal received — WS clients
+		// depend on this ordering (see tests/e2e/verification-core.spec.ts
+		// "WS events have correct shape, timestamps, and ordering"). The
+		// `gate_verification_started` event used to be fired synchronously
+		// inside `beginVerification` which inverted the order on the wire.
+		const activeForBroadcast = verificationHarness.getActiveVerification(signal.id);
+		if (activeForBroadcast && initialSteps.length > 0) {
+			broadcastToGoal(goalId, {
+				type: "gate_verification_started",
+				goalId,
+				gateId,
+				signalId: signal.id,
+				startedAt: activeForBroadcast.startedAt,
+				steps: (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+		}
+
 		// Build gate state map for metadata variable resolution + LLM reviewer context
 		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
 		for (const gs of gateStore.getGatesForGoal(goalId)) {
@@ -5417,9 +5446,6 @@ async function handleApiRoute(
 				injectDownstream: def?.injectDownstream,
 			});
 		}
-
-		// Cancel any in-flight verifications for the same gate before starting new ones
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
 
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
@@ -8350,22 +8376,14 @@ async function handleApiRoute(
 
 	// GET /api/staff/orphaned — staff with missing projectId or stuck on the system project
 	if (url.pathname === "/api/staff/orphaned" && req.method === "GET") {
-		const list = staffManager.listOrphaned().map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listOrphaned() });
 		return;
 	}
 
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const list = staffManager.listStaff(projectId).map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listStaff(projectId) });
 		return;
 	}
 
@@ -8412,8 +8430,7 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const staff = staffManager.getStaff(id);
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-			const sandboxed = staff.projectId ? (projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			json({ ...staff, sandboxed });
+			json(staff);
 			return;
 		}
 

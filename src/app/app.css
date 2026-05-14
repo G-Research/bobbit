@@ -135,6 +135,25 @@ details.wf-proposal-workflow .wf-proposal-gates {
 }
 
 /* ============================================================================
+ * SIDEBAR — nudge button hit boxes (+1px in each dimension)
+ * ============================================================================
+ * Adds a transparent 0.5px border on every side of sidebar buttons. With
+ * `box-sizing: border-box` (Tailwind default) and no explicit width/height
+ * on these buttons, the border is additive to the layout box — each button
+ * grows by exactly 1px in width and 1px in height without disturbing existing
+ * padding utilities (p-1, px-2 py-1, etc.). Because the box itself grows,
+ * neighbouring buttons shift outward by 0.5px each, so hit areas never
+ * overlap — unlike the previous `::after` inflation attempt (reverted in
+ * dd428416) where adjacent buttons ate into each other.
+ *
+ * Excluded: `.flex-1` tab buttons in the top tab strip (Roles / Tools /
+ * Skills / Workflows / New Goal) — they already fill their row.
+ */
+.sidebar-root button:not(.flex-1) {
+	border: 0.5px solid transparent;
+}
+
+/* ============================================================================
  * SIDEBAR — right edge border + glow
  * ============================================================================ */
 .sidebar-edge {

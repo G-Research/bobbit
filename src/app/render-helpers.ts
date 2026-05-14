@@ -28,6 +28,7 @@ import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import { needsHumanAttention } from "./notification-policy.js";
 
 // ============================================================================
 // FORMATTING
@@ -223,21 +224,19 @@ export function markSessionVisited(sessionId: string): void {
 }
 
 /** Returns true if the session has activity the user hasn't seen yet.
- *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt.
- *  For team agents (team leads and members), the dot only shows when the
- *  associated goal is complete — humans don't need to check on agents mid-work. */
+ *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt
+ *  AND the session warrants human attention (see `needsHumanAttention` —
+ *  team members never surface, team leads only when goal is complete or stuck). */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
 
-	// Team agents: suppress the unseen dot unless the goal is complete
-	const teamGoal = session.teamGoalId || (session.role === "team-lead" ? session.goalId : undefined);
-	if (teamGoal) {
-		const goal = state.goals.find(g => g.id === teamGoal);
-		if (!goal || goal.state !== "complete") return false;
-	}
+	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
+	const goalId = session.teamGoalId || session.goalId;
+	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+	if (!needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)) return false;
 
 	const mirror = _readMirror.get(session.id) ?? 0;
 	const lastRead = Math.max(session.lastReadAt ?? 0, mirror);
@@ -846,10 +845,34 @@ function renderGoalBadge(goalId: string) {
 export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; renderedAncestors?: Set<string>; displayTitleSuffix?: string }) {
 	const mobile = !isDesktop();
 	const isExpanded = expandedGoals.has(goal.id);
+	// `goalSessions` is the full, unfiltered roster of sessions belonging to this
+	// goal. It drives badges, gate counts, `hasActiveTeam`, `isWorkMerged`,
+	// `hasActiveSession`, and the on-demand team-agents fetch below — all of
+	// which must reflect REAL goal state, not the user's current filter view.
 	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
 	const isCreatingHere = state.creatingSessionForGoalId === goal.id;
 	const isTeamGoal = !!(goal as any).team;
 	const hasActiveTeam = isTeamGoal && goalSessions.some((s) => s.role === "team-lead" && s.status !== "terminated");
+
+	// `displaySessions` is the FILTERED subset used for actually rendering rows.
+	// Mirrors the Show Busy / Show Read handling at sidebar.ts:964,
+	// render.ts:272, and the delegate-child paths in renderSessionRow (~line 445)
+	// and renderLiveDelegates. Active session is exempt (handled inside
+	// `passesSidebarFilters`). A non-empty search bypasses filters entirely.
+	// Team-lead-sticky: if the natural team-lead would be filtered out but any
+	// team child still passes, keep the lead so it can host the child row
+	// (mirrors how delegate parents stay visible when a delegate survives the
+	// filter). Lead is re-inserted at its natural createdAt position.
+	const bypassFilters = !!state.searchQuery.trim();
+	const filteredGoalSessions = goalSessions.filter((s) =>
+		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
+	let displaySessions = filteredGoalSessions;
+	if (isTeamGoal) {
+		const naturalLead = goalSessions.find((s) => s.role === "team-lead");
+		if (naturalLead && !filteredGoalSessions.includes(naturalLead) && filteredGoalSessions.length > 0) {
+			displaySessions = [naturalLead, ...filteredGoalSessions].sort((a, b) => a.createdAt - b.createdAt);
+		}
+	}
 	const isLoading = teamLoading.has(goal.id);
 	const isPreparing = goal.setupStatus === "preparing";
 
@@ -937,13 +960,15 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 
 	const teamControls = "";
 
-	// Separate team lead from team children for nested rendering
-	const teamLead = isTeamGoal ? goalSessions.find(s => s.role === "team-lead") : null;
-	const teamChildren = isTeamGoal && teamLead ? goalSessions.filter(s => s.id !== teamLead.id) : [];
-	const nonTeamSessions = isTeamGoal ? goalSessions.filter(s => !teamLead || (s.id !== teamLead.id && !teamChildren.includes(s))) : goalSessions;
+	// Separate team lead from team children for nested rendering. Partitions are
+	// computed from `displaySessions` (the filtered view), NOT `goalSessions`,
+	// so the Show Busy / Show Read toggles actually affect what gets rendered.
+	const teamLead = isTeamGoal ? displaySessions.find(s => s.role === "team-lead") : null;
+	const teamChildren = isTeamGoal && teamLead ? displaySessions.filter(s => s.id !== teamLead.id) : [];
+	const nonTeamSessions = isTeamGoal ? displaySessions.filter(s => !teamLead || (s.id !== teamLead.id && !teamChildren.includes(s))) : displaySessions;
 
 	const renderTeamGroup = () => {
-		if (!teamLead) return goalSessions.map(renderSessionRow);
+		if (!teamLead) return displaySessions.map(renderSessionRow);
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
 		// Archived members belonging to the live lead. Includes:
 		//  (a) explicit link: `teamLeadSessionId === teamLead.id`
@@ -1066,7 +1091,15 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 			</div>
 			${isExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-					${goalSessions.length === 0 && !isCreatingHere ? (goal.archived ? nothing : emptyState) : (isTeamGoal ? renderTeamGroup() : goalSessions.map(renderSessionRow))}
+					${displaySessions.length === 0 && !isCreatingHere
+						? (goal.archived
+							? nothing
+							/* Suppress "No agents — Start Team" when the team IS active but its
+							   members have all been filtered out by the sidebar filters
+							   (Show Busy / Show Read / Show Archived). The active team is
+							   still alive — it would be misleading to offer Start Team. */
+							: (isTeamGoal && hasActiveTeam ? nothing : emptyState))
+						: (isTeamGoal ? renderTeamGroup() : displaySessions.map(renderSessionRow))}
 					${isCreatingHere ? html`<div style="padding-left:${CHEVRON_W}px;${mobile ? "" : "font-size: 0.8333em;"}" class="py-1 text-muted-foreground flex items-center gap-1">
 						<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
 						Creating…
