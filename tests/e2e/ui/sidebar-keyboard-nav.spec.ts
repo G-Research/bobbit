@@ -35,6 +35,7 @@ import {
 	waitForHealth,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -516,18 +517,9 @@ test.describe("Sidebar keyboard navigation contract (TDD repro)", () => {
 				`${MARK}: Ctrl+ArrowDown with archived view OFF must not visit archived goal (visited=[${[...visitedOff].join(",")}])`,
 			).toBe(false);
 
-			// -- Toggle archived view ON via the visible "See Archived" button. --
-			const seeArchivedBtn = page
-				.locator("button", { hasText: "See Archived" })
-				.locator("visible=true")
-				.first();
-			// Fall back to a simpler visible-button query if the chained locator
-			// returns nothing (Playwright's `visible=true` engine is sometimes
-			// finicky in chained mode).
-			const btn = (await seeArchivedBtn.count())
-				? seeArchivedBtn
-				: page.locator("button:has-text('See Archived')").first();
-			await btn.click();
+			// -- Toggle archived view ON via the visible Filters popover. --
+			await expect(filtersButton(page)).toBeVisible({ timeout: 5_000 });
+			await clickShowArchivedToggle(page);
 
 			// Wait for the toggle to land in client state, then for the archived
 			// goal to be fetched and rendered.
@@ -575,10 +567,7 @@ test.describe("Sidebar keyboard navigation contract (TDD repro)", () => {
 			).toBe(true);
 
 			// -- Toggle archived view OFF again — archived rows must leave the cycle. --
-			const btnOff = (await seeArchivedBtn.count())
-				? seeArchivedBtn
-				: page.locator("button:has-text('See Archived')").first();
-			await btnOff.click();
+			await clickShowArchivedToggle(page);
 			await expect
 				.poll(
 					() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),

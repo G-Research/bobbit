@@ -126,6 +126,11 @@ const projectScopeConfigCache = new Map<string, {
 
 let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
 const _projectScopePending = new Map<string, Record<string, any>>();
+/** Per-project structured `base_ref` validation error from the most recent save.
+ *  Populated by `saveProjectScopeConfig` when the server returns HTTP 400 with
+ *  `{ field: "base_ref", error, details? }`. Cleared on successful save or when
+ *  the field is edited. Rendered inline below the base_ref input. */
+const _baseRefErrors = new Map<string, { error: string; details?: Array<{ component: string; message: string }> }>();
 /** Per-project transient state for the "Add custom key" composer in the Project tab. */
 const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
@@ -193,6 +198,8 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 		const results = await Promise.all(promises);
 		if (results.every(r => r.ok)) {
 			projectScopeSaveStatus = "saved";
+			// Successful save clears any prior structured `base_ref` error.
+			_baseRefErrors.delete(projectId);
 			// Invalidate cache to reload
 			projectScopeConfigCache.delete(projectId);
 			// Refresh project list if rootPath changed
@@ -205,6 +212,23 @@ async function saveProjectScopeConfig(projectId: string, updates: Record<string,
 			setTimeout(() => { projectScopeSaveStatus = ""; renderApp(); }, 2000);
 		} else {
 			projectScopeSaveStatus = "error";
+			// Inspect each failed response for a structured `base_ref` error so the
+			// Settings UI can render it inline next to the input. The server returns
+			// `{ field: "base_ref", error, details? }` with HTTP 400.
+			for (const r of results) {
+				if (r.ok) continue;
+				if (r.status !== 400) continue;
+				try {
+					const body = await r.clone().json();
+					if (body && body.field === "base_ref" && typeof body.error === "string") {
+						_baseRefErrors.set(projectId, {
+							error: body.error,
+							details: Array.isArray(body.details) ? body.details : undefined,
+						});
+						break;
+					}
+				} catch { /* not JSON, skip */ }
+			}
 		}
 	} catch {
 		projectScopeSaveStatus = "error";
@@ -642,14 +666,15 @@ function renderSandboxSection(
 	`;
 }
 
-/** Worktree section: root override + pre-built pool size. Used by the General tab. */
+/** Worktree section: root override + pre-built pool size + base ref. Used by the General tab. */
 function renderWorktreeSection(
-	_projectId: string,
+	projectId: string,
 	resolved: Record<string, any>,
 	pendingChanges: Record<string, string>,
 	inputClass: string,
 	labelClass: string,
 ): import("lit").TemplateResult {
+	const baseRefError = _baseRefErrors.get(projectId);
 	return html`
 		<div class="flex flex-col gap-2">
 			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree</div>
@@ -670,6 +695,40 @@ function renderWorktreeSection(
 				/>
 			</div>
 			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">Custom parent directory for goal/session worktrees. Absolute or relative to rootPath.</p>
+
+			<div class="flex items-center gap-3">
+				<span class="${labelClass}">Base Ref</span>
+				<input
+					data-testid="base-ref-input"
+					type="text"
+					class="${inputClass}"
+					placeholder="origin/master (default)"
+					.value=${pendingChanges.base_ref ?? resolved.base_ref?.value ?? ""}
+					@input=${(e: Event) => {
+						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
+						// Clear stale inline error as soon as the user edits the field.
+						if (_baseRefErrors.has(projectId)) {
+							_baseRefErrors.delete(projectId);
+							renderApp();
+						}
+					}}
+				/>
+			</div>
+			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
+				Branch ref (local or <span class="font-mono">origin/...</span>) that new worktrees are based on and the
+				integration target for workflow gates. Empty = project primary. Per-component
+				overrides are not supported.
+			</p>
+			${baseRefError ? html`
+				<div data-testid="base-ref-error" class="ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)] -mt-1">
+					<p class="text-xs text-destructive">${baseRefError.error}</p>
+					${baseRefError.details && baseRefError.details.length > 0 ? html`
+						<ul class="list-disc ml-5 text-xs text-destructive mt-1">
+							${baseRefError.details.map(d => html`<li><span class="font-mono">${d.component}</span>: ${d.message}</li>`)}
+						</ul>
+					` : ""}
+				</div>
+			` : ""}
 
 			<div class="flex items-center gap-3 flex-wrap">
 				<span class="${labelClass}">Pool Size</span>

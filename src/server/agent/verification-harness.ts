@@ -27,7 +27,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import { detectPrimaryBranch } from "../skills/git.js";
+import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
@@ -69,6 +69,26 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	const modelId = modelStr.slice(slash + 1);
 	const meta = inferMeta(modelId);
 	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+}
+
+/**
+ * Returns the **un-offset** branch container path for a goal — the directory
+ * that `resolveStep()` / `componentRoot()` expect as their `branchContainer`
+ * argument. Component step resolution layers `repo + relativePath` on top of
+ * this value; if you pass `goal.cwd` (which may already include the project's
+ * `rootPath` offset relative to the git repo root), the offset is applied
+ * twice and verification fails with ENOENT on a doubled path segment.
+ *
+ * Pinned by `tests/verify-step-resolution.test.ts`.
+ */
+export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string {
+	// Return the un-offset branch container. `goal.cwd` may carry the project's
+	// rootPath offset (see goal-manager.createGoal); `goal.worktreePath` is always
+	// the worktree root. resolveStep() layers repo + relativePath itself, so passing
+	// the offset `cwd` here would apply the offset twice (e.g. /wt/branch/sub/sub).
+	// The `?? goal.cwd` fallback covers legacy / non-worktree goals where no
+	// worktreePath was created and `cwd` carries no offset.
+	return goal.worktreePath ?? goal.cwd;
 }
 
 /**
@@ -484,6 +504,98 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Look up the active verification entry for a single signal id. Used by
+	 * the gate_signal REST handler to read back the `startedAt` stamped by
+	 * `beginVerification` so it can emit `gate_verification_started` AFTER
+	 * its own `gate_signal_received` broadcast. See goal
+	 * "Fix WS event ordering: signal_received must precede verification_started".
+	 */
+	getActiveVerification(signalId: string): ActiveVerification | undefined {
+		return this.activeVerifications.get(signalId);
+	}
+
+	/**
+	 * Synchronously enumerate verification steps and seed the activeVerifications
+	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
+	 * caller to write into `signal.verification.steps` *before* invoking
+	 * `gateStore.recordSignal(signal)`.
+	 *
+	 * Why this exists: the gate_signal REST handler used to create the signal
+	 * with `steps: []`, record it, and then fire-and-forget `verifyGateSignal()`
+	 * which built the active entry several `await`s later. Between `recordSignal`
+	 * and that async write, any consumer reading the gate-store or
+	 * `getActiveVerifications()` saw an empty step list — a race window of
+	 * 15-30s on multi-step gates with verification-harness setup cost. By
+	 * splitting enumeration (synchronous, cheap) from execution (async,
+	 * expensive) and inlining the enumeration into the REST handler before
+	 * `recordSignal`, both stores agree from the very first persisted state.
+	 *
+	 * Returns an empty array for gates with no `verify[]` steps — the caller
+	 * should still record the signal and `verifyGateSignal` will auto-pass it.
+	 *
+	 * Idempotent: calling twice for the same signal returns the same enumeration
+	 * without re-stamping `startedAt`.
+	 *
+	 * Does NOT broadcast `gate_verification_started` — the caller must emit
+	 * that event AFTER its own `gate_signal_received` broadcast to preserve
+	 * WS event ordering. See goal "Fix WS event ordering: signal_received
+	 * must precede verification_started".
+	 */
+	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		const steps = gate.verify;
+		if (!steps || steps.length === 0) return [];
+
+		const existing = this.activeVerifications.get(signal.id);
+		if (existing) {
+			return existing.steps.map(s => ({
+				name: s.name,
+				type: s.type as GateSignalStep["type"],
+				passed: false,
+				output: "",
+				duration_ms: 0,
+				status: s.status,
+				phase: s.phase,
+			}));
+		}
+
+		const verificationStartedAt = Date.now();
+		const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
+		const active: ActiveVerification = {
+			goalId: signal.goalId,
+			gateId: signal.gateId,
+			signalId: signal.id,
+			steps: steps.map(s => {
+				const phase = s.phase ?? 0;
+				return {
+					name: s.name,
+					type: s.type,
+					status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
+					phase,
+					startedAt: verificationStartedAt,
+				};
+			}),
+			overallStatus: "running",
+			startedAt: verificationStartedAt,
+		};
+		this.activeVerifications.set(signal.id, active);
+		this._persistActive();
+
+		return steps.map(s => {
+			const phase = s.phase ?? 0;
+			const status: "running" | "waiting" = phase === minPhase ? "running" : "waiting";
+			return {
+				name: s.name,
+				type: s.type as GateSignalStep["type"],
+				passed: false,
+				output: "",
+				duration_ms: 0,
+				status,
+				phase,
+			};
+		});
+	}
+
+	/**
 	 * Check if any verification sessions for a given signalId are still alive.
 	 *
 	 * "Alive" means we have evidence the OS process / agent session is still
@@ -677,9 +789,16 @@ export class VerificationHarness {
 
 		const cwd = goal.worktreePath || goal.cwd;
 		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		// {{baseBranch}} — bare branch name derived from the project's `base_ref`,
+		// or `primary` when unset. {{master}} stays bound to `detectPrimaryBranch`
+		// (the project primary), independent of `base_ref`. See
+		// `docs/design/base-ref.md` §3.
+		const configuredBaseRef = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
+		const baseBranch = parseBaseRef(configuredBaseRef).branch || primary;
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
 			master: primary,
+			baseBranch,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
@@ -1237,44 +1356,59 @@ export class VerificationHarness {
 			return;
 		}
 
-		// Broadcast verification started
-		const verificationStartedAt = Date.now();
-		this.broadcastFn(signal.goalId, {
-			type: "gate_verification_started",
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			startedAt: verificationStartedAt,
-			steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
-		});
-
-		// Track active verification for REST bootstrapping
-		const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
-		const active: ActiveVerification = {
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			steps: steps.map(s => {
-				const phase = s.phase ?? 0;
-				return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
-			}),
-			overallStatus: "running",
-			startedAt: verificationStartedAt,
-		};
-		this.activeVerifications.set(signal.id, active);
-		this._persistActive();
+		// Reuse the active verification entry that the REST handler seeded
+		// via `beginVerification` (the synchronous-enumeration fix for the
+		// gate-store ↔ activeVerifications race). When the entry isn't there
+		// — callers that bypass the REST handler, or tests — fall back to
+		// the legacy inline construction so this method remains usable
+		// standalone.
+		let active = this.activeVerifications.get(signal.id);
+		let verificationStartedAt: number;
+		if (active) {
+			verificationStartedAt = active.startedAt;
+		} else {
+			verificationStartedAt = Date.now();
+			this.broadcastFn(signal.goalId, {
+				type: "gate_verification_started",
+				goalId: signal.goalId,
+				gateId: signal.gateId,
+				signalId: signal.id,
+				startedAt: verificationStartedAt,
+				steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+			const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
+			active = {
+				goalId: signal.goalId,
+				gateId: signal.gateId,
+				signalId: signal.id,
+				steps: steps.map(s => {
+					const phase = s.phase ?? 0;
+					return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+				}),
+				overallStatus: "running",
+				startedAt: verificationStartedAt,
+			};
+			this.activeVerifications.set(signal.id, active);
+			this._persistActive();
+		}
 
 		try {
+			// Project config — resolved via {{project.key}}. Look up `base_ref`
+			// here so `{{baseBranch}}` can be threaded into `builtinVars` below.
+			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
+			const configuredBaseRef = projectConfigStore?.get("base_ref") ?? "";
+			// {{baseBranch}} — bare branch name from `base_ref`, falling back to
+			// the project primary when unset. {{master}} keeps its meaning.
+			// See `docs/design/base-ref.md` §3.
+			const baseBranch = parseBaseRef(configuredBaseRef).branch || primaryBranch || "master";
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
 				master: primaryBranch || "master",
+				baseBranch,
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
 			};
-
-			// Project config — resolved via {{project.key}}
-			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
 			const projectVars: Record<string, string> = projectConfigStore
 				? projectConfigStore.getWithDefaults()
 				: {};

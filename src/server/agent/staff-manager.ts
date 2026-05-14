@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { SYSTEM_PROJECT_ID } from "./project-registry.js";
+import { createWorktree, cleanupWorktree, resolveBaseRef } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 
@@ -19,6 +20,73 @@ export class StaffManager {
 
 	constructor(pcm: ProjectContextManager) {
 		this.pcm = pcm;
+		this.logOrphansOnce();
+	}
+
+	/**
+	 * Log any orphaned staff (missing projectId or persisted under the synthetic
+	 * system project) one time during construction. This surfaces legacy records
+	 * that won't render under any real project's Sessions bucket until the user
+	 * re-homes them via the orphan banner.
+	 */
+	private logOrphansOnce(): void {
+		try {
+			for (const s of this.listOrphaned()) {
+				console.log(`[staff-manager] orphaned staff: id=${s.id} name=${s.name}${s.projectId ? ` (projectId=${s.projectId})` : " (no projectId)"}`);
+			}
+		} catch (err) {
+			console.warn("[staff-manager] orphan scan failed:", err);
+		}
+	}
+
+	/**
+	 * Return staff records that are not anchored to a real project: either
+	 * missing `projectId` outright, or persisted under the synthetic system
+	 * project. The sidebar surfaces these in an orphan banner with a one-click
+	 * re-assignment flow.
+	 */
+	listOrphaned(): PersistedStaff[] {
+		const orphans: PersistedStaff[] = [];
+		for (const ctx of this.pcm.all()) {
+			for (const staff of ctx.staffStore.getAll()) {
+				if (!staff.projectId || staff.projectId === SYSTEM_PROJECT_ID || ctx.project.id === SYSTEM_PROJECT_ID) {
+					orphans.push(staff);
+				}
+			}
+		}
+		return orphans;
+	}
+
+	/**
+	 * Re-home a staff record to a different project. Moves the persisted record
+	 * between per-project stores, updates `staff.projectId`, and re-indexes
+	 * search under the new project. Used by the orphan banner's "Assign to
+	 * project…" flow.
+	 *
+	 * Note: worktree path and branch are preserved as-is — those live on disk
+	 * under the original project's worktree root. Refreshing the worktree on
+	 * the next wake will rebase against whatever primary branch is canonical
+	 * for the new project.
+	 */
+	reassignProject(staffId: string, newProjectId: string): PersistedStaff | null {
+		const found = this.findStoreForStaff(staffId);
+		if (!found) return null;
+		if (found.projectId === newProjectId && found.staff.projectId === newProjectId) {
+			return found.staff;
+		}
+		const newCtx = this.pcm.getOrCreate(newProjectId);
+		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+
+		// Pull from old search index, drop from old store.
+		const oldCtx = this.pcm.getOrCreate(found.projectId);
+		oldCtx?.searchIndex?.removeStaff(staffId);
+		found.store.remove(staffId);
+
+		// Re-home: clone with updated projectId and put into the new project's store.
+		const moved: PersistedStaff = { ...found.staff, projectId: newProjectId, updatedAt: Date.now() };
+		newCtx.staffStore.put(moved);
+		newCtx.searchIndex?.indexStaff(moved, newProjectId);
+		return moved;
 	}
 
 	private getStore(projectId: string): StaffStore {
@@ -73,7 +141,12 @@ export class StaffManager {
 		// Create a worktree for this staff agent
 		const shortId = randomUUID().slice(0, 8);
 		const branchName = "staff-" + sanitiseBranchName(name) + "-" + shortId;
-		const worktreeResult = await createWorktree(cwd, branchName);
+		// Thread the project's configured `base_ref` so the staff worktree branches
+		// from the configured integration target and tracks it as upstream. See
+		// docs/design/base-ref.md.
+		const projectCtx = this.pcm.getOrCreate(projectId);
+		const configuredBaseRef = projectCtx?.projectConfigStore.get("base_ref") || undefined;
+		const worktreeResult = await createWorktree(cwd, branchName, { configuredBaseRef });
 		staff.worktreePath = worktreeResult.worktreePath;
 		staff.branch = worktreeResult.branchName;
 
@@ -254,12 +327,21 @@ export class StaffManager {
 		}
 
 		try {
-			const { stdout } = await execFile("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: wt, timeout: 5_000 });
-			const primary = stdout.trim().replace("refs/remotes/origin/", "");
-			if (!primary || primary.startsWith("-")) {
-				console.warn(`[staff-manager] Could not detect primary branch in ${wt} (got "${primary}"), skipping rebase`);
+			// Resolve the rebase target via the centralised `resolveBaseRef` helper.
+			// When the project has a configured `base_ref`, that's the integration
+			// target we rebase onto; otherwise we fall back to today's behaviour
+			// (`git symbolic-ref refs/remotes/origin/HEAD`). The helper returns the
+			// full ref including any `origin/` prefix, so we use it directly.
+			const configuredBaseRef = ctx?.projectConfigStore.get("base_ref") || undefined;
+			const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef);
+			if (!rebaseTarget || rebaseTarget === "HEAD" || rebaseTarget.startsWith("-")) {
+				console.warn(`[staff-manager] Could not resolve rebase target in ${wt} (got "${rebaseTarget}"), skipping rebase`);
 			} else {
-				await execFile("git", ["rebase", `origin/${primary}`], { cwd: wt, timeout: 60_000 });
+				// `resolveBaseRef` returns `origin/<branch>` for remote bases and the
+				// bare branch name for local bases. For staff rebase we want to track
+				// the remote tip when configured remotely; for local bases we rebase
+				// against the local branch directly.
+				await execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
 			}
 		} catch (err) {
 			console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);

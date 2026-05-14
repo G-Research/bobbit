@@ -278,8 +278,8 @@ export interface SessionInfo {
 // it without dragging in the full session-manager module graph (which
 // transitively pulls flexsearch, pi-coding-agent, etc.). Re-exported here
 // for backwards compat with existing call sites.
-export { spliceInFlightMessage } from "./splice-inflight-message.js";
-import { spliceInFlightMessage } from "./splice-inflight-message.js";
+export { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
+import { spliceInFlightMessage, spliceInFlightSteers } from "./splice-inflight-message.js";
 
 /** Helper: extract the text body of a user message (string or block array). */
 function extractUserMessageText(message: any): string {
@@ -1076,9 +1076,14 @@ export class SessionManager {
 	 * background so new sessions can claim one instantly (~0ms) instead of
 	 * waiting for `git worktree add` + `npm ci` + `git push` (~10-30s).
 	 */
-	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string): void {
+	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined): void {
 		if (this.worktreePools.has(projectId)) return;
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot });
+		// `baseRefResolver` reads the live project `base_ref` setting; the resolver
+		// pattern (mirrors `componentsResolver`) lets pool entries auto-adopt the
+		// current configured integration target without a server restart. When
+		// callers don't supply one, the pool falls back to today's
+		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
@@ -3338,11 +3343,17 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					const spliced = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
 					data = truncateLargeToolContentInMessages(withCompaction);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					const withCompaction = mergeCompactionSidecarIntoMessages(session.id, spliced);
 					const truncated = truncateLargeToolContentInMessages(withCompaction);
 					data = spliced === raw.messages && truncated === raw.messages && withCompaction === raw.messages
@@ -4164,9 +4175,15 @@ export class SessionManager {
 				const raw: any = msgs.data;
 				let data: any = raw;
 				if (Array.isArray(raw)) {
-					data = spliceInFlightMessage(raw, session.latestMessageUpdate);
+					data = spliceInFlightSteers(
+						spliceInFlightMessage(raw, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 				} else if (raw && Array.isArray(raw.messages)) {
-					const spliced = spliceInFlightMessage(raw.messages, session.latestMessageUpdate);
+					const spliced = spliceInFlightSteers(
+						spliceInFlightMessage(raw.messages, session.latestMessageUpdate),
+						session.inFlightSteerTexts,
+					);
 					data = spliced === raw.messages ? raw : { ...raw, messages: spliced };
 				}
 				broadcast(session.clients, { type: "messages", data });

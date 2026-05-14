@@ -629,11 +629,15 @@ export async function executeWorktreeAsync(
 		// existing `createWorktree` call.
 		const components = ctx.projectConfigStore?.getComponents() ?? [];
 		const isMulti = components.some(c => c.repo !== ".");
+		// Read the project's configured `base_ref` once so both the multi-repo and
+		// single-repo paths thread it into worktree creation. Empty/undefined
+		// falls back to today's `resolveRemotePrimary`. See docs/design/base-ref.md.
+		const configuredBaseRef = ctx.projectConfigStore?.get("base_ref") || undefined;
 		if (isMulti) {
 			const { createWorktreeSet } = await import("../skills/git.js");
 			const worktreeRoot = ctx.projectConfigStore?.get("worktree_root") || undefined;
 			const result = await withRetry(
-				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, { worktreeRoot }),
+				async () => createWorktreeSet(plan.repoPath!, components, plan.branch!, undefined, { worktreeRoot, configuredBaseRef }),
 				{ retries: 2, delays: [1000, 2000], label: "createWorktreeSet", sessionId: plan.id },
 			);
 			worktreeCwd = result.container;
@@ -646,7 +650,7 @@ export async function executeWorktreeAsync(
 		} else {
 			worktreeCwd = await withRetry(
 				async () => {
-					const result = await createWorktree(plan.repoPath!, plan.branch!);
+					const result = await createWorktree(plan.repoPath!, plan.branch!, { configuredBaseRef });
 					return result.worktreePath;
 				},
 				{ retries: 2, delays: [1000, 2000], label: "createWorktree", sessionId: plan.id },

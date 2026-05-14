@@ -449,6 +449,29 @@ Reusable helpers in `tests/e2e/ui/ui-helpers.ts`. Import from `./ui-helpers.js`:
 - `getVisibleSessions(page)` — return sidebar session titles
 - `waitForSessionIdle(sessionId)` — poll API until session is idle
 
+### Test-only window hooks
+
+Three properties are attached to `window` in `src/app/main.ts` for browser E2E use. All three are harmless in production — the state object is already mutable from devtools, the render trigger is the same function the production code paths invoke, and the expanded-goals set is just a `Set<string>`. None contain secrets.
+
+| Hook | What it is | Why tests need it |
+|---|---|---|
+| `window.__bobbitState` | The mutable `state` singleton from `src/app/state.ts` | Patch in-memory session/goal/cache fields to drive deterministic predicate scenarios that would otherwise require a real backend (team-lead role flips, fabricated goals, gate verification flags). |
+| `window.__bobbitRenderApp` | The `renderApp()` function | Force a fresh paint after patching state, without relying on viewport-resize side effects (which are unreliable under Playwright). |
+| `window.__bobbitExpandedGoals` | The `expandedGoals: Set<string>` driving sidebar group expansion | Inject synthetic goals into `state.goals` and force them into the expanded state — the production auto-expand path in `api.ts` only fires for server-confirmed goals. |
+
+Usage pattern (from `tests/e2e/ui/notification-policy.spec.ts`):
+
+```ts
+await page.evaluate(({ sessionId, patch }) => {
+  const state: any = (window as any).__bobbitState;
+  const s = state.gatewaySessions.find((x: any) => x.id === sessionId);
+  Object.assign(s, patch);
+  (window as any).__bobbitRenderApp();
+}, { sessionId, patch });
+```
+
+When using these hooks, also call `clearInterval(state.sessionPollTimer)` if the test runs long enough for the 5s session-list poll to land — otherwise the poll overwrites `state.gatewaySessions` with the server's un-patched view and the test flakes. See `stopPolling()` in `tests/e2e/ui/notification-policy.spec.ts` for the reference helper.
+
 ### Mock agent keywords
 
 The mock agent in `tests/e2e/mock-agent.mjs` responds to keywords in the prompt. Send `GOAL_PROPOSAL` to trigger a `propose_goal` tool call response (with `options: "QA testing"`) — used to test the goal assistant flow without a real LLM. The full trigger contract (busy/wait, bursts, real fs/shell tools, proposals, UI primitives, steer round-trip) is documented in the header comment of `tests/e2e/mock-agent-core.mjs` — single source of truth.
