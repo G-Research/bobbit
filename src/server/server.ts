@@ -3638,6 +3638,9 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
+				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
+				: undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -3646,6 +3649,7 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				inlineRoles: bodyInlineRoles,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
