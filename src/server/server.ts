@@ -3508,22 +3508,20 @@ async function handleApiRoute(
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
 					const seeds = buildDefaultWorkflows(projName);
+					// Always persist defaults to disk (both explicit-id and no-id cases).
+					// Pinned by goal-creation-auto-seed.spec.ts and
+					// projects-no-default-workflows.spec.ts Case C.
+					seeds.parent = buildParentWorkflow();
+					for (const wf of Object.values(seeds)) {
+						targetCtx.workflowStore.put(wf as unknown as Workflow);
+					}
+					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
 					if (workflowId) {
-						// Explicit id given: persist defaults to store and re-resolve.
-						seeds.parent = buildParentWorkflow();
-						for (const wf of Object.values(seeds)) {
-							targetCtx.workflowStore.put(wf as unknown as Workflow);
-						}
-						console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					} else {
-						// No id given: use "general" in-memory without persisting to disk.
-						// This lets goal creation succeed while leaving project.yaml unchanged.
-						const fallback = (seeds as Record<string, unknown>).general ?? Object.values(seeds)[0];
-						if (fallback) {
-							resolvedWorkflow = fallback as Workflow;
-							resolvedWorkflowId = (resolvedWorkflow as { id?: string }).id || "general";
-						}
+						// No explicit id: fall back to "general" from the newly-seeded store.
+						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+						resolvedWorkflowId = resolvedWorkflow?.id || "general";
 					}
 				}
 				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
