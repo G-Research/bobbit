@@ -3747,6 +3747,9 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
+				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
+				: undefined;
 			const goal = await targetGoalManager.createGoal(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
@@ -3755,6 +3758,7 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				inlineRoles: bodyInlineRoles,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -5670,6 +5674,13 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
+		// Guard: goal spec must be set before starting the team.
+		const startGoal = getGoalAcrossProjects(goalId);
+		const trimmedSpec = (startGoal?.spec ?? "").trim();
+		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
+			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
+			return;
+		}
 		try {
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
