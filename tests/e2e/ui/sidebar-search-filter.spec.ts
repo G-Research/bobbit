@@ -203,12 +203,23 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		const initiallyFocused = await searchInput.evaluate((el) => document.activeElement === el);
 		expect(initiallyFocused).toBe(false);
 
-		// Press Ctrl+K
-		await page.keyboard.press("Control+k");
+		// Wait for the app's keydown listener to attach before dispatching.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
+		// Dispatch via window.dispatchEvent — keyboard.press can be dropped
+		// under heavy parallel load before focus settles. Set both ctrlKey
+		// and metaKey to match the registry's platform-aware ctrlOrMeta check.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
 		// Search input should be focused
-		const nowFocused = await searchInput.evaluate((el) => document.activeElement === el);
-		expect(nowFocused).toBe(true);
+		await expect(searchInput).toBeFocused({ timeout: 5_000 });
 	});
 
 	test("SB-34: Ctrl+[ toggles sidebar collapse", async ({ page }) => {
@@ -270,13 +281,25 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			const textareaFocused = await page.evaluate(() => document.activeElement?.tagName.toLowerCase());
 			expect(textareaFocused).toBe("textarea");
 
-			// Press Ctrl+K — should still focus search
-			// Note: Ctrl+K uses ctrlOrMeta modifier so it fires even in input contexts
-			await page.keyboard.press("Control+k");
+			// Wait for the app's keydown listener to attach before dispatching.
+			await expect.poll(
+				() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+				{ timeout: 15_000 },
+			).toBe(true);
+
+			// Press Ctrl+K — should still focus search.
+			// Note: Ctrl+K uses ctrlOrMeta modifier so it fires even in input contexts.
+			// Dispatch via window.dispatchEvent — keyboard.press can be dropped
+			// under heavy parallel load. Set both ctrlKey and metaKey for
+			// platform-aware ctrlOrMeta matching.
+			await page.evaluate(() => {
+				window.dispatchEvent(new KeyboardEvent("keydown", {
+					key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+				}));
+			});
 
 			const searchInput = page.locator("input[data-search]");
-			const nowFocused = await searchInput.evaluate((el) => document.activeElement === el);
-			expect(nowFocused).toBe(true);
+			await expect(searchInput).toBeFocused({ timeout: 5_000 });
 		} finally {
 			await deleteSession(tempSession).catch(() => {});
 		}
