@@ -130,6 +130,19 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 
+#### `POST /api/goals` — `parentGoalId` error codes
+
+When `parentGoalId` is supplied, the handler validates it before calling the goal manager. All responses are `422`.
+
+| Code | When |
+|---|---|
+| `PARENT_NOT_FOUND` | `parentGoalId` does not exist in any project |
+| `PARENT_CROSS_PROJECT` | `parentGoalId` exists but belongs to a different project |
+| `SUBGOALS_DISABLED` | Subgoals preference is off for this goal tree |
+| `NESTING_DEPTH_EXCEEDED` | Adding the child would exceed `maxNestingDepth`. Response body also includes `currentDepth` and `maxDepth` (integers). |
+
+See [docs/design/propose-goal-parent-picker.md](design/propose-goal-parent-picker.md) for the full feature doc including the proposal-seed auto-inject for team-lead sessions.
+
 #### Nested goals (the 9 `Children` operations + plan/policy)
 
 All routes in this section are gated behind the **Subgoals (Experimental)**
