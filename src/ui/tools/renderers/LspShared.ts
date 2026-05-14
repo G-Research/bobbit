@@ -143,3 +143,73 @@ export function renderPathLineCol(path: string, line: number, character: number)
 	const p = normalisePath(path);
 	return html`<span class="font-mono text-xs text-muted-foreground">${p}:${line + 1}:${character + 1}</span>`;
 }
+
+// ── Diagnostics helpers ──────────────────────────────────────────────
+
+export interface Diagnostic {
+	path: string;
+	range: { start: { line: number; character: number } };
+	severity: 1 | 2 | 3 | 4;
+	message: string;
+	source?: string;
+}
+
+export function summariseDiagnostics(diags: Diagnostic[]): string {
+	const counts: Record<number, number> = {};
+	for (const d of diags) counts[d.severity] = (counts[d.severity] || 0) + 1;
+	const parts: string[] = [];
+	const labels: Record<number, [string, string]> = {
+		1: ["error", "errors"], 2: ["warning", "warnings"], 3: ["info", "info"], 4: ["hint", "hints"],
+	};
+	for (const sev of [1, 2, 3, 4] as const) {
+		const c = counts[sev];
+		if (c) parts.push(`${c} ${c === 1 ? labels[sev][0] : labels[sev][1]}`);
+	}
+	return parts.join(", ") || "0 diagnostics";
+}
+
+// ── Document symbol tree rendering ───────────────────────────────────
+
+export interface DocumentSymbol {
+	name: string;
+	detail?: string;
+	kind: number;
+	range: { start: { line: number; character: number } };
+	selectionRange?: any;
+	children?: DocumentSymbol[];
+}
+
+export const DOC_SYM_MAX_DEPTH = 3;
+
+export function countNested(syms: DocumentSymbol[]): number {
+	let n = 0;
+	for (const s of syms) { n += 1; if (s.children?.length) n += countNested(s.children); }
+	return n;
+}
+
+export function renderSymbolRow(s: DocumentSymbol): TemplateResult {
+	const kind = symbolKindLabel(s.kind);
+	const line = (s.range?.start?.line ?? 0) + 1;
+	return html`
+		<div class="flex items-center gap-1.5 text-sm py-0.5">
+			<span class="inline-block text-muted-foreground shrink-0" title=${kind.label}>${icon(kind.icon, "sm")}</span>
+			<span class="font-mono">${s.name}</span>
+			${s.detail ? html`<span class="text-xs text-muted-foreground truncate">: ${s.detail}</span>` : ""}
+			<span class="text-xs text-muted-foreground shrink-0 ml-auto">:${line}</span>
+		</div>
+	`;
+}
+
+export function renderSymbolTree(syms: DocumentSymbol[], depth: number): TemplateResult {
+	if (depth >= DOC_SYM_MAX_DEPTH) {
+		const n = countNested(syms);
+		return html`<div class="pl-4 text-xs text-muted-foreground italic">(${n} more nested symbol${n === 1 ? "" : "s"})</div>`;
+	}
+	return html`
+		<ul class="space-y-0 ${depth === 0 ? "" : "pl-4 border-l border-border ml-2"}">
+			${syms.map(s => s.children?.length
+				? html`<li><details ?open=${depth === 0}><summary class="cursor-pointer hover:bg-accent/50 rounded list-none">${renderSymbolRow(s)}</summary>${renderSymbolTree(s.children, depth + 1)}</details></li>`
+				: html`<li>${renderSymbolRow(s)}</li>`)}
+		</ul>
+	`;
+}
