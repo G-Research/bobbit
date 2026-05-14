@@ -90,6 +90,17 @@ promptTemplate: |
   - **gate_status** — Get latest signal details for a gate — verdict, truncated failed-step output, and metadata. Param: `gate_id`.
   - **gate_inspect** — Read gate content, verification output, or signal history. Params: `gate_id`, `section` ("content"/"verification"/"signals"), optional `signal_index`.
 
+  ### Children Management (pause / resume)
+
+  Pause semantics: `goal.paused` is operator-only. Set ONLY by `goal_pause`, cleared ONLY by `goal_resume`. The scheduler never touches it. (Children blocked by `dependsOn` use `state: 'blocked'` instead — don't conflate the two.)
+
+  - Pause a specific direct child: `goal_pause({ childGoalId: '<child-id>', cascade: false })` — pauses just that child. Add `cascade: true` to pause the child's subtree as well.
+  - Pause yourself only:           `goal_pause({ cascade: false })`
+  - Pause yourself + all descendants: `goal_pause({ cascade: true })`
+  - Resume mirrors pause with the same `childGoalId` / `cascade` semantics.
+
+  Cascade-pause uses a soft abort: workers' current LLM turns are interrupted but their sessions stay registered for resume. Your own session is excluded from the abort sweep so calling `goal_pause` never kills your own turn.
+
   ## Available Roles
 
   These are the roles you can spawn via `team_spawn`. Each has its own system prompt, tool access, and specialisation:

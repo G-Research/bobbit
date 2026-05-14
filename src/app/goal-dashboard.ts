@@ -1392,6 +1392,24 @@ function renderNavBar(goal: Goal): TemplateResult {
 					${goal.paused
 						? html`<button class="btn-icon" data-testid="goal-resume-btn" @click=${() => resumeGoalWithDialog(goal.id)} title="Resume goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Resume</span></button>`
 						: html`<button class="btn-icon" data-testid="goal-pause-btn" @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>Pause</span></button>`}
+					${(() => {
+						if (goal.paused) return nothing;
+						// TODO: memoize — O(n × depth) per render is fine at current goal-tree sizes.
+						const waitingCount = state.goals.filter(g => {
+							if (g.archived) return false;
+							if (!(g.paused === true || g.state === "blocked")) return false;
+							let cur: typeof g | undefined = g;
+							while (cur?.parentGoalId) {
+								if (cur.parentGoalId === goal.id) return true;
+								const nextId: string = cur.parentGoalId;
+								cur = state.goals.find(x => x.id === nextId);
+							}
+							return false;
+						}).length;
+						return waitingCount > 0
+							? html`<span class="text-xs text-muted-foreground" data-testid="goal-waiting-badge" style="margin-left:4px;">${waitingCount} waiting</span>`
+							: nothing;
+					})()}
 					${prStatus?.state === "MERGED" && !teamActive
 						? html`<button class="btn-icon primary" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgArchive}<span>Archive</span></button>`
 						: html`<button class="btn-icon danger" @click=${() => deleteGoal(goal.id)} title="Archive goal">${svgTrash}<span>Archive</span></button>`}

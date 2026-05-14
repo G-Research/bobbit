@@ -102,6 +102,33 @@ export class GoalManager {
 		this.workflowStore = workflowStore;
 		// Mark any goals stuck in "preparing" from a previous run as error
 		this._recoverStuckSetups();
+		// Lazy-migrate legacy paused=true + unresolved-deps goals to state='blocked'.
+		// See docs/design/pause-cascade.md — the scheduler used to set
+		// `paused: true` for dep-blocked children, conflating with operator pause.
+		this._migratePausedDepsToBlocked();
+	}
+
+	/**
+	 * Boot migration: legacy `paused: true` goals whose deps are still unmet
+	 * become `state: 'blocked', paused: false`. Operator-paused goals (no
+	 * dependsOnPlanIds or all resolved) keep `paused: true`.
+	 */
+	private _migratePausedDepsToBlocked(): void {
+		const all = this.store.getAll();
+		for (const goal of all) {
+			if (!goal.paused || goal.archived) continue;
+			const deps = goal.dependsOnPlanIds;
+			if (!deps || deps.length === 0) continue;
+			const allResolved = deps.every(depPid => {
+				const depSib = all.find(g =>
+					g.parentGoalId === goal.parentGoalId &&
+					g.spawnedFromPlanId === depPid);
+				return !!depSib && depSib.state === "complete";
+			});
+			if (allResolved) continue; // operator-paused — preserve
+			this.store.update(goal.id, { state: "blocked", paused: false });
+			console.log(`[goal-manager] Migrated goal ${goal.id} ("${goal.title}") from paused=true to state='blocked' (unresolved deps)`);
+		}
 	}
 
 	/**
