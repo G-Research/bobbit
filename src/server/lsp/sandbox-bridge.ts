@@ -78,6 +78,13 @@ export class DockerSandboxLspBridge implements SandboxLspBridge {
  * may need refinement — see docs/design/lsp-code-intelligence.md §Sandbox.
  */
 export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
+	/** Tracks the last-resolved per-project bridge so toHostPath can reverse-
+	 *  translate container paths without a separate lookup hint. The supervisor
+	 *  creates one bridge per LSP process and calls bridgeForHostPath
+	 *  consistently for the same worktree, so this reliably reflects the
+	 *  active project for the lifetime of that process. */
+	private lastBridge: DockerSandboxLspBridge | null = null;
+
 	constructor(
 		private sandboxManager: SandboxManager,
 		private projectContextManager: ProjectContextManager,
@@ -105,11 +112,13 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 		if (!best) return null;
 		// Worktree root for sessions is `<rootPath>-wt`; bind-mounted at
 		// `/workspace-wt` inside the container.
-		return new DockerSandboxLspBridge(
+		const bridge = new DockerSandboxLspBridge(
 			this.sandboxManager,
 			best.projectId,
 			`${best.root}-wt`,
 		);
+		this.lastBridge = bridge;
+		return bridge;
 	}
 
 	containerIdForWorktree(hostWorktreePath: string): string | null {
@@ -121,7 +130,14 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 	}
 
 	toHostPath(containerPath: string): string {
-		// Reverse lookup needs a hint of which project; without one, return as-is.
+		// Best-effort: use the most-recently-resolved per-project bridge.
+		// The supervisor holds one bridge instance per LSP process and calls
+		// bridgeForHostPath for the same worktree, so lastBridge reliably
+		// reflects the active project once any outbound call has been made.
+		if (this.lastBridge) {
+			const translated = this.lastBridge.toHostPath(containerPath);
+			if (translated !== containerPath) return translated;
+		}
 		return containerPath;
 	}
 

@@ -66,6 +66,9 @@ class TypescriptLspClient implements LspClient {
 			worktreePath: this.worktreePath,
 			command: resolved.node,
 			args: [resolved.cliMjs, "--stdio"],
+			// In a sandbox container, use the globally-installed binary from PATH
+			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
+			sandboxCmd: ["typescript-language-server", "--stdio"],
 			sandbox,
 		});
 
