@@ -869,7 +869,12 @@ export async function tryHandleNestedGoalRoute(
 				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
 			});
 		}
-		json({ paused: count });
+		json({
+			paused: count,
+			...(pauseResult.errors.length > 0
+				? { errors: pauseResult.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
+				: {}),
+		});
 		return true;
 	}
 
@@ -921,7 +926,12 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
-		json({ resumed: count });
+		json({
+			resumed: count,
+			...(resumeResult.errors.length > 0
+				? { errors: resumeResult.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
+				: {}),
+		});
 		return true;
 	}
 

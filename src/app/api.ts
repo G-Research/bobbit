@@ -994,16 +994,20 @@ export async function deleteGoal(id: string): Promise<void> {
 
 /** Collect a goal + all its non-archived descendants from client state. */
 function collectGoalIdsFor(rootId: string): string[] {
+	// Walk THROUGH archived nodes (mirroring countDescendants walk-through
+	// semantics) so live descendants under archived intermediates are included
+	// in the eager-archive flip. Only collect non-archived IDs since already-
+	// archived goals need no flip.
 	const out = [rootId];
 	const queue = [rootId];
 	const seen = new Set<string>([rootId]);
 	while (queue.length > 0) {
 		const cur = queue.shift()!;
 		for (const g of state.goals) {
-			if (g.parentGoalId !== cur || g.archived || seen.has(g.id)) continue;
+			if (g.parentGoalId !== cur || seen.has(g.id)) continue;
 			seen.add(g.id);
-			out.push(g.id);
-			queue.push(g.id);
+			if (!g.archived) out.push(g.id); // only collect non-archived
+			queue.push(g.id); // always descend through archived
 		}
 	}
 	return out;

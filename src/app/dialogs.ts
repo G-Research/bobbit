@@ -2442,17 +2442,21 @@ export async function showResumeGoalDialog(goal: Goal, descendantCount: number):
 
 /** Walk client state for the count of non-archived descendants of `goalId`. */
 export function countDescendants(goalId: string): number {
+	// Walk THROUGH archived nodes (mirroring the server's walk-through semantics
+	// so a live grandchild under an archived parent is counted). Only count
+	// non-archived nodes so the dialog accurately reflects what the cascade will
+	// archive beyond what is already archived.
 	let total = 0;
 	const queue = [goalId];
 	const seen = new Set<string>();
 	while (queue.length > 0) {
 		const cur = queue.shift()!;
 		for (const g of state.goals) {
-			if (g.parentGoalId !== cur || g.archived) continue;
+			if (g.parentGoalId !== cur) continue;
 			if (seen.has(g.id)) continue;
 			seen.add(g.id);
-			total++;
-			queue.push(g.id);
+			if (!g.archived) total++;
+			queue.push(g.id); // always descend, even through archived
 		}
 	}
 	return total;

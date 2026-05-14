@@ -39,8 +39,10 @@ test.describe("Sidebar cascade archive", () => {
 		try {
 			await openApp(page);
 
-			// Find the parent goal row in the sidebar by its title.
-			const goalRow = page.locator("div", { hasText: parentTitle }).first();
+			// Find the parent goal row in the sidebar by its data-goal-id attribute
+			// (sidebar-nested-row > sidebar-goal-row structure). Using data-goal-id
+			// is more precise than text matching which can hit broad ancestor divs.
+			const goalRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"]`);
 			await expect(goalRow).toBeVisible({ timeout: 15_000 });
 			await goalRow.hover();
 
