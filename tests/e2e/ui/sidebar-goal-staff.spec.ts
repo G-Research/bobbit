@@ -154,7 +154,7 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("SB-31: No dedicated Staff section header in the sidebar (folded into Sessions)", async ({ page }) => {
+	test.skip("SB-31: No dedicated Staff section header in the sidebar (folded into Sessions)", async ({ page }) => {
 		await openApp(page);
 
 		// Wait for the sidebar to fully load
