@@ -85,3 +85,4 @@ tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
 tests/fixtures/children-tool-renderers-bundle.js
 tests/fixtures/children-tool-renderers-bundle.css
+.qa-test-state/

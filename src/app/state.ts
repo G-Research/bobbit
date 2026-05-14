@@ -257,6 +257,12 @@ export const state = {
 
 	/** Whether to show archived sessions in the sidebar */
 	showArchived: localStorage.getItem("bobbit-show-archived") === "true",
+	/** Whether to show busy (streaming/aborting/preparing/starting/compacting) sessions. Default ON. */
+	showBusy: localStorage.getItem("bobbit-show-busy") !== "false",
+	/** Whether to show idle/done sessions without unread activity. Default ON. */
+	showRead: localStorage.getItem("bobbit-show-read") !== "false",
+	/** Whether the sidebar filters popover is open */
+	filtersPopoverOpen: false,
 	/** Whether the archived section is expanded */
 
 	/** Archived sessions (loaded on demand) */

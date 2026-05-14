@@ -21,6 +21,7 @@ import {
 	type Project,
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
+import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs.js";
 import { setHashRoute } from "./routing.js";
@@ -212,6 +213,36 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	const mirror = _readMirror.get(session.id) ?? 0;
 	const lastRead = Math.max(session.lastReadAt ?? 0, mirror);
 	return session.lastActivity > lastRead;
+}
+
+/**
+ * Apply sidebar visibility filters (Busy / Read).
+ * Active session is exempt — it always passes.
+ * Archived filtering is handled separately via `state.showArchived` flags
+ * already threaded through render-helpers.
+ * Search bypasses filters entirely — pass `bypass=true` when searchQuery is non-empty.
+ */
+export function passesSidebarFilters(
+	session: GatewaySession,
+	isActive: boolean,
+	bypass: boolean,
+): boolean {
+	if (bypass || isActive) return true;
+	if (!state.showBusy) {
+		const busy = session.status === "streaming"
+			|| session.status === "aborting"
+			|| session.status === "preparing"
+			|| session.status === "starting"
+			|| session.isCompacting;
+		if (busy) return false;
+	}
+	if (!state.showRead) {
+		// Only filter out idle/done sessions with no unread activity.
+		// Busy sessions (if not already filtered above) always remain visible.
+		const idleLike = session.status === "idle" || session.status === "terminated";
+		if (idleLike && !hasUnseenActivity(session)) return false;
+	}
+	return true;
 }
 
 /** One-shot migration: read the legacy localStorage map, POST mark-read for
@@ -509,7 +540,11 @@ export function renderSessionRow(session: GatewaySession) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + archived delegates)
-	const liveDelegates = state.gatewaySessions.filter(s => s.delegateOf === session.id && (state.showArchived || s.status !== "terminated"));
+	const _bypassFilters = !!state.searchQuery.trim();
+	const liveDelegates = state.gatewaySessions.filter(s =>
+		s.delegateOf === session.id
+		&& (state.showArchived || s.status !== "terminated")
+		&& passesSidebarFilters(s, s.id === activeSessionId(), _bypassFilters));
 	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
 	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
 	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
@@ -526,7 +561,7 @@ export function renderSessionRow(session: GatewaySession) {
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title="${isTeamLead ? "End team (Ctrl+Shift+D)" : "Terminate (Ctrl+Shift+D)"}">${icon(Trash2, "xs")}</button>
+			title=${(isTeamLead ? "End team" : "Terminate") + shortcutHint("terminate-session")}>${icon(Trash2, "xs")}</button>
 	`;
 
 	const navId = `session:${session.id}`;
@@ -569,7 +604,11 @@ export function renderSessionRow(session: GatewaySession) {
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const delegates = state.gatewaySessions.filter(s => s.delegateOf === parentSessionId && (state.showArchived || s.status !== "terminated"));
+	const bypassFilters = !!state.searchQuery.trim();
+	const delegates = state.gatewaySessions.filter(s =>
+		s.delegateOf === parentSessionId
+		&& (state.showArchived || s.status !== "terminated")
+		&& passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => s.status === "terminated"
@@ -655,7 +694,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			title="Modify">${icon(Pencil, "xs")}</button>
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
 			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); }}
-			title="End team (Ctrl+Shift+D)">${icon(Trash2, "xs")}</button>
+			title=${`End team${shortcutHint("terminate-session")}`}>${icon(Trash2, "xs")}</button>
 	`;
 
 	const chevron = html`<span

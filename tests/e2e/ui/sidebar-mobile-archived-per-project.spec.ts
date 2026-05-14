@@ -19,6 +19,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, nonGitCwd, waitForHealth } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -258,9 +259,9 @@ test.describe("Per-project Archived subsections (mobile)", () => {
 			)
 			.toBeGreaterThanOrEqual(2);
 
-		const seeArchived = page.locator("button").filter({ hasText: "See Archived" }).first();
+		const seeArchived = filtersButton(page);
 		await expect(seeArchived).toBeVisible({ timeout: 5_000 });
-		await seeArchived.click();
+		await clickShowArchivedToggle(page);
 
 		await expect(page.locator("span.uppercase").filter({ hasText: /^Archived$/ })).toHaveCount(
 			0,
