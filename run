@@ -20,7 +20,11 @@ fi
 if [ ! -d "$BOBBIT_HOME/node_modules" ]; then
   echo "First run — installing dependencies and building..."
   (cd "$BOBBIT_HOME" && npm install && npm run build)
-elif [ ! -f "$BOBBIT_HOME/dist/server/cli.js" ]; then
+elif [ "$BOBBIT_HOME/package-lock.json" -nt "$BOBBIT_HOME/node_modules/.package-lock.json" ] 2>/dev/null; then
+  echo "Dependencies changed — running npm install..."
+  (cd "$BOBBIT_HOME" && npm install)
+fi
+if [ ! -f "$BOBBIT_HOME/dist/server/cli.js" ]; then
   echo "Building server..."
   (cd "$BOBBIT_HOME" && npm run build:server)
 fi
