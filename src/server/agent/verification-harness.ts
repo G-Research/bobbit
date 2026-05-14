@@ -504,6 +504,98 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Look up the active verification entry for a single signal id. Used by
+	 * the gate_signal REST handler to read back the `startedAt` stamped by
+	 * `beginVerification` so it can emit `gate_verification_started` AFTER
+	 * its own `gate_signal_received` broadcast. See goal
+	 * "Fix WS event ordering: signal_received must precede verification_started".
+	 */
+	getActiveVerification(signalId: string): ActiveVerification | undefined {
+		return this.activeVerifications.get(signalId);
+	}
+
+	/**
+	 * Synchronously enumerate verification steps and seed the activeVerifications
+	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
+	 * caller to write into `signal.verification.steps` *before* invoking
+	 * `gateStore.recordSignal(signal)`.
+	 *
+	 * Why this exists: the gate_signal REST handler used to create the signal
+	 * with `steps: []`, record it, and then fire-and-forget `verifyGateSignal()`
+	 * which built the active entry several `await`s later. Between `recordSignal`
+	 * and that async write, any consumer reading the gate-store or
+	 * `getActiveVerifications()` saw an empty step list — a race window of
+	 * 15-30s on multi-step gates with verification-harness setup cost. By
+	 * splitting enumeration (synchronous, cheap) from execution (async,
+	 * expensive) and inlining the enumeration into the REST handler before
+	 * `recordSignal`, both stores agree from the very first persisted state.
+	 *
+	 * Returns an empty array for gates with no `verify[]` steps — the caller
+	 * should still record the signal and `verifyGateSignal` will auto-pass it.
+	 *
+	 * Idempotent: calling twice for the same signal returns the same enumeration
+	 * without re-stamping `startedAt`.
+	 *
+	 * Does NOT broadcast `gate_verification_started` — the caller must emit
+	 * that event AFTER its own `gate_signal_received` broadcast to preserve
+	 * WS event ordering. See goal "Fix WS event ordering: signal_received
+	 * must precede verification_started".
+	 */
+	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		const steps = gate.verify;
+		if (!steps || steps.length === 0) return [];
+
+		const existing = this.activeVerifications.get(signal.id);
+		if (existing) {
+			return existing.steps.map(s => ({
+				name: s.name,
+				type: s.type as GateSignalStep["type"],
+				passed: false,
+				output: "",
+				duration_ms: 0,
+				status: s.status,
+				phase: s.phase,
+			}));
+		}
+
+		const verificationStartedAt = Date.now();
+		const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
+		const active: ActiveVerification = {
+			goalId: signal.goalId,
+			gateId: signal.gateId,
+			signalId: signal.id,
+			steps: steps.map(s => {
+				const phase = s.phase ?? 0;
+				return {
+					name: s.name,
+					type: s.type,
+					status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
+					phase,
+					startedAt: verificationStartedAt,
+				};
+			}),
+			overallStatus: "running",
+			startedAt: verificationStartedAt,
+		};
+		this.activeVerifications.set(signal.id, active);
+		this._persistActive();
+
+		return steps.map(s => {
+			const phase = s.phase ?? 0;
+			const status: "running" | "waiting" = phase === minPhase ? "running" : "waiting";
+			return {
+				name: s.name,
+				type: s.type as GateSignalStep["type"],
+				passed: false,
+				output: "",
+				duration_ms: 0,
+				status,
+				phase,
+			};
+		});
+	}
+
+	/**
 	 * Check if any verification sessions for a given signalId are still alive.
 	 *
 	 * "Alive" means we have evidence the OS process / agent session is still
@@ -1264,32 +1356,41 @@ export class VerificationHarness {
 			return;
 		}
 
-		// Broadcast verification started
-		const verificationStartedAt = Date.now();
-		this.broadcastFn(signal.goalId, {
-			type: "gate_verification_started",
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			startedAt: verificationStartedAt,
-			steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
-		});
-
-		// Track active verification for REST bootstrapping
-		const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
-		const active: ActiveVerification = {
-			goalId: signal.goalId,
-			gateId: signal.gateId,
-			signalId: signal.id,
-			steps: steps.map(s => {
-				const phase = s.phase ?? 0;
-				return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
-			}),
-			overallStatus: "running",
-			startedAt: verificationStartedAt,
-		};
-		this.activeVerifications.set(signal.id, active);
-		this._persistActive();
+		// Reuse the active verification entry that the REST handler seeded
+		// via `beginVerification` (the synchronous-enumeration fix for the
+		// gate-store ↔ activeVerifications race). When the entry isn't there
+		// — callers that bypass the REST handler, or tests — fall back to
+		// the legacy inline construction so this method remains usable
+		// standalone.
+		let active = this.activeVerifications.get(signal.id);
+		let verificationStartedAt: number;
+		if (active) {
+			verificationStartedAt = active.startedAt;
+		} else {
+			verificationStartedAt = Date.now();
+			this.broadcastFn(signal.goalId, {
+				type: "gate_verification_started",
+				goalId: signal.goalId,
+				gateId: signal.gateId,
+				signalId: signal.id,
+				startedAt: verificationStartedAt,
+				steps: steps.map(s => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+			const minPhase = Math.min(...steps.map(s => s.phase ?? 0));
+			active = {
+				goalId: signal.goalId,
+				gateId: signal.gateId,
+				signalId: signal.id,
+				steps: steps.map(s => {
+					const phase = s.phase ?? 0;
+					return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+				}),
+				overallStatus: "running",
+				startedAt: verificationStartedAt,
+			};
+			this.activeVerifications.set(signal.id, active);
+			this._persistActive();
+		}
 
 		try {
 			// Project config — resolved via {{project.key}}. Look up `base_ref`
