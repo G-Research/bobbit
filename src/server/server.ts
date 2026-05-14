@@ -3043,11 +3043,13 @@ async function handleApiRoute(
 		// setting up a NEW project — they get a provisional project registration so sessions
 		// persist under their own project context (survives page refresh).
 		const isProjectAssistant = assistantType === "project" || assistantType === "project-scaffolding";
-		// Role/Tool/Staff assistants edit server-scope config and do not require a
+		// Role/Tool assistants edit server-scope config and do not require a
 		// project. When the client supplies a projectId we still attach to it (the
 		// Roles page can be scoped to a project); otherwise we skip project
 		// resolution entirely so `npx bobbit` in a non-project directory works.
-		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool" || assistantType === "staff";
+		// Staff assistants are project-scoped — they must resolve a project the
+		// same way `goal` assistants do (see the surface-staff-in-sessions design).
+		const isServerScopeAssistant = assistantType === "role" || assistantType === "tool";
 		let resolvedProjectId = body?.projectId as string | undefined;
 		let provisionalProjectId: string | undefined;
 
@@ -7784,6 +7786,16 @@ async function handleApiRoute(
 
 	// ── Staff endpoints ────────────────────────────────────────────
 
+	// GET /api/staff/orphaned — staff with missing projectId or stuck on the system project
+	if (url.pathname === "/api/staff/orphaned" && req.method === "GET") {
+		const list = staffManager.listOrphaned().map(s => {
+			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
+			return { ...s, sandboxed };
+		});
+		json({ staff: list });
+		return;
+	}
+
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
@@ -7840,6 +7852,24 @@ async function handleApiRoute(
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
 			const sandboxed = staff.projectId ? (projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
 			json({ ...staff, sandboxed });
+			return;
+		}
+
+		if (req.method === "PATCH") {
+			const body = await readBody(req);
+			if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
+				json({ error: "Missing projectId" }, 400);
+				return;
+			}
+			const targetProject = projectRegistry.get(body.projectId);
+			if (!targetProject) { json({ error: "Project not found" }, 404); return; }
+			try {
+				const staff = staffManager.reassignProject(id, body.projectId);
+				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				json(staff);
+			} catch (err: any) {
+				jsonError(400, err);
+			}
 			return;
 		}
 
