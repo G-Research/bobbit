@@ -23,6 +23,36 @@ Follow-on bug fixes during stabilisation:
 
 A pre-existing PWA-resume cold-offline test was skipped (verified flaky on `master` at `94143ba8`) and is tracked separately.
 
+## Follow-on: mixed-import warning cleanup
+
+After Tasks A–F landed, `npm run build` emitted ~15 Vite warnings of the form:
+
+> (!) X is dynamically imported by A, B but also statically imported by C, D —
+> dynamic import will not move module into another chunk.
+
+The warned modules are all in the **static** category (core data layer, core UI helpers, shared utilities). They were already being pulled into the main chunk by their static importers, so the `await import(...)` call sites at other locations had no code-splitting benefit — they only added overhead.
+
+The root cause was stale dynamic imports: before the bundle-size work, some modules deferred their dependencies with `await import()` to avoid circular imports or reduce initial parse. After Tasks A–F moved page modules and heavy renderers into their own chunks, those circular-import pressures were resolved and the `await import()` calls became redundant.
+
+**Fix (goal `clean-vite-4d2802e3`):** converted all mixed-import sites to top-of-file static imports across 14 files. Zero module boundaries changed — these modules were already in the main chunk.
+
+### Static vs truly-lazy classification
+
+The two categories that must stay clean:
+
+**Static** (top-of-file `import`): all modules that belong in the main chunk because they are used on every page load.
+- Core data layer: `state.ts`, `api.ts`, `routing.ts`, `error-helpers.ts`
+- Core UI helpers: `dialogs.ts`, `session-manager.ts`, `render.ts`, `sidebar.ts`, `sidebar-nav.ts`, `sidebar-filters.ts`
+- Shared utilities: `shortcut-registry.ts`, `proposal-helpers.ts`
+
+**Truly lazy** (remain `await import()` / `lazyPage()`):
+- Page chunks via `lazyPage()` in `src/app/render.ts` — goal-dashboard, role/tool/workflow/staff/skills/settings/search/system-prompt
+- Heavy tool renderers via `registerLazyToolRenderer()` in `src/ui/tools/renderer-registry.ts`
+- Heavy libraries: `ensureMarkdownBlock()` (KaTeX + marked), `pdfjs-dist`, `docx-preview` (via `attachment-utils.ts`)
+- External provider libs: pi-ai provider chunks, `google-shared`, `mistral` (already lazy via pi-ai's own dynamic imports — no action required)
+
+**Rule:** if a module appears in both a `lazyPage` / `registerLazyToolRenderer` call AND a top-of-file `import`, the lazy call is stale — remove it and keep only the static import. If a module has zero static importers, the dynamic boundary is real — leave it alone.
+
 ## Problem
 
 `npm run build:ui` emits a 3.6 MB / 999 kB-gzipped main chunk. The chunk dominates cold-launch parse-and-execute time and PWA snapshot resume. The goal spec mandates main chunk ≤ 600 kB gzipped (≥40% reduction) without architectural rewrites or new deps.
