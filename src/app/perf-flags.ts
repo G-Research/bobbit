@@ -14,7 +14,7 @@
 
 /**
  * Canonical list of perf flag names. Phase 2 coders extend this enum-style
- * type by adding their flag here, e.g. `"lazyToolContent"`, `"reducer-lru"`.
+ * type by adding their flag here, e.g. `"prefetchOnHover"`, `"reducer-lru"`.
  * Keeping the list centralised lets the harness enumerate flags without
  * duplication.
  */
@@ -27,14 +27,6 @@ export type PerfFlag = string;
  * flags are still gated by `localStorage.bobbitPerfFlags`.
  */
 export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
-	{
-		name: "lazyToolContent",
-		description:
-			"Phase 2B — pass `?stripToolContent=1` on `GET /api/sessions/:id` " +
-			"so the server replaces large tool-call content blocks with lazy " +
-			"placeholders. The renderer loads full content on demand via " +
-			"`/tool-content/:mi/:bi`.",
-	},
 	{
 		name: "prefetchOnHover",
 		description:
@@ -65,10 +57,6 @@ export const KNOWN_PERF_FLAGS: { name: string; description: string }[] = [
 			"`bobbitPerfFlags=-deferOffscreenRender` to disable.",
 	},
 ];
-
-/** Convenience canonical flag name for Phase 2B. Imported by call sites so
- *  a typo on the magic string surfaces at build time. */
-export const PERF_FLAG_LAZY_TOOL_CONTENT = "lazyToolContent";
 
 /** Convenience canonical flag name for Phase 2C. */
 export const PERF_FLAG_PREFETCH_ON_HOVER = "prefetchOnHover";
