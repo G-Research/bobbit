@@ -58,7 +58,7 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	return /^[A-Za-z0-9_./-]+$/.test(name);
 }
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
-import { VerificationHarness } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -5105,9 +5105,10 @@ async function handleApiRoute(
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
 		// hardcoded "master". See docs/goals-workflows-tasks.md — Gate baselines.
-		const primary = await detectPrimaryBranch(goal.cwd).catch(() => "master");
+		const branchContainer = goalBranchContainer(goal);
+		const primary = await detectPrimaryBranch(branchContainer).catch(() => "master");
 		verificationHarness.verifyGateSignal(
-			signal, gateDef, goal.cwd, goal.branch, primary, allGateStates, goal.spec,
+			signal, gateDef, branchContainer, goal.branch, primary, allGateStates, goal.spec,
 		).catch(err => console.error("[verification] Gate signal error:", err));
 
 		const verifySteps = (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type }));
