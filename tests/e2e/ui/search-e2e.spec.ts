@@ -128,8 +128,19 @@ test.describe("Search (UI)", () => {
 		// Verify search input exists
 		await expect(searchInput).toBeVisible({ timeout: 10_000 });
 
-		// Press Ctrl+K to focus the search input
-		await page.keyboard.press("Control+k");
+		// Wait for the app's keydown listener to attach before dispatching.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
+		// Dispatch Ctrl+K via window.dispatchEvent — same robustness fix as
+		// the Ctrl+[ fix: keyboard.press can be dropped under heavy load.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
 		// Verify the input is focused
 		await expect(searchInput).toBeFocused({ timeout: 3_000 });

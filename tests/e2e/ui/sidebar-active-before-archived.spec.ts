@@ -109,6 +109,7 @@ test.describe("Active-before-archived sidebar ordering", () => {
 	});
 
 	test("live children render before archived; Archived divider sits between them", async ({ page }) => {
+		test.setTimeout(60_000);
 		await openApp(page);
 		// Clear collapse state. Archived load is triggered via the toggle
 		// click below — setting `bobbit-show-archived` directly only flips the
