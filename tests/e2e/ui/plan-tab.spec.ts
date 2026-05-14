@@ -27,13 +27,13 @@ test.describe("Phase 5b — Plan tab", () => {
 		parentId = parent.id as string;
 		const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Phase A leaf", spec: "p1 spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Phase A leaf", spec: "p1 spec: plan-tab UI test first child goal, padded to meet spec validator minimum length." }),
 		});
 		expect(r1.status).toBe(201);
 		child1Id = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Phase A leaf 2", spec: "p2 spec" }),
+			body: JSON.stringify({ planId: "p2", title: "Phase A leaf 2", spec: "p2 spec: plan-tab UI test second child goal, padded to meet spec validator minimum length." }),
 		});
 		expect(r2.status).toBe(201);
 		child2Id = (await r2.json()).id as string;

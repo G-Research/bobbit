@@ -22,12 +22,12 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const parent = await createGoal({ title: "Tree-cost parent", projectId, team: false });
 		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "tree-cost UI test child 1: padded to meet spec validator minimum length." }),
 		});
 		const c1 = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "spec" }),
+			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "tree-cost UI test child 2: padded to meet spec validator minimum length." }),
 		});
 		const c2 = (await r2.json()).id as string;
 
@@ -67,12 +67,12 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false });
 		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Tree-cost child 1", spec: "tree-cost archived-children UI test child 1: padded to meet validator length." }),
 		});
 		const c1 = (await r1.json()).id as string;
 		const r2 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "spec" }),
+			body: JSON.stringify({ planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." }),
 		});
 		const c2 = (await r2.json()).id as string;
 

@@ -59,6 +59,7 @@ import { buildParentReadyNotification } from "./notify-team-lead-child-passed.js
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS, clampThinkingLevel } from "../../shared/thinking-levels.js";
 import { inferMeta } from "./aigw-manager.js";
+import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 
 /**
  * Clamp a thinking-level value against the resolved reviewer/QA model. When
@@ -3138,6 +3139,15 @@ export class VerificationHarness {
 					this._persistActive();
 				}
 			} else {
+				// Validate spec before spawning — reject placeholders so the child
+				// team-lead always receives a real task in its first user message.
+				const _specValidation = validateSpawnChildSpec(sg.spec ?? "");
+				if (!_specValidation.ok) {
+					return {
+						passed: false,
+						output: `runSubgoalStep: spec validation failed (${_specValidation.code}): ${_specValidation.error}`,
+					};
+				}
 				// Enforce nesting limit BEFORE spawning a fresh child. The
 				// outer `finally { sem.release() }` covers the early-return
 				// paths below — do NOT release here.

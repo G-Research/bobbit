@@ -113,10 +113,10 @@ describe("goal_plan_propose direct-spawn fallback respects dependsOn", () => {
 		// to provide topologically-sorted steps, but this is irrelevant to the
 		// enforcement: any step whose deps aren't yet `complete` is blocked.
 		const steps = [
-			{ planId: "root", title: "Root", spec: "root spec" },
-			{ planId: "a", title: "A", spec: "a spec", dependsOn: ["root"] },
-			{ planId: "b", title: "B", spec: "b spec", dependsOn: ["root"] },
-			{ planId: "leaf", title: "Leaf", spec: "leaf spec", dependsOn: ["a", "b"] },
+			{ planId: "root", title: "Root", spec: "Implement the root feature: set up the core data model and persistence layer as the foundation." },
+			{ planId: "a", title: "A", spec: "Implement feature A: build the primary service layer; depends on root completing first.", dependsOn: ["root"] },
+			{ planId: "b", title: "B", spec: "Implement feature B: build the secondary service layer; depends on root completing first.", dependsOn: ["root"] },
+			{ planId: "leaf", title: "Leaf", spec: "Implement the leaf integration: combines A and B outputs; runs only after both A and B complete.", dependsOn: ["a", "b"] },
 		];
 		const results: any[] = [];
 		for (const s of steps) {

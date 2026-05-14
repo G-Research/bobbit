@@ -15,7 +15,7 @@ test.describe("Phase 5b — parent breadcrumb", () => {
 		const parent = await createGoal({ title: "Breadcrumb root", projectId, team: false });
 		const r1 = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
 			method: "POST",
-			body: JSON.stringify({ planId: "p1", title: "Breadcrumb child", spec: "spec" }),
+			body: JSON.stringify({ planId: "p1", title: "Breadcrumb child", spec: "parent-breadcrumb UI test: child goal whose breadcrumb should link back to the parent goal." }),
 		});
 		expect(r1.status).toBe(201);
 		const childId = (await r1.json()).id as string;

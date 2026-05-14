@@ -120,7 +120,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-header-1",
 					title: "Child via header",
-					spec: "header-path child spec",
+					spec: "header-path child spec: verify X-Bobbit-Spawning-Session stamps spawnedBySessionId on the created child.",
 				},
 			});
 			expect(status).toBe(201);
@@ -148,7 +148,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-body-1",
 					title: "Child via body",
-					spec: "body-fallback child spec",
+					spec: "body-fallback child spec: verify body spawnedBySessionId is used when no header is provided.",
 					spawnedBySessionId: sessionId,
 				},
 			});
@@ -178,7 +178,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-precedence-1",
 					title: "Body-wins child",
-					spec: "precedence test",
+					spec: "precedence test: confirm header spawnedBySessionId wins over body spawnedBySessionId field.",
 					spawnedBySessionId: bodySession,
 				},
 			});
@@ -203,7 +203,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-role-1",
 					title: "Role-suggested child",
-					spec: "suggested-role spec",
+					spec: "suggested-role spec: verify suggestedRole is recorded on the spawned child goal correctly.",
 					suggestedRole: "test-engineer",
 				},
 			});
@@ -229,7 +229,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-lesson-4-1",
 					title: "stamp-immediately invariant child",
-					spec: "lesson 4.1 spec",
+					spec: "lesson 4.1 spec: spawnedFromPlanId must be stamped synchronously before the REST handler returns.",
 				},
 			});
 			expect(status).toBe(201);
@@ -249,7 +249,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-lesson-4-1",
 					title: "stamp-immediately invariant child",
-					spec: "lesson 4.1 spec",
+					spec: "lesson 4.1 spec: second call with same planId must be idempotent and return the existing child.",
 				},
 			});
 			expect(second.status).toBe(200);
@@ -283,7 +283,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-repopath-1",
 					title: "RepoPath child",
-					spec: "repoPath derivation",
+					spec: "repoPath derivation: when repoPath is omitted, derive it from the parent goal's repoPath.",
 				},
 			});
 			expect(status).toBe(201);
@@ -315,7 +315,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-setup-1",
 					title: "Setup-triggered child",
-					spec: "setup trigger smoke",
+					spec: "setup trigger smoke: verify spawn-child triggers worktree setup for the new child goal.",
 				},
 			});
 			expect(status).toBe(201);
@@ -350,7 +350,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			// Missing planId
 			const r1 = await spawnChildRaw({
 				parentId: parent.id,
-				body: { title: "no-planId", spec: "spec" },
+				body: { title: "no-planId", spec: "missing planId: actionable error spec body padded to meet validator minimum length." },
 			});
 			expect(r1.status).toBe(400);
 			expect(String(r1.body.error || "")).toMatch(/planId/i);
@@ -358,7 +358,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			// Missing title
 			const r2 = await spawnChildRaw({
 				parentId: parent.id,
-				body: { planId: "plan-x", spec: "spec" },
+				body: { planId: "plan-x", spec: "missing title: actionable error spec body padded to meet the spec validator minimum length." },
 			});
 			expect(r2.status).toBe(400);
 			expect(String(r2.body.error || "")).toMatch(/title/i);
@@ -383,7 +383,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-absent-1",
 					title: "No session-id child",
-					spec: "no session linkage",
+					spec: "no session linkage: when neither header nor body provides spawnedBySessionId, leave it unset.",
 				},
 			});
 			expect(status).toBe(201);
@@ -416,7 +416,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-inline-roles-1",
 					title: "Inline-roles child",
-					spec: "child with ephemeral synthesis-reviewer role",
+					spec: "child with ephemeral synthesis-reviewer role attached via inlineRoles in the spawn-child request.",
 					inlineRoles,
 				},
 			});
@@ -478,7 +478,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-inherit-1",
 					title: "Inherit child",
-					spec: "child overrides reviewer; inherits audit-tester",
+					spec: "child overrides reviewer; inherits audit-tester role from the parent goal's ephemeral roles.",
 					inlineRoles: {
 						reviewer: {
 							name: "reviewer",
@@ -522,7 +522,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-tier3-1",
 					title: "Tier-3 child",
-					spec: "defence-in-depth tier 3",
+					spec: "defence-in-depth tier 3: verify project-level ephemeral roles flow down into spawned children.",
 				},
 			});
 			expect(status).toBe(201);
@@ -551,7 +551,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-tier-precedence-1",
 					title: "Tier-precedence child",
-					spec: "tier 2 wins over tier 3",
+					spec: "tier 2 wins over tier 3: parent-level ephemeral roles override project-level same-named roles.",
 				},
 			});
 			expect(status).toBe(201);
@@ -582,7 +582,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				body: {
 					planId: "plan-inline-wf-1",
 					title: "Inline-workflow child",
-					spec: "child with ephemeral workflow",
+					spec: "child with ephemeral workflow attached via inlineWorkflow on the spawn-child request body.",
 					workflow: inlineWorkflow,
 				},
 			});
@@ -594,6 +594,90 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			expect(child.workflow.gates.length).toBe(2);
 			expect(child.workflow.gates[0].id).toBe("gather");
 
+			await deleteGoal(body.id);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+});
+
+/**
+ * Route-level spec validation — POST /api/goals/:id/spawn-child.
+ *
+ * Pins the HTTP 400 contract so a wiring regression in nested-goal-routes.ts
+ * is caught here, not just in the unit tests for the pure helper.
+ */
+test.describe("POST /spawn-child spec validation (route-level)", () => {
+	test(`spec: 'placeholder' → 400 SPEC_PLACEHOLDER @smoke`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-ph", title: "T", spec: "placeholder" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_PLACEHOLDER");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec: 'todo' → 400 SPEC_PLACEHOLDER`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-td", title: "T", spec: "todo" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_PLACEHOLDER");
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec shorter than 50 chars → 400 SPEC_TOO_SHORT`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-sh", title: "T", spec: "too short" },
+			});
+			expect(status).toBe(400);
+			expect(body.code).toBe("SPEC_TOO_SHORT");
+			expect(body.actualLength).toBeLessThan(50);
+			expect(body.minLength).toBe(50);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`spec missing → 400 (spec required, no regression)`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status } = await spawnChildRaw({
+				parentId: parent.id,
+				body: { planId: "plan-ms", title: "T" },
+			});
+			expect(status).toBe(400);
+		} finally {
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test(`valid spec (≥50 chars) → 201 success`, async () => {
+		const parent = await createParentGoal();
+		try {
+			const { status, body } = await spawnChildRaw({
+				parentId: parent.id,
+				body: {
+					planId: "plan-valid",
+					title: "Valid child",
+					spec: "Implement the feature described in the parent goal spec (this spec is exactly fifty-one characters).",
+				},
+			});
+			expect(status).toBe(201);
+			expect(body.id).toBeTruthy();
 			await deleteGoal(body.id);
 		} finally {
 			await deleteGoal(parent.id);

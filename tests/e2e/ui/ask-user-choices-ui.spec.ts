@@ -258,15 +258,34 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(letters.nth(1)).toHaveText("B.");
 
 		// Focus the first tab so keyboard input targets the widget.
-		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
+		const tab0 = widget.locator('[role="tab"][data-tab-index="0"]');
+		await tab0.focus();
+		// Wait for focus to settle before pressing keys — under load, focus()
+		// returns before the browser has actually given focus to the element.
+		await expect.poll(
+			() => page.evaluate(() => {
+				const el = document.querySelector('[role="tab"][data-tab-index="0"]');
+				return el && document.activeElement === el;
+			}),
+			{ timeout: 5_000 },
+		).toBe(true);
 
 		// Press '1' → picks option 1 on Q1 ("red") and auto-advances to Q2.
 		await page.keyboard.press("1");
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+			.toHaveAttribute("aria-selected", "true", { timeout: 8_000 });
 
 		// Re-focus for keyboard targeting on the new tab panel.
-		await widget.locator('[role="tab"][data-tab-index="1"]').focus();
+		const tab1 = widget.locator('[role="tab"][data-tab-index="1"]');
+		await tab1.focus();
+		// Wait for focus to settle.
+		await expect.poll(
+			() => page.evaluate(() => {
+				const el = document.querySelector('[role="tab"][data-tab-index="1"]');
+				return el && document.activeElement === el;
+			}),
+			{ timeout: 5_000 },
+		).toBe(true);
 
 		// Press '2' → picks option 2 on Q2 ("medium"). Last tab → no advance.
 		await page.keyboard.press("2");
