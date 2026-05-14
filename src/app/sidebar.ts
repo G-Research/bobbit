@@ -1060,7 +1060,6 @@ function renderProjectContent(
 			` : ""}
 			`; })()}
 		</div>
-		${!isProvisional && _staff ? renderStaffSidebarSection(_staff, project.id) : ""}
 		${!isProvisional ? renderProjectArchivedSection(
 			project,
 			// Bottom-section archived goals: only those whose parent is NOT
