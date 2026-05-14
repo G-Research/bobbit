@@ -27,7 +27,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { RpcBridge, type RpcBridgeOptions } from "./rpc-bridge.js";
 import { assembleSystemPrompt } from "./system-prompt.js";
-import { detectPrimaryBranch } from "../skills/git.js";
+import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
@@ -677,9 +677,16 @@ export class VerificationHarness {
 
 		const cwd = goal.worktreePath || goal.cwd;
 		const primary = await detectPrimaryBranch(cwd).catch(() => "master");
+		// {{baseBranch}} — bare branch name derived from the project's `base_ref`,
+		// or `primary` when unset. {{master}} stays bound to `detectPrimaryBranch`
+		// (the project primary), independent of `base_ref`. See
+		// `docs/design/base-ref.md` §3.
+		const configuredBaseRef = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
+		const baseBranch = parseBaseRef(configuredBaseRef).branch || primary;
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
 			master: primary,
+			baseBranch,
 			cwd,
 			goal_spec: goal.spec || "",
 			commit: signal.commitSha || "HEAD",
@@ -1265,16 +1272,22 @@ export class VerificationHarness {
 		this._persistActive();
 
 		try {
+			// Project config — resolved via {{project.key}}. Look up `base_ref`
+			// here so `{{baseBranch}}` can be threaded into `builtinVars` below.
+			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
+			const configuredBaseRef = projectConfigStore?.get("base_ref") ?? "";
+			// {{baseBranch}} — bare branch name from `base_ref`, falling back to
+			// the project primary when unset. {{master}} keeps its meaning.
+			// See `docs/design/base-ref.md` §3.
+			const baseBranch = parseBaseRef(configuredBaseRef).branch || primaryBranch || "master";
 			const builtinVars: Record<string, string> = {
 				branch: goalBranch || "HEAD",
 				master: primaryBranch || "master",
+				baseBranch,
 				cwd,
 				goal_spec: goalSpec || "",
 				commit: signal.commitSha || "HEAD",
 			};
-
-			// Project config — resolved via {{project.key}}
-			const projectConfigStore = this.resolveProjectConfigStore(signal.goalId);
 			const projectVars: Record<string, string> = projectConfigStore
 				? projectConfigStore.getWithDefaults()
 				: {};

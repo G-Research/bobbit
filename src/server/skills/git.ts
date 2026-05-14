@@ -85,6 +85,85 @@ async function resolveRemotePrimary(repoPath: string): Promise<string> {
 	return "HEAD";
 }
 
+/**
+ * Pure parser — splits a configured `base_ref` value into its component pieces.
+ * Exported so sandbox-internal callers can use the same logic without an exec
+ * round-trip. Does NOT consult disk; trim() and `origin/` stripping only.
+ *
+ * Examples:
+ *   configured = ""            → { ref: "", branch: "", isRemote: false }   (sentinel: unset)
+ *   configured = "  "          → { ref: "", branch: "", isRemote: false }   (whitespace == unset)
+ *   configured = "master"      → { ref: "master", branch: "master", isRemote: false }
+ *   configured = "origin/dev"  → { ref: "origin/dev", branch: "dev", isRemote: true }
+ *   configured = "origin/feature/foo" → { ref: "origin/feature/foo", branch: "feature/foo", isRemote: true }
+ *
+ * Note: this is a pure parser. It does NOT validate grammar, reject tags, SHAs,
+ * or non-`origin` prefixes — those are the REST handler's responsibility at
+ * save time. By the time `parseBaseRef` runs, the value has already been
+ * persisted to project config and is assumed well-formed.
+ */
+export function parseBaseRef(configured: string): { ref: string; branch: string; isRemote: boolean } {
+	const trimmed = (configured ?? "").trim();
+	if (!trimmed) return { ref: "", branch: "", isRemote: false };
+	if (trimmed.startsWith("origin/")) {
+		return { ref: trimmed, branch: trimmed.slice("origin/".length), isRemote: true };
+	}
+	return { ref: trimmed, branch: trimmed, isRemote: false };
+}
+
+/**
+ * Host-side resolver for `base_ref`. Used by the bulk of the server.
+ *   - configured non-empty → `parseBaseRef(configured)` (no exec).
+ *   - configured empty/undefined → falls back to `resolveRemotePrimary(repoPath)`
+ *     (today's behavior — `git symbolic-ref refs/remotes/origin/HEAD`).
+ *
+ * The fallback path returns the project's remote primary as `{ ref: "origin/main",
+ * branch: "main", isRemote: true }`. If primary detection fails, returns
+ * `{ ref: "HEAD", branch: "HEAD", isRemote: false }` — same sentinel as
+ * `resolveRemotePrimary` returns.
+ */
+export async function resolveBaseRef(
+	repoPath: string,
+	configured: string | undefined,
+): Promise<{ ref: string; branch: string; isRemote: boolean }> {
+	const parsed = parseBaseRef(configured ?? "");
+	if (parsed.ref) return parsed;
+	const remote = await resolveRemotePrimary(repoPath);
+	if (remote.startsWith("origin/")) {
+		return { ref: remote, branch: remote.slice("origin/".length), isRemote: true };
+	}
+	return { ref: remote, branch: remote, isRemote: false };
+}
+
+/**
+ * Sandbox variant of `resolveBaseRef`. Used by `project-sandbox.ts` so the
+ * container path doesn't pay an extra docker exec when configured is non-empty.
+ *   - configured non-empty → `parseBaseRef` (no exec).
+ *   - configured empty/undefined → `exec(["symbolic-ref", "refs/remotes/origin/HEAD"])`.
+ *
+ * The `exec` callback must run `git` inside the container with the worktree as
+ * cwd, returning stdout. Errors are caught and the sentinel `HEAD` is returned
+ * (matches `resolveRemotePrimary`'s fallback).
+ */
+export async function resolveBaseRefWithExec(
+	exec: (args: string[]) => Promise<string>,
+	configured: string | undefined,
+): Promise<{ ref: string; branch: string; isRemote: boolean }> {
+	const parsed = parseBaseRef(configured ?? "");
+	if (parsed.ref) return parsed;
+	try {
+		const out = await exec(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+		const trimmed = out.trim().replace("refs/remotes/", "");
+		if (trimmed.startsWith("origin/")) {
+			return { ref: trimmed, branch: trimmed.slice("origin/".length), isRemote: true };
+		}
+		if (trimmed) return { ref: trimmed, branch: trimmed, isRemote: false };
+	} catch {
+		// symbolic-ref may fail if origin/HEAD is not set
+	}
+	return { ref: "HEAD", branch: "HEAD", isRemote: false };
+}
+
 /** Check if a directory is inside a git repository. */
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	try {
@@ -119,9 +198,17 @@ export interface WorktreeResult {
  * source of truth.
  *
  * @param opts.startPoint — git ref to base the new branch on (default `"HEAD"`).
- *   Pass e.g. `origin/my-branch` to start from a remote tracking branch.
+ *   Pass e.g. `origin/my-branch` to start from a remote tracking branch. When
+ *   provided, this takes precedence over `configuredBaseRef`.
+ * @param opts.configuredBaseRef — the project's configured `base_ref` setting.
+ *   When `startPoint` is absent and this is non-empty, it drives both the
+ *   worktree start-point and the branch upstream (via `--set-upstream-to`).
+ *   Empty/undefined falls back to today's behavior (`resolveRemotePrimary`).
+ *   Only fires `--set-upstream-to` when this is non-empty — explicit-startPoint
+ *   callers (e.g. team-manager's hierarchical branching) keep today's
+ *   `push -u origin <branch>` upstream semantics.
  */
-export async function createWorktree(repoPath: string, branchName: string, opts?: { startPoint?: string; skipPush?: boolean; worktreeRoot?: string }): Promise<WorktreeResult> {
+export async function createWorktree(repoPath: string, branchName: string, opts?: { startPoint?: string; skipPush?: boolean; worktreeRoot?: string; configuredBaseRef?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
 	// "spawn git ENOENT" that looks like git isn't installed
 	if (!fs.existsSync(repoPath)) {
@@ -135,11 +222,23 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	const safeName = branchName.replace(/\//g, "-");
 	const worktreePath = path.join(wtRoot, safeName);
 
-	// Resolve the start point — default to the remote primary branch so worktrees
-	// are never based on a stale local checkout.
+	// Resolve the start point. Precedence:
+	//   1. Explicit `opts.startPoint`           (e.g. team-manager's `origin/<goal-branch>`)
+	//   2. `opts.configuredBaseRef` (non-empty)  (project's `base_ref` setting)
+	//   3. `resolveRemotePrimary(repoPath)`     (today's fallback)
+	// We capture whether the resolution came from a configured base so that:
+	//   a) worktree-add failures emit the design-spec'd "base_ref no longer exists" message, and
+	//   b) `--set-upstream-to=<configuredBaseRef>` fires post-creation.
+	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 	let startPoint = opts?.startPoint;
+	let startPointFromConfiguredBase = false;
 	if (!startPoint) {
-		startPoint = await resolveRemotePrimary(repoPath);
+		if (configuredBaseRefTrimmed) {
+			startPoint = parseBaseRef(configuredBaseRefTrimmed).ref;
+			startPointFromConfiguredBase = true;
+		} else {
+			startPoint = await resolveRemotePrimary(repoPath);
+		}
 	}
 
 	// Fetch the start point to ensure it's up to date
@@ -189,9 +288,26 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		}
 	} else {
 		// Branch doesn't exist — create branch and worktree in one step
-		await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, startPoint], {
-			cwd: repoPath,
-		});
+		try {
+			await execFile("git", ["worktree", "add", "-b", branchName, worktreePath, startPoint], {
+				cwd: repoPath,
+			});
+		} catch (err) {
+			// If the start-point came from the project's configured `base_ref` and
+			// the ref has since vanished (deleted on origin, renamed, etc.), emit
+			// the design-spec'd actionable error so the user knows to fetch / fix
+			// the setting. For explicit-startPoint callers we let git's error
+			// bubble up unchanged.
+			if (startPointFromConfiguredBase) {
+				const repoName = path.basename(repoPath);
+				throw new Error(
+					`Failed to create worktree: base_ref '${configuredBaseRefTrimmed}' no longer exists in repo '${repoName}'. ` +
+					`It may have been deleted on the remote since the project was configured. ` +
+					`Run 'git fetch origin' to refresh, then update the base_ref setting if the branch was renamed.`,
+				);
+			}
+			throw err;
+		}
 	}
 
 	// Push the new branch and set upstream tracking so git-status can report ahead/behind
@@ -204,6 +320,28 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 			});
 		} catch {
 			// Push may fail (no remote, auth issues, offline) — not fatal
+		}
+	}
+
+	// When the project has a configured `base_ref`, override the per-branch
+	// upstream so `@{u}` (and the ahead/behind pair in git-status-native) points
+	// at the configured integration target rather than `origin/<branch>` that
+	// `git push -u` just set. Runs whether the base is local (`master`) or
+	// remote (`origin/develop`) — save-time validation guarantees the ref
+	// resolves at PUT time; the defence-in-depth try/catch below catches the
+	// edge case where it has been deleted between save and worktree creation.
+	if (configuredBaseRefTrimmed) {
+		try {
+			await execFile("git", ["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
+				cwd: worktreePath,
+				timeout: 10_000,
+			});
+		} catch (err) {
+			const stderr = err instanceof Error ? err.message : String(err);
+			throw new Error(
+				`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}': ${stderr}. ` +
+				`Check that the ref is still a valid branch.`,
+			);
 		}
 	}
 
@@ -227,7 +365,7 @@ export async function createWorktreeSet(
 	components: Component[],
 	branchName: string,
 	baseBranch?: string,
-	opts?: { worktreeRoot?: string },
+	opts?: { worktreeRoot?: string; configuredBaseRef?: string },
 ): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
 	// Per-component worktree setup is the caller's responsibility — invoke
 	// `runComponentSetups()` after this function returns.
@@ -241,9 +379,16 @@ export async function createWorktreeSet(
 
 	const slug = branchToSlug(branchName);
 
-	// Single-repo path collapses to existing behavior.
+	// Single-repo path collapses to existing behavior. `configuredBaseRef`
+	// flows through `createWorktree`, which handles start-point resolution and
+	// the `--set-upstream-to` post-step uniformly with the standalone caller.
 	if (repos.length === 1 && repos[0] === ".") {
-		const result = await createWorktree(rootPath, branchName, { startPoint: baseBranch, skipPush: true, worktreeRoot: opts?.worktreeRoot });
+		const result = await createWorktree(rootPath, branchName, {
+			startPoint: baseBranch,
+			skipPush: true,
+			worktreeRoot: opts?.worktreeRoot,
+			configuredBaseRef: opts?.configuredBaseRef,
+		});
 		return {
 			container: result.worktreePath,
 			worktrees: [{ repo: ".", repoPath: rootPath, worktreePath: result.worktreePath }],
@@ -259,6 +404,8 @@ export async function createWorktreeSet(
 		fs.mkdirSync(container, { recursive: true });
 	}
 
+	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
+
 	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
 	for (const repo of repos) {
 		const repoSrc = path.join(rootPath, repo);
@@ -266,7 +413,20 @@ export async function createWorktreeSet(
 		if (!fs.existsSync(repoSrc)) {
 			throw new Error(`createWorktreeSet: source repo not found: ${repoSrc}`);
 		}
-		const startPoint = baseBranch ?? await resolveRemotePrimary(repoSrc);
+		// Start-point precedence mirrors `createWorktree`:
+		//   1. explicit `baseBranch` arg            (per-call override)
+		//   2. `opts.configuredBaseRef` (non-empty) (project's `base_ref` setting)
+		//   3. `resolveRemotePrimary(repoSrc)`     (today's fallback)
+		let startPoint: string;
+		let startPointFromConfiguredBase = false;
+		if (baseBranch) {
+			startPoint = baseBranch;
+		} else if (configuredBaseRefTrimmed) {
+			startPoint = parseBaseRef(configuredBaseRefTrimmed).ref;
+			startPointFromConfiguredBase = true;
+		} else {
+			startPoint = await resolveRemotePrimary(repoSrc);
+		}
 
 		// Branch may already exist from a prior partial attempt.
 		let branchExists = false;
@@ -282,7 +442,37 @@ export async function createWorktreeSet(
 				await execFile("git", ["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
 			}
 		} catch (err) {
+			if (startPointFromConfiguredBase && !branchExists) {
+				// Configured base ref disappeared between save and creation in this
+				// component repo. Emit the design-spec'd actionable message naming
+				// the repo so the user knows which one to `git fetch origin` in.
+				throw new Error(
+					`Failed to create worktree: base_ref '${configuredBaseRefTrimmed}' no longer exists in repo '${repo}'. ` +
+					`It may have been deleted on the remote since the project was configured. ` +
+					`Run 'git fetch origin' to refresh, then update the base_ref setting if the branch was renamed.`,
+				);
+			}
 			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
+		}
+
+		// When the project has a configured `base_ref`, override per-branch
+		// upstream so each component's `@{u}` reflects the integration target.
+		// Single-repo path delegates to `createWorktree` above, which handles
+		// this; the multi-repo loop must do it explicitly per worktree because
+		// it skips the `push -u` step entirely.
+		if (configuredBaseRefTrimmed) {
+			try {
+				await execFile("git", ["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
+					cwd: wtPath,
+					timeout: 10_000,
+				});
+			} catch (err) {
+				const stderr = err instanceof Error ? err.message : String(err);
+				throw new Error(
+					`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}' in repo '${repo}': ${stderr}. ` +
+					`Check that the ref is still a valid branch.`,
+				);
+			}
 		}
 
 		out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
