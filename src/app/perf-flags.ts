@@ -1,15 +1,12 @@
 // ============================================================================
-// PERF FLAGS — feature-flag helper for Phase 2 perf experiments
+// PERF FLAGS — feature-flag helper for perf optimisations
 //
-// Each Phase 2 hypothesis lives behind a flag here. The flag is comma-separated
-// in `localStorage.bobbitPerfFlags`. The harness toggles flags on/off to
-// measure before/after.
+// Each tunable optimisation lives behind a flag here. The flag set is
+// comma-separated in `localStorage.bobbitPerfFlags`. Default-on flags are
+// listed in `DEFAULT_ON_FLAGS`; explicit `-<flag>` entries opt out.
 //
-// IMPORTANT: flags are a measurement tool, not a permanent kill switch. When a
-// Phase 2 win ships in Phase 3, its flag MUST be removed and the optimisation
-// made unconditional. Long-lived flags create configuration sprawl.
-//
-// See `docs/perf/sidebar-nav-baseline.md` for the live experiment log.
+// See `docs/perf/defer-offscreen-render.md` for the documented optimisation
+// shipped under this mechanism (`deferOffscreenRender`, default-ON).
 // ============================================================================
 
 /**
