@@ -5,7 +5,6 @@ import { i18n } from "../../utils/i18n.js";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderInlineImages } from "./image-utils.js";
-import { codeBlock } from "../../components/syntax-highlight.js";
 
 export class DefaultRenderer implements ToolRenderer {
 	private toolName?: string;
@@ -72,13 +71,13 @@ export class DefaultRenderer implements ToolRenderer {
 							paramsJson
 								? html`<div>
 							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
-							${codeBlock(paramsJson, "json")}
+							<code-block .code=${paramsJson} language="json"></code-block>
 						</div>`
 								: ""
 						}
 						<div>
 							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Output")}</div>
-							${codeBlock(outputJson, outputLanguage)}
+							<code-block .code=${outputJson} language="${outputLanguage}"></code-block>
 						</div>
 						${images}
 					</div>
@@ -106,7 +105,7 @@ export class DefaultRenderer implements ToolRenderer {
 						${renderHeader(state, Code, this.label)}
 						<div>
 							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
-							${codeBlock(paramsJson, "json")}
+							<code-block .code=${paramsJson} language="json"></code-block>
 						</div>
 					</div>
 				`,

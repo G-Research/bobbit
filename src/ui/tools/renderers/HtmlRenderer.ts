@@ -4,7 +4,6 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { AppWindow } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { codeBlock } from "../../components/syntax-highlight.js";
 
 interface HtmlWriteParams {
 	path: string;
@@ -171,7 +170,7 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 							></iframe>
 						</div>
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-							${codeBlock(htmlContent, "html")}
+							<code-block .code=${htmlContent} language="html"></code-block>
 						</div>
 					</div>
 				`,
@@ -238,7 +237,7 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 						</div>
 					</div>
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-						${codeBlock(this._getThrottledCode(htmlContent), "html")}
+						<code-block .code=${this._getThrottledCode(htmlContent)} language="html"></code-block>
 					</div>
 				</div>
 			`,

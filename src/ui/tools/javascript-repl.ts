@@ -11,7 +11,6 @@ import { JAVASCRIPT_REPL_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { registerToolRenderer, renderCollapsibleHeader, renderHeader, getToolState } from "./renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "./types.js";
-import { codeBlock } from "../components/syntax-highlight.js";
 
 // Execute JavaScript code with attachments using SandboxedIframe
 export async function executeJavaScript(
@@ -254,7 +253,7 @@ export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScri
 					<div>
 						${renderCollapsibleHeader(state, Code, params.title ? params.title : i18n("Executing JavaScript"), codeContentRef, codeChevronRef, false)}
 						<div ${ref(codeContentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
-							${codeBlock(params.code || "", "javascript")}
+							<code-block .code=${params.code || ""} language="javascript"></code-block>
 							${output ? html`<console-block .content=${output} .variant=${result.isError ? "error" : "default"}></console-block>` : ""}
 						</div>
 						${
@@ -277,7 +276,7 @@ export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScri
 					<div>
 						${renderCollapsibleHeader(state, Code, params.title ? params.title : i18n("Executing JavaScript"), codeContentRef, codeChevronRef, false)}
 						<div ${ref(codeContentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-							${params.code ? html`${codeBlock(params.code, "javascript")}` : ""}
+							${params.code ? html`<code-block .code=${params.code} language="javascript"></code-block>` : ""}
 						</div>
 					</div>
 				`,

@@ -7,7 +7,6 @@ import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResul
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { HtmlRenderer } from "./HtmlRenderer.js";
 import { SvgRenderer } from "./SvgRenderer.js";
-import { codeBlock } from "../../components/syntax-highlight.js";
 
 /** Truncation metadata shape injected by the server for large content. */
 interface TruncatedContent {
@@ -137,7 +136,7 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 							${renderCollapsibleHeader(state, FileCode2, headerText, contentRef, chevronRef, false)}
 							${truncationBadge}
 							<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-								${codeBlock(displayContent, language)}
+								<code-block .code=${displayContent} language="${language}"></code-block>
 							</div>
 						</div>
 					`,
@@ -169,7 +168,7 @@ export class WriteRenderer implements ToolRenderer<WriteParams, any> {
 						${renderCollapsibleHeader(state, FileCode2, headerText, contentRef, chevronRef, false)}
 						${truncationBadge}
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
-							${codeBlock(this._getThrottledCode(displayContent), language)}
+							<code-block .code=${this._getThrottledCode(displayContent)} language="${language}"></code-block>
 						</div>
 					</div>
 				`,
