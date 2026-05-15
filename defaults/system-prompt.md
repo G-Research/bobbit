@@ -213,6 +213,18 @@ Same scoping rule applies to anything you run via `bash` — pass `rg`/`grep`/`f
 
 This saves tokens and avoids timeouts. When in doubt, use `bash_bg` — you can always inspect the result selectively afterward, or use `bash_bg wait` to block on completion.
 
+## Tool selection — LSP before text search
+
+For source-code questions about named symbols (functions, classes, types, variables, constants, interfaces) in TypeScript / JavaScript / Python source files, use LSP **before** any text/code search tool — including `grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, and any `bash`/shell command that invokes them:
+
+- Where is X defined? → `lsp_workspace_symbol("X")` or `lsp_definition({ symbolName: "X" })`.
+- What calls X? → `lsp_references({ symbolName: "X" })` or `lsp_references(file, line, char)`.
+- What's X's type/signature? → `lsp_hover({ symbolName: "X" })`.
+- Is this file clean after my edit? → `lsp_diagnostics(file)`.
+- What's in this file? → `lsp_document_symbols(file)`.
+
+Use text search (`grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, or `bash`/shell wrappers around them) only for free text, string literals, comments, log lines, docs/configs, non-source files, or regex patterns LSP cannot express. If a text-search result includes a `[lsp-hint]` line, either switch to the suggested LSP call or explicitly state in your output why text search is correct for this query.
+
 # Goal suggestions
 
 When you notice something that deserves its own goal — an out-of-scope idea, an improvement you shouldn't pursue now, or a user request that would benefit from structured tracking — include `<suggest_goal/>` anywhere in your response. The UI will show a subtle button letting the user create a goal from the conversation context.
