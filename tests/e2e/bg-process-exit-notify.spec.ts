@@ -227,8 +227,14 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 			);
 			expect([200, 204]).toContain(killRes.status);
 
-			// Wait a beat for any (incorrect) wake to fire.
-			await new Promise((r) => setTimeout(r, 750));
+			// Wait until the killed process is no longer running; the exit notifier
+			// would have fired by then if kill suppression were broken.
+			await pollUntil(async () => {
+				const r = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+				const list = await r.json();
+				const proc = list.processes?.find((p: any) => p.id === bg.id);
+				return !proc || proc.status === "exited";
+			}, { timeoutMs: 5_000, intervalMs: 50, label: "killed bg process settled" });
 
 			const bgWakes = spy.events.filter((e) =>
 				e.sessionId === sessionId
