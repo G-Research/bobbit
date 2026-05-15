@@ -76,7 +76,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + a per-worker counter so retries don't collide with a
 		// previous worker's teardown that still holds file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-inproc-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -84,6 +84,15 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
+		// the project rootPath derived from it, the preview-mount baseDir) all
+		// see the real path. On macOS /var/folders → /private/var/folders, and
+		// the path-guard's realpath-aware containment check otherwise rejects
+		// missing files under the symlinked baseDir with 400→03 instead of 404.
+		try {
+			const { realpathSync } = await import("node:fs");
+			bobbitDir = realpathSync(bobbitDir);
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Seed projects.json. The server no longer auto-registers a default project,
 		// so we register one explicitly via the API after startup (see below) to
 		// preserve the pre-existing test harness contract ("projects[0] == server CWD").

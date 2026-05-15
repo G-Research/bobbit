@@ -9,7 +9,7 @@
  * (not import time) so each worker gets the right server.
  */
 
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -236,6 +236,56 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 }
 
 /**
+ * Auto-inject `acceptCanonical: true` into POST /api/projects bodies whose
+ * `rootPath` resolves through a symlink. On macOS the OS tmpdir
+ * (/var/folders/...) is itself reached via /var → /private/var, so every
+ * test that registers a project under `os.tmpdir()` hits a 400
+ * `symlink_root` from POST /api/projects unless it opts in to the
+ * canonical path. The server-side validation stays intact for production
+ * callers — only test traffic going through `apiFetch` is affected, and
+ * any test that wants to *exercise* the 400 path uses `rawApiFetch`
+ * which bypasses this interceptor entirely.
+ *
+ * The marker `__e2e_no_accept_canonical: true` on the request body opts
+ * out (currently unused, reserved for future negative-path tests that
+ * still want to go through apiFetch).
+ */
+function maybeInjectAcceptCanonical(path: string, opts: RequestInit): RequestInit {
+	const method = (opts.method || "GET").toUpperCase();
+	if (method !== "POST" || path !== "/api/projects") return opts;
+	const body = opts.body as unknown;
+	let parsed: Record<string, unknown> | undefined;
+	if (typeof body === "string") {
+		try { parsed = JSON.parse(body); } catch { return opts; }
+	} else if (body && typeof body === "object") {
+		parsed = body as Record<string, unknown>;
+	} else {
+		return opts;
+	}
+	if (!parsed || typeof parsed !== "object") return opts;
+	if (parsed.__e2e_no_accept_canonical) return opts;
+	const patch: Record<string, unknown> = {};
+	// Canonicalize rootPath up-front so server-side lookups (upsert,
+	// duplicate-detection, path-containment) all operate on the same path
+	// the registry stores. Without this, on macOS the OS tmpdir
+	// (/var/folders/...) reaches a project through /var → /private/var,
+	// and routes that lookup-by-rootPath compare the raw symlink path
+	// against the canonical stored value and miss.
+	if (typeof parsed.rootPath === "string" && parsed.rootPath) {
+		try {
+			const canonical = realpathSync(parsed.rootPath);
+			if (canonical !== parsed.rootPath) patch.rootPath = canonical;
+		} catch { /* path may not exist yet (negative-path tests); leave as-is */ }
+	}
+	// Belt-and-braces: still set acceptCanonical so the server accepts
+	// any residual symlink in the rootPath chain (e.g. a parent the test
+	// didn't canonicalize) instead of 400'ing.
+	if (parsed.acceptCanonical === undefined) patch.acceptCanonical = true;
+	if (Object.keys(patch).length === 0) return opts;
+	return { ...opts, body: JSON.stringify({ ...parsed, ...patch }) };
+}
+
+/**
  * Append projectId as a query param when missing, for routes that read it from
  * the URL (workflow customize/override/PUT/DELETE on /:id). Returns the path
  * unchanged if it already carries projectId or no default project is registered.
@@ -328,7 +378,7 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
-	const injected = await maybeInjectProjectId(path, opts);
+	const injected = maybeInjectAcceptCanonical(path, await maybeInjectProjectId(path, opts));
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
 	const finalPath = await maybeInjectProjectIdQuery(path, method);
@@ -460,6 +510,62 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		);
 	}
 	return (await resp!.json()).id;
+}
+
+/**
+ * Register a project via REST. Canonicalizes `rootPath` and sets
+ * `acceptCanonical: true` so the macOS /var → /private/var symlink
+ * (or any other symlinked tmpdir) doesn't produce a 400 `symlink_root`.
+ *
+ * The default is upsert=false to mirror raw POST semantics. Pass
+ * `upsert: true` for idempotent re-registration.
+ *
+ * Returns the created/existing project. Throws on any non-2xx response
+ * with the server's error body included in the message — saves callers
+ * from writing `expect(resp.status).toBe(201)` plus a generic message.
+ *
+ * Tests that deliberately exercise the symlink_root 400 path must call
+ * `rawApiFetch("/api/projects", ...)` and construct the body themselves.
+ */
+export async function registerProject(opts: {
+	name: string;
+	rootPath: string;
+	components?: Array<Record<string, unknown>>;
+	workflows?: unknown;
+	upsert?: boolean;
+	config?: Record<string, unknown>;
+	/**
+	 * Marker that prevents the auto-seed-workflows helper from PUT-ing the
+	 * baseline workflow block into the new project. Set `seedWorkflows: false`
+	 * for tests that assert a zero-workflows project shape.
+	 */
+	seedWorkflows?: boolean;
+	/**
+	 * Extra fields merged into the request body verbatim (palette, color, etc).
+	 */
+	extra?: Record<string, unknown>;
+}): Promise<{ id: string; rootPath: string; [k: string]: unknown }> {
+	const body: Record<string, unknown> = {
+		name: opts.name,
+		rootPath: opts.rootPath,
+	};
+	if (opts.components) body.components = opts.components;
+	if (opts.workflows !== undefined) body.workflows = opts.workflows;
+	if (opts.upsert) body.upsert = true;
+	if (opts.config) Object.assign(body, opts.config);
+	if (opts.extra) Object.assign(body, opts.extra);
+	if (opts.seedWorkflows === false) body.__e2e_seed_skip__ = true;
+	// apiFetch's interceptor canonicalizes rootPath and adds acceptCanonical.
+	const resp = await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	if (resp.status < 200 || resp.status >= 300) {
+		let errBody: string;
+		try { errBody = await resp.text(); } catch { errBody = "<no body>"; }
+		throw new Error(`registerProject(${opts.name}) failed: ${resp.status} ${errBody}`);
+	}
+	return resp.json();
 }
 
 /** Delete a session (best-effort, for cleanup). */
