@@ -812,6 +812,21 @@ interface GoalFormConfig {
 	subgoalsEnabled?: boolean;
 	/** Maximum nesting depth from system prefs. */
 	maxNestingDepth?: number;
+
+	/** Current value of the per-goal "Allow subgoals" toggle. `null` means
+	 *  the user has not touched it (inherit system pref). Only set in
+	 *  proposal-modal mode; the goal-assistant flow leaves this undefined
+	 *  so the row is not rendered (and would otherwise be a no-op there). */
+	subgoalsAllowedValue?: boolean | null;
+	/** Current value of the per-goal "Max nesting depth" input. `null` means
+	 *  inherit system pref. Only set in proposal-modal mode. */
+	maxNestingDepthValue?: number | null;
+	/** Invoked when the user toggles "Allow subgoals". Presence (alongside
+	 *  `onMaxNestingDepthChange`) gates rendering of the subgoals row. */
+	onSubgoalsAllowedChange?: (value: boolean) => void;
+	/** Invoked when the user changes the "Max depth" input. `null` means the
+	 *  user cleared the field (inherit system pref). */
+	onMaxNestingDepthChange?: (value: number | null) => void;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -943,10 +958,10 @@ function renderGoalForm(config: GoalFormConfig) {
 			})() : (config.subgoalsEnabled ? html`
 				<div class="text-xs text-muted-foreground self-start px-2 py-0.5 rounded-full bg-secondary/60" data-testid="goal-form-toplevel-badge">Top-level goal</div>
 			` : "")}
-			${config.subgoalsEnabled ? (() => {
+			${(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange) ? (() => {
 				const systemCap = config.maxNestingDepth ?? 3;
-				const allowed = _proposalSubgoalsAllowed ?? config.subgoalsEnabled;
-				const depthValue = _proposalMaxNestingDepth ?? systemCap;
+				const allowed = config.subgoalsAllowedValue ?? config.subgoalsEnabled;
+				const depthValue = config.maxNestingDepthValue ?? systemCap;
 				return html`
 					<div class="flex items-center gap-2" data-testid="goal-form-subgoals-row">
 						<label class="${lblCls} w-20 md:w-16">Subgoals</label>
@@ -956,8 +971,7 @@ function renderGoalForm(config: GoalFormConfig) {
 								.checked=${allowed}
 								data-testid="goal-form-subgoals-toggle"
 								@change=${(e: Event) => {
-									_proposalSubgoalsAllowed = (e.target as HTMLInputElement).checked;
-									renderApp();
+									config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
 								}} />
 							<span class="text-muted-foreground">Allow subgoals</span>
 						</label>
@@ -975,11 +989,10 @@ function renderGoalForm(config: GoalFormConfig) {
 									@change=${(e: Event) => {
 										const raw = parseInt((e.target as HTMLInputElement).value, 10);
 										if (Number.isFinite(raw)) {
-											_proposalMaxNestingDepth = Math.min(systemCap, Math.max(1, raw));
+											config.onMaxNestingDepthChange?.(Math.min(systemCap, Math.max(1, raw)));
 										} else {
-											_proposalMaxNestingDepth = null;
+											config.onMaxNestingDepthChange?.(null);
 										}
-										renderApp();
 									}} />
 							</label>
 						` : ""}
@@ -2625,6 +2638,16 @@ function goalProposalPanel() {
 		onParentGoalChange: (id) => { _proposalParentGoalId = id || ""; renderApp(); },
 		subgoalsEnabled,
 		maxNestingDepth,
+		subgoalsAllowedValue: _proposalSubgoalsAllowed,
+		maxNestingDepthValue: _proposalMaxNestingDepth,
+		onSubgoalsAllowedChange: (value: boolean) => {
+			_proposalSubgoalsAllowed = value;
+			renderApp();
+		},
+		onMaxNestingDepthChange: (value: number | null) => {
+			_proposalMaxNestingDepth = value;
+			renderApp();
+		},
 	});
 }
 

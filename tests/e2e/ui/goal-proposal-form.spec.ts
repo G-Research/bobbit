@@ -143,6 +143,7 @@ test.describe("Goal proposal modal — subgoal controls", () => {
 			await deleteGoalIfExists(createdGoalId);
 			await deleteSession(sessionId);
 			await setPref("maxNestingDepth", null);
+			await setPref("subgoalsEnabled", null);
 		}
 	});
 
@@ -207,6 +208,7 @@ test.describe("Goal proposal modal — subgoal controls", () => {
 			await deleteGoalIfExists(createdGoalId);
 			await deleteSession(sessionId);
 			await setPref("maxNestingDepth", null);
+			await setPref("subgoalsEnabled", null);
 		}
 	});
 });
