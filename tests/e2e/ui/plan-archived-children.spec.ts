@@ -148,14 +148,25 @@ test.describe("Plan tab + tree-cost — archived/completed children", () => {
 		await toggle.click();
 		await expect(toggle).toHaveAttribute("data-live-only", "true", { timeout: 5_000 });
 
-		// After toggle, archived nodes are filtered out. The live
-		// in-progress child must remain. Completed (non-archived) children
-		// also remain — `liveOnly` filters by `archived`, not by state.
+		// After toggle, archived AND completed/terminal-state children are
+		// filtered out. Only the live in-progress child must remain.
+		// `liveOnly` filters by archived flag AND terminal state
+		// (complete/shelved). The button is labelled "Live only" — it
+		// must leave only live (todo/in-progress/blocked) children.
 		await expect(
 			page.locator('[data-testid="plan-node"][data-archived="true"]'),
 		).toHaveCount(0, { timeout: 10_000 });
-		const remaining = await page.locator('[data-testid="plan-node"]').count();
-		expect(remaining).toBeGreaterThanOrEqual(1);
+		// Pin: the completed (non-archived) child must also disappear.
+		const remainingChildGoalIds = await page.locator('[data-testid="plan-node"]').evaluateAll(
+			(els) => els.map(e => (e as HTMLElement).getAttribute("data-child-goal-id")),
+		);
+		expect(remainingChildGoalIds, "completed child must NOT remain under live-only")
+			.not.toContain(completeChildId);
+		expect(remainingChildGoalIds, "archived child must NOT remain under live-only")
+			.not.toContain(archivedChildId);
+		expect(remainingChildGoalIds, "live in-progress child MUST remain under live-only")
+			.toContain(liveChildId);
+		expect(await page.locator('[data-testid="plan-node"]').count()).toBe(1);
 
 		// Toggle back — archived child reappears.
 		await toggle.click();

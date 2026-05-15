@@ -108,7 +108,26 @@ describe("computePlanStepsForGoal — archived children visibility", () => {
 		state: "blocked",
 		createdAt: 3,
 	});
-	const allGoals: Goal[] = [parent, liveInProgress, archivedComplete, liveBlocked];
+	// Completed (NOT archived) — the liveOnly filter must hide this too,
+	// not just archived children. The button is labelled "Live only" so
+	// terminal-state children (complete/shelved) must NOT remain.
+	const completedLive: Goal = goal({
+		id: "completed-live",
+		title: "Completed (not archived)",
+		parentGoalId: "P",
+		spawnedFromPlanId: "p-completed-live",
+		state: "complete",
+		createdAt: 4,
+	});
+	const shelvedLive: Goal = goal({
+		id: "shelved-live",
+		title: "Shelved (not archived)",
+		parentGoalId: "P",
+		spawnedFromPlanId: "p-shelved-live",
+		state: "shelved",
+		createdAt: 5,
+	});
+	const allGoals: Goal[] = [parent, liveInProgress, archivedComplete, liveBlocked, completedLive, shelvedLive];
 
 	it("default (no opts) INCLUDES archived child in plan steps", () => {
 		const steps = computePlanStepsForGoal(parent, allGoals);
@@ -117,7 +136,11 @@ describe("computePlanStepsForGoal — archived children visibility", () => {
 			`expected archived child planId in steps; got ${JSON.stringify(planIds)}`);
 		assert.ok(planIds.includes("p-live-ip"));
 		assert.ok(planIds.includes("p-blocked"));
-		assert.equal(steps.length, 3, "all three direct children should appear by default");
+		assert.ok(planIds.includes("p-completed-live"),
+			"completed (non-archived) child must appear by default");
+		assert.ok(planIds.includes("p-shelved-live"),
+			"shelved (non-archived) child must appear by default");
+		assert.equal(steps.length, 5, "all five direct children should appear by default");
 	});
 
 	it("default (no opts) INCLUDES completed child in plan steps", () => {
@@ -140,17 +163,36 @@ describe("computePlanStepsForGoal — archived children visibility", () => {
 			"completed (non-archived) child must appear in default plan");
 	});
 
-	it("liveOnly:true EXCLUDES archived child but keeps live children", () => {
-		// Forward-compatible call signature: the impl task adds an
-		// optional `liveOnly?: boolean` to opts. If it has not landed
-		// yet, this test FAILS — which is the intended signal to the
-		// implementer that the contract is not yet satisfied.
+	it("liveOnly:true EXCLUDES archived AND completed/terminal children, keeps only live", () => {
 		const steps = computePlanStepsForGoal(parent, allGoals, { liveOnly: true } as any);
 		const planIds = steps.map(s => s.planId);
 		assert.ok(!planIds.includes("p-archived"),
 			`liveOnly:true must exclude archived child; got ${JSON.stringify(planIds)}`);
+		assert.ok(!planIds.includes("p-completed-live"),
+			`liveOnly:true must ALSO exclude completed (non-archived) child; got ${JSON.stringify(planIds)}`);
+		assert.ok(!planIds.includes("p-shelved-live"),
+			`liveOnly:true must ALSO exclude shelved (non-archived) child; got ${JSON.stringify(planIds)}`);
 		assert.ok(planIds.includes("p-live-ip"), "liveOnly:true must keep live in-progress");
 		assert.ok(planIds.includes("p-blocked"), "liveOnly:true must keep live blocked");
+		assert.equal(steps.length, 2, "liveOnly:true must leave exactly the two live children (in-progress + blocked)");
+	});
+
+	it("liveOnly:true keeps a todo child (todo is a live, non-terminal state)", () => {
+		const todoChild: Goal = goal({
+			id: "todo-child",
+			title: "Todo child",
+			parentGoalId: "P",
+			spawnedFromPlanId: "p-todo",
+			state: "todo",
+			createdAt: 6,
+		});
+		const goals = [parent, todoChild, completedLive, archivedComplete];
+		const steps = computePlanStepsForGoal(parent, goals, { liveOnly: true } as any);
+		const planIds = steps.map(s => s.planId);
+		assert.ok(planIds.includes("p-todo"), "liveOnly:true must keep todo child");
+		assert.ok(!planIds.includes("p-completed-live"));
+		assert.ok(!planIds.includes("p-archived"));
+		assert.equal(steps.length, 1);
 	});
 
 	it("liveOnly:false explicitly is equivalent to default — archived child still INCLUDED", () => {
