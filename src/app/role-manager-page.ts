@@ -60,7 +60,6 @@ let loading = true;
 let editLabel = "";
 let editPrompt = "";
 let editAccessory = "none";
-let editName = "";
 let editToolPolicies: Record<string, string> = {};
 let editModelOverride = "";
 let editThinkingOverride = "";
@@ -80,45 +79,6 @@ let assistantPrompts: AssistantPromptInfo[] = [];
 let activePromptTab: string = "baseline"; // "baseline" or assistant type key
 let editedPrompts: Map<string, string> = new Map(); // type -> edited content
 let originalPrompts: Map<string, string> = new Map(); // type -> original content (for dirty detection)
-
-// ============================================================================
-// POLICY RESOLUTION
-// ============================================================================
-
-/** Resolve effective policy for a tool using the layered resolution order */
-function resolveEffectivePolicy(toolName: string, toolGroup: string): string {
-	// 1. Direct tool override
-	if (editToolPolicies[toolName]) return editToolPolicies[toolName];
-	// 2. Group-level override (MCP prefix or group name)
-	const parts = toolName.split("__");
-	if (parts.length >= 3) {
-		const serverPrefix = parts.slice(0, 2).join("__");
-		if (editToolPolicies[serverPrefix]) return editToolPolicies[serverPrefix];
-	}
-	if (editToolPolicies[toolGroup]) return editToolPolicies[toolGroup];
-	// 3. Tool's own default
-	const tool = availableTools.find(t => t.name === toolName);
-	if (tool?.grantPolicy) return tool.grantPolicy;
-	// 4. Group default from group-policies file
-	if (groupPolicies[toolGroup]) return groupPolicies[toolGroup];
-	// 5. System fallback
-	return "allow";
-}
-
-/** Describe where a resolved policy came from */
-function policySource(toolName: string, toolGroup: string): string {
-	if (editToolPolicies[toolName]) return "role override";
-	const parts = toolName.split("__");
-	if (parts.length >= 3) {
-		const serverPrefix = parts.slice(0, 2).join("__");
-		if (editToolPolicies[serverPrefix]) return `from ${serverPrefix}`;
-	}
-	if (editToolPolicies[toolGroup]) return `from ${toolGroup} role override`;
-	const tool = availableTools.find(t => t.name === toolName);
-	if (tool?.grantPolicy) return "tool default";
-	if (groupPolicies[toolGroup]) return "group default";
-	return "system default";
-}
 
 // ============================================================================
 // DATA LOADING
@@ -177,7 +137,6 @@ function initEditState(role: RoleData): void {
 	editLabel = role.label;
 	editPrompt = role.promptTemplate;
 	editAccessory = role.accessory;
-	editName = role.name;
 	editToolPolicies = { ...(role.toolPolicies ?? {}) };
 	editModelOverride = role.model ?? "";
 	editThinkingOverride = role.thinkingLevel ?? "";
@@ -314,6 +273,77 @@ async function handleDelete(): Promise<void> {
 }
 
 // ============================================================================
+// STATELESS RENDERER OPTION TYPES (exported for modal/goal-draft reuse)
+// ============================================================================
+
+/**
+ * Scope hint for embedded renderers.
+ *  - "page":       default Roles page usage; full chrome (delete, customize, scope row).
+ *  - "goal-draft": embedded in goal proposal modal; library-mutation actions hidden.
+ */
+export type RoleRendererScope = "page" | "goal-draft";
+
+export interface RoleListOptions {
+	roles: RoleData[];
+	selectedName?: string | null;
+	/** Names of roles that have been customized for the current draft. */
+	customizedNames?: ReadonlySet<string> | string[];
+	onSelect: (role: RoleData) => void;
+	/** Optional per-row edit button. Defaults to onSelect. */
+	onEdit?: (role: RoleData) => void;
+	/** Optional per-row delete button. When omitted, delete action is hidden. */
+	onDelete?: (role: RoleData) => void;
+	loading?: boolean;
+	scope?: RoleRendererScope;
+	/** Optional empty-state action button shown when roles is empty. */
+	emptyAction?: TemplateResult;
+}
+
+export interface RoleEditorDraft {
+	label: string;
+	promptTemplate: string;
+	accessory: string;
+	toolPolicies: Record<string, string>;
+	model: string;
+	thinkingLevel: string;
+	activeTab: "prompt" | "tools" | "model";
+}
+
+export interface RoleEditorCallbacks {
+	onDraftChange: (patch: Partial<RoleEditorDraft>) => void;
+	onTabChange: (tab: "prompt" | "tools" | "model") => void;
+	onToggleToolGroup: (group: string) => void;
+}
+
+export interface RoleEditorOptions {
+	role: RoleData;
+	draft: RoleEditorDraft;
+	availableTools: ToolInfo[];
+	groupPolicies: Record<string, string>;
+	collapsedToolGroups: ReadonlySet<string>;
+	callbacks: RoleEditorCallbacks;
+	scope?: RoleRendererScope;
+	/** When true, all inputs are disabled and library-mutation chrome is hidden. */
+	readOnly?: boolean;
+	/** Optional header slot (e.g. Customize / Reset buttons in goal-draft scope). */
+	headerExtras?: TemplateResult | string;
+	/** Assistant sub-prompts — page-shell only. */
+	assistantPrompts?: AssistantPromptInfo[];
+	editedAssistantPrompts?: Map<string, string>;
+	activeAssistantPromptTab?: string;
+	onAssistantPromptTabChange?: (tab: string) => void;
+	onAssistantPromptChange?: (type: string, content: string) => void;
+}
+
+export interface RoleInspectorOptions {
+	role: RoleData;
+	availableTools: ToolInfo[];
+	groupPolicies: Record<string, string>;
+	scope?: RoleRendererScope;
+	headerExtras?: TemplateResult | string;
+}
+
+// ============================================================================
 // RENDER: NAV BAR
 // ============================================================================
 
@@ -418,37 +448,67 @@ async function handleScopeChange(scope: string): Promise<void> {
 	renderApp();
 }
 
-function renderRoleRow(role: RoleData, index: number): TemplateResult {
+interface RoleRowOptions {
+	role: RoleData;
+	index: number;
+	selected?: boolean;
+	customized?: boolean;
+	onSelect: (role: RoleData) => void;
+	onEdit?: (role: RoleData) => void;
+	onDelete?: (role: RoleData) => void;
+}
+
+/** Stateless row renderer; used by both the page list and the goal-draft modal. */
+export function renderRoleListRow(opts: RoleRowOptions): TemplateResult {
+	const { role, index, selected, customized, onSelect, onEdit, onDelete } = opts;
 	const origin = (role as any).origin as ConfigOrigin | undefined;
 	const overrides = (role as any).overrides as ConfigOrigin | undefined;
 	const inherited = isInherited(origin);
+	const classes = [
+		"role-row",
+		inherited ? "config-item-inherited" : "",
+		selected ? "role-row--selected" : "",
+		customized ? "role-row--customized" : "",
+	].filter(Boolean).join(" ");
 	return html`
-		<div class="role-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button" @click=${() => showEdit(role)} @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(role); } }}>
+		<div class="${classes}" data-role-name="${role.name}" tabindex="0" role="button"
+			?aria-selected=${!!selected}
+			@click=${() => onSelect(role)}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(role); } }}>
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
-				<span class="role-row-label">${role.label}</span>
+				<span class="role-row-label">${role.label}${customized ? html` <span class="role-row-customized-marker" title="Customized for this goal">●</span>` : nothing}</span>
 				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides)}</span>
 			</div>
 			<div class="role-row-actions">
-				<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(role); }} title="Edit">
+				${onEdit ? html`<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); onEdit(role); }} title="Edit">
 					${icon(Pencil, "sm")}
-				</button>
-				<button class="role-row-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); handleDeleteFromList(role); }} title="Delete">
+				</button>` : nothing}
+				${onDelete ? html`<button class="role-row-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); onDelete(role); }} title="Delete">
 					${icon(Trash2, "sm")}
-				</button>
+				</button>` : nothing}
 			</div>
 		</div>
 	`;
 }
 
-function renderListView(): TemplateResult {
+/**
+ * Stateless list renderer. The Roles page calls this with module state;
+ * the goal proposal modal calls it with draft-scoped state.
+ */
+export function renderRoleList(opts: RoleListOptions): TemplateResult {
+	const { roles, selectedName, onSelect, onEdit, onDelete, loading, emptyAction } = opts;
+	const customizedSet = opts.customizedNames instanceof Set
+		? opts.customizedNames
+		: new Set<string>(Array.isArray(opts.customizedNames) ? opts.customizedNames : []);
+
 	if (loading) {
 		return html`
 			<div class="roles-loading">
 				<svg class="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 					<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
 				</svg>
-				<span>Loading roles\u2026</span>
+				<span>Loading roles…</span>
 			</div>
 		`;
 	}
@@ -459,36 +519,55 @@ function renderListView(): TemplateResult {
 				<div class="roles-empty-bobbit">${idleBlob("none", 52)}</div>
 				<p class="roles-empty-title">No roles yet</p>
 				<p class="roles-empty-desc">Roles give agents a persona, system prompt, and tool restrictions.</p>
-				${Button({
-					variant: "default",
-					onClick: createRoleAssistantSession,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} Create your first role</span>`,
-				})}
+				${emptyAction ?? nothing}
 			</div>
 		`;
 	}
 
 	return html`
-		<p class="text-sm text-muted-foreground mb-6" style="max-width: 600px; margin-inline: auto;">Roles define what an agent can do \u2014 its system prompt and which tools it has access to. Bobbit includes built-in roles (coder, reviewer, tester) and you can create custom ones.</p>
 		<div class="roles-list">
-			${roles.map((role, i) => renderRoleRow(role, i))}
+			${roles.map((role, i) => renderRoleListRow({
+				role,
+				index: i,
+				selected: selectedName === role.name,
+				customized: customizedSet.has(role.name),
+				onSelect,
+				onEdit,
+				onDelete,
+			}))}
 		</div>
+	`;
+}
+
+
+
+function renderListView(): TemplateResult {
+	const emptyAction = Button({
+		variant: "default",
+		onClick: createRoleAssistantSession,
+		children: html`<span class="inline-flex items-center gap-1.5">${icon(Plus, "sm")} Create your first role</span>`,
+	}) as TemplateResult;
+
+	const list = renderRoleList({
+		roles,
+		loading,
+		onSelect: (r) => showEdit(r),
+		onEdit: (r) => showEdit(r),
+		onDelete: (r) => handleDeleteFromList(r),
+		emptyAction,
+	});
+
+	if (loading || roles.length === 0) return list;
+
+	return html`
+		<p class="text-sm text-muted-foreground mb-6" style="max-width: 600px; margin-inline: auto;">Roles define what an agent can do \u2014 its system prompt and which tools it has access to. Bobbit includes built-in roles (coder, reviewer, tester) and you can create custom ones.</p>
+		${list}
 	`;
 }
 
 // ============================================================================
 // RENDER: TOOL ACCESS TAB
 // ============================================================================
-
-function handleToolPolicyChange(toolName: string, newPolicy: string): void {
-	if (newPolicy) {
-		editToolPolicies = { ...editToolPolicies, [toolName]: newPolicy };
-	} else {
-		const { [toolName]: _, ...rest } = editToolPolicies;
-		editToolPolicies = rest;
-	}
-	renderApp();
-}
 
 function toggleGroup(group: string): void {
 	if (collapsedGroups.has(group)) {
@@ -499,10 +578,42 @@ function toggleGroup(group: string): void {
 	renderApp();
 }
 
-function renderToolAccessTab(): TemplateResult {
-	// Group tools by group name
+/** Resolve effective policy purely from passed-in state — used by stateless tab renderer. */
+function resolvePolicy(
+	toolName: string,
+	toolGroup: string,
+	toolPolicies: Record<string, string>,
+	tools: ToolInfo[],
+	groupPolicyMap: Record<string, string>,
+): { effective: string; source: string } {
+	if (toolPolicies[toolName]) return { effective: toolPolicies[toolName], source: "role override" };
+	const parts = toolName.split("__");
+	if (parts.length >= 3) {
+		const serverPrefix = parts.slice(0, 2).join("__");
+		if (toolPolicies[serverPrefix]) return { effective: toolPolicies[serverPrefix], source: `from ${serverPrefix}` };
+	}
+	if (toolPolicies[toolGroup]) return { effective: toolPolicies[toolGroup], source: `from ${toolGroup} role override` };
+	const tool = tools.find(t => t.name === toolName);
+	if (tool?.grantPolicy) return { effective: tool.grantPolicy, source: "tool default" };
+	if (groupPolicyMap[toolGroup]) return { effective: groupPolicyMap[toolGroup], source: "group default" };
+	return { effective: "allow", source: "system default" };
+}
+
+export interface RoleToolAccessTabOptions {
+	toolPolicies: Record<string, string>;
+	availableTools: ToolInfo[];
+	groupPolicies: Record<string, string>;
+	collapsedToolGroups: ReadonlySet<string>;
+	onPolicyChange: (toolOrGroup: string, newPolicy: string) => void;
+	onToggleGroup: (group: string) => void;
+	readOnly?: boolean;
+}
+
+export function renderRoleToolAccessTab(opts: RoleToolAccessTabOptions): TemplateResult {
+	const { toolPolicies, availableTools: tools, groupPolicies: gp, collapsedToolGroups, onPolicyChange, onToggleGroup, readOnly } = opts;
+
 	const groups = new Map<string, ToolInfo[]>();
-	for (const tool of availableTools) {
+	for (const tool of tools) {
 		const g = tool.group || "Other";
 		const list = groups.get(g) || [];
 		list.push(tool);
@@ -514,47 +625,48 @@ function renderToolAccessTab(): TemplateResult {
 	return html`
 		<p class="roles-tools-note">Set per-tool access policies for this role. Tools left at "Use default" inherit from tool, group, or system defaults.</p>
 		<div class="roles-access-list">
-			${Array.from(groups.entries()).map(([groupName, tools]) => {
-				const isCollapsed = collapsedGroups.has(groupName);
+			${Array.from(groups.entries()).map(([groupName, groupTools]) => {
+				const isCollapsed = collapsedToolGroups.has(groupName);
 
 				return html`
 					<div class="roles-access-group ${isCollapsed ? "collapsed" : ""}">
-						<div class="roles-access-group-header" @click=${() => toggleGroup(groupName)}>
+						<div class="roles-access-group-header" @click=${() => onToggleGroup(groupName)}>
 							${chevronSvg}
 							<span class="roles-access-group-name">${groupName}</span>
-							<span class="roles-access-group-count">${tools.length} tool${tools.length !== 1 ? "s" : ""}</span>
+							<span class="roles-access-group-count">${groupTools.length} tool${groupTools.length !== 1 ? "s" : ""}</span>
 							<span class="roles-access-group-policy-label">Group Policy:</span>
 							<select class="roles-access-group-select"
-								.value=${editToolPolicies[groupName] || ""}
+								.value=${toolPolicies[groupName] || ""}
+								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
-								@change=${(e: Event) => { e.stopPropagation(); handleToolPolicyChange(groupName, (e.target as HTMLSelectElement).value); }}
+								@change=${(e: Event) => { e.stopPropagation(); onPolicyChange(groupName, (e.target as HTMLSelectElement).value); }}
 							>
-								<option value="" ?selected=${!editToolPolicies[groupName]}>Use tool default</option>
+								<option value="" ?selected=${!toolPolicies[groupName]}>Use tool default</option>
 								${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
-									<option value=${opt.value} ?selected=${editToolPolicies[groupName] === opt.value}>${opt.label}</option>
+									<option value=${opt.value} ?selected=${toolPolicies[groupName] === opt.value}>${opt.label}</option>
 								`)}
 							</select>
 							<span class="roles-access-group-hint">${(() => {
-								const groupDefault = groupPolicies[groupName] || "allow";
+								const groupDefault = gp[groupName] || "allow";
 								const label = POLICY_LABELS[groupDefault] || groupDefault;
 								return html`\u2192 ${label} [system default]`;
 							})()}</span>
 						</div>
 						<div class="roles-access-group-items">
-							${tools.map(tool => {
-								const currentPolicy = editToolPolicies[tool.name] || "";
-								const hasGroupOverride = !!editToolPolicies[groupName];
+							${groupTools.map(tool => {
+								const currentPolicy = toolPolicies[tool.name] || "";
+								const hasGroupOverride = !!toolPolicies[groupName];
 								const defaultLabel = hasGroupOverride ? "Use group role default" : "Use tool default";
-								const effective = resolveEffectivePolicy(tool.name, groupName);
+								const { effective, source } = resolvePolicy(tool.name, groupName, toolPolicies, tools, gp);
 								const effectiveLabel = POLICY_LABELS[effective] || effective;
-								const source = policySource(tool.name, groupName);
 								return html`
 									<div class="roles-access-row">
 										<span class="roles-access-row-label" title="${tool.description}">${tool.name}</span>
 										<select
 											class="roles-access-row-select"
 											.value=${currentPolicy}
-											@change=${(e: Event) => handleToolPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
+											?disabled=${readOnly}
+											@change=${(e: Event) => onPolicyChange(tool.name, (e.target as HTMLSelectElement).value)}
 										>
 											<option value="" ?selected=${!currentPolicy}>${defaultLabel}</option>
 											${ROLE_POLICY_OPTIONS.filter(opt => opt.value !== "").map(opt => html`
@@ -573,49 +685,89 @@ function renderToolAccessTab(): TemplateResult {
 	`;
 }
 
+
+
 // ============================================================================
 // RENDER: PROMPT TAB
 // ============================================================================
 
-function renderPromptTab(): TemplateResult {
+export interface RolePromptTabOptions {
+	roleName: string;
+	promptTemplate: string;
+	onPromptChange: (value: string) => void;
+	readOnly?: boolean;
+	assistantPrompts?: AssistantPromptInfo[];
+	editedAssistantPrompts?: Map<string, string>;
+	activeAssistantPromptTab?: string;
+	onAssistantPromptTabChange?: (tab: string) => void;
+	onAssistantPromptChange?: (type: string, content: string) => void;
+}
+
+export function renderRolePromptTab(opts: RolePromptTabOptions): TemplateResult {
+	const {
+		roleName,
+		promptTemplate,
+		onPromptChange,
+		readOnly,
+		assistantPrompts: aPrompts = [],
+		editedAssistantPrompts: ePrompts = new Map(),
+		activeAssistantPromptTab: activeTab = "baseline",
+		onAssistantPromptTabChange,
+		onAssistantPromptChange,
+	} = opts;
+	const hasAssistantTabs = roleName === "assistant" && aPrompts.length > 0;
+	const showBaseline = !hasAssistantTabs || activeTab === "baseline";
 	return html`
-		${editName === "assistant" && assistantPrompts.length > 0 ? html`
+		${hasAssistantTabs ? html`
 			<div class="roles-prompt-tabs">
 				<button
-					class="roles-prompt-tab ${activePromptTab === "baseline" ? "roles-prompt-tab--active" : ""}"
-					@click=${() => { activePromptTab = "baseline"; renderApp(); }}
+					class="roles-prompt-tab ${activeTab === "baseline" ? "roles-prompt-tab--active" : ""}"
+					@click=${() => onAssistantPromptTabChange?.("baseline")}
 				>Shared Baseline</button>
-				${assistantPrompts.map((p) => html`
+				${aPrompts.map((p) => html`
 					<button
-						class="roles-prompt-tab ${activePromptTab === p.type ? "roles-prompt-tab--active" : ""}"
-						@click=${() => { activePromptTab = p.type; renderApp(); }}
+						class="roles-prompt-tab ${activeTab === p.type ? "roles-prompt-tab--active" : ""}"
+						@click=${() => onAssistantPromptTabChange?.(p.type)}
 					>${p.title.replace(" Assistant", "").replace(" Wizard", "")}</button>
 				`)}
 			</div>
 		` : nothing}
-		${activePromptTab === "baseline" || editName !== "assistant" || assistantPrompts.length === 0 ? html`
+		${showBaseline ? html`
 			<textarea
 				class="roles-prompt-editor"
-				.value=${editPrompt}
+				.value=${promptTemplate}
+				?readonly=${readOnly}
 				placeholder="Markdown system prompt template. Supports {{GOAL_BRANCH}} and {{AGENT_ID}} placeholders."
-				@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
+				@input=${(e: Event) => onPromptChange((e.target as HTMLTextAreaElement).value)}
 			></textarea>
 		` : html`
-			<p class="roles-prompt-hint">This prompt is appended after the shared baseline for ${assistantPrompts.find((p) => p.type === activePromptTab)?.title ?? activePromptTab} sessions.</p>
+			<p class="roles-prompt-hint">This prompt is appended after the shared baseline for ${aPrompts.find((p) => p.type === activeTab)?.title ?? activeTab} sessions.</p>
 			<textarea
 				class="roles-prompt-editor"
-				.value=${editedPrompts.get(activePromptTab) ?? ""}
-				@input=${(e: Event) => { editedPrompts.set(activePromptTab, (e.target as HTMLTextAreaElement).value); renderApp(); }}
+				.value=${ePrompts.get(activeTab) ?? ""}
+				?readonly=${readOnly}
+				@input=${(e: Event) => onAssistantPromptChange?.(activeTab, (e.target as HTMLTextAreaElement).value)}
 			></textarea>
 		`}
 	`;
 }
 
+
+
 // ============================================================================
 // RENDER: MODEL TAB
 // ============================================================================
 
-function renderModelTab(): TemplateResult {
+export interface RoleModelTabOptions {
+	model: string;
+	thinkingLevel: string;
+	onModelChange: (v: string) => void;
+	onThinkingChange: (v: string) => void;
+	readOnly?: boolean;
+}
+
+export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
+	const { model, thinkingLevel, onModelChange, onThinkingChange } = opts;
 	return html`
 		<p class="roles-tools-note" data-testid="roles-model-tab">
 			Overrides the global default for sessions running as this role. Leave blank to inherit.
@@ -623,44 +775,69 @@ function renderModelTab(): TemplateResult {
 		${renderModelRow(
 			"Model",
 			"When set, sessions assuming this role bind to this model on first turn. Empty = inherit default.sessionModel (or default.reviewModel for reviewer/QA sessions).",
-			editModelOverride,
-			(v: string) => { editModelOverride = v; renderApp(); },
-			editThinkingOverride,
-			(v: string) => { editThinkingOverride = v; renderApp(); },
+			model,
+			onModelChange,
+			thinkingLevel,
+			onThinkingChange,
 			"",
 			{ fallbackLabel: "(use default)" },
 		)}
 	`;
 }
 
+
+
 // ============================================================================
 // RENDER: EDIT VIEW
 // ============================================================================
 
-function renderEditView(): TemplateResult {
+/**
+ * Stateless role editor. Renders identity, accessory, and tabbed prompt/tools/model panes.
+ * Shared by the Roles page (page shell) and the goal proposal modal (goal-draft scope).
+ * Pass `readOnly: true` to use as a read-only inspector.
+ */
+export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
+	const {
+		role,
+		draft,
+		availableTools: tools,
+		groupPolicies: gp,
+		collapsedToolGroups,
+		callbacks,
+		readOnly,
+		headerExtras,
+		assistantPrompts: aPrompts,
+		editedAssistantPrompts,
+		activeAssistantPromptTab,
+		onAssistantPromptTabChange,
+		onAssistantPromptChange,
+	} = opts;
+	const origin = (role as any).origin as ConfigOrigin | undefined;
+	const overrides = (role as any).overrides as ConfigOrigin | undefined;
 	return html`
-		<div class="roles-edit-container">
+		<div class="roles-edit-container" data-testid="role-editor" data-role-name="${role.name}" data-scope="${opts.scope ?? "page"}">
 			<div class="roles-edit-main">
 				<!-- Identity section -->
 				<div class="roles-edit-section">
 					<div class="flex items-center justify-between">
 						<h2 class="roles-section-title">Identity</h2>
 						<span class="inline-flex items-center gap-2">
-							${renderOriginBadge((selectedRole as any)?.origin, (selectedRole as any)?.overrides)}
-							${renderCustomizeRevertButtons()}
+							${renderOriginBadge(origin, overrides)}
+							${headerExtras ?? nothing}
 						</span>
 					</div>
 					<div class="roles-identity-row">
 						<div class="roles-edit-field">
 							<label class="roles-field-label">Id</label>
-							<div class="roles-field-readonly">${editName}</div>
+							<div class="roles-field-readonly">${role.name}</div>
 						</div>
 						<div class="roles-edit-field" style="flex:1;min-width:0;">
 							<label class="roles-field-label">Label</label>
 							${Input({
-								value: editLabel,
+								value: draft.label,
 								placeholder: "e.g. Documentation Writer",
-								onInput: (e: Event) => { editLabel = (e.target as HTMLInputElement).value; renderApp(); },
+								disabled: !!readOnly,
+								onInput: (e: Event) => callbacks.onDraftChange({ label: (e.target as HTMLInputElement).value }),
 							})}
 						</div>
 					</div>
@@ -672,12 +849,13 @@ function renderEditView(): TemplateResult {
 					<div class="roles-accessory-grid">
 						${ACCESSORY_IDS.map((accId, i) => {
 							const acc = getAccessory(accId);
-							const selected = editAccessory === accId;
+							const selected = draft.accessory === accId;
 							return html`
 								<button
 									class="roles-accessory-option ${selected ? "roles-accessory-option--selected" : ""}"
 									title="${acc.label}"
-									@click=${() => { editAccessory = accId; renderApp(); }}
+									?disabled=${readOnly}
+									@click=${() => { if (!readOnly) callbacks.onDraftChange({ accessory: accId }); }}
 								>
 									<span class="roles-accessory-preview">
 										${idleBlob(accId, 42, i, i)}
@@ -691,21 +869,129 @@ function renderEditView(): TemplateResult {
 
 				<!-- Tab bar -->
 				<div class="roles-tab-bar">
-					<button class="roles-tab ${editTab === "prompt" ? "roles-tab--active" : ""}"
-						@click=${() => { editTab = "prompt"; renderApp(); }}>Prompt</button>
-					<button class="roles-tab ${editTab === "tools" ? "roles-tab--active" : ""}"
-						@click=${() => { editTab = "tools"; renderApp(); }}>Tool Access</button>
-					<button class="roles-tab ${editTab === "model" ? "roles-tab--active" : ""}"
-						@click=${() => { editTab = "model"; renderApp(); }} data-testid="roles-tab-model">Model</button>
+					<button class="roles-tab ${draft.activeTab === "prompt" ? "roles-tab--active" : ""}"
+						@click=${() => callbacks.onTabChange("prompt")}>Prompt</button>
+					<button class="roles-tab ${draft.activeTab === "tools" ? "roles-tab--active" : ""}"
+						@click=${() => callbacks.onTabChange("tools")}>Tool Access</button>
+					<button class="roles-tab ${draft.activeTab === "model" ? "roles-tab--active" : ""}"
+						@click=${() => callbacks.onTabChange("model")} data-testid="roles-tab-model">Model</button>
 				</div>
 
 				<!-- Tab content -->
 				<div class="roles-tab-content">
-					${editTab === "prompt" ? renderPromptTab() : editTab === "tools" ? renderToolAccessTab() : renderModelTab()}
+					${draft.activeTab === "prompt"
+						? renderRolePromptTab({
+								roleName: role.name,
+								promptTemplate: draft.promptTemplate,
+								onPromptChange: (v) => callbacks.onDraftChange({ promptTemplate: v }),
+								readOnly,
+								assistantPrompts: aPrompts,
+								editedAssistantPrompts,
+								activeAssistantPromptTab,
+								onAssistantPromptTabChange,
+								onAssistantPromptChange,
+						  })
+						: draft.activeTab === "tools"
+						? renderRoleToolAccessTab({
+								toolPolicies: draft.toolPolicies,
+								availableTools: tools,
+								groupPolicies: gp,
+								collapsedToolGroups,
+								onPolicyChange: (toolOrGroup, newPolicy) => {
+									const next = { ...draft.toolPolicies };
+									if (newPolicy) next[toolOrGroup] = newPolicy;
+									else delete next[toolOrGroup];
+									callbacks.onDraftChange({ toolPolicies: next });
+								},
+								onToggleGroup: callbacks.onToggleToolGroup,
+								readOnly,
+						  })
+						: renderRoleModelTab({
+								model: draft.model,
+								thinkingLevel: draft.thinkingLevel,
+								onModelChange: (v) => callbacks.onDraftChange({ model: v }),
+								onThinkingChange: (v) => callbacks.onDraftChange({ thinkingLevel: v }),
+								readOnly,
+						  })}
 				</div>
 			</div>
 		</div>
 	`;
+}
+
+/**
+ * Stateless read-only inspector. Renders the same DOM as the editor but with all
+ * controls disabled. Used by the goal proposal modal's Roles tab right pane.
+ */
+export function renderRoleInspector(opts: RoleInspectorOptions): TemplateResult {
+	const inspectorDraft: RoleEditorDraft = {
+		label: opts.role.label,
+		promptTemplate: opts.role.promptTemplate,
+		accessory: opts.role.accessory ?? "none",
+		toolPolicies: { ...(opts.role.toolPolicies ?? {}) },
+		model: opts.role.model ?? "",
+		thinkingLevel: opts.role.thinkingLevel ?? "",
+		activeTab: "prompt",
+	};
+	// Local UI state for tab/collapsed groups is intentionally non-interactive
+	// in the inspector — the consumer can opt for the full editor with readOnly
+	// when they need tab switching. The inspector exposes the prompt tab by default.
+	const noop = () => {};
+	return renderRoleEditor({
+		role: opts.role,
+		draft: inspectorDraft,
+		availableTools: opts.availableTools,
+		groupPolicies: opts.groupPolicies,
+		collapsedToolGroups: new Set<string>(),
+		callbacks: {
+			onDraftChange: noop,
+			onTabChange: noop,
+			onToggleToolGroup: noop,
+		},
+		readOnly: true,
+		scope: opts.scope ?? "goal-draft",
+		headerExtras: opts.headerExtras,
+	});
+}
+
+function renderEditView(): TemplateResult {
+	if (!selectedRole) return html``;
+	const draft: RoleEditorDraft = {
+		label: editLabel,
+		promptTemplate: editPrompt,
+		accessory: editAccessory,
+		toolPolicies: editToolPolicies,
+		model: editModelOverride,
+		thinkingLevel: editThinkingOverride,
+		activeTab: editTab,
+	};
+	return renderRoleEditor({
+		role: selectedRole,
+		draft,
+		availableTools,
+		groupPolicies,
+		collapsedToolGroups: collapsedGroups,
+		callbacks: {
+			onDraftChange: (patch) => {
+				if (patch.label !== undefined) editLabel = patch.label;
+				if (patch.promptTemplate !== undefined) editPrompt = patch.promptTemplate;
+				if (patch.accessory !== undefined) editAccessory = patch.accessory;
+				if (patch.toolPolicies !== undefined) editToolPolicies = patch.toolPolicies;
+				if (patch.model !== undefined) editModelOverride = patch.model;
+				if (patch.thinkingLevel !== undefined) editThinkingOverride = patch.thinkingLevel;
+				renderApp();
+			},
+			onTabChange: (tab) => { editTab = tab; renderApp(); },
+			onToggleToolGroup: (g) => toggleGroup(g),
+		},
+		scope: "page",
+		headerExtras: renderCustomizeRevertButtons() as TemplateResult,
+		assistantPrompts,
+		editedAssistantPrompts: editedPrompts,
+		activeAssistantPromptTab: activePromptTab,
+		onAssistantPromptTabChange: (tab) => { activePromptTab = tab; renderApp(); },
+		onAssistantPromptChange: (type, content) => { editedPrompts.set(type, content); renderApp(); },
+	});
 }
 
 // ============================================================================
