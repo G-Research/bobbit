@@ -41,7 +41,7 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
-| `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session. Response includes `cacheHitRate: number \| null`. See [docs/cache-hit-rate.md](cache-hit-rate.md). |
+| `GET` | `/api/sessions/:id/cost` | Token usage and cost for a single session. Response includes `cacheHitRate: number \| null`. See [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
@@ -124,7 +124,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
-| `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
+| `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 
@@ -171,7 +171,27 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `DELETE` | `/api/tasks/:id` | Delete a task |
 | `POST` | `/api/tasks/:id/assign` | Assign a task to a session (`{ sessionId }`). Auto-populates `baseSha` and `branch` from the agent's `TeamAgent` record if available |
 | `POST` | `/api/tasks/:id/transition` | Transition task state (`{ state }`) |
-| `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task |
+| `GET` | `/api/tasks/:id/cost` | Cost for the session assigned to a task (includes `cacheHitRate`) |
+
+#### Cost response shape
+
+All three cost endpoints (`/sessions/:id/cost`, `/goals/:id/cost`, `/tasks/:id/cost`) return the same `SessionCost` shape:
+
+```json
+{
+  "inputTokens": 12500,
+  "outputTokens": 340,
+  "cacheReadTokens": 87000,
+  "cacheWriteTokens": 3200,
+  "totalCost": 0.004712,
+  "cacheHitRate": 0.874
+}
+```
+
+- `cacheHitRate` — derived field: `cacheReadTokens / (cacheReadTokens + inputTokens)`. `null` when both counters are 0 (cold session or provider does not report cache tokens). Never stored on disk; recomputed on every read.
+- For goals, `cacheHitRate` is derived from the aggregate counters across all linked sessions — not an average of per-session rates.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semantics.
 
 ### Tools
 

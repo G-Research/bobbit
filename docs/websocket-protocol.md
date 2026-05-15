@@ -45,7 +45,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update. `cost` includes `cacheHitRate: number \| null` — derived as `cacheReadTokens / (cacheReadTokens + inputTokens)`, or `null` for cold/unsupported sessions. See [docs/cache-hit-rate.md](cache-hit-rate.md). |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update. `cost.cacheHitRate` is documented in [Cost update shape](#cost-update-shape). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
@@ -70,6 +70,26 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
+
+### Cost update shape
+
+The `cost` field of a `cost_update` message:
+
+```json
+{
+  "inputTokens": 12500,
+  "outputTokens": 340,
+  "cacheReadTokens": 87000,
+  "cacheWriteTokens": 3200,
+  "totalCost": 0.004712,
+  "cacheHitRate": 0.874
+}
+```
+
+- `cacheHitRate: number | null` — derived ratio `cacheReadTokens / (cacheReadTokens + inputTokens)`. `null` when the denominator is 0 (cold session, or provider that does not report cache counters). The UI `CostPopover` renders `null` as `—` and a non-null value as a percentage (e.g. `87%`).
+- Older clients that do not recognise `cacheHitRate` silently ignore it.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details and null semantics.
 
 ### Streaming resume
 

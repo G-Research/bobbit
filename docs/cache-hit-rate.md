@@ -1,6 +1,6 @@
 # Cache-Hit Rate
 
-Bobbit tracks `cacheReadTokens` and `cacheWriteTokens` on every agent turn. The cache-hit rate is a derived metric that makes cache effectiveness visible without any additional data collection.
+Bobbit tracks `cacheReadTokens` and `cacheWriteTokens` on every agent turn. The cache-hit rate is a derived observability metric that makes prompt-cache effectiveness visible without additional data collection or persisted state.
 
 ## Formula
 
@@ -8,11 +8,20 @@ Bobbit tracks `cacheReadTokens` and `cacheWriteTokens` on every agent turn. The 
 cacheHitRate = cacheReadTokens / (cacheReadTokens + inputTokens)
 ```
 
-`cacheWriteTokens` is excluded — writes are charged at full price and are not cache hits. The denominator is the total input the provider charged for, across both tiers. A rate of `0.85` means 85% of input tokens were served from cache at the cheaper cache-read price.
+- `cacheReadTokens` — tokens served from cache at cache-read price.
+- `inputTokens` — non-cached input tokens charged at full price.
+- `cacheWriteTokens` is excluded because writes are charged at full price and are not cache hits.
 
-**Null semantics:** when both `cacheReadTokens` and `inputTokens` are zero (cold session, or a provider that does not report cache counters), the rate is `null`. The UI renders `null` as an em dash (—) rather than `0%`, so an absent cache signal is never confused with a confirmed miss.
+The denominator is the total input charged by the provider in any tier. A value of `0.85` means 85% of input tokens were served from cache.
 
-The rate is never stored on disk. `CostTracker.getSnapshot()` and related helpers derive it at read time from the raw counters, which are persisted.
+## Null / cold-session semantics
+
+`cacheHitRate` is `null` when the denominator (`cacheReadTokens + inputTokens`) is zero:
+
+- Cold session: no turns have completed yet.
+- Provider that does not report cache counters: both counters remain 0.
+
+`null` is never coerced to `0`. The UI renders it as `—` to avoid implying the cache missed when it simply has no signal.
 
 ## Server exposure
 
@@ -26,20 +35,20 @@ Every `cost_update` broadcast includes `cacheHitRate` in the `cost` payload:
   "sessionId": "...",
   "cost": {
     "inputTokens": 10000,
+    "outputTokens": 1200,
     "cacheReadTokens": 85000,
     "cacheWriteTokens": 5000,
-    "outputTokens": 1200,
     "totalCost": 0.0034,
     "cacheHitRate": 0.8947
   }
 }
 ```
 
-Older clients that don't know the field safely ignore it.
+Older clients that do not recognise the field safely ignore it.
 
 ### REST endpoints
 
-All `/cost` and `/cost/breakdown` REST endpoints include `cacheHitRate` on the aggregate object:
+All `/cost` and `/cost/breakdown` REST endpoints include `cacheHitRate` on their cost objects:
 
 | Endpoint | Scope |
 |---|---|
@@ -49,15 +58,20 @@ All `/cost` and `/cost/breakdown` REST endpoints include `cacheHitRate` on the a
 | `GET /api/goals/:id/cost/breakdown` | Per-session breakdown |
 | `GET /api/tasks/:id/cost` | Session assigned to a task |
 
-For goal/task aggregates, `cacheHitRate` is derived from the summed raw counters across all sessions — not averaged from individual rates.
+For goal/task aggregates, `cacheHitRate` is derived from the summed raw counters across all sessions, not averaged from individual rates.
 
 ## UI — CostPopover
 
 The `CostPopover` component shows a **Cache hit** row in the token breakdown section:
 
-- **Warm session:** rounded percentage, e.g. `89%`
-- **Cold session or unsupported provider:** em dash (`—`)
+- Warm session: rounded percentage, e.g. `89%`
+- Cold session, unsupported provider, missing field, or non-finite value: em dash (`—`)
 
-The value updates live from `cost_update` WebSocket events on the same path as the existing token counters. No new dialog or affordance — it is one additional line in the existing breakdown.
+The value updates live from `cost_update` WebSocket events on the same path as the existing token counters. No new dialog or affordance is added; it is one additional line in the existing breakdown.
 
-`formatCacheHitRate()` in `CostPopover.ts` handles the null/missing/non-finite cases and always returns `—` for any of them, ensuring backwards compatibility with older server versions that do not send the field.
+## Implementation notes
+
+- `cacheHitRate` is derived on read and never stored on disk. The persisted cost record contains only raw counters (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalCost`).
+- Derivation lives in `src/server/agent/cost-tracker.ts`.
+- Public cost snapshots add `cacheHitRate: number | null` to the raw counters.
+- No protocol version bump is required because clients that ignore unknown fields continue to work.
