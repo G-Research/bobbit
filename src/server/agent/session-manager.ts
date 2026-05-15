@@ -5,7 +5,12 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
-import type { ServerMessage, QueuedMessage } from "../ws/protocol.js";
+import type {
+	ServerMessage,
+	QueuedMessage,
+	AutoRetryPendingEvent,
+	AutoRetryCancelledEvent,
+} from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -2077,16 +2082,17 @@ export class SessionManager {
 		// status remains "idle" (set by the agent_end handler) but we broadcast
 		// a synthetic event so the UI can show "Retrying in Xs due to provider
 		// overload…" instead of looking frozen.
+		const pendingEvent: AutoRetryPendingEvent = {
+			type: "auto_retry_pending",
+			reason: isBackoff ? "provider-overload" : "transient-error",
+			retryDelayMs: Math.round(delayMs),
+			attempt,
+			scheduledAt: Date.now(),
+			error: errMsg.slice(0, 200),
+		};
 		broadcast(session.clients, {
 			type: "event",
-			data: {
-				type: "auto_retry_pending",
-				reason: isBackoff ? "provider-overload" : "transient-error",
-				retryDelayMs: Math.round(delayMs),
-				attempt,
-				scheduledAt: Date.now(),
-				error: errMsg.slice(0, 200),
-			},
+			data: pendingEvent,
 		});
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
@@ -2116,13 +2122,14 @@ export class SessionManager {
 		clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = undefined;
 		if (reason !== "shutdown" && session.clients.size > 0) {
+			const cancelledEvent: AutoRetryCancelledEvent = {
+				type: "auto_retry_cancelled",
+				reason,
+				cancelledAt: Date.now(),
+			};
 			broadcast(session.clients, {
 				type: "event",
-				data: {
-					type: "auto_retry_cancelled",
-					reason,
-					cancelledAt: Date.now(),
-				},
+				data: cancelledEvent,
 			});
 		}
 	}
