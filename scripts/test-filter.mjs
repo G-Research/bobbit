@@ -40,21 +40,35 @@ let report;
 try {
   report = JSON.parse(raw);
 } catch {
-  // Not clean JSON — Playwright / npm may have prefixed non-JSON lines
-  // (npm warnings, vite messages, etc.) or the trailing newline got doubled.
-  // Try to locate the outer JSON object by scanning for a top-level '{' that
-  // parses to a complete document.
-  let recovered = null;
+  // Not clean JSON — Playwright workers and any imported `node:test` modules
+  // can interleave their own TAP/spec output into stdout before/around the
+  // JSON reporter's payload. Locate the JSON object by its distinctive
+  // Playwright opening (`\n{\n  "config":`) and trim trailing junk down to
+  // the last `}`. Falls back to naive first-brace scanning if the marker
+  // isn't present (e.g. config-less reporter variants).
+  const candidates = [];
+  const markerIdx = raw.indexOf("\n{\n  \"config\":");
+  if (markerIdx >= 0) candidates.push(markerIdx + 1);
+  // Every line that starts with `{` is a plausible JSON object start. This
+  // catches the Playwright payload even if its pretty-print indent ever
+  // changes (e.g. tabs vs spaces).
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === "{" && (i === 0 || raw[i - 1] === "\n")) candidates.push(i);
+  }
+  // Last resort: any `{`.
   const firstBrace = raw.indexOf("{");
-  if (firstBrace >= 0) {
-    // Try from firstBrace to end, shrinking from the right if trailing junk.
-    const candidate = raw.slice(firstBrace);
-    try { recovered = JSON.parse(candidate); } catch {
-      // Try trimming trailing non-} chars.
-      const lastBrace = candidate.lastIndexOf("}");
-      if (lastBrace > 0) {
-        try { recovered = JSON.parse(candidate.slice(0, lastBrace + 1)); } catch { /* give up */ }
-      }
+  if (firstBrace >= 0) candidates.push(firstBrace);
+
+  let recovered = null;
+  const tried = new Set();
+  for (const start of candidates) {
+    if (tried.has(start)) continue;
+    tried.add(start);
+    const tail = raw.slice(start);
+    try { recovered = JSON.parse(tail); break; } catch { /* keep trying */ }
+    const lastBrace = tail.lastIndexOf("}");
+    if (lastBrace > 0) {
+      try { recovered = JSON.parse(tail.slice(0, lastBrace + 1)); break; } catch { /* keep trying */ }
     }
   }
   if (recovered) {
