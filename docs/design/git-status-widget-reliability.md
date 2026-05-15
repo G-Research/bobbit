@@ -620,3 +620,75 @@ Multi-repo `repos[]` envelope entries carry the same two fields so future per-re
 - Per-file insertion/deletion counts in the dropdown (already linkable via the diff modal).
 - Counting vs `@{u}` upstream instead of `origin/<primary>`.
 - Surfacing the new numbers in the per-repo accordion UI.
+
+---
+
+## 14. Dropdown lifecycle hardening (2026-05 addendum)
+
+The data-flow work in §1–§7 leaves the widget *visible and fed*, but says nothing about the dropdown's open/close lifecycle. A separate bug — "git status pill is unresponsive, only F5 fixes it" — surfaced once `AgentInterface` re-render churn (use-stick-to-bottom port, narrow-host ResizeObserver, `DeferredBlock` + IntersectionObserver) increased pressure on the host's render gate. This section documents how the close path was hardened so the widget cannot wedge itself.
+
+### 14.1 Why it wedged
+
+`GitStatusWidget` coupled three fields:
+
+- `expanded` (`@state`) — dropdown is visible.
+- `_closing` (`@state`) — close animation is running.
+- `_dropdownEl` — the `#git-status-dropdown` div portaled into `document.body`.
+
+The **only** code that cleared `expanded` / `_closing` was an `animationend` listener attached to `_dropdownEl` inside `_closeDropdown()`:
+
+```ts
+this._dropdownEl.addEventListener('animationend', () => {
+  this._closing = false;
+  this.expanded = false;
+}, { once: true });
+```
+
+Per the CSS Animations spec, removing an animating element from the document cancels its animation and fires `animationcancel` — **not** `animationend`. The widget had no `animationcancel` listener. `disconnectedCallback` called `_removeDropdown()` unconditionally without resetting `expanded` / `_closing`. So if the host disconnected mid-close (or anything else canceled the animation), the listener was lost and the boolean state stayed forever in one of two wedges:
+
+- **Wedge A:** `expanded=true, _closing=true, _dropdownEl=null` — `_toggle` matched neither branch and silently returned.
+- **Wedge B:** `expanded=true, _closing=false, _dropdownEl=null` — `_toggle` entered the close branch and `_closeDropdown` early-returned on `!_dropdownEl`.
+
+The trigger in the field was `AgentInterface.render()`'s outer pill-strip gate — `${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html\`<div data-pill-strip>...\` : ''}` — briefly flipping false when state transitions emptied the pill strip. The widget got disconnected and reconnected, the portal vanished, the boolean state did not.
+
+A second contributor lived in `src/app/session-manager.ts`: `connectToSession` attached an anonymous `git-status-dropdown-open` listener to `state.chatPanel.agentInterface` on every connect, with no matching `removeEventListener`. Cached session switch-backs stacked listeners — each open fired N untracked refetches, N `gitStatusLoading` flips, N re-renders, and more chances to hit the disconnect race. Also a plain memory leak.
+
+### 14.2 Fix
+
+In `src/ui/components/GitStatusWidget.ts`:
+
+1. **Reset transient state in `disconnectedCallback`** — set `expanded = false` and `_closing = false` synchronously alongside `_removeDropdown()`. A reconnected instance starts clean even if the previous close was canceled.
+2. **Invalidate in-flight close-animation listeners with a `_closeToken` counter.** `_closeDropdown()` captures the current token; the `animationend` / `animationcancel` callback early-returns when `closeToken !== this._closeToken`. `disconnectedCallback` and the open path bump the token, so a stale `reset()` from a previous close cannot clobber the new state.
+3. **Add `animationcancel` listener mirroring `animationend`.** Belt-and-braces for any future code path that cancels the animation (element removal, animation-property race, `prefers-reduced-motion`).
+4. **Make `_toggle` self-healing.** Portal presence is the source of truth, not the boolean:
+   - `visiblyOpen = expanded && !_closing && _dropdownEl?.isConnected === true`. Only this triggers the close branch.
+   - If `_dropdownEl` exists but is no longer connected (or `expanded` was already reset), call `_removeDropdown()` to drop the stale reference, then open fresh.
+   - Otherwise: bump `_closeToken`, clear `_closing`, strip the `git-dropdown-closing` class if a stale portal is still around, render a fresh dropdown, and set `expanded = true`.
+
+In `src/app/session-manager.ts`:
+
+5. **Stop stacking `git-status-dropdown-open` listeners.** Store the handler on the agent interface as `__gitStatusDropdownOpenHandler`. Before adding a new one, `removeEventListener` the previous. The handler still closes over the current `sessionId` (so it always refetches the active session), but there is now exactly one listener per `AgentInterface` regardless of how many `connectToSession` calls have run against it.
+
+### 14.3 Why we did not flip `expanded` synchronously on close
+
+The original spec floated decoupling the animation from state entirely — set `expanded = false` synchronously and let the CSS animation play out cosmetically. Cleaner model, no race surface. We kept the animated close because:
+
+- Existing CSS keyframes drive opacity/transform on `.git-dropdown-closing` — flipping `expanded` synchronously would unmount the portal mid-animation in Lit's render path. Keeping the boolean true until the animation settles preserves the visual.
+- The token + `animationcancel` mirror + self-healing `_toggle` already removes every known wedge condition; the cosmetic-only refactor would change render timing for users not affected by the bug.
+
+If future render-tree changes reintroduce a wedge, the simpler model (sync close, cosmetic animation) is the recommended next step.
+
+### 14.4 Tests
+
+- **`tests/git-status-widget-wedge.spec.ts`** — Playwright file:// regression suite, mounted via the real `git-status-widget-states` bundle so `disconnectedCallback` actually runs. Three scenarios, each open + perturb + click and assert the dropdown reopens:
+  1. *Disconnect mid-close* — start the close animation, `removeChild` + `appendChild` the widget synchronously, then click. Mirrors the production trigger.
+  2. *External portal removal* — yank `#git-status-dropdown` out of body while `expanded === true`. Self-heal must reopen.
+  3. *`animationcancel` event* — start close, dispatch `animationcancel` synchronously. State must reset and the next click reopens.
+- **`tests/session-manager-git-dropdown-listener.test.ts`** — Node static-source assertion. Reads `src/app/session-manager.ts`, asserts the dropdown-open handler is stored on `__gitStatusDropdownOpenHandler` and that `removeEventListener` precedes `addEventListener` in the wiring block. Fails if anyone reverts to anonymous `addEventListener("git-status-dropdown-open", () => ...)`. Cheaper than a runtime listener-count spy and equally regression-proof for the leak.
+- **Skeleton inertness preserved** — the existing `git-status-widget-states` and `git-status-interactions` suites still cover `loading && !branch` non-interactivity, outside-click close, and Escape close. The wedge fix must not regress these.
+
+### 14.5 Out of scope
+
+- Replacing the portal-into-body pattern with a focus-trap dialog primitive (would also fix the wedge by construction, but is a much larger refactor).
+- Switching to the Web Animations API so `animation.cancel()` callbacks are first-class — the current CSS keyframes work fine with the `animationcancel` listener.
+- Per-repo dropdown lifecycle in the multi-repo accordion UI (not yet rendered).
