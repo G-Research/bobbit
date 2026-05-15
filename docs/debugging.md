@@ -423,21 +423,15 @@ See [docs/design/session-recovery-boot-passes.md §3](design/session-recovery-bo
 
 <a id="recovered-team-lead-has-fresh-uuid"></a>
 
-## Recovered team-lead session has fresh UUID + fun-name title instead of original
+## Recovered team-lead session has different UUID or fun-name title
 
-Symptom: after a boot recovery, the team-lead under a goal works — transcript is intact, the team-lead can resume — but its session id in the URL and its title are different from before. The title carries a `(recovered)` suffix.
+Symptom: after a boot recovery, the team-lead under a goal works — transcript is intact, the team-lead can resume — but its session id in the URL or its title differ from before. The title may carry a `(recovered)` suffix.
 
-This is expected. Pass-3 of the boot-recovery cascade (`reconstructTeamLeadSessionRecord` in `src/server/agent/team-store-consistency.ts`) synthesises a **fresh** session record from the surviving `*.jsonl`, because the original gateway session UUID is not preserved anywhere on disk:
+**With a session-sidecar present** (sessions created after the sidecar feature landed): pass-3 reads the `.sidecar.json` alongside the transcript and restores the exact original UUID, role, goal-id, and fun-name. Recovery is transparent — the session id is the same as before. See `docs/design/session-store-crash-safety.md` for the sidecar design.
 
-- The agent CLI's slug-dir is keyed by `slugify(cwd)` (the worktree path), not by session id.
-- The `.jsonl` filename embeds a timestamp but not the gateway's UUID.
-- `sessions.json` is the only source for the UUID, and by the time pass-3 runs the entry is gone — that's the precondition for reconstruction.
+**Without a sidecar** (older transcripts): pass-3 synthesises a **fresh** record because the original UUID lives only in `sessions.json`, which is gone by the time reconstruction runs. The reconstructed record has a new UUID, a `(recovered)` suffix in the title, but the same transcript content and `teamGoalId` / `projectId` binding. This is best-effort, not exact, recovery.
 
-The reconstructed record therefore has: a new UUID, a fun-name title with the `(recovered)` suffix (so users can tell), the same transcript file, the same `teamGoalId` / `projectId` binding, and (for archived goals) `archivedAt` stamped from the transcript's mtime. This is best-effort recovery, not exact recovery.
-
-When this becomes a problem: external bookmarks, hard-coded session-id references in scripts, or anything that joins on the old UUID will not find the recovered record. There is no automatic remapping. The transcript content and goal continuity are preserved; only the id and title differ.
-
-A future **session-sidecar** file — written alongside each `.jsonl`, recording the gateway session UUID, role, goal-id, and fun-name at create-time — would let pass-3 do *exact* recovery: same id, same title, same metadata. Sibling subgoal `a71963d9` is investigating this. Until it lands (and until enough sessions have been created under the sidecar regime that older transcripts have one), pass-3 remains best-effort.
+When a fresh UUID is a problem: external bookmarks or scripts that join on the old UUID will not find the recovered record. Transcript content and goal continuity are preserved; only the id and title differ. Sessions created under the sidecar regime recover exactly.
 
 See [docs/design/session-recovery-boot-passes.md §4](design/session-recovery-boot-passes.md#4-why-pass-3-cannot-recover-the-original-session-id).
 

@@ -206,15 +206,20 @@ explaining why it is intentionally bespoke.
 
 ## UI archive cascade
 
-The sidebar "Archive" action on a goal with descendants used to return a
-`409 HAS_DESCENDANTS` error and surface it to the user without offering a
-resolution path. After the fix, `deleteGoal()` / `showArchiveGoalDialog`
-in `src/app/dialogs.ts`:
+The sidebar "Archive" action on a goal with descendants was silently
+archiving only the root goal, leaving descendants live. After the fix,
+`deleteGoal()` in `src/app/api.ts` and `showArchiveGoalDialog` in
+`src/app/dialogs.ts` follow this path:
 
-1. Detects any non-archived descendants (via `GET /api/goals/:id/descendants`).
-2. If descendants exist, shows a confirm dialog listing the count.
-3. Passes `cascade: true` to `DELETE /api/goals/:id?cascade=true` when
-   the user confirms.
+1. `deleteGoal()` calls `countDescendants(id)` (client-side BFS over
+   `state.goals`, walk-through-archived semantics) to decide which path
+   to take.
+2. If descendants > 0, calls `showArchiveGoalDialog(goal)` which does a
+   preflight `DELETE /api/goals/:id?cascade=false`. The server returns
+   `409 HAS_DESCENDANTS { count }` when live descendants exist.
+3. On 409, the dialog shows a confirm modal listing the descendant count
+   and effects.
+4. On confirm, sends `DELETE /api/goals/:id?cascade=true`.
 
 The user is never shown a raw `409 HAS_DESCENDANTS` response; the dialog
 gives them an explicit choice.
@@ -253,8 +258,8 @@ asserting the child becomes archived.
 | `SubtreeWalkOpts` | `src/server/agent/goal-subtree.ts` |
 | `CascadeOpts` | `src/server/agent/goal-subtree.ts` |
 | `CascadeResult` | `src/server/agent/goal-subtree.ts` |
-| Archive handler | `src/server/agent/nested-goal-routes.ts` |
-| Teardown handler | `src/server/agent/nested-goal-routes.ts` |
+| Archive handler (`DELETE /api/goals/:id`) | `src/server/server.ts` |
+| Teardown handler (`POST /api/goals/:id/team/teardown`) | `src/server/server.ts` |
 | Pause/resume handler | `src/server/agent/nested-goal-routes.ts` |
 | Tree-cost handler | `src/server/server.ts` |
 | Unit tests | `tests/goal-subtree.test.ts` |

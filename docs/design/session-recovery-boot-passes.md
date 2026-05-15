@@ -173,32 +173,27 @@ footgun where re-archiving an already-archived session — easy to do
 from the UI, easy to do from a script — silently wiped the underlying
 record and its team-lead binding.
 
-## 4. Why pass-3 cannot recover the original session id
+## 4. Session-sidecar recovery (exact id restoration)
 
-`reconstructTeamLeadSessionRecord` mints a **fresh UUID** for the
-reconstructed session. The original session id is not recoverable
-because nothing on disk preserves it.
+Pass-3 originally minted a **fresh UUID** for the reconstructed session
+because nothing on disk preserved the original gateway session id. This
+has been superseded by the **session-sidecar** file.
 
-The agent CLI keys its slug-dir by `slugify(cwd)` — the worktree path —
-not by session id. The `.jsonl` filename does embed a timestamp, but
-the gateway's session UUID is independent and lives only in
-`sessions.json`. Once that index has lost the entry, there is no path
-back to the original id.
+A `.sidecar.json` is written alongside each `.jsonl` transcript and
+records the gateway's session UUID, role, goal-id, and fun-name title.
+On boot, `_bootRespawnSessionlessGoals` reads the sidecar before
+calling `reconstructTeamLeadSessionRecord` and backfills the original
+id when available (sidecar fields win). The result is now an *exact*
+recovery: same session UUID, same title, same transcript. See
+`docs/design/session-store-crash-safety.md` for the full sidecar design.
 
-The reconstructed record therefore has:
+The reconstructed record (sidecar or fallback) has:
 
-- A new UUID (different from the original).
-- A fun-name title with the `(recovered)` suffix, so the user can tell
-  it is reconstructed.
-- The same transcript content (it points at the same `.jsonl` file).
+- The **original UUID** when a sidecar exists; a fresh UUID otherwise.
+- The original fun-name title (from sidecar) or a `(recovered)` suffix fallback.
+- The same transcript content (points at the same `.jsonl` file).
 - The same goal binding (`teamGoalId`, `projectId`).
 - For archived goals, `archivedAt` stamped from the transcript's mtime.
-
-A future **session-sidecar** file — written alongside each `.jsonl`,
-recording the gateway's session UUID, role, goal-id, and fun-name — would
-make pass-3 an *exact* recovery: same id, same title, same metadata.
-Sibling subgoal `a71963d9` is investigating this. Until it lands, pass-3
-remains best-effort.
 
 ## 5. Deviations / decisions worth flagging
 

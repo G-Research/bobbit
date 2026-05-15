@@ -8,11 +8,14 @@ live in `SUBGOALS-SPEC.md` (root of the repo).
 
 > **Status: experimental.** The nested-goals feature is gated behind a
 > system-scope toggle ("Subgoals" in **Settings → System → General**),
-> default OFF. With the toggle off the entire feature surface — the
+> default OFF. With the toggle off the gated feature surface — the
 > `parent` workflow, the nine `Children`-group tools, the Plan / Children
 > tabs on the goal dashboard, sidebar nesting, mutation-pending cards,
-> and the nested-goal REST routes — is hidden or returns
-> `403 SUBGOALS_DISABLED`. The toggle will be retired and the feature
+> and the nested-goal REST routes (spawn-child, plan, integrate-child,
+> pause, resume, policy, mutation) — is hidden or returns
+> `403 SUBGOALS_DISABLED`. Note: `GET /api/goals/:id/descendants` and
+> `GET /api/goals/:id/tree-cost` are **not** gated — they power the
+> dashboard Plan tab which is core functionality. The toggle will be retired and the feature
 > promoted out of experimental status once the parent goal's audit
 > completes. See `docs/design/subgoals-experimental-toggle.md` for the
 > gating implementation.
