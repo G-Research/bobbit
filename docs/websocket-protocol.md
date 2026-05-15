@@ -45,7 +45,7 @@ Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update. `cost` includes `cacheHitRate: number \| null` — derived as `cacheReadTokens / (cacheReadTokens + inputTokens)`, or `null` for cold/unsupported sessions. See [docs/cache-hit-rate.md](cache-hit-rate.md). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
