@@ -18,6 +18,15 @@ import {
 	WsConnection,
 } from "./e2e-setup.js";
 
+// Both tests share a single session + WS connection created in beforeAll:
+// the first test drives a prompt that populates the cost tracker, the second
+// reads the resulting REST snapshot. Under fullyParallel mode Playwright will
+// dispatch the two tests to separate workers — each worker re-runs beforeAll
+// against a fresh session, leaving the REST snapshot test with no cost data
+// (404 from /api/sessions/:id/cost). Force serial so the prompt populates the
+// same session the REST test queries.
+test.describe.configure({ mode: "serial" });
+
 let sessionId: string;
 let wsConn: WsConnection;
 

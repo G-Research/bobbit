@@ -18,16 +18,37 @@ test.beforeAll(async () => {
 	const bundleExists = fs.existsSync(BUNDLE);
 	const bundleStale = bundleExists && fs.statSync(BUNDLE).mtimeMs < entryMtime;
 	if (!bundleExists || bundleStale) {
-		await esbuild.build({
-			entryPoints: [ENTRY],
-			bundle: true,
-			format: "iife",
-			target: "es2022",
-			outfile: BUNDLE,
-			tsconfig: "tsconfig.web.json",
-			define: { "import.meta.url": '"http://localhost/"' },
-			loader: { ".ts": "ts" },
-		});
+		// Multiple Playwright workers run this beforeAll concurrently and share
+		// the same on-disk bundle path. esbuild's outfile write is not atomic
+		// (open→truncate→stream→close), so a sibling worker's page.goto can
+		// load a partially-written bundle that throws before setting
+		// `window.__ready = true`, causing a 15s waitForFunction timeout.
+		//
+		// Build to a unique tmp path then rename — rename is atomic on POSIX
+		// and replaces in-place on Windows, so concurrent readers see either
+		// the prior bundle or the new one, never a truncated mix.
+		// Build into a unique tmp directory so the sibling .css file esbuild
+		// emits alongside the JS bundle is also isolated from the shared path.
+		const tmpDir = fs.mkdtempSync(path.join(path.dirname(BUNDLE), ".bundle-tmp-"));
+		const tmpOut = path.join(tmpDir, path.basename(BUNDLE));
+		const tmpCss = tmpOut.replace(/\.js$/, ".css");
+		const finalCss = BUNDLE.replace(/\.js$/, ".css");
+		try {
+			await esbuild.build({
+				entryPoints: [ENTRY],
+				bundle: true,
+				format: "iife",
+				target: "es2022",
+				outfile: tmpOut,
+				tsconfig: "tsconfig.web.json",
+				define: { "import.meta.url": '"http://localhost/"' },
+				loader: { ".ts": "ts" },
+			});
+			fs.renameSync(tmpOut, BUNDLE);
+			if (fs.existsSync(tmpCss)) fs.renameSync(tmpCss, finalCss);
+		} finally {
+			try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+		}
 	}
 });
 
