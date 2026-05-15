@@ -291,11 +291,18 @@ export default function (pi: ExtensionAPI) {
 	 * of each identifier start. The caller is expected to validate each
 	 * candidate via the language server — purely-textual matches include
 	 * comments, strings, and unrelated identifiers.
+	 *
+	 * SANDBOX: local file reads MUST use `process.cwd()`, not
+	 * `BOBBIT_HOST_CWD`. When the extension runs inside a sandbox container,
+	 * `BOBBIT_HOST_CWD` is the host-side path (e.g. /Users/.../bobbit-wt/...)
+	 * which is unreadable from inside the container; `process.cwd()` is the
+	 * mounted worktree (e.g. /workspace/...) which IS readable. The host
+	 * path is only meaningful for `/api/lsp/*` gateway calls.
 	 */
 	function findUseSiteCandidates(symbol: string, hintRel: string): Array<{ line: number; character: number }> {
 		const out: Array<{ line: number; character: number }> = [];
 		try {
-			const cwd = process.env.BOBBIT_HOST_CWD ?? process.cwd();
+			const cwd = process.cwd();
 			const abs = path.resolve(cwd, hintRel);
 			const text = fs.readFileSync(abs, "utf-8");
 			const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

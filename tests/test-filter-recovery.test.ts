@@ -72,6 +72,40 @@ test("JSON with trailing TAP/junk after the closing brace is recovered", () => {
 	assert.match(stdout, /PASSED: 3\/3 passed/);
 });
 
+test("JSON with trailing junk containing braces is recovered (balanced extraction)", () => {
+	// Regression for the low-severity test-filter bug: trimming to the
+	// final `}` in `raw` is wrong when trailing TAP / debug output itself
+	// contains `}` characters. The balanced-brace extractor must lock
+	// onto the END of the JSON payload, not the last `}` in the buffer.
+	const json = JSON.stringify(makeReport({ expected: 7 }), null, 2);
+	const noise =
+		"\n" +
+		"\u2714 test passed with template literal `${value}` (1ms)\n" +
+		"# subtest: assert.deepEqual({a:1, b:{c:2}}, ...) succeeded\n" +
+		"debug: closing brace } at end of error trace\n" +
+		"another stray } floating in the noise\n";
+	const raw = json + noise;
+	const { stdout, code } = runFilter(raw);
+	assert.equal(code, 0, `filter exited ${code}; stdout=${stdout.slice(0, 200)}`);
+	assert.match(stdout, /PASSED: 7\/7 passed/);
+});
+
+test("JSON preceded AND followed by brace-containing noise is recovered", () => {
+	// Hardest case: brace noise on both sides of the JSON. Pre-fix, the
+	// recovery latched onto a leading `{` (from the noise) and the last
+	// `}` (also from the noise), JSON.parse failed, and the filter
+	// degraded to passthrough+exit-1.
+	const leading =
+		"\u25b6 some test name with { in it (10ms)\n" +
+		"# yaml-ish: { foo: 1 }\n";
+	const json = JSON.stringify(makeReport({ expected: 2 }), null, 2);
+	const trailing = "\n# epilogue with } characters } sprinkled }\n";
+	const raw = leading + json + trailing;
+	const { stdout, code } = runFilter(raw);
+	assert.equal(code, 0, `filter exited ${code}; stdout=${stdout.slice(0, 200)}`);
+	assert.match(stdout, /PASSED: 2\/2 passed/);
+});
+
 test("unrecoverable garbage exits non-zero", () => {
 	const { code } = runFilter("not json at all and no braces here\n");
 	assert.equal(code, 1);

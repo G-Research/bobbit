@@ -36,16 +36,46 @@ if (mode === "--full") {
   process.exit(0);
 }
 
+/**
+ * Extract a balanced JSON object starting at `startIdx`, returning the
+ * substring through the matching closing brace. String-literal aware so
+ * `{` / `}` inside JSON strings don't perturb the depth counter. Returns
+ * `null` if no balanced object can be extracted (truncated input, etc.).
+ */
+function extractBalancedObject(s, startIdx) {
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = startIdx; i < s.length; i++) {
+    const c = s[i];
+    if (escape) { escape = false; continue; }
+    if (inStr) {
+      if (c === "\\") { escape = true; continue; }
+      if (c === "\"") inStr = false;
+      continue;
+    }
+    if (c === "\"") { inStr = true; continue; }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return s.slice(startIdx, i + 1);
+    }
+  }
+  return null;
+}
+
 let report;
 try {
   report = JSON.parse(raw);
 } catch {
   // Not clean JSON — Playwright workers and any imported `node:test` modules
   // can interleave their own TAP/spec output into stdout before/around the
-  // JSON reporter's payload. Locate the JSON object by its distinctive
-  // Playwright opening (`\n{\n  "config":`) and trim trailing junk down to
-  // the last `}`. Falls back to naive first-brace scanning if the marker
-  // isn't present (e.g. config-less reporter variants).
+  // JSON reporter's payload. Try several start points (the distinctive
+  // `\n{\n  "config":` marker, every line-leading `{`, then any `{`), and
+  // for each one (a) parse the tail directly, then (b) extract a balanced
+  // object, then (c) walk closing-brace positions backwards. Step (b) is
+  // what handles trailing junk that itself contains `}` — a previous
+  // single `lastIndexOf("}")` recovery would latch onto the junk brace.
   const candidates = [];
   const markerIdx = raw.indexOf("\n{\n  \"config\":");
   if (markerIdx >= 0) candidates.push(markerIdx + 1);
@@ -61,14 +91,29 @@ try {
 
   let recovered = null;
   const tried = new Set();
-  for (const start of candidates) {
+  outer: for (const start of candidates) {
     if (tried.has(start)) continue;
     tried.add(start);
     const tail = raw.slice(start);
+    // (a) Parse the whole tail — wins when there's no trailing junk.
     try { recovered = JSON.parse(tail); break; } catch { /* keep trying */ }
-    const lastBrace = tail.lastIndexOf("}");
-    if (lastBrace > 0) {
-      try { recovered = JSON.parse(tail.slice(0, lastBrace + 1)); break; } catch { /* keep trying */ }
+    // (b) Balanced-brace extraction — robust against trailing junk that
+    // itself contains `{` or `}`, because we count depth instead of
+    // searching for a literal brace.
+    const balanced = extractBalancedObject(tail, 0);
+    if (balanced !== null) {
+      try { recovered = JSON.parse(balanced); break; } catch { /* keep trying */ }
+    }
+    // (c) Fallback: walk every closing brace backwards. Tail-slice parses
+    // can still succeed when balanced extraction is defeated by an
+    // unterminated string literal in noise (depth never returns to 0).
+    let searchEnd = tail.length;
+    while (searchEnd > 0) {
+      const lastBrace = tail.lastIndexOf("}", searchEnd - 1);
+      if (lastBrace <= 0) break;
+      try { recovered = JSON.parse(tail.slice(0, lastBrace + 1)); break outer; }
+      catch { /* keep walking */ }
+      searchEnd = lastBrace;
     }
   }
   if (recovered) {

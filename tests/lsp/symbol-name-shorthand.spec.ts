@@ -67,6 +67,7 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 	let sup: LspSupervisor;
 	let tools: Map<string, RegisteredTool>;
 	let origFetch: typeof globalThis.fetch;
+	let origCwd: string;
 	let prevEnv: { token?: string; url?: string; cwd?: string };
 
 	before(async () => {
@@ -83,6 +84,11 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 			if (url.pathname.startsWith("/api/lsp/")) {
 				const method = url.pathname.replace("/api/lsp/", "");
 				const body = init?.body ? JSON.parse(String(init.body)) : {};
+				// Pin the supervisor cwd to FIXTURE regardless of `body.cwd` so
+				// individual tests can toggle BOBBIT_HOST_CWD (which flows into
+				// body.cwd via callLsp) to verify the local-read sandbox fix
+				// without breaking the API path.
+				body.cwd = FIXTURE;
 				try {
 					const result = await sup.dispatch(method, body);
 					return new Response(JSON.stringify(result), {
@@ -109,6 +115,13 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		process.env.BOBBIT_TOKEN = "test-token";
 		process.env.BOBBIT_GATEWAY_URL = "http://lsp-shorthand-test.invalid";
 		process.env.BOBBIT_HOST_CWD = FIXTURE;
+
+		// findUseSiteCandidates() reads files relative to `process.cwd()` (NOT
+		// BOBBIT_HOST_CWD — see the sandbox comment on that function). chdir
+		// into the fixture so relative paths like "src/index.ts" resolve
+		// during tests; restored in after().
+		origCwd = process.cwd();
+		process.chdir(FIXTURE);
 
 		// Materialise the comment/string regression fixture before warmup so
 		// typescript-language-server includes it in the project on first index.
@@ -137,6 +150,9 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		process.env.BOBBIT_TOKEN = prevEnv.token;
 		process.env.BOBBIT_GATEWAY_URL = prevEnv.url;
 		process.env.BOBBIT_HOST_CWD = prevEnv.cwd;
+		if (origCwd) {
+			try { process.chdir(origCwd); } catch { /* best-effort */ }
+		}
 		if (sup) await sup.shutdownAll();
 		try { fs.unlinkSync(COMMENT_FIXTURE_ABS); } catch { /* best-effort */ }
 	});
@@ -281,6 +297,38 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 			: (res.path ? [{ path: res.path, range: res.range }] : []);
 		assert.ok(locs.length >= 1, `expected at least one definition; got: ${JSON.stringify(res).slice(0, 300)}`);
 		assert.match(String(locs[0].path), /math\.ts$/, `definition should land in math.ts; got ${locs[0]?.path}`);
+	});
+
+	test("sandbox cwd: local use-site read uses process.cwd(), not BOBBIT_HOST_CWD", async () => {
+		// Regression for the high-severity sandbox bug: inside a container,
+		// BOBBIT_HOST_CWD is the host-side path (unreadable from the
+		// container) while process.cwd() is the mounted worktree. The
+		// extension's findUseSiteCandidates() MUST read local files via
+		// process.cwd(); using BOBBIT_HOST_CWD would ENOENT and silently
+		// degrade resolution to first-hit or ambiguous. Simulate that
+		// asymmetry by pointing BOBBIT_HOST_CWD at a nonexistent path while
+		// process.cwd() (chdir'd in before()) points at the fixture, then
+		// confirm the path-hint use-site resolution still succeeds.
+		const saved = process.env.BOBBIT_HOST_CWD;
+		process.env.BOBBIT_HOST_CWD = "/nonexistent-bobbit-host-cwd-regression";
+		try {
+			const tool = tools.get("lsp_definition")!;
+			const res = payload(await tool.execute("t-sandbox-cwd", {
+				path: "src/index.ts",
+				symbolName: "add",
+			}));
+			assert.notEqual(res.ambiguous, true, `expected non-ambiguous resolution despite wrong BOBBIT_HOST_CWD; got: ${JSON.stringify(res).slice(0, 300)}`);
+			assert.notEqual(res.error, "lsp_symbol_not_found", `expected resolution to succeed; got: ${JSON.stringify(res).slice(0, 300)}`);
+			assert.ok(res.resolvedFrom, "expected shorthand decoration");
+			assert.match(String(res.resolvedFrom.matched), /index\.ts:.*use-site/, `use-site must be reported in the hint file; got ${res.resolvedFrom.matched}`);
+			const locs = Array.isArray(res.result)
+				? res.result
+				: (res.path ? [{ path: res.path, range: res.range }] : []);
+			assert.ok(locs.length >= 1, `expected at least one definition; got: ${JSON.stringify(res).slice(0, 300)}`);
+			assert.match(String(locs[0].path), /math\.ts$/, `definition should land in math.ts; got ${locs[0]?.path}`);
+		} finally {
+			process.env.BOBBIT_HOST_CWD = saved;
+		}
 	});
 
 	test("lsp_definition({symbolName:'add'}) without path hint is ambiguous with two `add` symbols", async () => {
