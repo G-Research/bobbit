@@ -461,6 +461,59 @@ describe("BgProcessManager \u2014 exit notifications", () => {
 		mgr.cleanup(SESSION);
 	});
 
+	it("wait-in-progress on a running process claims the exit and suppresses auto-notify", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "noop", os.tmpdir());
+
+		const controller = new AbortController();
+		mgr.registerWait(SESSION, controller);
+		// Start the wait BEFORE the process exits — this is the path used by
+		// `bash_bg wait` mid-turn. The wait must claim the exit so the auto
+		// notifier never fires (regression: STREAM_BURST duplicates).
+		const waitP = mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
+
+		// Yield so the wait has parked, then drive the exit.
+		await Promise.resolve();
+		last().emit("exit", 0, null);
+
+		const result = await waitP;
+		mgr.unregisterWait(SESSION, controller);
+		assert.ok(result);
+		assert.equal(result!.info.status, "exited");
+		assert.equal(result!.info.exitCode, 0);
+
+		// Even after draining microtasks the notifier must NOT have fired — the
+		// agent observed the exit synchronously via the wait return value.
+		await drainMicrotasks();
+		assert.equal(calls.length, 0, `wait must claim the exit, got ${calls.length} notifications`);
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("timed-out wait still claims the exit (no late wake after the agent moved on)", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+
+		const controller = new AbortController();
+		mgr.registerWait(SESSION, controller);
+		const waitP = mgr.waitForExit(SESSION, info.id, 50, controller.signal);
+		t.mock.timers.tick(50);
+		const result = await waitP;
+		mgr.unregisterWait(SESSION, controller);
+		assert.ok(result);
+		assert.equal(result!.timedOut, true);
+
+		// Process exits later, after the agent already saw the timeout.
+		last().emit("exit", 0, null);
+		await drainMicrotasks();
+		assert.equal(calls.length, 0, "wait claimed the exit; late auto-notify must not fire");
+
+		mgr.cleanup(SESSION);
+	});
+
 	it("auto notification then wait does not duplicate", async (t) => {
 		const { mgr, last, calls } = makeManagerWithNotifier();
 		const SESSION = freshSession();

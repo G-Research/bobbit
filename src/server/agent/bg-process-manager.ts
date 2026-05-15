@@ -482,6 +482,15 @@ export class BgProcessManager {
 		}
 		if (signal?.aborted) return { info: this.toInfo(bg), timedOut: false, aborted: true };
 
+		// Claim the exit eagerly: the owning agent is mid-turn and is actively
+		// engaging with this process. Whatever the wait returns (exit/timeout/
+		// abort), the agent will see it and decide next steps — so we must NOT
+		// also wake the session via the auto-notifier when the process exits.
+		// Without this, a `bash_bg create+wait` cycle that completes inside a
+		// streaming turn enqueues a redundant bg-exit prompt that re-runs the
+		// tool call (observed as the transcript-fidelity STREAM_BURST dup).
+		bg.notified = true;
+
 		// Race exit / timeout / abort. We do NOT attach an "exit" listener to the
 		// child — instead we await `bg.exited`, which is resolved by the single
 		// listener installed in create() AFTER status/exitCode are updated. That
