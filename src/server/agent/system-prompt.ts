@@ -229,6 +229,7 @@ export interface PromptParts {
  * overrides cannot accidentally suppress the rule by replacing role YAML content.
  */
 const LSP_RULE_ROLES: ReadonlySet<string> = new Set([
+	"team-lead",
 	"coder",
 	"reviewer",
 	"code-reviewer",
@@ -255,14 +256,16 @@ export function lspToolSelectionRuleForRole(roleName?: string, rolePrompt?: stri
 	return (
 		`${LSP_TOOL_SELECTION_HEADER}\n\n` +
 		"For any query about a named symbol (function, class, type, variable, constant, interface) " +
-		"in TypeScript / JavaScript / Python source files, you MUST use LSP before `grep`:\n\n" +
+		"in TypeScript / JavaScript / Python source files, you MUST use LSP before any text/code search tool — " +
+		"including `grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, and `bash`/shell commands that invoke them:\n\n" +
 		"- Where is X defined? → `lsp_workspace_symbol(\"X\")` or `lsp_definition({ symbolName: \"X\" })`.\n" +
 		"- What calls X? → `lsp_references({ symbolName: \"X\" })` or `lsp_references(file, line, char)`.\n" +
 		"- What's X's type/signature? → `lsp_hover({ symbolName: \"X\" })`.\n" +
 		"- Is this file clean after my edit? → `lsp_diagnostics(file)`.\n" +
 		"- What's in this file? → `lsp_document_symbols(file)`.\n\n" +
-		"Use `grep` only for free-text/string-literal search, comments, logs, configs, or non-source files. " +
-		"If a grep result includes `[lsp-hint]`, either switch to LSP or explicitly justify why grep was correct."
+		"Use text search only for free-text/string-literal search, comments, logs, configs, non-source files, " +
+		"or regex/text patterns LSP cannot express. If a text-search result (grep, rg, bash, etc.) includes " +
+		"`[lsp-hint]`, either switch to LSP or explicitly justify why text search was correct."
 	);
 }
 

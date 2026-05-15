@@ -357,7 +357,7 @@ describe("LSP tool-selection rule injection", () => {
 	const HEADER = "## Tool selection — symbol queries";
 	const MUST = "MUST use LSP before";
 
-	for (const role of ["coder", "reviewer", "code-reviewer", "security-reviewer", "architect", "spec-auditor"]) {
+	for (const role of ["team-lead", "coder", "reviewer", "code-reviewer", "security-reviewer", "architect", "spec-auditor"]) {
 		it(`injects the LSP rule for role '${role}' even when role prompt lacks it`, () => {
 			const promptPath = assembleSystemPrompt(`lsp-inject-${role}`, {
 				cwd: cwdDir,
@@ -382,7 +382,7 @@ describe("LSP tool-selection rule injection", () => {
 		});
 	}
 
-	for (const role of ["docs-writer", "qa-tester", "team-lead", ""]) {
+	for (const role of ["docs-writer", "qa-tester", ""]) {
 		it(`does not inject the LSP rule for non-code role '${role || "(empty)"}'`, () => {
 			const promptPath = assembleSystemPrompt(`lsp-skip-${role || "empty"}`, {
 				cwd: cwdDir,
@@ -427,6 +427,34 @@ describe("LSP tool-selection rule injection", () => {
 		assert.ok(roleSection);
 		const sectionOccurrences = roleSection!.content.split(HEADER).length - 1;
 		assert.equal(sectionOccurrences, 1, `expected exactly one header in Role section, got ${sectionOccurrences}`);
+	});
+
+	it("hard rule text explicitly mentions rg, ripgrep, and git grep", () => {
+		const promptPath = assembleSystemPrompt("lsp-rule-text", {
+			cwd: cwdDir,
+			roleName: "coder",
+			rolePrompt: "You are a coder.",
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.ok(content.includes("rg"), "hard rule must mention `rg`");
+		assert.ok(content.includes("ripgrep"), "hard rule must mention `ripgrep`");
+		assert.ok(content.includes("git grep"), "hard rule must mention `git grep`");
+		assert.ok(content.includes("ag"), "hard rule must mention `ag`");
+		assert.ok(content.includes("ack"), "hard rule must mention `ack`");
+		assert.ok(content.includes("bash"), "hard rule must mention bash/shell commands");
+	});
+
+	it("injects the LSP rule for team-lead (code-investigation role)", () => {
+		const promptPath = assembleSystemPrompt("lsp-inject-team-lead", {
+			cwd: cwdDir,
+			roleName: "team-lead",
+			rolePrompt: "You are the team lead.",
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.ok(content.includes(HEADER), "team-lead prompt must include the hard-rule header");
+		assert.ok(content.includes(MUST), "team-lead prompt must include the MUST clause");
 	});
 
 	it("matches role names case-insensitively and trims whitespace", () => {
