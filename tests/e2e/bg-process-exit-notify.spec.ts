@@ -77,7 +77,7 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 			// Create session.
 			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: nonGitCwd() }),
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, assistantType: "role" }),
 			});
 			expect(res.status).toBe(201);
 			({ id: sessionId } = await res.json());
@@ -146,7 +146,7 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 		try {
 			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: nonGitCwd() }),
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, assistantType: "role" }),
 			});
 			expect(res.status).toBe(201);
 			({ id: sessionId } = await res.json());
@@ -199,7 +199,7 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 		try {
 			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: nonGitCwd() }),
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, assistantType: "role" }),
 			});
 			expect(res.status).toBe(201);
 			({ id: sessionId } = await res.json());
