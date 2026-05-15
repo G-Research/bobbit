@@ -1293,26 +1293,6 @@ export function createGateway(config: GatewayConfig) {
 				console.warn("[cost-backfill] boot backfill failed (non-fatal):", err);
 			}
 
-			// Transcript-pass backfill — lazy, fire-and-forget. Runs *after* the
-			// synchronous sidecar pass so it only touches entries that pass
-			// could not resolve. Bounded per-project (50 lines / 64 KiB per
-			// file, 30s total) and confidence-gated (see extractTranscriptGoalId).
-			// Bumps the cost-tracker generation when it stamps anything, which
-			// invalidates cached tree-cost rollups for the next request.
-			void Promise.resolve().then(async () => {
-				for (const ctx of projectContextManager.all()) {
-					try {
-						await backfillLegacyCostGoalIdsFromTranscripts({
-							costTracker: ctx.costTracker,
-							agentSessionsRoot,
-							goals: ctx.goalStore.getAll(),
-						});
-					} catch (err) {
-						console.warn("[cost-backfill] transcript-pass failed (non-fatal):", err);
-					}
-				}
-			});
-
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
 			// or the /api/maintenance/* endpoints to preview and clean up manually.
@@ -1342,6 +1322,26 @@ export function createGateway(config: GatewayConfig) {
 			// through the cold path (full createWorktree + npm ci).
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
+
+				// Transcript-pass backfill — lazy, fire-and-forget after listen().
+				// Runs *after* the synchronous sidecar pass so it only touches entries
+				// that pass could not resolve. Bounded per-project (50 lines / 64 KiB
+				// per file, 30s total) and confidence-gated (see extractTranscriptGoalId).
+				// Bumps the cost-tracker generation when it stamps anything, which
+				// invalidates cached tree-cost rollups for the next request.
+				const transcriptBackfillTask = (async () => {
+					for (const ctx of projectContextManager.all()) {
+						try {
+							await backfillLegacyCostGoalIdsFromTranscripts({
+								costTracker: ctx.costTracker,
+								agentSessionsRoot,
+								goals: ctx.goalStore.getAll(),
+							});
+						} catch (err) {
+							console.warn("[cost-backfill] transcript-pass failed (non-fatal):", err);
+						}
+					}
+				})();
 
 				const sweeperTask = (async () => {
 					const tStart = Date.now();
@@ -1552,7 +1552,7 @@ export function createGateway(config: GatewayConfig) {
 				// to avoid self-deadlock. See goal fix-routes-1db8c87b.
 				lspSupervisor.setRouteSelfCheckPromise(lspRouteCheckTask);
 
-				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
+				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
