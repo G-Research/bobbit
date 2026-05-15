@@ -102,20 +102,20 @@ Context compaction reduces token usage by summarising the conversation.
 
 ## System Prompt Assembly
 
-Each session's system prompt is assembled from seven sections. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time.
+Each session's system prompt is assembled from eight sections. Sections are separated by `\n\n---\n\n` and written to `.bobbit/state/session-prompts/{sessionId}.md` at spawn time.
 
-The sections are ordered so that the **stable prefix** (sections 1–4, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 5–7, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
+The sections are ordered so that the **stable prefix** (sections 1–5, which are deterministic functions of the project and allowed tools) comes before the **volatile suffix** (sections 6–8, which vary per goal/task/session). This ordering lets provider prompt caches (Anthropic ephemeral, OpenAI prompt cache) reuse the tool docs and skills catalog across team spawns and between turns, because the cache key only invalidates at the first changed byte.
 
 | # | Section | Volatile? | Source |
 |---|---------|-----------|--------|
 | 1 | **Global system prompt** | No | `.bobbit/config/system-prompt.md` (user customised) or `defaults/system-prompt.md`. Resolved by `resolveSystemPromptPath()`. See [internals.md — Config cascade](internals.md#config-cascade). |
 | 2 | **AGENTS.md / project docs** | No | From the session's working directory, with `@FILENAME.md` inline inclusion (recursive, circular-reference safe). |
-| 2.5 | **Working directory** | No | Injected `# Working Directory` block with the session's `cwd`. |
-| 3 | **Tool documentation** | No | Assembled from `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). |
-| 4 | **Available Skills catalog** | No | Built from the list of skills in scope for the session. |
-| 5 | **Goal + Role** | Yes | Goal spec and/or role prompt; combined under a single `# Goal` heading. |
-| 6 | **Current Task** | Yes | Task title, type, spec, and dependency list. Omitted when no task is assigned. |
-| 7 | **Workflow upstream-gate context** | Yes | Passed gate content injected for context. Omitted when not in a workflow. |
+| 3 | **Working directory** | No | Injected `# Working Directory` block with the session's `cwd`. |
+| 4 | **Tool documentation** | No | Assembled from `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). |
+| 5 | **Available Skills catalog** | No | Built from the list of skills in scope for the session. |
+| 6 | **Goal + Role** | Yes | Goal spec and/or role prompt; combined under a single `# Goal` heading. |
+| 7 | **Current Task** | Yes | Task title, type, spec, and dependency list. Omitted when no task is assigned. |
+| 8 | **Workflow upstream-gate context** | Yes | Passed gate content injected for context. Omitted when not in a workflow. |
 
 Implementation: `src/server/agent/system-prompt.ts::_assembleSystemPrompt`. The inspector UI uses `getPromptSections()` (same file) to show labeled sections in the same order.
 
