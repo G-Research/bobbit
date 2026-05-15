@@ -102,24 +102,14 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 				return proc?.status === "exited";
 			}, { timeoutMs: 10_000, intervalMs: 50, label: "bg process exited" });
 
-			// Now poll briefly for a wake event matching the bg exit.
-			let wake: WakeEvent | undefined;
-			try {
-				wake = await pollUntil(
-					() => spy.events.find((e) =>
-						e.sessionId === sessionId
-						&& /background process .* exited/i.test(e.message),
-					),
-					{ timeoutMs: 3_000, intervalMs: 50, label: "bg exit wake" },
-				);
-			} catch {
-				test.skip(
-					true,
-					"BgProcessManager exit-notifier → SessionManager wake plumbing not yet wired; "
-					+ "see design doc 'wake owning agent when a bash_bg process exits'.",
-				);
-				return;
-			}
+			// Now poll for a wake event matching the bg exit.
+			const wake: WakeEvent = await pollUntil(
+				() => spy.events.find((e) =>
+					e.sessionId === sessionId
+					&& /background process .* exited/i.test(e.message),
+				),
+				{ timeoutMs: 3_000, intervalMs: 50, label: "bg exit wake" },
+			);
 
 			expect(wake).toBeTruthy();
 			// Payload sanity: id, name, command (or truncation), exit code, success
@@ -166,25 +156,16 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 				return proc?.status === "exited";
 			}, { timeoutMs: 10_000, intervalMs: 50, label: "bg failure exited" });
 
-			let wake: WakeEvent | undefined;
-			try {
-				wake = await pollUntil(
-					() => spy.events.find((e) =>
-						e.sessionId === sessionId
-						&& /background process .* exited/i.test(e.message),
-					),
-					{ timeoutMs: 3_000, intervalMs: 50, label: "bg failure wake" },
-				);
-			} catch {
-				test.skip(
-					true,
-					"BgProcessManager exit-notifier wake plumbing not yet wired.",
-				);
-				return;
-			}
+			const wake: WakeEvent = await pollUntil(
+				() => spy.events.find((e) =>
+					e.sessionId === sessionId
+					&& /background process .* exited/i.test(e.message),
+				),
+				{ timeoutMs: 3_000, intervalMs: 50, label: "bg failure wake" },
+			);
 
-			expect(wake!.message).toMatch(/broken/);
-			expect(wake!.message).toMatch(/fail|exit code 2/i);
+			expect(wake.message).toMatch(/broken/);
+			expect(wake.message).toMatch(/fail|exit code 2/i);
 		} finally {
 			spy.restore();
 			if (sessionId) {
