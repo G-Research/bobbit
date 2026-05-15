@@ -117,4 +117,117 @@ describe("Source pin — merge-loss invariants", () => {
 			"creation time. DO NOT delete this pin.",
 		);
 	});
+
+	// ----------------------------------------------------------------------
+	// Proposal-modal Workflow/Roles tabs pins (this proposal-modal-tabs fix).
+	//
+	// Regression commit: 46e21256 "Merge child: plan-propose UX + dependsOn
+	// fallback (d4be2150)" silently dropped the entire inline-workflow +
+	// inline-roles editor surface from src/app/render.ts. The pre-merge
+	// parent (46e21256^1) had 13 references to `inlineWorkflowYaml` and 11
+	// to `inlineRolesYaml`; the merge result has zero of either. The merge
+	// took the trunk side of render.ts wholesale (-617 net lines) without
+	// preserving the proposal-modal customisation surface.
+	//
+	// The replacement landed by this proposal-modal-tabs fix is NOT the old
+	// YAML <details>+textarea UX — it is a tabbed surface that reuses the
+	// main Workflows/Roles page renderers (see
+	// docs/audit/silent-merge-loss-2026-05-15.md and the gated design doc).
+	// The pins below assert the *new* user-facing surface exists; deleting
+	// them or weakening them to allow the old YAML textareas is a hard fail.
+	// ----------------------------------------------------------------------
+
+	it("render.ts wires draft inlineWorkflow state into the proposal modal (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/render.ts");
+		assert.ok(
+			text.includes("inlineWorkflow"),
+			"src/app/render.ts must reference `inlineWorkflow` somewhere in the\n" +
+			"goal proposal modal — it is the draft-scoped customised-workflow\n" +
+			"snapshot the Workflow tab edits and the submit path forwards as the\n" +
+			"`workflow` field of createGoal. Regression commit 46e21256 silently\n" +
+			"dropped the entire inline-workflow editor surface from render.ts (13\n" +
+			"`inlineWorkflowYaml` refs at 46e21256^1 → 0 at 46e21256). Restored\n" +
+			"by this proposal-modal-tabs fix as a tabbed surface reusing the\n" +
+			"Workflows page renderers — NOT the old YAML textarea. If this pin\n" +
+			"fails, restore the proposal modal's Workflow tab rather than the old\n" +
+			"<details>+textarea block. DO NOT delete this pin.",
+		);
+	});
+
+	it("render.ts wires draft inlineRoles state into the proposal modal (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/render.ts");
+		assert.ok(
+			text.includes("inlineRoles"),
+			"src/app/render.ts must reference `inlineRoles` somewhere in the\n" +
+			"goal proposal modal — it is the draft-scoped per-role customisation\n" +
+			"map the Roles tab edits and the submit path forwards to createGoal.\n" +
+			"Regression commit 46e21256 silently dropped the entire inline-roles\n" +
+			"editor surface from render.ts (11 `inlineRolesYaml` refs at 46e21256^1\n" +
+			"→ 0 at 46e21256). Restored by this proposal-modal-tabs fix as a\n" +
+			"tabbed surface reusing the Roles page renderers — NOT the old YAML\n" +
+			"textarea. If this pin fails, restore the proposal modal's Roles tab\n" +
+			"rather than the old <details>+textarea block. DO NOT delete this pin.",
+		);
+	});
+
+	it("render.ts renders the proposal-modal Workflow tab (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/render.ts");
+		assert.ok(
+			text.includes('data-testid="goal-proposal-tab-workflow"'),
+			"src/app/render.ts must render the proposal modal's Workflow tab\n" +
+			"button with data-testid=\"goal-proposal-tab-workflow\". This is the\n" +
+			"user-visible affordance that lets operators inspect/customise the\n" +
+			"selected workflow for a goal at creation time. Regression commit\n" +
+			"46e21256 silently dropped the entire inline-workflow editor surface\n" +
+			"from render.ts; this proposal-modal-tabs fix restores it as a tab\n" +
+			"alongside Goal and Roles. DO NOT delete this pin — restore the\n" +
+			"dropped tab button instead.",
+		);
+	});
+
+	it("render.ts renders the proposal-modal Roles tab (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/render.ts");
+		assert.ok(
+			text.includes('data-testid="goal-proposal-tab-roles"'),
+			"src/app/render.ts must render the proposal modal's Roles tab button\n" +
+			"with data-testid=\"goal-proposal-tab-roles\". This is the user-visible\n" +
+			"affordance that lets operators inspect/customise per-goal role\n" +
+			"overrides at creation time. Regression commit 46e21256 silently\n" +
+			"dropped the entire inline-roles editor surface from render.ts; this\n" +
+			"proposal-modal-tabs fix restores it as a tab alongside Goal and\n" +
+			"Workflow. DO NOT delete this pin — restore the dropped tab button\n" +
+			"instead.",
+		);
+	});
+
+	it("api.ts createGoal opts include `workflow` (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/api.ts");
+		// Pin the opts-field name `workflow` on the createGoal signature. We
+		// match the parameter declaration shape so the pin doesn't false-fire
+		// on incidental uses of the word "workflow" elsewhere in the file.
+		assert.ok(
+			/createGoal\([\s\S]*?workflow\?\s*:/.test(text),
+			"src/app/api.ts::createGoal opts must declare a `workflow?: …` field.\n" +
+			"This is the wire field the proposal modal uses to send a draft-scoped\n" +
+			"customised inline workflow (snapshotted onto the goal). Regression\n" +
+			"commit 46e21256 silently dropped the UI that fed this field; this\n" +
+			"proposal-modal-tabs fix restores the UI and depends on the wire\n" +
+			"field staying in the createGoal signature. DO NOT delete this pin —\n" +
+			"restore the dropped opts field instead.",
+		);
+	});
+
+	it("api.ts createGoal opts include `inlineRoles` (this proposal-modal-tabs fix)", () => {
+		const text = read("src/app/api.ts");
+		assert.ok(
+			/createGoal\([\s\S]*?inlineRoles\?\s*:/.test(text),
+			"src/app/api.ts::createGoal opts must declare an `inlineRoles?: …`\n" +
+			"field. This is the wire field the proposal modal uses to send\n" +
+			"draft-scoped per-role customisations (snapshotted onto the goal).\n" +
+			"Regression commit 46e21256 silently dropped the UI that fed this\n" +
+			"field; this proposal-modal-tabs fix restores the UI and depends on\n" +
+			"the wire field staying in the createGoal signature. DO NOT delete\n" +
+			"this pin — restore the dropped opts field instead.",
+		);
+	});
 });
