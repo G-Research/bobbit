@@ -391,6 +391,17 @@ export class RemoteAgent {
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
+			// Populated when the server schedules an auto-retry timer for a
+			// transient / provider-overload error. Cleared on agent_start (next
+			// turn dispatched) or auto_retry_cancelled (user click / new prompt /
+			// session terminated).
+			autoRetryPending: null as {
+				reason: "provider-overload" | "transient-error";
+				retryDelayMs: number;
+				attempt: number;
+				scheduledAt: number;
+				error?: string;
+			} | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -1834,8 +1845,30 @@ export class RemoteAgent {
 				// Status is owned by `session_status` (server). agent_start is a
 				// signal: clear local error + capture timing.
 				this._state.error = undefined;
+				// New turn starting (either a fresh user prompt, an explicit retry,
+				// or a fired auto-retry timer) — the "retrying…" banner is done.
+				this._state.autoRetryPending = null;
 				this._taskStartTime = Date.now();
 				this._state.turnStartTime = this._taskStartTime;
+				break;
+
+			case "auto_retry_pending":
+				// Server scheduled a transient/overload auto-retry timer. Surface
+				// a visible "Retrying in Xs…" banner so the session doesn't look
+				// silently frozen between agent_end and the retry's agent_start.
+				this._state.autoRetryPending = {
+					reason: event.reason === "provider-overload" ? "provider-overload" : "transient-error",
+					retryDelayMs: typeof event.retryDelayMs === "number" ? event.retryDelayMs : 0,
+					attempt: typeof event.attempt === "number" ? event.attempt : 1,
+					scheduledAt: typeof event.scheduledAt === "number" ? event.scheduledAt : Date.now(),
+					error: typeof event.error === "string" ? event.error : undefined,
+				};
+				break;
+
+			case "auto_retry_cancelled":
+				// Server cancelled the pending timer (explicit user retry, new
+				// prompt enqueued, or session termination). Clear the banner.
+				this._state.autoRetryPending = null;
 				break;
 
 			case "agent_end": {

@@ -1443,10 +1443,7 @@ export class SessionManager {
 			);
 
 			// Cancel any pending auto-retry timer so it doesn't fire a second dispatch.
-			if (session.pendingAutoRetryTimer) {
-				clearTimeout(session.pendingAutoRetryTimer);
-				session.pendingAutoRetryTimer = undefined;
-			}
+			this.cancelPendingAutoRetry(session, "new-prompt");
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
@@ -2093,10 +2090,36 @@ export class SessionManager {
 			// Session may have been terminated in the meantime
 			if (!this.sessions.has(session.id)) return;
 			if (session.status !== "idle") return; // user sent something, or already retrying
-			this.retryLastPrompt(session.id).catch((err) => {
+			// Auto path: preserve `transientRetryAttempts` so successive overload
+			// failures continue growing the backoff toward the 5-minute cap.
+			this.retryLastPrompt(session.id, { auto: true }).catch((err) => {
 				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
 			});
 		}, delayMs);
+	}
+
+	/**
+	 * Cancel any pending auto-retry timer for this session and broadcast a
+	 * synthetic `auto_retry_cancelled` event so UI banners can clear. Safe to
+	 * call when no timer is pending — no-op in that case.
+	 */
+	private cancelPendingAutoRetry(
+		session: SessionInfo,
+		reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown",
+	): void {
+		if (!session.pendingAutoRetryTimer) return;
+		clearTimeout(session.pendingAutoRetryTimer);
+		session.pendingAutoRetryTimer = undefined;
+		if (reason !== "shutdown" && session.clients.size > 0) {
+			broadcast(session.clients, {
+				type: "event",
+				data: {
+					type: "auto_retry_cancelled",
+					reason,
+					cancelledAt: Date.now(),
+				},
+			});
+		}
 	}
 
 	/**
@@ -2104,19 +2127,26 @@ export class SessionManager {
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
-	async retryLastPrompt(sessionId: string): Promise<void> {
+	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean }): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
+		const isAuto = opts?.auto === true;
 		const hadToolCalls = session.turnHadToolCalls;
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
 		// Explicit retry resets the cap — human intervention gets a fresh budget.
-		session.consecutiveErrorTurns = 0;
-		if (session.pendingAutoRetryTimer) {
-			clearTimeout(session.pendingAutoRetryTimer);
-			session.pendingAutoRetryTimer = undefined;
+		// Auto retry must NOT reset, or the backoff would never grow toward the cap.
+		if (!isAuto) {
+			session.consecutiveErrorTurns = 0;
+			// Explicit user retry also resets the transient-retry budget so the
+			// next failure starts again at the 1s base. The auto-retry timer
+			// path preserves this counter so the delay grows toward the cap.
+			session.transientRetryAttempts = 0;
 		}
+		// In the auto path the timer has already cleared itself; this is a no-op.
+		// In the explicit path it tears down any in-flight pending banner.
+		this.cancelPendingAutoRetry(session, "explicit-retry");
 
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt
@@ -4440,10 +4470,7 @@ export class SessionManager {
 		}
 
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
-		if (session.pendingAutoRetryTimer) {
-			clearTimeout(session.pendingAutoRetryTimer);
-			session.pendingAutoRetryTimer = undefined;
-		}
+		this.cancelPendingAutoRetry(session, "terminated");
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race
@@ -5271,11 +5298,9 @@ export class SessionManager {
 			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
-			// timer doesn't fire after the agent has been stopped.
-			if (session.pendingAutoRetryTimer) {
-				clearTimeout(session.pendingAutoRetryTimer);
-				session.pendingAutoRetryTimer = undefined;
-			}
+			// timer doesn't fire after the agent has been stopped. Clients are
+			// closing in shutdown so suppress the cancellation broadcast.
+			this.cancelPendingAutoRetry(session, "shutdown");
 
 			session.unsubscribe();
 			await session.rpcClient.stop();
