@@ -127,6 +127,7 @@ export class GitStatusWidget extends LitElement {
     @state() private mergePrimaryError = '';
 
     private _dropdownEl: HTMLElement | null = null;
+    private _closeToken = 0;
 
     @state() private _closing = false;
 
@@ -147,11 +148,17 @@ export class GitStatusWidget extends LitElement {
     private _closeDropdown() {
         if (this._closing || !this._dropdownEl) return;
         this._closing = true;
+        const closeToken = ++this._closeToken;
         this._dropdownEl.classList.add('git-dropdown-closing');
-        this._dropdownEl.addEventListener('animationend', () => {
+        const reset = () => {
+            if (closeToken !== this._closeToken) return;
             this._closing = false;
             this.expanded = false;
-        }, { once: true });
+        };
+        this._dropdownEl.addEventListener('animationend', reset, { once: true });
+        // Removing an animating portal fires animationcancel, not animationend.
+        // Mirror the reset path so cancelled close animations cannot wedge the widget.
+        this._dropdownEl.addEventListener('animationcancel', reset, { once: true });
     }
 
     createRenderRoot() {
@@ -168,9 +175,15 @@ export class GitStatusWidget extends LitElement {
         super.disconnectedCallback();
         document.removeEventListener('click', this._onDocumentClick, true);
         document.removeEventListener('keydown', this._onEscapeKeyDropdown, true);
+        // Invalidate any in-flight close-animation listeners before removing the
+        // portaled dropdown. The portal lives under document.body, not our
+        // subtree, so disconnecting mid-close can cancel animationend entirely.
+        this._closeToken++;
         this._removeDropdown();
         this._removeModal();
         this._removeCommitsModal();
+        this._closing = false;
+        this.expanded = false;
     }
 
     private _removeDropdown() {
@@ -184,22 +197,44 @@ export class GitStatusWidget extends LitElement {
         e.stopPropagation();
         // Skeleton is non-interactive — no data to show in dropdown yet.
         if (this.loading && !this.branch) return;
-        if (this.expanded && !this._closing) {
+
+        // Portal presence is the source of truth for whether the dropdown is
+        // actually visible. If state says open but the portaled element was
+        // removed during a disconnect/reconnect or external cleanup, treat this
+        // click as an open and rebuild the portal instead of wedging in close.
+        const hasConnectedDropdown = this._dropdownEl?.isConnected === true;
+        const visiblyOpen = this.expanded && !this._closing && hasConnectedDropdown;
+        if (visiblyOpen) {
             this._closeDropdown();
-        } else if (!this.expanded) {
-            this.expanded = true;
-            this.dispatchEvent(new CustomEvent('git-fetch', {
-                bubbles: true,
-                composed: true,
-            }));
-            // Signal to parent (session-manager / goal-dashboard) that the
-            // dropdown was opened so it can refetch with ?untracked=1 for
-            // the full untracked-files list.
-            this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
-                bubbles: true,
-                composed: true,
-            }));
+            return;
         }
+
+        if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
+            this._removeDropdown();
+        }
+        this._closeToken++;
+        this._closing = false;
+        this._dropdownEl?.classList.remove('git-dropdown-closing');
+        if (this._dropdownEl) {
+            render(this._renderDropdownContent(), this._dropdownEl);
+            this._positionDropdown();
+        }
+        const wasExpanded = this.expanded;
+        this.expanded = true;
+        if (wasExpanded && !this._dropdownEl) {
+            this.requestUpdate('expanded', false);
+        }
+        this.dispatchEvent(new CustomEvent('git-fetch', {
+            bubbles: true,
+            composed: true,
+        }));
+        // Signal to parent (session-manager / goal-dashboard) that the
+        // dropdown was opened so it can refetch with ?untracked=1 for
+        // the full untracked-files list.
+        this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
+            bubbles: true,
+            composed: true,
+        }));
     }
 
     private _statusColor(status: string): string {
