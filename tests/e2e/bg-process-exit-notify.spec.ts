@@ -259,6 +259,102 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 		}
 	});
 
+	test("preference notifyAgentOnBgProcessExit=false suppresses agent wake; logs/status still work; toggling back on restores wake", async ({ gateway }) => {
+		const spy = installWakeSpy(gateway.sessionManager);
+		let sessionId: string | undefined;
+		try {
+			// Disable the agent-facing wake preference.
+			const prefRes = await adminFetch(gateway.baseURL, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ notifyAgentOnBgProcessExit: false }),
+			});
+			expect(prefRes.ok).toBeTruthy();
+
+			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, assistantType: "role" }),
+			});
+			expect(res.status).toBe(201);
+			({ id: sessionId } = await res.json());
+			spy.events.length = 0;
+
+			const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+				method: "POST",
+				body: JSON.stringify({ command: QUICK_CMD, name: "quiet" }),
+			});
+			expect(bgRes.status).toBe(201);
+			const bg = await bgRes.json();
+
+			// Process status still updates to exited.
+			await pollUntil(async () => {
+				const r = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+				const list = await r.json();
+				const proc = list.processes?.find((p: any) => p.id === bg.id);
+				return proc?.status === "exited";
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "disabled bg exited" });
+
+			// Notifier is scheduled on a microtask after the WS broadcast; by the time
+			// the REST poll above has observed status=exited (across HTTP + JSON parse),
+			// that microtask has already run and any wake event would be in spy.events.
+			const bgWakes = spy.events.filter((e) =>
+				e.sessionId === sessionId
+				&& /background process .* exited/i.test(e.message),
+			);
+			expect(bgWakes).toEqual([]);
+
+			// Logs API still surfaces the captured output even with wake suppressed.
+			const logsRes = await adminFetch(
+				gateway.baseURL,
+				`/api/sessions/${sessionId}/bg-processes/${bg.id}/logs`,
+			);
+			expect(logsRes.ok).toBeTruthy();
+			const logs = await logsRes.json();
+			const logText = typeof logs === "string" ? logs : (logs.logs ?? logs.output ?? JSON.stringify(logs));
+			expect(/bg done/.test(logText)).toBeTruthy();
+
+			// Re-enable and verify wake delivery is restored for a new bg process.
+			const enableRes = await adminFetch(gateway.baseURL, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ notifyAgentOnBgProcessExit: true }),
+			});
+			expect(enableRes.ok).toBeTruthy();
+			spy.events.length = 0;
+
+			const bg2Res = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+				method: "POST",
+				body: JSON.stringify({ command: QUICK_CMD, name: "loud" }),
+			});
+			expect(bg2Res.status).toBe(201);
+			const bg2 = await bg2Res.json();
+
+			await pollUntil(async () => {
+				const r = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+				const list = await r.json();
+				const proc = list.processes?.find((p: any) => p.id === bg2.id);
+				return proc?.status === "exited";
+			}, { timeoutMs: 10_000, intervalMs: 50, label: "re-enabled bg exited" });
+
+			const wake = await pollUntil(
+				() => spy.events.find((e) =>
+					e.sessionId === sessionId
+					&& /background process .* exited/i.test(e.message),
+				),
+				{ timeoutMs: 3_000, intervalMs: 50, label: "re-enabled wake event" },
+			);
+			expect(wake.message).toMatch(/loud/);
+		} finally {
+			// Reset preference to default.
+			await adminFetch(gateway.baseURL, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ notifyAgentOnBgProcessExit: null }),
+			}).catch(() => {});
+			spy.restore();
+			if (sessionId) {
+				await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+			}
+		}
+	});
+
 	test("agent-initiated kill does not produce a wake message", async ({ gateway }) => {
 		const spy = installWakeSpy(gateway.sessionManager);
 		let sessionId: string | undefined;
