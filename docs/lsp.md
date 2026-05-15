@@ -1,6 +1,6 @@
 # LSP Code Intelligence
 
-> All coding-role agents (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`) receive a mandatory **"Tool selection — symbol queries"** section in their `promptTemplate` that requires `lsp_*` tools over `grep` for any named-symbol query. See `defaults/roles/*.yaml` for the exact wording.
+> **Tool-selection rule injection.** For coding and reviewing roles (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`, `architect`, `spec-auditor`), the session setup pipeline (`session-setup.ts`) injects a mandatory **"Tool selection — symbol queries"** section into the composed prompt at runtime, _in addition to_ the same section present in `defaults/roles/*.yaml`. This dual approach is intentional: project-level role overrides in `.bobbit/config/roles/*` fully shadow the default role YAML (no field-level merge — see [Config cascade](internals.md#config-cascade)), so an override that omits the LSP rule would silently suppress it if the rule lived only in the default YAML. The runtime injection ensures the rule reaches every agent regardless of which role source wins the cascade. The injection is deduplicated — if the resolved role template already contains the section, it is not repeated.
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
