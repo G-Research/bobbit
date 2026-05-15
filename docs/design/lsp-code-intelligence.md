@@ -715,7 +715,17 @@ test:e2e` between every step.
 
 ---
 
-## 13. Out of scope (v1, re-confirmed)
+## 13. Post-v1 extension: symbol-name shorthand
+
+`lsp_definition`, `lsp_references`, and `lsp_hover` were extended after the v1 launch to accept an optional `symbolName` parameter as an alternative to the explicit `(path, line, character)` triple. When `symbolName` is supplied, the tool handler resolves it internally via `lsp_workspace_symbol` and dispatches against the first (or path-hinted) match, returning the same result shape as the coordinate-based path plus a `resolvedFrom` decoration.
+
+This was an **ergonomics lever, not a capability gap.** The LSP itself has always been able to answer "where is X defined?" once given a location — the problem was that finding the location required a prior `lsp_workspace_symbol` round trip, which made the LSP flow two calls versus grep's one. The shorthand collapses that to a single call, removing the main reason agents kept preferring `grep` over `lsp_definition` for symbol queries.
+
+Ambiguity handling (multiple hits with no disambiguating `path`) returns an `{ambiguous, candidates}` envelope rather than silently picking the wrong match. The `path` parameter doubles as a disambiguation hint: when both `symbolName` and `path` are given, hits in or near that file are preferred. All existing callers that pass explicit coordinates are unaffected.
+
+See `docs/lsp.md` §"Symbol-name shorthand" for the full API reference.
+
+## 14. Out of scope (v1, re-confirmed)
 
 - Completion / signature help / inline diagnostics overlay.
 - Code actions beyond `rename`.
