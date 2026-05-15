@@ -13,7 +13,7 @@ import { renderIdleBlobCanvas } from "../ui/bobbit-render.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { type ConfigOrigin, getConfigScope, setConfigScope, getConfigProjectId, renderOriginBadge, isInherited, renderConfigScopeRow, customizeItem, revertOverride, getCurrentProjectName } from "./config-scope.js";
-import { renderModelRow } from "./settings-page.js";
+import { renderModelRow, formatModelPref } from "./settings-page.js";
 
 // ============================================================================
 // HELPERS
@@ -767,7 +767,29 @@ export interface RoleModelTabOptions {
 }
 
 export function renderRoleModelTab(opts: RoleModelTabOptions): TemplateResult {
-	const { model, thinkingLevel, onModelChange, onThinkingChange } = opts;
+	const { model, thinkingLevel, onModelChange, onThinkingChange, readOnly } = opts;
+	if (readOnly) {
+		// Inspector mode: render a static summary instead of the picker so
+		// the user cannot mutate, clear, or fire a Test request against the
+		// underlying role from the goal proposal's read-only inspector.
+		const modelDisplay = model ? formatModelPref(model, "(use default)") : "(use default)";
+		const thinkingDisplay = thinkingLevel || "(default)";
+		return html`
+			<p class="roles-tools-note" data-testid="roles-model-tab">
+				Overrides the global default for sessions running as this role. Leave blank to inherit.
+			</p>
+			<div class="flex flex-col gap-1" data-testid="roles-model-readonly">
+				<div class="flex items-center gap-2">
+					<span class="text-sm font-medium text-foreground shrink-0 w-14">Model</span>
+					<span class="text-sm text-muted-foreground truncate" data-testid="roles-model-readonly-value">${modelDisplay}</span>
+				</div>
+				<div class="flex items-center gap-2">
+					<span class="text-sm font-medium text-foreground shrink-0 w-14">Thinking</span>
+					<span class="text-sm text-muted-foreground truncate" data-testid="roles-thinking-readonly-value">${thinkingDisplay}</span>
+				</div>
+			</div>
+		`;
+	}
 	return html`
 		<p class="roles-tools-note" data-testid="roles-model-tab">
 			Overrides the global default for sessions running as this role. Leave blank to inherit.

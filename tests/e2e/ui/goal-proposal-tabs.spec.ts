@@ -608,4 +608,141 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("switching the Goal-tab workflow picker after customizing clears the inline workflow (sends workflowId, not workflow)", async ({ page }) => {
+		// Regression guard: previously, customising workflow A and then
+		// changing the Goal-tab picker to B left `_proposalInlineWorkflow`
+		// stale. Submit would ship the A-shaped inline workflow alongside
+		// a workflowId that no longer matched. Picker change must reset the
+		// customisation, matching the Workflow-tab list-select behaviour.
+		test.setTimeout(60_000);
+		const title = `Modal picker resets custom ${Date.now()}`;
+		const sessionId = await createSession();
+		let createdGoalId: string | undefined;
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Picker switch clears inline workflow." });
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			const wfPicker = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+			await expect(wfPicker).toBeVisible({ timeout: 10_000 });
+			const wfIds: string[] = await wfPicker.evaluate((el: HTMLSelectElement) =>
+				Array.from(el.options).map(o => o.value),
+			);
+			test.skip(wfIds.length < 2, "Need at least two workflows for picker-reset test");
+			const initialId = await wfPicker.inputValue();
+			const otherId = wfIds.find((v) => v !== initialId)!;
+
+			// Customize workflow A.
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			const wfPanel = page.locator("[data-testid='goal-proposal-panel-workflow']").first();
+			await expect(wfPanel).toBeVisible();
+			const customizeBtn = wfPanel.locator("[data-testid='goal-proposal-workflow-customize']").first();
+			await expect(customizeBtn).toBeVisible({ timeout: 10_000 });
+			await customizeBtn.click();
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+			).toBeVisible({ timeout: 5_000 });
+			await expect(
+				wfPanel.locator("[data-testid='workflow-editor']").first(),
+			).toBeVisible({ timeout: 5_000 });
+
+			// Switch Goal-tab picker to B.
+			await page.locator("[data-testid='goal-proposal-tab-goal']").first().click();
+			await wfPicker.selectOption(otherId);
+			await expect(wfPicker).toHaveValue(otherId);
+
+			// Workflow tab should now show the (read-only) inspector for B
+			// with Customize available again — NOT an editor for A.
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-customize']").first(),
+			).toBeVisible({ timeout: 5_000 });
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+			).toHaveCount(0);
+			await expect(
+				wfPanel.locator("[data-testid='workflow-editor']").first(),
+			).toHaveCount(0);
+			await expect(
+				wfPanel.locator("[data-testid='workflow-inspector']").first(),
+			).toHaveAttribute("data-workflow-id", otherId);
+
+			// Submit and assert the payload carries workflowId B (not inline).
+			let captured: any = null;
+			page.on("request", (req) => {
+				if (
+					req.url().includes("/api/goals") &&
+					!req.url().includes("/api/goals/") &&
+					req.method() === "POST"
+				) {
+					try { captured = JSON.parse(req.postData() || "null"); } catch {}
+				}
+			});
+			const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createBtn).toBeEnabled({ timeout: 5_000 });
+			const respPromise = page.waitForResponse(
+				resp => resp.url().includes("/api/goals")
+					&& resp.request().method() === "POST"
+					&& resp.ok(),
+				{ timeout: 20_000 },
+			);
+			await createBtn.click();
+			await respPromise;
+
+			expect(captured, "POST /api/goals body must be captured").toBeTruthy();
+			expect(captured.workflowId, "workflowId must reflect the newly-picked workflow").toBe(otherId);
+			expect(captured.workflow, "stale inline workflow must NOT be forwarded").toBeFalsy();
+
+			await expect.poll(
+				async () => (await findGoalByTitle(title))?.id,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+			createdGoalId = (await findGoalByTitle(title))?.id;
+		} finally {
+			await deleteGoalIfExists(createdGoalId);
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("role inspector Model tab is fully read-only — no picker / clear / test controls", async ({ page }) => {
+		// Pin: when the role inspector is in readOnly mode, the Model tab
+		// must render a static summary, NOT the editable renderModelRow
+		// (which exposes a model picker, clear button, and Test action).
+		test.setTimeout(60_000);
+		const title = `Modal role model readonly ${Date.now()}`;
+		const sessionId = await createSession();
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Role inspector Model tab read-only." });
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			await page.locator("[data-testid='goal-proposal-tab-roles']").first().click();
+			const rolesPanel = page.locator("[data-testid='goal-proposal-panel-roles']").first();
+			await expect(rolesPanel).toBeVisible();
+
+			const firstRow = rolesPanel.locator(".role-row").first();
+			await expect(firstRow).toBeVisible({ timeout: 15_000 });
+			await firstRow.click();
+
+			const inspector = rolesPanel.locator("[data-testid='role-editor']").first();
+			await expect(inspector).toBeVisible({ timeout: 10_000 });
+
+			const modelTab = inspector.locator("[data-testid='roles-tab-model']").first();
+			await modelTab.click();
+			await expect(modelTab).toHaveClass(/roles-tab--active/);
+
+			// Read-only summary present.
+			await expect(
+				inspector.locator("[data-testid='roles-model-readonly']").first(),
+			).toBeVisible({ timeout: 5_000 });
+
+			// No editable model-row controls inside the inspector's Model tab.
+			await expect(
+				inspector.locator("[data-testid='model-row']"),
+			).toHaveCount(0);
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });

@@ -1674,7 +1674,17 @@ function goalPreviewPanel() {
 					if (sid) saveGoalDraft(sid);
 					renderApp();
 				},
-				onWorkflowChange: (e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+				onWorkflowChange: (e: Event) => {
+					_selectedWorkflowId = (e.target as HTMLSelectElement).value;
+					// Changing the picker selects a different library workflow; any
+					// prior goal-draft inline workflow customisation is for the old
+					// selection and must be cleared so submit doesn't ship stale
+					// inline content alongside the newly-selected workflowId.
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					clearWorkflowEditorController();
+					renderApp();
+				},
 				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
@@ -3156,7 +3166,17 @@ function goalProposalPanel() {
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
 		onCwdChange: (v) => { _proposalCwd = v; renderApp(); },
 		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
-		onWorkflowChange: (e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+		onWorkflowChange: (e: Event) => {
+			_proposalWorkflowId = (e.target as HTMLSelectElement).value;
+			// Changing the picker selects a different library workflow; any
+			// prior goal-draft inline workflow customisation is for the old
+			// selection and must be cleared so submit doesn't ship stale
+			// inline content alongside the newly-selected workflowId.
+			_proposalInlineWorkflow = null;
+			_proposalCustomizingWorkflow = false;
+			clearWorkflowEditorController();
+			renderApp();
+		},
 		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 		onSpecEditToggle: () => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); },
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
