@@ -1,7 +1,7 @@
 name: lsp_references
-description: "Find all symbol references. Prefer over grep for symbol callsites. 0-indexed line/char."
+description: "Find references. Pass symbolName OR (path, line, char). Prefer over grep for callsites. 0-indexed."
 summary: "Find references (LSP)"
-params: [path, line, character, includeDeclaration?]
+params: [path?, symbolName?, line?, character?, includeDeclaration?]
 provider:
   type: bobbit-extension
   extension: extension.ts
@@ -23,10 +23,19 @@ detail_docs: >-
 
   | Name | Type | Required | Description |
   |------|------|----------|-------------|
-  | `path` | string | Yes | File path relative to session cwd. |
-  | `line` | number | Yes | **0-indexed** line. |
-  | `character` | number | Yes | **0-indexed** column. |
+  | `path` | string | No | File path relative to session cwd. Required with line/char; otherwise a hint for `symbolName`. |
+  | `symbolName` | string | No | Resolve position via `lsp_workspace_symbol`; alternative to `(line, character)`. |
+  | `line` | number | No | **0-indexed** line. Required when not using `symbolName`. |
+  | `character` | number | No | **0-indexed** column. Required when not using `symbolName`. |
   | `includeDeclaration` | boolean | No | Default `true`. |
+
+
+  ## Symbol-name shorthand
+
+
+  Pass `symbolName` instead of `(line, character)`. Shorthand results
+  are decorated with `resolvedFrom: { symbolName, matched }`. Ambiguous
+  matches without a `path` hint return `{ ambiguous: true, candidates: [...] }`.
 
 
   Each result is `{ path, range: { start: {line, character}, end: {line, character} } }`,

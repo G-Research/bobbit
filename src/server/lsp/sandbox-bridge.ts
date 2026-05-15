@@ -94,6 +94,16 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 		const abs = path.resolve(hostPath);
 		let best: { projectId: string; root: string; worktreeRoot: string } | null = null;
 		for (const ctx of this.projectContextManager.all()) {
+			// Only consider sandbox-configured projects. For projects that have
+			// NOT opted into the docker sandbox (e.g. plain host projects, or the
+			// E2E test harness's default project) there is no fail-closed
+			// boundary to enforce — the host LSP is the correct choice. Skipping
+			// these here prevents `spawnLspChild`'s fail-closed guard
+			// (`server-process.ts`, security review 2026-05-15) from rejecting
+			// LSP requests for non-sandboxed worktrees. Pinned by
+			// `tests/lsp/sandbox-bridge-resolve.spec.ts` and `tests/e2e/lsp.spec.ts`.
+			const sandboxMode = (ctx.projectConfigStore as any)?.get?.("sandbox");
+			if (sandboxMode !== "docker") continue;
 			const root = path.resolve(ctx.project.rootPath);
 			// Respect the project's worktree_root config if set; otherwise default
 			// to the conventional <rootPath>-wt sibling directory.
@@ -122,9 +132,11 @@ export class MultiProjectSandboxLspBridge implements SandboxLspBridge {
 	}
 
 	/** Return a stable per-project bridge for a specific worktree (avoids
-	 *  shared mutable state for multi-project scenarios). */
-	resolveForWorktree(worktreePath: string): SandboxLspBridge {
-		return this.bridgeForHostPath(worktreePath) ?? this;
+	 *  shared mutable state for multi-project scenarios). Returns `null` when
+	 *  the worktree is NOT inside any sandbox-configured project — callers
+	 *  treat that as a host worktree (no sandbox path, no fail-closed). */
+	resolveForWorktree(worktreePath: string): SandboxLspBridge | null {
+		return this.bridgeForHostPath(worktreePath);
 	}
 
 	containerIdForWorktree(hostWorktreePath: string): string | null {

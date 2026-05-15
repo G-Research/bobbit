@@ -29,6 +29,12 @@ export interface LspProcessOpts {
 	 *  Callers should supply the container-installed equivalents here.
 	 *  Defaults to `[command, ...args]` when omitted (host-only fallback). */
 	sandboxCmd?: string[];
+	/** Fail closed instead of host-fallback when a sandbox container is
+	 *  required but `sandbox.containerIdForWorktree(worktreePath)` is null.
+	 *  Set by the supervisor for worktrees explicitly marked sandboxed.
+	 *  Host-only / fixture / dev flows leave this unset and keep the
+	 *  legacy host-spawn fallback. */
+	requireSandbox?: boolean;
 }
 
 export interface LspProcess {
@@ -39,6 +45,18 @@ export interface LspProcess {
 }
 
 const localRequire = createRequire(import.meta.url);
+
+/**
+ * Error thrown when a sandboxed worktree requests LSP but no container is
+ * available. We refuse to host-fallback in that case so untrusted sandbox
+ * files never get evaluated by a host-side language server.
+ */
+export class LspSandboxRequiredError extends Error {
+	constructor(worktreePath: string) {
+		super(`LSP spawn refused: sandbox required for worktree ${worktreePath} but no container is available`);
+		this.name = "LspSandboxRequiredError";
+	}
+}
 
 /**
  * Resolve typescript-language-server CLI script (.mjs) from the gateway
@@ -67,12 +85,15 @@ export function resolvePyrightLangserver(): { node: string; cliMjs: string } | n
 
 export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	let child: ChildProcess;
-	// Sandbox bridge is best-effort: when no container exists for this
-	// worktree (host-only sessions, fixture tests, sandbox not yet started),
-	// fall back to a host-side spawn rather than throwing. This keeps the
-	// supervisor working uniformly across sandboxed and non-sandboxed
-	// worktrees within the same gateway.
+	// Sandbox bridge is best-effort for host-only/dev fixtures, but fail-closed
+	// for worktrees the supervisor explicitly marked sandbox-required. That
+	// preserves normal host LSP behaviour outside sandboxed projects while
+	// preventing sandboxed sessions from silently spawning language servers on
+	// the host when their container is unavailable.
 	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
+	if (opts.requireSandbox && !cid) {
+		throw new LspSandboxRequiredError(opts.worktreePath);
+	}
 	if (opts.sandbox && cid) {
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
 		// Use sandboxCmd when provided; host-resolved paths (process.execPath,

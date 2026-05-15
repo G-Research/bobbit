@@ -21,6 +21,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE = path.resolve(__dirname, "..", "fixtures", "lsp-ts");
 
+// Security review 2026-05-15: /api/lsp/* now rejects cwds outside every
+// authorized project worktree (see tests/e2e/lsp-auth.spec.ts). The host
+// fixture under tests/fixtures/lsp-ts is NOT a registered project, so
+// authorize it via the operator escape hatch — same pattern as lsp.spec.ts.
+// Malicious-cwd assertions in lsp-auth.spec.ts use paths well outside FIXTURE
+// and remain unaffected.
+test.beforeAll(() => {
+	process.env.BOBBIT_LSP_AUTHORIZED_ROOTS = FIXTURE;
+});
+test.afterAll(() => {
+	delete process.env.BOBBIT_LSP_AUTHORIZED_ROOTS;
+});
+
 const LSP_METHODS = [
 	"definition",
 	"references",
@@ -40,7 +53,57 @@ function methodBody(method: string): Record<string, unknown> {
 
 const BENIGN_ERRORS = new Set(["lsp_unavailable", "lsp_capacity", "lsp_timeout"]);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDERING INVARIANT — DO NOT REORDER THE FIRST /api/lsp/stats TEST
+//
+// The in-process harness fixture is worker-scoped: every test in this file
+// shares ONE booted gateway. The regression test below ("is never 'pending'
+// on immediate post-boot read") pins the contract that the FIRST external
+// /api/lsp/stats call after start() must see a settled routeSelfCheck.
+//
+// If any other /api/lsp/stats call runs first, the supervisor's self-check
+// promise will have already been awaited (or naturally settled by elapsed
+// wall-time), and the regression test becomes a tautology that passes even
+// if the await is removed from the stats handler. That is exactly the
+// review finding that prompted this reorder — see goal fix-routes-1db8c87b,
+// task "Make post-boot test immediate".
+//
+// Keep the immediate-post-boot regression test as the FIRST declared test
+// in this file. The other stats tests (registration, 'ok', cap) must remain
+// AFTER it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("GET /api/lsp/stats is never 'pending' on immediate post-boot read", async () => {
+	// Direct regression for goal fix-routes-1db8c87b: the previous fire-and-forget
+	// boot ordering let /api/lsp/stats return routeSelfCheck === "pending" if the
+	// caller read the route before the background self-check task settled.
+	//
+	// The fix awaits the supervisor's route-self-check promise inside the stats
+	// handler (bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS). A single synchronous
+	// fetch immediately after start() must therefore return a settled value.
+	//
+	// This MUST be the first test in the file — see the ordering banner above.
+	// Status check (200) also subsumes the "not 404" registration assertion for
+	// this route, so no separate /stats registration test runs ahead of it.
+	//
+	// This assertion is intentionally weaker than the 'ok' test below: any settled
+	// state (ok / failed:...) is acceptable here. The point is that the route's
+	// observability contract is honored — callers never see the in-progress sentinel.
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status, "GET /api/lsp/stats must not be 404").not.toBe(404);
+	expect(res.status).toBe(200);
+	const body = await res.json() as Record<string, unknown>;
+	expect(
+		body.routeSelfCheck,
+		"routeSelfCheck must be settled — 'pending' means the stats handler did not await the self-check promise (goal fix-routes-1db8c87b)",
+	).not.toBe("pending");
+	expect(typeof body.routeSelfCheck, "routeSelfCheck must be a string").toBe("string");
+});
+
 test("GET /api/lsp/stats is registered (never 404)", async () => {
+	// Registration check — runs AFTER the immediate-post-boot regression test
+	// (see ordering banner above). By the time this runs the self-check has
+	// settled, but the route registration assertion is independent of that.
 	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
 	expect(res.status, "GET /api/lsp/stats must not be 404").not.toBe(404);
 	expect(res.status).toBe(200);
@@ -50,6 +113,12 @@ test("GET /api/lsp/stats reports routeSelfCheck: 'ok' after clean boot", async (
 	// The post-boot loopback self-check probes /api/lsp/stats, /api/lsp/state, and
 	// /api/lsp/diagnostics. On a clean in-process boot all three routes are registered
 	// and the supervisor's routeSelfCheck field must be "ok".
+	//
+	// This used to race against the boot pipeline (lspRouteCheckTask was awaited only
+	// after `start()` returned, so an immediate /api/lsp/stats could see "pending").
+	// The fix (goal fix-routes-1db8c87b) makes /api/lsp/stats await the supervisor's
+	// in-flight self-check promise with a bounded cap. No polling here — a single
+	// synchronous read must see a settled "ok".
 	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
 	expect(res.status).toBe(200);
 	const body = await res.json() as Record<string, unknown>;
@@ -61,6 +130,159 @@ test("GET /api/lsp/state is registered (never 404)", async () => {
 	const res = await apiFetch(`/api/lsp/state?${params}`, { method: "GET" });
 	expect(res.status, "GET /api/lsp/state must not be 404").not.toBe(404);
 	expect(res.status).toBe(200);
+});
+
+test("GET /api/lsp/stats returns within cap when self-check promise never settles", async ({ gateway }) => {
+	// Hang-safety regression for goal fix-routes-1db8c87b: the stats handler awaits
+	// the supervisor's routeSelfCheck promise, but bounds the wait with
+	// LSP_ROUTE_SELF_CHECK_STATS_CAP_MS so a pathological never-settling probe cannot
+	// hang /api/lsp/stats indefinitely. When the cap fires before the promise settles,
+	// the route returns whatever the supervisor's current routeSelfCheck value is —
+	// here we force it back to "pending" so the assertion is meaningful.
+	// Import the SAME compiled server module the in-process harness booted, so the
+	// cap override mutates the live module state. A static import from src/server
+	// would be a *different* module instance and the override would be a no-op.
+	const { __setLspRouteSelfCheckStatsCapMsForTesting } = await import("../../dist/server/server.js");
+
+	const supervisor = gateway.sessionManager.getLspSupervisor();
+	expect(supervisor, "supervisor must exist on the in-process gateway").toBeTruthy();
+
+	const SHORT_CAP_MS = 150;
+	// Wide upper bound — we just need to prove the route is bounded, not that it's
+	// tight. CI scheduling jitter on slow runners can add tens of ms; 2000ms is
+	// generous while still catching a regression that drops the cap entirely (which
+	// would block on the never-settling promise and eventually time the test out).
+	const MAX_OBSERVED_MS = 2000;
+
+	// IMPORTANT: the boot self-check IIFE writes setRouteSelfCheck("ok") directly
+	// when it succeeds, independently of which promise is published via
+	// setRouteSelfCheckPromise(). If we install our hang before that IIFE finishes,
+	// it can overwrite our "pending" sentinel mid-test. Wait for the boot probe to
+	// fully settle, THEN install the hang.
+	const priorPromise = supervisor.getRouteSelfCheckPromise();
+	if (priorPromise) await priorPromise.catch(() => { /* boot probe already failed — fine, we're about to overwrite the sentinel */ });
+
+	const neverSettles = new Promise<void>(() => { /* intentionally never resolves */ });
+	supervisor.setRouteSelfCheckPromise(neverSettles);
+	supervisor.setRouteSelfCheck("pending");
+	__setLspRouteSelfCheckStatsCapMsForTesting(SHORT_CAP_MS);
+
+	try {
+		const startedAt = Date.now();
+		const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+		const elapsed = Date.now() - startedAt;
+
+		expect(res.status).toBe(200);
+		const body = await res.json() as Record<string, unknown>;
+		expect(
+			body.routeSelfCheck,
+			"routeSelfCheck must remain 'pending' when the bounded wait expires before the promise settles",
+		).toBe("pending");
+		expect(
+			elapsed,
+			`/api/lsp/stats must return within the cap (${SHORT_CAP_MS}ms) when the self-check promise hangs — observed ${elapsed}ms`,
+		).toBeLessThan(MAX_OBSERVED_MS);
+		expect(
+			elapsed,
+			"if the route returned faster than the cap, the bounded await may not be running at all",
+		).toBeGreaterThanOrEqual(SHORT_CAP_MS - 20); // tiny slack for timer rounding
+	} finally {
+		__setLspRouteSelfCheckStatsCapMsForTesting(undefined);
+		supervisor.setRouteSelfCheckPromise(priorPromise);
+		// Restore the supervisor's settled sentinel so later tests in this file (and any
+		// retry) still observe the post-boot "ok" value.
+		supervisor.setRouteSelfCheck("ok");
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Telemetry: adoption counters on /api/lsp/stats
+//
+// Design: docs/design (Goal: LSP adoption telemetry). LspSupervisor maintains
+// process-local counters incremented on every dispatch() and via an internal
+// hint-emitted endpoint called by grep/bash hint extensions. /api/lsp/stats
+// exposes them under `counters`. Boot self-check may have already incremented
+// `diagnostics` and `lspCallsTotal`, so all assertions use deltas.
+// ---------------------------------------------------------------------------
+
+interface TelemetryCounters {
+	lspCallsTotal: number;
+	lspCallsByMethod: Record<string, number>;
+	lspCallsByStatus: Record<string, number>;
+	grepLspHintEmittedTotal: number;
+}
+
+async function getCounters(): Promise<TelemetryCounters> {
+	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
+	expect(res.status).toBe(200);
+	const body = await res.json() as { counters?: TelemetryCounters };
+	expect(body.counters, "/api/lsp/stats must expose a `counters` object").toBeDefined();
+	return body.counters as TelemetryCounters;
+}
+
+test("GET /api/lsp/stats exposes telemetry counters with stable shape", async () => {
+	const counters = await getCounters();
+	expect(typeof counters.lspCallsTotal).toBe("number");
+	expect(counters.lspCallsByMethod, "lspCallsByMethod must be an object").toBeTruthy();
+	expect(counters.lspCallsByStatus, "lspCallsByStatus must be an object").toBeTruthy();
+	expect(typeof counters.grepLspHintEmittedTotal).toBe("number");
+	// Known method keys are pre-initialized so the shape is stable before any calls.
+	for (const m of LSP_METHODS) {
+		expect(typeof counters.lspCallsByMethod[m], `lspCallsByMethod.${m} must be initialized to a number`).toBe("number");
+	}
+	for (const s of ["ok", "lsp_unavailable", "lsp_capacity", "lsp_timeout", "lsp_route_missing", "error"]) {
+		expect(typeof counters.lspCallsByStatus[s], `lspCallsByStatus.${s} must be initialized to a number`).toBe("number");
+	}
+});
+
+test("POST /api/lsp/diagnostics increments lspCallsTotal and lspCallsByMethod.diagnostics", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/diagnostics", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ path: "src/math.ts", cwd: FIXTURE }),
+	});
+	expect(res.status).toBe(200);
+	// Drain body so the request fully completes before re-reading stats.
+	await res.json();
+	const after = await getCounters();
+	expect(after.lspCallsTotal - before.lspCallsTotal, "lspCallsTotal must increment by 1").toBe(1);
+	expect((after.lspCallsByMethod.diagnostics ?? 0) - (before.lspCallsByMethod.diagnostics ?? 0), "lspCallsByMethod.diagnostics must increment by 1").toBe(1);
+});
+
+test("POST /api/lsp/diagnostics with path outside worktree increments lspCallsByStatus.lsp_unavailable", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/diagnostics", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		// Absolute path well outside the fixture's worktree triggers the
+		// supervisor's path-containment guard → lsp_unavailable.
+		body: JSON.stringify({ path: "/etc/hostname", cwd: FIXTURE }),
+	});
+	expect(res.status).toBe(200);
+	await res.json();
+	const after = await getCounters();
+	expect(
+		(after.lspCallsByStatus.lsp_unavailable ?? 0) - (before.lspCallsByStatus.lsp_unavailable ?? 0),
+		"lspCallsByStatus.lsp_unavailable must increment by 1",
+	).toBe(1);
+});
+
+test("POST /api/lsp/_internal/hint-emitted increments grepLspHintEmittedTotal", async () => {
+	const before = await getCounters();
+	const res = await apiFetch("/api/lsp/_internal/hint-emitted", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: "{}",
+	});
+	expect(res.status, "/api/lsp/_internal/hint-emitted must be a registered route").not.toBe(404);
+	expect(res.status).toBe(200);
+	await res.json().catch(() => undefined);
+	const after = await getCounters();
+	expect(
+		after.grepLspHintEmittedTotal - before.grepLspHintEmittedTotal,
+		"grepLspHintEmittedTotal must increment by 1",
+	).toBe(1);
 });
 
 for (const method of LSP_METHODS) {

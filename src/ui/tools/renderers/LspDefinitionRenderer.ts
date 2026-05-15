@@ -3,7 +3,16 @@ import { html } from "lit";
 import { MapPin } from "lucide";
 import { getToolState, isSkippedToolResult, renderHeader } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { parseLspResult, renderLocationRow, renderLspErrorEnvelope, type LspLocation } from "./LspShared.js";
+import {
+	isAmbiguousShorthand,
+	parseLspResult,
+	renderAmbiguousShorthand,
+	renderLocationRow,
+	renderLspErrorEnvelope,
+	renderResolvedFromBanner,
+	unwrapShorthand,
+	type LspLocation,
+} from "./LspShared.js";
 
 interface DefParams {
 	path: string;
@@ -44,11 +53,21 @@ export class LspDefinitionRenderer implements ToolRenderer<DefParams, any> {
 			};
 		}
 
-		if (data == null) {
+		if (isAmbiguousShorthand(data)) {
+			return {
+				content: html`<div>${renderHeader(state, MapPin, headerText)}${renderAmbiguousShorthand(data)}</div>`,
+				isCustom: false,
+			};
+		}
+
+		const { resolvedFrom, body } = unwrapShorthand(data);
+
+		if (body == null) {
 			return {
 				content: html`
 					<div>
 						${renderHeader(state, MapPin, headerText)}
+						${renderResolvedFromBanner(resolvedFrom)}
 						<div class="mt-1 text-sm text-muted-foreground italic">No definition found.</div>
 					</div>
 				`,
@@ -56,10 +75,10 @@ export class LspDefinitionRenderer implements ToolRenderer<DefParams, any> {
 			};
 		}
 
-		const locs: LspLocation[] = Array.isArray(data) ? data : [data];
+		const locs: LspLocation[] = Array.isArray(body) ? body : [body];
 		if (locs.length === 0) {
 			return {
-				content: html`<div>${renderHeader(state, MapPin, headerText)}<div class="mt-1 text-sm text-muted-foreground italic">No definition found.</div></div>`,
+				content: html`<div>${renderHeader(state, MapPin, headerText)}${renderResolvedFromBanner(resolvedFrom)}<div class="mt-1 text-sm text-muted-foreground italic">No definition found.</div></div>`,
 				isCustom: false,
 			};
 		}
@@ -67,6 +86,7 @@ export class LspDefinitionRenderer implements ToolRenderer<DefParams, any> {
 			content: html`
 				<div>
 					${renderHeader(state, MapPin, headerText)}
+					${renderResolvedFromBanner(resolvedFrom)}
 					<div class="mt-1 space-y-0.5">
 						${locs.map(l => html`<div>${renderLocationRow(l)}</div>`)}
 					</div>

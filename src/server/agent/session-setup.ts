@@ -624,15 +624,20 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// Step 10: post-spawn setup (model, thinking level)
 	await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
 
-	// Step 11: LSP pre-warm (best-effort, never throws).
-	// Finding #6: removed the `!plan.sandboxed` gate — sandboxed sessions now
-	// pre-warm too, the supervisor picks up the sandbox bridge if configured.
+	// Step 11: LSP pre-warm (best-effort, never throws). Runs AFTER sandbox
+	// wiring (step 6) so the bridge has a live container ID before any LSP
+	// child is spawned. For sandboxed sessions we use the host cwd (saved as
+	// `bridgeOptions.hostCwd`) because the supervisor keys worktrees by host
+	// path and the bridge translates internally; we also `markSandboxed()` so
+	// the supervisor refuses host-fallback if the container disappears.
 	// Finding #4: acquire() raises refcount so the supervisor does not
 	// idle-shutdown while a session is attached.
 	try {
-		if (ctx.lspSupervisor && session.cwd) {
-			ctx.lspSupervisor.preWarm(session.cwd, plan.projectId);
-			ctx.lspSupervisor.acquire(session.cwd);
+		const supWorktree = plan.bridgeOptions.hostCwd ?? session.cwd;
+		if (ctx.lspSupervisor && supWorktree) {
+			if (plan.sandboxed) ctx.lspSupervisor.markSandboxed(supWorktree);
+			ctx.lspSupervisor.preWarm(supWorktree, plan.projectId);
+			ctx.lspSupervisor.acquire(supWorktree);
 		}
 	} catch (err) {
 		console.warn(`[session-setup] LSP pre-warm failed for ${session.id}:`, err);
@@ -752,21 +757,14 @@ export async function executeWorktreeAsync(
 	ctx.store.update(session.id, persistFields);
 	console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 
-	// LSP pre-warm against the freshly-built worktree.
-	// Finding #6: drop the `!plan.sandboxed` gate so sandboxed sessions can
-	// pre-warm via the SandboxLspBridge.  Finding #4: acquire() per worktree.
-	try {
-		if (ctx.lspSupervisor) {
-			ctx.lspSupervisor.preWarm(worktreeCwd, plan.projectId);
-			ctx.lspSupervisor.acquire(worktreeCwd);
-			for (const r of session.repoWorktrees ?? []) {
-				ctx.lspSupervisor.preWarm(r.worktreePath, plan.projectId);
-				ctx.lspSupervisor.acquire(r.worktreePath);
-			}
-		}
-	} catch (err) {
-		console.warn(`[session-setup] LSP pre-warm (worktree) failed for ${session.id}:`, err);
-	}
+	// LSP pre-warm is intentionally deferred until AFTER sandbox wiring runs
+	// below. Doing it here would race with `applySandboxWiring`: for sandboxed
+	// sessions `containerIdForWorktree(worktreeCwd)` is still null at this
+	// point, so the typescript adapter would host-fallback and run tsserver
+	// against untrusted worktree files on the host. See security-review
+	// finding (sandboxed worktree LSP host-fallback). Do NOT reintroduce a
+	// prewarm here without a matching `markSandboxed()` + container readiness
+	// guarantee.
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
@@ -800,6 +798,26 @@ export async function executeWorktreeAsync(
 			resolvePrompt(plan, ctx);
 		}
 		if (preSandboxCwd) plan.bridgeOptions.hostCwd = preSandboxCwd;
+	}
+
+	// LSP pre-warm — deferred until AFTER sandbox wiring so the bridge has a
+	// live container ID for sandboxed worktrees. For sandboxed sessions we
+	// also `markSandboxed()` so the supervisor refuses host-fallback if the
+	// container disappears or races. `worktreeCwd` and `repoWorktrees[].worktreePath`
+	// are host paths — the bridge translates internally.
+	try {
+		if (ctx.lspSupervisor) {
+			if (plan.sandboxed) ctx.lspSupervisor.markSandboxed(worktreeCwd);
+			ctx.lspSupervisor.preWarm(worktreeCwd, plan.projectId);
+			ctx.lspSupervisor.acquire(worktreeCwd);
+			for (const r of session.repoWorktrees ?? []) {
+				if (plan.sandboxed) ctx.lspSupervisor.markSandboxed(r.worktreePath);
+				ctx.lspSupervisor.preWarm(r.worktreePath, plan.projectId);
+				ctx.lspSupervisor.acquire(r.worktreePath);
+			}
+		}
+	} catch (err) {
+		console.warn(`[session-setup] LSP pre-warm (worktree) failed for ${session.id}:`, err);
 	}
 
 	// After sandbox wiring — reconcile persisted branch with actual container branch.
@@ -1123,6 +1141,7 @@ export function handleSetupFailure(
 	if (plan.worktreePath && plan.repoPath && plan.branch) {
 		// Release LSP supervisor before tearing down the worktree.
 		if (ctx.lspSupervisor) {
+			ctx.lspSupervisor.unmarkSandboxed(plan.worktreePath);
 			ctx.lspSupervisor.shutdownForWorktree(plan.worktreePath).catch(() => {});
 		}
 		cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true).catch(() => {});

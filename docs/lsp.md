@@ -1,10 +1,10 @@
 # LSP Code Intelligence
 
-> All coding-role agents receive a short symbol-lookup hint in their system prompt summarising when to use `lsp_*` vs `grep` — see also AGENTS.md for project-specific nuance.
+> All coding-role agents (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`) receive a mandatory **"Tool selection — symbol queries"** section in their `promptTemplate` that requires `lsp_*` tools over `grep` for any named-symbol query. See `defaults/roles/*.yaml` for the exact wording.
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
-> Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md). This page is the operator/agent-facing reference; the design doc is the architectural source of truth.
+> This page is the operator/agent-facing reference. [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) is the original design document — useful for architecture rationale and historical context, but superseded by this page for current configuration and troubleshooting.
 
 ## Motivation
 
@@ -35,13 +35,15 @@ All seven tools are registered via the pi-extension loader from `defaults/tools/
 
 | Tool | Params | Result | Typical use |
 | --- | --- | --- | --- |
-| `lsp_definition` | `path, line, character` | `{ path, range }` or `null` | Jump to a function's declaration before calling it. |
-| `lsp_references` | `path, line, character, includeDeclaration?` | `Location[]` | Find every caller of a function. |
-| `lsp_hover` | `path, line, character` | `{ contents: string /* markdown */, range? }` or `null` | Read a symbol's type + doc comment without opening the file. |
+| `lsp_definition` | `path?, symbolName?, line?, character?` | `{ path, range }` or `null` | Jump to a function's declaration before calling it. |
+| `lsp_references` | `path?, symbolName?, line?, character?, includeDeclaration?` | `Location[]` | Find every caller of a function. |
+| `lsp_hover` | `path?, symbolName?, line?, character?` | `{ contents: string /* markdown */, range? }` or `null` | Read a symbol's type + doc comment without opening the file. |
 | `lsp_diagnostics` | `path?` | `Diagnostic[]` (each `{ path, range, severity, message, source?, code? }`) | Post-edit type-check loop. Omit `path` to aggregate across open docs. |
 | `lsp_document_symbols` | `path` | `DocumentSymbol[]` (tree) | Outline a file before editing. |
 | `lsp_workspace_symbol` | `query` | `SymbolInformation[]` (≤100) | Fuzzy symbol search across the worktree. |
 | `lsp_rename` | `path, line, character, newName` | `WorkspaceEdit` (`{ changes: { [path]: edits[] } }`) | Cross-file rename. Agent applies the returned edits via `edit`. |
+
+For `lsp_definition`, `lsp_references`, and `lsp_hover`, you can either pass `(path, line, character)` **or** just `symbolName` — see [Symbol-name shorthand](#symbol-name-shorthand) below.
 
 `Diagnostic.severity` is one of `error | warning | info | hint`. `Range` is LSP-native (`{ start: { line, character }, end: { line, character } }`, all 0-indexed).
 
@@ -55,6 +57,76 @@ When the supervisor cannot serve a call, the tool returns a structured error rat
 - `lsp_gateway_unreachable` — the extension could not connect to the gateway at all (ECONNREFUSED / network error). Check that the gateway process is running.
 
 Path inputs are clamped to live inside `cwd` — absolute or upward-traversing paths are rejected with `lsp_unavailable`.
+
+## Symbol-name shorthand
+
+`lsp_definition`, `lsp_references`, and `lsp_hover` all accept an optional `symbolName` parameter as an alternative to `(path, line, character)`. When `symbolName` is given, the tool resolves the symbol internally via `lsp_workspace_symbol` and dispatches against the best match — giving you a single-round-trip answer for the most common "where is X?" and "who calls X?" questions.
+
+### Basic usage
+
+```
+// One call — no need to grep first:
+lsp_definition({ symbolName: "archiveGoal" })
+lsp_references({ symbolName: "archiveGoal" })
+lsp_hover({ symbolName: "archiveGoal" })
+```
+
+The response includes a `resolvedFrom` field so you can see exactly which hit was used:
+
+```json
+{
+  "resolvedFrom": {
+    "symbolName": "archiveGoal",
+    "matched": "src/server/agent/goal-manager.ts:42"
+  },
+  "path": "src/server/agent/goal-manager.ts",
+  "range": { "start": { "line": 41, "character": 16 }, "end": { "line": 41, "character": 27 } }
+}
+```
+
+### Path hint
+
+When `symbolName` is ambiguous (the same name exists in multiple files), pass `path` alongside it to steer resolution toward a specific file or directory:
+
+```
+lsp_definition({ symbolName: "add", path: "src/math.ts" })
+```
+
+The tool prefers symbol hits in that file (exact match) and falls back to `hits[0]` if none match.
+
+### Ambiguous symbols
+
+If the workspace contains multiple distinct symbols with the same name and `path` does not resolve the ambiguity, the tool returns an `ambiguous` envelope rather than silently picking a wrong match:
+
+```json
+{
+  "ambiguous": true,
+  "symbol": "create",
+  "candidates": [
+    { "name": "create", "kind": 6, "path": "src/server/server.ts", "range": { ... } },
+    { "name": "create", "kind": 12, "path": "src/db/schema.ts", "range": { ... } }
+  ],
+  "hint": "Pass `path` to narrow, or use the exact symbol name."
+}
+```
+
+Re-invoke with a more specific name or a `path` hint to resolve.
+
+### Symbol not found
+
+If no match exists, the tool returns a structured error (not an exception):
+
+```json
+{
+  "error": "lsp_symbol_not_found",
+  "message": "No symbol matching \"doesNotExist\" found in workspace",
+  "hint": "Pass (path, line, character) explicitly if you have them."
+}
+```
+
+### Backward compatibility
+
+Existing callers that pass `(path, line, character)` work unchanged. The shorthand is purely additive — `symbolName` is ignored when `line` and `character` are both provided.
 
 ## Configuration
 
@@ -131,7 +203,7 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 
 **Prefer LSP for:**
 
-- Symbol lookups — `lsp_definition` / `lsp_references` over `rg <name>(`. Grep matches strings, comments, and unrelated identifiers; LSP follows imports, type aliases, and re-exports.
+- Symbol lookups — `lsp_definition({symbolName: "X"})` is the cleanest single-call answer for "where is X defined?"; no grep needed first. `lsp_references` works the same way. Grep matches strings, comments, and unrelated identifiers; LSP follows imports, type aliases, and re-exports.
 - Post-edit verification in the iteration loop — `lsp_diagnostics(path)` settles in <1s against a warm server; `npm run check` takes 20–30s and re-checks the whole monorepo every time.
 - Cross-file rename — `lsp_rename` returns a `WorkspaceEdit` you apply via `edit`, picking up every reference including ones inside JSDoc `@link` tags. Sed/grep replace will miss those *and* hit unrelated string literals.
 
@@ -140,6 +212,8 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Pure text search — string literals, comments, regex patterns, log messages: `grep` is the right tool.
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
+
+**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. The same hint fires for simple `grep`, `rg`, `ripgrep`, `ag`, and `ack` invocations run via the `bash` tool — the command is inspected after execution and, if the pattern is symbol-shaped and the paths target source files, the same `[lsp-hint]` line is prepended to the bash output. **Best-effort limitation:** when `grep` appears after a pipe (e.g. `cat file | grep foo`), the primary command is not grep and the hint may be skipped. Set `BOBBIT_GREP_LSP_HINT=0` to disable both the grep-tool and bash-tool hints.
 
 ## Route post-boot self-check
 
@@ -165,7 +239,7 @@ The check is skipped entirely when `lsp_disabled: true` is set in project config
 
 | Value | Meaning |
 | --- | --- |
-| `"pending"` | Check has not completed yet (gateway just started; only visible in a very tight polling window). |
+| `"pending"` | Check has not completed yet. Under normal conditions this is not returned by `/api/lsp/stats` to external callers: the handler awaits the self-check promise (with an 8-second cap) before responding. `"pending"` is surfaced only if the self-check does not settle before the cap expires — e.g. a pathologically slow or hung probe. |
 | `"ok"` | All three probes passed — routes are wired correctly. |
 | `"failed:<route>:<status>"` | One of the probes returned a bad status. `<route>` is the URL fragment (e.g. `stats`, `state`, `diagnostics`) and `<status>` is the HTTP status code (typically `404`). |
 | `"failed:diagnostics:initialize_failed"` | The `POST /api/lsp/diagnostics` probe returned HTTP 200 but the body contained `ENOENT` or `stat '` — the language server failed to initialize, most likely because a sandbox bridge translated host paths to container paths even though no container is running (bridge-attached-without-container bug). |
@@ -239,9 +313,82 @@ Renderers are wired in two places:
 1. **`src/ui/tools/index.ts`** — `registerToolRenderer("lsp_definition", new LspDefinitionRenderer())` (and six more). This is where the renderer is actually active at runtime.
 2. **`defaults/tools/lsp/<name>.yaml`** — `renderer: src/ui/tools/renderers/<Name>.ts` field. This is informational (used by docs and the config UI); the `index.ts` registration is authoritative.
 
+## Measuring adoption
+
+The LSP supervisor tracks process-local counters that let you see whether agents are calling LSP tools or falling back to grep. Counters are in-memory only and **reset on every gateway restart** — there is no persistence in v1.
+
+### Reading the counters
+
+```bash
+curl -sk $GW/api/lsp/stats -H "Authorization: Bearer $TOKEN" | jq .counters
+```
+
+Sample output:
+
+```json
+{
+  "lspCallsTotal": 137,
+  "lspCallsByMethod": {
+    "definition": 23,
+    "references": 18,
+    "hover": 8,
+    "diagnostics": 71,
+    "document_symbols": 5,
+    "workspace_symbol": 12,
+    "rename": 0
+  },
+  "lspCallsByStatus": {
+    "ok": 134,
+    "lsp_unavailable": 2,
+    "lsp_capacity": 0,
+    "lsp_timeout": 1,
+    "lsp_route_missing": 0,
+    "error": 0
+  },
+  "grepLspHintEmittedTotal": 89
+}
+```
+
+### Field meanings
+
+| Field | What it counts |
+| --- | --- |
+| `lspCallsTotal` | Every `POST /api/lsp/<method>` that reached `LspSupervisor.dispatch()`. |
+| `lspCallsByMethod` | Breakdown of `lspCallsTotal` by method name. |
+| `lspCallsByStatus` | Breakdown by outcome: `ok` (served), `lsp_unavailable` (server not ready / bad path), `lsp_capacity` (all slots busy), `lsp_timeout`, `lsp_route_missing` (route regression), `error` (unexpected throw). |
+| `grepLspHintEmittedTotal` | Number of `[lsp-hint]` lines emitted by the grep/bash hint tool extensions, reported via a best-effort loopback call. |
+
+### Adoption indicator
+
+The ratio:
+
+```
+lspCallsTotal / (lspCallsTotal + grepLspHintEmittedTotal)
+```
+
+approximates the fraction of symbol-lookup opportunities where the agent chose LSP over grep. A rising ratio means nudges are working. The denominator is a lower bound — not every grep is symbol-shaped, and hints fire only when the tool extension detects a likely-LSP pattern — so treat this as a directional indicator, not a precise percentage.
+
+### Hint endpoint contract (for sibling hint subgoals)
+
+Tool extensions that emit `[lsp-hint]` lines should report each emission by calling the shared helper:
+
+```ts
+import { recordHintEmitted } from "defaults/tools/_shared/lsp-telemetry.ts";
+await recordHintEmitted(); // best-effort; never throws
+```
+
+The helper POSTs to `POST /api/lsp/_internal/hint-emitted` using the standard gateway URL/token discovery pattern. The route is auth-gated (same as all `/api/*` routes). The call is **best-effort**: network errors, auth failures, and boot-race conditions are silently swallowed so the hint text is always printed regardless of telemetry availability.
+
+If importing the shared helper is not possible, a raw loopback POST works too:
+
+```bash
+curl -sk -X POST "$GW/api/lsp/_internal/hint-emitted" \
+  -H "Authorization: Bearer $TOKEN" -o /dev/null
+```
+
 ## See also
 
-- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — full design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan).
+- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — original design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan). Historical reference; this page supersedes it for current operator guidance.
 - [`src/server/lsp/`](../src/server/lsp/) — supervisor, adapters, sandbox bridge.
 - [`defaults/tools/lsp/`](../defaults/tools/lsp/) — tool YAMLs (budget-pinned by `tests/tool-description-budget.test.ts`).
 - [docs/internals.md](internals.md) — cross-references to surrounding subsystems.

@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
+import { authorizeLspCwd } from "./lsp/authorize-cwd.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { validateToken } from "./auth/token.js";
 import { oauthComplete, oauthFlowStatus, oauthStart, oauthStatus } from "./auth/oauth.js";
@@ -208,6 +209,24 @@ const _prInFlight = new Map<string, Promise<any | null>>();
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
 const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
+
+// LSP route self-check observability (goal fix-routes-1db8c87b).
+// External GET /api/lsp/stats callers await the in-flight post-boot self-check
+// promise so they observe a settled routeSelfCheck value instead of racing the
+// fire-and-forget probe. The await is bounded so a pathologically hung probe
+// cannot hang the route: worst-case probe time is 3 × 2000ms abort = ~6000ms,
+// plus a little slack for body reads and scheduling.
+export const LSP_ROUTE_SELF_CHECK_HEADER = "x-lsp-route-self-check";
+export const LSP_ROUTE_SELF_CHECK_STATS_CAP_MS = 8000;
+let _lspRouteSelfCheckStatsCapOverrideMs: number | undefined;
+/** Test-only: override the bounded wait used by the /api/lsp/stats route handler.
+ *  Pass undefined to restore the production default. */
+export function __setLspRouteSelfCheckStatsCapMsForTesting(ms: number | undefined): void {
+	_lspRouteSelfCheckStatsCapOverrideMs = ms;
+}
+function getLspRouteSelfCheckStatsCapMs(): number {
+	return _lspRouteSelfCheckStatsCapOverrideMs ?? LSP_ROUTE_SELF_CHECK_STATS_CAP_MS;
+}
 
 async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
@@ -1453,9 +1472,16 @@ export function createGateway(config: GatewayConfig) {
 						const ac = new AbortController();
 						const timer = setTimeout(() => ac.abort(), 2000);
 						try {
+							// Tag internal loopback probes so the /api/lsp/stats handler skips
+							// its routeSelfCheckPromise await and does not self-deadlock on the
+							// very promise this loop fulfils. See goal fix-routes-1db8c87b.
 							const res = await fetch(probe.url, {
 								method: probe.method,
-								headers: { ...authHeaders, ...(probe.body ? { "Content-Type": "application/json" } : {}) },
+								headers: {
+									...authHeaders,
+									...(probe.body ? { "Content-Type": "application/json" } : {}),
+									[LSP_ROUTE_SELF_CHECK_HEADER]: "1",
+								},
 								body: probe.body,
 								signal: ac.signal,
 							});
@@ -1499,6 +1525,12 @@ export function createGateway(config: GatewayConfig) {
 					}
 					lspSupervisor.setRouteSelfCheck("ok");
 				})();
+				// Publish the in-flight promise on the supervisor so the /api/lsp/stats
+				// route handler can await its settlement with a bounded timeout. This is
+				// route-local, NOT boot-blocking: boot still proceeds in parallel via the
+				// Promise.all below. The internal loopback probes above are header-tagged
+				// to avoid self-deadlock. See goal fix-routes-1db8c87b.
+				lspSupervisor.setRouteSelfCheckPromise(lspRouteCheckTask);
 
 				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
@@ -2059,18 +2091,51 @@ async function handleApiRoute(
 		return;
 	}
 
-	// LSP routes — agent-side tool surface
+	// ── LSP routes — agent-side tool surface ────────────────────────
+	// Security review 2026-05-15: every cwd arriving here is caller-supplied
+	// (LLM-influenced via the lsp_* tools or arbitrary curl with a gateway
+	// bearer). `authorizeLspCwd` rejects cwds outside any registered project
+	// worktree (or the gateway repo, for the host fixture E2Es) so the
+	// supervisor never spawns an LSP server outside an authorized boundary.
+	// Pinned by tests/lsp/authorize-cwd.spec.ts and tests/e2e/lsp-auth.spec.ts.
+	const lspAuthCtx = {
+		projectContextManager,
+		gatewayProjectRoot: getProjectRoot(),
+		sandboxScope,
+	};
+	// Finding #2: state probe for the cold-start progress signal.
 	if (url.pathname === "/api/lsp/state" && req.method === "GET") {
 		const supervisor = sessionManager.getLspSupervisor();
 		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
 		if (supervisor.disabled) { json({ state: "disabled" }); return; }
-		const cwd = url.searchParams.get("cwd") || "";
+		const rawCwd = url.searchParams.get("cwd") || "";
+		const auth = authorizeLspCwd(rawCwd, lspAuthCtx);
+		if (!auth.ok) {
+			json({ error: "lsp_forbidden_cwd", reason: auth.reason, message: auth.message }, auth.status);
+			return;
+		}
 		const pathArg = url.searchParams.get("path") || undefined;
 		try {
-			const key = supervisor.resolveKey(cwd, pathArg);
+			const key = supervisor.resolveKey(auth.cwd, pathArg);
 			json({ state: supervisor.stateFor(key), worktreePath: key.worktreePath, language: key.language });
 		} catch (err: any) {
 			json({ state: "unknown", error: String(err?.message ?? err) });
+		}
+		return;
+	}
+	// Internal telemetry endpoint: incremented by grep/bash LSP-hint tool
+	// extensions via best-effort POST. Auth-gated by the same handleApiRoute()
+	// path as every other /api/* route. Registered before the generic
+	// /api/lsp/:method matcher so the underscore-prefixed path is never
+	// interpreted as an LSP method name.
+	if (url.pathname === "/api/lsp/_internal/hint-emitted" && req.method === "POST") {
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		try {
+			supervisor.recordHintEmitted();
+			json({ ok: true });
+		} catch (err: any) {
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -2084,8 +2149,17 @@ async function handleApiRoute(
 			json({ error: "lsp_unavailable", message: "disabled by project config" });
 			return;
 		}
+		// Security review 2026-05-15: authorize cwd before handing off to the
+		// supervisor — otherwise findProjectRoot() walks up from an attacker-
+		// chosen path and the host LSP starts outside any authorized worktree.
+		const auth = authorizeLspCwd((body as any)?.cwd, lspAuthCtx);
+		if (!auth.ok) {
+			json({ error: "lsp_forbidden_cwd", reason: auth.reason, message: auth.message }, auth.status);
+			return;
+		}
+		const authorizedBody = { ...(body as Record<string, unknown>), cwd: auth.cwd };
 		try {
-			const result = await supervisor.dispatch(method, body || {});
+			const result = await supervisor.dispatch(method, authorizedBody as any);
 			json(result);
 		} catch (err: any) {
 			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
@@ -2097,8 +2171,49 @@ async function handleApiRoute(
 		return;
 	}
 	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
+		// Defense-in-depth: /api/lsp/stats leaks worktreePath for every active
+		// LSP entry. The sandbox guard already blocks the route for sandbox
+		// tokens; refuse explicitly here so a future guard-list change cannot
+		// silently turn this into a worktree-path oracle.
+		if (sandboxScope) {
+			json({ error: "lsp_forbidden_cwd", reason: "sandbox_scope_project_mismatch", message: "sandbox tokens cannot read LSP stats" }, 403);
+			return;
+		}
 		const supervisor = sessionManager.getLspSupervisor();
-		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
+		if (!supervisor) {
+			json({ error: "lsp_unavailable" });
+			return;
+		}
+		// Route-local await of the post-boot route self-check promise so external callers
+		// see a settled routeSelfCheck value ("ok" or "failed:...") instead of racing the
+		// fire-and-forget probe and getting "pending". This is intentionally route-local,
+		// NOT boot-blocking — keeping boot fast was the entire point of leaving the probe
+		// fire-and-forget. The internal loopback probes that fulfil this promise carry the
+		// LSP_ROUTE_SELF_CHECK_HEADER and skip this await to avoid self-deadlock. The wait
+		// is bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS so a pathologically hung probe
+		// cannot hang the route. See goal fix-routes-1db8c87b — do NOT "simplify" this
+		// back to unguarded fire-and-forget; the e2e test pins this behaviour.
+		const selfCheckHeader = req.headers[LSP_ROUTE_SELF_CHECK_HEADER];
+		const isInternalProbe = Array.isArray(selfCheckHeader) ? selfCheckHeader.includes("1") : selfCheckHeader === "1";
+		if (!isInternalProbe) {
+			const promise = supervisor.getRouteSelfCheckPromise();
+			if (promise) {
+				// Race the self-check promise against a bounded timeout. The timer is
+				// cleared in finally so a fast-settling promise does not leave a pending
+				// timer per request — without this, every external /api/lsp/stats call
+				// would retain a setTimeout handle until the cap elapsed.
+				let capTimer: ReturnType<typeof setTimeout> | undefined;
+				const capPromise = new Promise<void>(resolve => {
+					capTimer = setTimeout(resolve, getLspRouteSelfCheckStatsCapMs());
+				});
+				try {
+					await Promise.race([promise.catch(() => {}), capPromise]);
+				} finally {
+					if (capTimer) clearTimeout(capTimer);
+				}
+			}
+		}
+		json(supervisor.stats());
 		return;
 	}
 

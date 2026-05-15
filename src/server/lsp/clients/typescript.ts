@@ -73,29 +73,42 @@ class TypescriptLspClient implements LspClient {
 		this.worktreePath = worktreePath;
 	}
 
-	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
+	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void, requireSandbox?: boolean): Promise<void> {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
-		// Only attach the bridge when a sandbox container is actually running for
-		// this worktree; otherwise spawnLspChild() falls back to a host process and
-		// bridge.toUri() would translate host paths to container paths (e.g.
-		// /workspace-wt/<branch>) that don't exist on the host, breaking
-		// `initialize` with ENOENT. Do not simplify back to an unconditional cache
-		// — bug surfaced by coder sessions 03afb128 / 9150a1de on 2026-05-14.
-		const resolvedBridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
-		const containerId = resolvedBridge?.containerIdForWorktree?.(this.worktreePath) ?? null;
-		this.bridge = containerId ? resolvedBridge : undefined;
+		//
+		// A multi-project bridge can decline a worktree by returning `null` from
+		// `resolveForWorktree()` — that means the worktree is NOT inside any
+		// sandbox-configured project, so the host LSP is the correct choice and
+		// we must NOT pass the bridge through to `spawnLspChild` (doing so would
+		// trip its fail-closed guard and reject every LSP request for plain host
+		// projects). `undefined` means `resolveForWorktree` is unimplemented —
+		// legacy bare bridges in tests; fall back to the supplied bridge so the
+		// existing security tests keep proving the fail-closed contract.
+		//
+		// Security review 2026-05-15: when a bridge IS passed through and no
+		// container is running, `spawnLspChild()` rejects with `lsp_unavailable`
+		// rather than silently spawning on the host. Pinned by
+		// `tests/lsp/server-process-sandbox.spec.ts`.
+		const resolved = sandbox?.resolveForWorktree?.(this.worktreePath);
+		const effectiveSandbox: SpawnOpts["sandbox"] =
+			resolved === undefined ? sandbox :
+			resolved === null ? undefined :
+			resolved;
+		const containerId = effectiveSandbox?.containerIdForWorktree?.(this.worktreePath) ?? null;
+		this.bridge = containerId ? effectiveSandbox : undefined;
 		this.onClose = onClose;
-		const resolved = resolveTypescriptLanguageServer();
-		if (!resolved) throw new Error("typescript-language-server not installed");
+		const resolvedTs = resolveTypescriptLanguageServer();
+		if (!resolvedTs) throw new Error("typescript-language-server not installed");
 		this.proc = await spawnLspChild({
 			worktreePath: this.worktreePath,
-			command: resolved.node,
-			args: [resolved.cliMjs, "--stdio"],
+			command: resolvedTs.node,
+			args: [resolvedTs.cliMjs, "--stdio"],
 			// In a sandbox container, use the globally-installed binary from PATH
 			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
 			sandboxCmd: ["typescript-language-server", "--stdio"],
-			sandbox,
+			sandbox: effectiveSandbox,
+			requireSandbox,
 		});
 
 		this.proc.child.on("exit", (code) => {
@@ -232,8 +245,16 @@ class TypescriptLspClient implements LspClient {
 		if (absPath) {
 			const uri = pathToUri(absPath);
 			const before = this.diagVersionByUri.get(uri) ?? 0;
+			// Register the diagnostics wait BEFORE didOpen/didChange so a fast
+			// `publishDiagnostics` notification can't race us. If the listener
+			// is added after ensureDocOpen() the server may have already replied,
+			// leaving `lastReceiveAt = 0` and forcing the full 1500ms wait. The
+			// poll also treats an already-bumped version as evidence of a
+			// publish (initialising lastReceiveAt) to cover the case where a
+			// notification arrived between registration and poll start.
+			const waitPromise = this.waitForDiagnostics(uri, before, 1500, 200);
 			await this.ensureDocOpen(absPath);
-			await this.waitForDiagnostics(uri, before, 1500, 200);
+			await waitPromise;
 			return this.diagnosticsByUri.get(uri) ?? [];
 		}
 		// workspace-wide aggregate
@@ -267,7 +288,15 @@ class TypescriptLspClient implements LspClient {
 			const poll = setInterval(() => {
 				if (settled) return;
 				const cur = this.diagVersionByUri.get(uri) ?? 0;
-				if (cur > beforeVersion && lastReceiveAt && Date.now() - lastReceiveAt >= settleMs) finish();
+				if (cur > beforeVersion) {
+					// Race recovery: if the publish landed before our listener was
+					// attached (or between attach and first poll tick) `lastReceiveAt`
+					// is still 0 even though the version bumped. Seed it now so the
+					// settle countdown starts immediately rather than waiting the
+					// full maxWait.
+					if (!lastReceiveAt) lastReceiveAt = Date.now();
+					if (Date.now() - lastReceiveAt >= settleMs) finish();
+				}
 			}, 30);
 			(poll as any).unref?.();
 			const hardTimeout = setTimeout(finish, maxWait);
@@ -340,7 +369,7 @@ export class TypescriptLspFactory implements LspClientFactory {
 	}
 	async spawn(opts: SpawnOpts): Promise<LspClient> {
 		const client = new TypescriptLspClient(opts.worktreePath);
-		await client.start(opts.sandbox, opts.onClose);
+		await client.start(opts.sandbox, opts.onClose, opts.requireSandbox);
 		return client;
 	}
 }

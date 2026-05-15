@@ -1,6 +1,6 @@
 # LSP Code Intelligence
 
-**Status:** Draft (design doc — pre-implementation)
+**Status:** Historical design reference — implementation shipped. This document captures the original design intent and rationale. For current configuration, troubleshooting, and operator-facing detail, see [`docs/lsp.md`](../lsp.md).
 **Goal:** `goal-lsp-code-i-6a314817`
 **Owner:** team-lsp
 
@@ -29,7 +29,7 @@ Hard-capped + LRU-evicted by the supervisor (§3).
 **Done when:**
 
 - 7 `lsp_*` tools available to every coder/tester/reviewer role.
-- TS/JS works out of the box. Pyright auto-detected.
+- TS/JS works out of the box. Python (Pyright) is a stub in v1 — detection wired but `isInstalled()` returns false.
 - Pre-warm fires on session attach; warm-call latency p95 < 500ms.
 - All tests pass: unit + E2E + manual integration. No flaky tests.
 - `tests/tool-description-budget.test.ts` extended to cover the new group.
@@ -50,7 +50,6 @@ Hard-capped + LRU-evicted by the supervisor (§3).
 │   ├── clients/                                                         │
 │   │   ├── typescript.ts    ← typescript-language-server adapter        │
 │   │   └── pyright.ts       ← pyright-langserver adapter (optional v1)  │
-│   ├── docs.ts              ← maps tool names → method dispatch         │
 │   ├── error.ts             ← LspError taxonomy + retry policy          │
 │   └── types.ts             ← Position, Location, Diagnostic, etc.      │
 │                                                                        │
@@ -206,8 +205,8 @@ export class LspSupervisor {
 
 | Site                                                            | When                                                 | Call                                                 |
 | --------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
-| `src/server/agent/session-setup.ts::executePlan`                | end of `spawnAgent()` (line ~830+, after `postSpawn`) | `lspSupervisor.preWarm(session.cwd, plan.projectId)` |
-| `src/server/agent/session-setup.ts::executeWorktreeAsync`       | after worktree is created (line ~640, around `worktreeCwd` resolution) | same |
+| `src/server/agent/session-setup.ts::executePlan`                | end of `spawnAgent()`, after `postSpawn` | `lspSupervisor.preWarm(session.cwd, plan.projectId)` |
+| `src/server/agent/session-setup.ts::executeWorktreeAsync`       | after worktree is created and `worktreeCwd` is resolved | same |
 | `src/server/agent/worktree-pool.ts::_fill()`                     | after a pool entry is created                       | optional, behind `lsp_pool_prewarm: false` default — pools have unknown future use, opt-in only |
 | `src/server/agent/goal-manager.ts` (goal start)                  | inside the goal-start path that materializes the goal worktree | `lspSupervisor.preWarm(goalWorktreePath)` |
 
@@ -543,8 +542,8 @@ namespace. Defaults are baked into `LspSupervisor`.
 | `pre_warm_lsp`      | bool     | `true`  | Pre-warm on session attach. Set `false` on low-RAM machines.   |
 | `lsp_max_servers`   | number   | `4`     | Hard cap on concurrent LSP children, gateway-wide.             |
 | `lsp_idle_ttl_ms`   | number   | `600000` (10 min) | Idle shutdown timer.                                 |
-| `lsp_languages`     | csv      | `auto`  | Force-enable languages, e.g. `typescript,python`. `auto` (default) uses detection. |
-| `lsp_pool_prewarm`  | bool     | `false` | Pre-warm in worktree pool (off by default — pool worktrees may never be used). |
+| `lsp_languages`     | csv      | `auto`  | **Reserved — not currently honoured.** Designed to force-enable a specific language subset; auto-detection is always used in practice. |
+| `lsp_pool_prewarm`  | bool     | `false` | **Reserved — not currently honoured.** Designed to pre-warm worktree-pool entries; pool worktrees are not pre-warmed in v1. |
 | `lsp_disabled`      | bool     | `false` | Kill switch; all `lsp_*` tools return `lsp_unavailable`.       |
 
 These are read by the supervisor at construction time and again on
@@ -681,10 +680,7 @@ and an `evicted_total` counter for operator visibility.
 
 ### 11.5 Pyright availability
 
-Pyright auto-detection is silent on miss. Open question: should we **warn**
-the user once per session when a `pyproject.toml` is present but
-`pyright-langserver` is not installed? Proposed: yes, as a single info-level
-toast on first python LSP tool call. Defer to v1.1 if it adds scope.
+**Implementation status (v1):** `clients/pyright.ts` exists and detects Python projects via `pyproject.toml` / `requirements.txt` / `setup.py`, but `isInstalled()` unconditionally returns `false` — every Python LSP call falls back to `lsp_unavailable`. Pyright is a detection stub, not a working adapter. Full Pyright support is deferred to a future milestone. See `docs/lsp.md` for the current supported-languages table.
 
 ### 11.6 Compatibility with project-wide `tsc --noEmit`
 
@@ -715,7 +711,17 @@ test:e2e` between every step.
 
 ---
 
-## 13. Out of scope (v1, re-confirmed)
+## 13. Post-v1 extension: symbol-name shorthand
+
+`lsp_definition`, `lsp_references`, and `lsp_hover` were extended after the v1 launch to accept an optional `symbolName` parameter as an alternative to the explicit `(path, line, character)` triple. When `symbolName` is supplied, the tool handler resolves it internally via `lsp_workspace_symbol` and dispatches against the first (or path-hinted) match, returning the same result shape as the coordinate-based path plus a `resolvedFrom` decoration.
+
+This was an **ergonomics lever, not a capability gap.** The LSP itself has always been able to answer "where is X defined?" once given a location — the problem was that finding the location required a prior `lsp_workspace_symbol` round trip, which made the LSP flow two calls versus grep's one. The shorthand collapses that to a single call, removing the main reason agents kept preferring `grep` over `lsp_definition` for symbol queries.
+
+Ambiguity handling (multiple hits with no disambiguating `path`) returns an `{ambiguous, candidates}` envelope rather than silently picking the wrong match. The `path` parameter doubles as a disambiguation hint: when both `symbolName` and `path` are given, hits in or near that file are preferred. All existing callers that pass explicit coordinates are unaffected.
+
+See `docs/lsp.md` §"Symbol-name shorthand" for the full API reference.
+
+## 14. Out of scope (v1, re-confirmed)
 
 - Completion / signature help / inline diagnostics overlay.
 - Code actions beyond `rename`.
