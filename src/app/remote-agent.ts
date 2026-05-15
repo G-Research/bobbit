@@ -18,6 +18,10 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
+import type {
+	AutoRetryPendingEvent,
+	AutoRetryCancelledEvent,
+} from "../server/ws/protocol.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -1852,24 +1856,32 @@ export class RemoteAgent {
 				this._state.turnStartTime = this._taskStartTime;
 				break;
 
-			case "auto_retry_pending":
+			case "auto_retry_pending": {
 				// Server scheduled a transient/overload auto-retry timer. Surface
 				// a visible "Retrying in Xs…" banner so the session doesn't look
 				// silently frozen between agent_end and the retry's agent_start.
+				// Shape pinned by `AutoRetryPendingEvent` in src/server/ws/protocol.ts
+				// — the producer in session-manager.ts emits exactly these fields.
+				const e = event as AutoRetryPendingEvent;
 				this._state.autoRetryPending = {
-					reason: event.reason === "provider-overload" ? "provider-overload" : "transient-error",
-					retryDelayMs: typeof event.retryDelayMs === "number" ? event.retryDelayMs : 0,
-					attempt: typeof event.attempt === "number" ? event.attempt : 1,
-					scheduledAt: typeof event.scheduledAt === "number" ? event.scheduledAt : Date.now(),
-					error: typeof event.error === "string" ? event.error : undefined,
+					reason: e.reason,
+					retryDelayMs: e.retryDelayMs,
+					attempt: e.attempt,
+					scheduledAt: e.scheduledAt,
+					error: e.error,
 				};
 				break;
+			}
 
-			case "auto_retry_cancelled":
+			case "auto_retry_cancelled": {
 				// Server cancelled the pending timer (explicit user retry, new
 				// prompt enqueued, or session termination). Clear the banner.
+				// Shape pinned by `AutoRetryCancelledEvent` in src/server/ws/protocol.ts.
+				const _e = event as AutoRetryCancelledEvent;
+				void _e;
 				this._state.autoRetryPending = null;
 				break;
+			}
 
 			case "agent_end": {
 				this.streamingMessageId = undefined;
