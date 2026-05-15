@@ -41,6 +41,17 @@ let editName = "";
 let editDescription = "";
 let editGates: WorkflowGate[] = [];
 
+// Controlled mode — when set, the editor renders without save/delete/scope
+// chrome and notifies the controller via onChange instead of touching the
+// project workflow store. Used by embeds such as the goal-proposal modal.
+type EditorScope = "project" | "goal-draft";
+type EditorController = {
+	scope: EditorScope;
+	workflowKey: string;
+	onChange: (wf: Workflow) => void;
+};
+let editorController: EditorController | null = null;
+
 // Collapse/expand state — all gates start collapsed
 let expandedGateIndices: Set<number> = new Set();
 
@@ -122,6 +133,7 @@ function showList(): void {
 }
 
 function showEdit(workflow: Workflow): void {
+	editorController = null;
 	currentView = "edit";
 	selectedWorkflow = workflow;
 	isNew = false;
@@ -136,6 +148,7 @@ function showEdit(workflow: Workflow): void {
 }
 
 function showNewEdit(): void {
+	editorController = null;
 	currentView = "edit";
 	selectedWorkflow = null;
 	isNew = true;
@@ -438,6 +451,7 @@ function addGate(): void {
 	}];
 	// Expand the newly added gate
 	expandedGateIndices.add(editGates.length - 1);
+	notifyControlledChange();
 	renderApp();
 }
 
@@ -450,12 +464,31 @@ function removeGate(index: number): void {
 		else if (idx > index) newExpanded.add(idx - 1);
 	}
 	expandedGateIndices = newExpanded;
+	notifyControlledChange();
 	renderApp();
 }
 
 function updateGateField(index: number, field: string, value: any): void {
 	editGates = editGates.map((g, i) => i === index ? { ...g, [field]: value } : g);
+	notifyControlledChange();
 	renderApp();
+}
+
+// Build the current draft and notify the controller (if any).
+function notifyControlledChange(): void {
+	if (!editorController) return;
+	const draft: Workflow = {
+		id: editId,
+		name: editName,
+		description: editDescription,
+		gates: editGates.map((g) => ({
+			...g,
+			dependsOn: [...g.dependsOn],
+			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			metadata: g.metadata ? { ...g.metadata } : undefined,
+		})),
+	} as Workflow;
+	try { editorController.onChange(draft); } catch { /* ignore controller errors */ }
 }
 
 function toggleGateExpand(index: number): void {
@@ -487,6 +520,7 @@ function moveGate(fromIdx: number, toIdx: number): void {
 	const [moved] = newGates.splice(fromIdx, 1);
 	newGates.splice(toIdx, 0, moved);
 	editGates = newGates;
+	notifyControlledChange();
 
 	// Remap expanded indices
 	const remap = (oldIdx: number): number => {
@@ -855,27 +889,218 @@ async function handleScopeChange(scope: string): Promise<void> {
 }
 
 function renderWorkflowRow(wf: Workflow): TemplateResult {
+	return renderWorkflowListRow({
+		workflow: wf,
+		selected: false,
+		onSelect: () => showEdit(wf),
+		actions: html`
+			<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit">
+				${icon(Pencil, "sm")}
+			</button>
+			<button class="wf-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); handleDelete(wf); }} title="Delete">
+				${icon(Trash2, "sm")}
+			</button>
+		`,
+	});
+}
+
+// ============================================================================
+// EXPORTED RENDERERS — reusable from embeds (e.g. the goal-proposal modal).
+// These are stateless: every piece of state and every callback is supplied
+// by the caller. The page itself uses them via thin wrappers above so the
+// markup and class names stay identical wherever a workflow is shown.
+// ============================================================================
+
+function renderWorkflowListRow(opts: {
+	workflow: Workflow;
+	selected: boolean;
+	dirty?: boolean;
+	onSelect: () => void;
+	actions?: TemplateResult | string;
+}): TemplateResult {
+	const { workflow: wf, selected, dirty, onSelect, actions } = opts;
 	return html`
-		<div class="wf-row" tabindex="0" role="button"
-			@click=${() => showEdit(wf)}
-			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(wf); } }}>
+		<div class="wf-row ${selected ? "wf-row-selected" : ""}" tabindex="0" role="button"
+			aria-selected=${selected ? "true" : "false"}
+			data-workflow-id=${wf.id}
+			@click=${onSelect}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}>
 			<div class="wf-row-info">
-				<span class="wf-row-name">${wf.name}</span>
+				<span class="wf-row-name">${wf.name}${dirty ? html`<span class="wf-row-dirty" title="Customized for this goal"> · customized</span>` : nothing}</span>
 				<span class="wf-row-desc">${wf.description}</span>
 			</div>
 			<div class="wf-row-badges">
 				<span class="wf-badge">${wf.gates.length} gate${wf.gates.length !== 1 ? "s" : ""}</span>
 			</div>
-			<div class="wf-row-actions">
-				<button class="wf-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(wf); }} title="Edit">
-					${icon(Pencil, "sm")}
-				</button>
-				<button class="wf-action-btn delete" @click=${(e: Event) => { e.stopPropagation(); handleDelete(wf); }} title="Delete">
-					${icon(Trash2, "sm")}
-				</button>
+			${actions ? html`<div class="wf-row-actions">${actions}</div>` : nothing}
+		</div>
+	`;
+}
+
+/**
+ * Stateless workflow list renderer. Reused by the Workflows page list view
+ * and by the goal-proposal modal's Workflow tab. Pass `selectedId` to
+ * highlight a row; pass `dirtyIds` to badge rows that have been customized
+ * for the current scope (e.g. a goal draft).
+ */
+export function renderWorkflowList(opts: {
+	workflows: Workflow[];
+	selectedId?: string | null;
+	dirtyIds?: ReadonlySet<string>;
+	onSelect: (wf: Workflow) => void;
+	scope?: EditorScope;
+}): TemplateResult {
+	const { workflows: list, selectedId, dirtyIds, onSelect } = opts;
+	return html`
+		<div class="wf-list" data-testid="workflow-list">
+			${list.map((wf) => renderWorkflowListRow({
+				workflow: wf,
+				selected: selectedId === wf.id,
+				dirty: dirtyIds?.has(wf.id) ?? false,
+				onSelect: () => onSelect(wf),
+			}))}
+		</div>
+	`;
+}
+
+/**
+ * Stateless, read-only workflow inspector. Renders the same `.wf-gate-card`
+ * skeleton as the editor but without inputs, drag handles, or save chrome
+ * — suitable for the right pane of the goal-proposal modal's Workflow tab.
+ */
+export function renderWorkflowInspector(opts: {
+	workflow: Workflow | null;
+	scope?: EditorScope;
+}): TemplateResult {
+	const wf = opts.workflow;
+	if (!wf) {
+		return html`<div class="wf-empty" data-testid="workflow-inspector-empty">
+			<p class="wf-empty-title">No workflow selected</p>
+			<p class="wf-empty-desc">Pick a workflow from the list to see its gates and verification steps.</p>
+		</div>`;
+	}
+	return html`
+		<div class="wf-container wf-container-embedded wf-inspector" data-testid="workflow-inspector" data-workflow-id=${wf.id}>
+			<div class="wf-edit-identity">
+				<div class="wf-identity-row">
+					<label class="wf-field-label">ID</label>
+					<span class="wf-inspector-value" style="font-family:var(--font-mono,monospace);">${wf.id}</span>
+					<label class="wf-field-label" style="margin-left:8px;">Name</label>
+					<span class="wf-inspector-value" style="flex:1;min-width:0;">${wf.name}</span>
+				</div>
+				${wf.description ? html`<div class="wf-identity-row">
+					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
+					<span class="wf-inspector-value" style="flex:1;min-width:0;white-space:pre-wrap;">${wf.description}</span>
+				</div>` : nothing}
+			</div>
+			<div class="wf-artifacts-list">
+				${(wf.gates || []).map((g, idx) => renderInspectorGate(g, idx))}
+				${(wf.gates || []).length === 0 ? html`<div class="wf-empty"><p class="wf-empty-desc">This workflow has no gates.</p></div>` : nothing}
 			</div>
 		</div>
 	`;
+}
+
+function renderInspectorGate(gate: WorkflowGate, idx: number): TemplateResult {
+	const verifyCount = (gate.verify || []).length;
+	return html`
+		<div class="wf-gate-card expanded wf-gate-readonly" data-gate-id=${gate.id}>
+			<div class="wf-gate-header">
+				<span class="wf-gate-idx">${idx + 1}</span>
+				<span class="wf-gate-name">${gate.name || gate.id || "(unnamed)"}</span>
+				${gate.content ? html`<span class="wf-gate-pill">content</span>` : nothing}
+				${gate.injectDownstream ? html`<span class="wf-gate-pill">inject downstream</span>` : nothing}
+				${verifyCount > 0 ? html`<span class="wf-gate-pill">${verifyCount} verification${verifyCount !== 1 ? "s" : ""}</span>` : nothing}
+			</div>
+			<div class="wf-gate-body">
+				<div class="wf-gate-body-inner">
+					<div class="wf-identity-row">
+						<label class="wf-field-label">ID</label>
+						<span class="wf-inspector-value" style="font-family:var(--font-mono,monospace);">${gate.id || "—"}</span>
+					</div>
+					${gate.dependsOn && gate.dependsOn.length > 0 ? html`
+						<div class="wf-identity-row">
+							<label class="wf-field-label">Depends on</label>
+							<span class="wf-inspector-value">${gate.dependsOn.join(", ")}</span>
+						</div>
+					` : nothing}
+					${verifyCount > 0 ? html`
+						<div class="wf-field">
+							<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
+							<div class="wf-verification-steps">
+								${[...groupStepsByPhase(gate.verify || []).entries()].map(([phase, entries]) => html`
+									<div class="wf-phase-group" data-phase=${phase}>
+										<div class="wf-phase-header"><span>Phase ${phase}</span></div>
+										<div class="wf-phase-body">
+											${entries.map(({ step }) => html`
+												<div class="wf-vstep-card vstep-expanded wf-vstep-readonly">
+													<div class="wf-vstep-collapsed-header">
+														<span class="wf-verify-type-icon">${icon(step.type === "command" ? Terminal : step.type === "agent-qa" ? TestTube : MessageSquare, "sm")}</span>
+														<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
+														<span class="wf-vstep-sep">\u00B7</span>
+														<span class="wf-vstep-type-label">${step.type || "command"}</span>
+														${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
+													</div>
+													<div class="wf-vstep-body">
+														<div class="wf-vstep-fields">
+															${step.type === "command" && step.run ? html`<pre class="wf-inspector-code">${step.run}</pre>` : nothing}
+															${(step.type === "llm-review" || step.type === "agent-qa") && step.prompt ? html`<pre class="wf-inspector-code">${step.prompt}</pre>` : nothing}
+															${step.label ? html`<div class="wf-field-hint">Label: ${step.label}</div>` : nothing}
+														</div>
+													</div>
+												</div>
+											`)}
+										</div>
+									</div>
+								`)}
+							</div>
+						</div>
+					` : nothing}
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+/**
+ * Stateless workflow editor. Seeds module state from `workflow` whenever the
+ * workflow id changes, then renders the same edit view used by the page —
+ * minus save/delete chrome when `scope === "goal-draft"`. Every mutation is
+ * forwarded to `onChange(updatedWorkflow)` so the caller owns persistence.
+ */
+export function renderWorkflowEditor(opts: {
+	workflow: Workflow;
+	onChange: (wf: Workflow) => void;
+	scope?: EditorScope;
+}): TemplateResult {
+	const scope: EditorScope = opts.scope ?? "goal-draft";
+	const key = opts.workflow.id || "__draft__";
+	const needsReseed = !editorController || editorController.workflowKey !== key;
+	if (needsReseed) {
+		editorController = { scope, workflowKey: key, onChange: opts.onChange };
+		selectedWorkflow = null;
+		isNew = !opts.workflow.id;
+		editId = opts.workflow.id || "";
+		editName = opts.workflow.name || "";
+		editDescription = opts.workflow.description || "";
+		editGates = (opts.workflow.gates || []).map((g) => ({
+			...g,
+			dependsOn: [...(g.dependsOn || [])],
+			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			metadata: g.metadata ? { ...g.metadata } : undefined,
+		}));
+		expandedGateIndices = new Set();
+		expandedVStepKeys = new Set();
+	} else {
+		editorController = { scope, workflowKey: key, onChange: opts.onChange };
+	}
+	return renderEditView();
+}
+
+/** Clear the controlled-editor binding. Embeds should call this when the
+ * embed unmounts so the next page-level edit starts cleanly. */
+export function clearWorkflowEditorController(): void {
+	editorController = null;
 }
 
 function renderListView(): TemplateResult {
@@ -894,7 +1119,7 @@ function renderListView(): TemplateResult {
 				<svg class="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 					<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
 				</svg>
-				<span>Loading workflows\u2026</span>
+				<span>Loading workflows…</span>
 			</div>
 		`;
 	}
@@ -1087,29 +1312,32 @@ function autoGrowTextarea(el: HTMLTextAreaElement): void {
 }
 
 function renderEditView(): TemplateResult {
+	const controlled = editorController !== null;
 	return html`
-		<div class="wf-edit-container">
+		<div class="wf-edit-container" data-testid="workflow-editor" data-scope=${editorController?.scope ?? "project"}>
 			<div class="wf-edit-identity">
-				<div class="flex items-center justify-between mb-1">
-					<span>${selectedWorkflow ? renderOriginBadge((selectedWorkflow as any).origin, (selectedWorkflow as any).overrides) : ""}</span>
-					${renderCustomizeRevertButtons()}
-				</div>
+				${controlled ? nothing : html`
+					<div class="flex items-center justify-between mb-1">
+						<span>${selectedWorkflow ? renderOriginBadge((selectedWorkflow as any).origin, (selectedWorkflow as any).overrides) : ""}</span>
+						${renderCustomizeRevertButtons()}
+					</div>
+				`}
 				<div class="wf-identity-row">
 					<label class="wf-field-label">ID</label>
 					${isNew ? html`
 						<input class="wf-input" style="width:140px;" .value=${editId} placeholder="e.g. bug-fix"
-							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; renderApp(); }} />
+							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; notifyControlledChange(); renderApp(); }} />
 					` : html`
 						<input class="wf-input" style="width:140px;opacity:0.6;cursor:not-allowed;" .value=${editId} disabled />
 					`}
 					<label class="wf-field-label" style="margin-left:8px;">Name</label>
 					<input class="wf-input" style="flex:1;min-width:0;" .value=${editName} placeholder="Workflow name"
-						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); }} />
+						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; notifyControlledChange(); renderApp(); }} />
 				</div>
 				<div class="wf-identity-row">
 					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
 					<textarea class="wf-textarea wf-desc-auto" rows="1" .value=${editDescription} placeholder="What this workflow does"
-						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; autoGrowTextarea(e.target as HTMLTextAreaElement); }}></textarea>
+						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; notifyControlledChange(); autoGrowTextarea(e.target as HTMLTextAreaElement); }}></textarea>
 				</div>
 			</div>
 
