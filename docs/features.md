@@ -114,6 +114,24 @@ The assembled prompt is written to `.bobbit/state/session-prompts/{sessionId}.md
 
 `RemoteAgent` auto-reconnects on unexpected disconnects with exponential backoff (1s base, 30s max). On reconnect: re-authenticates, requests current messages and state, server replays the latest `tool_execution_update` per tool call ID from the `EventBuffer`.
 
+## Background Process Exit Notifications
+
+When a `bash_bg` process exits, Bobbit can wake the owning agent session and enqueue a prompt so the agent can react to the result.
+
+**Setting**: Settings → General → *Notify agents when background processes exit*
+
+- **Default**: ON — agents are notified whenever a managed background process exits.
+- **Preference key**: `notifyAgentOnBgProcessExit` (persisted via `PUT /api/preferences`).
+- **Disabling**: Set the toggle to OFF (stores `false`). The server then skips enqueueing the agent-facing wake/prompt on process exit. An explicit `false` is required to disable; an absent or `null` value is treated as ON.
+
+**What is not affected by this setting:**
+
+- `bg_process_exited` WebSocket broadcasts — the UI always receives exit events and updates process status badges regardless of the preference.
+- Explicit `bash_bg` operations (`wait`, `logs`, `grep`, `head`, `slice`) — these work by direct agent request and are never gated on this preference.
+- `bash_bg list` — always returns current process state.
+
+**Why it exists**: Long-running background jobs (builds, test suites, watchers) can exit many times during a session. Without the toggle, each exit wakes the agent and consumes prompt budget. Turning off agent notification lets background processes run silently while the agent works on other things; the agent can still inspect results on demand via `bash_bg logs` or `bash_bg grep`.
+
 ## Task Completion Notifications
 
 When the agent finishes a turn, the browser client notifies the user via:
