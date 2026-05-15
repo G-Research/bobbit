@@ -51,6 +51,13 @@ export interface TrackedChild {
 	killTree(signal?: "SIGTERM" | "SIGKILL", graceMsOverride?: number): void;
 	killed(): boolean;
 	timedOut(): boolean;
+	/**
+	 * Mark this tracked child as surviving gateway shutdown. When set,
+	 * `killAllTracked()` skips this entry so the child outlives the
+	 * gateway process — enabling Layer 1 restart-survival for detached
+	 * verification command steps (see `_resumeCommandStep`).
+	 */
+	markSurvival(): void;
 }
 
 const registry: Set<InternalTracked> = new Set();
@@ -60,6 +67,7 @@ interface InternalTracked extends TrackedChild {
 	_killed: boolean;
 	_timedOut: boolean;
 	_closed: boolean;
+	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
 }
@@ -90,8 +98,10 @@ export function spawnTracked(
 		_killed: false,
 		_timedOut: false,
 		_closed: false,
+		_survivesShutdown: false,
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
+		markSurvival: () => { tracked._survivesShutdown = true; },
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
 			if (tracked._closed) return;
 			tracked._killed = true;
@@ -165,8 +175,9 @@ export function spawnTracked(
  * Called from harness shutdown to ensure no chromium / playwright
  * descendants leak across gateway restarts.
  */
-export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL"): void {
+export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL", includeSurvival = false): void {
 	for (const t of Array.from(registry)) {
+		if (!includeSurvival && t._survivesShutdown) continue;
 		try { t.killTree(signal, 0); } catch { /* best-effort */ }
 	}
 }

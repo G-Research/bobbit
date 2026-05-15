@@ -2926,20 +2926,27 @@ export class VerificationHarness {
 			let spawnError: Error | undefined;
 			try {
 				if (containerId) {
-					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
+					// Wrap the command so the in-container shell writes its PID
+					// to a temp file. On timeout, we kill that PID's process
+					// group — scoped to this step's subtree, not container-wide.
+					const stepKillId = randomUUID().slice(0, 8);
+					const pidFile = `/tmp/.bobbit-step-${stepKillId}.pid`;
+					const wrappedCmd = `echo $$ > ${pidFile}; ${command}`;
+					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 						onTimeout: () => {
 							// Belt-and-braces: host-side tree-kill of `docker exec`
 							// does not reliably reach in-container descendants.
-							// Fire an in-container kill of pgid 1 (and everything
-							// it leads) as a fire-and-forget child before the host
-							// tree-kill runs.
+							// Kill the step's own process group via the persisted
+							// pid file — leaves other concurrent docker exec'd
+							// processes (agent sessions, other verification steps,
+							// bg-processes) untouched.
 							try {
 								const killer = spawn("docker", [
 									"exec", containerId, "/bin/sh", "-c",
-									"kill -TERM -1 2>/dev/null || true; sleep 0.2; kill -KILL -1 2>/dev/null || true",
+									`p=$(cat ${pidFile} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${pidFile} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${pidFile}`,
 								], { stdio: "ignore" });
 								killer.on("error", () => { /* docker missing — best-effort */ });
 							} catch { /* ignore */ }
@@ -3001,6 +3008,10 @@ export class VerificationHarness {
 				// unref so the child does not keep the gateway alive during a
 				// graceful shutdown — we want it to survive past our exit.
 				try { child.unref(); } catch { /* ignore */ }
+				// Mark for restart-survival so killAllTracked (called from
+				// shutdown()) skips this entry. The next boot resumes via
+				// _resumeCommandStep using the persisted pid + exit file.
+				tracked!.markSurvival();
 			}
 
 			let stdout = "";
