@@ -195,24 +195,24 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		// ── Dashboard rendering: tree-cost-total must match the subtree sum ──
 		await openApp(page);
 
-		async function readTreeCostTotal(goalId: string): Promise<string> {
+		// The dashboard formats `totalCostUsd` with `toFixed(2)` (see
+		// `renderTreeCostRow` in `src/app/goal-dashboard.ts`), so the rendered
+		// text is the canonical two-decimal dollar amount. The dashboard reset
+		// clears `treeCost = null` on goal switch and re-fetches async, so we
+		// poll on the expected value rather than snapshot once — otherwise a
+		// stale render between goal switches can produce a flaky read.
+		async function assertTreeCostTotal(goalId: string, expected: string): Promise<string> {
 			await navigateToHash(page, `#/goal/${goalId}`);
 			await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
 			const total = page.locator('[data-testid="tree-cost-total"]').first();
 			await expect(total).toBeVisible({ timeout: 10_000 });
+			await expect(total).toHaveText(expected, { timeout: 10_000 });
 			return (await total.textContent() ?? "").trim();
 		}
 
-		const parentText = await readTreeCostTotal(parent.id);
-		const childText  = await readTreeCostTotal(childId);
-		const grandText  = await readTreeCostTotal(grandId);
-
-		// The dashboard formats `totalCostUsd` with `toFixed(2)` (see
-		// `renderTreeCostRow` in `src/app/goal-dashboard.ts`), so the rendered
-		// text is the canonical two-decimal dollar amount.
-		expect(parentText).toBe("$0.75");
-		expect(childText).toBe("$0.25");
-		expect(grandText).toBe("$0.05");
+		const parentText = await assertTreeCostTotal(parent.id, "$0.75");
+		const childText  = await assertTreeCostTotal(childId,  "$0.25");
+		const grandText  = await assertTreeCostTotal(grandId,  "$0.05");
 
 		// Strict-less-than parsed against the rendered text — guards against a
 		// regression where every descendant displays the parent's value.
