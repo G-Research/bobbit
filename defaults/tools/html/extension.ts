@@ -158,10 +158,12 @@ const extension: ExtensionFactory = (pi) => {
 				const mountResult = await mountResp.json().catch(() => ({} as any)) as {
 					url?: string;
 					path?: string;
+					relPath?: string;
 					entry?: string;
 					mtime?: number;
 				};
-				if (!mountResult.url || !mountResult.path) {
+				if (typeof mountResult.url !== "string" || mountResult.url.length === 0 ||
+					typeof mountResult.path !== "string" || mountResult.path.length === 0) {
 					return {
 						content: [{
 							type: "text",
@@ -171,10 +173,19 @@ const extension: ExtensionFactory = (pi) => {
 				}
 
 				// Step 4: stamp v3 marker. Constant-size payload regardless of HTML.
+				//
+				// Prefer the short, host-invariant `<sid>/<entry>` form returned by
+				// newer gateways (see `MountResult.relPath` in src/server/preview/mount.ts).
+				// Fall back to the host-absolute `path` when talking to an older
+				// gateway build that doesn't populate `relPath` — the v3 contract
+				// only requires a non-empty string here, so the marker still parses.
+				const snapshotPath = (typeof mountResult.relPath === "string" && mountResult.relPath.length > 0)
+					? mountResult.relPath
+					: mountResult.path;
 				return {
 					content: [
 						{ type: "text", text: "Preview panel is open and will auto-update." },
-						{ type: "text", text: buildPreviewSnapshotV3Block(mountResult.url, mountResult.path) },
+						{ type: "text", text: buildPreviewSnapshotV3Block(mountResult.url, snapshotPath) },
 					],
 				};
 			} catch (err: any) {

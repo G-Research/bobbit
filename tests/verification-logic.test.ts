@@ -22,6 +22,9 @@ import {
 	TRANSIENT_ERROR_REGEXES,
 	QA_NON_TRANSIENT_PATTERNS,
 	detectJsonValidationError,
+	// New classifier for provider overload / rate-limit / quota-throttle.
+	// Used by SessionManager to pick the unbounded backoff policy.
+	isProviderBackoffError,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -201,6 +204,101 @@ describe("isTransientReviewError", () => {
 				`Expected '${pattern}' to be detected as transient`,
 			);
 		}
+	});
+});
+
+// ===================================================================
+// isProviderBackoffError — overload / rate-limit / quota-throttle
+// ===================================================================
+
+describe("isProviderBackoffError", () => {
+	// The exact payload from the goal spec — Anthropic SDK surfaces the error
+	// body as a JSON string in `error.message`.
+	const ANTHROPIC_OVERLOAD_JSON =
+		'Error: {"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011Cb3PkGgaYHToky3UNLG2i"}';
+
+	it("matches the Anthropic overloaded_error JSON sample", () => {
+		assert.equal(isProviderBackoffError(ANTHROPIC_OVERLOAD_JSON), true);
+	});
+
+	it("matches the bare 'overloaded_error' marker", () => {
+		assert.equal(isProviderBackoffError('{"type":"overloaded_error"}'), true);
+		assert.equal(isProviderBackoffError("overloaded_error"), true);
+	});
+
+	it("matches the bare 'rate_limit_error' marker", () => {
+		assert.equal(isProviderBackoffError('{"type":"rate_limit_error"}'), true);
+		assert.equal(isProviderBackoffError("Error: rate_limit_error from provider"), true);
+	});
+
+	it("matches HTTP 429 phrasings", () => {
+		assert.equal(isProviderBackoffError("HTTP 429 Too Many Requests"), true);
+		assert.equal(isProviderBackoffError("status 429"), true);
+		assert.equal(isProviderBackoffError("statusCode: 429"), true);
+	});
+
+	it("matches HTTP 529 phrasings", () => {
+		assert.equal(isProviderBackoffError("HTTP 529 Site is overloaded"), true);
+		assert.equal(isProviderBackoffError("status 529"), true);
+		assert.equal(isProviderBackoffError("statusCode: 529"), true);
+	});
+
+	it("overload/rate-limit markers are ALSO transient (single source of truth)", () => {
+		assert.equal(isTransientReviewError(ANTHROPIC_OVERLOAD_JSON), true);
+		assert.equal(isTransientReviewError('{"type":"rate_limit_error"}'), true);
+		assert.equal(isTransientReviewError("HTTP 429"), true);
+		assert.equal(isTransientReviewError("HTTP 529"), true);
+	});
+
+	it("returns false for empty / null-ish input", () => {
+		assert.equal(isProviderBackoffError(""), false);
+		assert.equal(isProviderBackoffError(null as unknown as string), false);
+		assert.equal(isProviderBackoffError(undefined as unknown as string), false);
+	});
+
+	it("returns false for JSON parse / tool-validation transient errors", () => {
+		// These remain transient (bounded retry) but are NOT provider-backoff.
+		const jsonGlitch =
+			"Error: Expected ',' or '}' after property value in JSON at position 320";
+		assert.equal(isTransientReviewError(jsonGlitch), true);
+		assert.equal(isProviderBackoffError(jsonGlitch), false);
+
+		const toolValidation = 'Validation failed for tool "verification_result": ...';
+		assert.equal(isTransientReviewError(toolValidation), true);
+		assert.equal(isProviderBackoffError(toolValidation), false);
+
+		const unexpectedToken = "SyntaxError: Unexpected token 'x' in JSON";
+		assert.equal(isTransientReviewError(unexpectedToken), true);
+		assert.equal(isProviderBackoffError(unexpectedToken), false);
+	});
+
+	it("returns false for network-blip transient errors", () => {
+		// ECONNRESET / socket hang up / ECONNREFUSED are transient but the
+		// existing bounded-retry policy is appropriate — they should NOT
+		// switch the session into the 5-minute-cap unbounded mode.
+		for (const msg of [
+			"Error: read ECONNRESET",
+			"socket hang up while connecting",
+			"Error: connect ECONNREFUSED 127.0.0.1:3000",
+			"Error: spawn UNKNOWN",
+			"Agent process not running",
+			"process exited",
+		]) {
+			assert.equal(
+				isTransientReviewError(msg), true,
+				`Expected transient: ${msg}`,
+			);
+			assert.equal(
+				isProviderBackoffError(msg), false,
+				`Expected NOT provider-backoff: ${msg}`,
+			);
+		}
+	});
+
+	it("does not false-positive on random 3-digit numbers or unrelated 'rate' words", () => {
+		assert.equal(isProviderBackoffError("compiled 429 files"), false);
+		assert.equal(isProviderBackoffError("sample rate: 44100"), false);
+		assert.equal(isProviderBackoffError("TypeError: cannot read properties of null"), false);
 	});
 });
 

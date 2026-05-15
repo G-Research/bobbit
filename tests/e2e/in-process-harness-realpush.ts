@@ -158,7 +158,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// acceptCanonical=true: macOS TMPDIR is a symlink (/var/folders
+				// → /private/var/folders); without it the register 400s.
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 

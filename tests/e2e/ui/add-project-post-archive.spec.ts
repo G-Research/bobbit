@@ -62,7 +62,7 @@ test.describe("Add Project — post-archive routes to assistant", () => {
 
 	test("after archiving an existing .bobbit/, Continue opens the project assistant (not auto-import)", async ({ page }, testInfo) => {
 		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
-	test.setTimeout(120_000); // many sequential UI waits; 30s default is too tight under E2E suite load
+		testInfo.setTimeout(120_000); // many sequential UI waits; 30s default is too tight under E2E suite load
 
 		// Seed: non-empty .bobbit/ but NO project.yaml. This is the "ghost
 		// .bobbit/" shape: presence of the directory but no configured project.

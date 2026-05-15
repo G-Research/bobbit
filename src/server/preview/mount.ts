@@ -48,6 +48,16 @@ export interface MountResult {
 	url: string;
 	/** Host-absolute path to the entry file (debug parity with v2 markers). */
 	path: string;
+	/**
+	 * Project-root-relative entry identifier — always `<sessionId>/<entry>`
+	 * with forward slashes (POSIX) regardless of host OS. Host-invariant, so
+	 * its size is bounded by content shape, not where `bobbitStateDir()`
+	 * happens to live on disk. Stamped into the v3 preview-snapshot block by
+	 * the agent tool so the per-block size stays under the 250 B cap on
+	 * macOS (`/private/var/folders/...`) and Windows E2E harness paths too.
+	 * See `defaults/tools/html/extension.ts` and `defaults/tools/html/snapshot.ts`.
+	 */
+	relPath: string;
 	/** Relative entry filename inside the mount. */
 	entry: string;
 	/** mtime of the entry file in ms since epoch. */
@@ -209,6 +219,7 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 	return {
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
+		relPath: path.posix.join(sessionId, safeEntry),
 		entry: safeEntry,
 		mtime: Math.floor(fs.statSync(target).mtimeMs),
 	};
@@ -380,6 +391,7 @@ export function mountFile(
 	return {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
+		relPath: path.posix.join(sessionId, entry),
 		entry,
 		mtime: Math.floor(fs.statSync(target).mtimeMs),
 		assets: Array.from(resolvedAssets).sort(),

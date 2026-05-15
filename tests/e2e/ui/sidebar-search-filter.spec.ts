@@ -209,21 +209,17 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			{ timeout: 15_000 },
 		).toBe(true);
 
-		// Dispatch Ctrl+K via window.dispatchEvent rather than Playwright's
-		// keyboard.press — under heavy parallel load the first Chromium
-		// keystroke can be dropped before focus settles. The app's shortcut
-		// registry listens on `window`, so dispatching there reaches it
-		// reliably. Set BOTH ctrlKey and metaKey so the dispatched event
-		// matches the registry's platform-aware ctrlOrMeta check on macOS
-		// (metaKey) and Linux/Windows (ctrlKey) without per-platform branching.
+		// Dispatch via window.dispatchEvent — keyboard.press can be dropped
+		// under heavy parallel load before focus settles. Set both ctrlKey
+		// and metaKey to match the registry's platform-aware ctrlOrMeta check.
 		await page.evaluate(() => {
 			window.dispatchEvent(new KeyboardEvent("keydown", {
 				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
 			}));
 		});
 
-		// Search input should be focused — poll for the focus to settle
-		// rather than asserting synchronously against a single render frame.
+		// Search input should be focused — poll to absorb the rAF/render delay
+		// the shortcut handler relies on.
 		await expect.poll(
 			() => searchInput.evaluate((el) => document.activeElement === el),
 			{ timeout: 5_000 },

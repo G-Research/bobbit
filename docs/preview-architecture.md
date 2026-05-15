@@ -288,12 +288,25 @@ The `preview_open` tool stamps the result with a constant-size marker block:
 
 ```
 __preview_snapshot_v3__
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<host-abs>"}
+{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>"}
 ```
 
 ≤ 250 bytes per block, regardless of HTML size. The renderer parses the
 marker via `parseSnapshot()` and uses `url` / `path` to drive the **Open**
 button on archived tool cards.
+
+**`path` is host-invariant.** The field carries the project-root-relative
+`<sessionId>/<entry>` identifier (forward slashes on every OS), not the
+host-absolute path on disk. The single source of truth is
+`MountResult.relPath` in `src/server/preview/mount.ts`; the agent tool in
+`defaults/tools/html/extension.ts` prefers `relPath` over the legacy
+host-absolute `path` when calling `buildPreviewSnapshotV3Block`. Bounding the
+payload by content shape (rather than by where `bobbitStateDir()` happens to
+live on disk) is what keeps the 250 B per-block cap holding on macOS
+(`/private/var/folders/...`) and Windows E2E harness paths. Archived sessions
+that recorded the legacy host-absolute form still parse — `parseSnapshot`
+only requires a non-empty string — but new blocks always use the relative
+form. Per-block size is pinned by `tests/e2e/preview-token-cost.spec.ts`.
 
 **Legacy markers** are preserved in the parser **only** for archived
 sessions:
