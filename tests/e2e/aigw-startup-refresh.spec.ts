@@ -15,7 +15,7 @@
  */
 import { test as base, expect } from "@playwright/test";
 import http from "node:http";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,7 +37,7 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;

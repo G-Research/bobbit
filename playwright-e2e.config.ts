@@ -34,8 +34,12 @@ export default defineConfig({
 	// providing a meaningful wall-clock win once browser project is capped
 	// at 3 anyway.
 	workers: 4,
+	// `line` reporter streams one line per test completion to stdout, with
+	// no batching — unlike `list` which redraws in place and buffers heavily
+	// when stdout is not a TTY (the verification-harness tailer sees nothing
+	// for the full ~5 min run). `line` works correctly under file/pipe stdio.
 	reporter: [
-		["list"],
+		[process.stdout.isTTY ? "list" : "line"],
 		...recordScreenReporters,
 	],
 	globalSetup: "./tests/e2e/e2e-global-setup.ts",
