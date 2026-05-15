@@ -141,6 +141,8 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
 
+**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. Set `BOBBIT_GREP_LSP_HINT=0` to disable.
+
 ## Route post-boot self-check
 
 The gateway runs a lightweight self-check once, immediately after `server.listen()` completes, to verify that all `/api/lsp/*` routes are reachable. This catches a class of silent regression where a bad merge drops the LSP dispatch block from `handleApiRoute()` — the supervisor and tools are intact, but every agent call returns `lsp_route_missing` because the HTTP handler is gone.
