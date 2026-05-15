@@ -1102,7 +1102,8 @@ GET /api/goals/:id/tree-cost
     totalCostUsd,
     totalTokensIn,
     totalTokensOut,
-    breakdown: [{ goalId, depth, title, costUsd, tokensIn, tokensOut }, …]
+    breakdown: [{ goalId, depth, title, costUsd, tokensIn, tokensOut }, …],
+    unattributableLegacy?: { goalId, title, costUsd, tokensIn, tokensOut, firstSeenAt? }
   }
 ```
 
@@ -1179,23 +1180,25 @@ sessions that were **purged before the fix** remain unstamped: the live
 `sessionStore`-only resolver can't recover the mapping.
 
 The boot-time backfill is implemented in
-`src/server/agent/cost-backfill.ts` (`backfillLegacyCostGoalIds`). It
-runs once after all session state is restored and tries two paths in
-order for each unstamped entry:
+`src/server/agent/cost-backfill.ts`. The authoritative sidecar pass
+(`backfillLegacyCostGoalIds`) runs once after all session state is restored and tries two paths in order for each unstamped entry:
 
 1. **Live persisted session record** — `sessionManager.getPersistedSession(sessionId)`, preferring `teamGoalId` then `goalId`. If the record exists but has neither field, the sidecar next to its `.jsonl` file is read as a sub-step.
 2. **Sidecar index scan** — if the session record is gone entirely, `buildSidecarGoalIdIndex` walks the agent sessions root two levels deep (`<slug>/<id>.bobbit.json`), parses every sidecar, and builds a `bobbitSessionId → teamGoalId` map. This path recovers goals for sessions purged after the session-sidecar feature landed (`a71963d9`).
 
-Entries that survive both passes (no live record, no sidecar, or sidecar predates the sidecar feature) are left unstamped. The backfill is
+Entries that survive the live-record/sidecar pass are then eligible for the transcript pass (`backfillLegacyCostGoalIdsFromTranscripts`). That second pass runs after `server.listen()` as part of boot background tasks, scans production transcript files named `<isoTs>_<sessionId>.jsonl` (and legacy `<sessionId>.jsonl` fixtures), reads only the first 50 lines / 64 KiB, and stops after a 30s per-project deadline. It stamps only confidence-gated hits: exactly one known goal id from `goalStore.getAll()` near `BOBBIT_GOAL_ID`, `--goal <id>`, a `goal-<slug>-<id8>` worktree path, or goal-context markers. Unknown ids, multiple known ids, and prose-only references stay unstamped.
+
+Entries that survive all backfill passes are left unstamped. The backfill is
 idempotent — already-stamped entries are skipped — and bumps the
 generation tick only when at least one entry is actually updated.
-Boot log:
+Boot logs:
 
 ```
 [cost-backfill] stamped goalId on N entries; M still unattributable
+[cost-backfill] transcript-pass stamped goalId on N additional entries; M still unattributable
 ```
 
-Pinned by `tests/cost-backfill.test.ts` and `tests/e2e/cost-backfill-on-boot.spec.ts`.
+Pinned by `tests/cost-backfill.test.ts`, `tests/cost-backfill-transcript-pass.test.ts`, and `tests/e2e/cost-backfill-on-boot.spec.ts`. See [docs/cost-backfill.md](cost-backfill.md) for the full recovery design.
 
 ### Unattributable legacy bucket
 
@@ -1218,7 +1221,8 @@ field to the response when the bucket is non-empty:
     "title": "Unattributable (legacy)",
     "costUsd": 0.0056,
     "tokensIn": 1200,
-    "tokensOut": 300
+    "tokensOut": 300,
+    "firstSeenAt": 1746918000000
   }
 }
 ```
@@ -1227,7 +1231,7 @@ This bucket is **not** included in `totalCostUsd` — it is informational
 only. The tree-cost panel renders it as a muted italic row at the
 bottom of the breakdown table when non-empty (testid
 `tree-cost-row-unattributable-legacy`), labelled _Unattributable
-(legacy)_.
+(legacy)_. The dashboard also uses `firstSeenAt` (falling back to the named sidecar-era constant) to visually distinguish qualifying `$0.0000 (legacy)` goal rows from real zero-spend rows.
 
 ### On-disk schema
 

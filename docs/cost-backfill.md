@@ -123,10 +123,10 @@ never stamps an entry unless it can satisfy one of the following:
 
 ## Unattributable legacy bucket
 
-Entries that survive both passes stay stamped with the sentinel
-`UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__"` (see `cost-tracker.ts`).
-`CostTracker.getUnattributableLegacyCostWithMetadata()` aggregates these and
-returns:
+Entries that survive both passes remain **unstamped** (`goalId` stays unset).
+They are not rewritten to a sentinel on disk. `CostTracker.getUnattributableLegacyCostWithMetadata()` aggregates these unstamped entries and the API presents the aggregate under the response-only sentinel `UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__"`.
+
+It returns:
 
 - Total cost, `tokensIn`, `tokensOut` (same shape as any other goal cost).
 - `firstSeenAt` — the **minimum** `firstSeenAt` timestamp across all unstamped
@@ -140,6 +140,7 @@ response payload:
 ```json
 {
   "unattributableLegacy": {
+    "goalId": "__unattributable__",
     "title": "Unattributable (legacy)",
     "costUsd": 1073.80,
     "tokensIn": 2200000,
