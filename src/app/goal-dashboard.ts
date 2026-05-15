@@ -15,6 +15,7 @@ import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
 import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-visibility.js";
+import { isLegacyUnattributableTreeCostRow, LEGACY_TREE_COST_ROW_TOOLTIP } from "./tree-cost-legacy.js";
 import { isSubgoalsEnabled } from "./subgoals-flag.js";
 import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
@@ -178,6 +179,13 @@ interface TreeCostUnattributableLegacy {
 	costUsd: number;
 	tokensIn: number;
 	tokensOut: number;
+	/**
+	 * Oldest timestamp (ms epoch) observed among unstamped cost entries in
+	 * this bucket. Used by the UI as the threshold for marking zero-cost
+	 * rows as "legacy". Optional; falls back to an exported constant in
+	 * `tree-cost-legacy.ts` when absent.
+	 */
+	firstSeenAt?: number;
 }
 interface TreeCost {
 	rootGoalId: string;
@@ -1588,17 +1596,31 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 							</tr>
 						</thead>
 						<tbody>
-							${treeCost.breakdown.map(b => html`
-								<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
+							${treeCost.breakdown.map(b => {
+								// Look up the matching goal (live or archived descendant) to
+								// decide whether this is a "legacy zero" row. See
+								// src/app/tree-cost-legacy.ts for the classification rules.
+								const goalForRow =
+									state.goals.find(g => g.id === b.goalId) ||
+									dashboardDescendants.find(g => g.id === b.goalId);
+								const isLegacy = isLegacyUnattributableTreeCostRow(goalForRow, b, treeCost);
+								const rowStyle = isLegacy
+									? "border-bottom:1px dashed var(--border);color:var(--muted-foreground);font-style:italic;"
+									: "border-bottom:1px dashed var(--border);";
+								const titleSuffix = isLegacy ? html` <span style="color:var(--muted-foreground);">(legacy)</span>` : nothing;
+								const rowTitle = isLegacy ? LEGACY_TREE_COST_ROW_TOOLTIP : undefined;
+								return html`
+								<tr data-testid="tree-cost-row-${b.goalId}" style=${rowStyle} title=${rowTitle ?? nothing}>
 									<td style="padding:3px 8px;">
 										<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
 										<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
-											@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
+											@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>${titleSuffix}
 									</td>
 									<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
 									<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
 								</tr>
-							`)}
+							`;
+							})}
 							${(() => {
 								// Residual bucket: cost entries whose goalId couldn't be
 								// recovered by the boot-time backfill. Rendered as a muted
