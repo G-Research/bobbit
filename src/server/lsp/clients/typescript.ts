@@ -73,7 +73,7 @@ class TypescriptLspClient implements LspClient {
 		this.worktreePath = worktreePath;
 	}
 
-	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
+	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void, requireSandbox?: boolean): Promise<void> {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
 		// Only attach the bridge when a sandbox container is actually running for
@@ -96,6 +96,7 @@ class TypescriptLspClient implements LspClient {
 			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
 			sandboxCmd: ["typescript-language-server", "--stdio"],
 			sandbox,
+			requireSandbox,
 		});
 
 		this.proc.child.on("exit", (code) => {
@@ -340,7 +341,7 @@ export class TypescriptLspFactory implements LspClientFactory {
 	}
 	async spawn(opts: SpawnOpts): Promise<LspClient> {
 		const client = new TypescriptLspClient(opts.worktreePath);
-		await client.start(opts.sandbox, opts.onClose);
+		await client.start(opts.sandbox, opts.onClose, opts.requireSandbox);
 		return client;
 	}
 }
