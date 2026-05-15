@@ -4,7 +4,7 @@ User-facing reference for the nested-goal feature. For internal data-model
 details see [goals-workflows-tasks.md](goals-workflows-tasks.md); for
 restart-resilience invariants see the relevant entries in
 [debugging.md](debugging.md). Implementation specs that drove the feature
-live in `SUBGOALS-SPEC.md` (root of the repo).
+are captured in [docs/design/](design/) and the goal specs that drove each subfeature.
 
 > **Status: experimental.** The nested-goals feature is gated behind a
 > system-scope toggle ("Subgoals" in **Settings → System → General**),

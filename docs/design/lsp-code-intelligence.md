@@ -625,7 +625,7 @@ indicator later; that earns its own browser test when it lands.)
 - **AGENTS.md** — extend the "Before editing" section with one line:
   > Prefer `lsp_definition` / `lsp_references` over `grep` for symbol lookup;
   > prefer `lsp_diagnostics` over `npm run check` for post-edit verification.
-  Plus a `· [docs/lsp.md](docs/lsp.md)` link in the Reference docs list.
+  Plus a `· [docs/lsp.md](../lsp.md)` link in the Reference docs list.
 - **`docs/internals.md`** — short subsection under a new "LSP" heading
   pointing at this design doc and `src/server/lsp/supervisor.ts`.
 
