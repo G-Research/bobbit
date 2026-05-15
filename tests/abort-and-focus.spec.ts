@@ -3,8 +3,13 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const FIXTURE = `file://${path.resolve("tests/abort-and-focus.html").replace(/\\/g, "/")}`;
+// Resolve fixture relative to this spec file, not process.cwd().
+// Other unit specs (e.g. tests/lsp/symbol-name-shorthand.spec.ts) call process.chdir()
+// and Playwright runs unit specs with fullyParallel — so cwd is unreliable here.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURE = `file://${path.resolve(__dirname, "abort-and-focus.html").replace(/\\/g, "/")}`;
 
 test.describe("PI-21: Abort/Stop streaming", () => {
 	test.beforeEach(async ({ page }) => {

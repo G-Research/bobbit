@@ -54,4 +54,24 @@ describe("Goal proposal modal — subgoal controls source-pin", () => {
 			"operators cannot tighten the per-goal nesting cap at creation time.",
 		);
 	});
+
+	it("Allow-subgoals checkbox uses the shared toggle-switch pill style", () => {
+		const text = fs.readFileSync(RENDER_TS, "utf-8");
+		// Find the line introducing the subgoals checkbox and assert its class.
+		// The toggle must live in the shared toggle row alongside Sandbox /
+		// Auto-start team / Enable QA Testing, all of which use class="toggle-switch".
+		// A raw <input type="checkbox"> without this class is the visual
+		// inconsistency the UX-consistency subgoal was created to fix.
+		const idx = text.indexOf("goal-form-subgoals-toggle");
+		assert.ok(idx >= 0, "goal-form-subgoals-toggle not found");
+		// Look back ~400 chars for the enclosing <input> tag declaration.
+		const window = text.slice(Math.max(0, idx - 400), idx);
+		assert.ok(
+			window.includes("class=\"toggle-switch\""),
+			"The Allow-subgoals checkbox must use class=\"toggle-switch\" to match\n" +
+			"the Sandbox / Auto-start team / Enable QA Testing peer toggles in the\n" +
+			"same shared row. A raw checkbox here is the exact visual inconsistency\n" +
+			"that the UX-consistency subgoal restored — do not delete this pin.",
+		);
+	});
 });

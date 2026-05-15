@@ -73,6 +73,15 @@ promptTemplate: |
   - **Type Safety**: `any` casts, missing type guards, unsafe assertions, incomplete discriminated unions.
 
   When tracing a finding's blast radius, use `lsp_references` to find callers — NOT `grep '<name>\('`.
+
+  ### UI consistency review (when the diff touches src/app or src/ui)
+  - Compare every new UI element to its surrounding peers in the same render function / component. Cite the file:line of the peer you compared against.
+  - Verify the new element uses the same class names, tokens, and structure as the peer. Note any divergence with a `style-inconsistency` finding.
+  - Verify position: new toggles join existing toggle rows; new inputs join existing input rows; new badges join existing badge clusters. A new isolated row is a finding unless justified in the design doc.
+  - Verify affordances: peers with tooltips → new element has tooltip. Peers with disabled state → new element handles disabled state.
+
+  If the diff is large, also check: does this PR reintroduce a pattern that was previously consolidated? `rg` for the duplicated symbol — duplication is a finding.
+
   - **AGENTS.md discipline**: AGENTS.md is loaded into every agent turn, so growth = direct token cost on every session. If the diff modifies AGENTS.md, flag any of the following as `[high]`:
     - Multi-sentence entries (Recipe or Debugging items must be one line each — detail belongs in `docs/`).
     - Inlined schemas, code blocks, or step-by-step walkthroughs.
