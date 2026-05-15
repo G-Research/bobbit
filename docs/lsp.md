@@ -1,6 +1,6 @@
 # LSP Code Intelligence
 
-> All coding-role agents receive a short symbol-lookup hint in their system prompt summarising when to use `lsp_*` vs `grep` — see also AGENTS.md for project-specific nuance.
+> All coding-role agents (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`) receive a mandatory **"Tool selection — symbol queries"** section in their `promptTemplate` that requires `lsp_*` tools over `grep` for any named-symbol query. See `defaults/roles/*.yaml` for the exact wording.
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
@@ -310,6 +310,79 @@ Renderers are wired in two places:
 
 1. **`src/ui/tools/index.ts`** — `registerToolRenderer("lsp_definition", new LspDefinitionRenderer())` (and six more). This is where the renderer is actually active at runtime.
 2. **`defaults/tools/lsp/<name>.yaml`** — `renderer: src/ui/tools/renderers/<Name>.ts` field. This is informational (used by docs and the config UI); the `index.ts` registration is authoritative.
+
+## Measuring adoption
+
+The LSP supervisor tracks process-local counters that let you see whether agents are calling LSP tools or falling back to grep. Counters are in-memory only and **reset on every gateway restart** — there is no persistence in v1.
+
+### Reading the counters
+
+```bash
+curl -sk $GW/api/lsp/stats -H "Authorization: Bearer $TOKEN" | jq .counters
+```
+
+Sample output:
+
+```json
+{
+  "lspCallsTotal": 137,
+  "lspCallsByMethod": {
+    "definition": 23,
+    "references": 18,
+    "hover": 8,
+    "diagnostics": 71,
+    "document_symbols": 5,
+    "workspace_symbol": 12,
+    "rename": 0
+  },
+  "lspCallsByStatus": {
+    "ok": 134,
+    "lsp_unavailable": 2,
+    "lsp_capacity": 0,
+    "lsp_timeout": 1,
+    "lsp_route_missing": 0,
+    "error": 0
+  },
+  "grepLspHintEmittedTotal": 89
+}
+```
+
+### Field meanings
+
+| Field | What it counts |
+| --- | --- |
+| `lspCallsTotal` | Every `POST /api/lsp/<method>` that reached `LspSupervisor.dispatch()`. |
+| `lspCallsByMethod` | Breakdown of `lspCallsTotal` by method name. |
+| `lspCallsByStatus` | Breakdown by outcome: `ok` (served), `lsp_unavailable` (server not ready / bad path), `lsp_capacity` (all slots busy), `lsp_timeout`, `lsp_route_missing` (route regression), `error` (unexpected throw). |
+| `grepLspHintEmittedTotal` | Number of `[lsp-hint]` lines emitted by the grep/bash hint tool extensions, reported via a best-effort loopback call. |
+
+### Adoption indicator
+
+The ratio:
+
+```
+lspCallsTotal / (lspCallsTotal + grepLspHintEmittedTotal)
+```
+
+approximates the fraction of symbol-lookup opportunities where the agent chose LSP over grep. A rising ratio means nudges are working. The denominator is a lower bound — not every grep is symbol-shaped, and hints fire only when the tool extension detects a likely-LSP pattern — so treat this as a directional indicator, not a precise percentage.
+
+### Hint endpoint contract (for sibling hint subgoals)
+
+Tool extensions that emit `[lsp-hint]` lines should report each emission by calling the shared helper:
+
+```ts
+import { recordHintEmitted } from "defaults/tools/_shared/lsp-telemetry.ts";
+await recordHintEmitted(); // best-effort; never throws
+```
+
+The helper POSTs to `POST /api/lsp/_internal/hint-emitted` using the standard gateway URL/token discovery pattern. The route is auth-gated (same as all `/api/*` routes). The call is **best-effort**: network errors, auth failures, and boot-race conditions are silently swallowed so the hint text is always printed regardless of telemetry availability.
+
+If importing the shared helper is not possible, a raw loopback POST works too:
+
+```bash
+curl -sk -X POST "$GW/api/lsp/_internal/hint-emitted" \
+  -H "Authorization: Bearer $TOKEN" -o /dev/null
+```
 
 ## See also
 
