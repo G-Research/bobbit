@@ -208,6 +208,20 @@ The `gate_signal` REST handler enumerates the verification step list **synchrono
 
 Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart via a detached-spawn + atomic exit-file scheme, with a `bootEpoch`-based correctness floor so a step from a previous gateway lifetime can never falsely lock the gate behind HTTP 409 `Verification already in progress`. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — HTTP 409 after gateway restart](debugging.md#http-409-verification-already-in-progress-after-gateway-restart). Pinned by `tests/verification-harness-restart.test.ts` and `tests/e2e/verification-restart-resignal.spec.ts`.
 
+#### Subprocess tree-kill primitive
+
+Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pid, sig)` only signal the immediate child shell. Anything that shell forked (npm, playwright, Chromium, docker exec’d in-container processes) keeps running, and the harness’s `child.on("close")` races against the orphans holding stdio open. Symptom: a command step stuck in `running` long past its configured timeout, with descendants still visible in `ps`.
+
+`src/server/agent/spawn-tree.ts` solves this with an owned timer and a real tree kill. The contract is small:
+
+- `spawnTracked(cmd, args, opts) → TrackedChild` — spawns with `detached: true` on POSIX so the child becomes its own process-group leader (`pgid === child.pid`). Reaps via `process.kill(-pgid, sig)` on POSIX, `taskkill /T /F /PID <pid>` on Windows. SIGTERM is sent first, then SIGKILL escalates after `killGraceMs` (default 5000ms; cancellation passes 1000ms). The helper owns the `setTimeout` (`.unref()`'d), clears it on close, and invokes the caller’s `onTimeout` before killing. The returned `TrackedChild` exposes `killTree(signal?, graceMsOverride?)`, `killed()`, `timedOut()`.
+- `killTreeByPid(pid, signal?)` — same tree-kill semantics keyed by a persisted pid (no `ChildProcess` handle). Used by user/agent cancellation and by post-restart recovery against the pid recorded in `active-verifications.json`.
+- `killAllTracked(signal?)` — walks an internal registry and reaps every in-flight tracked child. Called on gateway shutdown so a restart never strands Chromium/playwright trees.
+
+The three `spawn` sites in `VerificationHarness.runCommandStep` (docker-exec, detached restart-survivor, attached-pipe) all route through `spawnTracked`. Cancellation polling, the recovery sweep, and shutdown all route through the same primitive. **Never reintroduce `spawn({ timeout })`** — the file header in `spawn-tree.ts` documents why and the same rule applies to any new caller that spawns a shell which may itself spawn descendants (test runners, browser drivers, package managers). Reuse the helper.
+
+Confirm a kill by polling `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`). Failed-by-timeout steps emit `— killed subprocess tree` as their final output line. Pinned by `tests/verification-harness-timeout.test.ts` (unit) and `tests/e2e/verification-timeout.spec.ts` (E2E). Symptom→fix lookup in [debugging.md — Verification step stuck in `running`](debugging.md#verification-step-stuck-in-running).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:

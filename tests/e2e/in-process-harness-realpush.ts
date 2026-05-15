@@ -49,7 +49,7 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;

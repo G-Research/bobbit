@@ -6,11 +6,24 @@
  * browser tests fail because the UI assets don't exist.
  */
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export default function globalSetup() {
+	// On macOS, os.tmpdir() returns /var/folders/... which is a symlink to
+	// /private/var/folders/... The project registry rejects symlinked rootPaths
+	// unless acceptCanonical:true is passed. Canonicalize TMPDIR here (global
+	// setup runs before any worker) so all test files that call os.tmpdir()
+	// receive the real path and project registration succeeds without needing
+	// per-call acceptCanonical.
+	if (process.platform !== "win32") {
+		try {
+			const canonical = realpathSync(tmpdir());
+			if (canonical !== tmpdir()) process.env.TMPDIR = canonical;
+		} catch { /* ignore — tmpdir() is always readable */ }
+	}
+
 	// Run the no-new-sleeps guard FIRST so a CI run blocks the moment a new
 	// hardcoded sleep is introduced. Cheap (<200ms) and bypasses the build
 	// step on guard failure. See tests/e2e/test-utils/no-new-sleeps.mjs.

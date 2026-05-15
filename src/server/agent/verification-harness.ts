@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -33,7 +34,7 @@ import {
 import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
-import { getVerificationShell } from "./shell-util.js";
+import { getVerificationShell, GIT_BASH } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
@@ -470,6 +471,7 @@ export async function buildReviewPrompt(
 }
 
 export class VerificationHarness {
+	private static _warnedCmdExeDetached = false;
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
@@ -821,8 +823,12 @@ export class VerificationHarness {
 				continue;
 			}
 
-			// Step was running — try to resume from the existing session first
-			let resumeResult = await this._tryResumeFromSession(v, step);
+			// Step was running — for command-type steps, try the file-based
+			// (Layer 1) resume path; for session-backed steps, re-attach to the
+			// restored reviewer session as before.
+			let resumeResult = step.type === "command"
+				? await this._resumeCommandStep(v, step)
+				: await this._tryResumeFromSession(v, step);
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
 			// re-run from scratch rather than giving up
@@ -1132,6 +1138,22 @@ export class VerificationHarness {
 	/** Monotonic counter used to stamp `seq` on every broadcast event. */
 	private _verifSeqCounter = 0;
 
+	/**
+	 * Tracked subprocess for each live command-step, keyed by
+	 * `${signalId}:${stepIndex}`. Used by `cancelVerification` /
+	 * `cancelStaleVerifications` to tree-kill the running shell on cancel,
+	 * and by `shutdown()` for graceful gateway exit.
+	 */
+	private _trackedCommandChildren = new Map<string, TrackedChild>();
+
+	/**
+	 * Tracked-child keys that were killed by an explicit cancellation rather
+	 * than a timeout or natural exit. Read in `runCommandStep`'s close
+	 * handler so the resolved output carries the cancellation marker even
+	 * after the parent `ActiveVerification` entry has been purged.
+	 */
+	private _cancelledTrackedKeys = new Set<string>();
+
 	private readonly broadcastFn: (goalId: string, event: any) => void;
 
 	constructor(
@@ -1247,6 +1269,30 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Tree-kill any tracked command-step subprocess registered under the given
+	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
+	 * observable within ~1s (single-timer path, no setInterval poll).
+	 */
+	private _killTrackedForSignal(signalId: string): void {
+		for (const key of Array.from(this._trackedCommandChildren.keys())) {
+			if (key.startsWith(signalId + ":")) {
+				const t = this._trackedCommandChildren.get(key);
+				this._trackedCommandChildren.delete(key);
+				this._cancelledTrackedKeys.add(key);
+				try { t?.killTree("SIGTERM", 1000); } catch { /* best-effort */ }
+			}
+		}
+	}
+
+	/**
+	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
+	 * orphan chromium / playwright descendants don't survive the gateway exit.
+	 */
+	shutdown(): void {
+		try { killAllTracked("SIGKILL"); } catch { /* best-effort */ }
+	}
+
+	/**
 	 * Cancel ALL in-flight verifications for a goal (all gates).
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
@@ -1255,6 +1301,8 @@ export class VerificationHarness {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
+
+			this._killTrackedForSignal(signalId);
 
 			for (const step of active.steps) {
 				if (step.sessionId && step.status === "running") {
@@ -1288,6 +1336,8 @@ export class VerificationHarness {
 				// Mark as cancelled
 				active.cancelled = true;
 				active.overallStatus = "cancelled";
+
+				this._killTrackedForSignal(signalId);
 
 				// Terminate all running reviewer sessions
 				for (const step of active.steps) {
@@ -2870,7 +2920,6 @@ export class VerificationHarness {
 	): string {
 		return _substituteVars(template, builtinVars, projectVars, agentVars, allGateStates);
 	}
-
 	private runCommandStep(
 		command: string,
 		cwd: string,
@@ -2884,103 +2933,473 @@ export class VerificationHarness {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
 			// Shell selection: default to plain bash (fast), use --login only for
 			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
-			//
-			// On Windows, Git Bash with --login is ~3.7s per spawn (sources /etc/profile,
-			// ~/.bash_profile). Plain bash is ~150ms. 25× difference.
-			//
-			// Heuristic: commands that reference common tool names get --login.
-			// Everything else (echo, test, [], cat, grep, basic shell operators)
-			// runs in plain shell. This preserves backward compat for real workflows
-			// while making test workflows 25× faster.
 			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
-			// For sandboxed goals, run the command inside the project container
-			const child = containerId
-				? spawn("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", command], {
-					stdio: ["ignore", "pipe", "pipe"],
-					timeout: timeoutSec * 1000,
-					env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-				})
-				: spawn(shellBin, [...shellArgs, command], {
-					cwd: normalizedCwd,
-					timeout: timeoutSec * 1000,
-					stdio: ["ignore", "pipe", "pipe"],
-					...(process.platform === "win32" ? { windowsHide: true } : {}),
-				});
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (d: Buffer) => {
-				const text = d.toString();
-				stdout += text;
-				if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024);
-				if (streamCtx) {
-					this.broadcastFn(streamCtx.goalId, {
-						type: "gate_verification_step_output",
-						goalId: streamCtx.goalId,
-						gateId: streamCtx.gateId,
-						signalId: streamCtx.signalId,
-						stepIndex: streamCtx.stepIndex,
-						stream: "stdout" as const,
-						text,
-						ts: Date.now(),
-					});
-					const av = this.activeVerifications.get(streamCtx.signalId);
-					if (av && av.steps[streamCtx.stepIndex]) {
-						const step = av.steps[streamCtx.stepIndex];
-						step.output = (step.output || "") + text;
-						if (step.output.length > 512 * 1024) {
-							step.output = step.output.slice(-512 * 1024);
-						}
-					}
+
+			// Decide execution mode.
+			let useDetached = !containerId && !!streamCtx;
+
+			// On Windows without Git Bash, the resolved shell is cmd.exe which
+			// cannot execute the bash exit-file wrapper. Silently degrade to
+			// attached mode so the verification still runs, and warn once so
+			// the missing restart-survival capability is visible in the logs.
+			if (useDetached && process.platform === "win32" && !GIT_BASH) {
+				if (!VerificationHarness._warnedCmdExeDetached) {
+					VerificationHarness._warnedCmdExeDetached = true;
+					console.warn("[verification] Git Bash not found on Windows — detached command mode disabled (cmd.exe cannot run the bash exit-file wrapper). Verification command steps will not survive a gateway restart.");
 				}
-			});
-			child.stderr.on("data", (d: Buffer) => {
-				const text = d.toString();
-				stderr += text;
-				if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
-				if (streamCtx) {
-					this.broadcastFn(streamCtx.goalId, {
-						type: "gate_verification_step_output",
-						goalId: streamCtx.goalId,
-						gateId: streamCtx.gateId,
-						signalId: streamCtx.signalId,
-						stepIndex: streamCtx.stepIndex,
-						stream: "stderr" as const,
-						text,
-						ts: Date.now(),
-					});
-					const av = this.activeVerifications.get(streamCtx.signalId);
-					if (av && av.steps[streamCtx.stepIndex]) {
-						const step = av.steps[streamCtx.stepIndex];
-						step.output = (step.output || "") + text;
-						if (step.output.length > 512 * 1024) {
-							step.output = step.output.slice(-512 * 1024);
-						}
-					}
+				useDetached = false;
+			}
+			let outFile: string | undefined;
+			let errFile: string | undefined;
+			let exitFile: string | undefined;
+			let outFd: number | undefined;
+			let errFd: number | undefined;
+
+			if (useDetached && streamCtx) {
+				try {
+					const stepDir = path.join(this._stateDir, "verifications", streamCtx.signalId);
+					fs.mkdirSync(stepDir, { recursive: true });
+					outFile = path.join(stepDir, `${streamCtx.stepIndex}.out`);
+					errFile = path.join(stepDir, `${streamCtx.stepIndex}.err`);
+					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
+					try { fs.unlinkSync(exitFile); } catch { /* not present */ }
+					try { fs.unlinkSync(exitFile + ".tmp"); } catch { /* not present */ }
+					outFd = fs.openSync(outFile, "w");
+					errFd = fs.openSync(errFile, "w");
+				} catch (err) {
+					console.warn(`[verification] Failed to set up survival files — falling back to attached mode: ${(err as Error).message}`);
+					if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
+					if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
+					useDetached = false;
+					outFile = errFile = exitFile = undefined;
 				}
-			});
-			child.on("close", (code) => {
-				const output = (stdout + "\n" + stderr).trim().slice(-5000);
-				if (expectFailure) {
-					resolve(matchExpectFailure(code, output, errorPattern));
-					return;
-				}
-				resolve({ passed: code === 0, output: output || `exit code ${code}` });
-			});
-			child.on("error", (err) => {
+			}
+
+			// Build the command to actually run. In detached mode we wrap so
+			// the wrapper, not the gateway, owns writing the exit code atomically.
+			let cmdToRun = command;
+			if (useDetached && exitFile) {
+				const exitTmp = exitFile + ".tmp";
+				const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+				// Run command in a subshell so its `exit` does not short-circuit our
+				// exit-file write; capture $?, write atomically, then propagate.
+				cmdToRun = `( ${command}\n); __ec=$?; printf %s "$__ec" > ${sq(exitTmp)} && mv ${sq(exitTmp)} ${sq(exitFile)}; exit $__ec`;
+			}
+
+			// Resolve a synchronously-thrown spawn error the same way we'd
+			// handle child.on("error", ...) — surface the error text and honour
+			// expectFailure semantics. Without this, accessing child.pid below
+			// would throw TypeError and crash the verification pipeline.
+			const handleSpawnError = (err: Error): { passed: boolean; output: string } => {
 				if (expectFailure && errorPattern) {
 					try {
-						const regex = new RegExp(errorPattern, 'i');
-						resolve({ passed: regex.test(err.message), output: err.message });
+						const regex = new RegExp(errorPattern, "i");
+						return { passed: regex.test(err.message), output: err.message };
 					} catch {
-						resolve({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
+						return { passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` };
 					}
-				} else {
-					resolve({ passed: expectFailure, output: err.message });
 				}
+				return { passed: expectFailure, output: err.message };
+			};
+
+			// IMPORTANT: do NOT re-introduce `spawn(..., { timeout })` here.
+			// Node's `timeout` option only kills the immediate child (the
+			// shell), leaving descendants (npm, playwright, chromium) running.
+			// The same is true for any direct `process.kill(child.pid, sig)`.
+			// We use `spawnTracked` which spawns the child in its own process
+			// group (POSIX `detached:true`) so the helper can kill the whole
+			// tree via `process.kill(-pgid, sig)` (or `taskkill /T /F` on
+			// Windows). The helper owns the timeout timer. See spawn-tree.ts.
+			// This primitive is reusable; any caller that spawns a shell which
+			// may itself spawn descendants should prefer it over raw spawn.
+			let tracked: TrackedChild | undefined;
+			let child: any;
+			let spawnError: Error | undefined;
+			try {
+				if (containerId) {
+					// Wrap the command so the in-container shell writes its PID
+					// to a temp file. On timeout, we kill that PID's process
+					// group — scoped to this step's subtree, not container-wide.
+					const stepKillId = randomUUID().slice(0, 8);
+					const pidFile = `/tmp/.bobbit-step-${stepKillId}.pid`;
+					const wrappedCmd = `echo $$ > ${pidFile}; ${command}`;
+					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+						stdio: ["ignore", "pipe", "pipe"],
+						timeoutMs: timeoutSec * 1000,
+						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+						onTimeout: () => {
+							// Belt-and-braces: host-side tree-kill of `docker exec`
+							// does not reliably reach in-container descendants.
+							// Kill the step's own process group via the persisted
+							// pid file — leaves other concurrent docker exec'd
+							// processes (agent sessions, other verification steps,
+							// bg-processes) untouched.
+							try {
+								const killer = spawn("docker", [
+									"exec", containerId, "/bin/sh", "-c",
+									`p=$(cat ${pidFile} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${pidFile} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${pidFile}`,
+								], { stdio: "ignore" });
+								killer.on("error", () => { /* docker missing — best-effort */ });
+							} catch { /* ignore */ }
+						},
+					});
+				} else if (useDetached) {
+					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+						cwd: normalizedCwd,
+						stdio: ["ignore", outFd!, errFd!],
+						timeoutMs: timeoutSec * 1000,
+						windowsHide: process.platform === "win32",
+					});
+				} else {
+					tracked = spawnTracked(shellBin, [...shellArgs, cmdToRun], {
+						cwd: normalizedCwd,
+						stdio: ["ignore", "pipe", "pipe"],
+						timeoutMs: timeoutSec * 1000,
+						windowsHide: process.platform === "win32",
+					});
+				}
+				child = tracked.child;
+			} catch (err) {
+				spawnError = err as Error;
+			} finally {
+				// Once spawn has dup'd the FDs into the child, parent's copies are
+				// no longer needed. Closing them avoids leaks even if we don't
+				// reach the resolve path.
+				if (outFd !== undefined) { try { fs.closeSync(outFd); } catch {} }
+				if (errFd !== undefined) { try { fs.closeSync(errFd); } catch {} }
+			}
+
+			if (spawnError || !child || !tracked) {
+				resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				return;
+			}
+
+			// Register so cancellation / shutdown can tree-kill the live child.
+			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
+			this._trackedCommandChildren.set(trackedKey, tracked);
+
+			// Stamp the persisted step with everything needed for cross-restart
+			// recovery before doing anything else — if the gateway dies right
+			// now, the next boot must be able to find the child.
+			if (useDetached && streamCtx && child.pid != null) {
+				const av = this.activeVerifications.get(streamCtx.signalId);
+				if (av && av.steps[streamCtx.stepIndex]) {
+					const s = av.steps[streamCtx.stepIndex];
+					s.pid = child.pid;
+					s.startTimeMs = Date.now();
+					s.outFile = outFile;
+					s.errFile = errFile;
+					s.exitFile = exitFile;
+					s.bootEpoch = this.bootEpoch;
+					s.timeoutSec = timeoutSec;
+					s.expectFailure = expectFailure;
+					s.errorPattern = errorPattern;
+					this._persistActive();
+				}
+				// unref so the child does not keep the gateway alive during a
+				// graceful shutdown — we want it to survive past our exit.
+				try { child.unref(); } catch { /* ignore */ }
+				// Mark for restart-survival so killAllTracked (called from
+				// shutdown()) skips this entry. The next boot resumes via
+				// _resumeCommandStep using the persisted pid + exit file.
+				tracked!.markSurvival();
+			}
+
+			let stdout = "";
+			let stderr = "";
+			let stopTail: (() => void) | undefined;
+
+			if (useDetached && streamCtx && outFile && errFile) {
+				stopTail = this._startFileTailers(outFile, errFile, streamCtx);
+			} else if (!useDetached) {
+				const onData = (text: string, stream: "stdout" | "stderr") => {
+					if (stream === "stdout") {
+						stdout += text;
+						if (stdout.length > 1024 * 1024) stdout = stdout.slice(-512 * 1024);
+					} else {
+						stderr += text;
+						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
+					}
+					if (streamCtx) {
+						this.broadcastFn(streamCtx.goalId, {
+							type: "gate_verification_step_output",
+							goalId: streamCtx.goalId,
+							gateId: streamCtx.gateId,
+							signalId: streamCtx.signalId,
+							stepIndex: streamCtx.stepIndex,
+							stream,
+							text,
+							ts: Date.now(),
+						});
+						const av = this.activeVerifications.get(streamCtx.signalId);
+						if (av && av.steps[streamCtx.stepIndex]) {
+							const step = av.steps[streamCtx.stepIndex];
+							step.output = (step.output || "") + text;
+							if (step.output.length > 512 * 1024) {
+								step.output = step.output.slice(-512 * 1024);
+							}
+						}
+					}
+				};
+				child.stdout?.on("data", (d: Buffer) => onData(d.toString(), "stdout"));
+				child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
+			}
+
+			child.on("close", (code: number | null) => {
+				this._trackedCommandChildren.delete(trackedKey);
+				try { stopTail?.(); } catch { /* ignore */ }
+
+				let outText = stdout;
+				let errText = stderr;
+				if (useDetached && outFile && errFile) {
+					try { outText = fs.readFileSync(outFile, "utf8"); } catch { outText = stdout; }
+					try { errText = fs.readFileSync(errFile, "utf8"); } catch { errText = stderr; }
+				}
+				const tail = (outText + "\n" + errText).trim().slice(-5000);
+				const didTimeOut = tracked!.timedOut();
+				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
+
+				if (didTimeOut) {
+					const marker = `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`;
+					const combined = tail ? `${tail}\n${marker}` : marker;
+					if (expectFailure) {
+						// Honour expectFailure + errorPattern against the accumulated output.
+						resolve(matchExpectFailure(null, combined, errorPattern));
+						return;
+					}
+					resolve({ passed: false, output: combined });
+					return;
+				}
+				if (didCancel) {
+					const marker = `[step cancelled \u2014 killed subprocess tree]`;
+					const combined = tail ? `${tail}\n${marker}` : marker;
+					resolve({ passed: false, output: combined });
+					return;
+				}
+				if (expectFailure) {
+					resolve(matchExpectFailure(code, tail, errorPattern));
+					return;
+				}
+				resolve({ passed: code === 0, output: tail || `exit code ${code}` });
+			});
+			child.on("error", (err: Error) => {
+				this._trackedCommandChildren.delete(trackedKey);
+				try { stopTail?.(); } catch { /* ignore */ }
+				resolve(handleSpawnError(err));
 			});
 		});
 	}
 
+	/**
+	 * Poll the per-step stdout/stderr files for new bytes and broadcast each
+	 * chunk as a `gate_verification_step_output` event, mirroring the live
+	 * UI broadcast path of the legacy attached-pipe mode. Returns a stop
+	 * function that does a final flush before clearing the interval.
+	 */
+	private _startFileTailers(
+		outFile: string,
+		errFile: string,
+		ctx: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+	): () => void {
+		let outPos = 0;
+		let errPos = 0;
+		let stopped = false;
+
+		const readNew = (filePath: string, pos: number, stream: "stdout" | "stderr"): number => {
+			try {
+				const stat = fs.statSync(filePath);
+				if (stat.size <= pos) return pos;
+				const fd = fs.openSync(filePath, "r");
+				try {
+					const len = stat.size - pos;
+					const buf = Buffer.alloc(len);
+					fs.readSync(fd, buf, 0, len, pos);
+					const text = buf.toString("utf8");
+					this.broadcastFn(ctx.goalId, {
+						type: "gate_verification_step_output",
+						goalId: ctx.goalId,
+						gateId: ctx.gateId,
+						signalId: ctx.signalId,
+						stepIndex: ctx.stepIndex,
+						stream,
+						text,
+						ts: Date.now(),
+					});
+					const av = this.activeVerifications.get(ctx.signalId);
+					if (av && av.steps[ctx.stepIndex]) {
+						const s = av.steps[ctx.stepIndex];
+						s.output = (s.output || "") + text;
+						if (s.output.length > 512 * 1024) s.output = s.output.slice(-512 * 1024);
+					}
+					return stat.size;
+				} finally {
+					try { fs.closeSync(fd); } catch { /* ignore */ }
+				}
+			} catch {
+				return pos;
+			}
+		};
+
+		const interval = setInterval(() => {
+			if (stopped) return;
+			outPos = readNew(outFile, outPos, "stdout");
+			errPos = readNew(errFile, errPos, "stderr");
+		}, 200);
+
+		return () => {
+			if (stopped) return;
+			stopped = true;
+			clearInterval(interval);
+			// Final flush to catch the tail end of output written between the
+			// last poll and child exit.
+			outPos = readNew(outFile, outPos, "stdout");
+			errPos = readNew(errFile, errPos, "stderr");
+		};
+	}
+
+	/**
+	 * Resume a command-type step that was running when the gateway died.
+	 *
+	 * Strategy (see `ActiveVerification` jsdoc for context):
+	 *
+	 * 1. If `exitFile` already exists — the wrapper completed before we got
+	 *    back — read it plus the stdout/stderr tails and finalize via the
+	 *    same `matchExpectFailure` / pass-fail logic the live path uses.
+	 * 2. Else if `pid` is still alive — the detached child outlived the
+	 *    gateway and is still chugging away. Poll for the exit file with
+	 *    the remaining timeout budget computed from `startedAt`.
+	 * 3. Else — process is gone and there's no exit file. The child was
+	 *    killed (OOM, manual kill, antivirus). Finalize as failed.
+	 *
+	 * Returns null when there's nothing to resume (no exit file recorded,
+	 * e.g. the step pre-dates Layer 1 or used the attached-mode fallback)
+	 * so the caller can fall through to the legacy "no session id" failure.
+	 */
+	private async _resumeCommandStep(
+		v: ActiveVerification,
+		step: ActiveVerification["steps"][number],
+	): Promise<{ name: string; type: string; passed: boolean; output: string; duration_ms: number } | null> {
+		if (!step.exitFile && !step.pid) return null;
+
+		const readFiles = (): { out: string; err: string } => {
+			let out = "";
+			let err = "";
+			try { if (step.outFile) out = fs.readFileSync(step.outFile, "utf8"); } catch { /* ignore */ }
+			try { if (step.errFile) err = fs.readFileSync(step.errFile, "utf8"); } catch { /* ignore */ }
+			return { out, err };
+		};
+		const readExitFile = (): number | null => {
+			if (!step.exitFile) return null;
+			try {
+				const raw = fs.readFileSync(step.exitFile, "utf8").trim();
+				const n = parseInt(raw, 10);
+				return Number.isFinite(n) ? n : null;
+			} catch {
+				return null;
+			}
+		};
+		const finalize = (code: number | null) => {
+			const { out, err } = readFiles();
+			const output = (out + "\n" + err).trim().slice(-5000);
+			let passed: boolean;
+			let displayOutput: string;
+			if (step.expectFailure) {
+				const m = matchExpectFailure(code, output, step.errorPattern);
+				passed = m.passed;
+				displayOutput = m.output;
+			} else {
+				passed = code === 0;
+				displayOutput = output || `exit code ${code}`;
+			}
+			return {
+				name: step.name,
+				type: step.type,
+				passed,
+				output: displayOutput,
+				duration_ms: Date.now() - step.startedAt,
+			};
+		};
+
+		// Case A: child already finished before we restarted.
+		if (step.exitFile && fs.existsSync(step.exitFile)) {
+			console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
+			return finalize(readExitFile());
+		}
+
+		// Cross-platform PID-reuse safeguard: Node doesn't expose a per-PID OS
+		// start time, so we can't directly tie a live pid back to the same
+		// process we spawned. As a pragmatic floor: if the recorded
+		// startTimeMs is older than the step's own timeout, the original
+		// child must already have exited (timeout would have killed it),
+		// so a live `step.pid` here is almost certainly a reused/recycled
+		// pid belonging to an unrelated process. Skip Case B and fall
+		// through to Case C (finalize as failed).
+		const timeoutSec = step.timeoutSec ?? 300;
+		const pidLooksReused = typeof step.startTimeMs === "number"
+			&& (Date.now() - step.startTimeMs) > timeoutSec * 1000;
+
+		// Case B: child still running on the host.
+		if (!pidLooksReused && typeof step.pid === "number" && isPidAlive(step.pid)) {
+			const timeoutMs = timeoutSec * 1000;
+			const deadline = step.startedAt + timeoutMs;
+			console.log(`[verification] Resume: pid ${step.pid} for "${step.name}" still alive — polling for exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
+
+			// Tail the surviving child's stdout/stderr files so UI clients see
+			// live output during the resume wait (and so subsequent gate_status
+			// calls show the streamed tail). Mirrors the live-spawn path.
+			let stopTail: (() => void) | undefined;
+			if (step.outFile && step.errFile) {
+				const stepIndex = v.steps.indexOf(step);
+				if (stepIndex >= 0) {
+					stopTail = this._startFileTailers(step.outFile, step.errFile, {
+						goalId: v.goalId,
+						gateId: v.gateId,
+						signalId: v.signalId,
+						stepIndex,
+					});
+				}
+			}
+
+			try {
+				while (Date.now() < deadline) {
+					await new Promise(r => setTimeout(r, 500));
+					if (step.exitFile && fs.existsSync(step.exitFile)) {
+						return finalize(readExitFile());
+					}
+					if (!isPidAlive(step.pid)) break;
+				}
+				// One last check after the loop
+				if (step.exitFile && fs.existsSync(step.exitFile)) {
+					return finalize(readExitFile());
+				}
+				// Timed out or process died without writing the exit file
+				// The original spawn used detached:true, so the persisted pid is
+				// also the pgid. killTreeByPid handles negative-pid kill (POSIX)
+				// and taskkill /T /F (Windows) so we reap descendants too.
+				if (step.pid) try { killTreeByPid(step.pid, "SIGKILL"); } catch { /* already dead */ }
+				return {
+					name: step.name,
+					type: step.type,
+					passed: false,
+					output: "Verification command did not produce an exit code (timeout or process died after restart).",
+					duration_ms: Date.now() - step.startedAt,
+				};
+			} finally {
+				if (stopTail) stopTail();
+			}
+		}
+
+		// Case C: process gone, no exit file — killed by something between our
+		// last persist and now.
+		console.log(`[verification] Resume: pid/exit-file gone for "${step.name}" — marking failed`);
+		return {
+			name: step.name,
+			type: step.type,
+			passed: false,
+			output: "Verification command process died during gateway restart before producing an exit code.",
+			duration_ms: Date.now() - step.startedAt,
+		};
+	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,
 	// stale-pointer invalidation, workflow-less recovery, paused != failed,
