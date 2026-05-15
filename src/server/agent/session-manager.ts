@@ -1422,6 +1422,14 @@ export class SessionManager {
 		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
 		if (session.lastTurnErrored) {
 			const consec = session.consecutiveErrorTurns ?? 0;
+
+			// Always cancel any pending auto-retry timer when a new user prompt
+			// arrives — regardless of whether we're about to park (cap reached)
+			// or implicitly unstick. A parked prompt at the cap must not leave a
+			// retry banner/timer running, since the user has signalled fresh intent
+			// and the next action will be an explicit Retry click or fix upstream.
+			this.cancelPendingAutoRetry(session, "new-prompt");
+
 			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
 				// Cap reached — park. Human must click Retry (or fix upstream) to drain.
 				console.log(
@@ -1441,9 +1449,6 @@ export class SessionManager {
 			console.log(
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
-
-			// Cancel any pending auto-retry timer so it doesn't fire a second dispatch.
-			this.cancelPendingAutoRetry(session, "new-prompt");
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
