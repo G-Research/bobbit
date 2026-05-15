@@ -11,11 +11,11 @@ live in `SUBGOALS-SPEC.md` (root of the repo).
 > default OFF. With the toggle off the gated feature surface — the
 > `parent` workflow, the nine `Children`-group tools, the Plan / Children
 > tabs on the goal dashboard, sidebar nesting, mutation-pending cards,
-> and the nested-goal REST routes (spawn-child, plan, integrate-child,
-> pause, resume, policy, mutation) — is hidden or returns
-> `403 SUBGOALS_DISABLED`. Note: `GET /api/goals/:id/descendants` and
-> `GET /api/goals/:id/tree-cost` are **not** gated — they power the
-> dashboard Plan tab which is core functionality. The toggle will be retired and the feature
+> the nested-goal REST routes (spawn-child, plan, integrate-child, pause,
+> resume, policy, mutation), and `GET /api/goals/:id/tree-cost` — is
+> hidden or returns `403 SUBGOALS_DISABLED`. Note:
+> `GET /api/goals/:id/descendants` is **not** gated — it powers the
+> dashboard Plan tab which is core functionality regardless of the toggle. The toggle will be retired and the feature
 > promoted out of experimental status once the parent goal's audit
 > completes. See `docs/design/subgoals-experimental-toggle.md` for the
 > gating implementation.
@@ -714,13 +714,14 @@ every cascade-affecting route. The UI is the cascade-policy authority:
 descendants exist, so the UI can prompt for confirmation.
 
 `POST /api/goals/:id/team/teardown?cascade=true|false` mirrors the same
-contract for stopping a parent's team. With `cascade=false` (the
-default), the server pre-flights the descendant tree (BFS via
+contract for stopping a parent's team. The `?cascade=` parameter is
+**required** — omitting it returns `422 CASCADE_REQUIRED`. With
+`cascade=false`, the server pre-flights the descendant tree (BFS via
 `parentGoalId`, skips archived) and returns
 **409 `{code: "HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}`**
 if any descendant goal still has a live team. With `cascade=true`, walks
-descendants depth-first, tears down each team, then the parent;
-returns `{ok: true, toreDown: N, errors: []}`. Each teardown is
+descendants **bottom-up (leaves first)**, tears down each team, then
+the parent; returns `{ok: true, toreDown: N, errors: []}`. Each teardown is
 best-effort (`getTeamState` guard + try/catch) so one missing/error team
 doesn't stop the rest. The client wrapper `teardownTeamWithDialog(goalId)`
 in `src/app/api.ts` pre-flights `cascade=false` and on 409 opens
