@@ -4,7 +4,7 @@
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
-> Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md). This page is the operator/agent-facing reference; the design doc is the architectural source of truth.
+> This page is the operator/agent-facing reference. [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) is the original design document — useful for architecture rationale and historical context, but superseded by this page for current configuration and troubleshooting.
 
 ## Motivation
 
@@ -243,7 +243,7 @@ Renderers are wired in two places:
 
 ## See also
 
-- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — full design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan).
+- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — original design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan). Historical reference; this page supersedes it for current operator guidance.
 - [`src/server/lsp/`](../src/server/lsp/) — supervisor, adapters, sandbox bridge.
 - [`defaults/tools/lsp/`](../defaults/tools/lsp/) — tool YAMLs (budget-pinned by `tests/tool-description-budget.test.ts`).
 - [docs/internals.md](internals.md) — cross-references to surrounding subsystems.
