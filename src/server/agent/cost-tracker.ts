@@ -381,6 +381,7 @@ export function computeTreeCost(
 	// because the `rootGoalId` stamp on every persisted goal is consistent
 	// with its `parentGoalId` chain (see goal-manager.createGoal). Include
 	// archived nodes — their cost survives archival.
+	// pinned by tests/cost-tree-archived.test.ts::computeTreeCost includes archived descendants in breakdown
 	const treeMembers = walkGoalSubtree(rootGoalId, allGoals as PersistedGoal[], {
 		includeRoot: true,
 		includeArchived: true,
