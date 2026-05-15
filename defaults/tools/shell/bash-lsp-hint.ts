@@ -132,12 +132,12 @@ export function parseTopLevelGrep(command: string): ParsedGrep | null {
 
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i];
-		if (a.hadQuotes) {
-			positionals.push(a.value);
-			continue;
-		}
 		const v = a.value;
-		// Long flag with `=` form
+		// Long flag with `=` form. We allow this branch even if the token
+		// crossed a quote boundary, because agents commonly write
+		// `--include='*.ts'` / `--regexp="foo"` and the tokenizer merges
+		// the unquoted flag prefix with the quoted value into a single
+		// token whose `hadQuotes` flag is true.
 		if (v.startsWith("--") && v.includes("=")) {
 			const eq = v.indexOf("=");
 			const flag = v.slice(0, eq);
@@ -147,6 +147,10 @@ export function parseTopLevelGrep(command: string): ParsedGrep | null {
 			} else if (flag === "--include" || flag === "--glob" || flag === "--iglob") {
 				globsFromFlag.push(val);
 			}
+			continue;
+		}
+		if (a.hadQuotes) {
+			positionals.push(v);
 			continue;
 		}
 		// Flag taking a separate value
@@ -191,6 +195,11 @@ function targetIsSource(target: string): boolean {
 	return false;
 }
 
+// Lines like `grep: foo.ts: No such file or directory` produced by the
+// grep family on its stderr. We must NOT treat error-only output as
+// grep matches worth annotating with an LSP hint.
+const GREP_ERROR_LINE_RE = /^(?:grep|rg|ripgrep|ag|ack):\s/;
+
 function bashHasOutput(result: GrepLikeResult | undefined | null): boolean {
 	if (!result) return false;
 	if ((result as GrepLikeResult).isError === true) return false;
@@ -202,7 +211,13 @@ function bashHasOutput(result: GrepLikeResult | undefined | null): boolean {
 		// The bash tool prefixes output with "Exit code: N\n" — strip that
 		// before deciding whether grep itself produced anything.
 		const stripped = text.replace(/^Exit code:\s*\S+\s*\n?/, "").trim();
-		if (stripped.length > 0) return true;
+		if (stripped.length === 0) continue;
+		// If every remaining non-empty line is a grep/rg error message,
+		// treat it as no output. Otherwise we'd misleadingly prepend an
+		// `[lsp-hint]` to a failed search.
+		const lines = stripped.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+		if (lines.length > 0 && lines.every(l => GREP_ERROR_LINE_RE.test(l))) continue;
+		return true;
 	}
 	return false;
 }

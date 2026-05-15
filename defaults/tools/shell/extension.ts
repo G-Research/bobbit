@@ -20,6 +20,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { createWriteStream } from "node:fs";
 import { lspHintForBashCommand } from "./bash-lsp-hint.js";
+import { recordHintEmitted } from "../_shared/lsp-telemetry.ts";
 
 const MAX_BYTES = 50 * 1024; // 50KB output limit
 const MAX_LINES = 2000;
@@ -167,6 +168,9 @@ export default function (pi: ExtensionAPI) {
 					const hint = lspHintForBashCommand(originalCommand, result as any);
 					if (!hint) return result;
 					const existing = Array.isArray(result.content) ? result.content : [];
+					// Best-effort telemetry; fire-and-forget. Failures inside
+					// `recordHintEmitted` are swallowed by the helper.
+					void recordHintEmitted();
 					return { ...result, content: [{ type: "text" as const, text: hint }, ...existing] };
 				} catch { return result; }
 			};

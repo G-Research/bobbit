@@ -123,6 +123,37 @@ describe("lspHintForBashCommand — emits for symbol-shaped grep-like bash comma
 		assert.ok(hint, "expected a hint when --include targets *.ts");
 		assertHintShape(hint!);
 	});
+
+	it("`--glob='**/*.ts'` ripgrep flag is recognised as TS/JS target", () => {
+		const hint = lspHintForBashCommand(
+			"rg --glob='**/*.ts' \"archiveGoal\" .",
+			bashResult(SAMPLE_HIT),
+		);
+		assert.ok(hint, "expected a hint when --glob targets **/*.ts");
+		assertHintShape(hint!);
+	});
+
+	it("`--regexp='archiveGoal'` provides the pattern via long flag", () => {
+		const hint = lspHintForBashCommand(
+			"grep -rn --regexp='archiveGoal' src/",
+			bashResult(SAMPLE_HIT),
+		);
+		assert.ok(hint, "expected a hint when pattern comes from --regexp= flag");
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("archiveGoal"),
+			`expected identifier from --regexp= in hint: ${hint}`,
+		);
+	});
+
+	it("`--include=\"*.ts\"` (double-quoted) is also recognised", () => {
+		const hint = lspHintForBashCommand(
+			'grep -rn --include="*.ts" "archiveGoal" .',
+			bashResult(SAMPLE_HIT),
+		);
+		assert.ok(hint, "expected a hint when --include is double-quoted");
+		assertHintShape(hint!);
+	});
 });
 
 describe("lspHintForBashCommand — suppresses hint for non-source or non-grep cases", () => {
@@ -188,6 +219,33 @@ describe("lspHintForBashCommand — suppresses hint for non-source or non-grep c
 			bashResult("docs/x.md:1:archiveGoal"),
 		);
 		assert.equal(hint, null);
+	});
+
+	it("grep failure output (`No such file or directory`) -> no hint", () => {
+		const hint = lspHintForBashCommand(
+			'grep -rn "archiveGoal" missing.ts',
+			bashResult("Exit code: 2\ngrep: missing.ts: No such file or directory"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("ripgrep failure-only output -> no hint", () => {
+		const hint = lspHintForBashCommand(
+			'rg "archiveGoal" missing.ts',
+			bashResult("Exit code: 2\nrg: missing.ts: No such file or directory (os error 2)"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("mixed grep error + a real match -> hint emitted (real output present)", () => {
+		const hint = lspHintForBashCommand(
+			'grep -rn "archiveGoal" missing.ts src/app/',
+			bashResult(
+				"Exit code: 2\ngrep: missing.ts: No such file or directory\nsrc/app/goals.ts:42:archiveGoal",
+			),
+		);
+		assert.ok(hint, "expected hint when at least one line is a real match");
+		assertHintShape(hint!);
 	});
 });
 
