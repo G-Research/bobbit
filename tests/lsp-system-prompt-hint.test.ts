@@ -57,6 +57,16 @@ describe("LSP symbol-lookup hint — buildLspSymbolLookupHint()", () => {
 		assert.ok(hint.includes(LSP_HINT_MARKER), "Hint must contain the marker heading");
 	});
 
+	it("hint copy mentions rg and shell text search alongside grep", () => {
+		const hint = buildLspSymbolLookupHint(undefined);
+		assert.ok(hint !== undefined);
+		assert.ok(hint.includes("rg"), "Hint should mention `rg`");
+		assert.ok(
+			hint.includes("shell text search") || hint.includes("git grep"),
+			"Hint should mention shell text search or `git grep`",
+		);
+	});
+
 	it("returns the hint string when allowedTools is undefined (unrestricted)", () => {
 		const hint = buildLspSymbolLookupHint(undefined);
 		assert.ok(hint !== undefined, "Expected hint when allowedTools is unrestricted");
