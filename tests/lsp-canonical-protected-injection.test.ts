@@ -722,6 +722,194 @@ describe("assembleSystemPrompt — global de-duplication across late fragments",
 });
 
 // ---------------------------------------------------------------------------
+// 4e. Ordering: canonical LSP section precedes later tool/AGENTS/workflow
+//     guidance that mentions grep/rg.
+//
+//     Pins the user requirement that an agent reading the prompt top-to-bottom
+//     encounters the LSP-before-text-search rule BEFORE encountering any
+//     downstream search-tool guidance that could otherwise be obeyed in
+//     isolation. Regression target: protected injection must land in the
+//     base-prompt slot, not be appended after late fragments.
+// ---------------------------------------------------------------------------
+
+describe("assembleSystemPrompt — canonical LSP section precedes late grep/rg guidance", () => {
+	// Sentinel strings that only appear in late fragments. Used to locate the
+	// "late tool guidance" anchor without false-matching the canonical section
+	// itself (which also mentions rg/grep).
+	const TOOL_DOCS_SENTINEL = "LATE_TOOLDOCS_GREP_GUIDANCE_SENTINEL";
+	const WORKFLOW_SENTINEL = "LATE_WORKFLOW_RG_GUIDANCE_SENTINEL";
+	const AGENTS_SENTINEL = "LATE_AGENTS_GIT_GREP_GUIDANCE_SENTINEL";
+
+	it("injected canonical header precedes toolDocs grep/rg guidance", () => {
+		const basePath = writeCustomPrompt(
+			"order-tooldocs",
+			"# Acme Project Assistant\n\nBe terse. No LSP guidance here.\n",
+		);
+		const toolDocs =
+			"# Tools\n\n" +
+			"- grep(pattern, path) — search file contents with ripgrep.\n" +
+			"- rg(pattern) — text search across the worktree.\n" +
+			`Tip: use grep and rg liberally. ${TOOL_DOCS_SENTINEL}\n`;
+		const promptPath = assembleSystemPrompt("order-tooldocs", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Order",
+			goalState: "active",
+			goalSpec: "Pin ordering.\n",
+			toolDocs,
+			allowedTools: ["read", "bash", "grep", "find", "ls"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+
+		const headerIdx = content.indexOf(CANONICAL_HEADER);
+		const lateIdx = content.indexOf(TOOL_DOCS_SENTINEL);
+
+		assert.notStrictEqual(headerIdx, -1, "canonical header must be present");
+		assert.notStrictEqual(lateIdx, -1, "toolDocs sentinel must be present");
+		assert.ok(
+			headerIdx < lateIdx,
+			`canonical LSP header must appear BEFORE late toolDocs grep/rg guidance. ` +
+				`headerIdx=${headerIdx}, lateToolDocsIdx=${lateIdx}`,
+		);
+		assert.strictEqual(
+			count(content, CANONICAL_HEADER),
+			1,
+			"final prompt must still contain exactly one canonical LSP section",
+		);
+	});
+
+	it("injected canonical header precedes workflowContext grep/rg guidance", () => {
+		const basePath = writeCustomPrompt(
+			"order-workflow",
+			"# Acme Project Assistant\n\nBe terse. No LSP guidance here.\n",
+		);
+		const workflowContext =
+			"# Upstream Gates\n\n" +
+			"## Gate: Design Document (passed)\n\n" +
+			"Use rg and git grep to locate hot spots. " +
+			`${WORKFLOW_SENTINEL}\n`;
+		const promptPath = assembleSystemPrompt("order-workflow", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Order WF",
+			goalState: "active",
+			goalSpec: "Pin ordering.\n",
+			workflowContext,
+			allowedTools: ["read", "bash", "grep", "find", "ls"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+
+		const headerIdx = content.indexOf(CANONICAL_HEADER);
+		const lateIdx = content.indexOf(WORKFLOW_SENTINEL);
+
+		assert.notStrictEqual(headerIdx, -1, "canonical header must be present");
+		assert.notStrictEqual(lateIdx, -1, "workflow sentinel must be present");
+		assert.ok(
+			headerIdx < lateIdx,
+			`canonical LSP header must appear BEFORE workflowContext grep/rg guidance. ` +
+				`headerIdx=${headerIdx}, lateWorkflowIdx=${lateIdx}`,
+		);
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+	});
+
+	it("injected canonical header precedes AGENTS.md grep/rg guidance", () => {
+		// Create a cwd that contains an AGENTS.md mentioning grep/rg, simulating
+		// a project that documents text-search habits in its agent guide.
+		const projectDir = path.join(tmpDir, "order-agents-cwd");
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(projectDir, "AGENTS.md"),
+			"# Project guide\n\nUse rg and git grep to find symbols. " +
+				`${AGENTS_SENTINEL}\n`,
+			"utf-8",
+		);
+		const basePath = writeCustomPrompt(
+			"order-agents",
+			"# Acme Project Assistant\n\nBe terse. No LSP guidance here.\n",
+		);
+		const promptPath = assembleSystemPrompt("order-agents", {
+			baseSystemPromptPath: basePath,
+			cwd: projectDir,
+			goalTitle: "Order AGENTS",
+			goalState: "active",
+			goalSpec: "Pin ordering.\n",
+			allowedTools: ["read", "bash", "grep", "find", "ls"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+
+		const headerIdx = content.indexOf(CANONICAL_HEADER);
+		const lateIdx = content.indexOf(AGENTS_SENTINEL);
+
+		assert.notStrictEqual(headerIdx, -1, "canonical header must be present");
+		assert.notStrictEqual(lateIdx, -1, "AGENTS.md sentinel must be present");
+		assert.ok(
+			headerIdx < lateIdx,
+			`canonical LSP header must appear BEFORE AGENTS.md grep/rg guidance. ` +
+				`headerIdx=${headerIdx}, lateAgentsIdx=${lateIdx}`,
+		);
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+	});
+
+	it("canonical header precedes EVERY late fragment when all are present", () => {
+		const projectDir = path.join(tmpDir, "order-all-cwd");
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(projectDir, "AGENTS.md"),
+			"# Project guide\n\nUse grep. " + AGENTS_SENTINEL + "\n",
+			"utf-8",
+		);
+		const basePath = writeCustomPrompt(
+			"order-all",
+			"# Acme Project Assistant\n\nBe terse. No LSP guidance here.\n",
+		);
+		const promptPath = assembleSystemPrompt("order-all", {
+			baseSystemPromptPath: basePath,
+			cwd: projectDir,
+			goalTitle: "Order All",
+			goalState: "active",
+			goalSpec: "Pin ordering.\n",
+			toolDocs:
+				"# Tools\n\n- grep(pattern). - rg(pattern). " +
+				TOOL_DOCS_SENTINEL +
+				"\n",
+			workflowContext:
+				"# Upstream Gates\n\n## Gate: Design (passed)\n\n" +
+				"Use rg. " +
+				WORKFLOW_SENTINEL +
+				"\n",
+			allowedTools: ["read", "bash", "grep", "find", "ls"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+
+		const headerIdx = content.indexOf(CANONICAL_HEADER);
+		assert.notStrictEqual(headerIdx, -1, "canonical header must be present");
+		assert.strictEqual(
+			count(content, CANONICAL_HEADER),
+			1,
+			"final prompt must contain exactly one canonical LSP section across all late fragments",
+		);
+
+		for (const [label, sentinel] of [
+			["toolDocs", TOOL_DOCS_SENTINEL],
+			["workflowContext", WORKFLOW_SENTINEL],
+			["AGENTS.md", AGENTS_SENTINEL],
+		] as const) {
+			const lateIdx = content.indexOf(sentinel);
+			assert.notStrictEqual(lateIdx, -1, `${label} sentinel must be present`);
+			assert.ok(
+				headerIdx < lateIdx,
+				`canonical LSP header must appear BEFORE ${label} grep/rg guidance. ` +
+					`headerIdx=${headerIdx}, ${label}Idx=${lateIdx}`,
+			);
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
 // 5. Existing default-prompt behavior still holds (regression guard)
 // ---------------------------------------------------------------------------
 
