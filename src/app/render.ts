@@ -1899,20 +1899,18 @@ function staffPreviewPanel() {
 						},
 					})}
 				</div>
-				${state.sandboxStatus?.configured ? html`
 				<div>
-					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus.available && state.sandboxStatus.imageExists) ? "opacity-40 pointer-events-none" : ""}">
+					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists) ? "opacity-40 pointer-events-none" : ""}">
 						<input type="checkbox" class="toggle-switch" .checked=${_staffSandboxed}
-							?disabled=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)}
+							?disabled=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)}
 							@change=${(e: Event) => { _staffSandboxed = (e.target as HTMLInputElement).checked; renderApp(); }} />
 						<span class="text-xs text-muted-foreground font-medium">Sandbox (Docker)</span>
-						<span title=${!(state.sandboxStatus.available && state.sandboxStatus.imageExists)
+						<span title=${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists)
 							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
 							: "Runs this staff agent in an isolated Docker container with restricted filesystem and network access"}
 							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 					</label>
 				</div>
-				` : ""}
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
 						<label class="text-xs text-muted-foreground font-medium">Triggers</label>

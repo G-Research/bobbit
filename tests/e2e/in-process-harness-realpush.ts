@@ -49,7 +49,7 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -159,7 +159,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// acceptCanonical=true: macOS TMPDIR is a symlink (/var/folders
+				// → /private/var/folders); without it the register 400s.
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 

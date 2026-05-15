@@ -215,6 +215,7 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef?: stri
 	return {
 		branch,
 		primaryBranch,
+		primaryRef: pref,
 		isOnPrimary,
 		status,
 		hasUpstream,
@@ -280,6 +281,10 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		'git diff --shortstat "$PREF...HEAD" 2>/dev/null || true',
 		'printf "\\0"',
 		'git diff --shortstat HEAD 2>/dev/null || true',
+		'printf "\\0"',
+		// Echo the resolved PREF so the host can report which ref was actually
+		// used (`origin/<primary>` if it exists, else the bare local branch).
+		'printf "%s" "$PREF"',
 	].join("\n");
 
 	const { stdout } = await execFileAsync(
@@ -338,9 +343,15 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 
 	const { status, clean, summary } = parsePorcelain(sections[4] || "");
 
+	// Section 12: the resolved PREF echoed by the batch script (see above).
+	// Fall back to the host-side mirror of the same `origin/<primary>` vs bare
+	// branch decision when the section is missing (older container script).
+	const primaryRef = sections[12] && sections[12] !== "" ? sections[12] : primaryBranch;
+
 	return {
 		branch,
 		primaryBranch,
+		primaryRef,
 		isOnPrimary,
 		status,
 		hasUpstream,

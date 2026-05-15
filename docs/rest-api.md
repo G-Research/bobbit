@@ -216,13 +216,15 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders in a dedicated collapsible **Staff** sub-section under the owning project in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)). The staff-creation **assistant session** (`assistantType: "staff"`) is a normal session and appears in that project's Sessions list while open — it is not a staff agent until `propose_staff` is accepted.
 
+For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md).
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes a `sandboxed` boolean (inherited from project config). Returns `{ staff: PersistedStaff[] }`. |
+| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes the persisted `sandboxed` boolean (chosen at creation, immutable thereafter — see [staff-agents.md](staff-agents.md)). Returns `{ staff: PersistedStaff[] }`. |
 | `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }`. Consumed by the sidebar's orphan banner. |
-| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes `sandboxed` boolean) |
-| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). Subject to the [project resolution contract](#project-resolution-contract). |
-| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`) |
+| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes the persisted `sandboxed` boolean) |
+| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). `sandboxed` defaults to `false`; the value is persisted on the record and cannot be changed afterwards. Subject to the [project resolution contract](#project-resolution-contract). |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). |
 | `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, and re-indexes search; the existing worktree branch is preserved (the next wake rebases against the new project's primary branch). Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing or not a non-empty string; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |

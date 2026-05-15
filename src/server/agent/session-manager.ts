@@ -5,7 +5,12 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { WebSocket } from "ws";
-import type { ServerMessage, QueuedMessage } from "../ws/protocol.js";
+import type {
+	ServerMessage,
+	QueuedMessage,
+	AutoRetryPendingEvent,
+	AutoRetryCancelledEvent,
+} from "../ws/protocol.js";
 import { EventBuffer } from "./event-buffer.js";
 import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -41,7 +46,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
-import { isTransientReviewError } from "./verification-logic.js";
+import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -67,6 +72,7 @@ import {
 	handleSetupFailure,
 	sendDelegatePrompt,
 	DELEGATE_SPAWN_TIMEOUT_MS,
+	nextBackoffDelay,
 } from "./session-setup.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -1434,6 +1440,14 @@ export class SessionManager {
 		// (up to MAX_CONSECUTIVE_ERROR_TURNS) or park the message in the queue.
 		if (session.lastTurnErrored) {
 			const consec = session.consecutiveErrorTurns ?? 0;
+
+			// Always cancel any pending auto-retry timer when a new user prompt
+			// arrives — regardless of whether we're about to park (cap reached)
+			// or implicitly unstick. A parked prompt at the cap must not leave a
+			// retry banner/timer running, since the user has signalled fresh intent
+			// and the next action will be an explicit Retry click or fix upstream.
+			this.cancelPendingAutoRetry(session, "new-prompt");
+
 			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
 				// Cap reached — park. Human must click Retry (or fix upstream) to drain.
 				console.log(
@@ -1453,12 +1467,6 @@ export class SessionManager {
 			console.log(
 				`[session-manager] Session ${session.id} implicit unstick from enqueuePrompt (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
 			);
-
-			// Cancel any pending auto-retry timer so it doesn't fire a second dispatch.
-			if (session.pendingAutoRetryTimer) {
-				clearTimeout(session.pendingAutoRetryTimer);
-				session.pendingAutoRetryTimer = undefined;
-			}
 
 			// Clear error state. Do NOT reset consecutiveErrorTurns — that only
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
@@ -2036,32 +2044,69 @@ export class SessionManager {
 	}
 
 	/**
-	 * Auto-retry a turn that ended with a transient model/streaming error
-	 * (e.g. malformed tool-call JSON from input_json_delta accumulation, or a
-	 * transport blip matching TRANSIENT_ERROR_PATTERNS). Bounded retries with
-	 * exponential backoff; after the cap, the error surfaces to the user as
-	 * before and they can manually retry.
+	 * Auto-retry a turn that ended with a transient model/streaming error.
+	 *
+	 * Two policies, selected by error class:
+	 *
+	 * - Provider overload / rate-limit (`isProviderBackoffError`, e.g.
+	 *   Anthropic `overloaded_error`, `rate_limit_error`, HTTP 429/529):
+	 *   effectively unbounded retries with exponential backoff capped at
+	 *   5 minutes and ±20% jitter. Overload events can legitimately last
+	 *   10+ minutes; surfacing the error to the user is worse than waiting.
+	 *
+	 * - Other transient glitches (malformed tool-call JSON, ECONNRESET, etc.):
+	 *   bounded 3 attempts at 1s/2s/4s, after which the error surfaces and
+	 *   the user can manually retry.
 	 */
 	private maybeAutoRetryTransient(session: SessionInfo): void {
-		const MAX_ATTEMPTS = 3;
+		const BOUNDED_MAX_ATTEMPTS = 3;
+		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
 		const errMsg = session.lastTurnErrorMessage || "";
 		if (!errMsg) return;
 		if (!isTransientReviewError(errMsg)) return;
 
+		const isBackoff = isProviderBackoffError(errMsg);
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
-		if (attempt > MAX_ATTEMPTS) {
+
+		if (!isBackoff && attempt > BOUNDED_MAX_ATTEMPTS) {
 			console.warn(
-				`[session-manager] Session ${session.id} exhausted ${MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
+				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
 			return;
 		}
 		session.transientRetryAttempts = attempt;
 
-		const delayMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-		console.log(
-			`[session-manager] Session ${session.id} turn failed transiently (attempt ${attempt}/${MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
-		);
+		const delayMs = isBackoff
+			? nextBackoffDelay(attempt, { baseMs: 1000, maxMs: PROVIDER_BACKOFF_MAX_MS, jitterRatio: 0.2 })
+			: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
+
+		if (isBackoff) {
+			console.log(
+				`[session-manager] Session ${session.id} hit provider overload/rate-limit (attempt ${attempt}); auto-retrying in ${Math.round(delayMs / 1000)}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		} else {
+			console.log(
+				`[session-manager] Session ${session.id} turn failed transiently (attempt ${attempt}/${BOUNDED_MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		}
+
+		// Visible UI notification while the retry timer is pending. The session
+		// status remains "idle" (set by the agent_end handler) but we broadcast
+		// a synthetic event so the UI can show "Retrying in Xs due to provider
+		// overload…" instead of looking frozen.
+		const pendingEvent: AutoRetryPendingEvent = {
+			type: "auto_retry_pending",
+			reason: isBackoff ? "provider-overload" : "transient-error",
+			retryDelayMs: Math.round(delayMs),
+			attempt,
+			scheduledAt: Date.now(),
+			error: errMsg.slice(0, 200),
+		};
+		broadcast(session.clients, {
+			type: "event",
+			data: pendingEvent,
+		});
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = setTimeout(() => {
@@ -2069,10 +2114,37 @@ export class SessionManager {
 			// Session may have been terminated in the meantime
 			if (!this.sessions.has(session.id)) return;
 			if (session.status !== "idle") return; // user sent something, or already retrying
-			this.retryLastPrompt(session.id).catch((err) => {
+			// Auto path: preserve `transientRetryAttempts` so successive overload
+			// failures continue growing the backoff toward the 5-minute cap.
+			this.retryLastPrompt(session.id, { auto: true }).catch((err) => {
 				console.error(`[session-manager] Auto-retry failed for session ${session.id}:`, err);
 			});
 		}, delayMs);
+	}
+
+	/**
+	 * Cancel any pending auto-retry timer for this session and broadcast a
+	 * synthetic `auto_retry_cancelled` event so UI banners can clear. Safe to
+	 * call when no timer is pending — no-op in that case.
+	 */
+	private cancelPendingAutoRetry(
+		session: SessionInfo,
+		reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown",
+	): void {
+		if (!session.pendingAutoRetryTimer) return;
+		clearTimeout(session.pendingAutoRetryTimer);
+		session.pendingAutoRetryTimer = undefined;
+		if (reason !== "shutdown" && session.clients.size > 0) {
+			const cancelledEvent: AutoRetryCancelledEvent = {
+				type: "auto_retry_cancelled",
+				reason,
+				cancelledAt: Date.now(),
+			};
+			broadcast(session.clients, {
+				type: "event",
+				data: cancelledEvent,
+			});
+		}
 	}
 
 	/**
@@ -2080,19 +2152,26 @@ export class SessionManager {
 	 * - Fresh response error (no tool calls): re-sends the original user prompt
 	 * - Mid-work error (tool calls already executed): sends a system continuation
 	 */
-	async retryLastPrompt(sessionId: string): Promise<void> {
+	async retryLastPrompt(sessionId: string, opts?: { auto?: boolean }): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
+		const isAuto = opts?.auto === true;
 		const hadToolCalls = session.turnHadToolCalls;
 		session.lastTurnErrored = false;
 		session.turnHadToolCalls = false;
 		// Explicit retry resets the cap — human intervention gets a fresh budget.
-		session.consecutiveErrorTurns = 0;
-		if (session.pendingAutoRetryTimer) {
-			clearTimeout(session.pendingAutoRetryTimer);
-			session.pendingAutoRetryTimer = undefined;
+		// Auto retry must NOT reset, or the backoff would never grow toward the cap.
+		if (!isAuto) {
+			session.consecutiveErrorTurns = 0;
+			// Explicit user retry also resets the transient-retry budget so the
+			// next failure starts again at the 1s base. The auto-retry timer
+			// path preserves this counter so the delay grows toward the cap.
+			session.transientRetryAttempts = 0;
 		}
+		// In the auto path the timer has already cleared itself; this is a no-op.
+		// In the explicit path it tears down any in-flight pending banner.
+		this.cancelPendingAutoRetry(session, "explicit-retry");
 
 		if (hadToolCalls) {
 			// Agent was mid-work — send a system continuation prompt
@@ -4418,10 +4497,7 @@ export class SessionManager {
 		}
 
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
-		if (session.pendingAutoRetryTimer) {
-			clearTimeout(session.pendingAutoRetryTimer);
-			session.pendingAutoRetryTimer = undefined;
-		}
+		this.cancelPendingAutoRetry(session, "terminated");
 
 		// Wait for in-flight metadata persist so the agentSessionFile path is
 		// saved before we archive.  Without this, a quick terminate can race
@@ -5253,6 +5329,11 @@ export class SessionManager {
 			// and we write it here to handle the case where shutdown() races
 			// with a pending agent_end that hasn't flushed to disk yet.
 			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
+
+			// Cancel any pending transient/provider-backoff auto-retry so the
+			// timer doesn't fire after the agent has been stopped. Clients are
+			// closing in shutdown so suppress the cancellation broadcast.
+			this.cancelPendingAutoRetry(session, "shutdown");
 
 			session.unsubscribe();
 			await session.rpcClient.stop();
