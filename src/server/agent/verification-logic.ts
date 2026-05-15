@@ -51,8 +51,9 @@ export const TRANSIENT_ERROR_PATTERNS = [
 export const PROVIDER_BACKOFF_REGEXES: RegExp[] = [
 	// HTTP 429 (rate limit) and 529 (Anthropic overload) in any common SDK
 	// phrasing: "HTTP 429", "status 429", "statusCode: 429", "status code 429".
-	/\b(?:HTTP|status(?:[ _-]?code)?:?)\s*5?29\b/i,
-	/\b(?:HTTP|status(?:[ _-]?code)?:?)\s*429\b/i,
+	// NB: must list 429 and 529 explicitly — an earlier `5?29` shorthand also
+	// matched bogus "HTTP 29" and missed 429 entirely.
+	/\b(?:HTTP|status(?:[ _-]?code)?:?)\s*(?:429|529)\b/i,
 	// Provider error type markers (also covered as literal substrings above,
 	// but kept here for completeness when matched via the classifier).
 	/overloaded_error/i,
@@ -128,7 +129,11 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 
 function matchesAnyTransient(output: string): boolean {
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
-	return TRANSIENT_ERROR_REGEXES.some(re => re.test(output));
+	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
+	// Provider overload / rate-limit conditions (HTTP 429/529 phrasings) are
+	// transient too — keep `isTransientReviewError()` as the single source of
+	// truth so any consumer that gates on "transient" also covers these.
+	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
 /** Check if an LLM review error output matches a transient failure pattern. */
