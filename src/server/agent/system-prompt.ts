@@ -242,6 +242,51 @@ const LSP_RULE_ROLES: ReadonlySet<string> = new Set([
 export const LSP_TOOL_SELECTION_HEADER = "## Tool selection — symbol queries";
 
 /**
+ * Canonical header for the protected LSP-before-text-search rule injected
+ * into every assembled system prompt. Kept identical to the section header
+ * shipped in `defaults/system-prompt.md` so existing base prompts that already
+ * include the section are detected and not duplicated.
+ */
+export const LSP_CANONICAL_TOOL_SELECTION_HEADER = "## Tool selection — LSP before text search";
+
+/**
+ * Canonical LSP-before-text-search rule body. Source of truth for the
+ * `ensureCanonicalLspRule()` injection — mirrors the section in
+ * `defaults/system-prompt.md`. Must mention every LSP entry point and every
+ * common text-search fallback so a project base-prompt override that omits the
+ * header still receives the full guidance.
+ */
+export const LSP_CANONICAL_TOOL_SELECTION_RULE =
+	`${LSP_CANONICAL_TOOL_SELECTION_HEADER}\n\n` +
+	"For source-code questions about named symbols (functions, classes, types, variables, constants, interfaces) in TypeScript / JavaScript / Python source files, use LSP **before** any text/code search tool — including `grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, and any `bash`/shell command that invokes them:\n\n" +
+	"- Where is X defined? → `lsp_workspace_symbol(\"X\")` or `lsp_definition({ symbolName: \"X\" })`.\n" +
+	"- What calls X? → `lsp_references({ symbolName: \"X\" })` or `lsp_references(file, line, char)`.\n" +
+	"- What's X's type/signature? → `lsp_hover({ symbolName: \"X\" })`.\n" +
+	"- Is this file clean after my edit? → `lsp_diagnostics(file)`.\n" +
+	"- What's in this file? → `lsp_document_symbols(file)`.\n\n" +
+	"Use text search (`grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, or `bash`/shell wrappers around them) only for free text, string literals, comments, log lines, docs/configs, non-source files, or regex patterns LSP cannot express. If a text-search result includes a `[lsp-hint]` line, either switch to the suggested LSP call or explicitly state in your output why text search is correct for this query.";
+
+/**
+ * Ensure the assembled base prompt contains exactly one canonical
+ * `## Tool selection — LSP before text search` section. If the base prompt
+ * already contains the header (e.g. it came from `defaults/system-prompt.md`
+ * or a project override that preserved the rule), it is returned unchanged.
+ * Otherwise the canonical rule is appended after the base prompt with a blank
+ * line separator.
+ *
+ * This is the protected-core injection that prevents a project
+ * `.bobbit/config/system-prompt.md` override from accidentally suppressing
+ * the LSP-over-grep guidance.
+ */
+export function ensureCanonicalLspRule(basePrompt: string): string {
+	if (basePrompt.includes(LSP_CANONICAL_TOOL_SELECTION_HEADER)) return basePrompt;
+	const trimmed = basePrompt.trimEnd();
+	return trimmed
+		? `${trimmed}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`
+		: `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
+}
+
+/**
  * Return the hard LSP-over-grep tool-selection rule for a given role, or
  * `undefined` when the role is not a code-lookup role or the supplied
  * `rolePrompt` already contains the header (duplication guard).
@@ -372,11 +417,21 @@ export function assembleSystemPrompt(sessionId: string, parts: PromptParts): str
 function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | undefined {
 	const sections: string[] = [];
 
-	// 1. Global system prompt (resolve @refs relative to its directory)
+	// 1. Global system prompt (resolve @refs relative to its directory).
+	// Protected-core injection: ensure the canonical LSP-before-text-search rule
+	// is present, even when a project `.bobbit/config/system-prompt.md` override
+	// replaces the shipped default. Applied immediately after reading the base
+	// prompt and before any role/AGENTS.md/goal/tool-docs/skills sections are
+	// appended so the rule appears in the base-prompt portion of the final file.
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
 		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
-		if (base) sections.push(base);
+		const withLsp = ensureCanonicalLspRule(base);
+		if (withLsp.trim()) sections.push(withLsp);
+	} else {
+		// No base prompt configured/found — still inject the protected core rule so
+		// agents in minimal-config environments retain LSP-over-grep guidance.
+		sections.push(ensureCanonicalLspRule("").trim());
 	}
 
 	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
@@ -482,11 +537,18 @@ function estimateTokens(text: string): number {
 export function getPromptSections(parts: PromptParts): PromptSection[] {
 	const sections: PromptSection[] = [];
 
-	// 1. Global system prompt (resolve @refs relative to its directory)
+	// 1. Global system prompt (resolve @refs relative to its directory).
+	// Mirror the protected-core LSP rule injection from _assembleSystemPrompt so
+	// the inspector view matches the on-disk prompt byte-for-byte in its base
+	// section.
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
 		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
-		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
+		const withLsp = ensureCanonicalLspRule(base);
+		if (withLsp.trim()) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: withLsp, tokens: estimateTokens(withLsp) });
+	} else {
+		const injected = ensureCanonicalLspRule("").trim();
+		if (injected) sections.push({ label: "System Prompt", source: "<protected-core>", content: injected, tokens: estimateTokens(injected) });
 	}
 
 	// 2. Agent files (individual sections per file for provenance)
