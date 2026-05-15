@@ -224,4 +224,117 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		// Cleanup.
 		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
+
+	// ───────────────────────────────────────────────────────────────────────
+	// Legacy-zero child row UX — pinned by design doc
+	// `Design: transcript-pass cost backfill + legacy-zero UI`.
+	//
+	// When a child goal predates per-goal cost tracking AND its breakdown
+	// entry is exactly zero AND the `unattributableLegacy` bucket is non-zero,
+	// the dashboard must render that child row as muted+italic with a
+	// `(legacy)` marker and a tooltip pointing the user at the residual
+	// bucket. The bottom Unattributable (legacy) row itself must keep
+	// rendering unchanged so the existing data-testid pin still holds.
+	//
+	// Production dependencies are implemented in this goal: server publishes
+	// `unattributableLegacy.firstSeenAt`, and the dashboard applies
+	// `isLegacyUnattributableTreeCostRow(...)` to per-child breakdown rows.
+	// ───────────────────────────────────────────────────────────────────────
+	test("legacy-zero child row renders muted italic with (legacy) marker; bottom bucket unchanged", async ({ page, gateway }) => {
+		const projectId = await defaultProjectId();
+		if (!projectId) throw new Error("defaultProjectId() returned undefined");
+
+		// Parent + one child. The child will be backdated to predate the
+		// sidecar-era threshold and intentionally left with zero spend.
+		const parent = await createGoal({ title: "Tree-cost legacy-zero parent", projectId, team: false });
+		const rChild = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "legacy-c", title: "Tree-cost legacy child", spec: "tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement." }),
+		});
+		expect(rChild.status).toBe(201);
+		const childId = (await rChild.json()).id as string;
+
+		// Backdate the child's createdAt well before any plausible sidecar
+		// `firstSeenAt`. Goal-store `update()` deliberately excludes
+		// `createdAt`, so reach for `put()` with a cloned-and-mutated record.
+		const pcm = (gateway.sessionManager as { getProjectContextManager?: () => unknown }).getProjectContextManager?.() as {
+			getOrCreate: (pid: string) => { goalStore: { get: (id: string) => unknown; put: (g: unknown) => void } };
+		};
+		const ctx = pcm.getOrCreate(projectId);
+		const existing = ctx.goalStore.get(childId) as { createdAt: number } & Record<string, unknown> | undefined;
+		if (!existing) throw new Error(`goalStore missing child ${childId}`);
+		// Two years ago — predates per-goal cost tracking comfortably.
+		const backdatedCreatedAt = Date.now() - 2 * 365 * 24 * 3600 * 1000;
+		ctx.goalStore.put({ ...existing, createdAt: backdatedCreatedAt });
+
+		// Seed an unattributable legacy cost — `recordUsage` without `goalId`
+		// flows directly into `getUnattributableLegacyCost()`.
+		const costTracker = (gateway.sessionManager as { getCostTracker: (pid: string) => { recordUsage: (sid: string, u: { cost: number; inputTokens: number; outputTokens: number }, goalId?: string) => void } }).getCostTracker(projectId);
+		const seedRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		costTracker.recordUsage(`tc-legacy-orphan-${seedRunId}`, { cost: 1.23, inputTokens: 2_000, outputTokens: 1_000 });
+
+		// REST sanity — endpoint must expose the residual bucket with a
+		// `firstSeenAt` the UI can use as a threshold.
+		const treeRes = await apiFetch(`/api/goals/${parent.id}/tree-cost`);
+		expect(treeRes.status).toBe(200);
+		const tree = await treeRes.json();
+		expect(tree.unattributableLegacy, "non-empty unattributableLegacy bucket").toBeTruthy();
+		expect(tree.unattributableLegacy.costUsd).toBeGreaterThan(0);
+		expect(typeof tree.unattributableLegacy.firstSeenAt, "server must publish firstSeenAt for UI threshold").toBe("number");
+		expect(tree.unattributableLegacy.firstSeenAt).toBeGreaterThan(backdatedCreatedAt);
+
+		// Child must appear in breakdown with strict-zero cost/tokens — that
+		// is the classification precondition for the (legacy) treatment.
+		const childRow = tree.breakdown.find((b: { goalId: string }) => b.goalId === childId) as { costUsd: number; tokensIn: number; tokensOut: number } | undefined;
+		expect(childRow, "child must appear in breakdown").toBeTruthy();
+		expect(childRow!.costUsd).toBe(0);
+		expect(childRow!.tokensIn).toBe(0);
+		expect(childRow!.tokensOut).toBe(0);
+
+		// ── UI ──
+		await openApp(page);
+		await navigateToHash(page, `#/goal/${parent.id as string}`);
+		await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
+
+		const toggle = page.locator('[data-testid="tree-cost-toggle"]').first();
+		await toggle.click();
+		const breakdown = page.locator('[data-testid="tree-cost-breakdown"]').first();
+		await expect(breakdown).toBeVisible({ timeout: 5_000 });
+
+		// Legacy child row — testid is preserved per design doc.
+		const legacyRow = page.locator(`[data-testid="tree-cost-row-${childId}"]`).first();
+		await expect(legacyRow).toBeVisible({ timeout: 5_000 });
+
+		// Muted-italic styling. Implementation may apply italic to the row
+		// or to any inner cell; assert at least one resolves to italic.
+		const rowFontStyle = await legacyRow.evaluate((el) => getComputedStyle(el as HTMLElement).fontStyle);
+		const cellFontStyle = await legacyRow.locator("td").first().evaluate((el) => getComputedStyle(el as HTMLElement).fontStyle);
+		expect([rowFontStyle, cellFontStyle], "legacy-zero row must be italic somewhere").toContain("italic");
+
+		// `(legacy)` marker appears in the row text (title or cost cell).
+		const rowText = (await legacyRow.textContent() ?? "").toLowerCase();
+		expect(rowText).toContain("(legacy)");
+
+		// Tooltip points the user at the bottom bucket. The `title` attr
+		// is acceptable on the row or any descendant cell.
+		const tooltips = await legacyRow.evaluate((el) => {
+			const self = (el as HTMLElement).getAttribute("title") ?? "";
+			const children = Array.from((el as HTMLElement).querySelectorAll("[title]")).map(c => c.getAttribute("title") ?? "");
+			return [self, ...children].filter(Boolean).join(" | ");
+		});
+		expect(tooltips.toLowerCase()).toContain("legacy");
+		expect(tooltips.toLowerCase()).toMatch(/unattributable|bottom of this list|predates/);
+
+		// The existing bottom Unattributable (legacy) row MUST still render
+		// unchanged — its testid pin is the single source of truth for that
+		// invariant and must not regress.
+		const bottomBucket = page.locator('[data-testid="tree-cost-row-unattributable-legacy"]').first();
+		await expect(bottomBucket).toBeVisible({ timeout: 5_000 });
+		const bottomText = (await bottomBucket.textContent() ?? "");
+		expect(bottomText.toLowerCase()).toContain("unattributable");
+		expect(bottomText).toMatch(/\$\d/);
+
+		// Cleanup.
+		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	});
 });

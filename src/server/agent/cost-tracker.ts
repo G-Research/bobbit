@@ -21,6 +21,14 @@ export interface SessionCost {
 	 * re-association).
 	 */
 	goalId?: string;
+	/**
+	 * Wall-clock timestamp (ms since epoch) when this entry first gained
+	 * any usage. Stamped once on the first `recordUsage` call, never
+	 * overwritten. Optional because entries persisted before this field
+	 * existed (legacy data) have none — `getUnattributableLegacyCostWithMetadata`
+	 * only reports a `firstSeenAt` when at least one unstamped entry has one.
+	 */
+	firstSeenAt?: number;
 }
 
 export interface UsageData {
@@ -124,6 +132,9 @@ export class CostTracker {
 							if (typeof c.goalId === "string" && c.goalId.length > 0) {
 								entry.goalId = c.goalId;
 							}
+							if (typeof c.firstSeenAt === "number" && Number.isFinite(c.firstSeenAt)) {
+								entry.firstSeenAt = c.firstSeenAt;
+							}
 							this.costs.set(id, entry);
 						}
 					}
@@ -168,6 +179,9 @@ export class CostTracker {
 		existing.totalCost = Math.round(existing.totalCost * 1_000_000) / 1_000_000;
 		if (goalId && !existing.goalId) {
 			existing.goalId = goalId;
+		}
+		if (!existing.firstSeenAt) {
+			existing.firstSeenAt = Date.now();
 		}
 		this.costs.set(sessionId, existing);
 		this.generation++;
@@ -251,6 +265,28 @@ export class CostTracker {
 		}
 		total.totalCost = Math.round(total.totalCost * 1_000_000) / 1_000_000;
 		return total;
+	}
+
+	/**
+	 * Same as `getUnattributableLegacyCost` but also returns the minimum
+	 * `firstSeenAt` timestamp across unstamped entries (when any have one).
+	 * Used by `/api/goals/:id/tree-cost` so the UI can compute a legacy-
+	 * threshold without hardcoding a date. `firstSeenAt` is `undefined`
+	 * when no unstamped entry has a recorded timestamp (genuinely-legacy
+	 * data that pre-dates the field).
+	 */
+	getUnattributableLegacyCostWithMetadata(): SessionCost & { firstSeenAt?: number } {
+		const total = this.getUnattributableLegacyCost();
+		let firstSeenAt: number | undefined;
+		for (const c of this.costs.values()) {
+			if (c.goalId) continue;
+			if (typeof c.firstSeenAt === "number" && Number.isFinite(c.firstSeenAt)) {
+				if (firstSeenAt === undefined || c.firstSeenAt < firstSeenAt) {
+					firstSeenAt = c.firstSeenAt;
+				}
+			}
+		}
+		return firstSeenAt !== undefined ? { ...total, firstSeenAt } : total;
 	}
 
 	/**

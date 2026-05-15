@@ -30,7 +30,7 @@ import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, c
 import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
-import { backfillLegacyCostGoalIds } from "./agent/cost-backfill.js";
+import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -1280,8 +1280,8 @@ export function createGateway(config: GatewayConfig) {
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
 			// once per project context after sessions are restored so the
 			// resolver can see live PersistedSession records. Idempotent.
+			const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
 			try {
-				const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
 				for (const ctx of projectContextManager.all()) {
 					backfillLegacyCostGoalIds({
 						costTracker: ctx.costTracker,
@@ -1322,6 +1322,26 @@ export function createGateway(config: GatewayConfig) {
 			// through the cold path (full createWorktree + npm ci).
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
+
+				// Transcript-pass backfill — lazy, fire-and-forget after listen().
+				// Runs *after* the synchronous sidecar pass so it only touches entries
+				// that pass could not resolve. Bounded per-project (50 lines / 64 KiB
+				// per file, 30s total) and confidence-gated (see extractTranscriptGoalId).
+				// Bumps the cost-tracker generation when it stamps anything, which
+				// invalidates cached tree-cost rollups for the next request.
+				const transcriptBackfillTask = (async () => {
+					for (const ctx of projectContextManager.all()) {
+						try {
+							await backfillLegacyCostGoalIdsFromTranscripts({
+								costTracker: ctx.costTracker,
+								agentSessionsRoot,
+								goals: ctx.goalStore.getAll(),
+							});
+						} catch (err) {
+							console.warn("[cost-backfill] transcript-pass failed (non-fatal):", err);
+						}
+					}
+				})();
 
 				const sweeperTask = (async () => {
 					const tStart = Date.now();
@@ -1532,7 +1552,7 @@ export function createGateway(config: GatewayConfig) {
 				// to avoid self-deadlock. See goal fix-routes-1db8c87b.
 				lspSupervisor.setRouteSelfCheckPromise(lspRouteCheckTask);
 
-				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
+				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
@@ -3783,15 +3803,24 @@ async function handleApiRoute(
 		// `goalId` could not be recovered by the boot backfill). NOT added
 		// to `totalCostUsd` — it's an informational residual, separate from
 		// the selected goal's subtree. Hidden entirely when empty.
-		const legacy = costTracker.getUnattributableLegacyCost();
+		const legacy = costTracker.getUnattributableLegacyCostWithMetadata();
 		if (legacy.totalCost > 0 || legacy.inputTokens > 0 || legacy.outputTokens > 0) {
-			(result as typeof result & { unattributableLegacy?: unknown }).unattributableLegacy = {
+			const payload: {
+				goalId: string;
+				title: string;
+				costUsd: number;
+				tokensIn: number;
+				tokensOut: number;
+				firstSeenAt?: number;
+			} = {
 				goalId: "__unattributable__",
 				title: "Unattributable (legacy)",
 				costUsd: legacy.totalCost,
 				tokensIn: legacy.inputTokens,
 				tokensOut: legacy.outputTokens,
 			};
+			if (typeof legacy.firstSeenAt === "number") payload.firstSeenAt = legacy.firstSeenAt;
+			(result as typeof result & { unattributableLegacy?: unknown }).unattributableLegacy = payload;
 		}
 		json(result);
 		return;
