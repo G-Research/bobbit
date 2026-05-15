@@ -4,7 +4,7 @@
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
-> Design contract: [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md). This page is the operator/agent-facing reference; the design doc is the architectural source of truth.
+> This page is the operator/agent-facing reference. [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) is the original design document — useful for architecture rationale and historical context, but superseded by this page for current configuration and troubleshooting.
 
 ## Motivation
 
@@ -140,6 +140,8 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Pure text search — string literals, comments, regex patterns, log messages: `grep` is the right tool.
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
+
+**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. Set `BOBBIT_GREP_LSP_HINT=0` to disable.
 
 ## Route post-boot self-check
 
@@ -314,7 +316,7 @@ curl -sk -X POST "$GW/api/lsp/_internal/hint-emitted" \
 
 ## See also
 
-- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — full design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan).
+- [docs/design/lsp-code-intelligence.md](design/lsp-code-intelligence.md) — original design doc (supervisor lifecycle states, eviction edge cases, Windows path handling, testing plan). Historical reference; this page supersedes it for current operator guidance.
 - [`src/server/lsp/`](../src/server/lsp/) — supervisor, adapters, sandbox bridge.
 - [`defaults/tools/lsp/`](../defaults/tools/lsp/) — tool YAMLs (budget-pinned by `tests/tool-description-budget.test.ts`).
 - [docs/internals.md](internals.md) — cross-references to surrounding subsystems.

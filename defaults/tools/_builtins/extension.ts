@@ -31,12 +31,15 @@ import {
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// Wrapper for the built-in grep tool lives in `grep-lsp-hint.ts` so it can be
+// unit-tested without pulling in the pi-coding-agent runtime. See that module.
+import { wrapGrepWithLspHint } from "./grep-lsp-hint.js";
 
 const FACTORIES: Record<string, (cwd: string) => unknown> = {
 	read: createReadToolDefinition,
 	edit: createEditToolDefinition,
 	write: createWriteToolDefinition,
-	grep: createGrepToolDefinition,
+	grep: (cwd: string) => wrapGrepWithLspHint(createGrepToolDefinition(cwd) as any),
 	find: createFindToolDefinition,
 	ls: createLsToolDefinition,
 };
