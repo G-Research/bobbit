@@ -25,7 +25,7 @@ import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-r
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
-import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
+import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
@@ -3641,9 +3641,17 @@ async function handleApiRoute(
 		const goalId = goalTreeCostMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const rootGoalId = goal.rootGoalId ?? goal.id;
+		// Dashboard tree-cost is intentionally rooted at the REQUESTED goal,
+		// not its topmost ancestor (`goal.rootGoalId`). Opening a subgoal's
+		// dashboard must show the rollup of that subgoal + its descendants only;
+		// using `rootGoalId` would leak the whole project's grand total down to
+		// every descendant view. `computeTreeCost` consumes `walkGoalSubtree`
+		// for the descendant walk — do not add another traversal helper here.
+		// Pinned by tests/api-goals-tree-cost.test.ts and
+		// tests/e2e/ui/tree-cost-rollup.spec.ts — do not "fix" this back to
+		// `goal.rootGoalId ?? goal.id` without tripping those tests.
 		if (!goal.projectId) {
-			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
+			json({ rootGoalId: goalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
 			return;
 		}
 		const ctx = projectContextManager.getContextForGoal(goalId);
@@ -3651,7 +3659,7 @@ async function handleApiRoute(
 		const allGoals = ctx.goalStore.getAll();
 		const costTracker = sessionManager.getCostTracker(goal.projectId);
 		const result = computeTreeCost(
-			rootGoalId,
+			goalId,
 			allGoals,
 			costTracker,
 			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
@@ -3873,9 +3881,37 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			// Resolve per-goal subgoal-nesting overrides.
+			//
+			// Two inputs: the parent's effective inherited ceiling (if any) and the
+			// explicit body values from the proposal form. Rules:
+			//   - System pref is the global ceiling (subgoalsEnabled gate + maxDepth cap).
+			//   - For child goals the parent's effective values are also a ceiling.
+			//   - Explicit body values can only tighten/disable, never exceed the ceiling.
+			// Helpers from subgoal-nesting-limit.ts compute the ceiling so this stays
+			// the single source of truth.
+			const nestingPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
 			const inheritedNesting = (parentGoalId && resolvedParentGoal)
-				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
+				? inheritedChildOverrides(resolvedParentGoal, nestingPrefs)
 				: undefined;
+			const ceilSubgoalsAllowed = inheritedNesting
+				? inheritedNesting.subgoalsAllowed
+				: nestingPrefs.subgoalsEnabled;
+			const ceilMaxNestingDepth = inheritedNesting
+				? inheritedNesting.maxNestingDepth
+				: nestingPrefs.maxNestingDepth;
+			const bodySubgoalsAllowedRaw = body?.subgoalsAllowed;
+			const bodyMaxNestingDepthRaw = body?.maxNestingDepth;
+			let effSubgoalsAllowed: boolean | undefined = inheritedNesting?.subgoalsAllowed;
+			if (typeof bodySubgoalsAllowedRaw === "boolean") {
+				// body=false always wins (disable always allowed); body=true only if
+				// the ceiling permits it. System/parent OFF blocks the explicit true.
+				effSubgoalsAllowed = bodySubgoalsAllowedRaw && ceilSubgoalsAllowed;
+			}
+			let effMaxNestingDepth: number | undefined = inheritedNesting?.maxNestingDepth;
+			if (typeof bodyMaxNestingDepthRaw === "number" && Number.isFinite(bodyMaxNestingDepthRaw)) {
+				effMaxNestingDepth = Math.min(clampMaxDepth(bodyMaxNestingDepthRaw), ceilMaxNestingDepth);
+			}
 			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
 				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
 				: undefined;
@@ -3889,8 +3925,8 @@ async function handleApiRoute(
 				projectId: targetProjectId,
 				parentGoalId,
 				inlineRoles: bodyInlineRoles,
-				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
-				maxNestingDepth: inheritedNesting?.maxNestingDepth,
+				subgoalsAllowed: effSubgoalsAllowed,
+				maxNestingDepth: effMaxNestingDepth,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

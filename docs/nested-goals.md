@@ -584,18 +584,27 @@ they share the same experimental gate.
   pattern as `subgoalsEnabled` (see
   [design/subgoals-experimental-toggle.md](design/subgoals-experimental-toggle.md)).
 
-**Goal creation panel** (below the Sandbox / Auto-start toggles):
+**Goal creation form** — rendered in two surfaces:
 
-- An **Allow subgoals** toggle. Default inherits from
-  `isSubgoalsEnabled()`. When the system pref is OFF the toggle is OFF
-  and greyed out — a per-goal flag cannot override a system-level OFF.
-  Flipping it OFF disables subgoals for this specific goal tree.
-- A **Max nesting depth** stepper (testid
-  `goal-form-max-nesting-depth`), visible only when Allow subgoals is
-  ON. Default inherits from `getSystemMaxNestingDepth()`. The tooltip
-  surfaces the current system ceiling. The submit path only sends the
-  override when it differs from the inherited default; otherwise the
-  field is omitted and the server resolves at request time from prefs.
+- **Goal-proposal modal** (in the team-lead / assistant chat, when
+  `propose_goal` is called or the assistant prompts the user).
+
+The standalone goal creation panel uses the same `renderGoalForm`
+component, but does not currently wire these proposal-only override
+callbacks. In the proposal modal, the per-goal controls appear below the
+parent/depth section:
+
+- An **Allow subgoals** checkbox (testid `goal-form-subgoals-toggle`).
+  Default inherits from `isSubgoalsEnabled()`. When the system pref is
+  OFF the checkbox is unchecked and greyed out — a per-goal flag cannot
+  override a system-level OFF. Unchecking it disables subgoals for this
+  specific goal tree.
+- A **Max depth** number input (testid `goal-form-max-depth`), visible
+  only when Allow subgoals is ON. Default inherits from
+  `getSystemMaxNestingDepth()`. Clamped to `[1, systemCap]` — the
+  per-goal value can only tighten, never exceed the system ceiling. The
+  submit path only sends the override when the user has touched it;
+  otherwise the field is omitted and the server resolves from prefs.
 
 The enforcement is **purely server-side**. The UI controls are UX —
 if a rogue agent bypasses the panel and POSTs a higher `maxNestingDepth`
@@ -614,6 +623,12 @@ the two 403 codes so agents understand why a spawn might be rejected.
   at depth+1 > max; idempotent re-call accepted past the limit.
 - `tests/e2e/ui/subgoal-nesting-limit.spec.ts` — settings stepper +
   goal-creation panel controls + persistence across reload.
+- `tests/e2e/ui/goal-proposal-form.spec.ts` — proposal modal: toggle
+  visibility, max-depth hide/show, created goal has correct
+  `subgoalsAllowed` / `maxNestingDepth` fields via `GET /api/goals/:id`.
+- `tests/proposal-form-controls-source-pinned.test.ts` — source-pin:
+  asserts `render.ts` contains `goal-form-subgoals-toggle` and
+  `goal-form-max-depth` test ids (catches silent merge-loss regressions).
 
 ## Concurrency
 
@@ -1091,11 +1106,23 @@ GET /api/goals/:id/tree-cost
   }
 ```
 
-The handler resolves the rollup root as `goal.rootGoalId ?? goal.id`, so
-a request against a child goal still returns the WHOLE-TREE rollup. The
-breakdown is sorted `depth ASC, createdAt ASC` (root first, deepest
+The rollup is **rooted at the requested goal**, not its topmost ancestor
+(`goal.rootGoalId`). This means:
+
+- A **root-goal** dashboard sees the whole-project rollup (its own cost
+  plus every descendant).
+- A **subgoal** dashboard sees only that subgoal and its own descendants
+  — never the parent's or sibling's spend.
+- A **leaf** (no children) sees only its own cost.
+
+The breakdown is sorted `depth ASC, createdAt ASC` (root first, deepest
 descendants last). The walk uses BFS over `parentGoalId` with a depth
 cap of 32 (cycle-safe). Gated by `requireSubgoalsEnabled()`.
+
+Pinned by `tests/api-goals-tree-cost.test.ts` (3-deep tree, asserts each
+level sees its own subtree only) and `tests/e2e/ui/tree-cost-rollup.spec.ts`
+(browser: child value strictly less than parent). Do not revert to
+`goal.rootGoalId ?? goal.id` — those tests will fail.
 
 The cache lives on the existing `CostTracker` (per-tracker WeakMap keyed
 by `rootGoalId`). `costTracker.getGeneration()` ticks monotonically on
@@ -1385,7 +1412,7 @@ synthesis just wasn't using it.
 | PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. The `goal_state_changed` broadcast carries the new values inline so clients don't need to re-fetch. |
 | DELETE | `/api/goals/:id?cascade=true\|false[&mergedManually=true]` | (query) | 422 `CASCADE_REQUIRED`, 409 `HAS_DESCENDANTS` when `cascade=false`. Optional `mergedManually=true` stamps the target's `state` to `"complete"` before archiving (target-only) so the Plan-tab DAG renders it green; for use after a manual `git merge` of a child whose `ready-to-merge` failed. |
 | POST | `/api/goals/:id/team/teardown?cascade=true\|false` | (query) | 422 `CASCADE_REQUIRED` when omitted. 409 `HAS_DESCENDANT_TEAMS` when `cascade=false` and descendants have live teams; `cascade=true` walks descendants **bottom-up (leaves first)** and tears down each team. Best-effort per-goal: returns `{ok, toreDown, errors[]}`. |
-| GET | `/api/goals/:id/tree-cost` | — | BFS rollup; cache keyed by `(rootGoalId, costGeneration)`. |
+| GET | `/api/goals/:id/tree-cost` | — | BFS rollup rooted at the **requested goal** (not the topmost ancestor); cache keyed by `(goalId, costGeneration)`. |
 
 WS broadcasts: `goal_created` (carries `parentGoalId`), `goal_state_changed`,
 `mutation_pending`, `mutation_decided`, `cost_changed`, plus the existing
@@ -1596,8 +1623,8 @@ A user must be able to:
 12. **Inline workflow YAML pasted in the New Goal dialog** snapshots
     onto the goal and resolves before the project/server/builtin
     cascade.
-13. **Cost rollup**: a parent goal's dashboard shows the sum of all
-    descendants' costs (tree-cost rollup).
+13. **Cost rollup**: each goal's dashboard shows the sum of that goal and
+    its own descendants only (tree-cost rollup rooted at the viewed goal).
 14. **Plan tab shows nested sub-trees inline** — grandchildren visible
     without clicking into a child (Plan-tab nested rendering).
 15. **The system survives a gateway restart mid-verification** —
