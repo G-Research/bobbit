@@ -22,7 +22,7 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -258,15 +258,21 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// longer does this implicitly — see "eliminate default project" refactor.
 		// Workflows already seeded above via direct project.yaml write.
 		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			// Resolve symlinks (e.g. macOS /var → /private/var) — the server rejects
+			// symlinked project roots with code=symlink_root.
+			const canonicalRoot = realpathSync(bobbitDir);
+			const regResp = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
 			});
-		} catch { /* best-effort */ }
+			if (!regResp.ok) {
+				throw new Error(`[gateway-harness] default project registration failed: ${regResp.status} ${await regResp.text()}`);
+			}
+		} catch (err) { console.error("[gateway-harness] default project registration error:", err); throw err; }
 
 		const info: GatewayInfo = {
 			port,

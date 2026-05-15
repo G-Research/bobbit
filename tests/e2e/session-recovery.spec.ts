@@ -19,7 +19,7 @@
  * fixture is worker-scoped and not suited for restart cycles.
  */
 import { test as base, expect } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -110,10 +110,11 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		// Register the default project at the bobbitDir, mirroring the in-process
 		// harness. The session-store under test lives at
 		// `<rootPath>/.bobbit/state/sessions.json`.
+		const canonicalRoot = realpathSync(bobbitDir);
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+			body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
 		});
 		if (!resp.ok) {
 			throw new Error(`project register failed: ${resp.status} ${await resp.text()}`);

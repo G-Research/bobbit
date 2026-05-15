@@ -30,7 +30,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -152,15 +152,19 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
 		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			const canonicalRoot = realpathSync(bobbitDir);
+			const regResp = await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
 			});
-		} catch { /* best-effort */ }
+			if (!regResp.ok) {
+				throw new Error(`[realpush-harness] default project registration failed: ${regResp.status} ${await regResp.text()}`);
+			}
+		} catch (err) { console.error("[realpush-harness] default project registration error:", err); throw err; }
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.
