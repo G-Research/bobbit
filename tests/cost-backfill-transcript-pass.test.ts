@@ -1,32 +1,20 @@
 /**
- * Tests for the transcript-pass cost goalId backfill (second pass that
- * runs after the sidecar pass for entries with no live session and no
- * sidecar on disk).
- *
- * Covers:
- *   1. High-confidence transcript hit (working-directory path / system
- *      prompt with `BOBBIT_GOAL_ID`) stamps the entry.
- *   2. Two distinct known goal ids in the same transcript -> unmapped.
- *   3. Goal id not in the known-goal set -> unmapped.
- *   4. Truncated `.jsonl` survives without crashing.
- *   5. Missing `.jsonl` for a sessionId -> entry stays unmapped.
- *   6. Pure prose mention (no high/medium-confidence marker) -> unmapped.
- *
- * Pinning rule: a wrong attribution is worse than `unattributable`. If
- * any of these tests start passing-by-stamping, that's a regression.
+ * Tests for the transcript-pass cost goalId backfill (second pass after the
+ * live-session/sidecar pass). Wrong attribution is worse than leaving an
+ * entry unattributable, so these tests pin the confidence gates.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cost-backfill-transcript-"));
 process.env.BOBBIT_DIR = tmpDir;
 const stateDir = path.join(tmpDir, "state");
-fs.mkdirSync(stateDir, { recursive: true });
-const SESSIONS_ROOT = path.join(tmpDir, "agent-sessions");
-fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
+const COSTS_FILE = path.join(stateDir, "session-costs.json");
+const AGENT_SESSIONS_ROOT = path.join(stateDir, "agent-sessions");
+fs.mkdirSync(AGENT_SESSIONS_ROOT, { recursive: true });
 
 const { CostTracker } = await import("../src/server/agent/cost-tracker.ts");
 const {
@@ -34,12 +22,11 @@ const {
 	extractTranscriptGoalId,
 } = await import("../src/server/agent/cost-backfill.ts");
 
-const GOAL_A = "11111111-2222-3333-4444-555555555555";
-const GOAL_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-const GOAL_UNKNOWN = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb";
+const GOAL_A = "deadbeef-1111-2222-3333-444455556666";
+const GOAL_B = "cafebabe-aaaa-bbbb-cccc-ddddeeeeffff";
+const GOAL_UNKNOWN = "00000000-9999-9999-9999-000000000000";
 
-function makeCostsFile(entries: Record<string, { totalCost?: number; inputTokens?: number; outputTokens?: number; goalId?: string }>): string {
-	const file = path.join(stateDir, "session-costs.json");
+function seedCosts(entries: Record<string, { totalCost?: number; inputTokens?: number; outputTokens?: number; goalId?: string }>): void {
 	const out: Record<string, unknown> = {};
 	for (const [sid, e] of Object.entries(entries)) {
 		out[sid] = {
@@ -51,158 +38,199 @@ function makeCostsFile(entries: Record<string, { totalCost?: number; inputTokens
 			...(e.goalId ? { goalId: e.goalId } : {}),
 		};
 	}
-	fs.writeFileSync(file, JSON.stringify(out, null, 2));
-	return file;
+	fs.writeFileSync(COSTS_FILE, JSON.stringify(out), "utf-8");
 }
 
-function writeTranscript(sessionId: string, slug: string, contents: string): string {
-	const slugDir = path.join(SESSIONS_ROOT, slug);
+function seedTranscript(slug: string, sessionId: string, body: string): string {
+	const slugDir = path.join(AGENT_SESSIONS_ROOT, slug);
 	fs.mkdirSync(slugDir, { recursive: true });
-	const file = path.join(slugDir, `${sessionId}.jsonl`);
-	fs.writeFileSync(file, contents);
-	return file;
+	const p = path.join(slugDir, `${sessionId}.jsonl`);
+	fs.writeFileSync(p, body, "utf-8");
+	return p;
 }
 
 function silentLogger() {
 	return { log: () => {}, warn: () => {} };
 }
 
-beforeEach(() => {
-	try { fs.rmSync(path.join(stateDir, "session-costs.json"), { force: true }); } catch { /* ignore */ }
-	try { fs.rmSync(SESSIONS_ROOT, { recursive: true, force: true }); } catch { /* ignore */ }
-	fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
+function reset(): void {
+	try { fs.unlinkSync(COSTS_FILE); } catch { /* ok */ }
+	try { fs.rmSync(AGENT_SESSIONS_ROOT, { recursive: true, force: true }); } catch { /* ok */ }
+	fs.mkdirSync(AGENT_SESSIONS_ROOT, { recursive: true });
+}
+
+beforeEach(reset);
+after(() => {
+	try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
 });
 
-describe("extractTranscriptGoalId", () => {
-	it("stamps on high-confidence BOBBIT_GOAL_ID env marker", () => {
-		const text = `Working Directory: /tmp/x\nBOBBIT_GOAL_ID=${GOAL_A}\nrest of system prompt`;
-		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
+describe("extractTranscriptGoalId — pure confidence rules", () => {
+	it("returns undefined when no known UUID appears", () => {
+		assert.equal(extractTranscriptGoalId("hello world no uuid here", new Set([GOAL_A])), undefined);
 	});
 
-	it("stamps on worktree path segment goal-<slug>-<id8>", () => {
-		const id8 = GOAL_A.slice(0, 8);
-		const text = `Working Directory: /repo-wt/goal-deepe-feat-${id8}/\nGoalId is ${GOAL_A} somewhere`;
-		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
+	it("returns undefined when UUID exists but is not in knownGoalIds", () => {
+		assert.equal(extractTranscriptGoalId(`BOBBIT_GOAL_ID=${GOAL_UNKNOWN}`, new Set([GOAL_A])), undefined);
 	});
 
-	it("stamps on --goal CLI flag", () => {
-		const text = `command: bobbit-agent --goal ${GOAL_A} --debug\n... ${GOAL_A}`;
-		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
-	});
-
-	it("stamps when id appears within a goal-context window", () => {
-		const text = `# Goal\nFix the cost backfill ${GOAL_A}\n...rest of spec`;
-		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
-	});
-
-	it("does NOT stamp on prose-only mention", () => {
-		const text = `Hello world, see ticket ${GOAL_A} for context. Nothing else here.`;
-		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), undefined);
-	});
-
-	it("does NOT stamp when two known ids appear", () => {
-		const text = `BOBBIT_GOAL_ID=${GOAL_A}\nWorking Directory: /tmp/goal-x-${GOAL_B.slice(0, 8)}/\nref ${GOAL_B}`;
+	it("returns undefined when multiple distinct known UUIDs appear", () => {
+		const text = `BOBBIT_GOAL_ID=${GOAL_A} also see ${GOAL_B}`;
 		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A, GOAL_B])), undefined);
 	});
 
-	it("does NOT stamp when id is not in the known set", () => {
-		const text = `BOBBIT_GOAL_ID=${GOAL_UNKNOWN}\nWorking Directory: /tmp/goal-x-${GOAL_UNKNOWN.slice(0, 8)}/`;
+	it("returns the single known UUID near BOBBIT_GOAL_ID", () => {
+		assert.equal(extractTranscriptGoalId(`env: BOBBIT_GOAL_ID=${GOAL_A}`, new Set([GOAL_A])), GOAL_A);
+	});
+
+	it("returns the single known UUID in --goal CLI arg", () => {
+		assert.equal(extractTranscriptGoalId(`agent --goal ${GOAL_A} --foo`, new Set([GOAL_A])), GOAL_A);
+	});
+
+	it("returns the single known UUID when worktree goal-<slug>-<id8> matches", () => {
+		const text = `Working Directory: /repos/proj-wt/goal-my-feature-${GOAL_A.slice(0, 8)}/src ${GOAL_A}`;
+		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
+	});
+
+	it("returns the single known UUID near goal-context markers", () => {
+		const text = `# Goal\n\n**Title** ...\nGoal id: ${GOAL_A}\n\n## Spec`;
+		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), GOAL_A);
+	});
+
+	it("returns undefined for prose-only references", () => {
+		const text = `some chatter ... see goal ${GOAL_A} for background ... more chatter ...`;
 		assert.equal(extractTranscriptGoalId(text, new Set([GOAL_A])), undefined);
 	});
 });
 
 describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
-	it("stamps an entry whose transcript has a high-confidence working-directory hit", async () => {
-		makeCostsFile({ "sess-1": { totalCost: 0.5, inputTokens: 100 } });
-		const tracker = new CostTracker(stateDir);
-		writeTranscript("sess-1", "my-slug", [
-			`{"type":"system","content":"Working Directory: /repo-wt/goal-feat-${GOAL_A.slice(0, 8)}/"}`,
-			`{"type":"system","content":"BOBBIT_GOAL_ID=${GOAL_A}"}`,
-			`{"type":"user","content":"# Goal\\nFix the thing\\nid: ${GOAL_A}"}`,
-		].join("\n"));
+	it("high-confidence Working Directory + system prompt hit stamps matching real goal", async () => {
+		seedCosts({ s1: { totalCost: 0.001, inputTokens: 100, outputTokens: 50 } });
+		const body = [
+			JSON.stringify({ type: "system", subtype: "init", cwd: `/wt/goal-slug-${GOAL_A.slice(0, 8)}` }),
+			JSON.stringify({
+				type: "user",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: `Working Directory: /wt/goal-slug-${GOAL_A.slice(0, 8)}\nBOBBIT_GOAL_ID=${GOAL_A}\n# Goal\nspec: ...` }],
+				},
+			}),
+		].join("\n") + "\n";
+		seedTranscript("slug-a", "s1", body);
 
+		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
 			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
 			goals: [{ id: GOAL_A }, { id: GOAL_B }],
 			logger: silentLogger(),
 		});
+		assert.equal(res.stamped, 1);
+		assert.equal(res.unattributable, 0);
+		assert.equal(tracker.getSessionCost("s1")?.goalId, GOAL_A);
+	});
 
+	it("two distinct real goal ids in same transcript stays unmapped", async () => {
+		seedCosts({ s_amb: { totalCost: 0.002 } });
+		seedTranscript("slug-amb", "s_amb", [
+			JSON.stringify({ type: "system", cwd: `/wt/goal-x-${GOAL_A.slice(0, 8)}` }),
+			JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `# Goal\nBOBBIT_GOAL_ID=${GOAL_A}\nSibling reference: ${GOAL_B}` }] } }),
+		].join("\n") + "\n");
+
+		const tracker = new CostTracker(stateDir);
+		const res = await backfillLegacyCostGoalIdsFromTranscripts({
+			costTracker: tracker,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
+			goals: [{ id: GOAL_A }, { id: GOAL_B }],
+			logger: silentLogger(),
+		});
+		assert.equal(res.stamped, 0);
+		assert.equal(res.unattributable, 1);
+		assert.equal(tracker.getSessionCost("s_amb")?.goalId, undefined);
+	});
+
+	it("UUID hit that is not in knownGoalIds stays unmapped", async () => {
+		seedCosts({ s_unk: { totalCost: 0.003 } });
+		seedTranscript("slug-unk", "s_unk", JSON.stringify({
+			type: "user",
+			message: { role: "user", content: [{ type: "text", text: `Working Directory: /wt/goal-foo-${GOAL_UNKNOWN.slice(0, 8)}\nBOBBIT_GOAL_ID=${GOAL_UNKNOWN}` }] },
+		}) + "\n");
+
+		const tracker = new CostTracker(stateDir);
+		const res = await backfillLegacyCostGoalIdsFromTranscripts({
+			costTracker: tracker,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
+			goals: [{ id: GOAL_A }, { id: GOAL_B }],
+			logger: silentLogger(),
+		});
+		assert.equal(res.stamped, 0);
+		assert.equal(res.unattributable, 1);
+		assert.equal(tracker.getSessionCost("s_unk")?.goalId, undefined);
+	});
+
+	it("truncated mid-line jsonl survives without crashing", async () => {
+		seedCosts({ s_trunc: { totalCost: 0.004 } });
+		const truncated =
+			JSON.stringify({ type: "system", cwd: `/wt/goal-trunc-${GOAL_A.slice(0, 8)}` }) +
+			"\n" +
+			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"BOBBIT_GOAL_ID=${GOAL_A} half-`;
+		seedTranscript("slug-trunc", "s_trunc", truncated);
+
+		const tracker = new CostTracker(stateDir);
+		const res = await backfillLegacyCostGoalIdsFromTranscripts({
+			costTracker: tracker,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
+			goals: [{ id: GOAL_A }],
+			logger: silentLogger(),
+		});
 		assert.equal(res.stamped, 1);
 		assert.equal(res.unattributable, 0);
-		assert.equal(tracker.getSessionCost("sess-1")?.goalId, GOAL_A);
+		assert.equal(tracker.getSessionCost("s_trunc")?.goalId, GOAL_A);
 	});
 
-	it("leaves entry unmapped when transcript references two real goal ids", async () => {
-		makeCostsFile({ "sess-2": { totalCost: 0.2 } });
+	it("missing jsonl for sessionId leaves entry unmapped without crash", async () => {
+		seedCosts({ s_missing: { totalCost: 0.005 } });
 		const tracker = new CostTracker(stateDir);
-		writeTranscript("sess-2", "slug2", [
-			`BOBBIT_GOAL_ID=${GOAL_A}`,
-			`# Goal nesting context: parent ${GOAL_B}`,
-		].join("\n"));
-
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
 			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
-			goals: [{ id: GOAL_A }, { id: GOAL_B }],
-			logger: silentLogger(),
-		});
-		assert.equal(res.stamped, 0);
-		assert.equal(tracker.getSessionCost("sess-2")?.goalId, undefined);
-	});
-
-	it("leaves entry unmapped when the only id is unknown", async () => {
-		makeCostsFile({ "sess-3": {} });
-		const tracker = new CostTracker(stateDir);
-		writeTranscript("sess-3", "slug3", `BOBBIT_GOAL_ID=${GOAL_UNKNOWN}\nWorking Directory: /repo-wt/goal-x-${GOAL_UNKNOWN.slice(0, 8)}/`);
-
-		const res = await backfillLegacyCostGoalIdsFromTranscripts({
-			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
-			goals: [{ id: GOAL_A }],
-			logger: silentLogger(),
-		});
-		assert.equal(res.stamped, 0);
-		assert.equal(tracker.getSessionCost("sess-3")?.goalId, undefined);
-	});
-
-	it("survives truncated jsonl", async () => {
-		makeCostsFile({ "sess-4": {} });
-		const tracker = new CostTracker(stateDir);
-		// Line truncated mid-JSON, but contains a high-confidence id marker first.
-		writeTranscript("sess-4", "slug4", `BOBBIT_GOAL_ID=${GOAL_A}\n{"type":"system","content":"truncated mid-line and never closed`);
-
-		const res = await backfillLegacyCostGoalIdsFromTranscripts({
-			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
-			goals: [{ id: GOAL_A }],
-			logger: silentLogger(),
-		});
-		assert.equal(res.stamped, 1);
-		assert.equal(tracker.getSessionCost("sess-4")?.goalId, GOAL_A);
-	});
-
-	it("survives missing jsonl for an unmapped sessionId", async () => {
-		makeCostsFile({ "sess-missing": {} });
-		const tracker = new CostTracker(stateDir);
-		// No transcript file written.
-		const res = await backfillLegacyCostGoalIdsFromTranscripts({
-			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
 			goals: [{ id: GOAL_A }],
 			logger: silentLogger(),
 		});
 		assert.equal(res.stamped, 0);
 		assert.equal(res.unattributable, 1);
-		assert.equal(tracker.getSessionCost("sess-missing")?.goalId, undefined);
+		assert.equal(tracker.getSessionCost("s_missing")?.goalId, undefined);
 	});
 
-	it("no-op when there are no unstamped entries", async () => {
-		makeCostsFile({ "sess-x": { goalId: GOAL_A } });
+	it("already-stamped entries are not revisited by transcript pass", async () => {
+		seedCosts({
+			s_done: { totalCost: 0.010, goalId: "goal-prior" },
+			s_todo: { totalCost: 0.001 },
+		});
+		const body = JSON.stringify({
+			type: "user",
+			message: { role: "user", content: [{ type: "text", text: `Working Directory: /wt/goal-z-${GOAL_A.slice(0, 8)}\nBOBBIT_GOAL_ID=${GOAL_A}` }] },
+		}) + "\n";
+		seedTranscript("slug-z", "s_todo", body);
+		seedTranscript("slug-z", "s_done", body);
+
 		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
 			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
+			goals: [{ id: GOAL_A }],
+			logger: silentLogger(),
+		});
+		assert.equal(res.stamped, 1);
+		assert.equal(tracker.getSessionCost("s_done")?.goalId, "goal-prior");
+		assert.equal(tracker.getSessionCost("s_todo")?.goalId, GOAL_A);
+	});
+
+	it("empty unmapped set is a no-op", async () => {
+		seedCosts({ s_done: { totalCost: 0.001, goalId: "goal-x" } });
+		const tracker = new CostTracker(stateDir);
+		const res = await backfillLegacyCostGoalIdsFromTranscripts({
+			costTracker: tracker,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
 			goals: [{ id: GOAL_A }],
 			logger: silentLogger(),
 		});
@@ -210,17 +238,18 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 		assert.equal(res.unattributable, 0);
 	});
 
-	it("does not stamp when knownGoalIds is empty", async () => {
-		makeCostsFile({ "sess-5": {} });
+	it("knownGoalIds empty leaves entries unattributable", async () => {
+		seedCosts({ s_empty: { totalCost: 0.001 } });
+		seedTranscript("slug-empty", "s_empty", `BOBBIT_GOAL_ID=${GOAL_A}`);
 		const tracker = new CostTracker(stateDir);
-		writeTranscript("sess-5", "slug5", `BOBBIT_GOAL_ID=${GOAL_A}`);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
 			costTracker: tracker,
-			agentSessionsRoot: SESSIONS_ROOT,
+			agentSessionsRoot: AGENT_SESSIONS_ROOT,
 			goals: [],
 			logger: silentLogger(),
 		});
 		assert.equal(res.stamped, 0);
 		assert.equal(res.unattributable, 1);
+		assert.equal(tracker.getSessionCost("s_empty")?.goalId, undefined);
 	});
 });
