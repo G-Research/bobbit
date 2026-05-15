@@ -15,6 +15,7 @@ import {
 } from "vscode-jsonrpc/lib/node/main.js";
 
 import type { SandboxLspBridge } from "./client.js";
+import { LspUnavailableError } from "./error.js";
 
 const STDERR_RING_BYTES = 64 * 1024;
 
@@ -67,13 +68,25 @@ export function resolvePyrightLangserver(): { node: string; cliMjs: string } | n
 
 export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	let child: ChildProcess;
-	// Sandbox bridge is best-effort: when no container exists for this
-	// worktree (host-only sessions, fixture tests, sandbox not yet started),
-	// fall back to a host-side spawn rather than throwing. This keeps the
-	// supervisor working uniformly across sandboxed and non-sandboxed
-	// worktrees within the same gateway.
-	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
-	if (opts.sandbox && cid) {
+	// Sandbox isolation must be fail-closed: when the caller has configured a
+	// sandbox bridge for this worktree but no container is currently running,
+	// we MUST NOT silently spawn the language server on the host. Doing so
+	// would leak a process (running as the gateway user, with full host fs
+	// access) for a project that has explicitly opted into sandbox isolation,
+	// defeating the security boundary. Refuse to start instead — the
+	// supervisor surfaces this as `lsp_unavailable` to the agent, which can
+	// fall back to grep. Non-sandboxed projects (no `opts.sandbox`) still
+	// spawn host language servers normally.
+	// Security review finding (2026-05-15): never reintroduce host fallback
+	// when `opts.sandbox` is set. Pinned by
+	// tests/lsp/server-process-sandbox.spec.ts.
+	if (opts.sandbox) {
+		const cid = opts.sandbox.containerIdForWorktree(opts.worktreePath);
+		if (!cid) {
+			throw new LspUnavailableError(
+				`LSP unavailable: sandbox is configured for worktree ${opts.worktreePath} but no container is running. Refusing to spawn language server on the host.`,
+			);
+		}
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
 		// Use sandboxCmd when provided; host-resolved paths (process.execPath,
 		// gateway node_modules scripts) do not exist inside the container.
