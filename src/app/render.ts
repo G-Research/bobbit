@@ -958,47 +958,6 @@ function renderGoalForm(config: GoalFormConfig) {
 			})() : (config.subgoalsEnabled ? html`
 				<div class="text-xs text-muted-foreground self-start px-2 py-0.5 rounded-full bg-secondary/60" data-testid="goal-form-toplevel-badge">Top-level goal</div>
 			` : "")}
-			${(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange) ? (() => {
-				const systemCap = config.maxNestingDepth ?? 3;
-				const allowed = config.subgoalsAllowedValue ?? config.subgoalsEnabled;
-				const depthValue = config.maxNestingDepthValue ?? systemCap;
-				return html`
-					<div class="flex items-center gap-2" data-testid="goal-form-subgoals-row">
-						<label class="${lblCls} w-20 md:w-16">Subgoals</label>
-						<label class="flex items-center gap-1.5 text-xs">
-							<input
-								type="checkbox"
-								.checked=${allowed}
-								data-testid="goal-form-subgoals-toggle"
-								@change=${(e: Event) => {
-									config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
-								}} />
-							<span class="text-muted-foreground">Allow subgoals</span>
-						</label>
-						${allowed ? html`
-							<label class="flex items-center gap-1.5 text-xs ml-3">
-								<span class="text-muted-foreground">Max depth</span>
-								<input
-									type="number"
-									min="1"
-									max=${String(systemCap)}
-									step="1"
-									.value=${String(depthValue)}
-									data-testid="goal-form-max-depth"
-									class="w-16 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground"
-									@change=${(e: Event) => {
-										const raw = parseInt((e.target as HTMLInputElement).value, 10);
-										if (Number.isFinite(raw)) {
-											config.onMaxNestingDepthChange?.(Math.min(systemCap, Math.max(1, raw)));
-										} else {
-											config.onMaxNestingDepthChange?.(null);
-										}
-									}} />
-							</label>
-						` : ""}
-					</div>
-				`;
-			})() : ""}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
 					<span class="${lblCls} w-20 md:w-16">Worktree</span>
@@ -1077,6 +1036,47 @@ function renderGoalForm(config: GoalFormConfig) {
 						` : ''}
 					</label>
 				`;})}
+				${(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange) ? (() => {
+					const systemCap = config.maxNestingDepth ?? 3;
+					const allowed = config.subgoalsAllowedValue ?? config.subgoalsEnabled;
+					const depthValue = config.maxNestingDepthValue ?? systemCap;
+					return html`
+						<label class="flex items-center gap-1.5 cursor-pointer">
+							<input type="checkbox" class="toggle-switch"
+								.checked=${allowed}
+								data-testid="goal-form-subgoals-toggle"
+								@change=${(e: Event) => {
+									config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
+								}} />
+							<span class="text-xs text-muted-foreground font-medium">Allow subgoals</span>
+							<span title="Allow this goal to spawn child subgoals. When off, the team-lead cannot use goal_spawn_child / goal_plan_propose."
+								class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+						</label>
+						${allowed ? html`
+							<label class="flex items-center gap-1.5 text-xs text-muted-foreground -ml-2">
+								<span>Max depth</span>
+								<input
+									type="number"
+									min="1"
+									max=${String(systemCap)}
+									step="1"
+									.value=${String(depthValue)}
+									data-testid="goal-form-max-depth"
+									class="w-12 text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground"
+									@change=${(e: Event) => {
+										const raw = parseInt((e.target as HTMLInputElement).value, 10);
+										if (Number.isFinite(raw)) {
+											config.onMaxNestingDepthChange?.(Math.min(systemCap, Math.max(1, raw)));
+										} else {
+											config.onMaxNestingDepthChange?.(null);
+										}
+									}} />
+								<span title=${`System cap is ${systemCap} — per-goal can tighten further, never exceed it`}
+									class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+							</label>
+						` : ""}
+					`;
+				})() : ""}
 			</div>
 			<div class="flex-1 flex flex-col min-h-0">
 				<div class="flex items-center justify-between mb-1.5">
