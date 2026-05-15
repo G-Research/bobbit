@@ -43,6 +43,9 @@ test.afterAll(async () => {
 	await deleteSession(sessionId).catch(() => {});
 });
 
+const PER_BLOCK_CAP = 250;
+const AGGREGATE_CAP = 50 * PER_BLOCK_CAP;
+
 test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 250 B", async () => {
 	test.setTimeout(60_000);
 	const huge = "<p>" + "x".repeat(100_000) + "</p>";
@@ -73,22 +76,22 @@ test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 25
 		const block = buildPreviewSnapshotV3Block(body.url, body.relPath);
 		expect(
 			block.length,
-			`iteration ${i}: v3 block must be ≤ 250 bytes, got ${block.length}`,
-		).toBeLessThanOrEqual(250);
+			`iteration ${i}: v3 block must be ≤ ${PER_BLOCK_CAP} bytes, got ${block.length}`,
+		).toBeLessThanOrEqual(PER_BLOCK_CAP);
 		// Block payload must not echo the input HTML.
 		expect(block).not.toContain("xxxxx");
 		blocks.push(block);
 		total += block.length;
 	}
 
-	// Sum across 50 iterations ≤ 12 500 bytes (50 × 250 B per-block cap).
+	// Sum across 50 iterations ≤ 50 × PER_BLOCK_CAP bytes.
 	// The HTML payload was 100 KB each ⇒ without v3, the conversation cost
 	// would be ≥ 5 MB; this assertion proves the bytes never enter the
 	// tool-result stream.
 	expect(
 		total,
-		`total snapshot bytes across 50 iterations should be ≤ 12 500, got ${total}`,
-	).toBeLessThanOrEqual(12_500);
+		`total snapshot bytes across 50 iterations should be ≤ ${AGGREGATE_CAP}, got ${total}`,
+	).toBeLessThanOrEqual(AGGREGATE_CAP);
 
 	// Sanity: 50 distinct entries, each block parsable.
 	expect(new Set(blocks).size).toBe(50);

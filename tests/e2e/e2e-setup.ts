@@ -241,7 +241,7 @@ async function maybeInjectProjectId(path: string, opts: RequestInit): Promise<Re
 		if (typeof body === "string") {
 			try {
 				const parsed = JSON.parse(body) as Record<string, unknown>;
-				if (parsed && typeof parsed === "object" && !parsed.acceptCanonical) {
+				if (parsed && typeof parsed === "object" && parsed.acceptCanonical === undefined) {
 					body = JSON.stringify({ ...parsed, acceptCanonical: true });
 				}
 			} catch { /* not JSON — leave unchanged */ }
