@@ -329,6 +329,7 @@ export interface PromptParts {
  * overrides cannot accidentally suppress the rule by replacing role YAML content.
  */
 const LSP_RULE_ROLES: ReadonlySet<string> = new Set([
+	"team-lead",
 	"coder",
 	"reviewer",
 	"code-reviewer",
@@ -355,29 +356,33 @@ export function lspToolSelectionRuleForRole(roleName?: string, rolePrompt?: stri
 	return (
 		`${LSP_TOOL_SELECTION_HEADER}\n\n` +
 		"For any query about a named symbol (function, class, type, variable, constant, interface) " +
-		"in TypeScript / JavaScript / Python source files, you MUST use LSP before `grep`:\n\n" +
+		"in TypeScript / JavaScript / Python source files, you MUST use LSP before any text/code search tool — " +
+		"including `grep`, `rg`, `ripgrep`, `git grep`, `ag`, `ack`, and `bash`/shell commands that invoke them:\n\n" +
 		"- Where is X defined? → `lsp_workspace_symbol(\"X\")` or `lsp_definition({ symbolName: \"X\" })`.\n" +
 		"- What calls X? → `lsp_references({ symbolName: \"X\" })` or `lsp_references(file, line, char)`.\n" +
 		"- What's X's type/signature? → `lsp_hover({ symbolName: \"X\" })`.\n" +
 		"- Is this file clean after my edit? → `lsp_diagnostics(file)`.\n" +
 		"- What's in this file? → `lsp_document_symbols(file)`.\n\n" +
-		"Use `grep` only for free-text/string-literal search, comments, logs, configs, or non-source files. " +
-		"If a grep result includes `[lsp-hint]`, either switch to LSP or explicitly justify why grep was correct."
+		"Use text search only for free-text/string-literal search, comments, logs, configs, non-source files, " +
+		"or regex/text patterns LSP cannot express. If a text-search result (grep, rg, bash, etc.) includes " +
+		"`[lsp-hint]`, either switch to LSP or explicitly justify why text search was correct."
 	);
 }
 
 /**
- * Compute the effective role-prompt text for prompt assembly: the supplied
- * `rolePrompt` with the LSP tool-selection rule appended when applicable.
- * Returns `undefined` when there is no role prompt to render.
+ * Compute the effective role-prompt text for prompt assembly.
+ *
+ * Historically this also appended a per-role `## Tool selection — symbol queries`
+ * section via `lspToolSelectionRuleForRole()`. That rule now lives as a single
+ * canonical section (`## Tool selection — LSP before text search`) in the base
+ * `defaults/system-prompt.md`, which every agent receives, so the per-role
+ * injection is intentionally suppressed here to avoid duplicate competing
+ * sections. `lspToolSelectionRuleForRole` and `LSP_TOOL_SELECTION_HEADER`
+ * remain exported for backward compatibility with existing tests/callers.
  */
-function effectiveRolePrompt(roleName?: string, rolePrompt?: string): string | undefined {
+function effectiveRolePrompt(_roleName?: string, rolePrompt?: string): string | undefined {
 	const base = rolePrompt?.trim();
-	const rule = lspToolSelectionRuleForRole(roleName, rolePrompt);
-	if (!base && !rule) return undefined;
-	if (!rule) return base;
-	if (!base) return rule;
-	return `${base}\n\n${rule}`;
+	return base ? base : undefined;
 }
 
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -543,12 +548,12 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. LSP symbol-lookup hint (injected when lsp_* tools are active and LSP is enabled)
-	{
-		const lspDisabled = String(parts.projectConfigStore?.get("lsp_disabled") ?? "false").toLowerCase() === "true";
-		const lspHint = buildLspSymbolLookupHint(parts.allowedTools, lspDisabled);
-		if (lspHint) sections.push(lspHint);
-	}
+	// 5.5. LSP symbol-lookup hint — superseded by the canonical
+	// `## Tool selection — LSP before text search` section in the base system
+	// prompt (`defaults/system-prompt.md`). The hint is no longer appended here
+	// to avoid duplicate competing LSP sections in the final prompt.
+	// `buildLspSymbolLookupHint` remains exported for backward compatibility.
+	void buildLspSymbolLookupHint;
 
 	// 5.6. Available Skills (autonomous activation catalog)
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {

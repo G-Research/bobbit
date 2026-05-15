@@ -15,7 +15,7 @@ export const LSP_HINT_MARKER = "## Symbol-lookup hint";
 /** Static hint paragraph appended to the system prompt. */
 export const LSP_SYMBOL_LOOKUP_HINT = `## Symbol-lookup hint
 
-For source-code queries about symbols (functions, classes, types, variables) — prefer the \`lsp_*\` tools over \`grep\`/\`read\`:
+For source-code queries about symbols (functions, classes, types, variables) — prefer the \`lsp_*\` tools over \`grep\`/\`rg\`/\`read\`/shell text search:
 
 - "Where is X defined?" → \`lsp_workspace_symbol("X")\` or \`lsp_definition(...)\` on a use-site.
 - "What calls X?" → \`lsp_references(file, line, char)\`.
@@ -23,7 +23,7 @@ For source-code queries about symbols (functions, classes, types, variables) —
 - "Is this file clean?" → \`lsp_diagnostics(file)\` (faster than \`npm run check\`).
 - "What's in this file?" → \`lsp_document_symbols(file)\` (outline tree).
 
-Fall back to \`grep\` for free-text matching, comments, config files, or non-source content. Line/character args are 0-indexed (\`read.offset\` is 1-indexed — be careful).`;
+Fall back to text search (\`grep\`, \`rg\`, \`git grep\`, etc.) for free-text matching, comments, config files, or non-source content. Line/character args are 0-indexed (\`read.offset\` is 1-indexed — be careful).`;
 
 /**
  * Return the LSP symbol-lookup hint when the session's allowed-tools list
