@@ -29,6 +29,25 @@ function _togglePlanExpanded(goalId: string): void {
 	renderApp();
 }
 
+/**
+ * Plan-tab live-only filter state, keyed by the goalId whose Plan tab is
+ * being viewed. Default is **show all** (including archived/completed
+ * children); the set tracks goals the user explicitly toggled to
+ * live-only. Defaults that hide data are the root cause of regressions
+ * where archived siblings vanish from the plan.
+ */
+const _planLiveOnlyGoals: Set<string> = new Set();
+
+function _isPlanLiveOnly(goalId: string): boolean {
+	return _planLiveOnlyGoals.has(goalId);
+}
+
+function _togglePlanLiveOnly(goalId: string): void {
+	if (_planLiveOnlyGoals.has(goalId)) _planLiveOnlyGoals.delete(goalId);
+	else _planLiveOnlyGoals.add(goalId);
+	renderApp();
+}
+
 interface PlanLayoutNode extends PlanEdgeNode {
 	step: PlanStep;
 	state: PlanNodeState;
@@ -43,7 +62,7 @@ const PLAN_PADDING = 16;
 const PLAN_RENDER_DEPTH_CAP = 3;
 
 /** Compute the node + edge layout for a single plan (one goal's plan). */
-function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, parentGoalId: string): {
+function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, parentGoalId: string, liveOnly: boolean): {
 	nodes: PlanLayoutNode[];
 	edges: PlanEdge[];
 	width: number;
@@ -59,7 +78,8 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 	// Scope candidates to THIS goal's direct children; otherwise opening
 	// "See Archived" pollutes the resolver with unrelated archived siblings.
 	const candidates: PlanNodeChild[] = allGoals
-		.filter(g => g.parentGoalId === parentGoalId)
+		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
+		.filter(g => g.parentGoalId === parentGoalId && (!liveOnly || !g.archived))
 		.map(g => ({
 			id: g.id,
 			parentGoalId: g.parentGoalId,
@@ -133,9 +153,9 @@ function planNodeBorderColor(s: PlanNodeState): string {
 	}
 }
 
-function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, ownerGoalId: string): TemplateResult | typeof nothing {
+function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, ownerGoalId: string, liveOnly: boolean): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
-	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId);
+	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId, liveOnly);
 	const paths = computeEdgePaths(nodes, edges, {});
 	return html`
 		<div class="plan-level" data-testid="plan-level-${depth}" data-plan-depth="${depth}" style="position:relative;margin-bottom:18px;">
@@ -145,7 +165,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 					// Show the chevron only when the resolved child has its
 					// own formal plan or own ad-hoc children.
 					const childHasSubPlan = n.childGoal
-						? computePlanStepsForGoal(n.childGoal as any, allGoals, { isNested: true }).length > 0
+						? computePlanStepsForGoal(n.childGoal as any, allGoals, { isNested: true, liveOnly }).length > 0
 						: false;
 					const isArchived = !!n.childGoal?.archived;
 					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
@@ -181,7 +201,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 			</svg>
 			${nodes.filter(n => n.childGoal && _isPlanExpanded(n.childGoal.id)).map(n => {
 				const child = n.childGoal!;
-				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals, { isNested: true });
+				const childPlanSteps = computePlanStepsForGoal(child as any, allGoals, { isNested: true, liveOnly });
 				// Leaf children render NOTHING — the parent node already names them.
 				if (childPlanSteps.length === 0) return nothing;
 				if (depth + 1 > PLAN_RENDER_DEPTH_CAP) {
@@ -191,7 +211,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 				return html`
 					<div data-testid="plan-subtree" data-parent-goal-id="${child.id}"
 						style="margin-left:24px;border-left:2px solid var(--border);padding-left:8px;">
-						${renderPlanLevel(childPlanSteps, allGoals, depth + 1, child.id)}
+						${renderPlanLevel(childPlanSteps, allGoals, depth + 1, child.id, liveOnly)}
 					</div>
 				`;
 			})}
@@ -199,8 +219,17 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 	`;
 }
 
-/** Compute plan steps for an arbitrary goal (top-level or nested). */
-export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested?: boolean }): PlanStep[] {
+/**
+ * Compute plan steps for an arbitrary goal (top-level or nested).
+ *
+ * Default behaviour: include ALL direct children regardless of state
+ * (archived/completed children remain visible in the plan). Pass
+ * `liveOnly:true` to opt OUT of archived children at the call site —
+ * defaults that hide data are the root cause of "archived siblings
+ * vanish from the plan" regressions, so the helper default stays
+ * inclusive and only explicit callers exclude.
+ */
+export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { isNested?: boolean; liveOnly?: boolean }): PlanStep[] {
 	const formalGate = goal.workflow?.gates.find(g => g.id === "execution");
 	let formalSteps: FormalPlanStep[] | undefined = (formalGate as any)?.verify
 		?.filter((v: any) => v.type === "subgoal" && v.subgoal)
@@ -212,7 +241,8 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 			dependsOn: Array.isArray(v.subgoal.dependsOn) ? v.subgoal.dependsOn : undefined,
 		}));
 	const childSynthesis: SynthesisGoal[] = allGoals
-		.filter(g => g.parentGoalId === goal.id)
+		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
+		.filter(g => g.parentGoalId === goal.id && (!opts?.liveOnly || !g.archived))
 		.map(g => ({
 			id: g.id,
 			parentGoalId: g.parentGoalId,
@@ -241,13 +271,32 @@ export function renderPlanTab(args: {
 	allGoals: Goal[];
 }): TemplateResult {
 	const { currentGoal, allGoals } = args;
-	const steps = computePlanStepsForGoal(currentGoal, allGoals);
+	const liveOnly = _isPlanLiveOnly(currentGoal.id);
+	const steps = computePlanStepsForGoal(currentGoal, allGoals, { liveOnly });
+	const toggle = html`
+		<div class="plan-tab-controls" style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:8px;">
+			<button type="button"
+				data-testid="plan-live-only-toggle"
+				data-live-only="${liveOnly ? 'true' : 'false'}"
+				@click=${() => _togglePlanLiveOnly(currentGoal.id)}
+				title="${liveOnly ? 'Showing live subgoals only — click to include archived/completed' : 'Showing all subgoals (including archived/completed) — click to show live only'}"
+				style="font-size:11px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:${liveOnly ? 'var(--muted)' : 'transparent'};color:var(--foreground);cursor:pointer;">
+				${liveOnly ? 'Live only' : 'Show all'}
+			</button>
+		</div>
+	`;
 	if (steps.length === 0) {
-		return html`<div class="tab-empty">${svgPlan}<span>No plan yet — propose subgoal steps or spawn a child.</span></div>`;
+		return html`
+			<div class="tab-panel-inner" data-testid="plan-tab" style="overflow-x:auto;">
+				${toggle}
+				<div class="tab-empty">${svgPlan}<span>No plan yet — propose subgoal steps or spawn a child.</span></div>
+			</div>
+		`;
 	}
 	return html`
 		<div class="tab-panel-inner" data-testid="plan-tab" style="overflow-x:auto;">
-			${renderPlanLevel(steps, allGoals, 0, currentGoal.id)}
+			${toggle}
+			${renderPlanLevel(steps, allGoals, 0, currentGoal.id, liveOnly)}
 		</div>
 	`;
 }
