@@ -29,6 +29,12 @@ export interface LspProcessOpts {
 	 *  Callers should supply the container-installed equivalents here.
 	 *  Defaults to `[command, ...args]` when omitted (host-only fallback). */
 	sandboxCmd?: string[];
+	/** Fail closed instead of host-fallback when a sandbox container is
+	 *  required but `sandbox.containerIdForWorktree(worktreePath)` is null.
+	 *  Set by the supervisor for worktrees explicitly marked sandboxed.
+	 *  Host-only / fixture / dev flows leave this unset and keep the
+	 *  legacy host-spawn fallback. */
+	requireSandbox?: boolean;
 }
 
 export interface LspProcess {
@@ -39,6 +45,18 @@ export interface LspProcess {
 }
 
 const localRequire = createRequire(import.meta.url);
+
+/**
+ * Error thrown when a sandboxed worktree requests LSP but no container is
+ * available. We refuse to host-fallback in that case so untrusted sandbox
+ * files never get evaluated by a host-side language server.
+ */
+export class LspSandboxRequiredError extends Error {
+	constructor(worktreePath: string) {
+		super(`LSP spawn refused: sandbox required for worktree ${worktreePath} but no container is available`);
+		this.name = "LspSandboxRequiredError";
+	}
+}
 
 /**
  * Resolve typescript-language-server CLI script (.mjs) from the gateway
@@ -73,6 +91,13 @@ export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	// supervisor working uniformly across sandboxed and non-sandboxed
 	// worktrees within the same gateway.
 	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
+	if (opts.requireSandbox && !cid) {
+		// Security: sandboxed sessions must never run an LSP server against
+		// untrusted worktree files on the host. Refuse the spawn so callers
+		// (supervisor pre-warm, on-demand ensure) surface `lsp_unavailable`
+		// rather than silently host-falling-back.
+		throw new LspSandboxRequiredError(opts.worktreePath);
+	}
 	if (opts.sandbox && cid) {
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
 		// Use sandboxCmd when provided; host-resolved paths (process.execPath,

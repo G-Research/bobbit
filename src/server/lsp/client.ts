@@ -23,6 +23,11 @@ export interface SpawnOpts {
 	 * as a crash.
 	 */
 	onClose?: (graceful: boolean) => void;
+	/** When true, the adapter must fail closed if no sandbox container is
+	 *  available for `worktreePath`. Set by the supervisor for worktrees
+	 *  marked sandboxed via `LspSupervisor.markSandboxed()`. Host-only flows
+	 *  leave this unset. See `LspProcessOpts.requireSandbox`. */
+	requireSandbox?: boolean;
 }
 
 export interface LspClient {
