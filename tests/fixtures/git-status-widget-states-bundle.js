@@ -1033,7 +1033,6 @@
       Low: "Low",
       Medium: "Medium",
       High: "High",
-      "Extra high": "Extra high",
       "Storage Permission Required": "Storage Permission Required",
       "This app needs persistent storage to save your conversations": "This app needs persistent storage to save your conversations",
       "Why is this needed?": "Why is this needed?",
