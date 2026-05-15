@@ -111,4 +111,117 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		// Cleanup.
 		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
 	});
+
+	// ───────────────────────────────────────────────────────────────────────
+	// Subtree-rooted rollup — `/tree-cost` must aggregate from the requested
+	// goal DOWNWARD, not from the topmost ancestor. Bug repro: opening any
+	// descendant's dashboard previously showed the whole-tree rollup because
+	// the handler resolved `rootGoalId = goal.rootGoalId ?? goal.id`.
+	//
+	// Server fix lives in `src/server/server.ts` (GET /api/goals/:id/tree-cost)
+	// and is pinned at the unit level by `tests/api-goals-tree-cost.test.ts`.
+	// This block pins the user-visible behaviour: the dashboard header value
+	// (`data-testid="tree-cost-total"`) must reflect the requested subgoal's
+	// subtree sum, not the project-wide grand total.
+	// ───────────────────────────────────────────────────────────────────────
+	test("dashboard tree-cost-total is rooted at the requested subgoal (parent / child / grandchild)", async ({ page, gateway }) => {
+		const projectId = await defaultProjectId();
+		if (!projectId) throw new Error("defaultProjectId() returned undefined");
+
+		// Build a 3-deep chain: parent → child → grandchild.
+		const parent = await createGoal({ title: "Tree-cost subtree parent", projectId, team: false });
+		const rChild = await apiFetch(`/api/goals/${parent.id}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "sub-c", title: "Tree-cost subtree child", spec: "tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length." }),
+		});
+		expect(rChild.status).toBe(201);
+		const childId = (await rChild.json()).id as string;
+		const rGrand = await apiFetch(`/api/goals/${childId}/spawn-child`, {
+			method: "POST",
+			body: JSON.stringify({ planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." }),
+		});
+		expect(rGrand.status).toBe(201);
+		const grandId = (await rGrand.json()).id as string;
+
+		// Seed distinct, easy-to-read costs on each goal directly through the
+		// cost tracker. Picked so each subtree total has a unique two-decimal
+		// rendering AND every level is strictly less than its ancestor:
+		//   grandchild only        =        0.05
+		//   child + grandchild     = 0.20 + 0.05 = 0.25
+		//   parent + child + grand = 0.50 + 0.20 + 0.05 = 0.75
+		const costTracker = (gateway.sessionManager as any).getCostTracker(projectId);
+		const seedRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		costTracker.recordUsage(`tc-seed-parent-${seedRunId}`, { cost: 0.50, inputTokens: 1_000, outputTokens: 500 }, parent.id);
+		costTracker.recordUsage(`tc-seed-child-${seedRunId}`,  { cost: 0.20, inputTokens:   400, outputTokens: 200 }, childId);
+		costTracker.recordUsage(`tc-seed-grand-${seedRunId}`,  { cost: 0.05, inputTokens:   100, outputTokens:  50 }, grandId);
+
+		// ── REST sanity: endpoint must root the rollup at the requested goal ──
+		async function fetchTree(goalId: string): Promise<{ rootGoalId: string; totalCostUsd: number; breakdown: Array<{ goalId: string }> }> {
+			const r = await apiFetch(`/api/goals/${goalId}/tree-cost`);
+			expect(r.status, `GET /tree-cost ${goalId}`).toBe(200);
+			return r.json();
+		}
+		const parentTree = await fetchTree(parent.id);
+		const childTree  = await fetchTree(childId);
+		const grandTree  = await fetchTree(grandId);
+
+		// rootGoalId must be the REQUESTED goal — not the topmost ancestor.
+		expect(parentTree.rootGoalId).toBe(parent.id);
+		expect(childTree.rootGoalId, "child request must root rollup at the child, not the parent").toBe(childId);
+		expect(grandTree.rootGoalId, "grandchild request must root rollup at the grandchild, not an ancestor").toBe(grandId);
+
+		// Subtree totals (within float-rounding tolerance).
+		expect(parentTree.totalCostUsd).toBeCloseTo(0.75, 6);
+		expect(childTree.totalCostUsd).toBeCloseTo(0.25, 6);
+		expect(grandTree.totalCostUsd).toBeCloseTo(0.05, 6);
+
+		// Strict ordering: each descendant's subtree total must be < its ancestor's.
+		expect(childTree.totalCostUsd).toBeLessThan(parentTree.totalCostUsd);
+		expect(grandTree.totalCostUsd).toBeLessThan(childTree.totalCostUsd);
+		expect(grandTree.totalCostUsd).toBeLessThan(parentTree.totalCostUsd);
+
+		// Breakdown shape: grandchild sees only itself; child sees itself + grand;
+		// parent sees all three. Confirms `computeTreeCost` walked from the requested
+		// goal downward rather than from the audit root.
+		expect(grandTree.breakdown.map(b => b.goalId).sort()).toEqual([grandId].sort());
+		expect(childTree.breakdown.map(b => b.goalId).sort()).toEqual([childId, grandId].sort());
+		expect(parentTree.breakdown.map(b => b.goalId).sort()).toEqual([parent.id, childId, grandId].sort());
+		// Negative containment — the requested goal's ancestor must NOT appear
+		// in the breakdown. This is exactly the pre-fix bug shape.
+		expect(childTree.breakdown.map(b => b.goalId)).not.toContain(parent.id);
+		expect(grandTree.breakdown.map(b => b.goalId)).not.toContain(parent.id);
+		expect(grandTree.breakdown.map(b => b.goalId)).not.toContain(childId);
+
+		// ── Dashboard rendering: tree-cost-total must match the subtree sum ──
+		await openApp(page);
+
+		// The dashboard formats `totalCostUsd` with `toFixed(2)` (see
+		// `renderTreeCostRow` in `src/app/goal-dashboard.ts`), so the rendered
+		// text is the canonical two-decimal dollar amount. The dashboard reset
+		// clears `treeCost = null` on goal switch and re-fetches async, so we
+		// poll on the expected value rather than snapshot once — otherwise a
+		// stale render between goal switches can produce a flaky read.
+		async function assertTreeCostTotal(goalId: string, expected: string): Promise<string> {
+			await navigateToHash(page, `#/goal/${goalId}`);
+			await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
+			const total = page.locator('[data-testid="tree-cost-total"]').first();
+			await expect(total).toBeVisible({ timeout: 10_000 });
+			await expect(total).toHaveText(expected, { timeout: 10_000 });
+			return (await total.textContent() ?? "").trim();
+		}
+
+		const parentText = await assertTreeCostTotal(parent.id, "$0.75");
+		const childText  = await assertTreeCostTotal(childId,  "$0.25");
+		const grandText  = await assertTreeCostTotal(grandId,  "$0.05");
+
+		// Strict-less-than parsed against the rendered text — guards against a
+		// regression where every descendant displays the parent's value.
+		function parseUsd(s: string): number { return parseFloat(s.replace(/[^\d.]/g, "")); }
+		expect(parseUsd(childText)).toBeLessThan(parseUsd(parentText));
+		expect(parseUsd(grandText)).toBeLessThan(parseUsd(childText));
+		expect(parseUsd(grandText)).toBeLessThan(parseUsd(parentText));
+
+		// Cleanup.
+		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
+	});
 });
