@@ -591,20 +591,24 @@ they share the same experimental gate.
 
 The standalone goal creation panel uses the same `renderGoalForm`
 component, but does not currently wire these proposal-only override
-callbacks. In the proposal modal, the per-goal controls appear below the
-parent/depth section:
+callbacks. In the proposal modal, the per-goal controls now share the
+same visual group as the other proposal toggles:
 
-- An **Allow subgoals** checkbox (testid `goal-form-subgoals-toggle`).
-  Default inherits from `isSubgoalsEnabled()`. When the system pref is
-  OFF the checkbox is unchecked and greyed out — a per-goal flag cannot
-  override a system-level OFF. Unchecking it disables subgoals for this
-  specific goal tree.
-- A **Max depth** number input (testid `goal-form-max-depth`), visible
-  only when Allow subgoals is ON. Default inherits from
-  `getSystemMaxNestingDepth()`. Clamped to `[1, systemCap]` — the
-  per-goal value can only tighten, never exceed the system ceiling. The
-  submit path only sends the override when the user has touched it;
-  otherwise the field is omitted and the server resolves from prefs.
+- **Allow subgoals** (testid `goal-form-subgoals-toggle`) appears in the
+  shared toggle-switch row after optional-step toggles such as **Enable
+  QA Testing**. It uses the same `toggle-switch` pill styling and `ⓘ`
+  tooltip affordance as Sandbox / Auto-start team / QA toggles. It is
+  visible only while the system Subgoals preference is ON; when the
+  system pref is OFF, the proposal-modal controls are hidden rather than
+  shown disabled, so a per-goal flag cannot override a system-level OFF.
+  Turning it off disables subgoals for this specific goal tree.
+- **Max depth** (testid `goal-form-max-depth`) appears inline in that
+  same toggle row as a subordinate pill only when Allow subgoals is ON.
+  Default inherits from `getSystemMaxNestingDepth()`. Clamped to
+  `[1, systemCap]` — the per-goal value can only tighten, never exceed
+  the system ceiling. The submit path only sends the override when the
+  user has touched it; otherwise the field is omitted and the server
+  resolves from prefs.
 
 The enforcement is **purely server-side**. The UI controls are UX —
 if a rogue agent bypasses the panel and POSTs a higher `maxNestingDepth`

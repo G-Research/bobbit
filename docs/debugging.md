@@ -1012,8 +1012,8 @@ Key files: `src/server/agent/resolve-role.ts` (pure helper), `src/server/agent/t
 **Diagnose:**
 
 1. Reproduce by calling `propose_goal` with both fields and immediately `view_proposal type:"goal"`. The returned markdown's frontmatter must contain `inlineWorkflow:` and `inlineRoles:` keys.
-2. If the keys are missing, grep `src/server/proposals/proposal-types.ts:43` for `GOAL_FRONTMATTER_KEYS` — it must include both names. Without them, the fix has been reverted.
-3. If the keys are present in the draft but the goal record on `GET /api/goals/:id` doesn't carry them, check the acceptance path: `src/app/render.ts::handleCreateGoal` reads `state.activeProposals.goal?.fields.inlineWorkflow` and `inlineRoles` BEFORE deleting the slot, then passes them to `createGoal()` in `src/app/api.ts:851`. Both call sites (`goalPreviewPanel`, `goalProposalPanel`) must read from the proposal slot.
+2. If the keys are missing, grep `src/server/proposals/proposal-types.ts` for `GOAL_FRONTMATTER_KEYS` — it must include both names. Without them, the fix has been reverted.
+3. If the keys are present in the draft but the goal record on `GET /api/goals/:id` doesn't carry them, check the acceptance path: `src/app/render.ts::handleCreateGoal` reads `state.activeProposals.goal?.fields.inlineWorkflow` and `inlineRoles` BEFORE deleting the slot, then passes them to `createGoal()` in `src/app/api.ts`. Both call sites (`goalPreviewPanel`, `goalProposalPanel`) must read from the proposal slot.
 4. For the role-acceptance equivalent: `src/app/render.ts::handleCreateRole` snapshots the proposal slot before delete and forwards `toolPolicies` (preferring the explicit Record over the comma-string reconstruction), `model`, `thinkingLevel`, `description` to `createRole()`. The same silent-drop bug class would affect roles when an agent set those fields via `edit_proposal(type="role", ...)`.
 
 Tests pinning the contract:

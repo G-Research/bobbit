@@ -93,6 +93,29 @@ test.describe("Goal proposal modal — subgoal controls", () => {
 			const maxDepth = page.locator("[data-testid='goal-form-max-depth']").first();
 			await expect(maxDepth).toBeVisible({ timeout: 5_000 });
 
+			// 1b. Verify the toggle row contains Sandbox → Auto-start team →
+			//     Enable QA Testing → Allow subgoals → Max depth in that order.
+			//     This pins UI consistency: the subgoals controls must live in the
+			//     same shared toggle row as their peers, not in a separate row.
+			const rowText = await toggle.evaluate((el) => {
+				const row = el.closest("div.flex.flex-wrap");
+				return row ? (row.textContent || "").replace(/\s+/g, " ").trim() : "";
+			});
+			expect(rowText, "Allow-subgoals toggle must live in the shared toggle row").not.toBe("");
+			const expectedOrder = [
+				...(rowText.includes("Sandbox") ? ["Sandbox"] : []),
+				"Auto-start team",
+				"Enable QA Testing",
+				"Allow subgoals",
+				"Max depth",
+			];
+			let cursor = 0;
+			for (const label of expectedOrder) {
+				const idx = rowText.indexOf(label, cursor);
+				expect(idx, `Expected "${label}" after position ${cursor} in row text: "${rowText}"`).toBeGreaterThanOrEqual(cursor);
+				cursor = idx + label.length;
+			}
+
 			// 2. Toggle OFF → max-depth input disappears.
 			await toggle.click();
 			await expect(toggle).not.toBeChecked();
