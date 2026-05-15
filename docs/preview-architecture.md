@@ -256,19 +256,18 @@ Single-segment `*` and `?` globs match within one path segment only —
 
 ```json
 {
-  "url":   "/preview/3f2c…/report.html",
-  "path":  "C:/Users/.../bobbit/state/preview/3f2c…/report.html",
-  "entry": "report.html",
-  "mtime": 1775853741666,
-  "assets": ["img/chart.png", "styles.css"]
+  "url":     "/preview/3f2c…/report.html",
+  "path":    "C:/Users/.../bobbit/state/preview/3f2c…/report.html",
+  "relPath": "3f2c…/report.html",
+  "entry":   "report.html",
+  "mtime":   1775853741666,
+  "assets":  ["img/chart.png", "styles.css"]
 }
 ```
 
-The `assets[]` field is echoed back only on the `file` form, sorted, and
-contains the resolved relative paths actually copied (after glob
-expansion and de-duplication). The inline `html` form omits it. Renderer
-reopen flows can round-trip this list back into a follow-up
-`POST /api/preview/mount` to re-stamp the same mount.
+- `path` — host-absolute path to the entry file (useful for debugging; mirrors v2 marker semantics).
+- `relPath` — host-invariant `<sessionId>/<entry>` identifier, always with forward slashes regardless of OS. The agent tool stamps this into the v3 snapshot marker so the per-block size stays under the 250 B cap even on long macOS temp paths or Windows `AppData` paths.
+- `assets[]` — echoed back only on the `file` form, sorted, containing the resolved relative paths actually copied (after glob expansion and de-duplication). The inline `html` form omits it. Renderer reopen flows can round-trip this list back into a follow-up `POST /api/preview/mount` to re-stamp the same mount.
 
 After every success the server calls `broadcastPreviewChanged(sessionId, …)`
 to fan out a `preview-changed` SSE event to every subscribed tab.
@@ -276,7 +275,7 @@ to fan out a `preview-changed` SSE event to every subscribed tab.
 ### `GET /api/preview/mount?sessionId=<sid>`
 
 Bootstrap probe used by the panel after session-select. Returns the same
-`{ url, path, entry, mtime }` shape as the `POST`, or `404 { error: "no
+`{ url, path, relPath, entry, mtime }` shape as the `POST`, or `404 { error: "no
 preview mount" }` when the mount is missing or empty. Resolves the entry via
 the same `pickEntry()` helper the content route uses.
 
@@ -288,12 +287,14 @@ The `preview_open` tool stamps the result with a constant-size marker block:
 
 ```
 __preview_snapshot_v3__
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<host-abs>"}
+{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>"}
 ```
 
 ≤ 250 bytes per block, regardless of HTML size. The renderer parses the
 marker via `parseSnapshot()` and uses `url` / `path` to drive the **Open**
 button on archived tool cards.
+
+The `path` field carries the **host-invariant relative identifier** `<sessionId>/<entry>` (forward slashes on all OSes) rather than the host-absolute path. This keeps the block size bounded by content shape rather than by where `bobbitStateDir()` happens to live on disk — critical for the 250 B cap to hold on macOS (`/private/var/folders/…`) and Windows (`C:\Users\…\AppData\Local\Temp\bobbit-e2e\…`) alike. Archived sessions that recorded a legacy host-absolute path in the `path` field still parse — `parseSnapshot` only requires a non-empty string.
 
 **Legacy markers** are preserved in the parser **only** for archived
 sessions:
@@ -302,7 +303,7 @@ sessions:
 |---|---|---|
 | `__preview_snapshot_v1__` | raw inline HTML | Reopen via `POST /api/preview/mount {html}` |
 | `__preview_snapshot_v2__` | `{kind:"file",path}` | Reopen via `POST /api/preview/mount {file}` |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path}` | Mount already populated; SSE will deliver the entry |
+| `__preview_snapshot_v3__` | `{kind:"preview",url,path}` — `path` is `<sid>/<entry>` (host-invariant, forward slashes) | Mount already populated; SSE will deliver the entry |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`

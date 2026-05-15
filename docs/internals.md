@@ -2138,7 +2138,7 @@ Agent calls preview_open({html|file})
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
           {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
-        ]
+        ]  // path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
    └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
        {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
@@ -2150,7 +2150,7 @@ User clicks Open on widget #N (PreviewRenderer.ts):
 
 ### Key design decisions
 
-- **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
+- **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The `path` field is the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes) rather than the host-absolute path — keeping block size bounded by content shape, not install location. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
 - **Cookie auth for the content origin** - `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens.
