@@ -48,6 +48,14 @@ class DispatchSimulator {
 	enqueue(text: string, opts?: { isSteered?: boolean; isFollowUp?: boolean }): QueuedMessage | null {
 		// Error-state gating with implicit unstick up to MAX_CONSECUTIVE_ERROR_TURNS.
 		if (this.lastTurnErrored) {
+			// Always cancel any pending auto-retry timer when a new user prompt
+			// arrives — regardless of whether we're about to park (cap reached)
+			// or implicitly unstick. Otherwise a parked prompt at the cap would
+			// leave a stale retry banner/timer running.
+			if (this.pendingAutoRetryTimer) {
+				this.pendingAutoRetryTimer.cancelled = true;
+				this.pendingAutoRetryTimer = undefined;
+			}
 			if (this.consecutiveErrorTurns >= MAX_CONSECUTIVE_ERROR_TURNS) {
 				this.logs.push(
 					`park:consecutiveErrorTurns=${this.consecutiveErrorTurns}`
@@ -59,10 +67,6 @@ class DispatchSimulator {
 			this.logs.push(
 				`unstick:consecutiveErrorTurns=${this.consecutiveErrorTurns}`
 			);
-			if (this.pendingAutoRetryTimer) {
-				this.pendingAutoRetryTimer.cancelled = true;
-				this.pendingAutoRetryTimer = undefined;
-			}
 			const errSnippet = (this.lastTurnErrorMessage || "").slice(0, 200);
 			this.lastTurnErrored = false;
 			this.lastTurnErrorMessage = "";
@@ -1084,6 +1088,45 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.pendingAutoRetryTimer).toBeUndefined();
 		// Only ONE dispatch from the unstick (no double dispatch from retry timer).
 		expect(sim.dispatched.length).toBe(before + 1);
+	});
+
+	test("(retry-overload) pending auto-retry cancelled even when new prompt is parked at error cap", () => {
+		// Pinned by goal "Retry overloaded errors" code-review high finding:
+		// enqueuePrompt() must cancel any pending auto-retry timer BEFORE the
+		// cap-reached park branch returns, otherwise a parked prompt at the cap
+		// leaves a stale retry banner/timer running until it fires a second
+		// dispatch on top of the user's just-parked input.
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+		// Drive the consecutive-error counter up to the cap with overload errors.
+		for (let i = 0; i < MAX_CONSECUTIVE_ERROR_TURNS; i++) {
+			sim.errorEnd('{"type":"overloaded_error"}');
+		}
+		expect(sim.consecutiveErrorTurns).toBe(MAX_CONSECUTIVE_ERROR_TURNS);
+
+		// Schedule an auto-retry timer as the overload-backoff path would have.
+		const timer = sim.scheduleAutoRetry();
+		expect(sim.pendingAutoRetryTimer).toBe(timer);
+		expect(timer.cancelled).toBe(false);
+
+		const dispatchedBefore = sim.dispatched.length;
+
+		// New user prompt arrives while we're at the cap. It MUST be parked
+		// (cap behaviour preserved) AND the pending auto-retry must be cancelled.
+		sim.enqueue("new-prompt-at-cap");
+
+		// Park path was taken (no new dispatch, message lives in queue).
+		expect(sim.dispatched.length).toBe(dispatchedBefore);
+		expect(sim.logs.some(l => l.startsWith("park:"))).toBe(true);
+		expect(sim.queue.length).toBeGreaterThan(0);
+
+		// Critical: timer cancelled, banner no longer pending.
+		expect(timer.cancelled).toBe(true);
+		expect(sim.pendingAutoRetryTimer).toBeUndefined();
+
+		// Session remains in error state until explicit Retry / fix upstream.
+		expect(sim.lastTurnErrored).toBe(true);
+		expect(sim.consecutiveErrorTurns).toBe(MAX_CONSECUTIVE_ERROR_TURNS);
 	});
 
 	test("aborting status transition during force-abort (PI-21b)", () => {
