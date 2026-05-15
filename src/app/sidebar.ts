@@ -667,7 +667,7 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 				const btnPad = mobile ? "p-1.5" : "p-0.5";
 				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
+					@click=${(e: Event) => { e.stopPropagation(); setHashRoute("staff-edit", agent.id); }}
 					title="Edit">${icon(Pencil, "xs")}</button>`;
 				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
@@ -770,7 +770,7 @@ function _handleSearchClear(): void {
 
 function _handleFullSearchClick(query: string): void {
 	// Navigate to #/search?q=query — uses hash directly since route may not be registered yet
-	window.location.hash = query ? `#/search?q=${encodeURIComponent(query)}` : "#/search";
+	setHashRoute("search", query || undefined);
 }
 
 /**

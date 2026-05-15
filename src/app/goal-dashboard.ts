@@ -2509,7 +2509,7 @@ export function renderGoalDashboard(): TemplateResult {
 		// times out.
 		const skeletonTabs = ["Spec", "Gates", "Tasks", "Agents", "Commits"];
 		return html`
-			<div class="dashboard-container" style="flex:1;min-height:0;">
+			<div class="dashboard-container" data-testid="goal-dashboard" style="flex:1;min-height:0;">
 				<div class="tab-bar" data-dashboard-loading="true">
 					${skeletonTabs.map((label, i) => html`
 						<div class="tab ${i === 1 ? "active" : ""}" title="${label}">
@@ -2526,7 +2526,7 @@ export function renderGoalDashboard(): TemplateResult {
 
 	if (error || !currentGoal) {
 		return html`
-			<div class="dashboard-container">
+			<div class="dashboard-container" data-testid="goal-dashboard">
 				<div class="dashboard-error">
 					<p>${error || "Goal not found"}</p>
 					${Button({
@@ -2545,7 +2545,7 @@ export function renderGoalDashboard(): TemplateResult {
 	const isArchived = currentGoal.archived === true;
 
 	return html`
-		<div class="dashboard-container">
+		<div class="dashboard-container" data-testid="goal-dashboard">
 			${renderNavBar(currentGoal)}
 			${renderParentBreadcrumb(currentGoal)}
 			${isArchived ? html`

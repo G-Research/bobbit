@@ -588,7 +588,7 @@ export function renderSessionRow(session: GatewaySession) {
 	const staffId = session.staffId;
 	const pencilTitle = staffId ? "Edit staff" : "Modify";
 	const pencilHandler = staffId
-		? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
+		? (e: Event) => { e.stopPropagation(); setHashRoute("staff-edit", staffId); }
 		: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); };
 	const buttons = html`
 		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"

@@ -9,6 +9,7 @@ import { renderHeader, getToolState, isSkippedToolResult } from "../renderer-reg
 import type { ToolRenderer, ToolRenderResult, ToolRenderContext } from "../types.js";
 import { DefaultRenderer } from "./DefaultRenderer.js";
 import { isSubgoalsEnabled } from "../../../app/subgoals-flag.js";
+import { setHashRoute } from "../../../app/routing.js";
 import { getResult, truncate, goalIdChip, parseParams } from "./children-renderer-helpers.js";
 import "../../../ui/components/ExpandableSection.js";
 
@@ -55,16 +56,12 @@ export class GoalSpawnChildRenderer implements ToolRenderer {
 		const childGoalId: string | undefined = data?.id || data?.goalId;
 		const alreadyExists: boolean = !!data?.alreadyExists;
 
+		// Invariant: goal_spawn_child returns a real goal id, not a proposal id. If proposal navigation is ever needed, add a separate renderer path instead of showing this button without childGoalId.
 		const openGoal = (e: Event) => {
 			e.preventDefault();
 			e.stopPropagation();
 			if (!childGoalId) return;
-			document.dispatchEvent(new CustomEvent("goal-open", { detail: { goalId: childGoalId }, bubbles: true }));
-			// Defensive fallback: also set the route hash (mirrors goal-dashboard's
-			// setHashRoute pattern) in case no listener wires the custom event.
-			try {
-				if (typeof window !== "undefined") window.location.hash = `#goal-dashboard/${childGoalId}`;
-			} catch { /* ignore */ }
+			setHashRoute("goal-dashboard", childGoalId);
 		};
 
 		return {
