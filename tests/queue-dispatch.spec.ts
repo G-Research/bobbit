@@ -241,11 +241,21 @@ class DispatchSimulator {
 	/**
 	 * Models retryLastPrompt — clears error state. The retry prompt triggers
 	 * agent_start → agent processes → agent_end → drainQueue.
+	 *
+	 * `auto:true` mirrors the SessionManager.retryLastPrompt call shape used
+	 * by the auto-retry timer: the transient-retry counter is PRESERVED so
+	 * the next failure continues growing the backoff toward the 5-minute cap.
+	 * The explicit (user-click) path resets both the error-turn cap and the
+	 * transient-retry budget so a human Retry starts the backoff afresh.
 	 */
-	retry(): void {
+	retry(opts?: { auto?: boolean }): void {
+		const isAuto = opts?.auto === true;
 		this.lastTurnErrored = false;
-		// Explicit retry bypasses the cap — fresh budget.
-		this.consecutiveErrorTurns = 0;
+		if (!isAuto) {
+			// Explicit retry bypasses the cap — fresh budget.
+			this.consecutiveErrorTurns = 0;
+			this.transientRetryAttempts = 0;
+		}
 		if (this.pendingAutoRetryTimer) {
 			this.pendingAutoRetryTimer.cancelled = true;
 			this.pendingAutoRetryTimer = undefined;
@@ -1003,6 +1013,36 @@ test.describe("Queue Dispatch Integration", () => {
 		// Explicit retry also resets the error-turn cap.
 		expect(sim.consecutiveErrorTurns).toBe(0);
 		expect(sim.lastTurnErrored).toBe(false);
+	});
+
+	test("(retry-overload) explicit retryLastPrompt resets transientRetryAttempts; auto path preserves it", () => {
+		// Pinned by goal "Retry overloaded errors" review finding #2: the same
+		// retryLastPrompt method is invoked both by the auto-retry timer and by
+		// the user-click Retry button. Explicit (user-initiated) retry MUST
+		// reset the backoff budget so the next failure starts at the 1s base;
+		// auto retry MUST preserve it so the delay grows toward the 5-min cap.
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+		sim.errorEnd('{"type":"overloaded_error"}'); // consecutiveErrorTurns -> 1
+		sim.transientRetryAttempts = 5; // simulate several prior auto-retries
+		const priorConsecutive = sim.consecutiveErrorTurns;
+
+		// Auto path — transient budget preserved; consecutive-error counter is
+		// also preserved (only the explicit user path forgives that cap).
+		sim.retry({ auto: true });
+		expect(sim.transientRetryAttempts).toBe(5);
+		expect(sim.consecutiveErrorTurns).toBe(priorConsecutive);
+
+		// Now simulate the retry failing again and the user clicking Retry.
+		sim.agentEnd();
+		sim.errorEnd('{"type":"overloaded_error"}');
+		sim.transientRetryAttempts = 7;
+		sim.consecutiveErrorTurns = 2;
+
+		// Explicit path — both budgets reset.
+		sim.retry();
+		expect(sim.transientRetryAttempts).toBe(0);
+		expect(sim.consecutiveErrorTurns).toBe(0);
 	});
 
 	test("(retry-overload) provider-overload error can retry past the 3-attempt non-provider cap", () => {
