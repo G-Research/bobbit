@@ -249,6 +249,136 @@ describe("lspHintForBashCommand — suppresses hint for non-source or non-grep c
 	});
 });
 
+describe("lspHintForBashCommand — setup chains (cd && grep, env-prefix, set)", () => {
+	it("`cd /repo && grep -n 'archiveGoal|deleteGoal' src/app/` -> hint emitted", () => {
+		const hint = lspHintForBashCommand(
+			"cd /repo && grep -n \"archiveGoal|deleteGoal\" src/app/",
+			bashResult(SAMPLE_HIT),
+		);
+		assert.ok(hint, "expected a hint after cd && grep setup chain");
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("lsp_workspace_symbol"),
+			`expected lsp_workspace_symbol in hint: ${hint}`,
+		);
+	});
+
+	it("`cd /repo && grep ... | head -20` -> hint emitted (downstream pipe is filter, not primary)", () => {
+		const hint = lspHintForBashCommand(
+			"cd /repo && grep -n \"enqueuePrompt\\|deliverLiveSteer\" src/server/agent/session-manager.ts | head -20",
+			bashResult(
+				"src/server/agent/session-manager.ts:120:  enqueuePrompt(id, prompt);",
+			),
+		);
+		assert.ok(hint, "expected a hint when grep is followed by | head");
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("enqueuePrompt") || hint!.includes("deliverLiveSteer"),
+			`expected a relevant alternation identifier in hint: ${hint}`,
+		);
+	});
+
+	it("`set -e; cd /repo && rg \"createSession\\(\" src/` -> hint suggests lsp_references", () => {
+		const hint = lspHintForBashCommand(
+			'set -e; cd /repo && rg "createSession\\(" src/',
+			bashResult("src/server/agent/manager.ts:88:  createSession(opts);"),
+		);
+		assert.ok(hint, "expected a hint after `set -e; cd && rg`");
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("lsp_references"),
+			`expected lsp_references suggestion: ${hint}`,
+		);
+		assert.ok(
+			hint!.includes("createSession"),
+			`expected identifier in hint: ${hint}`,
+		);
+	});
+
+	it("`FOO=1 grep -rn 'function foo' src/server/` -> hint emitted (leading env assignment stripped)", () => {
+		const hint = lspHintForBashCommand(
+			'FOO=1 grep -rn "function foo" src/server/',
+			bashResult("src/server/a.ts:1:function foo() {}"),
+		);
+		assert.ok(hint, "expected a hint when leading env assignment precedes grep");
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("foo"),
+			`expected identifier 'foo' in hint: ${hint}`,
+		);
+	});
+
+	it("`cat file | grep foo` -> still no hint (grep downstream of pipe in primary segment)", () => {
+		const hint = lspHintForBashCommand(
+			"cat file | grep foo",
+			bashResult("foo something"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("`ls -la | grep '.ts'` -> still no hint (primary cmd is ls)", () => {
+		const hint = lspHintForBashCommand(
+			"ls -la | grep '.ts'",
+			bashResult("foo.ts"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("`cd /repo && grep \"Error initializing\" *.log` -> no hint (non-source target)", () => {
+		const hint = lspHintForBashCommand(
+			'cd /repo && grep "Error initializing" *.log',
+			bashResult("server.log:1:Error initializing module"),
+		);
+		assert.equal(hint, null);
+	});
+});
+
+describe("lspHintForBashCommand — regression: session c9a21d20-b5be-48e7-9200-c153f78480aa", () => {
+	// These are the exact two `cd ... && grep ...` commands observed in the
+	// post-11:06 audit that received zero [lsp-hint] lines. Pin them so the
+	// regression cannot return silently.
+	it("`cd ... && grep -n 'enqueuePrompt\\|deliverLiveSteer' src/server/agent/session-manager.ts | head -20` -> hint emitted", () => {
+		const hint = lspHintForBashCommand(
+			"cd /Users/aj/Documents/dev/bobbit-subgoals-wt/goal-x && grep -n \"enqueuePrompt\\|deliverLiveSteer\" src/server/agent/session-manager.ts | head -20",
+			bashResult(
+				"src/server/agent/session-manager.ts:120:  enqueuePrompt(id, prompt);\n" +
+					"src/server/agent/session-manager.ts:240:  deliverLiveSteer(id, msg);",
+			),
+		);
+		assert.ok(
+			hint,
+			"regression: this exact command must produce a bash-grep [lsp-hint]",
+		);
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("lsp_workspace_symbol") || hint!.includes("lsp_references"),
+			`expected an lsp_* suggestion in hint: ${hint}`,
+		);
+		assert.ok(
+			hint!.includes("enqueuePrompt") || hint!.includes("deliverLiveSteer"),
+			`expected a relevant alternation identifier in hint: ${hint}`,
+		);
+	});
+
+	it("`cd ... && grep -n 'pollUntil' tests/e2e/test-utils/cleanup.ts | head -5` -> hint emitted", () => {
+		const hint = lspHintForBashCommand(
+			"cd /Users/aj/Documents/dev/bobbit-subgoals-wt/goal-x && grep -n \"pollUntil\" tests/e2e/test-utils/cleanup.ts | head -5",
+			bashResult(
+				"tests/e2e/test-utils/cleanup.ts:18:export async function pollUntil(fn) {",
+			),
+		);
+		assert.ok(
+			hint,
+			"regression: this exact command must produce a bash-grep [lsp-hint]",
+		);
+		assertHintShape(hint!);
+		assert.ok(
+			hint!.includes("pollUntil"),
+			`expected identifier 'pollUntil' in hint: ${hint}`,
+		);
+	});
+});
+
 describe("lspHintForBashCommand — env opt-out", () => {
 	let prev: string | undefined;
 	before(() => {

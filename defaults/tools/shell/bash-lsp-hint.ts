@@ -100,32 +100,106 @@ interface ParsedGrep {
 	targets: string[];
 }
 
+/** `NAME=value` style simple env assignment (unquoted, valid identifier). */
+function isEnvAssignment(tok: Token): boolean {
+	if (tok.hadQuotes) return false;
+	return /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok.value);
+}
+
 /**
- * Identify whether the top-level command (the segment before any pipe /
- * `&&` / `||` / `;`) is a grep-like invocation, and if so parse out its
- * pattern and target paths/globs.
+ * Split a token stream into top-level command segments on `&&` and `;`
+ * only. Returns null if any hard-stop operator (`||`, `&`) appears — those
+ * indicate control flow we don't want to reason about best-effort.
+ */
+function splitSimpleChain(tokens: Token[]): Token[][] | null {
+	const segments: Token[][] = [];
+	let current: Token[] = [];
+	for (const t of tokens) {
+		if (t.hadQuotes) { current.push(t); continue; }
+		if (t.value === "||" || t.value === "&") return null;
+		if (t.value === "&&" || t.value === ";") {
+			segments.push(current);
+			current = [];
+			continue;
+		}
+		current.push(t);
+	}
+	segments.push(current);
+	return segments;
+}
+
+/**
+ * True if the segment is setup-only (cd, set, or only env assignments)
+ * and should be skipped while walking a simple chain.
+ */
+function isSetupSegment(segment: Token[]): boolean {
+	if (segment.length === 0) return true;
+	// All-env-assignments segment (`FOO=1 BAR=2`).
+	if (segment.every(isEnvAssignment)) return true;
+	const head = segment[0];
+	if (head.hadQuotes) return false;
+	if (head.value === "cd" || head.value === "set") return true;
+	return false;
+}
+
+/** Truncate a segment at the first top-level pipe. */
+function truncateAtPipe(segment: Token[]): Token[] {
+	const out: Token[] = [];
+	for (const t of segment) {
+		if (!t.hadQuotes && t.value === "|") break;
+		out.push(t);
+	}
+	return out;
+}
+
+/** Drop leading simple env-assignment tokens (`FOO=1 grep ...`). */
+function stripLeadingEnv(segment: Token[]): Token[] {
+	let i = 0;
+	while (i < segment.length && isEnvAssignment(segment[i])) i++;
+	return segment.slice(i);
+}
+
+/**
+ * Identify whether a top-level command in a simple chain is a grep-like
+ * invocation, and if so parse out its pattern and target paths/globs.
  *
- * Returns null if the first command isn't grep-like — including the case
- * where grep appears only after a pipe (`cat foo | grep bar`).
+ * Walks segments split by `&&` / `;`, skipping setup-only segments
+ * (`cd <path>`, `set ...`, bare env assignments) and stripping leading
+ * env assignments before inspecting the command. Returns the first
+ * grep-like match found, or null.
+ *
+ * NOT matched: pipe-only filters like `cat foo | grep bar` because the
+ * pipe truncation keeps only the primary command of each segment.
  */
 export function parseTopLevelGrep(command: string): ParsedGrep | null {
 	const tokens = tokenizeShell(command);
 	if (tokens.length === 0) return null;
 
-	// Take tokens before the first operator.
-	const segment: Token[] = [];
-	for (const t of tokens) {
-		if (t.value === "|" || t.value === "||" || t.value === "&&" || t.value === ";" || t.value === "&") break;
-		segment.push(t);
+	const segments = splitSimpleChain(tokens);
+	if (!segments) return null;
+
+	for (const raw of segments) {
+		if (isSetupSegment(raw)) continue;
+		const stripped = stripLeadingEnv(raw);
+		if (stripped.length === 0) continue;
+		if (isSetupSegment(stripped)) continue;
+		const segment = truncateAtPipe(stripped);
+		if (segment.length === 0) continue;
+
+		const head = segment[0];
+		if (head.hadQuotes) continue;
+		const cmdName = head.value;
+		if (!GREP_LIKE_COMMANDS.has(cmdName)) {
+			// Not grep-like; stop — only walk through pure setup prefix.
+			return null;
+		}
+
+		return parseGrepArgs(cmdName, segment.slice(1));
 	}
-	if (segment.length === 0) return null;
+	return null;
+}
 
-	const head = segment[0];
-	if (head.hadQuotes) return null;
-	const cmdName = head.value;
-	if (!GREP_LIKE_COMMANDS.has(cmdName)) return null;
-
-	const args = segment.slice(1);
+function parseGrepArgs(cmdName: string, args: Token[]): ParsedGrep {
 	let patternFromFlag: string | undefined;
 	const globsFromFlag: string[] = [];
 	const positionals: string[] = [];
@@ -177,6 +251,7 @@ export function parseTopLevelGrep(command: string): ParsedGrep | null {
 		targets: [...globsFromFlag, ...positionals],
 	};
 }
+
 
 const PY_EXT_RE = /(?<![A-Za-z0-9_])py(?![A-Za-z0-9_])/;
 
