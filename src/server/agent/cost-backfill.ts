@@ -134,6 +134,240 @@ export function backfillLegacyCostGoalIds(opts: CostBackfillOptions): CostBackfi
 	return { stamped, unattributable: remaining };
 }
 
+// ---------------------------------------------------------------------------
+// Transcript-pass backfill
+//
+// Second pass that runs *after* the sidecar pass for cost entries whose
+// session record AND sidecar are both gone, but whose agent transcript
+// (`<sessionsRoot>/<slug>/<sessionId>.jsonl`) is still on disk. bobbit
+// injects the goalId into the first turn of every spawn (working-directory
+// path, `BOBBIT_GOAL_ID` env block, goal-context system prompt), so the
+// id usually appears verbatim in the first ~50 lines.
+//
+// Hard rule: confidence-based stamping only. A guess is worse than
+// `unattributable`. See `extractTranscriptGoalId` for the rules.
+// ---------------------------------------------------------------------------
+
+/** Minimal goal shape used to build the known-id set. */
+export interface CostBackfillGoalRef {
+	id: string;
+}
+
+export interface CostBackfillTranscriptOptions {
+	costTracker: CostTracker;
+	agentSessionsRoot: string;
+	/** Goal source — typically `ctx.goalStore.getAll()`. Used to cross-reference
+	 *  every regex hit. Ids not present here are never stamped. */
+	goals: CostBackfillGoalRef[];
+	logger?: Pick<Console, "log" | "warn">;
+	/** Max lines to read per transcript. Default 50. */
+	maxLines?: number;
+	/** Max bytes to read per transcript. Default 64 KiB. */
+	maxBytes?: number;
+	/** Per-project total runtime budget in ms. Default 30s. */
+	deadlineMs?: number;
+}
+
+export interface CostBackfillTranscriptResult {
+	stamped: number;
+	unattributable: number;
+	skipped: number;
+}
+
+const GOAL_ID_REGEX = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g;
+
+const CONFIDENCE_KEYWORDS = [
+	"BOBBIT_GOAL_ID",
+	"--goal",
+	"# Goal",
+	"Goal Spec",
+	"Goal nesting context",
+	"Current Goal",
+	"Working Directory",
+];
+
+/**
+ * Extract a single, high-confidence goalId from transcript `text`. Returns
+ * `undefined` unless exactly one id from `knownGoalIds` appears AND it
+ * appears in a high/medium-confidence context (worktree path / env-injection
+ * marker / `# Goal` / `--goal` flag etc.). Prose mentions (e.g. "see goal
+ * <uuid>") are deliberately ignored — a wrong attribution is worse than
+ * `unattributable`.
+ *
+ * Exported for unit coverage.
+ */
+export function extractTranscriptGoalId(
+	text: string,
+	knownGoalIds: Set<string>,
+): string | undefined {
+	if (!text) return undefined;
+	const hits = new Set<string>();
+	for (const m of text.matchAll(GOAL_ID_REGEX)) {
+		const id = m[0];
+		if (knownGoalIds.has(id)) hits.add(id);
+	}
+	if (hits.size !== 1) return undefined;
+	const id = [...hits][0]!;
+	const short = id.slice(0, 8);
+
+	// High confidence: explicit env injection / CLI flag / worktree path.
+	if (
+		text.includes(`BOBBIT_GOAL_ID=${id}`) ||
+		text.includes(`BOBBIT_GOAL_ID: ${id}`) ||
+		text.includes(`BOBBIT_GOAL_ID="${id}"`) ||
+		text.includes(`--goal ${id}`) ||
+		text.includes(`--goal=${id}`)
+	) {
+		return id;
+	}
+	// Worktree path segment: `.../goal-<slug>-<id8>/...` where id8 = first 8.
+	if (new RegExp(`goal-[a-z0-9][a-z0-9-]*-${short}\\b`).test(text)) {
+		return id;
+	}
+
+	// Medium confidence: id occurs in the goal-context block. Be conservative:
+	// require a goal-keyword marker within ~400 chars of the id occurrence.
+	const idx = text.indexOf(id);
+	if (idx >= 0) {
+		const windowStart = Math.max(0, idx - 400);
+		const windowEnd = Math.min(text.length, idx + id.length + 400);
+		const window = text.slice(windowStart, windowEnd);
+		for (const kw of CONFIDENCE_KEYWORDS) {
+			if (window.includes(kw)) return id;
+		}
+	}
+	return undefined;
+}
+
+/** Read up to `maxLines` lines or `maxBytes` bytes from a file. Defensive:
+ *  any I/O error returns `""`. Truncated trailing lines are still returned. */
+function readTranscriptHead(
+	filePath: string,
+	maxLines: number,
+	maxBytes: number,
+): string {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buf = Buffer.alloc(maxBytes);
+		const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+		const text = buf.subarray(0, n).toString("utf8");
+		const lines = text.split("\n");
+		return lines.slice(0, maxLines).join("\n");
+	} catch {
+		return "";
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore */ }
+		}
+	}
+}
+
+/**
+ * Locate `<sessionsRoot>/<slug>/<sessionId>.jsonl` by scanning slug dirs
+ * one level deep. Returns the first match or `undefined`. Defensive — any
+ * I/O error is swallowed.
+ */
+function findTranscriptPath(
+	agentSessionsRoot: string,
+	sessionId: string,
+): string | undefined {
+	let entries: string[];
+	try {
+		if (!fs.existsSync(agentSessionsRoot)) return undefined;
+		entries = fs.readdirSync(agentSessionsRoot);
+	} catch {
+		return undefined;
+	}
+	const target = `${sessionId}.jsonl`;
+	for (const slug of entries) {
+		const slugDir = path.join(agentSessionsRoot, slug);
+		try {
+			const stat = fs.statSync(slugDir);
+			if (!stat.isDirectory()) continue;
+		} catch { continue; }
+		const candidate = path.join(slugDir, target);
+		try {
+			if (fs.existsSync(candidate)) return candidate;
+		} catch { /* ignore */ }
+	}
+	return undefined;
+}
+
+/**
+ * Transcript-pass backfill. Runs *after* `backfillLegacyCostGoalIds` for
+ * any cost entries that the sidecar pass could not map. Best-effort and
+ * confidence-gated — silent skip beats wrong attribution.
+ *
+ * Logs one summary line:
+ *   `[cost-backfill] transcript-pass stamped goalId on N additional entries; M still unattributable`
+ * Plus a warning suffix when the deadline skipped sessions.
+ *
+ * Safe to call repeatedly. Idempotent via `CostTracker.backfillGoalIds`.
+ */
+export async function backfillLegacyCostGoalIdsFromTranscripts(
+	opts: CostBackfillTranscriptOptions,
+): Promise<CostBackfillTranscriptResult> {
+	const { costTracker, agentSessionsRoot, goals } = opts;
+	const logger = opts.logger ?? console;
+	const maxLines = opts.maxLines ?? 50;
+	const maxBytes = opts.maxBytes ?? 64 * 1024;
+	const deadlineMs = opts.deadlineMs ?? 30_000;
+
+	const unmapped = costTracker.getUnstampedSessionIds();
+	if (unmapped.length === 0) {
+		logger.log("[cost-backfill] transcript-pass stamped goalId on 0 additional entries; 0 still unattributable");
+		return { stamped: 0, unattributable: 0, skipped: 0 };
+	}
+
+	const known = new Set<string>();
+	for (const g of goals) {
+		if (g && typeof g.id === "string" && g.id.length > 0) known.add(g.id);
+	}
+	if (known.size === 0) {
+		logger.log(`[cost-backfill] transcript-pass stamped goalId on 0 additional entries; ${unmapped.length} still unattributable`);
+		return { stamped: 0, unattributable: unmapped.length, skipped: 0 };
+	}
+
+	const transcriptMap = new Map<string, string>();
+	const start = Date.now();
+	let skipped = 0;
+
+	for (let i = 0; i < unmapped.length; i++) {
+		const sid = unmapped[i]!;
+		if (Date.now() - start > deadlineMs) {
+			skipped = unmapped.length - i;
+			break;
+		}
+		let transcriptPath: string | undefined;
+		try {
+			transcriptPath = findTranscriptPath(agentSessionsRoot, sid);
+		} catch {
+			transcriptPath = undefined;
+		}
+		if (!transcriptPath) continue;
+		const text = readTranscriptHead(transcriptPath, maxLines, maxBytes);
+		if (!text) continue;
+		let goalId: string | undefined;
+		try {
+			goalId = extractTranscriptGoalId(text, known);
+		} catch {
+			goalId = undefined;
+		}
+		if (goalId) transcriptMap.set(sid, goalId);
+	}
+
+	const stamped = costTracker.backfillGoalIds((sid) => transcriptMap.get(sid));
+	const remaining = costTracker.getUnstampedSessionIds().length;
+
+	const suffix = skipped > 0 ? ` (deadline reached; ${skipped} session(s) skipped)` : "";
+	logger.log(
+		`[cost-backfill] transcript-pass stamped goalId on ${stamped} additional entries; ${remaining} still unattributable${suffix}`,
+	);
+
+	return { stamped, unattributable: remaining, skipped };
+}
+
 /**
  * Walk `agentSessionsRoot` two levels deep (`<slug>/<file>`) and parse every
  * `*.bobbit.json` sidecar. Returns a map from `bobbitSessionId` to
