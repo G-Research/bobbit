@@ -165,7 +165,7 @@ The check is skipped entirely when `lsp_disabled: true` is set in project config
 
 | Value | Meaning |
 | --- | --- |
-| `"pending"` | Check has not completed yet (gateway just started; only visible in a very tight polling window). |
+| `"pending"` | Check has not completed yet. Under normal conditions this is not returned by `/api/lsp/stats` to external callers: the handler awaits the self-check promise (with an 8-second cap) before responding. `"pending"` is surfaced only if the self-check does not settle before the cap expires — e.g. a pathologically slow or hung probe. |
 | `"ok"` | All three probes passed — routes are wired correctly. |
 | `"failed:<route>:<status>"` | One of the probes returned a bad status. `<route>` is the URL fragment (e.g. `stats`, `state`, `diagnostics`) and `<status>` is the HTTP status code (typically `404`). |
 | `"failed:diagnostics:initialize_failed"` | The `POST /api/lsp/diagnostics` probe returned HTTP 200 but the body contained `ENOENT` or `stat '` — the language server failed to initialize, most likely because a sandbox bridge translated host paths to container paths even though no container is running (bridge-attached-without-container bug). |

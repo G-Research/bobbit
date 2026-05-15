@@ -106,7 +106,11 @@ export interface LspStats {
 	}>;
 	evictedTotal: number;
 	/** Post-boot loopback self-check result. "ok" = all /api/lsp/* routes responded correctly;
-	 *  "pending" = check has not completed yet; "failed:<route>:<status>" = route returned unexpected status. */
+	 *  "pending" = check has not completed yet; "failed:<route>:<status>" = route returned unexpected status.
+	 *  Note: external callers of /api/lsp/stats await the in-flight self-check promise with a
+	 *  bounded timeout (see LSP_ROUTE_SELF_CHECK_STATS_CAP_MS in server.ts, goal
+	 *  fix-routes-1db8c87b). "pending" may still be surfaced if the bounded wait expires
+	 *  before the post-boot probe completes — e.g. a pathologically slow or hung probe. */
 	routeSelfCheck: string;
 	/** Adoption telemetry — see `LspTelemetryCounters`. */
 	counters: LspTelemetryCounters;
@@ -131,6 +135,7 @@ export class LspSupervisor {
 	private watchFiles: string[];
 	private configChangeDebounceMs: number;
 	private _routeSelfCheck = "pending";
+	private _routeSelfCheckPromise: Promise<void> | undefined;
 	private _counters: LspTelemetryCounters = {
 		lspCallsTotal: 0,
 		lspCallsByMethod: Object.fromEntries(KNOWN_LSP_METHODS.map(m => [m, 0])),
@@ -170,6 +175,19 @@ export class LspSupervisor {
 	/** Set the result of the post-boot route self-check. Called by the server boot loop. */
 	setRouteSelfCheck(value: string): void {
 		this._routeSelfCheck = value;
+	}
+
+	/** Store the in-flight post-boot route self-check promise so the /api/lsp/stats
+	 *  route handler can await its settlement (with a bounded timeout) before reporting
+	 *  routeSelfCheck. See goal fix-routes-1db8c87b. */
+	setRouteSelfCheckPromise(promise: Promise<void> | undefined): void {
+		this._routeSelfCheckPromise = promise;
+	}
+
+	/** Return the in-flight route self-check promise, or undefined if none is registered
+	 *  (lsp disabled, or already-resolved-and-cleared). */
+	getRouteSelfCheckPromise(): Promise<void> | undefined {
+		return this._routeSelfCheckPromise;
 	}
 
 	/** Increment the grep/bash LSP-hint counter. Called via

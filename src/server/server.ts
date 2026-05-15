@@ -200,6 +200,24 @@ const _prInFlight = new Map<string, Promise<any | null>>();
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
 const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
 
+// LSP route self-check observability (goal fix-routes-1db8c87b).
+// External GET /api/lsp/stats callers await the in-flight post-boot self-check
+// promise so they observe a settled routeSelfCheck value instead of racing the
+// fire-and-forget probe. The await is bounded so a pathologically hung probe
+// cannot hang the route: worst-case probe time is 3 × 2000ms abort = ~6000ms,
+// plus a little slack for body reads and scheduling.
+export const LSP_ROUTE_SELF_CHECK_HEADER = "x-lsp-route-self-check";
+export const LSP_ROUTE_SELF_CHECK_STATS_CAP_MS = 8000;
+let _lspRouteSelfCheckStatsCapOverrideMs: number | undefined;
+/** Test-only: override the bounded wait used by the /api/lsp/stats route handler.
+ *  Pass undefined to restore the production default. */
+export function __setLspRouteSelfCheckStatsCapMsForTesting(ms: number | undefined): void {
+	_lspRouteSelfCheckStatsCapOverrideMs = ms;
+}
+function getLspRouteSelfCheckStatsCapMs(): number {
+	return _lspRouteSelfCheckStatsCapOverrideMs ?? LSP_ROUTE_SELF_CHECK_STATS_CAP_MS;
+}
+
 async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
@@ -1414,9 +1432,16 @@ export function createGateway(config: GatewayConfig) {
 						const ac = new AbortController();
 						const timer = setTimeout(() => ac.abort(), 2000);
 						try {
+							// Tag internal loopback probes so the /api/lsp/stats handler skips
+							// its routeSelfCheckPromise await and does not self-deadlock on the
+							// very promise this loop fulfils. See goal fix-routes-1db8c87b.
 							const res = await fetch(probe.url, {
 								method: probe.method,
-								headers: { ...authHeaders, ...(probe.body ? { "Content-Type": "application/json" } : {}) },
+								headers: {
+									...authHeaders,
+									...(probe.body ? { "Content-Type": "application/json" } : {}),
+									[LSP_ROUTE_SELF_CHECK_HEADER]: "1",
+								},
 								body: probe.body,
 								signal: ac.signal,
 							});
@@ -1460,6 +1485,12 @@ export function createGateway(config: GatewayConfig) {
 					}
 					lspSupervisor.setRouteSelfCheck("ok");
 				})();
+				// Publish the in-flight promise on the supervisor so the /api/lsp/stats
+				// route handler can await its settlement with a bounded timeout. This is
+				// route-local, NOT boot-blocking: boot still proceeds in parallel via the
+				// Promise.all below. The internal loopback probes above are header-tagged
+				// to avoid self-deadlock. See goal fix-routes-1db8c87b.
+				lspSupervisor.setRouteSelfCheckPromise(lspRouteCheckTask);
 
 				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
@@ -2068,7 +2099,40 @@ async function handleApiRoute(
 	}
 	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
 		const supervisor = sessionManager.getLspSupervisor();
-		json(supervisor ? supervisor.stats() : { error: "lsp_unavailable" });
+		if (!supervisor) {
+			json({ error: "lsp_unavailable" });
+			return;
+		}
+		// Route-local await of the post-boot route self-check promise so external callers
+		// see a settled routeSelfCheck value ("ok" or "failed:...") instead of racing the
+		// fire-and-forget probe and getting "pending". This is intentionally route-local,
+		// NOT boot-blocking — keeping boot fast was the entire point of leaving the probe
+		// fire-and-forget. The internal loopback probes that fulfil this promise carry the
+		// LSP_ROUTE_SELF_CHECK_HEADER and skip this await to avoid self-deadlock. The wait
+		// is bounded by LSP_ROUTE_SELF_CHECK_STATS_CAP_MS so a pathologically hung probe
+		// cannot hang the route. See goal fix-routes-1db8c87b — do NOT "simplify" this
+		// back to unguarded fire-and-forget; the e2e test pins this behaviour.
+		const selfCheckHeader = req.headers[LSP_ROUTE_SELF_CHECK_HEADER];
+		const isInternalProbe = Array.isArray(selfCheckHeader) ? selfCheckHeader.includes("1") : selfCheckHeader === "1";
+		if (!isInternalProbe) {
+			const promise = supervisor.getRouteSelfCheckPromise();
+			if (promise) {
+				// Race the self-check promise against a bounded timeout. The timer is
+				// cleared in finally so a fast-settling promise does not leave a pending
+				// timer per request — without this, every external /api/lsp/stats call
+				// would retain a setTimeout handle until the cap elapsed.
+				let capTimer: ReturnType<typeof setTimeout> | undefined;
+				const capPromise = new Promise<void>(resolve => {
+					capTimer = setTimeout(resolve, getLspRouteSelfCheckStatsCapMs());
+				});
+				try {
+					await Promise.race([promise.catch(() => {}), capPromise]);
+				} finally {
+					if (capTimer) clearTimeout(capTimer);
+				}
+			}
+		}
+		json(supervisor.stats());
 		return;
 	}
 
