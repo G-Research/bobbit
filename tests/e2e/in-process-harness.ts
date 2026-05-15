@@ -20,7 +20,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -44,11 +44,14 @@ const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 // local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
 // is outside the git repo — otherwise isGitRepo() returns true for the project
 // rootPath and sessions auto-create worktrees (slow, conflicts with git state).
+// Use realpathSync so macOS symlinked /var/folders/... resolves to /private/var/...
+// before any project rootPath is constructed. This avoids symlink_root rejections
+// in tests that create sub-projects from bobbitDir-derived paths.
 const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -180,7 +183,12 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// `acceptCanonical: true` is required on macOS where `os.tmpdir()`
+				// returns `/var/folders/...` which is a symlink to `/private/var/...`.
+				// Without it, the registry rejects the rootPath with `symlink_root`
+				// and the harness boots with zero projects — silently breaking
+				// every test that relies on `apiFetch` auto-injecting a projectId.
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 
