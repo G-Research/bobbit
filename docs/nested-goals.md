@@ -597,11 +597,11 @@ same visual group as the other proposal toggles:
 - **Allow subgoals** (testid `goal-form-subgoals-toggle`) appears in the
   shared toggle-switch row after optional-step toggles such as **Enable
   QA Testing**. It uses the same `toggle-switch` pill styling and `ⓘ`
-  tooltip affordance as Sandbox / Auto-start team / QA toggles. Default
-  inherits from `isSubgoalsEnabled()`. When the system pref is OFF the
-  toggle is unchecked and greyed out — a per-goal flag cannot override a
-  system-level OFF. Turning it off disables subgoals for this specific
-  goal tree.
+  tooltip affordance as Sandbox / Auto-start team / QA toggles. It is
+  visible only while the system Subgoals preference is ON; when the
+  system pref is OFF, the proposal-modal controls are hidden rather than
+  shown disabled, so a per-goal flag cannot override a system-level OFF.
+  Turning it off disables subgoals for this specific goal tree.
 - **Max depth** (testid `goal-form-max-depth`) appears inline in that
   same toggle row as a subordinate pill only when Allow subgoals is ON.
   Default inherits from `getSystemMaxNestingDepth()`. Clamped to
