@@ -585,10 +585,11 @@ they share the same experimental gate.
 
 - **Goal-proposal modal** (in the team-lead / assistant chat, when
   `propose_goal` is called or the assistant prompts the user).
-- **Standalone goal creation panel** (sidebar "New Goal" flow).
 
-Both surfaces share the same `renderGoalForm` component and expose the
-same per-goal controls below the Sandbox / Auto-start toggles:
+The standalone goal creation panel uses the same `renderGoalForm`
+component, but does not currently wire these proposal-only override
+callbacks. In the proposal modal, the per-goal controls appear below the
+parent/depth section:
 
 - An **Allow subgoals** checkbox (testid `goal-form-subgoals-toggle`).
   Default inherits from `isSubgoalsEnabled()`. When the system pref is
