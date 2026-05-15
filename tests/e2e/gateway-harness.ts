@@ -264,7 +264,13 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// acceptCanonical=true is needed on macOS, where TMPDIR
+				// (/var/folders/...) is a symlink to /private/var/folders/...
+				// Without it, the server rejects the register with a
+				// SymlinkProjectRootError 400 and the harness silently runs
+				// with zero registered projects — every POST /api/sessions
+				// or /api/goals then 400s with "projectId required".
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 
