@@ -30,22 +30,19 @@ import { tmpdir } from "node:os";
 function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-symlink-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });
-	// macOS tmpdir() lives under /var/folders/... which is itself a
-	// symlink to /private/var/folders/... If we leave the root un-canonical,
-	// the *canonical* subdir we build is also under a symlink chain, so
-	// the server's realpathSync() resolves it to a different string than
-	// what we then assert against. Canonicalize the test root so only the
-	// explicit `link → canonical` symlink we create is meaningful.
-	return realpathSync(dir);
+	return dir;
 }
 
 /** Build canonical + symlink dirs. Returns null on systems where creating
  *  symlinks requires elevated privileges (Windows non-admin). */
 function makeSymlinkPair(label: string): { canonical: string; link: string } | null {
 	const root = uniqueDir(label);
-	const canonical = join(root, "canonical");
+	let canonical = join(root, "canonical");
 	const link = join(root, "link");
 	mkdirSync(canonical, { recursive: true });
+	// Canonicalize via realpath so the value we compare against matches what
+	// the server stores (the server resolves symlinks during register).
+	canonical = realpathSync(canonical);
 	// Write a sentinel file so directory has content.
 	writeFileSync(join(canonical, "marker.txt"), "x");
 	try {
@@ -66,13 +63,26 @@ function makeSymlinkPair(label: string): { canonical: string; link: string } | n
 }
 
 test.describe("Add Project — symlink confirm flow", () => {
+	test.beforeEach(async () => {
+		// Remove all pre-registered projects so the app opens with the
+		// "Add Project" splash screen. The gateway harness now successfully
+		// registers a default project (with acceptCanonical), so without this
+		// cleanup the app navigates directly to the project assistant and the
+		// Add Project flow is never triggered.
+		const res = await apiFetch("/api/projects");
+		const data = await res.json();
+		const projects = data.projects || data || [];
+		for (const p of projects) {
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test.afterEach(async () => {
 		// Clean up any projects this spec created.
 		const res = await apiFetch("/api/projects");
 		const data = await res.json();
 		const projects = data.projects || data || [];
 		for (const p of projects) {
-			if (p.name === "default") continue;
 			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
@@ -88,15 +98,13 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Need a configured project (hasBobbit === true) to trigger Path A
-		// (auto-import → registerProject). Without it, the path is routed to
-		// the project assistant and the symlink check never runs. The server's
-		// hasBobbit probe checks `.bobbit/config/project.yaml` specifically
-		// (mere presence of an empty .bobbit/ is no longer enough), so write
-		// a minimal project.yaml.
+		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
+		// Without it, /api/projects/detect returns hasBobbit=false (since commit 54d5b710
+		// project.yaml is the source of truth) and doContinue takes Path B (project assistant),
+		// so the symlink check in registerProject never runs.
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
-		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: symlink-test\n");
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		// Type the symlinked path.
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
@@ -147,11 +155,10 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Add .bobbit/config/project.yaml so Path A is taken — server's
-		// hasBobbit probe checks for the project.yaml file specifically.
+		// Add .bobbit/config/project.yaml so Path A is taken (hasBobbit=true).
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
-		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: symlink-cancel-test\n");
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();

@@ -7,7 +7,7 @@
  * See docs/design/multi-repo-components.md §5.3 / §9.2.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, registerProject } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,42 +35,31 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 	gitInit(path.join(root, "shared"));
 
 	const projectName = `mr-goal-${Date.now()}`;
-	const projRes = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify({
-			name: projectName,
-			rootPath: root,
-			components: [
-				{ name: "api", repo: "api" },
-				{ name: "web", repo: "web" },
-				{ name: "shared", repo: "shared" },
-			],
-			// Goal creation requires a resolvable workflow id (default "general").
-			// As of the "no default workflow scaffold" change, projects no longer
-			// auto-seed workflows on creation, so tests that POST /api/projects
-			// directly (bypassing the apiFetch auto-seed helper) must supply them.
-			// Minimal inline "general" workflow with free-form steps that don't
-			// reference a specific component (validator-safe across this project's
-			// components list).
-			workflows: {
-				general: {
-					name: "General",
-					description: "E2E test workflow",
-					gates: [
-						{
-							id: "implementation",
-							name: "Implementation",
-							depends_on: [],
-							verify: [{ name: "Build", type: "command", run: "echo ok" }],
-						},
-					],
-				},
+	const project = await registerProject({
+		name: projectName,
+		rootPath: root,
+		components: [
+			{ name: "api", repo: "api" },
+			{ name: "web", repo: "web" },
+			{ name: "shared", repo: "shared" },
+		],
+		// Goal creation requires a resolvable workflow id (default "general").
+		// Inline a minimal workflow so this test doesn't depend on auto-seed.
+		workflows: {
+			general: {
+				name: "General",
+				description: "E2E test workflow",
+				gates: [
+					{
+						id: "implementation",
+						name: "Implementation",
+						depends_on: [],
+						verify: [{ name: "Build", type: "command", run: "echo ok" }],
+					},
+				],
 			},
-		}),
+		},
 	});
-	expect(projRes.status).toBe(201);
-	const project = await projRes.json();
 
 	// Create a goal scoped to this project; cwd points at one of the repos so
 	// isGitRepo() returns true and `goal.repoPath` is set.

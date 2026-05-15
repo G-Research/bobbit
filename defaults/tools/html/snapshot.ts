@@ -16,7 +16,18 @@
  *     __preview_snapshot_v2__\n{"kind":"file","path":"/abs/path/to/report.html"}\n
  *
  *   v3 (current — per-session preview mount; constant ~150 byte payload):
- *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<host-abs>"}\n
+ *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>"}\n
+ *
+ *   The `path` field carries the project-root-relative identifier
+ *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
+ *   host-absolute path. Block size is therefore bounded by content shape,
+ *   not by where `bobbitStateDir()` lives on disk — so the 250 B per-block
+ *   cap holds on macOS (`/private/var/folders/...`) and on Windows
+ *   (`C:\Users\...\AppData\Local\Temp\bobbit-e2e\...`) too. The agent
+ *   tool (`defaults/tools/html/extension.ts`) is responsible for picking
+ *   the relative form before calling `buildPreviewSnapshotV3Block`.
+ *   Archived sessions that recorded the legacy host-absolute path still
+ *   parse — `parseSnapshot` only requires a non-empty string.
  *
  * v1 and v2 marker constants and parser arms are preserved for archived-session
  * compatibility. New code emits **only** v3 — the v1/v2 *builder* functions have
@@ -112,8 +123,16 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
  *
  * Pre-condition: total result block must be ≤ 250 bytes (the unit test
  * asserts this for typical session id + `report.html`).
+ *
+ * @param url       Content-origin URL (always `/preview/<sid>/<entry>`).
+ * @param entryPath The path identifier shown in the block. **Callers must
+ *                  pass a project-root-relative form** (`<sid>/<entry>`)
+ *                  to keep block size bounded by content shape rather than
+ *                  install location. Builder accepts any non-empty string
+ *                  for backwards compatibility with archived host-absolute
+ *                  payloads, but the cap-test only holds for the short form.
  */
-export function buildPreviewSnapshotV3Block(url: string, hostPath: string): string {
-	const payload = JSON.stringify({ kind: "preview", url, path: hostPath });
+export function buildPreviewSnapshotV3Block(url: string, entryPath: string): string {
+	const payload = JSON.stringify({ kind: "preview", url, path: entryPath });
 	return PREVIEW_SNAPSHOT_MARKER_V3 + payload + "\n";
 }

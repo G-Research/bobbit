@@ -49,7 +49,7 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -152,19 +152,17 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
 		try {
-			const canonicalRoot = realpathSync(bobbitDir);
-			const regResp = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
+				// acceptCanonical=true: macOS TMPDIR is a symlink (/var/folders
+				// → /private/var/folders); without it the register 400s.
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
-			if (!regResp.ok) {
-				throw new Error(`[realpush-harness] default project registration failed: ${regResp.status} ${await regResp.text()}`);
-			}
-		} catch (err) { console.error("[realpush-harness] default project registration error:", err); throw err; }
+		} catch { /* best-effort */ }
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.

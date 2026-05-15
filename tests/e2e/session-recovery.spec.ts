@@ -40,7 +40,7 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 interface StartedGateway {
 	port: number;
@@ -110,11 +110,13 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		// Register the default project at the bobbitDir, mirroring the in-process
 		// harness. The session-store under test lives at
 		// `<rootPath>/.bobbit/state/sessions.json`.
-		const canonicalRoot = realpathSync(bobbitDir);
+		// acceptCanonical:true handles the macOS /var → /private/var tmpdir symlink
+		// (bobbitDir lives under tmpdir()). Without it the server rejects with 400
+		// symlink_root and the rest of this fixture has nothing to register against.
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-			body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
+			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 		});
 		if (!resp.ok) {
 			throw new Error(`project register failed: ${resp.status} ${await resp.text()}`);

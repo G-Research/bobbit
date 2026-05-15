@@ -18,6 +18,7 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
+import type { AutoRetryPendingEvent } from "../server/ws/protocol.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -391,6 +392,17 @@ export class RemoteAgent {
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
+			// Populated when the server schedules an auto-retry timer for a
+			// transient / provider-overload error. Cleared on agent_start (next
+			// turn dispatched) or auto_retry_cancelled (user click / new prompt /
+			// session terminated).
+			autoRetryPending: null as {
+				reason: "provider-overload" | "transient-error";
+				retryDelayMs: number;
+				attempt: number;
+				scheduledAt: number;
+				error?: string;
+			} | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -1834,8 +1846,36 @@ export class RemoteAgent {
 				// Status is owned by `session_status` (server). agent_start is a
 				// signal: clear local error + capture timing.
 				this._state.error = undefined;
+				// New turn starting (either a fresh user prompt, an explicit retry,
+				// or a fired auto-retry timer) — the "retrying…" banner is done.
+				this._state.autoRetryPending = null;
 				this._taskStartTime = Date.now();
 				this._state.turnStartTime = this._taskStartTime;
+				break;
+
+			case "auto_retry_pending": {
+				// Server scheduled a transient/overload auto-retry timer. Surface
+				// a visible "Retrying in Xs…" banner so the session doesn't look
+				// silently frozen between agent_end and the retry's agent_start.
+				// Shape pinned by `AutoRetryPendingEvent` in src/server/ws/protocol.ts
+				// — the producer in session-manager.ts emits exactly these fields.
+				const e = event as AutoRetryPendingEvent;
+				this._state.autoRetryPending = {
+					reason: e.reason,
+					retryDelayMs: e.retryDelayMs,
+					attempt: e.attempt,
+					scheduledAt: e.scheduledAt,
+					error: e.error,
+				};
+				break;
+			}
+
+			case "auto_retry_cancelled":
+				// Server cancelled the pending timer (explicit user retry, new
+				// prompt enqueued, or session termination). Clear the banner.
+				// Wire shape pinned by `AutoRetryCancelledEvent` in src/server/ws/protocol.ts;
+				// no field is read today (banner just clears) so no narrowing needed.
+				this._state.autoRetryPending = null;
 				break;
 
 			case "agent_end": {

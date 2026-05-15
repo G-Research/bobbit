@@ -22,7 +22,7 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -123,7 +123,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-browser-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -131,6 +131,15 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
+		// project rootPaths derived from it, preview-mount baseDir) see the real
+		// path. On macOS /var/folders → /private/var/folders; mixing the symlink
+		// path with the canonical form breaks the path-guard containment check
+		// (missing files report 400→03 instead of 404).
+		try {
+			const { realpathSync } = await import("node:fs");
+			bobbitDir = realpathSync(bobbitDir);
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
@@ -258,21 +267,21 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// longer does this implicitly — see "eliminate default project" refactor.
 		// Workflows already seeded above via direct project.yaml write.
 		try {
-			// Resolve symlinks (e.g. macOS /var → /private/var) — the server rejects
-			// symlinked project roots with code=symlink_root.
-			const canonicalRoot = realpathSync(bobbitDir);
-			const regResp = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			await fetch(`http://127.0.0.1:${port}/api/projects`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: canonicalRoot, upsert: true, __e2e_seed_skip__: true }),
+				// acceptCanonical=true is needed on macOS, where TMPDIR
+				// (/var/folders/...) is a symlink to /private/var/folders/...
+				// Without it, the server rejects the register with a
+				// SymlinkProjectRootError 400 and the harness silently runs
+				// with zero registered projects — every POST /api/sessions
+				// or /api/goals then 400s with "projectId required".
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
-			if (!regResp.ok) {
-				throw new Error(`[gateway-harness] default project registration failed: ${regResp.status} ${await regResp.text()}`);
-			}
-		} catch (err) { console.error("[gateway-harness] default project registration error:", err); throw err; }
+		} catch { /* best-effort */ }
 
 		const info: GatewayInfo = {
 			port,

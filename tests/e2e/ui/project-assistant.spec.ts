@@ -9,7 +9,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, nonGitCwd, waitForSessionStatus, deleteSession } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
-import { mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -28,14 +28,9 @@ async function createProjectAssistantSession(
 }
 
 /** Create a unique temp dir for each test.
- *
- * Canonicalized via realpathSync because macOS tmpdir() lives under
- * /var/folders/... which is a symlink to /private/var/folders/...; the
- * server stores project rootPath canonically (via realpathSync inside
- * registerProject), so test-side lookups by `p.rootPath === dir` only
- * match when `dir` is already canonical. Tests that specifically exercise
- * the symlinked-rootPath flow build their own symlink pair instead.
- */
+ *  Returns the canonical (realpath) form so the project-assistant flow
+ *  isn't blocked by the symlink-confirm dialog on macOS (tmpdir is
+ *  /var/folders which symlinks to /private/var/folders). */
 function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-projast-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });

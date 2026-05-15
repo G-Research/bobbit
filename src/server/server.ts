@@ -1401,6 +1401,7 @@ export function createGateway(config: GatewayConfig) {
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
 			wss.close();
+			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
 			}
@@ -7630,6 +7631,7 @@ async function handleApiRoute(
 			json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
+				relPath: path.posix.join(sessionId, entry),
 				entry,
 				mtime: Math.floor(stat.mtimeMs),
 			});

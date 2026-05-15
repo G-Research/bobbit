@@ -2,6 +2,15 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Verification step stuck in `running`
+
+- **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
+- **Cause**: Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pid, sig)` only target the immediate child shell, not its descendants. The shell dies; everything it spawned keeps running. The harness's `child.on("close")` races against orphans holding stdio open.
+- **Fix (tree-kill)**: all command-step spawns in `verification-harness.ts::runCommandStep` go through `src/server/agent/spawn-tree.ts::spawnTracked`, which puts the child in its own process group (POSIX `detached: true`, pgid === child.pid) and reaps the whole tree via `process.kill(-pgid, sig)` on POSIX or `taskkill /T /F /PID <pid>` on Windows. SIGTERM is sent first, then SIGKILL escalates after `killGraceMs` (default 5000ms; cancellation passes 1000ms). The helper owns the timeout timer — never re-add `spawn({ timeout })`; see the file header for the rationale.
+- **Three integration points**: (1) per-step timeout — `spawnTracked({ timeoutMs, onTimeout })`; (2) user/agent cancellation and post-restart recovery — both route through `killTreeByPid(pid, "SIGKILL")` against the persisted step pid; (3) gateway shutdown — `killAllTracked("SIGKILL")` walks the in-flight registry. All three docker-exec, detached, and attached-pipe spawn sites in `runCommandStep` use the same primitive.
+- **Confirm a kill**: poll `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`, so ~5s on timeout, ~1s on cancel). `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty in the same window. The failed step's `output` ends with `— killed subprocess tree`.
+- **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.
@@ -156,7 +165,17 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
   1. `[session-manager] Session … implicit unstick from enqueuePrompt (consecutiveErrorTurns=…)` or `… from deliverLiveSteer` log lines — if missing, the call didn't reach the helper. Steers must route through `SessionManager.deliverLiveSteer()` (see the abort/steer section above).
   2. `consecutiveErrorTurns` on the session info — if it's ≥ 3, the cap is parking. Click Retry or fix the upstream.
   3. Team-lead nudges to an errored worker: no longer suppressed in `team-manager.ts` (the old `if (teamLeadSession.lastTurnErrored) return;` guard was removed). SessionManager is now the single source of truth for error-state policy.
-- **Related**: previous mitigation was pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + bounded auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`). That path still exists for quick in-band recovery; the implicit-unstick path is the structural fallback when the whitelist doesn't match.
+- **Related**: pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`) handles transient in-band recovery. See [docs/auto-retry.md](auto-retry.md) for the full policy. The implicit-unstick path is the structural fallback when the whitelist doesn't match.
+
+## Provider overload / rate-limit: session appears frozen with no retry banner
+
+- **Symptom**: turn ended with `overloaded_error` or `rate_limit_error` (or `HTTP 429/529`); session is `idle` but the UI shows no retry banner and nothing happens.
+- **Expected behaviour**: `maybeAutoRetryTransient` schedules an exponential-backoff retry automatically and broadcasts `auto_retry_pending`. The banner reads *"Retrying in ~Xs due to provider overload…"*.
+- **Diagnosis**:
+  1. Check server log for `[session-manager] Session … hit provider overload/rate-limit`. If missing, `isProviderBackoffError` didn't match — verify the error string contains `overloaded_error`, `rate_limit_error`, or an HTTP 429/529 phrase.
+  2. Check `session.pendingAutoRetryTimer` is set (non-null). If the timer fired but the retry itself failed again, look for `[session-manager] Auto-retry failed for session` in the log.
+  3. Banner missing despite `auto_retry_pending` being broadcast? Check `state.autoRetryPending` in `remote-agent.ts` — the `case "auto_retry_pending"` handler must have run. If it did, verify `AgentInterface` re-renders on `auto_retry_pending` events (see `AgentInterface._handleEvent`).
+- See [docs/auto-retry.md](auto-retry.md) for the full policy, cancellation triggers, and test coverage.
 
 ## "Setting up worktree…" banner missing on a brand-new session / preparing UX absent
 
