@@ -584,18 +584,27 @@ they share the same experimental gate.
   pattern as `subgoalsEnabled` (see
   [design/subgoals-experimental-toggle.md](design/subgoals-experimental-toggle.md)).
 
-**Goal creation panel** (below the Sandbox / Auto-start toggles):
+**Goal creation form** — rendered in two surfaces:
 
-- An **Allow subgoals** toggle. Default inherits from
-  `isSubgoalsEnabled()`. When the system pref is OFF the toggle is OFF
-  and greyed out — a per-goal flag cannot override a system-level OFF.
-  Flipping it OFF disables subgoals for this specific goal tree.
-- A **Max nesting depth** stepper (testid
-  `goal-form-max-nesting-depth`), visible only when Allow subgoals is
-  ON. Default inherits from `getSystemMaxNestingDepth()`. The tooltip
-  surfaces the current system ceiling. The submit path only sends the
-  override when it differs from the inherited default; otherwise the
-  field is omitted and the server resolves at request time from prefs.
+- **Goal-proposal modal** (in the team-lead / assistant chat, when
+  `propose_goal` is called or the assistant prompts the user).
+
+The standalone goal creation panel uses the same `renderGoalForm`
+component, but does not currently wire these proposal-only override
+callbacks. In the proposal modal, the per-goal controls appear below the
+parent/depth section:
+
+- An **Allow subgoals** checkbox (testid `goal-form-subgoals-toggle`).
+  Default inherits from `isSubgoalsEnabled()`. When the system pref is
+  OFF the checkbox is unchecked and greyed out — a per-goal flag cannot
+  override a system-level OFF. Unchecking it disables subgoals for this
+  specific goal tree.
+- A **Max depth** number input (testid `goal-form-max-depth`), visible
+  only when Allow subgoals is ON. Default inherits from
+  `getSystemMaxNestingDepth()`. Clamped to `[1, systemCap]` — the
+  per-goal value can only tighten, never exceed the system ceiling. The
+  submit path only sends the override when the user has touched it;
+  otherwise the field is omitted and the server resolves from prefs.
 
 The enforcement is **purely server-side**. The UI controls are UX —
 if a rogue agent bypasses the panel and POSTs a higher `maxNestingDepth`
@@ -614,6 +623,12 @@ the two 403 codes so agents understand why a spawn might be rejected.
   at depth+1 > max; idempotent re-call accepted past the limit.
 - `tests/e2e/ui/subgoal-nesting-limit.spec.ts` — settings stepper +
   goal-creation panel controls + persistence across reload.
+- `tests/e2e/ui/goal-proposal-form.spec.ts` — proposal modal: toggle
+  visibility, max-depth hide/show, created goal has correct
+  `subgoalsAllowed` / `maxNestingDepth` fields via `GET /api/goals/:id`.
+- `tests/proposal-form-controls-source-pinned.test.ts` — source-pin:
+  asserts `render.ts` contains `goal-form-subgoals-toggle` and
+  `goal-form-max-depth` test ids (catches silent merge-loss regressions).
 
 ## Concurrency
 

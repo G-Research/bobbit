@@ -25,7 +25,7 @@ import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-r
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
-import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
+import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError } from "./agent/goal-paused-guard.js";
 import { collectDescendants } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
@@ -3881,9 +3881,37 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			// Resolve per-goal subgoal-nesting overrides.
+			//
+			// Two inputs: the parent's effective inherited ceiling (if any) and the
+			// explicit body values from the proposal form. Rules:
+			//   - System pref is the global ceiling (subgoalsEnabled gate + maxDepth cap).
+			//   - For child goals the parent's effective values are also a ceiling.
+			//   - Explicit body values can only tighten/disable, never exceed the ceiling.
+			// Helpers from subgoal-nesting-limit.ts compute the ceiling so this stays
+			// the single source of truth.
+			const nestingPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
 			const inheritedNesting = (parentGoalId && resolvedParentGoal)
-				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
+				? inheritedChildOverrides(resolvedParentGoal, nestingPrefs)
 				: undefined;
+			const ceilSubgoalsAllowed = inheritedNesting
+				? inheritedNesting.subgoalsAllowed
+				: nestingPrefs.subgoalsEnabled;
+			const ceilMaxNestingDepth = inheritedNesting
+				? inheritedNesting.maxNestingDepth
+				: nestingPrefs.maxNestingDepth;
+			const bodySubgoalsAllowedRaw = body?.subgoalsAllowed;
+			const bodyMaxNestingDepthRaw = body?.maxNestingDepth;
+			let effSubgoalsAllowed: boolean | undefined = inheritedNesting?.subgoalsAllowed;
+			if (typeof bodySubgoalsAllowedRaw === "boolean") {
+				// body=false always wins (disable always allowed); body=true only if
+				// the ceiling permits it. System/parent OFF blocks the explicit true.
+				effSubgoalsAllowed = bodySubgoalsAllowedRaw && ceilSubgoalsAllowed;
+			}
+			let effMaxNestingDepth: number | undefined = inheritedNesting?.maxNestingDepth;
+			if (typeof bodyMaxNestingDepthRaw === "number" && Number.isFinite(bodyMaxNestingDepthRaw)) {
+				effMaxNestingDepth = Math.min(clampMaxDepth(bodyMaxNestingDepthRaw), ceilMaxNestingDepth);
+			}
 			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
 				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
 				: undefined;
@@ -3897,8 +3925,8 @@ async function handleApiRoute(
 				projectId: targetProjectId,
 				parentGoalId,
 				inlineRoles: bodyInlineRoles,
-				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
-				maxNestingDepth: inheritedNesting?.maxNestingDepth,
+				subgoalsAllowed: effSubgoalsAllowed,
+				maxNestingDepth: effMaxNestingDepth,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {

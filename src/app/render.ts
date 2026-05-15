@@ -812,6 +812,21 @@ interface GoalFormConfig {
 	subgoalsEnabled?: boolean;
 	/** Maximum nesting depth from system prefs. */
 	maxNestingDepth?: number;
+
+	/** Current value of the per-goal "Allow subgoals" toggle. `null` means
+	 *  the user has not touched it (inherit system pref). Only set in
+	 *  proposal-modal mode; the goal-assistant flow leaves this undefined
+	 *  so the row is not rendered (and would otherwise be a no-op there). */
+	subgoalsAllowedValue?: boolean | null;
+	/** Current value of the per-goal "Max nesting depth" input. `null` means
+	 *  inherit system pref. Only set in proposal-modal mode. */
+	maxNestingDepthValue?: number | null;
+	/** Invoked when the user toggles "Allow subgoals". Presence (alongside
+	 *  `onMaxNestingDepthChange`) gates rendering of the subgoals row. */
+	onSubgoalsAllowedChange?: (value: boolean) => void;
+	/** Invoked when the user changes the "Max depth" input. `null` means the
+	 *  user cleared the field (inherit system pref). */
+	onMaxNestingDepthChange?: (value: number | null) => void;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -943,6 +958,47 @@ function renderGoalForm(config: GoalFormConfig) {
 			})() : (config.subgoalsEnabled ? html`
 				<div class="text-xs text-muted-foreground self-start px-2 py-0.5 rounded-full bg-secondary/60" data-testid="goal-form-toplevel-badge">Top-level goal</div>
 			` : "")}
+			${(config.subgoalsEnabled && config.onSubgoalsAllowedChange && config.onMaxNestingDepthChange) ? (() => {
+				const systemCap = config.maxNestingDepth ?? 3;
+				const allowed = config.subgoalsAllowedValue ?? config.subgoalsEnabled;
+				const depthValue = config.maxNestingDepthValue ?? systemCap;
+				return html`
+					<div class="flex items-center gap-2" data-testid="goal-form-subgoals-row">
+						<label class="${lblCls} w-20 md:w-16">Subgoals</label>
+						<label class="flex items-center gap-1.5 text-xs">
+							<input
+								type="checkbox"
+								.checked=${allowed}
+								data-testid="goal-form-subgoals-toggle"
+								@change=${(e: Event) => {
+									config.onSubgoalsAllowedChange?.((e.target as HTMLInputElement).checked);
+								}} />
+							<span class="text-muted-foreground">Allow subgoals</span>
+						</label>
+						${allowed ? html`
+							<label class="flex items-center gap-1.5 text-xs ml-3">
+								<span class="text-muted-foreground">Max depth</span>
+								<input
+									type="number"
+									min="1"
+									max=${String(systemCap)}
+									step="1"
+									.value=${String(depthValue)}
+									data-testid="goal-form-max-depth"
+									class="w-16 text-xs px-2 py-1 rounded-md border border-border bg-background text-foreground"
+									@change=${(e: Event) => {
+										const raw = parseInt((e.target as HTMLInputElement).value, 10);
+										if (Number.isFinite(raw)) {
+											config.onMaxNestingDepthChange?.(Math.min(systemCap, Math.max(1, raw)));
+										} else {
+											config.onMaxNestingDepthChange?.(null);
+										}
+									}} />
+							</label>
+						` : ""}
+					</div>
+				`;
+			})() : ""}
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
 					<span class="${lblCls} w-20 md:w-16">Worktree</span>
@@ -2379,6 +2435,10 @@ let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
+// Per-goal subgoal controls. null means "inherit system preference" — only forwarded
+// to createGoal when the user actually touched the control.
+let _proposalSubgoalsAllowed: boolean | null = null;
+let _proposalMaxNestingDepth: number | null = null;
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
@@ -2400,6 +2460,8 @@ function syncProposalFormState(): void {
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
 		: [];
 	_proposalSaving = false;
+	_proposalSubgoalsAllowed = null;
+	_proposalMaxNestingDepth = null;
 }
 
 function goalProposalPanel() {
@@ -2462,6 +2524,12 @@ function goalProposalPanel() {
 		let goal;
 		try {
 			try {
+				const subgoalsAllowedField = subgoalsEnabled && _proposalSubgoalsAllowed !== null
+					? _proposalSubgoalsAllowed
+					: undefined;
+				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
+					? _proposalMaxNestingDepth
+					: undefined;
 				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 					spec: _proposalSpec,
 					workflowId,
@@ -2470,6 +2538,8 @@ function goalProposalPanel() {
 					enabledOptionalSteps,
 					autoStartTeam,
 					parentGoalId: _proposalParentGoalId || undefined,
+					subgoalsAllowed: subgoalsAllowedField,
+					maxNestingDepth: maxNestingDepthField,
 				});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
@@ -2485,6 +2555,8 @@ function goalProposalPanel() {
 			_proposalSandboxed = false;
 			_proposalAutoStartTeam = true;
 			_proposalParentGoalId = "";
+			_proposalSubgoalsAllowed = null;
+			_proposalMaxNestingDepth = null;
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2508,6 +2580,8 @@ function goalProposalPanel() {
 		_proposalEnabledOptionalSteps = [];
 		_proposalAutoStartTeam = true;
 		_proposalParentGoalId = "";
+		_proposalSubgoalsAllowed = null;
+		_proposalMaxNestingDepth = null;
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
 		if (sid && dismissed) markProposalDismissed(sid, dismissed);
@@ -2564,6 +2638,16 @@ function goalProposalPanel() {
 		onParentGoalChange: (id) => { _proposalParentGoalId = id || ""; renderApp(); },
 		subgoalsEnabled,
 		maxNestingDepth,
+		subgoalsAllowedValue: _proposalSubgoalsAllowed,
+		maxNestingDepthValue: _proposalMaxNestingDepth,
+		onSubgoalsAllowedChange: (value: boolean) => {
+			_proposalSubgoalsAllowed = value;
+			renderApp();
+		},
+		onMaxNestingDepthChange: (value: number | null) => {
+			_proposalMaxNestingDepth = value;
+			renderApp();
+		},
 	});
 }
 
