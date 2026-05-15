@@ -31,6 +31,8 @@ import {
 	initPromptDirs,
 	assembleSystemPrompt,
 	ensureCanonicalLspRule,
+	stripCanonicalLspRule,
+	getPromptSections,
 	LSP_CANONICAL_TOOL_SELECTION_HEADER,
 	LSP_CANONICAL_TOOL_SELECTION_RULE,
 } from "../src/server/agent/system-prompt.ts";
@@ -384,6 +386,145 @@ describe("assembleSystemPrompt — representative session shapes against a custo
 			);
 		});
 	}
+});
+
+// ---------------------------------------------------------------------------
+// 4b. De-duplication when role/goal content also includes the canonical header
+// ---------------------------------------------------------------------------
+
+describe("assembleSystemPrompt — de-duplicates canonical LSP section across base + role + goal", () => {
+	const CANONICAL_ROLE_BLOB =
+		"You are a **Coder** agent.\n\n" +
+		"## Your Role\nImplement features.\n\n" +
+		CANONICAL_HEADER + "\n\n" +
+		"Role-supplied copy of the rule that mentions lsp_definition and rg.\n\n" +
+		"## Footer Section\nStill here.\n";
+
+	it("rolePrompt containing the canonical header does not produce a duplicate", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-role-base",
+			"# Acme Project Assistant\n\nBe terse.\n",
+		);
+		const content = assembleWithBase("dedupe-role", basePath, {
+			roleName: "coder",
+			rolePrompt: CANONICAL_ROLE_BLOB,
+		});
+		assert.strictEqual(
+			count(content, CANONICAL_HEADER),
+			1,
+			"final prompt must contain exactly one canonical LSP section even when rolePrompt also includes it",
+		);
+	});
+
+	it("rolePrompt with canonical header preserves non-LSP role wording", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-role-preserve",
+			"# Acme\n\nBe terse.\n",
+		);
+		const content = assembleWithBase("dedupe-role-preserve", basePath, {
+			roleName: "coder",
+			rolePrompt: CANONICAL_ROLE_BLOB,
+		});
+		assert.ok(content.includes("You are a **Coder** agent."), "role intro must survive");
+		assert.ok(content.includes("Implement features."), "role body must survive");
+		assert.ok(content.includes("## Footer Section"), "trailing role section must survive");
+		assert.ok(content.includes("Still here."), "trailing role section body must survive");
+	});
+
+	it("both base prompt and rolePrompt with canonical header still yields exactly one section", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-both",
+			"# Acme\n\n" + CANONICAL_HEADER + "\n\nBase project copy of the rule.\n\n## Other\nbody\n",
+		);
+		const content = assembleWithBase("dedupe-both", basePath, {
+			roleName: "coder",
+			rolePrompt: CANONICAL_ROLE_BLOB,
+		});
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+		assert.ok(content.includes("Base project copy of the rule."), "base bespoke wording must survive");
+		assert.ok(content.includes("You are a **Coder** agent."), "role intro must survive");
+	});
+
+	it("goalSpec containing the canonical header does not produce a duplicate", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-goal-base",
+			"# Acme\n\nBe terse.\n",
+		);
+		const promptPath = assembleSystemPrompt("dedupe-goal", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Dedupe Goal",
+			goalState: "active",
+			goalSpec:
+				"# Original goal\n\nDo the thing.\n\n" +
+				CANONICAL_HEADER + "\n\n" +
+				"Goal-supplied LSP wording.\n",
+			allowedTools: ["read", "bash", "grep"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+		assert.ok(content.includes("Do the thing."), "non-LSP goal-spec content must survive");
+	});
+
+	it("getPromptSections() output across all sections contains exactly one canonical header", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-sections",
+			"# Acme\n\nBe terse.\n",
+		);
+		const sections = getPromptSections({
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Dedupe",
+			goalSpec:
+				"Do the thing.\n\n" + CANONICAL_HEADER + "\n\nGoal copy of rule.\n",
+			roleName: "coder",
+			rolePrompt: CANONICAL_ROLE_BLOB,
+		});
+		const joined = sections.map(s => s.content).join("\n\n");
+		assert.strictEqual(
+			count(joined, CANONICAL_HEADER),
+			1,
+			"getPromptSections() final output must contain exactly one canonical LSP section across base + goal + role",
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 4c. stripCanonicalLspRule() helper unit tests
+// ---------------------------------------------------------------------------
+
+describe("stripCanonicalLspRule()", () => {
+	it("is a no-op when the header is absent", () => {
+		const input = "# Hello\n\nNo LSP rule here.\n";
+		assert.strictEqual(stripCanonicalLspRule(input), input);
+	});
+
+	it("removes the section and stops at the next H2 heading", () => {
+		const input =
+			"# Top\n\nIntro.\n\n" +
+			CANONICAL_HEADER + "\n\nbody body body\n\n" +
+			"## Next\nkeep me\n";
+		const out = stripCanonicalLspRule(input);
+		assert.ok(!out.includes(CANONICAL_HEADER));
+		assert.ok(!out.includes("body body body"));
+		assert.ok(out.includes("Intro."));
+		assert.ok(out.includes("## Next"));
+		assert.ok(out.includes("keep me"));
+	});
+
+	it("removes the section through end-of-string when no following heading", () => {
+		const input =
+			"# Top\n\nIntro.\n\n" + CANONICAL_HEADER + "\n\nbody body body\n";
+		const out = stripCanonicalLspRule(input);
+		assert.ok(!out.includes(CANONICAL_HEADER));
+		assert.ok(!out.includes("body body body"));
+		assert.ok(out.includes("Intro."));
+	});
+
+	it("handles empty/undefined input safely", () => {
+		assert.strictEqual(stripCanonicalLspRule(""), "");
+	});
 });
 
 // ---------------------------------------------------------------------------
