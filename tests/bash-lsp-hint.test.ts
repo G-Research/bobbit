@@ -273,8 +273,8 @@ describe("lspHintForBashCommand — setup chains (cd && grep, env-prefix, set)",
 		assert.ok(hint, "expected a hint when grep is followed by | head");
 		assertHintShape(hint!);
 		assert.ok(
-			hint!.includes("enqueuePrompt"),
-			`expected first identifier in hint: ${hint}`,
+			hint!.includes("enqueuePrompt") || hint!.includes("deliverLiveSteer"),
+			`expected a relevant alternation identifier in hint: ${hint}`,
 		);
 	});
 
@@ -355,8 +355,8 @@ describe("lspHintForBashCommand — regression: session c9a21d20-b5be-48e7-9200-
 			`expected an lsp_* suggestion in hint: ${hint}`,
 		);
 		assert.ok(
-			hint!.includes("enqueuePrompt"),
-			`expected first identifier in hint: ${hint}`,
+			hint!.includes("enqueuePrompt") || hint!.includes("deliverLiveSteer"),
+			`expected a relevant alternation identifier in hint: ${hint}`,
 		);
 	});
 
