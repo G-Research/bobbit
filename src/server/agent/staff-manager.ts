@@ -137,6 +137,10 @@ export class StaffManager {
 			createdAt: now,
 			updatedAt: now,
 			projectId,
+			// Per-staff sandbox preference: persisted at creation and used
+			// directly on every spawn/wake. The project's sandbox config is
+			// NEVER consulted anywhere in the staff path.
+			sandboxed: opts?.sandboxed ?? false,
 		};
 		// Create a worktree for this staff agent
 		const shortId = randomUUID().slice(0, 8);
@@ -162,9 +166,9 @@ export class StaffManager {
 			if (staff.memory) {
 				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
 			}
-			// Per-staff sandbox preference: opts.sandboxed overrides the
-			// project-level default. Undefined means "inherit project setting".
-			const effectiveSandboxed = opts?.sandboxed ?? sessionManager.isSandboxEnabled;
+			// Per-staff sandbox preference: read straight from the persisted
+			// record. The project-level setting is NEVER consulted here.
+			const effectiveSandboxed = staff.sandboxed;
 			// Lazy per-project sandbox init — surfaces bootstrap errors up-front
 			// instead of mid-session-spawn. Idempotent; safe if already initialised.
 			if (effectiveSandboxed) {
@@ -400,8 +404,8 @@ export class StaffManager {
 				// model/thinking-level overrides apply at spawn.
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: staffId },
-				sandboxed: sessionManager.isSandboxEnabled,
-				sandboxBranch: sessionManager.isSandboxEnabled ? staff.branch : undefined,
+				sandboxed: staff.sandboxed,
+				sandboxBranch: staff.sandboxed ? staff.branch : undefined,
 			});
 			session.staffId = staffId;
 			sessionManager.setTitle(session.id, staff.name);
@@ -430,7 +434,7 @@ export class StaffManager {
 		// Lazy per-project sandbox init before waking. Idempotent; no-op for
 		// non-sandboxed staff. Errors are per-project — waking staff in
 		// project A will not be blocked by a broken sandbox in project B.
-		if (sessionManager.isSandboxEnabled) {
+		if (staff.sandboxed) {
 			const sm = sessionManager.getSandboxManager?.();
 			if (sm) {
 				try {

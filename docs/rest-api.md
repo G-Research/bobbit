@@ -125,10 +125,23 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits) |
 | `GET` | `/api/goals/:id/git-status` | Git status for goal worktree (branch, ahead/behind primary, clean) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal |
-| `GET` | `/api/goals/:id/tree-cost` | BFS tree-cost rollup across the goal and **all descendants (including archived)**. Returns `{ rootGoalId, totalCostUsd, totalTokensIn, totalTokensOut, breakdown: [{goalId, costUsd, tokensIn, tokensOut, depth}, ...] }`. Cached on `(rootGoalId, costGeneration)` — invalidated when any descendant's cost mutates. Archived descendants are included because their cost is permanent. **Gated** by `requireSubgoalsEnabled()` — returns `403 SUBGOALS_DISABLED` when the Subgoals toggle is off. |
+| `GET` | `/api/goals/:id/tree-cost` | BFS tree-cost rollup across the goal and **all descendants (live + archived)** via `walkGoalSubtree`. Returns `{ rootGoalId, totalCostUsd, totalTokensIn, totalTokensOut, breakdown: [{goalId, depth, title, costUsd, tokensIn, tokensOut}, …], unattributableLegacy? }`. Archived descendants are included because their cost is permanent. The optional `unattributableLegacy` field (`{ goalId: "__unattributable__", title, costUsd, tokensIn, tokensOut }`) is present only when legacy cost entries exist whose goalId could not be recovered by the boot-time backfill; it is NOT included in `totalCostUsd`. Cached on `(rootGoalId, costGeneration)` — invalidated when any cost entry mutates. **Gated** by `requireSubgoalsEnabled()` — returns `403 SUBGOALS_DISABLED` when the Subgoals toggle is off. See [docs/nested-goals.md — Cost rollup](nested-goals.md#cost-rollup) and [docs/design/hierarchical-cascade.md](design/hierarchical-cascade.md). |
 | `GET` | `/api/goals/:id/descendants` | BFS descendant walk via `parentGoalId` (depth cap 32). Returns `{ goals: PersistedGoal[] }` with full records for every descendant — live AND archived — of the goal, excluding the goal itself. Powers the dashboard's Plan-tab data source so archived siblings stay visible in the DAG regardless of the sidebar's "See Archived" toggle (see [docs/nested-goals.md — Plan tab](nested-goals.md#data-source-dashboardgoalpool-and-descendants)). NOT gated by `requireSubgoalsEnabled()` — Plan tab is core dashboard functionality. 404 if the goal or its project context is not found. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+#### `POST /api/goals` — `parentGoalId` error codes
+
+When `parentGoalId` is supplied, the handler validates it before calling the goal manager. All responses are `422`.
+
+| Code | When |
+|---|---|
+| `PARENT_NOT_FOUND` | `parentGoalId` does not exist in any project |
+| `PARENT_CROSS_PROJECT` | `parentGoalId` exists but belongs to a different project |
+| `SUBGOALS_DISABLED` | Subgoals preference is off for this goal tree |
+| `NESTING_DEPTH_EXCEEDED` | Adding the child would exceed `maxNestingDepth`. Response body also includes `currentDepth` and `maxDepth` (integers). |
+
+See [docs/design/propose-goal-parent-picker.md](design/propose-goal-parent-picker.md) for the full feature doc including the proposal-seed auto-inject for team-lead sessions.
 
 #### Nested goals (the 9 `Children` operations + plan/policy)
 
@@ -237,13 +250,15 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders in a dedicated collapsible **Staff** sub-section under the owning project in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)). The staff-creation **assistant session** (`assistantType: "staff"`) is a normal session and appears in that project's Sessions list while open — it is not a staff agent until `propose_staff` is accepted.
 
+For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md).
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes a `sandboxed` boolean (inherited from project config). Returns `{ staff: PersistedStaff[] }`. |
+| `GET` | `/api/staff` | List staff agent definitions. Optional `?projectId=<id>` filter; otherwise aggregates across all projects. Each entry includes the persisted `sandboxed` boolean (chosen at creation, immutable thereafter — see [staff-agents.md](staff-agents.md)). Returns `{ staff: PersistedStaff[] }`. |
 | `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }`. Consumed by the sidebar's orphan banner. |
-| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes `sandboxed` boolean) |
-| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). Subject to the [project resolution contract](#project-resolution-contract). |
-| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`) |
+| `GET` | `/api/staff/:id` | Get a single staff agent definition (includes the persisted `sandboxed` boolean) |
+| `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). `sandboxed` defaults to `false`; the value is persisted on the record and cannot be changed afterwards. Subject to the [project resolution contract](#project-resolution-contract). |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). |
 | `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, and re-indexes search; the existing worktree branch is preserved (the next wake rebases against the new project's primary branch). Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing or not a non-empty string; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |

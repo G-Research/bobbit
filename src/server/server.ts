@@ -1,13 +1,13 @@
 import { exec, execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID, createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 
 import { fileURLToPath } from "node:url";
-import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { bobbitStateDir, bobbitConfigDir, getProjectRoot, globalAgentDir } from "./bobbit-dir.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -23,11 +23,13 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
-import { computeTreeCost } from "./agent/cost-tracker.js";
-import { collectDescendants } from "./agent/goal-descendants.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
-import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
+import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides } from "./agent/subgoal-nesting-limit.js";
+import { GoalPausedError } from "./agent/goal-paused-guard.js";
+import { collectDescendants } from "./agent/goal-descendants.js";
+import { computeTreeCost } from "./agent/cost-tracker.js";
+import { backfillLegacyCostGoalIds } from "./agent/cost-backfill.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
@@ -52,7 +54,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -280,6 +282,15 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
+	/**
+	 * Actual ref used for `aheadOfPrimary`/`behindPrimary` calculations.
+	 * Equals `origin/<primaryBranch>` when the remote ref exists, else the
+	 * bare local branch name `<primaryBranch>`. Surfaced separately from
+	 * `primaryBranch` so the UI can render the truthful target (a configured
+	 * `base_ref` of `MyUpstream` is a LOCAL branch — "Merged into
+	 * origin/MyUpstream" is misleading when origin has no such ref).
+	 */
+	primaryRef: string;
 	status: { file: string; status: string }[];
 	hasUpstream: boolean; ahead: number; behind: number;
 	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
@@ -690,6 +701,9 @@ export function createGateway(config: GatewayConfig) {
 		maxServers: lspMaxServers,
 		idleTtlMs: lspIdleTtlMs,
 	});
+	if (!lspDisabled) {
+		console.log("[lsp] supervisor ready; routes /api/lsp/{state,stats,definition,references,hover,diagnostics,document_symbols,workspace_symbol,rename} registered, 2 factories");
+	}
 	// SandboxManager is wired later when sandbox=docker, so the supervisor
 	// exposes a setter rather than taking it via constructor.
 	sessionManager.setLspSupervisor(lspSupervisor);
@@ -1098,10 +1112,10 @@ export function createGateway(config: GatewayConfig) {
 	return {
 		server,
 		sessionManager,
-		bgProcessManager,
-		projectContextManager,
 		/** @internal Exposed for in-process E2E tests to drive supervisor-respawn directly. */
 		teamManager,
+		bgProcessManager,
+		projectContextManager,
 		async start(): Promise<number> {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
@@ -1243,6 +1257,23 @@ export function createGateway(config: GatewayConfig) {
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
 
+			// One-shot legacy cost backfill: stamp `goalId` on cost entries
+			// that pre-date the forward-stamp fix (commit a4050f59). Runs
+			// once per project context after sessions are restored so the
+			// resolver can see live PersistedSession records. Idempotent.
+			try {
+				const agentSessionsRoot = path.join(globalAgentDir(), "sessions");
+				for (const ctx of projectContextManager.all()) {
+					backfillLegacyCostGoalIds({
+						costTracker: ctx.costTracker,
+						sessionManager,
+						agentSessionsRoot,
+					});
+				}
+			} catch (err) {
+				console.warn("[cost-backfill] boot backfill failed (non-fatal):", err);
+			}
+
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
 			// or the /api/maintenance/* endpoints to preview and clean up manually.
@@ -1365,7 +1396,111 @@ export function createGateway(config: GatewayConfig) {
 					}));
 				})();
 
-				await Promise.all([sweeperTask, poolInitTask]);
+				// LSP route self-check: loopback probes verify /api/lsp/* routes are
+				// registered in handleApiRoute(). A merge regression can silently drop
+				// the route block while leaving everything else intact. Skip when
+				// lsp_disabled is set — there are no LSP routes to check.
+				const lspRouteCheckTask = (async () => {
+					if (lspDisabled) return;
+					const addr = server.address() as import("node:net").AddressInfo;
+					const checkPort = addr.port;
+					const base = `http://127.0.0.1:${checkPort}`;
+					const authHeaders = { "Authorization": `Bearer ${config.authToken}` };
+					const cwd = config.defaultCwd || getProjectRoot();
+					// Use server.ts itself as the "real src file" for the /state probe.
+					const srcFile = path.resolve(getProjectRoot(), "src/server/server.ts");
+					// LspSupervisor.dispatch() rejects absolute `args.path` (clamp finding #7),
+					// so the diagnostics probe must send a cwd-relative path rooted at a
+					// directory that actually contains the file. We pin cwd to the gateway
+					// worktree root (where server.ts lives in dev/prod) so the relative
+					// path resolves regardless of what config.defaultCwd happens to be —
+					// otherwise the route returns lsp_unavailable without ever initialising
+					// tsserver and the ENOENT bridge-bug check is silently skipped.
+					// When the gateway root is a synthetic test fixture without real source
+					// (in-process e2e harness, ad-hoc bobbit invocation in an empty dir),
+					// the diagnostics probe is skipped — the /stats and /state GET probes
+					// still verify route registration.
+					const diagCwd = getProjectRoot();
+					const diagPath = path.relative(diagCwd, srcFile);
+					const diagnosticsProbeViable = fs.existsSync(srcFile);
+					const probes: Array<{ route: string; url: string; method: string; body?: string; failOn404Only: boolean; inspectBody?: boolean }> = [
+						{
+							route: "/api/lsp/stats",
+							url: `${base}/api/lsp/stats`,
+							method: "GET",
+							failOn404Only: false,
+						},
+						{
+							route: "/api/lsp/state",
+							url: `${base}/api/lsp/state?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(srcFile)}`,
+							method: "GET",
+							failOn404Only: false,
+						},
+						...(diagnosticsProbeViable ? [{
+							// POST probe catches the "bridge attached without a running container"
+							// regression: a GET on /stats or /state wouldn't initialize tsserver,
+							// so only a real diagnostics call surfaces the ENOENT from a misrouted
+							// /workspace-wt/... rootUri. See sessions 03afb128 / 9150a1de (2026-05-14).
+							route: "/api/lsp/diagnostics",
+							url: `${base}/api/lsp/diagnostics`,
+							method: "POST",
+							body: JSON.stringify({ cwd: diagCwd, path: diagPath }),
+							failOn404Only: false,
+							inspectBody: true,
+						}] : []),
+					];
+					for (const probe of probes) {
+						const ac = new AbortController();
+						const timer = setTimeout(() => ac.abort(), 2000);
+						try {
+							const res = await fetch(probe.url, {
+								method: probe.method,
+								headers: { ...authHeaders, ...(probe.body ? { "Content-Type": "application/json" } : {}) },
+								body: probe.body,
+								signal: ac.signal,
+							});
+							const failed = probe.failOn404Only ? res.status === 404 : res.status !== 200;
+							// For inspectBody probes, read the body BEFORE deciding on a generic
+							// status failure: the ENOENT bridge-mis-attach bug surfaces as HTTP 500
+							// via jsonError(500, err), so a status-first short-circuit would mask it
+							// with a generic failed:/api/lsp/diagnostics:500 and miss the required
+							// failed:diagnostics:initialize_failed signal.
+							if (probe.inspectBody) {
+								// Body should be either real diagnostics or a structured supervisor
+								// envelope ({error: lsp_unavailable|lsp_capacity|lsp_timeout, ...}).
+								// ENOENT or "stat '" indicate the bridge mis-attaching bug — fail loudly.
+								let text = "";
+								try { text = await res.text(); } catch { /* ignore body read errors */ }
+								clearTimeout(timer);
+								if (text.includes("ENOENT") || text.includes("stat '")) {
+									lspSupervisor.setRouteSelfCheck("failed:diagnostics:initialize_failed");
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} and body contained ENOENT/stat ' — the TypeScript LSP bridge is likely attached without a running sandbox container (see sessions 03afb128 / 9150a1de). Agents will see lsp_unavailable for every diagnostics call. Body snippet: ${text.slice(0, 400)}`);
+									return;
+								}
+								if (failed) {
+									lspSupervisor.setRouteSelfCheck(`failed:${probe.route}:${res.status}`);
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
+									return;
+								}
+							} else {
+								clearTimeout(timer);
+								if (failed) {
+									lspSupervisor.setRouteSelfCheck(`failed:${probe.route}:${res.status}`);
+									console.error(`[lsp] route self-check FAILED: ${probe.route} returned ${res.status} — handleApiRoute likely lost the /api/lsp/* block during a merge. Agents will not be able to use LSP tools.`);
+									return;
+								}
+							}
+						} catch (err: any) {
+							clearTimeout(timer);
+							// Timeout or network error — not a missing route, skip loudly
+							console.warn(`[lsp] route self-check: ${probe.route} probe failed (${err?.message ?? err}) — skipping check`);
+							return;
+						}
+					}
+					lspSupervisor.setRouteSelfCheck("ok");
+				})();
+
+				await Promise.all([sweeperTask, poolInitTask, lspRouteCheckTask]);
 				console.log(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
 
@@ -3481,6 +3616,64 @@ async function handleApiRoute(
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
 	})) return;
 
+	// GET /api/goals/:goalId/descendants — live + archived descendants for the Plan tab.
+	// Feeds dashboardDescendants in goal-dashboard.ts so archived children render in the DAG
+	// and contribute to tree-cost rollups. Without this route, the Plan tab silently drops
+	// every archived/completed child.
+	const goalDescendantsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/descendants$/);
+	if (goalDescendantsMatch && req.method === "GET") {
+		const goalId = goalDescendantsMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (!goal.projectId) { json({ goals: [] }); return; }
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
+		// getAll() returns both live and archived.
+		const allGoals = ctx.goalStore.getAll();
+		json({ goals: collectDescendants(goalId, allGoals) });
+		return;
+	}
+
+	// GET /api/goals/:goalId/tree-cost — cost rollup across descendant tree (live + archived).
+	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
+	if (goalTreeCostMatch && req.method === "GET") {
+		if (!requireSubgoalsEnabled()) return;
+		const goalId = goalTreeCostMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		const rootGoalId = goal.rootGoalId ?? goal.id;
+		if (!goal.projectId) {
+			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
+			return;
+		}
+		const ctx = projectContextManager.getContextForGoal(goalId);
+		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
+		const allGoals = ctx.goalStore.getAll();
+		const costTracker = sessionManager.getCostTracker(goal.projectId);
+		const result = computeTreeCost(
+			rootGoalId,
+			allGoals,
+			costTracker,
+			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
+		);
+		// Surface the unattributable legacy bucket (cost entries whose
+		// `goalId` could not be recovered by the boot backfill). NOT added
+		// to `totalCostUsd` — it's an informational residual, separate from
+		// the selected goal's subtree. Hidden entirely when empty.
+		const legacy = costTracker.getUnattributableLegacyCost();
+		if (legacy.totalCost > 0 || legacy.inputTokens > 0 || legacy.outputTokens > 0) {
+			(result as typeof result & { unattributableLegacy?: unknown }).unattributableLegacy = {
+				goalId: "__unattributable__",
+				title: "Unattributable (legacy)",
+				costUsd: legacy.totalCost,
+				tokensIn: legacy.inputTokens,
+				tokensOut: legacy.outputTokens,
+			};
+		}
+		json(result);
+		return;
+	}
+
 	// ── Goal endpoints ─────────────────────────────────────────────
 
 	// GET /api/goals
@@ -3596,7 +3789,46 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
-			// Cascade: body.workflow → workflowId lookup → auto-seed → first match.
+			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
+			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
+			let resolvedParentGoal: PersistedGoal | undefined;
+			if (parentGoalId) {
+				// Parent MUST be in the same project context — cross-project hierarchy
+				// would corrupt the parentGoalId chain because createGoal only walks
+				// its own store. Reject cross-project parents with a clear 422.
+				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId);
+				if (!resolvedParentGoal) {
+					const crossProject = getGoalAcrossProjects(parentGoalId);
+					if (crossProject) {
+						json({ error: "Parent goal belongs to a different project. Select a parent in the same project.", code: "PARENT_CROSS_PROJECT" }, 422);
+					} else {
+						json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
+					}
+					return;
+				}
+				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
+				const nestResult = checkCanSpawnChild(
+					resolvedParentGoal,
+					prefs,
+					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
+				);
+				if (!nestResult.ok) {
+					if (nestResult.code === "SUBGOALS_DISABLED") {
+						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
+						return;
+					}
+					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
+						json({
+							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,
+							code: "NESTING_DEPTH_EXCEEDED",
+							currentDepth: nestResult.currentDepth,
+							maxDepth: nestResult.maxDepth,
+						}, 422);
+						return;
+					}
+				}
+			}
+			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
 			let resolvedWorkflow: Workflow | undefined;
 			let resolvedWorkflowId = workflowId;
 			const inlineWorkflow = body?.workflow;
@@ -3641,6 +3873,9 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			const inheritedNesting = (parentGoalId && resolvedParentGoal)
+				? inheritedChildOverrides(resolvedParentGoal, readSubgoalNestingPrefs((k) => preferencesStore.get(k)))
+				: undefined;
 			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
 				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
 				: undefined;
@@ -3652,7 +3887,10 @@ async function handleApiRoute(
 				sandboxed,
 				enabledOptionalSteps,
 				projectId: targetProjectId,
+				parentGoalId,
 				inlineRoles: bodyInlineRoles,
+				subgoalsAllowed: inheritedNesting?.subgoalsAllowed,
+				maxNestingDepth: inheritedNesting?.maxNestingDepth,
 			});
 			// Set projectId (explicit or auto-detected from cwd)
 			if (targetProjectId) {
@@ -3766,19 +4004,19 @@ async function handleApiRoute(
 				reattemptOf: body.reattemptOf,
 			});
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
-			// Spec-edit notification: emit goal_spec_changed WS event when spec changes.
+			// Spec-edit notification: emit goal_spec_changed WS event and nudge the team lead.
 			if (typeof body.spec === "string" && body.spec !== prevSpec) {
-				const specHash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+				const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 				broadcastToAll({
 					type: "goal_spec_changed",
 					goalId: id,
-					prevSpecHash: specHash(prevSpec),
-					newSpecHash: specHash(body.spec),
+					prevSpecHash: hash(prevSpec),
+					newSpecHash: hash(body.spec),
 					prevLen: prevSpec.length,
-					newLen: body.spec.length,
+					newLen: (body.spec as string).length,
 					ts: Date.now(),
 				});
-				try { teamManager.notifyTeamLeadOfSpecChange(id, prevSpec.length, body.spec.length); }
+				try { teamManager.notifyTeamLeadOfSpecChange(id, prevSpec.length, (body.spec as string).length); }
 				catch (err) { console.error(`[api] notifyTeamLeadOfSpecChange failed for ${id}:`, err); }
 			}
 			json({ ok: true });
@@ -5174,7 +5412,9 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
-		// Pause-cascade: a paused goal must reject gate signals.
+		// Pause-cascade: a paused goal must reject gate signals. This is the
+		// most upstream block for both llm-review-* verifier spawns and
+		// command/qa-step kickoffs in the same handler chain.
 		if (goal.paused) { json({ error: `Goal ${goalId} is paused`, code: "GOAL_PAUSED", goalId }, 409); return; }
 		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
 		const gateSignalCtx = projectContextManager.getContextForGoal(goalId);
@@ -5311,9 +5551,18 @@ async function handleApiRoute(
 			}
 		}
 
-		// Create signal record
+		// Cancel any in-flight verifications for the same gate BEFORE seeding
+		// the new one — otherwise cancelStaleVerifications would observe and
+		// tear down the just-seeded active entry.
+		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+
+		// Create signal record. Step enumeration is performed synchronously
+		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
+		// `activeVerifications` agree on the step list from the very first
+		// persisted state. See goal "Fix verification progress race".
+		const signalId = randomUUID();
 		const signal = {
-			id: randomUUID(),
+			id: signalId,
 			gateId,
 			goalId,
 			sessionId: signalSessionId,
@@ -5322,8 +5571,11 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
-			verification: { status: "running" as const, steps: [] },
+			verification: { status: "running" as const, steps: [] as any[] },
 		};
+
+		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
 
@@ -5338,6 +5590,23 @@ async function handleApiRoute(
 		// Broadcast signal received
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
+		// Broadcast verification started AFTER signal received — WS clients
+		// depend on this ordering (see tests/e2e/verification-core.spec.ts
+		// "WS events have correct shape, timestamps, and ordering"). The
+		// `gate_verification_started` event used to be fired synchronously
+		// inside `beginVerification` which inverted the order on the wire.
+		const activeForBroadcast = verificationHarness.getActiveVerification(signal.id);
+		if (activeForBroadcast && initialSteps.length > 0) {
+			broadcastToGoal(goalId, {
+				type: "gate_verification_started",
+				goalId,
+				gateId,
+				signalId: signal.id,
+				startedAt: activeForBroadcast.startedAt,
+				steps: (gateDef.verify || []).map((s: any) => ({ name: s.name, type: s.type, phase: s.phase ?? 0 })),
+			});
+		}
+
 		// Build gate state map for metadata variable resolution + LLM reviewer context
 		const allGateStates = new Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>();
 		for (const gs of gateStore.getGatesForGoal(goalId)) {
@@ -5349,9 +5618,6 @@ async function handleApiRoute(
 				injectDownstream: def?.injectDownstream,
 			});
 		}
-
-		// Cancel any in-flight verifications for the same gate before starting new ones
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
 
 		// Fire-and-forget verification — resolve primary branch dynamically so
 		// diff baselines use the repo's actual primary (origin/HEAD), not a stale
@@ -5632,6 +5898,8 @@ async function handleApiRoute(
 		} catch (err) {
 			if (err instanceof GateDependencyError) {
 				jsonError(409, err);
+			} else if (err instanceof GoalPausedError) {
+				json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
 			} else {
 				jsonError(400, err);
 			}
@@ -6601,8 +6869,19 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
+			// Auto-inject parentGoalId for team-lead sessions proposing a goal
+			let enrichedArgs = args as Record<string, unknown>;
+			if (proposalType === "goal") {
+				const sess = sessionManager.getSession(sessionId);
+				if (sess?.role === "team-lead" && sess.teamGoalId) {
+					const existingParent = enrichedArgs.parentGoalId;
+					if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
+						enrichedArgs = { ...enrichedArgs, parentGoalId: sess.teamGoalId };
+					}
+				}
+			}
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
 					json(parsed, 400);
@@ -7251,7 +7530,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to master
+	// POST /api/sessions/:id/git-squash-push — squash all branch commits and push directly to project primary
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-squash-push')) {
 		if (shouldSkipRemotePush()) { json({ ok: true, output: "skipped (test mode)" }); return; }
 		const id = url.pathname.split('/')[3];
@@ -7261,23 +7540,37 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			// Detect primary branch
-			let primaryBranch = "master";
+			// Honour project `base_ref` config. Squash-push fundamentally needs an
+			// `origin/<primary>` (it pushes a single commit to that remote ref) —
+			// if the configured base_ref points at a local-only branch with no
+			// origin counterpart, fail loudly rather than push to the wrong place.
+			let sessionBaseRef: string | undefined;
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
-				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
+				const sessCtx = projectContextManager.getContextForSession(id);
+				if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+			} catch { /* config unavailable — fall through */ }
+
+			const parsedBase = parseBaseRef(sessionBaseRef ?? "");
+			let primaryBranch = parsedBase.branch;
+			if (!primaryBranch) {
+				try {
+					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
+					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+				} catch {
+					try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { primaryBranch = "master"; } }
+				}
 			}
 
-			// Fetch latest master
-			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
+			// Fetch the remote primary; if origin has no such ref, refuse — squash
+			// push only makes sense for a remote primary.
+			try { await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid); }
+			catch { json({ error: `origin has no "${primaryBranch}" branch — squash push needs a remote primary. Check the project's base_ref configuration.` }, 400); return; }
 			const primaryRef = `origin/${primaryBranch}`;
 
 			// Check we have commits ahead
 			const aheadCount = parseInt(await execGit(`git rev-list --count ${primaryRef}..HEAD`, cwd, 5000, cid), 10) || 0;
-			if (aheadCount === 0) { json({ error: "No commits ahead of master" }, 400); return; }
+			if (aheadCount === 0) { json({ error: `No commits ahead of ${primaryRef}` }, 400); return; }
 
 			// Build commit message from branch commits
 			const logOutput = await execGit(`git log --format="%s" ${primaryRef}..HEAD`, cwd, 5000, cid);
@@ -7319,7 +7612,7 @@ async function handleApiRoute(
 			const msg = err instanceof Error ? err.message : String(err);
 			// Check for merge conflicts from merge-tree
 			if (msg.includes("CONFLICT") || msg.includes("merge-tree")) {
-				json({ error: "Merge conflicts with master. Use 'Merge master' first to resolve." }, 409);
+				json({ error: "Merge conflicts with primary. Use 'Rebase on primary' first to resolve." }, 409);
 			} else {
 				json({ error: msg }, 500);
 			}
@@ -7327,7 +7620,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/sessions/:id/git-merge-primary — merge origin/master into current branch
+	// POST /api/sessions/:id/git-merge-primary — rebase current branch onto project's primary ref
 	if (req.method === 'POST' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/git-merge-primary')) {
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
@@ -7336,27 +7629,49 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			// Detect primary branch
-			let primaryBranch = "master";
+			// Honour project `base_ref` config when set (mirrors the git-status
+			// handler at line ~6598). A local-only base_ref (e.g. "MyUpstream")
+			// must rebase against the LOCAL branch, not `origin/MyUpstream` which
+			// may not exist.
+			let sessionBaseRef: string | undefined;
 			try {
-				const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
-				primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
-			} catch {
-				try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
-				catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { /* keep default */ } }
+				const sessCtx = projectContextManager.getContextForSession(id);
+				if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
+			} catch { /* config unavailable — fall through */ }
+
+			const parsedBase = parseBaseRef(sessionBaseRef ?? "");
+			let primaryBranch = parsedBase.branch;
+			if (!primaryBranch) {
+				try {
+					const remoteHead = await execGit("git symbolic-ref refs/remotes/origin/HEAD", cwd, 5000, cid);
+					primaryBranch = remoteHead.replace("refs/remotes/origin/", "");
+				} catch {
+					try { await execGit("git rev-parse --verify refs/heads/master", cwd, 5000, cid); primaryBranch = "master"; }
+					catch { try { await execGit("git rev-parse --verify refs/heads/main", cwd, 5000, cid); primaryBranch = "main"; } catch { primaryBranch = "master"; } }
+				}
 			}
-			await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
-			const output = await execGit(`git rebase origin/${primaryBranch}`, cwd, 30000, cid);
+
+			// Resolve actual ref: prefer `origin/<primary>` when origin has it,
+			// else fall back to the bare local branch (matches `pref` semantics
+			// in `git-status-native.ts`).
+			let primaryRef = primaryBranch;
+			try { await execGit(`git rev-parse --verify origin/${primaryBranch}`, cwd, 5000, cid); primaryRef = `origin/${primaryBranch}`; } catch { /* use local */ }
+
+			// Only fetch when we're actually targeting the remote.
+			if (primaryRef.startsWith("origin/")) {
+				await execGit(`git fetch origin ${primaryBranch}`, cwd, 30000, cid);
+			}
+			const output = await execGit(`git rebase ${primaryRef}`, cwd, 30000, cid);
 
 			// After rebase, check if orphaned commits remain (common after squash-merge PRs).
-			// If the tree is identical to origin/primary (no diff), the commits are redundant —
-			// reset to origin/primary to clean them up.
-			const aheadAfter = parseInt(await execGitSafe(`git rev-list --count origin/${primaryBranch}..HEAD`, cwd, "0", cid), 10) || 0;
+			// If the tree is identical to the primary ref (no diff), the commits are redundant —
+			// reset to the primary ref to clean them up.
+			const aheadAfter = parseInt(await execGitSafe(`git rev-list --count ${primaryRef}..HEAD`, cwd, "0", cid), 10) || 0;
 			if (aheadAfter > 0) {
-				const diff = await execGitSafe(`git diff origin/${primaryBranch}..HEAD`, cwd, "", cid);
+				const diff = await execGitSafe(`git diff ${primaryRef}..HEAD`, cwd, "", cid);
 				if (diff.trim() === "") {
 					// Tree is identical — these are orphaned commits from a squash merge
-					await execGit(`git reset --hard origin/${primaryBranch}`, cwd, 10000, cid);
+					await execGit(`git reset --hard ${primaryRef}`, cwd, 10000, cid);
 					invalidateGitStatusCache(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
@@ -7684,49 +7999,6 @@ async function handleApiRoute(
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
 		const cost = sessionManager.getCostTracker(goal.projectId).getGoalCost(goalId, sessionIds);
 		json(cost);
-		return;
-	}
-
-	// GET /api/goals/:goalId/tree-cost — sum of cost across the descendant goal tree
-	const goalTreeCostMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/tree-cost$/);
-	if (goalTreeCostMatch && req.method === "GET") {
-		if (!requireSubgoalsEnabled()) return;
-		const goalId = goalTreeCostMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const rootGoalId = goal.rootGoalId ?? goal.id;
-		if (!goal.projectId) {
-			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
-			return;
-		}
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
-		const allGoals = ctx.goalStore.getAll();
-		const costTracker = sessionManager.getCostTracker(goal.projectId);
-		const result = computeTreeCost(
-			rootGoalId,
-			allGoals,
-			costTracker,
-			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
-		);
-		json(result);
-		return;
-	}
-
-	// GET /api/goals/:goalId/descendants — full descendant goal records (live + archived)
-	// Powers the Plan tab's data source so archived children remain visible in
-	// the DAG independently of the sidebar's "See Archived" toggle.
-	const goalDescendantsMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/descendants$/);
-	if (goalDescendantsMatch && req.method === "GET") {
-		const goalId = goalDescendantsMatch[1];
-		const goal = getGoalAcrossProjects(goalId);
-		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		if (!goal.projectId) { json({ goals: [] }); return; }
-		const ctx = projectContextManager.getContextForGoal(goalId);
-		if (!ctx) { json({ error: "Goal project context not found" }, 404); return; }
-		const allGoals = ctx.goalStore.getAll();
-		const descendants = collectDescendants(goalId, allGoals);
-		json({ goals: descendants });
 		return;
 	}
 
@@ -8316,22 +8588,14 @@ async function handleApiRoute(
 
 	// GET /api/staff/orphaned — staff with missing projectId or stuck on the system project
 	if (url.pathname === "/api/staff/orphaned" && req.method === "GET") {
-		const list = staffManager.listOrphaned().map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listOrphaned() });
 		return;
 	}
 
 	// GET /api/staff
 	if (url.pathname === "/api/staff" && req.method === "GET") {
 		const projectId = url.searchParams.get("projectId") || undefined;
-		const list = staffManager.listStaff(projectId).map(s => {
-			const sandboxed = s.projectId ? (projectContextManager.getOrCreate(s.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			return { ...s, sandboxed };
-		});
-		json({ staff: list });
+		json({ staff: staffManager.listStaff(projectId) });
 		return;
 	}
 
@@ -8378,8 +8642,7 @@ async function handleApiRoute(
 		if (req.method === "GET") {
 			const staff = staffManager.getStaff(id);
 			if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-			const sandboxed = staff.projectId ? (projectContextManager.getOrCreate(staff.projectId)?.projectConfigStore.get("sandbox") === "docker") : false;
-			json({ ...staff, sandboxed });
+			json(staff);
 			return;
 		}
 

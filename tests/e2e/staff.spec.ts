@@ -343,16 +343,24 @@ test.describe("Staff Agents — REST API", () => {
 		expect(wakeRes.status).toBe(400);
 	});
 
-	test("GET /api/staff/:id includes sandboxed field", async () => {
+	// ----- Pinned tests for fix-staff-sandbox-model design contract -----
+	//
+	// `sandboxed` is a persisted boolean on PersistedStaff: chosen at creation,
+	// stored on the record, immutable for the staff's lifetime. The project's
+	// sandbox config is NEVER consulted in the staff path. Replaces the earlier
+	// (broken) behaviour that synthesised the field from project config in GET.
+
+	test("GET /api/staff/:id returns the persisted sandboxed boolean (default false)", async () => {
+		// sharedStaff was created without an explicit `sandboxed` field —
+		// the default must be `false`.
 		const res = await apiFetch(`/api/staff/${sharedStaff.id}`, {});
 		expect(res.ok).toBe(true);
 		const staff = await res.json();
 		expect(typeof staff.sandboxed).toBe("boolean");
-		// Test environment has no Docker — sandboxed should be false
 		expect(staff.sandboxed).toBe(false);
 	});
 
-	test("GET /api/staff list includes sandboxed field on each item", async () => {
+	test("GET /api/staff list returns sandboxed as a boolean on every item", async () => {
 		const res = await apiFetch(`/api/staff`, {});
 		expect(res.ok).toBe(true);
 		const data = await res.json();
@@ -360,6 +368,124 @@ test.describe("Staff Agents — REST API", () => {
 		for (const s of data.staff) {
 			expect(typeof s.sandboxed).toBe("boolean");
 		}
+	});
+
+	test("POST /api/staff omitting sandboxed → GET returns false", async () => {
+		const staff = await apiCreateStaff(token, {
+			name: "NoSandboxField Bot",
+			systemPrompt: "x",
+			cwd: gitCwd(),
+		});
+		cleanupStaffIds.push(staff.id);
+		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
+
+		expect(staff.sandboxed).toBe(false);
+
+		// Round-trip via GET to confirm the API surface agrees.
+		const res = await apiFetch(`/api/staff/${staff.id}`, {});
+		const fetched = await res.json();
+		expect(fetched.sandboxed).toBe(false);
+	});
+
+	test("POST /api/staff with sandboxed: false explicitly → GET returns false", async () => {
+		const res = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({
+				name: "ExplicitFalseSandbox Bot",
+				systemPrompt: "x",
+				cwd: gitCwd(),
+				sandboxed: false,
+			}),
+		});
+		expect(res.status).toBe(201);
+		const staff = await res.json();
+		cleanupStaffIds.push(staff.id);
+		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
+
+		expect(staff.sandboxed).toBe(false);
+
+		const getRes = await apiFetch(`/api/staff/${staff.id}`, {});
+		const fetched = await getRes.json();
+		expect(fetched.sandboxed).toBe(false);
+	});
+
+	test("sandboxed is persisted to staff.json on disk (survives reload)", async ({ gateway }) => {
+		const { readFileSync } = await import("node:fs");
+		const { join } = await import("node:path");
+
+		const staff = await apiCreateStaff(token, {
+			name: "PersistedSandbox Bot",
+			systemPrompt: "x",
+			cwd: gitCwd(),
+		});
+		cleanupStaffIds.push(staff.id);
+		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
+
+		// staff.json lives under <project-rootPath>/.bobbit/state/staff.json.
+		// The in-process harness registers the default project at `bobbitDir`.
+		const staffJsonPath = join(gateway.bobbitDir, ".bobbit", "state", "staff.json");
+		const raw = readFileSync(staffJsonPath, "utf-8");
+		const persisted = JSON.parse(raw) as Array<Record<string, unknown>>;
+		const record = persisted.find((s) => s.id === staff.id);
+		expect(record, "staff record must be written to staff.json").toBeTruthy();
+		expect(record!.sandboxed, "sandboxed must be persisted as a real boolean (not derived at GET time)").toBe(false);
+
+		// Simulate "server restart" at the data-model level by reloading the
+		// store from disk. The full in-process harness has no reboot path, but
+		// proving the JSON contains the field is equivalent: a fresh StaffStore
+		// constructed against the same dir would read it back (see
+		// tests/staff-sandboxed-persistence.test.ts for that pinning).
+	});
+
+	test("PUT /api/staff/:id { sandboxed: true } silently drops the field (immutable after creation)", async () => {
+		const staff = await apiCreateStaff(token, {
+			name: "ImmutableSandbox Bot",
+			systemPrompt: "x",
+			cwd: gitCwd(),
+		});
+		cleanupStaffIds.push(staff.id);
+		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
+
+		expect(staff.sandboxed).toBe(false);
+
+		// Attempt to flip sandboxed via PUT. The server's allow-list does NOT
+		// forward `body.sandboxed` to staffManager.updateStaff — the field is
+		// silently dropped (no 400, no error).
+		const putRes = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ sandboxed: true, description: "updated" }),
+		});
+		expect(putRes.ok).toBe(true);
+
+		// GET must still return the original value.
+		const getRes = await apiFetch(`/api/staff/${staff.id}`, {});
+		const fetched = await getRes.json();
+		expect(fetched.sandboxed).toBe(false);
+		// Sanity: other fields in the same PUT still take effect, proving the
+		// allow-list isn't blanket-rejecting the request.
+		expect(fetched.description).toBe("updated");
+	});
+
+	test("PUT /api/staff/:id { sandboxed: false } silently drops the field too (no PUT path for the value)", async () => {
+		// Same shape as the truthy attempt above — the API has no PUT path for
+		// the field at all, so passing the existing value is also a no-op.
+		const staff = await apiCreateStaff(token, {
+			name: "NoPutPath Bot",
+			systemPrompt: "x",
+			cwd: gitCwd(),
+		});
+		cleanupStaffIds.push(staff.id);
+		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
+
+		const putRes = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ sandboxed: false }),
+		});
+		expect(putRes.ok).toBe(true);
+
+		const getRes = await apiFetch(`/api/staff/${staff.id}`, {});
+		const fetched = await getRes.json();
+		expect(fetched.sandboxed).toBe(false);
 	});
 
 	test("POST /api/staff/:id/wake refreshes worktree from primary branch", async () => {

@@ -68,6 +68,15 @@ export interface TreeCostGoal {
 /** Source of session ids per goal — pluggable so tests don't need a real SessionManager. */
 export type SessionIdsForGoalFn = (goalId: string) => string[];
 
+/**
+ * Sentinel goalId for legacy cost entries whose original goal mapping
+ * could not be recovered by `backfillLegacyCostGoalIds` (no live session
+ * record + no sidecar on disk). Surfaced via `getUnattributableLegacyCost`
+ * and rendered as a separate informational row in the tree-cost panel —
+ * never silently absorbed into a parent goal's subtree total.
+ */
+export const UNATTRIBUTABLE_LEGACY_GOAL_ID = "__unattributable__";
+
 function emptyCost(): SessionCost {
 	return {
 		inputTokens: 0,
@@ -218,6 +227,44 @@ export class CostTracker {
 
 	getAllCosts(): Map<string, SessionCost> {
 		return new Map(this.costs);
+	}
+
+	/**
+	 * Aggregate cost across all entries that have no stamped `goalId`.
+	 * These are typically legacy entries recorded before goalId stamping
+	 * existed (commit `a4050f59`) AND whose source session has been
+	 * purged AND whose sidecar lookup failed during boot backfill.
+	 *
+	 * Kept separate from `computeTreeCost` so unattributable totals are
+	 * never silently rolled into a parent goal's subtree — the tree-cost
+	 * endpoint exposes this as an explicit `unattributableLegacy` bucket.
+	 */
+	getUnattributableLegacyCost(): SessionCost {
+		const total = emptyCost();
+		for (const c of this.costs.values()) {
+			if (c.goalId) continue;
+			total.inputTokens += c.inputTokens;
+			total.outputTokens += c.outputTokens;
+			total.cacheReadTokens += c.cacheReadTokens;
+			total.cacheWriteTokens += c.cacheWriteTokens;
+			total.totalCost += c.totalCost;
+		}
+		total.totalCost = Math.round(total.totalCost * 1_000_000) / 1_000_000;
+		return total;
+	}
+
+	/**
+	 * Iterate session ids that have a recorded cost entry without a
+	 * stamped `goalId`. Used by the boot-time legacy backfill
+	 * (`cost-backfill.ts`) to drive its resolver. Returns a fresh array
+	 * so callers don't see internal-map mutations during iteration.
+	 */
+	getUnstampedSessionIds(): string[] {
+		const out: string[] = [];
+		for (const [sid, c] of this.costs) {
+			if (!c.goalId) out.push(sid);
+		}
+		return out;
 	}
 
 	removeSession(sessionId: string): void {

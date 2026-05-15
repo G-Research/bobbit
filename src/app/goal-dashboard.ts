@@ -74,6 +74,7 @@ let error = "";
 interface GoalRepoEntry {
 	branch?: string;
 	primaryBranch?: string;
+	primaryRef?: string;
 	isOnPrimary?: boolean;
 	clean?: boolean;
 	aheadOfPrimary?: number;
@@ -88,6 +89,7 @@ interface GoalRepoEntry {
 interface GoalGitStatus {
 	branch: string;
 	primaryBranch: string;
+	primaryRef?: string;
 	isOnPrimary: boolean;
 	clean: boolean;
 	aheadOfPrimary: number;
@@ -153,7 +155,7 @@ let expandedLiveStepKeys: Set<string> = new Set();
 let expandedArtifactKeys: Set<string> = new Set();
 let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; stepName: string; liveOutput: string; stepType: string } | null = null;
 
-/** Dashboard event WebSocket — receives gate verification events without a session */
+/** Dashboard event WebSocket - receives gate verification events without a session */
 let dashboardWs: WebSocket | null = null;
 let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
@@ -170,12 +172,26 @@ interface TreeCostBreakdown {
 	tokensIn: number;
 	tokensOut: number;
 }
+interface TreeCostUnattributableLegacy {
+	goalId: "__unattributable__";
+	title: string;
+	costUsd: number;
+	tokensIn: number;
+	tokensOut: number;
+}
 interface TreeCost {
 	rootGoalId: string;
 	totalCostUsd: number;
 	totalTokensIn: number;
 	totalTokensOut: number;
 	breakdown: TreeCostBreakdown[];
+	/**
+	 * Optional residual bucket for cost entries whose `goalId` could not be
+	 * recovered by the boot-time backfill. Rendered as a muted bottom row in
+	 * the tree-cost panel; NOT a child of any goal and NOT included in
+	 * `totalCostUsd` / subtree breakdown totals.
+	 */
+	unattributableLegacy?: TreeCostUnattributableLegacy;
 }
 let treeCost: TreeCost | null = null;
 let treeCostExpanded = false;
@@ -228,7 +244,7 @@ function recentSpecEditTs(goalId: string): number | undefined {
 export function notifyGoalEventForDashboard(): void {
 	if (currentGoalId) {
 		schedulePlanRerender();
-		// Re-fetch tree cost in the background — capped at 5s minimum interval
+		// Re-fetch tree cost in the background - capped at 5s minimum interval
 		// so a burst of events doesn't hammer the endpoint.
 		const now = Date.now();
 		if (currentGoalId && !treeCostInFlight && now - treeCostLastFetchAt > 5_000) {
@@ -242,7 +258,7 @@ export function notifyGoalEventForDashboard(): void {
 
 /** Fetch live+archived descendants for the Plan tab. In-flight guard + staleness check. */
 async function fetchDashboardDescendants(goalId: string): Promise<void> {
-	// §5.6: skip the round-trip when the experimental flag is off — the
+	// §5.6: skip the round-trip when the experimental flag is off - the
 	// Plan tab is hidden in that case so the data would never be rendered.
 	if (!isSubgoalsEnabled()) return;
 	if (dashboardDescendantsInFlight) return;
@@ -280,7 +296,7 @@ function dashboardGoalPool(): Goal[] {
 }
 
 async function fetchTreeCost(goalId: string): Promise<void> {
-	// §5.6: skip when the experimental flag is off — the tree-cost row is
+	// §5.6: skip when the experimental flag is off - the tree-cost row is
 	// only meaningful for nested goals and the row is gated on the same flag.
 	if (!isSubgoalsEnabled()) return;
 	if (treeCostInFlight) return;
@@ -383,7 +399,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	// Only show the full-page loading skeleton on the initial load for this
 	// goal. Re-entering loadDashboardData for the same goal (e.g. hashchange
 	// race, navigation back to the same dashboard, or refreshDashboardGoal()
-	// fallthrough) must keep the tab bar rendered — otherwise tests and users
+	// fallthrough) must keep the tab bar rendered - otherwise tests and users
 	// see the dashboard flicker between skeleton and content under load.
 	if (!sameGoal) {
 		loading = true;
@@ -549,7 +565,7 @@ async function fetchActiveVerifications(goalId: string): Promise<void> {
 
 		renderApp();
 	} catch (err) {
-		// Non-fatal — WS events will still work
+		// Non-fatal - WS events will still work
 		console.warn("[dashboard] Failed to fetch active verifications:", err);
 	}
 }
@@ -602,7 +618,7 @@ export function clearDashboardState(): void {
 /**
  * Refresh just the goal metadata for the currently-displayed dashboard.
  * Called when a goal_setup_complete/error event arrives so the "Setting up
- * worktree…" banner dismisses without a full page reload.
+ * worktree..." banner dismisses without a full page reload.
  */
 export async function refreshDashboardGoal(): Promise<void> {
 	if (!currentGoalId) return;
@@ -617,7 +633,7 @@ export async function refreshDashboardGoal(): Promise<void> {
 			}
 			renderApp();
 		}
-	} catch { /* ignore — polling will catch up */ }
+	} catch { /* ignore - polling will catch up */ }
 }
 
 // ============================================================================
@@ -679,7 +695,7 @@ function startAgentPolling(goalId: string): void {
 	stopAgentPolling();
 	fetchAgents(goalId).then((a) => { agents = a; renderApp(); });
 	agentPollTimer = setInterval(async () => {
-		// QA-2: archived goals don't have a team — polling /team produces a
+		// QA-2: archived goals don't have a team - polling /team produces a
 		// 404-spam loop that's visible in network logs and burns the goal's
 		// next-render budget. Stop the interval the moment we observe the
 		// goal is archived (server-side WS event already triggered a state
@@ -785,7 +801,7 @@ function handleLiveVerificationEvent(e: Event) {
 		case "gate_verification_step_complete": {
 			let entry = liveVerifications.get(key);
 			if (!entry) {
-				// Create entry dynamically — we missed the started event
+				// Create entry dynamically - we missed the started event
 				entry = { gateId: detail.gateId, signalId: detail.signalId, steps: [], overallStatus: "running" };
 				liveVerifications.set(key, entry);
 				startLiveVerifTimer();
@@ -922,7 +938,7 @@ function startGitStatusPolling(goalId: string): void {
 		// Coalesce: skip tick if any refresh started in the last 10s.
 		const elapsed = performance.now() - gitStatusLastRefreshAt;
 		if (elapsed < 10_000) {
-			// still poll PR status — fall through to PR-only block below
+			// still poll PR status - fall through to PR-only block below
 		} else {
 			refreshGoalGitStatus(goalId);
 		}
@@ -1180,7 +1196,7 @@ async function handleStartTeam(goalId: string): Promise<void> {
 async function handleEndTeam(goalId: string): Promise<void> {
 	// Pre-flight: when the goal has live descendant teams, the user MUST be
 	// asked whether to cascade. Stopping just the parent team while leaving
-	// children's teams running is the bug the user reported — it's both
+	// children's teams running is the bug the user reported - it's both
 	// confusing UX and wasteful (descendant team-leads keep burning tokens).
 	const hasLiveDescendantTeams = state.goals.some(g =>
 		!g.archived
@@ -1313,7 +1329,7 @@ function renderSetupBanner(goal: Goal): TemplateResult {
 		return html`
 			<div class="setup-banner setup-banner--preparing">
 				<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
-				<span>Setting up worktree…</span>
+				<span>Setting up worktree...</span>
 			</div>
 		`;
 	}
@@ -1333,7 +1349,7 @@ function renderParentBreadcrumb(goal: Goal): TemplateResult | typeof nothing {
 	const parent = state.goals.find(g => g.id === goal.parentGoalId);
 	const root = goal.rootGoalId ? state.goals.find(g => g.id === goal.rootGoalId) : undefined;
 	if (!parent && !root) return nothing;
-	// "← root.title / parent.title" — root and parent may be the same when a
+	// "← root.title / parent.title" - root and parent may be the same when a
 	// direct child of the root, in which case we emit just one segment.
 	const parts: TemplateResult[] = [];
 	if (root && root.id !== parent?.id) {
@@ -1394,7 +1410,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 						: html`<button class="btn-icon" data-testid="goal-pause-btn" @click=${() => pauseGoalWithDialog(goal.id)} title="Pause goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>Pause</span></button>`}
 					${(() => {
 						if (goal.paused) return nothing;
-						// TODO: memoize — O(n × depth) per render is fine at current goal-tree sizes.
+						// TODO: memoize - O(n × depth) per render is fine at current goal-tree sizes.
 						const waitingCount = state.goals.filter(g => {
 							if (g.archived) return false;
 							if (!(g.paused === true || g.state === "blocked")) return false;
@@ -1542,7 +1558,7 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 	if (!currentGoal) return nothing;
 	if (!treeCost) return nothing;
 	// Tree cost is meaningful whenever the rollup spans more than this goal
-	// alone — i.e. there's a parent or any descendant (live or archived).
+	// alone - i.e. there's a parent or any descendant (live or archived).
 	// Drive this off the server-side breakdown so archived children still
 	// keep the row visible (the `state.goals` filter excludes them when
 	// "See Archived" is off).
@@ -1562,28 +1578,48 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 				<span class="meta-label">${formatTokens(treeCost.totalTokensIn + treeCost.totalTokensOut)} tokens</span>
 			</div>
 			${treeCostExpanded ? html`
-				<table data-testid="tree-cost-breakdown" style="width:100%;margin-top:6px;border-collapse:collapse;font-size:11px;">
-					<thead>
-						<tr style="border-bottom:1px solid var(--border);color:var(--muted-foreground);">
-							<th style="text-align:left;padding:4px 8px;font-weight:500;">Goal</th>
-							<th style="text-align:right;padding:4px 8px;font-weight:500;">Cost</th>
-							<th style="text-align:right;padding:4px 8px;font-weight:500;">Tokens</th>
-						</tr>
-					</thead>
-					<tbody>
-						${treeCost.breakdown.map(b => html`
-							<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
-								<td style="padding:3px 8px;">
-									<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
-									<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
-										@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
-								</td>
-								<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
-								<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
+				<div data-testid="tree-cost-breakdown-scroll" style="width:100%;max-height:min(60vh, 480px);overflow-y:auto;margin-top:6px;border:1px solid var(--border);border-radius:4px;">
+					<table data-testid="tree-cost-breakdown" style="width:100%;border-collapse:collapse;font-size:11px;">
+						<thead style="position:sticky;top:0;background:var(--background);z-index:1;">
+							<tr style="border-bottom:1px solid var(--border);color:var(--muted-foreground);">
+								<th style="text-align:left;padding:4px 8px;font-weight:500;">Goal</th>
+								<th style="text-align:right;padding:4px 8px;font-weight:500;">Cost</th>
+								<th style="text-align:right;padding:4px 8px;font-weight:500;">Tokens</th>
 							</tr>
-						`)}
-					</tbody>
-				</table>
+						</thead>
+						<tbody>
+							${treeCost.breakdown.map(b => html`
+								<tr data-testid="tree-cost-row-${b.goalId}" style="border-bottom:1px dashed var(--border);">
+									<td style="padding:3px 8px;">
+										<span style="color:var(--muted-foreground);">${"  ".repeat(b.depth)}</span>
+										<a style="color:var(--primary);cursor:pointer;text-decoration:none;"
+											@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", b.goalId); }}>${b.title}</a>
+									</td>
+									<td style="text-align:right;padding:3px 8px;">$${b.costUsd.toFixed(4)}</td>
+									<td style="text-align:right;padding:3px 8px;color:var(--muted-foreground);">${formatTokens(b.tokensIn + b.tokensOut)}</td>
+								</tr>
+							`)}
+							${(() => {
+								// Residual bucket: cost entries whose goalId couldn't be
+								// recovered by the boot-time backfill. Rendered as a muted
+								// bottom row when non-empty; NOT a child of the root goal
+								// and NOT part of subtree totals — see backfill design doc.
+								const u = treeCost!.unattributableLegacy;
+								if (!u) return nothing;
+								const tokens = u.tokensIn + u.tokensOut;
+								if (u.costUsd <= 0 && tokens <= 0) return nothing;
+								return html`
+									<tr data-testid="tree-cost-row-unattributable-legacy"
+										style="border-top:1px solid var(--border);color:var(--muted-foreground);font-style:italic;">
+										<td style="padding:3px 8px;">${u.title}</td>
+										<td style="text-align:right;padding:3px 8px;">$${u.costUsd.toFixed(4)}</td>
+										<td style="text-align:right;padding:3px 8px;">${formatTokens(tokens)}</td>
+									</tr>
+								`;
+							})()}
+						</tbody>
+					</table>
+				</div>
 			` : nothing}
 		</div>
 	`;
@@ -1625,6 +1661,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.token=${localStorage.getItem("gateway.token") || ""}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
+						.primaryRef=${gs?.primaryRef ?? `origin/${gs?.primaryBranch ?? "master"}`}
 						.isOnPrimary=${gs?.isOnPrimary ?? false}
 						.summary=${gs?.summary ?? ''}
 						.clean=${gs?.clean ?? true}
@@ -1780,7 +1817,7 @@ function renderTabBar(): TemplateResult {
 		const liveChildCount = childCount - archivedChildCount;
 		// Plan tab visibility: present whenever the goal's workflow has a
 		// goal-plan gate (formal plan) OR there's at least one direct child
-		// (synthesised living-plan). Use ALL goals — archived parent goals
+		// (synthesised living-plan). Use ALL goals - archived parent goals
 		// must still surface their plan tree, otherwise the dashboard becomes
 		// blank-staring at a fully-archived tree.
 		if (shouldShowPlanTab(currentGoal as any, dashboardGoalPool() as any)) {
@@ -2245,10 +2282,22 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								<span>Passed (no verification)</span>
 							</div>`
 						: html`
-						${signal.verification.steps.map((step, si) => html`
-							<div class="verify-step verify-step--${step.passed ? "pass" : "fail"}">
+						${signal.verification.steps.map((step, si) => {
+							// For in-flight signals seeded by beginVerification, prefer
+							// `step.status` over `step.passed` so waiting/running rows
+							// don't render as failed. Completed signals leave `status`
+							// unset and fall back to the boolean `passed` verdict.
+							const inFlight = vStatus === "running" && step.status && step.status !== "passed" && step.status !== "failed";
+							const stepClass = inFlight
+								? (step.status === "running" ? "running" : step.status === "skipped" ? "skip" : "waiting")
+								: (step.passed ? "pass" : "fail");
+							const stepIcon = inFlight
+								? (step.status === "running" ? "\u25CF" : step.status === "skipped" ? "\u2192" : "\u25CB")
+								: (step.passed ? "\u2713" : "\u2717");
+							return html`
+							<div class="verify-step verify-step--${stepClass}">
 								<div class="verify-step__header">
-									<span class="verify-step__icon">${step.passed ? "\u2713" : "\u2717"}</span>
+									<span class="verify-step__icon">${stepIcon}</span>
 									<span class="verify-step__name">${step.name}</span>
 									<span class="verify-step__type">${step.type}</span>
 									${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
@@ -2261,7 +2310,8 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 								) : nothing}
 								${step.artifact ? renderStepArtifact(step.artifact, `${signal.id}:${si}`) : nothing}
 							</div>
-						`)}
+						`;
+						})}
 					`}
 					${signal.metadata && Object.keys(signal.metadata).length > 0 ? html`
 						<div class="signal-metadata">
@@ -2459,7 +2509,7 @@ export function renderGoalDashboard(): TemplateResult {
 		// times out.
 		const skeletonTabs = ["Spec", "Gates", "Tasks", "Agents", "Commits"];
 		return html`
-			<div class="dashboard-container" style="flex:1;min-height:0;">
+			<div class="dashboard-container" data-testid="goal-dashboard" style="flex:1;min-height:0;">
 				<div class="tab-bar" data-dashboard-loading="true">
 					${skeletonTabs.map((label, i) => html`
 						<div class="tab ${i === 1 ? "active" : ""}" title="${label}">
@@ -2476,7 +2526,7 @@ export function renderGoalDashboard(): TemplateResult {
 
 	if (error || !currentGoal) {
 		return html`
-			<div class="dashboard-container">
+			<div class="dashboard-container" data-testid="goal-dashboard">
 				<div class="dashboard-error">
 					<p>${error || "Goal not found"}</p>
 					${Button({
@@ -2495,7 +2545,7 @@ export function renderGoalDashboard(): TemplateResult {
 	const isArchived = currentGoal.archived === true;
 
 	return html`
-		<div class="dashboard-container">
+		<div class="dashboard-container" data-testid="goal-dashboard">
 			${renderNavBar(currentGoal)}
 			${renderParentBreadcrumb(currentGoal)}
 			${isArchived ? html`

@@ -19,12 +19,13 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	activeSessionId,
+	expandedGoals,
 } from "./state.js";
 import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
-import { doRenderApp } from "./render.js";
+import { doRenderApp, showHeaderToast } from "./render.js";
 import { renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
@@ -53,6 +54,13 @@ setRenderApp(doRenderApp);
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).
 (window as any).__bobbitState = state;
+// Expose the render trigger too, so tests that patch in-memory state can
+// force a fresh paint without relying on viewport-resize side effects.
+(window as any).__bobbitRenderApp = renderApp;
+// Expose the expanded-goals set so tests that inject synthetic goals into
+// state.goals can also force them into the expanded state (the normal
+// auto-expand path only fires for goals the server has confirmed).
+(window as any).__bobbitExpandedGoals = expandedGoals;
 
 // E2E test hook: expose renderTool() and lit-html's render() so browser-based
 // tests can mount renderers directly without going through the session
@@ -164,6 +172,54 @@ async function handleHashChange(): Promise<void> {
 				await refreshSessions();
 			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
+			// Preserve prior UI state so a missing goal can keep the current view.
+			const prevSelectedSessionId = state.selectedSessionId;
+			const prevGoalDashboardId = state.goalDashboardId;
+			const prevAppView = state.appView;
+
+			// Refresh sessions first so state.goals contains the latest active,
+			// archived, and cross-project goal data before we try to resolve.
+			await refreshSessions();
+
+			// Resolve the goal: in-state first, then fall back to a per-id API
+			// fetch (covers cross-project and freshly-spawned goals not yet in
+			// the local goals list).
+			let gdGoal: any = state.goals.find(g => g.id === route.goalId) || null;
+			if (!gdGoal) {
+				try {
+					const res = await gatewayFetch(`/api/goals/${route.goalId}`);
+					if (res.ok) {
+						const fetched: any = await res.json().catch(() => null);
+						if (fetched && fetched.id) {
+							gdGoal = fetched;
+							// Merge into state.goals so the sidebar can reflect
+							// the target project on the upcoming render.
+							const idx = state.goals.findIndex(g => g.id === fetched.id);
+							if (idx >= 0) state.goals[idx] = { ...state.goals[idx], ...fetched };
+							else state.goals.push(fetched);
+						}
+					}
+				} catch { /* ignore — handled below */ }
+			}
+
+			if (!gdGoal) {
+				// Goal can't be resolved anywhere — toast and stay on prior view.
+				showHeaderToast(`Goal no longer exists (id=${route.goalId.slice(0, 8)})`);
+				state.selectedSessionId = prevSelectedSessionId;
+				state.goalDashboardId = prevGoalDashboardId;
+				state.appView = prevAppView;
+				// Restore the hash to the previous concrete route when possible,
+				// rather than leaving the bad #/goal/<id> in the URL bar. Use
+				// replaceState-style routing so we don't recurse through handleHashChange.
+				if (prevSelectedSessionId) {
+					setHashRoute("session", prevSelectedSessionId, true);
+				} else if (prevGoalDashboardId) {
+					setHashRoute("goal-dashboard", prevGoalDashboardId, true);
+				}
+				renderApp();
+				return;
+			}
+
 			if (state.remoteAgent) {
 				state.remoteAgent.disconnect();
 				state.remoteAgent = null;
@@ -171,13 +227,13 @@ async function handleHashChange(): Promise<void> {
 			}
 			state.selectedSessionId = null;
 			state.goalDashboardId = route.goalId;
-			// Apply palette for the goal's project
-			const gdGoal = state.goals.find(g => g.id === route.goalId);
-			applyProjectPalette(gdGoal?.projectId);
+			// Apply palette for the goal's project. applyProjectPalette also
+			// updates state.activeProjectId, which keeps the sidebar/breadcrumb
+			// pointed at the right project for cross-project navigation.
+			applyProjectPalette(gdGoal.projectId);
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
 			renderApp();
-			await refreshSessions();
 		} else if (route.view === "roles") {
 			clearDashboardState();
 			if (state.remoteAgent) {

@@ -837,44 +837,18 @@ export async function tryHandleNestedGoalRoute(
 			return typeof s === "string" && s.trim() ? s.trim() : undefined;
 		};
 		const callerSessionId = readHdr("x-bobbit-spawning-session") ?? readHdr("x-bobbit-session-id");
-		// Pause via cascadeSubtree so per-node failures are collected in
-		// errors[] rather than aborting remaining goals. applyOperatorPause is
-		// the SINGLE WRITE site for goal.paused=true (enforced by comment on
-		// executePauseForGoals above). After the cascade, run the abort sweep
-		// to interrupt streaming sessions in the paused set.
+		// Walk via the cascade framework's pure walker (top-down order — parent
+		// paused first so its supervisor doesn't respawn workers during child
+		// pauses), then route through executePauseForGoals which remains the
+		// single entry point for goal.paused=true writes (replan-overflow auto-
+		// pause uses the same function — see line ~1029).
 		const pauseCtx = projectContextManager.getContextForGoal(targetRoot.id);
 		const pauseAllGoals = pauseCtx?.goalStore.getAll() ?? [];
-		const pauseResult = await cascadeSubtree(
-			targetRoot.id,
-			pauseAllGoals,
-			{ includeRoot: true, includeArchived: false, ...(cascade ? {} : { maxDepth: 0 }) },
-			{
-				order: "top-down",
-				apply: async (g) => {
-					if (g.paused) return 0;
-					await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
-					return 1;
-				},
-			},
-		);
-		const count = pauseResult.processed.reduce((n, p) => n + (p.result as number), 0);
-		// Cascade-abort sweep: interrupt streaming sessions in the paused set,
-		// excluding the caller's own session (Issue 6).
-		const pausedIds = new Set(pauseResult.processed.map(p => p.goalId));
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			if (s.id === callerSessionId) continue;
-			sessionManager.abortSessionTurn(s.id).catch((err) => {
-				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
-		}
-		json({
-			paused: count,
-			...(pauseResult.errors.length > 0
-				? { errors: pauseResult.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
-				: {}),
-		});
+		const pauseTargets: PersistedGoal[] = cascade
+			? walkGoalSubtree(targetRoot.id, pauseAllGoals, { includeRoot: true, includeArchived: false })
+			: [targetRoot];
+		const count = await executePauseForGoals(pauseTargets, callerSessionId);
+		json({ paused: count });
 		return true;
 	}
 
@@ -904,10 +878,12 @@ export async function tryHandleNestedGoalRoute(
 			}
 			targetRoot = childGoal;
 		}
-		// Resume via cascadeSubtree so per-node failures are collected in
-		// errors[] rather than aborting remaining goals. Resume is top-down
-		// (parent reactivated first so it can re-supervise children).
+		// Resume via cascadeSubtree so per-node failures are collected rather
+		// than aborting remaining goals. Top-down order — parent reactivated
+		// first so it can re-supervise children.
 		// R-039: resumes only `paused` goals; does NOT touch 'blocked' state.
+		// 'blocked' is scheduler-managed (set/cleared by spawn-child /
+		// integrate-child) and is NOT touched here.
 		const resumeCtx = projectContextManager.getContextForGoal(targetRoot.id);
 		const resumeAllGoals = resumeCtx?.goalStore.getAll() ?? [];
 		const resumeResult = await cascadeSubtree(

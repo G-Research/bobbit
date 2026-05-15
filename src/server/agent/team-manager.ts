@@ -891,7 +891,89 @@ export class TeamManager {
 		// boot-respawn for sessionless in-progress goals — Boot-respawn for sessionless in-progress goals.
 		this._bootRespawnSessionlessGoals();
 
+		// boot-resume idle team-leads with outstanding work. The stuck-sweep
+		// would catch these after STUCK_QUIET_THRESHOLD_MS (5 min) but that
+		// leaves a gap where the operator sees a freshly-restored team-lead
+		// sitting idle on a failed gate / open task with no progress signal.
+		// Fire a one-shot wake-up immediately for teams whose state implies
+		// concrete pending work. shouldSkipNudge handles paused/complete/
+		// archived/in-flight-child so dormant goals are not woken.
+		this._bootResumeIdleTeamLeads();
+
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
+	}
+
+	/**
+	 * Detect teams whose lead is idle on boot AND that have concrete
+	 * outstanding work (a failed gate or an open task). Send a one-shot
+	 * boot-resume nudge so the operator doesn't have to wait for the 5-min
+	 * stuck-sweep tick before progress resumes after a gateway restart.
+	 *
+	 * Conservatism rules:
+	 *  - Skip everything `shouldSkipNudge` skips (paused/complete/shelved/
+	 *    archived/in-flight-child/nudge-pending/active-verification).
+	 *  - Skip teams with no failed gate AND no open task — a goal with all
+	 *    gates passed and no pending tasks is genuinely dormant; nudging
+	 *    it would just re-invoke an LLM for no reason.
+	 *  - Stamp `nudgePending` + `lastNudgeAtPerGoal` so the stuck-sweep
+	 *    doesn't double-fire within STUCK_QUIET_THRESHOLD_MS.
+	 */
+	private _bootResumeIdleTeamLeads(): void {
+		const now = Date.now();
+		let resumed = 0;
+		for (const [goalId, entry] of this.teams) {
+			if (!entry.teamLeadSessionId) continue;
+			const session = this.sessionManager.getSession(entry.teamLeadSessionId);
+			if (!session || session.status !== "idle") continue;
+			if (this.shouldSkipNudge(goalId)) continue;
+			const summary = this._outstandingWorkSummary(goalId);
+			if (!summary) continue;
+
+			const msg =
+				`[BOOT-RESUME] The gateway restarted; you were idle with outstanding work.\n` +
+				`${summary}\n\n` +
+				"Check `task_list` and `gate_list` to confirm, then resume — fix any\n" +
+				"failed gate, assign or complete open tasks, or call `team_complete`\n" +
+				"if everything is genuinely done.";
+			try {
+				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, msg, { isSteered: true });
+				this.nudgePending.set(goalId, true);
+				this.lastNudgeAtPerGoal.set(goalId, now);
+				resumed++;
+				console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
+			} catch (err) {
+				console.error(`[team-manager] Boot-resume enqueuePrompt failed for goal=${goalId}:`, err);
+			}
+		}
+		if (resumed > 0) {
+			console.log(`[team-manager] Boot-resume nudged ${resumed} idle team-lead(s) with outstanding work.`);
+		}
+	}
+
+	/**
+	 * Return a one-line description of a goal's concrete outstanding work,
+	 * or null if there is none. "Outstanding" = failed gate OR open task
+	 * (state in todo/in-progress). Passed gates and complete tasks don't
+	 * count; this is about "the team-lead has a concrete next action".
+	 */
+	private _outstandingWorkSummary(goalId: string): string | null {
+		const ctx = this.config.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx) return null;
+		let failedGates = 0;
+		try {
+			const gateStates = ctx.gateStore.getGatesForGoal(goalId);
+			failedGates = gateStates.filter(g => g.status === "failed").length;
+		} catch { /* gate store may be unavailable for a freshly-recovered goal */ }
+		let openTasks = 0;
+		try {
+			const tasks = ctx.taskStore.getByGoalId(goalId);
+			openTasks = tasks.filter(t => t.state === "todo" || t.state === "in-progress").length;
+		} catch { /* task store may be unavailable */ }
+		if (failedGates === 0 && openTasks === 0) return null;
+		const parts: string[] = [];
+		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
+		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
+		return parts.join(", ");
 	}
 
 	/**

@@ -19,6 +19,7 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
+import { needsHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 export { errorFromResponse, errorDetails };
 // Static import of dialogs creates a cycle (dialogs.ts imports from api.ts),
@@ -150,10 +151,13 @@ export async function refreshSessions(): Promise<void> {
 			const activeId = state.remoteAgent?.gatewaySessionId;
 			for (const s of newSessions) {
 				const prev = _prevSessionStatus.get(s.id);
-				const isSubAgent = !!s.delegateOf || (!!s.role && s.role !== "lead");
-				if (prev === "streaming" && s.status === "idle" && s.id !== activeId && !isSubAgent) {
-					RemoteAgent.playNotificationBeep();
-					showFaviconBadge();
+				if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
+					const goalId = s.teamGoalId || s.goalId;
+					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)) {
+						RemoteAgent.playNotificationBeep();
+						showFaviconBadge();
+					}
 				}
 			}
 			for (const s of newSessions) {
@@ -775,6 +779,14 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 export interface GitStatusData {
 	branch: string;
 	primaryBranch: string;
+	/**
+	 * Actual ref used for ahead/behind-primary calculations. Equals
+	 * `origin/<primaryBranch>` when the remote ref exists, else the bare
+	 * local branch `<primaryBranch>`. Display this verbatim instead of
+	 * synthesising `origin/<primaryBranch>` — a configured `base_ref` may
+	 * be a local branch with no `origin/` counterpart.
+	 */
+	primaryRef: string;
 	isOnPrimary: boolean;
 	summary: string;
 	clean: boolean;
@@ -877,8 +889,8 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
-export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number }): Promise<Goal | null> {
-	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth } = opts ?? {};
+export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; parentGoalId?: string }): Promise<Goal | null> {
+	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, parentGoalId } = opts ?? {};
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -893,6 +905,7 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		}
 		if (subgoalsAllowed !== undefined) body.subgoalsAllowed = subgoalsAllowed;
 		if (maxNestingDepth !== undefined) body.maxNestingDepth = maxNestingDepth;
+		if (parentGoalId) body.parentGoalId = parentGoalId;
 		const res = await gatewayFetch("/api/goals", {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -1350,6 +1363,12 @@ export interface GateSignal {
 				contentType: string;
 				metadata?: Record<string, string>;
 			};
+			/** Lifecycle status for in-flight rows seeded by beginVerification. */
+			status?: "waiting" | "running" | "passed" | "failed" | "skipped";
+			/** Optional phase number, mirrored from the workflow VerifyStep. */
+			phase?: number;
+			/** True when the step was skipped (optional step or phase abort). */
+			skipped?: boolean;
 		}>;
 	};
 }
