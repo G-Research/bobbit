@@ -88,3 +88,11 @@ Ensures visible sidebar entries always have their children loaded.
 
 - **API tests** — `tests/e2e/sidebar-child-loading.spec.ts`, `tests/e2e/archived-session-merge.spec.ts`: verify server-side BFS enrichment covers `teamGoalId`, `teamLeadSessionId`, `delegateOf` chains; archived-goals response includes affiliated sessions.
 - **Browser E2E** — `tests/e2e/ui/sidebar-child-loading.spec.ts`: expanding a goal always shows its children including archived team members and delegates.
+
+## Provider overload / transient error auto-retry
+
+Covers `maybeAutoRetryTransient`, `nextBackoffDelay`, and the two-policy model described in [docs/auto-retry.md](auto-retry.md).
+
+- **`tests/backoff-delay.test.ts`** (unit) — pins `nextBackoffDelay` in isolation: doubling sequence, cap enforcement at `maxMs` before and after jitter, jitter bounds (±20%), finite output for very large attempt counts.
+- **`tests/auto-retry-policy.test.ts`** (unit) — pins the end-to-end policy decision tree using the same exported building blocks (`isTransientReviewError`, `isProviderBackoffError`, `nextBackoffDelay`) the manager calls: overload/rate-limit retries indefinitely past the 3-attempt bounded cap; HTTP 429/529 phrasings classified as provider-backoff; non-provider transient errors stop after attempt 3; non-transient errors produce no retry.
+- **`tests/queue-dispatch.spec.ts`** (unit, session-manager simulation) — pins `pendingAutoRetryTimer` teardown on explicit retry; explicit retry resets `transientRetryAttempts` while auto retry preserves it; provider-overload errors bypass the 3-attempt non-provider cap.
