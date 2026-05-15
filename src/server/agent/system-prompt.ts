@@ -321,6 +321,65 @@ export interface PromptParts {
 	skillsCatalogBudget?: number;
 }
 
+/**
+ * Roles that perform symbol-level source-code lookup and therefore receive the
+ * hard "LSP-over-grep" tool-selection rule injected into their role prompt.
+ *
+ * Kept as an exact, case-normalized set so project `.bobbit/config/roles/*.yaml`
+ * overrides cannot accidentally suppress the rule by replacing role YAML content.
+ */
+const LSP_RULE_ROLES: ReadonlySet<string> = new Set([
+	"coder",
+	"reviewer",
+	"code-reviewer",
+	"security-reviewer",
+	"architect",
+	"spec-auditor",
+]);
+
+/** Exact header used to detect a pre-existing LSP rule section and to inject one. */
+export const LSP_TOOL_SELECTION_HEADER = "## Tool selection — symbol queries";
+
+/**
+ * Return the hard LSP-over-grep tool-selection rule for a given role, or
+ * `undefined` when the role is not a code-lookup role or the supplied
+ * `rolePrompt` already contains the header (duplication guard).
+ *
+ * Matching is exact on `roleName` after lower-casing and trimming.
+ */
+export function lspToolSelectionRuleForRole(roleName?: string, rolePrompt?: string): string | undefined {
+	if (!roleName) return undefined;
+	const norm = roleName.trim().toLowerCase();
+	if (!LSP_RULE_ROLES.has(norm)) return undefined;
+	if (rolePrompt && rolePrompt.includes(LSP_TOOL_SELECTION_HEADER)) return undefined;
+	return (
+		`${LSP_TOOL_SELECTION_HEADER}\n\n` +
+		"For any query about a named symbol (function, class, type, variable, constant, interface) " +
+		"in TypeScript / JavaScript / Python source files, you MUST use LSP before `grep`:\n\n" +
+		"- Where is X defined? → `lsp_workspace_symbol(\"X\")` or `lsp_definition({ symbolName: \"X\" })`.\n" +
+		"- What calls X? → `lsp_references({ symbolName: \"X\" })` or `lsp_references(file, line, char)`.\n" +
+		"- What's X's type/signature? → `lsp_hover({ symbolName: \"X\" })`.\n" +
+		"- Is this file clean after my edit? → `lsp_diagnostics(file)`.\n" +
+		"- What's in this file? → `lsp_document_symbols(file)`.\n\n" +
+		"Use `grep` only for free-text/string-literal search, comments, logs, configs, or non-source files. " +
+		"If a grep result includes `[lsp-hint]`, either switch to LSP or explicitly justify why grep was correct."
+	);
+}
+
+/**
+ * Compute the effective role-prompt text for prompt assembly: the supplied
+ * `rolePrompt` with the LSP tool-selection rule appended when applicable.
+ * Returns `undefined` when there is no role prompt to render.
+ */
+function effectiveRolePrompt(roleName?: string, rolePrompt?: string): string | undefined {
+	const base = rolePrompt?.trim();
+	const rule = lspToolSelectionRuleForRole(roleName, rolePrompt);
+	if (!base && !rule) return undefined;
+	if (!rule) return base;
+	if (!base) return rule;
+	return `${base}\n\n${rule}`;
+}
+
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
 export const SKILLS_CATALOG_BUDGET = 16384;
 /** Lower bound for a user-configured skills-catalog byte budget. */
@@ -440,8 +499,9 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat)
 	{
 		let effectiveGoalSpec = parts.goalSpec || "";
-		if (parts.rolePrompt?.trim()) {
-			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + parts.rolePrompt.trim();
+		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
+		if (role) {
+			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + role;
 		}
 		if (effectiveGoalSpec.trim()) {
 			const header = parts.goalTitle
@@ -580,9 +640,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
 	}
 
-	// 4. Role prompt
-	if (parts.rolePrompt?.trim()) {
-		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
+	// 4. Role prompt (with injected LSP rule for code-lookup roles)
+	{
+		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
+		if (role) {
+			sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: role, tokens: estimateTokens(role) });
+		}
 	}
 
 	// 4.5. Goal nesting context (Phase 6) — see _assembleSystemPrompt for shape.

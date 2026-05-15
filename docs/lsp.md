@@ -1,6 +1,6 @@
 # LSP Code Intelligence
 
-> All coding-role agents (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`) receive a mandatory **"Tool selection — symbol queries"** section in their `promptTemplate` that requires `lsp_*` tools over `grep` for any named-symbol query. See `defaults/roles/*.yaml` for the exact wording.
+> **Tool-selection rule injection.** For coding and reviewing roles (`coder`, `reviewer`, `code-reviewer`, `security-reviewer`, `architect`, `spec-auditor`), the session setup pipeline (`session-setup.ts`) injects a mandatory **"Tool selection — symbol queries"** section into the composed prompt at runtime, _in addition to_ the same section present in `defaults/roles/*.yaml`. This dual approach is intentional: project-level role overrides in `.bobbit/config/roles/*` fully shadow the default role YAML (no field-level merge — see [Config cascade](internals.md#config-cascade)), so an override that omits the LSP rule would silently suppress it if the rule lived only in the default YAML. The runtime injection ensures the rule reaches every agent regardless of which role source wins the cascade. The injection is deduplicated — if the resolved role template already contains the section, it is not repeated.
 
 Bobbit ships a Language Server Protocol (LSP) integration so coding agents can ask IDE-grade questions about a worktree — go-to-definition, find-references, hover, diagnostics, document/workspace symbols, rename — without falling back to `grep` + multi-file `read` or full-project `tsc` runs.
 
@@ -213,7 +213,18 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
 
-**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. The same hint fires for simple `grep`, `rg`, `ripgrep`, `ag`, and `ack` invocations run via the `bash` tool — the command is inspected after execution and, if the pattern is symbol-shaped and the paths target source files, the same `[lsp-hint]` line is prepended to the bash output. **Best-effort limitation:** when `grep` appears after a pipe (e.g. `cat file | grep foo`), the primary command is not grep and the hint may be skipped. Set `BOBBIT_GREP_LSP_HINT=0` to disable both the grep-tool and bash-tool hints.
+**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. The same hint fires for `grep`, `rg`, `ripgrep`, `ag`, and `ack` invocations run via the `bash` tool — the command is inspected after execution and, if the pattern is symbol-shaped and the paths target source files, the same `[lsp-hint]` line is prepended to the bash output.
+
+The hint parser understands simple setup-chain prefixes, so all of the following patterns correctly emit a hint:
+
+```bash
+cd /repo && grep -n "archiveGoal|deleteGoal" src/app/
+cd /repo && grep -n "enqueuePrompt\|deliverLiveSteer" src/server/agent/session-manager.ts | head -20
+set -e; cd /repo && rg "createSession\\(" src/
+FOO=1 grep -rn "function foo" src/server/
+```
+
+The parser splits the command on `&&` and `;`, skips any leading setup segment (`cd <path>`, `set …`, or bare `VARIABLE=value` assignments), then inspects the first token of the next segment (ignoring any trailing `| head` or other pipe filters) to decide whether it is grep-like. If the first non-setup segment is *not* a grep-like command the parser stops and no hint is emitted, so `cat file | grep foo` and `ls -la | grep '.ts'` are correctly suppressed: in both cases `grep` is downstream of a pipe in the first (and only) segment, not the primary command of any segment. Searches targeting non-source files (e.g. `*.log`, `*.md`) are also suppressed. Set `BOBBIT_GREP_LSP_HINT=0` to disable both the grep-tool and bash-tool hints.
 
 ## Route post-boot self-check
 
