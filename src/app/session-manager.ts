@@ -1569,10 +1569,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			state.chatPanel.agentInterface.onGitFetch = () => {
 				refreshGitStatusForSession(sessionId, { fetch: true, source: "user" });
 			};
-			// Dropdown-open → refetch with untracked=1 for full file list.
-			state.chatPanel.agentInterface.addEventListener("git-status-dropdown-open", () => {
+			// Dropdown-open → refetch with untracked=1 for full file list. This
+			// handler is re-bound on session switches so it closes over the current
+			// sessionId, but remove the previous one first to avoid listener stacking.
+			const gitStatusAgentInterface = state.chatPanel.agentInterface as typeof state.chatPanel.agentInterface & {
+				__gitStatusDropdownOpenHandler?: EventListener;
+			};
+			if (gitStatusAgentInterface.__gitStatusDropdownOpenHandler) {
+				gitStatusAgentInterface.removeEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
+			}
+			gitStatusAgentInterface.__gitStatusDropdownOpenHandler = () => {
 				refreshGitStatusForSession(sessionId, { untracked: true, source: "user" });
-			});
+			};
+			gitStatusAgentInterface.addEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
 			state.chatPanel.agentInterface.onGitPush = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
