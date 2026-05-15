@@ -4,7 +4,16 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Crosshair } from "lucide";
 import { getToolState, isSkippedToolResult, renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { parseLspResult, renderLspErrorEnvelope, normalisePath, type LspLocation } from "./LspShared.js";
+import {
+	isAmbiguousShorthand,
+	normalisePath,
+	parseLspResult,
+	renderAmbiguousShorthand,
+	renderLspErrorEnvelope,
+	renderResolvedFromBanner,
+	unwrapShorthand,
+	type LspLocation,
+} from "./LspShared.js";
 
 interface RefParams {
 	path: string;
@@ -53,13 +62,18 @@ export class LspReferencesRenderer implements ToolRenderer<RefParams, any> {
 			return { content: html`<div>${renderHeader(state, Crosshair, "References")}${errEnv}</div>`, isCustom: false };
 		}
 
-		const locs: LspLocation[] = Array.isArray(data) ? data : [];
+		if (isAmbiguousShorthand(data)) {
+			return { content: html`<div>${renderHeader(state, Crosshair, "References")}${renderAmbiguousShorthand(data)}</div>`, isCustom: false };
+		}
+
+		const { resolvedFrom, body } = unwrapShorthand(data);
+		const locs: LspLocation[] = Array.isArray(body) ? body : [];
 		const groups = groupByPath(locs);
 		const headerText = `${locs.length} reference${locs.length === 1 ? "" : "s"} in ${groups.size} file${groups.size === 1 ? "" : "s"}`;
 
 		if (locs.length === 0) {
 			return {
-				content: html`<div>${renderHeader(state, Crosshair, headerText)}<div class="mt-1 text-sm text-muted-foreground italic">No references found.</div></div>`,
+				content: html`<div>${renderHeader(state, Crosshair, headerText)}${renderResolvedFromBanner(resolvedFrom)}<div class="mt-1 text-sm text-muted-foreground italic">No references found.</div></div>`,
 				isCustom: false,
 			};
 		}
@@ -71,6 +85,7 @@ export class LspReferencesRenderer implements ToolRenderer<RefParams, any> {
 			content: html`
 				<div>
 					${renderCollapsibleHeader(state, Crosshair, headerText, contentRef, chevronRef, false)}
+					${renderResolvedFromBanner(resolvedFrom)}
 					<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 						<div class="space-y-2">
 							${[...groups.entries()].map(([path, items]) => html`

@@ -188,6 +188,27 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		assert.ok(typeof data.hint === "string" && data.hint.length > 0, "expected a hint string");
 	});
 
+	test("lsp_definition({path:'src/index.ts', symbolName:'add'}) resolves via use-site to math.ts", async () => {
+		// Goal-spec scenario: the hint file (index.ts) is NOT a definition site,
+		// it's a USE site (`import { add } from './math.js'`). Same-dir matching
+		// would otherwise see two `add` candidates (math.ts, adder.ts) both under
+		// `src/` and flag ambiguous. Resolver must instead treat the hint as a
+		// use-site and dispatch from there so the LSP resolves the real target.
+		const tool = tools.get("lsp_definition")!;
+		const res = payload(await tool.execute("t5a", { path: "src/index.ts", symbolName: "add" }));
+		assert.notEqual(res.ambiguous, true, `expected non-ambiguous resolution; got: ${JSON.stringify(res).slice(0, 300)}`);
+		assert.ok(res.resolvedFrom, "expected shorthand decoration");
+		assert.match(String(res.resolvedFrom.matched), /index\.ts:/, `use-site must be in index.ts; got ${res.resolvedFrom.matched}`);
+		// Resulting definition (object-spread when LSP returns a single Location,
+		// or wrapped under `.result` when it returns an array) must land in math.ts
+		// — the actual imported definition the use-site references.
+		const locs = Array.isArray(res.result)
+			? res.result
+			: (res.path ? [{ path: res.path, range: res.range }] : []);
+		assert.ok(locs.length >= 1, `expected at least one definition location; got: ${JSON.stringify(res).slice(0, 300)}`);
+		assert.match(String(locs[0].path), /math\.ts$/, `definition should land in math.ts; got ${locs[0]?.path}`);
+	});
+
 	test("lsp_definition({path:'src/adder.ts', symbolName:'add'}) selects the adder.ts hit, not math.ts", async () => {
 		const tool = tools.get("lsp_definition")!;
 		const res = payload(await tool.execute("t6", { path: "src/adder.ts", symbolName: "add" }));

@@ -204,12 +204,33 @@ export default function (pi: ExtensionAPI) {
 			if (exactPath) {
 				preferred = exactPath;
 			} else {
+				// The hint file itself isn't a definition site. Treat it as a
+				// use-site: locate `symbolName` in the file and dispatch from
+				// that coordinate. The LSP server then resolves to the real
+				// definition the use-site refers to — semantically what the
+				// caller meant by passing the hint.
+				const useSite = tryFindUseSite(symbolName, hint);
+				if (useSite) {
+					const resolvedArgs: Record<string, unknown> = { ...args };
+					delete resolvedArgs.symbolName;
+					resolvedArgs.path = hint;
+					resolvedArgs.line = useSite.line;
+					resolvedArgs.character = useSite.character;
+					return {
+						kind: "ok",
+						args: resolvedArgs,
+						resolvedFrom: {
+							symbolName,
+							matched: `${hint}:${useSite.line + 1} (use-site)`,
+						},
+					};
+				}
 				const hintDir = path.posix.dirname(hint.replace(/\\/g, "/"));
 				const sameDir = hits.filter(h => path.posix.dirname(h.path.replace(/\\/g, "/")) === hintDir);
 				if (sameDir.length === 1) {
 					preferred = sameDir[0];
 				} else if (sameDir.length > 1) {
-					// Multiple in the same directory → still ambiguous.
+					// Multiple in the same directory and no use-site in hint file → ambiguous.
 					ambiguous = true;
 				} else {
 					// Hint doesn't match any candidate's path or directory — fall
@@ -248,6 +269,28 @@ export default function (pi: ExtensionAPI) {
 				matched: `${preferred.path}:${preferred.range.start.line + 1}`,
 			},
 		};
+	}
+
+	/**
+	 * Locate the first occurrence of `symbol` (word-boundary match) in the
+	 * file at `hintRel` (session-cwd-relative). Returns 0-indexed line/char
+	 * of the identifier start, or undefined when the file can't be read or
+	 * the identifier isn't found.
+	 */
+	function tryFindUseSite(symbol: string, hintRel: string): { line: number; character: number } | undefined {
+		try {
+			const cwd = process.env.BOBBIT_HOST_CWD ?? process.cwd();
+			const abs = path.resolve(cwd, hintRel);
+			const text = fs.readFileSync(abs, "utf-8");
+			const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const re = new RegExp(`\\b${escaped}\\b`);
+			const lines = text.split(/\r?\n/);
+			for (let i = 0; i < lines.length; i++) {
+				const m = re.exec(lines[i]);
+				if (m && typeof m.index === "number") return { line: i, character: m.index };
+			}
+		} catch { /* file missing or unreadable — fall back to other heuristics */ }
+		return undefined;
 	}
 
 	/** Decorate a successful shorthand result with `resolvedFrom`. */
