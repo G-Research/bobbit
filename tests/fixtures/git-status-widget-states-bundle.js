@@ -1033,6 +1033,7 @@
       Low: "Low",
       Medium: "Medium",
       High: "High",
+      "Extra high": "Extra high",
       "Storage Permission Required": "Storage Permission Required",
       "This app needs persistent storage to save your conversations": "This app needs persistent storage to save your conversations",
       "Why is this needed?": "Why is this needed?",
@@ -1369,6 +1370,7 @@
       super(...arguments);
       this.branch = "";
       this.primaryBranch = "master";
+      this.primaryRef = "origin/master";
       this.isOnPrimary = true;
       this.summary = "";
       this.clean = true;
@@ -1415,6 +1417,7 @@
       this.mergingPrimary = false;
       this.mergePrimaryError = "";
       this._dropdownEl = null;
+      this._closeToken = 0;
       this._closing = false;
       this._onDocumentClick = (e8) => {
         const target = e8.target;
@@ -1457,11 +1460,15 @@
     _closeDropdown() {
       if (this._closing || !this._dropdownEl) return;
       this._closing = true;
+      const closeToken = ++this._closeToken;
       this._dropdownEl.classList.add("git-dropdown-closing");
-      this._dropdownEl.addEventListener("animationend", () => {
+      const reset = () => {
+        if (closeToken !== this._closeToken) return;
         this._closing = false;
         this.expanded = false;
-      }, { once: true });
+      };
+      this._dropdownEl.addEventListener("animationend", reset, { once: true });
+      this._dropdownEl.addEventListener("animationcancel", reset, { once: true });
     }
     createRenderRoot() {
       return this;
@@ -1475,9 +1482,12 @@
       super.disconnectedCallback();
       document.removeEventListener("click", this._onDocumentClick, true);
       document.removeEventListener("keydown", this._onEscapeKeyDropdown, true);
+      this._closeToken++;
       this._removeDropdown();
       this._removeModal();
       this._removeCommitsModal();
+      this._closing = false;
+      this.expanded = false;
     }
     _removeDropdown() {
       if (this._dropdownEl) {
@@ -1488,19 +1498,35 @@
     _toggle(e8) {
       e8.stopPropagation();
       if (this.loading && !this.branch) return;
-      if (this.expanded && !this._closing) {
+      const hasConnectedDropdown = this._dropdownEl?.isConnected === true;
+      const visiblyOpen = this.expanded && !this._closing && hasConnectedDropdown;
+      if (visiblyOpen) {
         this._closeDropdown();
-      } else if (!this.expanded) {
-        this.expanded = true;
-        this.dispatchEvent(new CustomEvent("git-fetch", {
-          bubbles: true,
-          composed: true
-        }));
-        this.dispatchEvent(new CustomEvent("git-status-dropdown-open", {
-          bubbles: true,
-          composed: true
-        }));
+        return;
       }
+      if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
+        this._removeDropdown();
+      }
+      this._closeToken++;
+      this._closing = false;
+      this._dropdownEl?.classList.remove("git-dropdown-closing");
+      if (this._dropdownEl) {
+        D(this._renderDropdownContent(), this._dropdownEl);
+        this._positionDropdown();
+      }
+      const wasExpanded = this.expanded;
+      this.expanded = true;
+      if (wasExpanded && !this._dropdownEl) {
+        this.requestUpdate("expanded", false);
+      }
+      this.dispatchEvent(new CustomEvent("git-fetch", {
+        bubbles: true,
+        composed: true
+      }));
+      this.dispatchEvent(new CustomEvent("git-status-dropdown-open", {
+        bubbles: true,
+        composed: true
+      }));
     }
     _statusColor(status) {
       switch (status) {
@@ -1595,10 +1621,10 @@
     }
     _renderPrimaryStatus() {
       if (this.isOnPrimary) {
-        return b2`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+        return b2`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
       }
       if (this.mergedIntoPrimary && this.behindPrimary === 0) {
-        return b2`<div class="text-green-600 dark:text-green-400">Merged into origin/${this.primaryBranch}</div>`;
+        return b2`<div class="text-green-600 dark:text-green-400">Merged into ${this.primaryRef}</div>`;
       }
       if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
         return b2`<div class="text-muted-foreground">
@@ -1610,7 +1636,7 @@
           e8.stopPropagation();
           this._fetchCommits("behind", "primary");
         }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
       }
@@ -1620,7 +1646,7 @@
           e8.stopPropagation();
           this._fetchCommits("ahead", "primary");
         }}>${this.aheadOfPrimary} ahead</span>
-                of origin/${this.primaryBranch}
+                of ${this.primaryRef}
                 ${!this.prState ? this._renderAskPrButton() : A}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : A}
             </div>`;
@@ -1631,11 +1657,11 @@
           e8.stopPropagation();
           this._fetchCommits("behind", "primary");
         }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
       }
-      return b2`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+      return b2`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
     }
     /** Small PR status icon + number for the pill */
     _prPillIcon() {
@@ -1744,8 +1770,8 @@
         e8.stopPropagation();
         this._handleMergePrimary();
       }}
-            title="Rebase this branch on top of origin/master"
-        >${this.mergingPrimary ? "Rebasing\u2026" : "Rebase on master"}</button>${this.mergePrimaryError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : A}`;
+            title="Rebase this branch on top of ${this.primaryRef}"
+        >${this.mergingPrimary ? "Rebasing\u2026" : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : A}`;
     }
     _handleMergePrimary() {
       this.mergingPrimary = true;
@@ -1785,7 +1811,7 @@
         e8.stopPropagation();
         this._handleSquashPush();
       }}
-            title="Squash all branch commits into one and push directly to master"
+            title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
         >${this.squashPushing ? "Pushing\u2026" : "Squash push"}</button>${this.squashPushError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : A}`;
     }
     _handleSquashPush() {
@@ -2344,6 +2370,9 @@
   __decorateClass([
     n4()
   ], GitStatusWidget.prototype, "primaryBranch", 2);
+  __decorateClass([
+    n4()
+  ], GitStatusWidget.prototype, "primaryRef", 2);
   __decorateClass([
     n4({ type: Boolean })
   ], GitStatusWidget.prototype, "isOnPrimary", 2);

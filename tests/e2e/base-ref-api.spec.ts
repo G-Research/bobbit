@@ -7,7 +7,7 @@
  *  - Multi-repo `details[]` payload when the ref is missing in some components.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, registerProject as registerProjectShared } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -47,17 +47,9 @@ function fakeOriginRef(repo: string, branch: string, sha?: string): void {
 }
 
 async function registerProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<string> {
-	// macOS `os.tmpdir()` resolves through /private — register() would 400 with
-	// symlink_root unless we opt in to the canonical path.
-	const body: Record<string, unknown> = { name, rootPath, acceptCanonical: true };
-	if (components) body.components = components;
-	const res = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify(body),
-	});
-	expect(res.status).toBe(201);
-	const proj = await res.json();
+	// Delegate to the shared helper which canonicalizes rootPath (handles the
+	// macOS /var → /private/var tmpdir symlink) and sets acceptCanonical:true.
+	const proj = await registerProjectShared({ name, rootPath, components });
 	return proj.id;
 }
 

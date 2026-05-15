@@ -70,6 +70,7 @@ let error = "";
 interface GoalRepoEntry {
 	branch?: string;
 	primaryBranch?: string;
+	primaryRef?: string;
 	isOnPrimary?: boolean;
 	clean?: boolean;
 	aheadOfPrimary?: number;
@@ -84,6 +85,7 @@ interface GoalRepoEntry {
 interface GoalGitStatus {
 	branch: string;
 	primaryBranch: string;
+	primaryRef?: string;
 	isOnPrimary: boolean;
 	clean: boolean;
 	aheadOfPrimary: number;
@@ -1329,6 +1331,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.token=${localStorage.getItem("gateway.token") || ""}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
+						.primaryRef=${gs?.primaryRef ?? `origin/${gs?.primaryBranch ?? "master"}`}
 						.isOnPrimary=${gs?.isOnPrimary ?? false}
 						.summary=${gs?.summary ?? ''}
 						.clean=${gs?.clean ?? true}

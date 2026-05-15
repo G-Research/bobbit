@@ -22,7 +22,7 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -131,11 +131,15 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
-		// Canonicalize: on macOS, tmpdir() is a symlink (/var/folders ->
-		// /private/var/folders). Resolving it now means every downstream
-		// project / session / preview path uses the canonical form, avoiding
-		// symlink_root rejections and keeping path-length-sensitive tests stable.
-		bobbitDir = realpathSync(bobbitDir);
+		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
+		// project rootPaths derived from it, preview-mount baseDir) see the real
+		// path. On macOS /var/folders → /private/var/folders; mixing the symlink
+		// path with the canonical form breaks the path-guard containment check
+		// (missing files report 400→03 instead of 404).
+		try {
+			const { realpathSync } = await import("node:fs");
+			bobbitDir = realpathSync(bobbitDir);
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
@@ -269,7 +273,13 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// acceptCanonical=true is needed on macOS, where TMPDIR
+				// (/var/folders/...) is a symlink to /private/var/folders/...
+				// Without it, the server rejects the register with a
+				// SymlinkProjectRootError 400 and the harness silently runs
+				// with zero registered projects — every POST /api/sessions
+				// or /api/goals then 400s with "projectId required".
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 

@@ -6,6 +6,15 @@ import './DiffBlock.js';
 export class GitStatusWidget extends LitElement {
     @property() branch = '';
     @property() primaryBranch = 'master';
+    /**
+     * Display-ready ref name used for ahead/behind-primary comparisons.
+     * `origin/<primaryBranch>` when origin has the ref, else the bare local
+     * branch (e.g. when a configured `base_ref` points at a local-only branch).
+     * Always render this verbatim — do NOT synthesise `origin/${primaryBranch}`.
+     * Default mirrors today's behaviour for the bootstrap render before the
+     * server payload lands.
+     */
+    @property() primaryRef = 'origin/master';
     @property({ type: Boolean }) isOnPrimary = true;
     @property() summary = '';
     @property({ type: Boolean }) clean = true;
@@ -118,6 +127,7 @@ export class GitStatusWidget extends LitElement {
     @state() private mergePrimaryError = '';
 
     private _dropdownEl: HTMLElement | null = null;
+    private _closeToken = 0;
 
     @state() private _closing = false;
 
@@ -138,11 +148,17 @@ export class GitStatusWidget extends LitElement {
     private _closeDropdown() {
         if (this._closing || !this._dropdownEl) return;
         this._closing = true;
+        const closeToken = ++this._closeToken;
         this._dropdownEl.classList.add('git-dropdown-closing');
-        this._dropdownEl.addEventListener('animationend', () => {
+        const reset = () => {
+            if (closeToken !== this._closeToken) return;
             this._closing = false;
             this.expanded = false;
-        }, { once: true });
+        };
+        this._dropdownEl.addEventListener('animationend', reset, { once: true });
+        // Removing an animating portal fires animationcancel, not animationend.
+        // Mirror the reset path so cancelled close animations cannot wedge the widget.
+        this._dropdownEl.addEventListener('animationcancel', reset, { once: true });
     }
 
     createRenderRoot() {
@@ -159,9 +175,15 @@ export class GitStatusWidget extends LitElement {
         super.disconnectedCallback();
         document.removeEventListener('click', this._onDocumentClick, true);
         document.removeEventListener('keydown', this._onEscapeKeyDropdown, true);
+        // Invalidate any in-flight close-animation listeners before removing the
+        // portaled dropdown. The portal lives under document.body, not our
+        // subtree, so disconnecting mid-close can cancel animationend entirely.
+        this._closeToken++;
         this._removeDropdown();
         this._removeModal();
         this._removeCommitsModal();
+        this._closing = false;
+        this.expanded = false;
     }
 
     private _removeDropdown() {
@@ -175,22 +197,44 @@ export class GitStatusWidget extends LitElement {
         e.stopPropagation();
         // Skeleton is non-interactive — no data to show in dropdown yet.
         if (this.loading && !this.branch) return;
-        if (this.expanded && !this._closing) {
+
+        // Portal presence is the source of truth for whether the dropdown is
+        // actually visible. If state says open but the portaled element was
+        // removed during a disconnect/reconnect or external cleanup, treat this
+        // click as an open and rebuild the portal instead of wedging in close.
+        const hasConnectedDropdown = this._dropdownEl?.isConnected === true;
+        const visiblyOpen = this.expanded && !this._closing && hasConnectedDropdown;
+        if (visiblyOpen) {
             this._closeDropdown();
-        } else if (!this.expanded) {
-            this.expanded = true;
-            this.dispatchEvent(new CustomEvent('git-fetch', {
-                bubbles: true,
-                composed: true,
-            }));
-            // Signal to parent (session-manager / goal-dashboard) that the
-            // dropdown was opened so it can refetch with ?untracked=1 for
-            // the full untracked-files list.
-            this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
-                bubbles: true,
-                composed: true,
-            }));
+            return;
         }
+
+        if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
+            this._removeDropdown();
+        }
+        this._closeToken++;
+        this._closing = false;
+        this._dropdownEl?.classList.remove('git-dropdown-closing');
+        if (this._dropdownEl) {
+            render(this._renderDropdownContent(), this._dropdownEl);
+            this._positionDropdown();
+        }
+        const wasExpanded = this.expanded;
+        this.expanded = true;
+        if (wasExpanded && !this._dropdownEl) {
+            this.requestUpdate('expanded', false);
+        }
+        this.dispatchEvent(new CustomEvent('git-fetch', {
+            bubbles: true,
+            composed: true,
+        }));
+        // Signal to parent (session-manager / goal-dashboard) that the
+        // dropdown was opened so it can refetch with ?untracked=1 for
+        // the full untracked-files list.
+        this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
+            bubbles: true,
+            composed: true,
+        }));
     }
 
     private _statusColor(status: string): string {
@@ -271,24 +315,27 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderPrimaryStatus() {
+        // Render the actual ref name (`primaryRef`) rather than synthesising
+        // `origin/${primaryBranch}` — the project may have `base_ref` pointed
+        // at a local-only branch with no origin counterpart.
         if (this.isOnPrimary) {
-            return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+            return html`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
         }
         if (this.mergedIntoPrimary && this.behindPrimary === 0) {
-            return html`<div class="text-green-600 dark:text-green-400">Merged into origin/${this.primaryBranch}</div>`;
+            return html`<div class="text-green-600 dark:text-green-400">Merged into ${this.primaryRef}</div>`;
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
                 <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
-                of origin/${this.primaryBranch}
+                of ${this.primaryRef}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : nothing}
             </div>`;
@@ -296,11 +343,11 @@ export class GitStatusWidget extends LitElement {
         if (this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
                 <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
-                origin/${this.primaryBranch}
+                ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
-        return html`<div class="text-green-600 dark:text-green-400">Up to date with origin/${this.primaryBranch}</div>`;
+        return html`<div class="text-green-600 dark:text-green-400">Up to date with ${this.primaryRef}</div>`;
     }
 
     /** Small PR status icon + number for the pill */
@@ -411,12 +458,15 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderMergePrimaryButton() {
+        // Label uses the bare branch name to stay compact ("Rebase on dev");
+        // tooltip carries the full resolved ref (`origin/dev` or local `dev`)
+        // so the user can see exactly what the rebase will target.
         return html`<button
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.mergingPrimary}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
-            title="Rebase this branch on top of origin/master"
-        >${this.mergingPrimary ? 'Rebasing\u2026' : 'Rebase on master'}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
+            title="Rebase this branch on top of ${this.primaryRef}"
+        >${this.mergingPrimary ? 'Rebasing\u2026' : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : nothing}`;
     }
 
     private _handleMergePrimary() {
@@ -455,7 +505,7 @@ export class GitStatusWidget extends LitElement {
             style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.squashPushing}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleSquashPush(); }}
-            title="Squash all branch commits into one and push directly to master"
+            title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
         >${this.squashPushing ? 'Pushing\u2026' : 'Squash push'}</button>${this.squashPushError ? html`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : nothing}`;
     }
 

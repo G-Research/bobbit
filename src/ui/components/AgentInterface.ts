@@ -54,6 +54,7 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) gitStatus?: {
 		branch: string;
 		primaryBranch: string;
+		primaryRef?: string;
 		isOnPrimary: boolean;
 		summary: string;
 		clean: boolean;
@@ -832,6 +833,12 @@ export class AgentInterface extends LitElement {
 				this._updateAndPin();
 				return;
 			}
+			if ((ev as any).type === "auto_retry_pending" || (ev as any).type === "auto_retry_cancelled") {
+				// Auto-retry banner state changed — re-render so the banner appears
+				// (pending) or disappears (cancelled / consumed by next agent_start).
+				this._updateAndPin();
+				return;
+			}
 			switch (ev.type) {
 				case "turn_end":
 				case "agent_start":
@@ -1255,6 +1262,37 @@ export class AgentInterface extends LitElement {
 					</div>
 				` : nothing}
 
+				${(() => {
+					const pending = (state as any).autoRetryPending as null | {
+						reason: "provider-overload" | "transient-error";
+						retryDelayMs: number;
+						attempt: number;
+						scheduledAt: number;
+						error?: string;
+					};
+					if (!pending) return nothing;
+					const secs = Math.max(1, Math.round(pending.retryDelayMs / 1000));
+					const label = pending.reason === "provider-overload"
+						? `Retrying in ~${secs}s due to provider overload…`
+						: `Retrying in ~${secs}s after transient error…`;
+					const detail = `attempt #${pending.attempt}`;
+					return html`
+						<div
+							class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm"
+							data-testid="auto-retry-banner"
+							data-reason=${pending.reason}
+							data-attempt=${String(pending.attempt)}
+							data-retry-delay-ms=${String(pending.retryDelayMs)}
+						>
+							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+							</svg>
+							<span>${label}</span>
+							<span class="opacity-60">(${detail})</span>
+						</div>
+					`;
+				})()}
+
 			</div>
 		`;
 	}
@@ -1612,6 +1650,7 @@ export class AgentInterface extends LitElement {
 								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 								.primaryBranch=${this.gitStatus?.primaryBranch ?? 'master'}
+								.primaryRef=${this.gitStatus?.primaryRef ?? `origin/${this.gitStatus?.primaryBranch ?? 'master'}`}
 								.isOnPrimary=${this.gitStatus?.isOnPrimary ?? true}
 								.summary=${this.gitStatus?.summary ?? ''}
 								.clean=${this.gitStatus?.clean ?? true}

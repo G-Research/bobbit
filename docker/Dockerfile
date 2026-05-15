@@ -1,10 +1,35 @@
 FROM node:20-slim
 
-# Install build tools, git, curl, gh CLI, fd-find
+# Install build tools, git, curl, gh CLI, ripgrep.
+#
+# NOTE: we deliberately do NOT install Debian's `fd-find` apt package — at the
+# time of writing it ships fd 8.6.0 (bookworm), which predates `--no-require-git`
+# (added in fd 9.0). pi-coding-agent 0.74+ passes `--no-require-git`
+# unconditionally, so the apt fd fails every `find` tool call inside the
+# sandbox. Instead we pull a fixed-version fd binary from sharkdp's GitHub
+# release below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates build-essential python3 ripgrep fd-find \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && ln -s $(which fdfind) /usr/local/bin/fd 2>/dev/null || true
+    git curl ca-certificates build-essential python3 ripgrep \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install fd from sharkdp/fd GitHub release (must be >= 9.0 for --no-require-git).
+# Pinned to a known-good version; bump as needed.
+ARG FD_VERSION=10.2.0
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) fd_arch="x86_64-unknown-linux-gnu" ;; \
+      arm64) fd_arch="aarch64-unknown-linux-gnu" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    tarball="fd-v${FD_VERSION}-${fd_arch}.tar.gz"; \
+    url="https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/${tarball}"; \
+    curl -fsSL "$url" -o /tmp/fd.tar.gz; \
+    tar -xzf /tmp/fd.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/fd-v${FD_VERSION}-${fd_arch}/fd" /usr/local/bin/fd; \
+    ln -sf /usr/local/bin/fd /usr/local/bin/fdfind; \
+    rm -rf /tmp/fd.tar.gz "/tmp/fd-v${FD_VERSION}-${fd_arch}"; \
+    fd --version
 
 # gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -22,8 +47,13 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 # Install pi-coding-agent and its dependencies inside the image.
 # This avoids bind-mounting node_modules from the host, which is 20x slower
 # on Docker Desktop (Windows/macOS) due to cross-OS filesystem bridging.
-ARG PI_AGENT_VERSION=0.57.1
-RUN npm install -g @mariozechner/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
+#
+# NOTE: package scope is @earendil-works (renamed from @mariozechner). The host
+# detects its own pi-coding-agent version from node_modules and passes it in via
+# --build-arg PI_AGENT_VERSION=<host-version>; the ARG default below is only a
+# fallback for manual `docker build docker/` invocations.
+ARG PI_AGENT_VERSION=0.74.0
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
