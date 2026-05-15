@@ -1464,6 +1464,7 @@ export function createGateway(config: GatewayConfig) {
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
 			wss.close();
+			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
 			}
