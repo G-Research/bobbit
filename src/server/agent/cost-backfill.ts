@@ -264,9 +264,11 @@ function readTranscriptHead(
 }
 
 /**
- * Locate `<sessionsRoot>/<slug>/<sessionId>.jsonl` by scanning slug dirs
- * one level deep. Returns the first match or `undefined`. Defensive — any
- * I/O error is swallowed.
+ * Locate a transcript for `sessionId` by scanning `<sessionsRoot>/<slug>/`
+ * one level deep. The agent CLI names transcripts `<isoTs>_<sessionId>.jsonl`
+ * (see `agent-session-path.ts`), while a few older tests/fixtures used
+ * `<sessionId>.jsonl`; accept both. Returns the first match or `undefined`.
+ * Defensive — any I/O error is swallowed.
  */
 function findTranscriptPath(
 	agentSessionsRoot: string,
@@ -279,17 +281,24 @@ function findTranscriptPath(
 	} catch {
 		return undefined;
 	}
-	const target = `${sessionId}.jsonl`;
+	const exactTarget = `${sessionId}.jsonl`;
+	const suffixTarget = `_${sessionId}.jsonl`;
 	for (const slug of entries) {
 		const slugDir = path.join(agentSessionsRoot, slug);
 		try {
 			const stat = fs.statSync(slugDir);
 			if (!stat.isDirectory()) continue;
 		} catch { continue; }
-		const candidate = path.join(slugDir, target);
-		try {
-			if (fs.existsSync(candidate)) return candidate;
-		} catch { /* ignore */ }
+		let names: string[];
+		try { names = fs.readdirSync(slugDir); } catch { continue; }
+		for (const name of names) {
+			if (name !== exactTarget && !name.endsWith(suffixTarget)) continue;
+			const candidate = path.join(slugDir, name);
+			try {
+				const stat = fs.statSync(candidate);
+				if (stat.isFile()) return candidate;
+			} catch { /* ignore */ }
+		}
 	}
 	return undefined;
 }

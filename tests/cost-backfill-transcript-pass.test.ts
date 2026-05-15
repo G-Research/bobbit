@@ -41,12 +41,16 @@ function seedCosts(entries: Record<string, { totalCost?: number; inputTokens?: n
 	fs.writeFileSync(COSTS_FILE, JSON.stringify(out), "utf-8");
 }
 
-function seedTranscript(slug: string, sessionId: string, body: string): string {
+function seedTranscript(slug: string, sessionId: string, body: string, filename = `${sessionId}.jsonl`): string {
 	const slugDir = path.join(AGENT_SESSIONS_ROOT, slug);
 	fs.mkdirSync(slugDir, { recursive: true });
-	const p = path.join(slugDir, `${sessionId}.jsonl`);
+	const p = path.join(slugDir, filename);
 	fs.writeFileSync(p, body, "utf-8");
 	return p;
+}
+
+function seedAgentNamedTranscript(slug: string, sessionId: string, body: string): string {
+	return seedTranscript(slug, sessionId, body, `2026-04-03T15-15-12-009Z_${sessionId}.jsonl`);
 }
 
 function silentLogger() {
@@ -115,7 +119,7 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 				},
 			}),
 		].join("\n") + "\n";
-		seedTranscript("slug-a", "s1", body);
+		seedAgentNamedTranscript("slug-a", "s1", body);
 
 		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
@@ -131,7 +135,7 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 
 	it("two distinct real goal ids in same transcript stays unmapped", async () => {
 		seedCosts({ s_amb: { totalCost: 0.002 } });
-		seedTranscript("slug-amb", "s_amb", [
+		seedAgentNamedTranscript("slug-amb", "s_amb", [
 			JSON.stringify({ type: "system", cwd: `/wt/goal-x-${GOAL_A.slice(0, 8)}` }),
 			JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: `# Goal\nBOBBIT_GOAL_ID=${GOAL_A}\nSibling reference: ${GOAL_B}` }] } }),
 		].join("\n") + "\n");
@@ -150,7 +154,7 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 
 	it("UUID hit that is not in knownGoalIds stays unmapped", async () => {
 		seedCosts({ s_unk: { totalCost: 0.003 } });
-		seedTranscript("slug-unk", "s_unk", JSON.stringify({
+		seedAgentNamedTranscript("slug-unk", "s_unk", JSON.stringify({
 			type: "user",
 			message: { role: "user", content: [{ type: "text", text: `Working Directory: /wt/goal-foo-${GOAL_UNKNOWN.slice(0, 8)}\nBOBBIT_GOAL_ID=${GOAL_UNKNOWN}` }] },
 		}) + "\n");
@@ -173,7 +177,7 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 			JSON.stringify({ type: "system", cwd: `/wt/goal-trunc-${GOAL_A.slice(0, 8)}` }) +
 			"\n" +
 			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"BOBBIT_GOAL_ID=${GOAL_A} half-`;
-		seedTranscript("slug-trunc", "s_trunc", truncated);
+		seedAgentNamedTranscript("slug-trunc", "s_trunc", truncated);
 
 		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
@@ -210,8 +214,8 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 			type: "user",
 			message: { role: "user", content: [{ type: "text", text: `Working Directory: /wt/goal-z-${GOAL_A.slice(0, 8)}\nBOBBIT_GOAL_ID=${GOAL_A}` }] },
 		}) + "\n";
-		seedTranscript("slug-z", "s_todo", body);
-		seedTranscript("slug-z", "s_done", body);
+		seedAgentNamedTranscript("slug-z", "s_todo", body);
+		seedAgentNamedTranscript("slug-z", "s_done", body);
 
 		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
@@ -240,7 +244,7 @@ describe("backfillLegacyCostGoalIdsFromTranscripts", () => {
 
 	it("knownGoalIds empty leaves entries unattributable", async () => {
 		seedCosts({ s_empty: { totalCost: 0.001 } });
-		seedTranscript("slug-empty", "s_empty", `BOBBIT_GOAL_ID=${GOAL_A}`);
+		seedAgentNamedTranscript("slug-empty", "s_empty", `BOBBIT_GOAL_ID=${GOAL_A}`);
 		const tracker = new CostTracker(stateDir);
 		const res = await backfillLegacyCostGoalIdsFromTranscripts({
 			costTracker: tracker,
