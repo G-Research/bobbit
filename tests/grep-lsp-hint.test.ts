@@ -202,6 +202,38 @@ describe("lspHintFor — suppresses hint for non-symbol or non-source cases", ()
 		const hint = lspHintFor({ glob: "*.ts" }, grepResult(SAMPLE_HIT));
 		assert.equal(hint, null);
 	});
+
+	it("mixed alternation with regex shape `foo|bar.*` suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "foo|bar.*", glob: "*.ts" },
+			grepResult("src/a.ts:1:foo()"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("mixed alternation with path-like branch `foo|team/teardown` suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "foo|team/teardown", glob: "*.ts" },
+			grepResult("src/a.ts:1:foo()"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("alternation containing a `+` quantifier suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "foo|bar+", glob: "*.ts" },
+			grepResult("src/a.ts:1:foo()"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("alternation containing a character class suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "foo|bar[0-9]", glob: "*.ts" },
+			grepResult("src/a.ts:1:foo()"),
+		);
+		assert.equal(hint, null);
+	});
 });
 
 describe("lspHintFor — env opt-out", () => {

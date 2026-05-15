@@ -41,6 +41,15 @@ const SOURCE_EXT_RE = /(?<![A-Za-z0-9_])(?:ts|tsx|js|jsx|mts|cts)(?![A-Za-z0-9_]
 const IDENT_BRANCH_RE =
 	/^(?:function\s+|const\s+|let\s+|class\s+|interface\s+|type\s+|export\s+function\s+|export\s+async\s+function\s+)?([A-Za-z_$][A-Za-z0-9_$]*)(\\\()?$/;
 
+// Top-level allowed-character guard. The whole pattern (before splitting on
+// `|`) must contain only word characters, pipe, parens, backslash, dot,
+// dollar, and whitespace (to permit `function foo` style branches). Any
+// other character — slash, `*`, `+`, `?`, `[`, `]`, `{`, `}`, etc. — means
+// the pattern is doing path or regex work that LSP cannot replace, so we
+// must NOT emit a hint even if one branch happens to look symbol-shaped
+// (e.g. `foo|bar.*` or `foo|team/teardown`).
+const ALLOWED_PATTERN_RE = /^[A-Za-z0-9_|()\\.$\s]+$/;
+
 function isHintDisabled(): boolean {
 	return process.env.BOBBIT_GREP_LSP_HINT === "0";
 }
@@ -52,6 +61,7 @@ function isHintDisabled(): boolean {
  */
 export function parseSymbolPattern(pattern: string): { identifier: string; isCallSite: boolean } | null {
 	if (!pattern) return null;
+	if (!ALLOWED_PATTERN_RE.test(pattern)) return null;
 	const branches = pattern.split("|");
 	for (const raw of branches) {
 		const branch = raw.trim();
