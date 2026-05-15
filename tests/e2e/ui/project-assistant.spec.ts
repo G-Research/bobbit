@@ -9,7 +9,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, nonGitCwd, waitForSessionStatus, deleteSession } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -27,11 +27,14 @@ async function createProjectAssistantSession(
 	return { sessionId: data.id, provisionalProjectId: data.provisionalProjectId };
 }
 
-/** Create a unique temp dir for each test. */
+/** Create a unique temp dir for each test.
+ *  Returns the canonical (realpath) form so the project-assistant flow
+ *  isn't blocked by the symlink-confirm dialog on macOS (tmpdir is
+ *  /var/folders which symlinks to /private/var/folders). */
 function uniqueDir(label: string): string {
 	const dir = join(tmpdir(), `bobbit-e2e-projast-${label}-${process.env.E2E_PORT}-${Date.now()}`);
 	mkdirSync(dir, { recursive: true });
-	return dir;
+	return realpathSync(dir);
 }
 
 /** Get all projects from the API. */
