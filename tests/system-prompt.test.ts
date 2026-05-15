@@ -350,6 +350,97 @@ describe("getPromptSections", () => {
 	});
 });
 
+describe("LSP tool-selection rule injection", () => {
+	beforeEach(setup);
+	afterEach(cleanup);
+
+	const HEADER = "## Tool selection — symbol queries";
+	const MUST = "MUST use LSP before";
+
+	for (const role of ["coder", "reviewer", "code-reviewer", "security-reviewer", "architect", "spec-auditor"]) {
+		it(`injects the LSP rule for role '${role}' even when role prompt lacks it`, () => {
+			const promptPath = assembleSystemPrompt(`lsp-inject-${role}`, {
+				cwd: cwdDir,
+				roleName: role,
+				rolePrompt: `You are a ${role}. Do good work.`,
+			});
+			assert.ok(promptPath);
+			const content = fs.readFileSync(promptPath!, "utf-8");
+			assert.ok(content.includes(HEADER), `prompt missing header for ${role}`);
+			assert.ok(content.includes(MUST), `prompt missing MUST text for ${role}`);
+			assert.ok(content.includes("lsp_workspace_symbol"), `prompt missing LSP example for ${role}`);
+
+			const sections = getPromptSections({
+				cwd: cwdDir,
+				roleName: role,
+				rolePrompt: `You are a ${role}. Do good work.`,
+			});
+			const roleSection = sections.find(s => s.label === "Role");
+			assert.ok(roleSection, `expected Role section for ${role}`);
+			assert.ok(roleSection!.content.includes(HEADER), `Role section missing header for ${role}`);
+			assert.ok(roleSection!.content.includes(MUST), `Role section missing MUST text for ${role}`);
+		});
+	}
+
+	for (const role of ["docs-writer", "qa-tester", "team-lead", ""]) {
+		it(`does not inject the LSP rule for non-code role '${role || "(empty)"}'`, () => {
+			const promptPath = assembleSystemPrompt(`lsp-skip-${role || "empty"}`, {
+				cwd: cwdDir,
+				roleName: role,
+				rolePrompt: `You are a ${role || "helper"}.`,
+			});
+			assert.ok(promptPath);
+			const content = fs.readFileSync(promptPath!, "utf-8");
+			assert.ok(!content.includes(HEADER), `prompt should NOT contain header for ${role}`);
+			assert.ok(!content.includes(MUST), `prompt should NOT contain MUST text for ${role}`);
+
+			const sections = getPromptSections({
+				cwd: cwdDir,
+				roleName: role,
+				rolePrompt: `You are a ${role || "helper"}.`,
+			});
+			for (const s of sections) {
+				assert.ok(!s.content.includes(HEADER), `section '${s.label}' should not contain header for ${role}`);
+			}
+		});
+	}
+
+	it("does not duplicate the LSP rule when role prompt already contains the header", () => {
+		const preExisting =
+			`You are a coder.\n\n${HEADER}\n\nUse LSP first.`;
+		const promptPath = assembleSystemPrompt("lsp-no-dupe", {
+			cwd: cwdDir,
+			roleName: "coder",
+			rolePrompt: preExisting,
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		const occurrences = content.split(HEADER).length - 1;
+		assert.equal(occurrences, 1, `expected exactly one '${HEADER}' occurrence, got ${occurrences}`);
+
+		const sections = getPromptSections({
+			cwd: cwdDir,
+			roleName: "coder",
+			rolePrompt: preExisting,
+		});
+		const roleSection = sections.find(s => s.label === "Role");
+		assert.ok(roleSection);
+		const sectionOccurrences = roleSection!.content.split(HEADER).length - 1;
+		assert.equal(sectionOccurrences, 1, `expected exactly one header in Role section, got ${sectionOccurrences}`);
+	});
+
+	it("matches role names case-insensitively and trims whitespace", () => {
+		const promptPath = assembleSystemPrompt("lsp-case", {
+			cwd: cwdDir,
+			roleName: "  Coder  ",
+			rolePrompt: "You are a coder.",
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.ok(content.includes(HEADER));
+	});
+});
+
 describe("cleanupSessionPrompt", () => {
 	beforeEach(setup);
 	afterEach(cleanup);
