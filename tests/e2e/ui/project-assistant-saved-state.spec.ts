@@ -31,10 +31,26 @@ async function createRegisteredProjectAssistant(projectId: string, cwd: string):
 	return data.id as string;
 }
 
-/** Navigate to a session via hash route and wait for the textarea. */
+/** Navigate to a session via hash route and wait for the connect to fully
+ *  settle. The textarea becomes visible as soon as the chat shell renders,
+ *  but `connectToSession()` also kicks off an async draft restore that may
+ *  still be in flight — for a fresh project-assistant session that restore
+ *  resolves with `restored=false` and clears `state.activeProposals.project`,
+ *  which would clobber any synthetic injection done immediately after
+ *  `openSession()` returns. Wait for `state.connectingSessionId === null`
+ *  (set in the `finally` block of `connectToSession`, after both draft
+ *  restore and background work complete) so the test is sync’d against the
+ *  real connect lifecycle. */
 async function openSession(page: import("@playwright/test").Page, sessionId: string): Promise<void> {
 	await page.evaluate((id: string) => { window.location.hash = `#/session/${id}`; }, sessionId);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(
+		() => page.evaluate(() => {
+			const s = (window as any).bobbitState;
+			return s?.connectingSessionId === null;
+		}),
+		{ timeout: 20_000 },
+	).toBe(true);
 }
 
 /** Inject a synthetic project proposal directly into client state. Used to
@@ -68,12 +84,22 @@ async function injectProjectProposal(
 	await forceRender(page);
 }
 
-/** Force a renderApp() call by toggling the viewport across the desktop
- *  breakpoint (768 px) — the only viewport-driven renderApp trigger. */
+/** Force a renderApp() pass and wait two animation frames for the
+ *  rAF-scheduled paint to land. The viewport-toggle trick is unreliable on
+ *  Playwright — browser resize events can coalesce so two rapid
+ *  `setViewportSize` calls may only fire a single resize event with the
+ *  final width, leaving the breakpoint listener in `state.ts` to no-op and
+ *  no `renderApp()` ever firing. Call `__bobbitRenderApp` directly instead
+ *  (exposed on window by `src/app/main.ts` alongside `__bobbitState`). */
 async function forceRender(page: import("@playwright/test").Page): Promise<void> {
-	const { width, height } = page.viewportSize() ?? { width: 1280, height: 720 };
-	await page.setViewportSize({ width: 700, height });
-	await page.setViewportSize({ width, height });
+	await page.evaluate(() => {
+		const trigger = (window as any).__bobbitRenderApp;
+		if (typeof trigger !== "function") throw new Error("__bobbitRenderApp missing");
+		trigger();
+		return new Promise<void>((resolve) =>
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+		);
+	});
 }
 
 /** Programmatically flip the per-session accepted flag, mirroring what the

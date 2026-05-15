@@ -76,26 +76,38 @@ class TypescriptLspClient implements LspClient {
 	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void, requireSandbox?: boolean): Promise<void> {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
-		// Only attach the bridge when a sandbox container is actually running for
-		// this worktree; otherwise spawnLspChild() falls back to a host process and
-		// bridge.toUri() would translate host paths to container paths (e.g.
-		// /workspace-wt/<branch>) that don't exist on the host, breaking
-		// `initialize` with ENOENT. Do not simplify back to an unconditional cache
-		// — bug surfaced by coder sessions 03afb128 / 9150a1de on 2026-05-14.
-		const resolvedBridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
-		const containerId = resolvedBridge?.containerIdForWorktree?.(this.worktreePath) ?? null;
-		this.bridge = containerId ? resolvedBridge : undefined;
+		//
+		// A multi-project bridge can decline a worktree by returning `null` from
+		// `resolveForWorktree()` — that means the worktree is NOT inside any
+		// sandbox-configured project, so the host LSP is the correct choice and
+		// we must NOT pass the bridge through to `spawnLspChild` (doing so would
+		// trip its fail-closed guard and reject every LSP request for plain host
+		// projects). `undefined` means `resolveForWorktree` is unimplemented —
+		// legacy bare bridges in tests; fall back to the supplied bridge so the
+		// existing security tests keep proving the fail-closed contract.
+		//
+		// Security review 2026-05-15: when a bridge IS passed through and no
+		// container is running, `spawnLspChild()` rejects with `lsp_unavailable`
+		// rather than silently spawning on the host. Pinned by
+		// `tests/lsp/server-process-sandbox.spec.ts`.
+		const resolved = sandbox?.resolveForWorktree?.(this.worktreePath);
+		const effectiveSandbox: SpawnOpts["sandbox"] =
+			resolved === undefined ? sandbox :
+			resolved === null ? undefined :
+			resolved;
+		const containerId = effectiveSandbox?.containerIdForWorktree?.(this.worktreePath) ?? null;
+		this.bridge = containerId ? effectiveSandbox : undefined;
 		this.onClose = onClose;
-		const resolved = resolveTypescriptLanguageServer();
-		if (!resolved) throw new Error("typescript-language-server not installed");
+		const resolvedTs = resolveTypescriptLanguageServer();
+		if (!resolvedTs) throw new Error("typescript-language-server not installed");
 		this.proc = await spawnLspChild({
 			worktreePath: this.worktreePath,
-			command: resolved.node,
-			args: [resolved.cliMjs, "--stdio"],
+			command: resolvedTs.node,
+			args: [resolvedTs.cliMjs, "--stdio"],
 			// In a sandbox container, use the globally-installed binary from PATH
 			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
 			sandboxCmd: ["typescript-language-server", "--stdio"],
-			sandbox,
+			sandbox: effectiveSandbox,
 			requireSandbox,
 		});
 

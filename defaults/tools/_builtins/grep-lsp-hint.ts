@@ -5,8 +5,13 @@
  *
  * Disable via env: `BOBBIT_GREP_LSP_HINT=0`.
  *
- * Pure module — no I/O — so it can be unit-tested with synthetic inputs.
+ * Pure module — no I/O for hint computation — so it can be unit-tested with
+ * synthetic inputs. The wrapper additionally fires a best-effort telemetry
+ * ping (`recordHintEmitted`) so the gateway can track adoption; that call
+ * is fire-and-forget and never blocks the result.
  */
+
+import { recordHintEmitted } from "../_shared/lsp-telemetry.ts";
 
 export interface GrepLikeParams {
 	pattern?: string;
@@ -134,6 +139,9 @@ export function wrapGrepWithLspHint<T extends { execute: (...args: any[]) => any
 		const hint = lspHintFor(params, result);
 		if (!hint) return result;
 		const existingContent = Array.isArray(result?.content) ? result.content : [];
+		// Best-effort telemetry: fire-and-forget; failures are swallowed by
+		// `recordHintEmitted` itself so they cannot affect the tool result.
+		void recordHintEmitted();
 		return {
 			...result,
 			content: [{ type: "text", text: hint }, ...existingContent],

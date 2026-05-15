@@ -85,17 +85,13 @@ export function resolvePyrightLangserver(): { node: string; cliMjs: string } | n
 
 export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	let child: ChildProcess;
-	// Sandbox bridge is best-effort: when no container exists for this
-	// worktree (host-only sessions, fixture tests, sandbox not yet started),
-	// fall back to a host-side spawn rather than throwing. This keeps the
-	// supervisor working uniformly across sandboxed and non-sandboxed
-	// worktrees within the same gateway.
+	// Sandbox bridge is best-effort for host-only/dev fixtures, but fail-closed
+	// for worktrees the supervisor explicitly marked sandbox-required. That
+	// preserves normal host LSP behaviour outside sandboxed projects while
+	// preventing sandboxed sessions from silently spawning language servers on
+	// the host when their container is unavailable.
 	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
 	if (opts.requireSandbox && !cid) {
-		// Security: sandboxed sessions must never run an LSP server against
-		// untrusted worktree files on the host. Refuse the spawn so callers
-		// (supervisor pre-warm, on-demand ensure) surface `lsp_unavailable`
-		// rather than silently host-falling-back.
 		throw new LspSandboxRequiredError(opts.worktreePath);
 	}
 	if (opts.sandbox && cid) {

@@ -14,6 +14,19 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE = path.resolve(__dirname, "..", "fixtures", "lsp-ts");
 
+// Security review 2026-05-15: /api/lsp/* now rejects cwds outside every
+// authorized project worktree. The host fixture under tests/fixtures/lsp-ts
+// is NOT a registered project, so authorize it via the operator escape
+// hatch instead of polluting the fixture with a .bobbit/ project config.
+// This still fails closed for sandbox-scoped callers (they ignore the
+// extras list entirely — see src/server/lsp/authorize-cwd.ts).
+test.beforeAll(() => {
+	process.env.BOBBIT_LSP_AUTHORIZED_ROOTS = FIXTURE;
+});
+test.afterAll(() => {
+	delete process.env.BOBBIT_LSP_AUTHORIZED_ROOTS;
+});
+
 test("GET /api/lsp/stats returns supervisor stats", async () => {
 	const res = await apiFetch("/api/lsp/stats", { method: "GET" });
 	expect(res.status).toBe(200);

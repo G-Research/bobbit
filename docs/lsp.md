@@ -213,7 +213,7 @@ The gateway exposes three routes for diagnostics and the in-tool progress signal
 - Files outside any project root (orphan scripts, top-level config) — there's no LSP server to ask.
 - **Release gating** — `npm run check` remains authoritative across the whole monorepo (project references, multiple `tsconfig.*.json`, full re-check). Use `lsp_diagnostics` to iterate fast, then run `npm run check` once before commit. They occasionally disagree (different TS versions, project-reference boundaries); the design doc has more on why.
 
-**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. Set `BOBBIT_GREP_LSP_HINT=0` to disable.
+**Inline grep hint:** When `grep` is called with a symbol-shaped pattern against TS/JS sources (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`), its result is automatically prepended with a single `[lsp-hint]` line suggesting the equivalent `lsp_workspace_symbol`, `lsp_definition`, or `lsp_references` call. The same hint fires for simple `grep`, `rg`, `ripgrep`, `ag`, and `ack` invocations run via the `bash` tool — the command is inspected after execution and, if the pattern is symbol-shaped and the paths target source files, the same `[lsp-hint]` line is prepended to the bash output. **Best-effort limitation:** when `grep` appears after a pipe (e.g. `cat file | grep foo`), the primary command is not grep and the hint may be skipped. Set `BOBBIT_GREP_LSP_HINT=0` to disable both the grep-tool and bash-tool hints.
 
 ## Route post-boot self-check
 

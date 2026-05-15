@@ -15,6 +15,7 @@ import { ColorStore } from "./agent/color-store.js";
 import { PrStatusStore } from "./agent/pr-status-store.js";
 import { SessionManager } from "./agent/session-manager.js";
 import { LspSupervisor } from "./lsp/supervisor.js";
+import { authorizeLspCwd } from "./lsp/authorize-cwd.js";
 import { TypescriptLspFactory } from "./lsp/clients/typescript.js";
 import { PyrightLspFactory } from "./lsp/clients/pyright.js";
 import { MultiProjectSandboxLspBridge } from "./lsp/sandbox-bridge.js";
@@ -2043,15 +2044,31 @@ async function handleApiRoute(
 	}
 
 	// ── LSP routes — agent-side tool surface ────────────────────────
+	// Security review 2026-05-15: every cwd arriving here is caller-supplied
+	// (LLM-influenced via the lsp_* tools or arbitrary curl with a gateway
+	// bearer). `authorizeLspCwd` rejects cwds outside any registered project
+	// worktree (or the gateway repo, for the host fixture E2Es) so the
+	// supervisor never spawns an LSP server outside an authorized boundary.
+	// Pinned by tests/lsp/authorize-cwd.spec.ts and tests/e2e/lsp-auth.spec.ts.
+	const lspAuthCtx = {
+		projectContextManager,
+		gatewayProjectRoot: getProjectRoot(),
+		sandboxScope,
+	};
 	// Finding #2: state probe for the cold-start progress signal.
 	if (url.pathname === "/api/lsp/state" && req.method === "GET") {
 		const supervisor = sessionManager.getLspSupervisor();
 		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
 		if (supervisor.disabled) { json({ state: "disabled" }); return; }
-		const cwd = url.searchParams.get("cwd") || "";
+		const rawCwd = url.searchParams.get("cwd") || "";
+		const auth = authorizeLspCwd(rawCwd, lspAuthCtx);
+		if (!auth.ok) {
+			json({ error: "lsp_forbidden_cwd", reason: auth.reason, message: auth.message }, auth.status);
+			return;
+		}
 		const pathArg = url.searchParams.get("path") || undefined;
 		try {
-			const key = supervisor.resolveKey(cwd, pathArg);
+			const key = supervisor.resolveKey(auth.cwd, pathArg);
 			json({ state: supervisor.stateFor(key), worktreePath: key.worktreePath, language: key.language });
 		} catch (err: any) {
 			json({ state: "unknown", error: String(err?.message ?? err) });
@@ -2085,8 +2102,17 @@ async function handleApiRoute(
 			json({ error: "lsp_unavailable", message: "disabled by project config" });
 			return;
 		}
+		// Security review 2026-05-15: authorize cwd before handing off to the
+		// supervisor — otherwise findProjectRoot() walks up from an attacker-
+		// chosen path and the host LSP starts outside any authorized worktree.
+		const auth = authorizeLspCwd((body as any)?.cwd, lspAuthCtx);
+		if (!auth.ok) {
+			json({ error: "lsp_forbidden_cwd", reason: auth.reason, message: auth.message }, auth.status);
+			return;
+		}
+		const authorizedBody = { ...(body as Record<string, unknown>), cwd: auth.cwd };
 		try {
-			const result = await supervisor.dispatch(method, body || {});
+			const result = await supervisor.dispatch(method, authorizedBody as any);
 			json(result);
 		} catch (err: any) {
 			if (err?.code === "lsp_unavailable" || err?.code === "lsp_capacity" || err?.code === "lsp_timeout") {
@@ -2098,6 +2124,14 @@ async function handleApiRoute(
 		return;
 	}
 	if (url.pathname === "/api/lsp/stats" && req.method === "GET") {
+		// Defense-in-depth: /api/lsp/stats leaks worktreePath for every active
+		// LSP entry. The sandbox guard already blocks the route for sandbox
+		// tokens; refuse explicitly here so a future guard-list change cannot
+		// silently turn this into a worktree-path oracle.
+		if (sandboxScope) {
+			json({ error: "lsp_forbidden_cwd", reason: "sandbox_scope_project_mismatch", message: "sandbox tokens cannot read LSP stats" }, 403);
+			return;
+		}
 		const supervisor = sessionManager.getLspSupervisor();
 		if (!supervisor) {
 			json({ error: "lsp_unavailable" });
