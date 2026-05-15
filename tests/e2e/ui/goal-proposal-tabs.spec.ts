@@ -333,12 +333,12 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 		}
 	});
 
-	test("workflow inspector DOM shares core gate markup with the main Workflows page editor", async ({ page }) => {
+	test("workflow inspector and editor share gate markup (single renderer path)", async ({ page }) => {
 		test.setTimeout(90_000);
 		const title = `Modal wf parity ${Date.now()}`;
 		const sessionId = await createSession();
 		try {
-			await seedGoalProposal(sessionId, { title, spec: "Workflow inspector parity DOM." });
+			await seedGoalProposal(sessionId, { title, spec: "Workflow inspector / editor parity." });
 			await openSession(page, sessionId);
 			await waitForProposalForm(page, title);
 
@@ -348,40 +348,60 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 			const inspector = wfPanel.locator("[data-testid='workflow-inspector']").first();
 			await expect(inspector).toBeVisible({ timeout: 10_000 });
 
-			// The inspector must render gate cards via the SHARED renderer
-			// (`renderGateEditor`) — it has the canonical `.wf-gate-card` class
-			// rather than a forked hand-rolled fragment.
-			const gateCards = inspector.locator(".wf-gate-card");
-			const gateCount = await gateCards.count();
-			expect(gateCount, "inspector must render shared .wf-gate-card markup").toBeGreaterThan(0);
-
-			// Capture gate names + workflow id from the modal inspector.
-			const inspectorWfId = await inspector.getAttribute("data-workflow-id");
-			expect(inspectorWfId).toBeTruthy();
+			// 1) The inspector must render gate cards via the SHARED renderer
+			//    (`renderGateEditor`) — canonical `.wf-gate-card` class, not a
+			//    forked hand-rolled fragment. Inspector inputs are disabled.
+			const inspectorGates = inspector.locator(".wf-gate-card");
+			const inspectorCount = await inspectorGates.count();
+			expect(inspectorCount, "inspector must render shared .wf-gate-card markup").toBeGreaterThan(0);
+			// Inspector identity inputs (Name field) are disabled.
+			const inspectorName = inspector.locator(".wf-edit-identity input.wf-input").nth(1);
+			if (await inspectorName.count() > 0) {
+				await expect(inspectorName).toBeDisabled();
+			}
 			const inspectorNames: string[] = [];
-			for (let i = 0; i < gateCount; i++) {
-				const nm = (await gateCards.nth(i).locator(".wf-gate-name").first().textContent()) || "";
+			for (let i = 0; i < inspectorCount; i++) {
+				const nm = (await inspectorGates.nth(i).locator(".wf-gate-name").first().textContent()) || "";
 				inspectorNames.push(nm.trim());
 			}
+			const inspectorWfId = await inspector.getAttribute("data-workflow-id");
+			expect(inspectorWfId).toBeTruthy();
 
-			// Now navigate to the Workflows page and open the same workflow in
-			// its editor view. It must use the SAME renderer (`renderEditView`
-			// without readOnly), so `.wf-gate-card` + identical `.wf-gate-name`
-			// strings must appear in the same order.
-			await navigateToHash(page, `#/workflow-edit/${inspectorWfId}`);
-			const editor = page.locator("[data-testid='workflow-editor']").first();
-			await expect(editor).toBeVisible({ timeout: 15_000 });
+			// 2) Customize → same workflow, same shared renderer (renderEditView),
+			//    but readOnly:false. testid flips to `workflow-editor`. The gate
+			//    name sequence must be byte-identical — proving both surfaces
+			//    share a single rendering path.
+			const customizeBtn = wfPanel.locator("[data-testid='goal-proposal-workflow-customize']").first();
+			await expect(customizeBtn).toBeVisible({ timeout: 10_000 });
+			await customizeBtn.click();
+			const editor = wfPanel.locator("[data-testid='workflow-editor']").first();
+			await expect(editor).toBeVisible({ timeout: 5_000 });
 			const editorGates = editor.locator(".wf-gate-card");
-			await expect(editorGates.first()).toBeVisible({ timeout: 10_000 });
+			await expect(editorGates.first()).toBeVisible({ timeout: 5_000 });
 			const editorCount = await editorGates.count();
-			expect(editorCount, "main page editor must render shared .wf-gate-card markup").toBe(inspectorNames.length);
+			expect(editorCount, "editor must render shared .wf-gate-card markup").toBe(inspectorCount);
 			const editorNames: string[] = [];
 			for (let i = 0; i < editorCount; i++) {
 				const nm = (await editorGates.nth(i).locator(".wf-gate-name").first().textContent()) || "";
 				editorNames.push(nm.trim());
 			}
-			expect(editorNames, "gate name sequence must match across modal inspector and main page editor")
+			expect(editorNames, "gate name sequence must match across inspector and editor (shared renderer)")
 				.toEqual(inspectorNames);
+			// In edit mode, identity inputs must be enabled (single renderer
+			// honours the readOnly flag).
+			const editorName = editor.locator(".wf-edit-identity input.wf-input").nth(1);
+			if (await editorName.count() > 0) {
+				await expect(editorName).toBeEnabled();
+			}
+
+			// 3) Reset → back to inspector. Same gate names again, testid flips
+			//    back to workflow-inspector. Confirms the renderer is genuinely
+			//    the same code path — only the readOnly bit differs.
+			const resetBtn = wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first();
+			await resetBtn.click();
+			const inspector2 = wfPanel.locator("[data-testid='workflow-inspector']").first();
+			await expect(inspector2).toBeVisible({ timeout: 5_000 });
+			await expect(inspector2).toHaveAttribute("data-workflow-id", inspectorWfId!);
 		} finally {
 			await deleteSession(sessionId);
 		}
