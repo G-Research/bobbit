@@ -39,6 +39,27 @@ for (const role of CODING_ROLES) {
 			`${role}.yaml promptTemplate must contain the literal "${SECTION_HEADER}" section header`,
 		);
 	});
+
+	test(`${role}.yaml hard rule covers grep/rg/ripgrep/git grep/bash and uses MUST`, () => {
+		const file = path.join(rolesDir, `${role}.yaml`);
+		const raw = fs.readFileSync(file, "utf-8");
+		const doc = YAML.parse(raw) as { promptTemplate?: string };
+		const tmpl = doc.promptTemplate ?? "";
+		const headerIdx = tmpl.indexOf(SECTION_HEADER);
+		assert.ok(headerIdx >= 0, `${role}.yaml must contain section header`);
+		// Scope the assertions to the body of the section (up to the next h2).
+		const rest = tmpl.slice(headerIdx + SECTION_HEADER.length);
+		const nextH2 = rest.search(/\n\s*##\s/);
+		const body = nextH2 >= 0 ? rest.slice(0, nextH2) : rest;
+
+		assert.ok(/\bMUST\b/.test(body), `${role}.yaml hard rule must use "MUST"`);
+		for (const token of ["grep", "rg", "ripgrep", "git grep", "bash"]) {
+			assert.ok(
+				body.includes(token),
+				`${role}.yaml hard rule must mention \`${token}\` so agents know the LSP-first rule applies to it`,
+			);
+		}
+	});
 }
 
 test("reviewer.yaml + code-reviewer.yaml mention lsp_references for blast-radius tracing", () => {

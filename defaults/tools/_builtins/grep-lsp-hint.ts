@@ -118,7 +118,7 @@ function buildHint(identifier: string, isCallSite: boolean): string {
 	const suggestion = isCallSite
 		? `\`lsp_references\` on a use-site of \`${identifier}\``
 		: `\`lsp_workspace_symbol("${identifier}")\` or \`lsp_definition\` on a use-site`;
-	const msg = `${HINT_PREFIX} Symbol-shaped query — for .ts/.js code, ${suggestion} is faster and authoritative. Grep results follow.`;
+	const msg = `${HINT_PREFIX} Symbol-shaped query — for .ts/.js code, ${suggestion} is faster and authoritative. Text-search results follow.`;
 	if (msg.length <= MAX_HINT_LEN) return msg;
 	// Defensive truncation; should not trigger with normal identifiers.
 	return `${msg.slice(0, MAX_HINT_LEN - 1)}…`;
