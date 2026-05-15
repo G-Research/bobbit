@@ -2058,6 +2058,22 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// Internal telemetry endpoint: incremented by grep/bash LSP-hint tool
+	// extensions via best-effort POST. Auth-gated by the same handleApiRoute()
+	// path as every other /api/* route. Registered before the generic
+	// /api/lsp/:method matcher so the underscore-prefixed path is never
+	// interpreted as an LSP method name.
+	if (url.pathname === "/api/lsp/_internal/hint-emitted" && req.method === "POST") {
+		const supervisor = sessionManager.getLspSupervisor();
+		if (!supervisor) { json({ error: "lsp_unavailable", message: "supervisor not initialised" }); return; }
+		try {
+			supervisor.recordHintEmitted();
+			json({ ok: true });
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
 	const lspMatch = url.pathname.match(/^\/api\/lsp\/([a-z_]+)$/);
 	if (lspMatch && req.method === "POST") {
 		const method = lspMatch[1];
