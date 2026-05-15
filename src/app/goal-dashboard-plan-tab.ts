@@ -5,7 +5,21 @@
 
 import { html, nothing, svg, type TemplateResult } from "lit";
 import { setHashRoute } from "./routing.js";
-import { state, renderApp, type Goal } from "./state.js";
+import { state, renderApp, type Goal, type GoalState } from "./state.js";
+
+/**
+ * Goal states considered "terminal" for the live-only Plan filter.
+ * A child is "live" iff it is NOT archived AND its `state` is not in
+ * this set — i.e. only todo / in-progress / blocked remain. Centralised
+ * here so the filter site below and the data helper below share the
+ * exact same rule, and so the test fixture can pin it.
+ */
+const PLAN_TERMINAL_STATES: ReadonlySet<GoalState> = new Set<GoalState>(["complete", "shelved"]);
+
+function _isLiveChild(g: { state?: string | null; archived?: boolean | null }): boolean {
+	if (g.archived) return false;
+	return !PLAN_TERMINAL_STATES.has((g.state ?? "todo") as GoalState);
+}
 import { buildPlanSteps, type PlanStep, type SynthesisGoal, type FormalPlanStep } from "./plan-synthesis.js";
 import { resolvePlanNodeChild, type PlanNodeChild, type PlanNodeState } from "./plan-node-state.js";
 import { computeEdgePaths, type PlanEdgeNode, type PlanEdge } from "./plan-edge-paths.js";
@@ -79,7 +93,9 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 	// "See Archived" pollutes the resolver with unrelated archived siblings.
 	const candidates: PlanNodeChild[] = allGoals
 		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
-		.filter(g => g.parentGoalId === parentGoalId && (!liveOnly || !g.archived))
+		// liveOnly EXCLUDES archived AND terminal-state (complete/shelved) children — only
+		// in-progress / todo / blocked remain. See PLAN_TERMINAL_STATES.
+		.filter(g => g.parentGoalId === parentGoalId && (!liveOnly || _isLiveChild(g)))
 		.map(g => ({
 			id: g.id,
 			parentGoalId: g.parentGoalId,
@@ -242,7 +258,9 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 		}));
 	const childSynthesis: SynthesisGoal[] = allGoals
 		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
-		.filter(g => g.parentGoalId === goal.id && (!opts?.liveOnly || !g.archived))
+		// liveOnly EXCLUDES archived AND terminal-state (complete/shelved) children — only
+		// in-progress / todo / blocked remain. See PLAN_TERMINAL_STATES.
+		.filter(g => g.parentGoalId === goal.id && (!opts?.liveOnly || _isLiveChild(g)))
 		.map(g => ({
 			id: g.id,
 			parentGoalId: g.parentGoalId,
@@ -279,7 +297,7 @@ export function renderPlanTab(args: {
 				data-testid="plan-live-only-toggle"
 				data-live-only="${liveOnly ? 'true' : 'false'}"
 				@click=${() => _togglePlanLiveOnly(currentGoal.id)}
-				title="${liveOnly ? 'Showing live subgoals only — click to include archived/completed' : 'Showing all subgoals (including archived/completed) — click to show live only'}"
+				title="${liveOnly ? 'Showing live (in-progress/todo/blocked) subgoals only — click to include archived/completed' : 'Showing all subgoals (including archived/completed) — click to show live only'}"
 				style="font-size:11px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:${liveOnly ? 'var(--muted)' : 'transparent'};color:var(--foreground);cursor:pointer;">
 				${liveOnly ? 'Live only' : 'Show all'}
 			</button>

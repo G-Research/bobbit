@@ -95,6 +95,60 @@ describe("computeTreeCost — archived child cost attribution", () => {
 		assert.equal(archivedRow!.tokensOut, 25, "archived child's tokensOut must be non-zero");
 	});
 
+	it("cache invalidates when allGoals tree shape changes even if cost generation is unchanged", () => {
+		const tracker = freshTracker();
+		_resetTreeCostCacheForTesting(tracker);
+
+		tracker.recordUsage("s-p", { cost: 0.01 }, "TS");
+		tracker.recordUsage("s-a", { cost: 0.02 }, "TS-archived");
+
+		const before: G[] = [
+			{ id: "TS", title: "Parent", createdAt: 1 },
+		];
+		const first = computeTreeCost("TS", before, tracker);
+		assert.equal(first.breakdown.length, 1,
+			"baseline: only the root before the archived child is registered");
+
+		// Add an archived descendant WITHOUT mutating any cost entry.
+		// Cost generation is unchanged — but the tree shape changed, so the
+		// cached breakdown must NOT be returned. The archived row must
+		// appear with its previously-stamped cost.
+		const after: G[] = [
+			{ id: "TS", title: "Parent", createdAt: 1 },
+			{ id: "TS-archived", title: "Archived child", createdAt: 2, parentGoalId: "TS", rootGoalId: "TS", archived: true },
+		];
+		const second = computeTreeCost("TS", after, tracker);
+		assert.equal(second.breakdown.length, 2,
+			"tree-shape change must bust the cache and surface the archived descendant");
+		const archivedRow = second.breakdown.find(e => e.goalId === "TS-archived");
+		assert.ok(archivedRow, "archived row must appear after tree-shape change");
+		assert.equal(archivedRow!.costUsd, 0.02);
+	});
+
+	it("cache bypassed when sessionIdsForGoal fallback is supplied (avoids stale breakdown)", () => {
+		const tracker = freshTracker();
+		_resetTreeCostCacheForTesting(tracker);
+
+		// No goalId-stamped entries — forces the fallback path via sessionIds.
+		tracker.recordUsage("sess-A", { cost: 0.10 });
+		tracker.recordUsage("sess-B", { cost: 0.20 });
+
+		const goals: G[] = [
+			{ id: "FB", title: "Parent", createdAt: 1 },
+		];
+
+		const first = computeTreeCost("FB", goals, tracker, (gid) => gid === "FB" ? ["sess-A"] : []);
+		assert.equal(first.breakdown[0].costUsd, 0.10,
+			"first call uses fallback resolver returning sess-A");
+
+		// Different closure (different sessionIds for same goal) — with the
+		// old cache (keyed only on generation), this would return $0.10
+		// stale. Fixed impl bypasses cache when a resolver is supplied.
+		const second = computeTreeCost("FB", goals, tracker, (gid) => gid === "FB" ? ["sess-B"] : []);
+		assert.equal(second.breakdown[0].costUsd, 0.20,
+			"resolver-presence must bypass cache so the new sessionIds mapping is honoured");
+	});
+
 	it("deeply-nested archived descendants also contribute to the rollup", () => {
 		const tracker = freshTracker();
 		_resetTreeCostCacheForTesting(tracker);
