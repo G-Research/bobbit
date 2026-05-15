@@ -519,6 +519,7 @@ import {
 	renderRoleList,
 	renderRoleInspector,
 	renderRoleEditor,
+	fetchRolesForProject,
 	type RoleEditorDraft,
 } from "./role-manager-page.js";
 const _workflowCacheByProject = new Map<string, Workflow[]>();
@@ -1444,13 +1445,17 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
  *  state that the preview panel owns separately via `state.previewTitle` etc. */
 let _previewProposalInlineKey: string | null = null;
 function syncPreviewProposalTabsState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | {
+	const slot = state.activeProposals.goal;
+	const proposal = slot?.fields as undefined | {
 		inlineWorkflow?: Workflow;
 		inlineRoles?: Record<string, RoleData>;
 	};
+	// Identity keyed by sessionId + initial inline payload, NOT mutable title/
+	// spec; otherwise streaming token updates would wipe the user's active tab
+	// and any draft customisations. Same proposal session => keep tabs.
 	const inlineKey = proposal?.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
 	const rolesKey = proposal?.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
-	const key = `${inlineKey}|${rolesKey}`;
+	const key = `${slot?.sessionId || ""}|${inlineKey}|${rolesKey}`;
 	if (_previewProposalInlineKey === key) return;
 	_previewProposalInlineKey = key;
 	resetProposalTabsState();
@@ -1732,7 +1737,7 @@ function goalPreviewPanel() {
 				onCustomizeRole: () => {
 					const name = _proposalSelectedRoleName;
 					if (!name) return;
-					const src = (_proposalRolesCache ?? []).find((r) => r.name === name);
+					const src = proposalRolesList().find((r) => r.name === name);
 					if (!src) return;
 					if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
 					_proposalCustomizingRole = true;
@@ -1769,8 +1774,8 @@ function goalPreviewPanel() {
 				},
 				roleEditTab: _proposalRoleEditTab,
 				roleCollapsedGroups: _proposalRoleCollapsedGroups,
-				roleList: _proposalRolesCache ?? [],
-				roleListLoading: _proposalRolesLoading,
+				roleList: proposalRolesList(),
+				roleListLoading: proposalRolesLoading(),
 				availableTools: _availableTools,
 				groupPolicies: _proposalGroupPoliciesCache ?? {},
 			})}
@@ -2841,6 +2846,16 @@ let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
+/**
+ * Identity key for resetting proposal-tab + inline-customisation state.
+ *
+ * Reset is keyed by the proposal slot's `sessionId` (and the *initial*
+ * inlineWorkflow/inlineRoles hydration payload) — NOT by mutable title/spec/
+ * cwd/workflow fields. Otherwise every keystroke that streams in from the
+ * agent (or any same-proposal field bump) would wipe the user's active tab
+ * and any draft workflow/role customisations. Same proposal => keep tabs.
+ */
+let _proposalTabsInitializedFrom: string | null = null;
 // Per-goal subgoal controls. null means "inherit system preference" — only forwarded
 // to createGoal when the user actually touched the control.
 let _proposalSubgoalsAllowed: boolean | null = null;
@@ -2872,29 +2887,47 @@ let _proposalCustomizingRole = false;
 // role-manager-page.ts).
 let _proposalRoleEditTab: "prompt" | "tools" | "model" = "prompt";
 let _proposalRoleCollapsedGroups = new Set<string>();
-// Role data caches for the modal (system-scope; project-scope reuses these).
-let _proposalRolesCache: RoleData[] | null = null;
-let _proposalRolesLoading = false;
+// Role data caches for the modal, project-scoped: roles can be customised per
+// project, so we must key the cache by `projectId` ("" for system scope) and
+// re-fetch when the selected project changes. Mirrors the main Roles page's
+// `fetchRolesScoped()` semantics — must use `/api/roles?projectId=...`, not
+// the global `/api/roles`, otherwise project overrides aren't visible.
+const _proposalRolesCacheByProject = new Map<string, RoleData[]>();
+const _proposalRolesLoadingByProject = new Set<string>();
 let _proposalGroupPoliciesCache: Record<string, string> | null = null;
 let _proposalGroupPoliciesLoading = false;
 
+function proposalRolesProjectKey(): string {
+	return state.previewProjectId || "";
+}
+
+/** Read-only accessor: roles list for the modal's currently-selected project. */
+function proposalRolesList(): RoleData[] {
+	return _proposalRolesCacheByProject.get(proposalRolesProjectKey()) ?? [];
+}
+
+function proposalRolesLoading(): boolean {
+	return _proposalRolesLoadingByProject.has(proposalRolesProjectKey());
+}
+
 function ensureProposalRolesLoaded(): void {
-	if (_proposalRolesCache !== null || _proposalRolesLoading) return;
-	_proposalRolesLoading = true;
-	gatewayFetch("/api/roles")
-		.then((res) => res.ok ? res.json() : { roles: [] })
-		.then((data) => {
-			const list: RoleData[] = data.roles || data || [];
-			_proposalRolesCache = list;
-			_proposalRolesLoading = false;
-			if (!_proposalSelectedRoleName && list.length > 0) {
+	const key = proposalRolesProjectKey();
+	if (_proposalRolesCacheByProject.has(key) || _proposalRolesLoadingByProject.has(key)) return;
+	_proposalRolesLoadingByProject.add(key);
+	fetchRolesForProject(key || undefined)
+		.then((list) => {
+			_proposalRolesCacheByProject.set(key, list);
+			_proposalRolesLoadingByProject.delete(key);
+			// Only update selection / re-render if the user hasn't switched
+			// projects since this fetch started.
+			if (proposalRolesProjectKey() === key && !_proposalSelectedRoleName && list.length > 0) {
 				_proposalSelectedRoleName = list[0].name;
 			}
 			renderApp();
 		})
 		.catch(() => {
-			_proposalRolesCache = [];
-			_proposalRolesLoading = false;
+			_proposalRolesCacheByProject.set(key, []);
+			_proposalRolesLoadingByProject.delete(key);
 			renderApp();
 		});
 }
@@ -2950,7 +2983,8 @@ function resetProposalTabsState(): void {
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | {
+	const slot = state.activeProposals.goal;
+	const proposal = slot?.fields as undefined | {
 		title: string;
 		spec: string;
 		cwd?: string;
@@ -2960,13 +2994,45 @@ function syncProposalFormState(): void {
 		inlineWorkflow?: Workflow;
 		inlineRoles?: Record<string, RoleData>;
 	};
-	if (!proposal) return;
-	// Use a simple identity check to avoid re-initializing on every render.
-	// `inlineWorkflow`/`inlineRoles` are included so a proposal that mutates
-	// them re-hydrates the modal tabs (instead of clinging to stale draft state).
+	if (!slot || !proposal) return;
+
+	// --- Tab + inline-customisation reset identity ---------------------------
+	// Keyed by sessionId + initial inline payload. Mutable title/spec/cwd/
+	// workflow/options must NOT trigger a tab reset, otherwise the user loses
+	// their active tab + draft workflow/role edits every time the agent streams
+	// a token. See `_proposalTabsInitializedFrom` comment above.
 	const inlineKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
 	const rolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${inlineKey}|${rolesKey}`;
+	const tabsKey = `${slot.sessionId}|${inlineKey}|${rolesKey}`;
+	if (_proposalTabsInitializedFrom !== tabsKey) {
+		_proposalTabsInitializedFrom = tabsKey;
+		// Hydrate proposal-tab state: agent-supplied inlineWorkflow / inlineRoles
+		// pre-populate the Workflow / Roles tabs so the user can inspect and tweak
+		// the customisations before accepting. Reset every other tab control to
+		// defaults so a fresh proposal (different sessionId) doesn't leak prior
+		// draft state.
+		resetProposalTabsState();
+		if (proposal.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
+			_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
+			_proposalCustomizingWorkflow = true;
+		}
+		if (proposal.inlineRoles && typeof proposal.inlineRoles === "object") {
+			for (const [name, role] of Object.entries(proposal.inlineRoles)) {
+				if (role && typeof role === "object") {
+					_proposalInlineRoles[name] = cloneRole(role as RoleData);
+				}
+			}
+			const firstCustomized = Object.keys(_proposalInlineRoles)[0];
+			if (firstCustomized) {
+				_proposalSelectedRoleName = firstCustomized;
+			}
+		}
+	}
+
+	// --- Mutable field sync (title/spec/cwd/workflow/options/parent) ---------
+	// This is allowed to refresh on every proposal update; it does NOT touch
+	// tab state or inline-customisation drafts.
+	const key = `${slot.sessionId}|${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2976,6 +3042,9 @@ function syncProposalFormState(): void {
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
 	_proposalWorkflowId = proposal.workflow || "";
+	if (!_proposalWorkflowId && _proposalInlineWorkflow) {
+		_proposalWorkflowId = _proposalInlineWorkflow.id;
+	}
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
@@ -2983,28 +3052,6 @@ function syncProposalFormState(): void {
 	_proposalSaving = false;
 	_proposalSubgoalsAllowed = null;
 	_proposalMaxNestingDepth = null;
-
-	// Hydrate proposal-tab state: agent-supplied inlineWorkflow / inlineRoles
-	// pre-populate the Workflow / Roles tabs so the user can inspect and tweak
-	// the customisations before accepting. Reset every other tab control to
-	// defaults so a re-streamed proposal doesn't leak prior draft state.
-	resetProposalTabsState();
-	if (proposal.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
-		_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
-		_proposalCustomizingWorkflow = true;
-		if (!_proposalWorkflowId) _proposalWorkflowId = _proposalInlineWorkflow.id;
-	}
-	if (proposal.inlineRoles && typeof proposal.inlineRoles === "object") {
-		for (const [name, role] of Object.entries(proposal.inlineRoles)) {
-			if (role && typeof role === "object") {
-				_proposalInlineRoles[name] = cloneRole(role as RoleData);
-			}
-		}
-		const firstCustomized = Object.keys(_proposalInlineRoles)[0];
-		if (firstCustomized) {
-			_proposalSelectedRoleName = firstCustomized;
-		}
-	}
 }
 
 function goalProposalPanel() {
@@ -3249,7 +3296,7 @@ function goalProposalPanel() {
 		onCustomizeRole: () => {
 			const name = _proposalSelectedRoleName;
 			if (!name) return;
-			const src = (_proposalRolesCache ?? []).find((r) => r.name === name);
+			const src = proposalRolesList().find((r) => r.name === name);
 			if (!src) return;
 			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
 			_proposalCustomizingRole = true;
@@ -3286,8 +3333,8 @@ function goalProposalPanel() {
 		},
 		roleEditTab: _proposalRoleEditTab,
 		roleCollapsedGroups: _proposalRoleCollapsedGroups,
-		roleList: _proposalRolesCache ?? [],
-		roleListLoading: _proposalRolesLoading,
+		roleList: proposalRolesList(),
+		roleListLoading: proposalRolesLoading(),
 		availableTools: _availableTools,
 		groupPolicies: _proposalGroupPoliciesCache ?? {},
 	});

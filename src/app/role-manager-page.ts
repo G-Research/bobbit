@@ -84,8 +84,16 @@ let originalPrompts: Map<string, string> = new Map(); // type -> original conten
 // DATA LOADING
 // ============================================================================
 
-async function fetchRolesScoped(): Promise<RoleData[]> {
-	const projectId = getConfigProjectId();
+/**
+ * Project-scoped role fetcher. When `projectId` is provided, returns the
+ * effective role set for that project (project override + defaults). When
+ * omitted, returns the system-scope role list.
+ *
+ * Exported so external callers (e.g. the goal proposal modal in render.ts)
+ * can reuse the same scoping semantics as the main Roles page rather than
+ * fetching unscoped `/api/roles`. See `_proposalRolesCache` in render.ts.
+ */
+export async function fetchRolesForProject(projectId?: string): Promise<RoleData[]> {
 	const url = projectId ? `/api/roles?projectId=${encodeURIComponent(projectId)}` : "/api/roles";
 	try {
 		const res = await gatewayFetch(url);
@@ -96,6 +104,10 @@ async function fetchRolesScoped(): Promise<RoleData[]> {
 	} catch {
 		return [];
 	}
+}
+
+async function fetchRolesScoped(): Promise<RoleData[]> {
+	return fetchRolesForProject(getConfigProjectId());
 }
 
 export async function loadRolePageData(): Promise<void> {

@@ -745,4 +745,112 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	test("tab + customisation state survives title/spec edits on the same proposal", async ({ page }) => {
+		// Regression guard: previously, `syncProposalFormState()` keyed its
+		// initialisation identity on mutable title/spec/cwd/workflow fields,
+		// so every keystroke or streamed-token update from the agent reset
+		// `_proposalActiveTab` and wiped the inline workflow/role drafts.
+		// The identity is now keyed on the proposal slot's sessionId plus its
+		// initial inline payload — mutable title/spec edits must NOT reset
+		// the active tab or the inline customisations.
+		test.setTimeout(60_000);
+		const title = `Modal tabs persist edits ${Date.now()}`;
+		const sessionId = await createSession();
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Initial spec." });
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			// Move to the Workflow tab and open the customiser so we have draft
+			// state worth losing.
+			const wfTab = page.locator("[data-testid='goal-proposal-tab-workflow']").first();
+			await wfTab.click();
+			await expect(wfTab).toHaveAttribute("aria-selected", "true");
+			const wfPanel = page.locator("[data-testid='goal-proposal-panel-workflow']").first();
+			const customizeBtn = wfPanel
+				.locator("[data-testid='goal-proposal-workflow-customize']")
+				.first();
+			if (await customizeBtn.count() > 0) {
+				await customizeBtn.click();
+				await expect(
+					wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+				).toBeVisible({ timeout: 5_000 });
+			}
+
+			// Now mutate the title via the Goal-tab input. The proposal slot
+			// is the same proposal (same sessionId), so the modal must keep
+			// the active Workflow tab + the customisation draft.
+			const goalTab = page.locator("[data-testid='goal-proposal-tab-goal']").first();
+			await goalTab.click();
+			const titleInput = page.locator("input[placeholder='Goal title']").first();
+			await titleInput.fill(title + " (edited)");
+
+			// Drive a state change that re-renders the modal.
+			const autoStart = page.locator("[data-testid='goal-form-auto-start']").first();
+			if (await autoStart.count() > 0) await autoStart.click();
+
+			// Switch back to Workflow — the customisation must still be live
+			// (Reset button visible), proving the inline draft wasn't wiped.
+			await wfTab.click();
+			if (await customizeBtn.count() > 0) {
+				await expect(
+					wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+				).toBeVisible({ timeout: 5_000 });
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("roles tab loads project-scoped roles via /api/roles?projectId=...", async ({ page }) => {
+		// Regression guard: the modal's roles loader used to be unscoped
+		// (`gatewayFetch("/api/roles")` with a single global cache), which
+		// meant a project's role overrides never appeared in the proposal
+		// modal. It now mirrors the main Roles page by calling
+		// `GET /api/roles?projectId=<linkedProject>` and caches per-project.
+		test.setTimeout(60_000);
+		const title = `Modal roles project-scoped ${Date.now()}`;
+		const sessionId = await createSession();
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Role loader scoping." });
+
+			// Attach the request listener BEFORE navigating so we capture the
+			// initial /api/roles fetch that fires as the proposal panel mounts.
+			const seenRoleUrls: string[] = [];
+			page.on("request", (req) => {
+				const url = req.url();
+				if (/\/api\/roles(?:$|\?)/.test(url)) seenRoleUrls.push(url);
+			});
+
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			// Open the Roles tab — forces a render that calls
+			// ensureProposalRolesLoaded for the current previewProjectId.
+			await page.locator("[data-testid='goal-proposal-tab-roles']").first().click();
+			const rolesPanel = page.locator("[data-testid='goal-proposal-panel-roles']").first();
+			await expect(rolesPanel).toBeVisible();
+			await expect(rolesPanel.locator(".role-row").first()).toBeVisible({ timeout: 15_000 });
+
+			// Resolve the linked project id from the proposal slot via the API
+			// — this matches how `state.previewProjectId` is derived in render.
+			const sessResp = await apiFetch(`/api/sessions/${sessionId}`);
+			const sess = await sessResp.json().catch(() => null);
+			const linkedProjectId: string | null = sess?.projectId || sess?.session?.projectId || null;
+
+			// The modal MUST have hit /api/roles at least once.
+			expect(seenRoleUrls.length, `roles request count (saw: ${seenRoleUrls.join(", ")})`).toBeGreaterThan(0);
+			// If a project is linked, at least one request must carry that
+			// projectId; this is the regression pin for the unscoped global
+			// cache the modal previously shipped. (When no project is linked,
+			// the unscoped URL is correct.)
+			if (linkedProjectId) {
+				const scoped = seenRoleUrls.find((u) => u.includes(`projectId=${encodeURIComponent(linkedProjectId)}`));
+				expect(scoped, `expected /api/roles?projectId=${linkedProjectId} (saw: ${seenRoleUrls.join(", ")})`).toBeTruthy();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });
