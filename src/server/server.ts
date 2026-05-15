@@ -794,7 +794,12 @@ export function createGateway(config: GatewayConfig) {
 			return session?.clients;
 		},
 		undefined,
-		(event) => notifySessionOfBgExit(sessionManager, event),
+		(event) => {
+			// Gate agent-facing wake/prompt on user preference. Default ON; suppress only when explicitly false.
+			// WS bg_process_exited broadcasts, process status, and explicit bash_bg wait/logs are unaffected.
+			if (preferencesStore.get("notifyAgentOnBgProcessExit") === false) return;
+			notifySessionOfBgExit(sessionManager, event);
+		},
 	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
