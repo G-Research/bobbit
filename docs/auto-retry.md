@@ -140,9 +140,17 @@ banner below the composer:
 > ↻ *Retrying in ~4s due to provider overload…* (attempt #3)
 
 When the retry fires, or the user intervenes, the server broadcasts
-`auto_retry_cancelled` and the banner disappears. The session status remains
-`"idle"` throughout — the banner is the only visible indicator of the pending
-wait.
+`auto_retry_cancelled` (fields: `reason: "explicit-retry" | "new-prompt" |
+"terminated" | "shutdown"`, `cancelledAt: number`) and the banner disappears.
+The session status remains `"idle"` throughout — the banner is the only
+visible indicator of the pending wait.
+
+**Wire-shape pin.** Both events are typed in the WS protocol union as
+`AutoRetryPendingEvent` / `AutoRetryCancelledEvent` exported from
+`src/server/ws/protocol.ts`. The producer (`session-manager.ts`) and consumer
+(`src/app/remote-agent.ts`) both rely on this typing — no runtime `typeof`
+guards on the consumer side. If you need to add or rename a field, update the
+protocol types first; both ends will fail to type-check until they agree.
 
 ---
 
