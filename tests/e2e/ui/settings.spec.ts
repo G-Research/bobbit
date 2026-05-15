@@ -174,6 +174,70 @@ test.describe("Settings (full-stack UI)", () => {
 		await expect(finalCheckbox).toBeChecked();
 	});
 
+	test("notify-bg-exit toggle persists after reload", async ({ page }) => {
+		try {
+			await openApp(page);
+			await navigateToHash(page, "#/settings/system/general");
+
+			await expect(
+				page.getByText("Notify agents when background processes exit"),
+			).toBeVisible({ timeout: 10_000 });
+			const checkbox = page.locator("[data-testid='general-notify-bg-exit']");
+			await expect(checkbox).toBeVisible({ timeout: 5_000 });
+
+			// Default: ON (preference unset).
+			await expect(checkbox).toBeChecked();
+
+			// Uncheck → PUT /api/preferences → reload → still unchecked, preference shows false.
+			let responsePromise = page.waitForResponse(
+				resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+			);
+			await checkbox.click();
+			await expect(checkbox).not.toBeChecked();
+			await responsePromise;
+
+			const prefsAfterUncheck = await (await apiFetch("/api/preferences")).json();
+			expect(prefsAfterUncheck.notifyAgentOnBgProcessExit).toBe(false);
+
+			await page.reload();
+			await expect(
+				page.locator("button").filter({ hasText: "Settings" }).first(),
+			).toBeVisible({ timeout: 15_000 });
+			await navigateToHash(page, "#/settings/system/general");
+			await expect(
+				page.getByText("Notify agents when background processes exit"),
+			).toBeVisible({ timeout: 10_000 });
+			const afterReload = page.locator("[data-testid='general-notify-bg-exit']");
+			await expect(afterReload).toBeVisible({ timeout: 5_000 });
+			await expect(afterReload).not.toBeChecked();
+
+			// Re-check → PUT → reload → still checked.
+			responsePromise = page.waitForResponse(
+				resp => resp.url().includes("/api/preferences") && resp.request().method() === "PUT" && resp.status() === 200,
+			);
+			await afterReload.click();
+			await expect(afterReload).toBeChecked();
+			await responsePromise;
+
+			await page.reload();
+			await expect(
+				page.locator("button").filter({ hasText: "Settings" }).first(),
+			).toBeVisible({ timeout: 15_000 });
+			await navigateToHash(page, "#/settings/system/general");
+			await expect(
+				page.getByText("Notify agents when background processes exit"),
+			).toBeVisible({ timeout: 10_000 });
+			const finalCheckbox = page.locator("[data-testid='general-notify-bg-exit']");
+			await expect(finalCheckbox).toBeChecked();
+		} finally {
+			// Reset preference to default (unset) so subsequent tests aren't affected.
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ notifyAgentOnBgProcessExit: null }),
+			});
+		}
+	});
+
 	test("skills catalog budget: change, persists across reload, reset clears preference", async ({ page }) => {
 		await openApp(page);
 		await navigateToHash(page, "#/settings/system/general");

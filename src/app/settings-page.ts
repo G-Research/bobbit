@@ -105,6 +105,7 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let settingsNotifyAgentOnBgProcessExit = true;
 // Skills-catalog byte budget override. `null` means "use server default" (no preference set).
 let settingsSkillsCatalogBudget: number | null = null;
 
@@ -1929,6 +1930,7 @@ function loadGeneralSettings() {
 					settingsShowTimestamps = !!prefs.showTimestamps;
 					// Default ON when unset — only an explicit `false` opts out.
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
+					settingsNotifyAgentOnBgProcessExit = prefs.notifyAgentOnBgProcessExit !== false;
 					const raw = prefs.skillsCatalogBudget;
 					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
 					renderApp();
@@ -1990,6 +1992,17 @@ async function resetSkillsCatalogBudget(): Promise<void> {
 		await gatewayFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ skillsCatalogBudget: null }),
+		});
+	} catch {}
+}
+
+async function toggleNotifyAgentOnBgProcessExit(): Promise<void> {
+	settingsNotifyAgentOnBgProcessExit = !settingsNotifyAgentOnBgProcessExit;
+	renderApp();
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ notifyAgentOnBgProcessExit: settingsNotifyAgentOnBgProcessExit }),
 		});
 	} catch {}
 }
@@ -2090,6 +2103,21 @@ function renderGeneralTab() {
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
 					Play a short notification beep when an agent finishes its turn.
+				</p>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="flex items-center gap-2 cursor-pointer">
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						data-testid="general-notify-bg-exit"
+						.checked=${settingsNotifyAgentOnBgProcessExit}
+						@change=${toggleNotifyAgentOnBgProcessExit}
+					/>
+					<span class="text-sm font-medium text-foreground">Notify agents when background processes exit</span>
+				</label>
+				<p class="text-xs text-muted-foreground ml-6">
+					Wake the owning agent with a bash_bg summary when one of its background processes finishes. UI process badges and explicit bash_bg wait/logs still work when this is off.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">
