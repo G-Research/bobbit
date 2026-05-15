@@ -171,3 +171,149 @@ has a starting point.
   Part 1 trigger — a UI control landing visually inconsistent with its
   peer toggles — showed the existing "Consistency is kindness" guidance
   was not sticking through review.
+
+---
+
+## Addendum — 2026-05-15: focused re-audit of merge `46e21256`
+
+### Why this addendum exists
+
+The original audit above (Part 2 of `goal/audit-subg-225e4d3d`) seeded
+its probe list from the five then-known regressions and did **not**
+enumerate the proposal-modal customisation surface. That methodology
+gap let a sixth silent loss survive — confirmed below — and triggered
+the `goal/proposal-modal-tabs` follow-up subgoal. This addendum
+documents the focused re-audit of merge `46e21256` as specified by the
+follow-up subgoal's design doc.
+
+### Method
+
+Spec called for two diffs:
+
+1. `git diff 46e21256^1..d4be2150 -- src/app/ src/server/` (what the
+   child branch intended to land).
+2. `git diff 46e21256^1..46e21256 -- src/app/ src/server/` (what
+   actually landed in the merge result).
+
+Anything present in (1) but missing from (2) is a silent-loss
+candidate.
+
+**Limitation: `d4be2150` is not resolvable from this worktree.**
+
+- `git cat-file -t d4be2150` → `fatal: Not a valid object name`.
+- `git fetch --all` did not surface it. The original child branch
+  `goal/plan-propo-d4be2150` appears to have been pruned after the
+  merge; the object is presumably unreferenced.
+- `46e21256`'s commit subject names `d4be2150` as the child tip, but
+  `git show 46e21256 --format='%P'` reports parents
+  `0ae9c6dc … 23b9c38b …`. Reading `c1d7a9e1 "Merge
+  origin/goal/audit-subg-225e4d3d into goal/plan-propo-d4be2150"` and
+  the commit-graph topology, the child-branch lineage is the **first**
+  parent (`0ae9c6dc`), not the second. Parent ordering is inverted
+  from the usual "merge X into HEAD" convention.
+
+Given the missing object, this addendum substitutes `46e21256^1`
+(== `0ae9c6dc`, the child-branch tip at merge time, which transitively
+contains the `d4be2150` work via the c1d7a9e1 "merge audit-subg into
+child" commit) for the spec's `d4be2150`. Diff (1) therefore collapses
+to **the changes the child branch contributed that did not reach the
+merge result**, computed as the set difference between (a) symbols
+present at `46e21256^1` and (b) symbols present at `46e21256`. This is
+strictly stronger than the literal spec because it also catches losses
+from commits that landed on the child branch after `d4be2150` but
+before the merge.
+
+### Quantitative finding — `src/app/render.ts`
+
+| Symbol | At `46e21256^1` (child tip) | At `46e21256` (merge result) | At `HEAD` |
+|---|---:|---:|---:|
+| `inlineWorkflowYaml` | **13** | 0 | 0 |
+| `inlineRolesYaml` | **11** | 0 | 0 |
+| `inlineWorkflow` (bare) | 27 | 0 | 0 |
+| `inlineRoles` (bare) | 33 | 0 | 0 |
+| `_proposalInlineWorkflow` | 21 | 0 | 0 |
+| `_proposalInlineRoles` | 20 | 0 | 0 |
+
+`git diff --stat 46e21256^1 46e21256 -- src/app/` reports `render.ts`
+at **697 lines changed, -617 net** — the merge resolved the conflict
+by taking the trunk side of `render.ts` wholesale. Every UI surface
+tying the goal-proposal modal to inline workflow/role customisation
+was dropped in a single hunk, and CI stayed green because no test
+referenced any of the dropped symbols.
+
+### Restoration choice
+
+The follow-up subgoal explicitly chooses **not** to re-introduce the
+old `<details>` + raw-YAML `<textarea>` UX, even though that is what
+was literally dropped. User feedback on the regression rejected the
+old UX as inconsistent with the rest of the app. The replacement is
+the tabbed `Goal / Workflow / Roles` modal that reuses the main
+Workflows and Roles page renderers. The behavioural contract is
+preserved (operators can still inspect and customise workflow + roles
+at proposal time); the surface is upgraded.
+
+This is documented here so a future audit does not flag
+"inlineWorkflowYaml still missing at HEAD" as a fresh regression — it
+is intentionally not restored, superseded by the tabbed UX.
+
+### Other candidates examined in the same merge
+
+| File / symbol | Verdict | Evidence |
+|---|---|---|
+| `src/server/server.ts` `const inlineWorkflow = body?.workflow` block in `POST /api/goals` | present at HEAD | `git grep -n inlineWorkflow HEAD -- src/server/server.ts` shows lines 3987–3990; restored by `686ed9fd "Fix propose_goal silently dropping inlineWorkflow + inlineRoles"` after this same `46e21256` loss |
+| `src/server/proposals/proposal-types.ts` carries `inlineWorkflow` / `inlineRoles` on the proposal payload type | present at HEAD | grep-confirmed |
+| `src/server/agent/nested-goal-routes.ts` accepts `inlineWorkflow` / `inlineRoles` | present at HEAD | grep-confirmed |
+| `src/server/agent/spawn-child-workflow.ts` consumes `inlineWorkflow` | present at HEAD | grep-confirmed |
+| `src/server/agent/system-prompt.ts` / `team-manager.ts` / `verification-harness.ts` / `goal-manager.ts` / `goal-store.ts` / `resolve-role.ts` consume `inlineRoles` | present at HEAD | grep-confirmed |
+| `src/app/settings-page.ts` (+63 lines in merge) | present at HEAD | unrelated to proposal-modal regression; functional |
+| `src/app/api.ts` `createGoal` opts `workflow?: unknown` + `inlineRoles?: Record<string, unknown>` | present at HEAD | line 892, confirmed; **pinned** by this fix's new source-pins |
+| `src/server/agent/project-assistant.ts` dynamic-import surface (called out in design doc) | present at HEAD | grep-confirmed; no further loss |
+| `src/server/state-migration/seed-default-workflows.ts` (touched in merge) | present at HEAD | functional change, not a loss |
+
+The **only** silently-dropped surface from `46e21256` still missing
+from HEAD is the `src/app/render.ts` proposal-modal customisation UI
+documented above. Every server-side counterpart was already restored
+by `686ed9fd` (which the original audit missed because it was
+grep-positive at HEAD — the original audit confirmed the server side
+intact without realising the client side that *fed* those endpoints
+was gone).
+
+### New source-pins added
+
+`tests/source-pin-merge-invariants.test.ts` now also pins:
+
+1. `src/app/render.ts` contains `inlineWorkflow` (draft-scoped state).
+2. `src/app/render.ts` contains `inlineRoles` (draft-scoped state).
+3. `src/app/render.ts` contains `data-testid="goal-proposal-tab-workflow"`.
+4. `src/app/render.ts` contains `data-testid="goal-proposal-tab-roles"`.
+5. `src/app/api.ts::createGoal` opts declare `workflow?: …`.
+6. `src/app/api.ts::createGoal` opts declare `inlineRoles?: …`.
+
+Each failure message names regression commit `46e21256` and "this
+proposal-modal-tabs fix" (the final commit hash will be filled in by
+the team lead once the goal lands).
+
+Pins (1)–(4) deliberately fail until the modal-integration agent
+restores the proposal modal's Workflow/Roles tabs in `render.ts`. That
+is the intended pre-implementation state: the pins are reporting the
+regression they will defend against. Pins (5)–(6) already pass — the
+wire surface in `api.ts` survived `46e21256` intact.
+
+### Methodology fix for future audits
+
+The original audit's probe list was seeded from known-restored
+regressions. That class of probe will never surface a *new* silent
+loss whose symbol is unique to the dropped hunk. Future audits must
+additionally:
+
+1. For every merge with a large net-deletion on a UI module (here:
+   `render.ts` lost 617 net lines in a single merge), enumerate the
+   distinct symbols present on each parent and diff the sets, not just
+   the line counts.
+2. For every server-side wire field (`inlineWorkflow`, `inlineRoles`,
+   any new `propose_*` payload field), require a paired UI consumer
+   pin. A wire field with no UI consumer is itself a silent-loss
+   signal.
+
+These rules are noted here for the next audit owner; they are not yet
+codified as tooling.
