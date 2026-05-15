@@ -7630,6 +7630,7 @@ async function handleApiRoute(
 			json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
+				relPath: path.posix.join(sessionId, entry),
 				entry,
 				mtime: Math.floor(stat.mtimeMs),
 			});
