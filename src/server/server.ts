@@ -3641,9 +3641,17 @@ async function handleApiRoute(
 		const goalId = goalTreeCostMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const rootGoalId = goal.rootGoalId ?? goal.id;
+		// Dashboard tree-cost is intentionally rooted at the REQUESTED goal,
+		// not its topmost ancestor (`goal.rootGoalId`). Opening a subgoal's
+		// dashboard must show the rollup of that subgoal + its descendants only;
+		// using `rootGoalId` would leak the whole project's grand total down to
+		// every descendant view. `computeTreeCost` consumes `walkGoalSubtree`
+		// for the descendant walk — do not add another traversal helper here.
+		// Pinned by tests/api-goals-tree-cost.test.ts and
+		// tests/e2e/ui/tree-cost-rollup.spec.ts — do not "fix" this back to
+		// `goal.rootGoalId ?? goal.id` without tripping those tests.
 		if (!goal.projectId) {
-			json({ rootGoalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
+			json({ rootGoalId: goalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
 			return;
 		}
 		const ctx = projectContextManager.getContextForGoal(goalId);
@@ -3651,7 +3659,7 @@ async function handleApiRoute(
 		const allGoals = ctx.goalStore.getAll();
 		const costTracker = sessionManager.getCostTracker(goal.projectId);
 		const result = computeTreeCost(
-			rootGoalId,
+			goalId,
 			allGoals,
 			costTracker,
 			(gid) => sessionManager.getAllSessionIdsForGoal(gid),
