@@ -193,6 +193,34 @@ describe("LspDefinitionRenderer", () => {
 		const text = renderText(r, params, mkResult({ error: "lsp_unavailable", message: "boom" }));
 		assert.match(text, /LSP unavailable/);
 	});
+	it("renders lsp_symbol_not_found as warning hint, not as a location", () => {
+		const text = renderText(r, params, mkResult({ error: "lsp_symbol_not_found", message: "no match for foo", hint: "refine" }));
+		assert.match(text, /Symbol not found/);
+		assert.doesNotMatch(text, /undefined:/, "must not render a bogus undefined:1 location");
+	});
+	it("renders ambiguous shorthand with candidate list, not a bogus location", () => {
+		const text = renderText(r, params, mkResult({
+			ambiguous: true, symbol: "add",
+			candidates: [
+				{ name: "add", path: "src/math.ts", range: { start: { line: 0, character: 16 } } },
+				{ name: "add", path: "src/adder.ts", range: { start: { line: 10, character: 1 } } },
+			],
+			hint: "pass path to narrow",
+		}));
+		assert.match(text, /Ambiguous symbol/);
+		assert.match(text, /src\/math\.ts:1/);
+		assert.match(text, /src\/adder\.ts:11/);
+		assert.doesNotMatch(text, /undefined:/, "must not render a bogus undefined:1 location");
+	});
+	it("unwraps shorthand-decorated single Location (object spread)", () => {
+		const text = renderText(r, params, mkResult({
+			resolvedFrom: { symbolName: "add", matched: "src/math.ts:1" },
+			path: "src/math.ts",
+			range: { start: { line: 0, character: 16 } },
+		}));
+		assert.match(text, /src\/math\.ts:1/);
+		assert.match(text, /Resolved/);
+	});
 });
 
 // ── LspReferencesRenderer ────────────────────────────────────────────
@@ -214,6 +242,19 @@ describe("LspReferencesRenderer", () => {
 	it("handles empty results", () => {
 		const text = renderText(r, params, mkResult([]));
 		assert.match(text, /No references found/);
+	});
+	it("unwraps shorthand-wrapped array under .result", () => {
+		const text = renderText(r, params, mkResult({
+			resolvedFrom: { symbolName: "add", matched: "src/math.ts:1" },
+			result: [
+				{ path: "a.ts", range: { start: { line: 0, character: 0 } } },
+				{ path: "b.ts", range: { start: { line: 2, character: 0 } } },
+			],
+		}));
+		assert.match(text, /2 references in 2 files/);
+		assert.match(text, /a\.ts/);
+		assert.match(text, /b\.ts/);
+		assert.match(text, /Resolved/);
 	});
 });
 

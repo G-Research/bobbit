@@ -113,12 +113,22 @@ export function renderLocationRow(loc: LspLocation): TemplateResult {
 
 // ── Error envelope ───────────────────────────────────────────────────
 
-const LSP_ERROR_CODES = new Set(["lsp_unavailable", "lsp_capacity", "lsp_timeout"]);
+const LSP_ERROR_CODES = new Set([
+	"lsp_unavailable",
+	"lsp_capacity",
+	"lsp_timeout",
+	"lsp_gateway_unreachable",
+	"lsp_route_missing",
+	"lsp_symbol_not_found",
+]);
 
 const ERROR_HINTS: Record<string, string> = {
 	lsp_unavailable: "LSP unavailable — try grep.",
 	lsp_capacity: "LSP at capacity — retry shortly or fall back to grep.",
 	lsp_timeout: "LSP timed out — try grep for this lookup.",
+	lsp_gateway_unreachable: "LSP gateway unreachable — try grep.",
+	lsp_route_missing: "LSP route not registered — likely a server build regression.",
+	lsp_symbol_not_found: "Symbol not found in workspace.",
 };
 
 export function isLspErrorEnvelope(body: any): boolean {
@@ -150,6 +160,67 @@ export function parseLspResult(result: ToolResultMessage | undefined): any | nul
 	} catch {
 		return null;
 	}
+}
+
+// ── Shorthand `resolvedFrom` / `ambiguous` envelopes ──────────────
+
+/**
+ * Unwrap shorthand decoration produced by defaults/tools/lsp/extension.ts.
+ *
+ * The extension wraps shorthand (symbolName) results two ways:
+ *   - Array / scalar / null results → `{ resolvedFrom, result: <body> }`
+ *   - Object results               → `{ resolvedFrom, ...body }`
+ *
+ * This helper normalises both back into `{ resolvedFrom, body }`.
+ */
+export function unwrapShorthand(data: any): { resolvedFrom?: { symbolName: string; matched: string }; body: any } {
+	if (!data || typeof data !== "object" || Array.isArray(data) || !("resolvedFrom" in data)) {
+		return { resolvedFrom: undefined, body: data };
+	}
+	const { resolvedFrom, ...rest } = data;
+	const restKeys = Object.keys(rest);
+	if (restKeys.length === 1 && restKeys[0] === "result") {
+		return { resolvedFrom, body: (rest as any).result };
+	}
+	return { resolvedFrom, body: rest };
+}
+
+export function renderResolvedFromBanner(rf: { symbolName: string; matched: string } | undefined): TemplateResult | "" {
+	if (!rf) return "";
+	return html`
+		<div class="text-xs text-muted-foreground mt-0.5">
+			Resolved <span class="font-mono">${rf.symbolName}</span> →
+			<span class="font-mono">${rf.matched}</span>
+		</div>
+	`;
+}
+
+export function isAmbiguousShorthand(data: any): boolean {
+	return !!data && typeof data === "object" && data.ambiguous === true && Array.isArray(data.candidates);
+}
+
+export function renderAmbiguousShorthand(data: any): TemplateResult {
+	const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+	return html`
+		<div class="mt-2 text-sm rounded border border-amber-500/40 bg-amber-500/10 p-2">
+			<div class="flex items-start gap-2">
+				<span class="inline-block text-amber-600 dark:text-amber-500 shrink-0">${icon(AlertTriangle, "sm")}</span>
+				<div class="min-w-0">
+					<div class="text-amber-700 dark:text-amber-400 font-medium">
+						Ambiguous symbol <span class="font-mono">${data.symbol ?? ""}</span> — ${candidates.length} candidate${candidates.length === 1 ? "" : "s"}
+					</div>
+					${data.hint ? html`<div class="text-xs text-muted-foreground mt-0.5">${data.hint}</div>` : ""}
+				</div>
+			</div>
+			<div class="mt-1 pl-6 space-y-0.5">
+				${candidates.map((c: any) => {
+					const p = normalisePath(String(c.path ?? "?"));
+					const line = (c.range?.start?.line ?? 0) + 1;
+					return html`<div class="font-mono text-xs"><span class="text-muted-foreground">${c.name ?? ""}</span> <span>${p}:${line}</span></div>`;
+				})}
+			</div>
+		</div>
+	`;
 }
 
 /** Compact path:line:col cell. Used by diagnostics rendering. */

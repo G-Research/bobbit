@@ -73,7 +73,7 @@ class TypescriptLspClient implements LspClient {
 		this.worktreePath = worktreePath;
 	}
 
-	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void): Promise<void> {
+	async start(sandbox: SpawnOpts["sandbox"], onClose?: (graceful: boolean) => void, requireSandbox?: boolean): Promise<void> {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
 		// Only attach the bridge when a sandbox container is actually running for
@@ -96,6 +96,7 @@ class TypescriptLspClient implements LspClient {
 			// (Dockerfile: RUN npm install -g typescript typescript-language-server).
 			sandboxCmd: ["typescript-language-server", "--stdio"],
 			sandbox,
+			requireSandbox,
 		});
 
 		this.proc.child.on("exit", (code) => {
@@ -232,8 +233,16 @@ class TypescriptLspClient implements LspClient {
 		if (absPath) {
 			const uri = pathToUri(absPath);
 			const before = this.diagVersionByUri.get(uri) ?? 0;
+			// Register the diagnostics wait BEFORE didOpen/didChange so a fast
+			// `publishDiagnostics` notification can't race us. If the listener
+			// is added after ensureDocOpen() the server may have already replied,
+			// leaving `lastReceiveAt = 0` and forcing the full 1500ms wait. The
+			// poll also treats an already-bumped version as evidence of a
+			// publish (initialising lastReceiveAt) to cover the case where a
+			// notification arrived between registration and poll start.
+			const waitPromise = this.waitForDiagnostics(uri, before, 1500, 200);
 			await this.ensureDocOpen(absPath);
-			await this.waitForDiagnostics(uri, before, 1500, 200);
+			await waitPromise;
 			return this.diagnosticsByUri.get(uri) ?? [];
 		}
 		// workspace-wide aggregate
@@ -267,7 +276,15 @@ class TypescriptLspClient implements LspClient {
 			const poll = setInterval(() => {
 				if (settled) return;
 				const cur = this.diagVersionByUri.get(uri) ?? 0;
-				if (cur > beforeVersion && lastReceiveAt && Date.now() - lastReceiveAt >= settleMs) finish();
+				if (cur > beforeVersion) {
+					// Race recovery: if the publish landed before our listener was
+					// attached (or between attach and first poll tick) `lastReceiveAt`
+					// is still 0 even though the version bumped. Seed it now so the
+					// settle countdown starts immediately rather than waiting the
+					// full maxWait.
+					if (!lastReceiveAt) lastReceiveAt = Date.now();
+					if (Date.now() - lastReceiveAt >= settleMs) finish();
+				}
 			}, 30);
 			(poll as any).unref?.();
 			const hardTimeout = setTimeout(finish, maxWait);
@@ -340,7 +357,7 @@ export class TypescriptLspFactory implements LspClientFactory {
 	}
 	async spawn(opts: SpawnOpts): Promise<LspClient> {
 		const client = new TypescriptLspClient(opts.worktreePath);
-		await client.start(opts.sandbox, opts.onClose);
+		await client.start(opts.sandbox, opts.onClose, opts.requireSandbox);
 		return client;
 	}
 }

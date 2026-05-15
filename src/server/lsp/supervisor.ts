@@ -130,6 +130,12 @@ export class LspSupervisor {
 	 *  in 60s reliably trips the cooldown even though we delete the dead
 	 *  entry on every exit. */
 	private crashState = new Map<string, { count: number; lastAt: number; disabledUntil: number }>();
+	/** Worktrees whose sessions run inside a sandbox container. LSP spawns
+	 *  for these worktrees are required to use the sandbox bridge — host
+	 *  fallback is refused (`LspSandboxRequiredError`). Populated by
+	 *  session-setup AFTER `applySandboxWiring` returns and the project
+	 *  container is live. */
+	private sandboxedWorktrees = new Set<string>();
 	private evictedTotal = 0;
 	private shuttingDown = false;
 	private watchFiles: string[];
@@ -171,6 +177,29 @@ export class LspSupervisor {
 
 	/** Whether a sandbox bridge is configured (finding #6 plumbing check). */
 	hasSandboxBridge(): boolean { return !!this.sandbox; }
+
+	/**
+	 * Mark a worktree as sandboxed so subsequent LSP spawns refuse the host
+	 * fallback. Must only be called AFTER `applySandboxWiring()` has succeeded
+	 * — otherwise the sandbox bridge has no container ID yet and the very next
+	 * `ensure()`/`preWarm()` will fail closed unnecessarily. session-setup
+	 * owns the ordering.
+	 */
+	markSandboxed(worktreePath: string): void {
+		this.sandboxedWorktrees.add(path.resolve(worktreePath));
+	}
+
+	/** Reverse `markSandboxed`. Called by session-setup on teardown so a
+	 *  re-used worktree path (after cleanup) doesn't keep the sandbox-only
+	 *  flag set indefinitely. */
+	unmarkSandboxed(worktreePath: string): void {
+		this.sandboxedWorktrees.delete(path.resolve(worktreePath));
+	}
+
+	/** Test/debug accessor. */
+	isSandboxed(worktreePath: string): boolean {
+		return this.sandboxedWorktrees.has(path.resolve(worktreePath));
+	}
 
 	/** Set the result of the post-boot route self-check. Called by the server boot loop. */
 	setRouteSelfCheck(value: string): void {
@@ -286,12 +315,18 @@ export class LspSupervisor {
 		if (this.entries.size >= this.maxServers) {
 			this.evictLru(id);
 		}
-		const spawnOpts: SpawnOpts = {
+	const spawnOpts: SpawnOpts = {
 			worktreePath: key.worktreePath,
 			sandbox: this.sandbox,
 			// Finding #3: factories that honour `onClose` will invoke this on
 			// unexpected child exit so the supervisor can drop the dead entry.
 			onClose: (graceful: boolean) => this.handleEntryClose(id, graceful),
+			// Security: when this worktree belongs to a sandboxed session, the
+			// adapter must refuse host-fallback if no container is available.
+			// Prevents untrusted sandbox files from being evaluated by a
+			// host-side language server (e.g. tsserver) when sandbox wiring
+			// is racing with preWarm or has not yet bound the container.
+			requireSandbox: this.sandboxedWorktrees.has(key.worktreePath),
 		};
 		const newEntry: Entry = {
 			key,
@@ -370,6 +405,7 @@ export class LspSupervisor {
 	/** Force-stop every server rooted at the worktree path. */
 	async shutdownForWorktree(worktreePath: string): Promise<void> {
 		const wp = path.resolve(worktreePath);
+		this.sandboxedWorktrees.delete(wp);
 		const promises: Promise<void>[] = [];
 		for (const [id, entry] of [...this.entries.entries()]) {
 			if (entry.key.worktreePath !== wp) continue;
