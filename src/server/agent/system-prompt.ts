@@ -270,17 +270,19 @@ export function lspToolSelectionRuleForRole(roleName?: string, rolePrompt?: stri
 }
 
 /**
- * Compute the effective role-prompt text for prompt assembly: the supplied
- * `rolePrompt` with the LSP tool-selection rule appended when applicable.
- * Returns `undefined` when there is no role prompt to render.
+ * Compute the effective role-prompt text for prompt assembly.
+ *
+ * Historically this also appended a per-role `## Tool selection — symbol queries`
+ * section via `lspToolSelectionRuleForRole()`. That rule now lives as a single
+ * canonical section (`## Tool selection — LSP before text search`) in the base
+ * `defaults/system-prompt.md`, which every agent receives, so the per-role
+ * injection is intentionally suppressed here to avoid duplicate competing
+ * sections. `lspToolSelectionRuleForRole` and `LSP_TOOL_SELECTION_HEADER`
+ * remain exported for backward compatibility with existing tests/callers.
  */
-function effectiveRolePrompt(roleName?: string, rolePrompt?: string): string | undefined {
+function effectiveRolePrompt(_roleName?: string, rolePrompt?: string): string | undefined {
 	const base = rolePrompt?.trim();
-	const rule = lspToolSelectionRuleForRole(roleName, rolePrompt);
-	if (!base && !rule) return undefined;
-	if (!rule) return base;
-	if (!base) return rule;
-	return `${base}\n\n${rule}`;
+	return base ? base : undefined;
 }
 
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -439,12 +441,12 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. LSP symbol-lookup hint (injected when lsp_* tools are active and LSP is enabled)
-	{
-		const lspDisabled = String(parts.projectConfigStore?.get("lsp_disabled") ?? "false").toLowerCase() === "true";
-		const lspHint = buildLspSymbolLookupHint(parts.allowedTools, lspDisabled);
-		if (lspHint) sections.push(lspHint);
-	}
+	// 5.5. LSP symbol-lookup hint — superseded by the canonical
+	// `## Tool selection — LSP before text search` section in the base system
+	// prompt (`defaults/system-prompt.md`). The hint is no longer appended here
+	// to avoid duplicate competing LSP sections in the final prompt.
+	// `buildLspSymbolLookupHint` remains exported for backward compatibility.
+	void buildLspSymbolLookupHint;
 
 	// 5.6. Available Skills (autonomous activation catalog)
 	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
