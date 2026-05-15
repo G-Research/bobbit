@@ -9,7 +9,7 @@
  * (not import time) so each worker gets the right server.
  */
 
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -326,8 +326,35 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 	} catch { /* best-effort */ }
 }
 
+/**
+ * For POST /api/projects, canonicalize the request body's `rootPath` through
+ * realpathSync. macOS temp dirs live under /var/folders/... which is a symlink
+ * to /private/var/folders/...; the server rejects symlinked roots with
+ * code=symlink_root. Tests that deliberately exercise the 400 path use
+ * `rawApiFetch` instead, which skips this canonicalization.
+ */
+function maybeCanonicalizeProjectRoot(path: string, opts: RequestInit): RequestInit {
+	const method = (opts.method || "GET").toUpperCase();
+	if (method !== "POST" || path !== "/api/projects") return opts;
+	const body = opts.body;
+	let parsed: Record<string, unknown> | undefined;
+	if (typeof body === "string") {
+		try { parsed = JSON.parse(body); } catch { return opts; }
+	} else if (body && typeof body === "object" && !(body instanceof ArrayBuffer) && !(body instanceof Uint8Array)) {
+		parsed = body as unknown as Record<string, unknown>;
+	} else {
+		return opts;
+	}
+	if (!parsed || typeof parsed.rootPath !== "string" || !parsed.rootPath) return opts;
+	let canonical: string;
+	try { canonical = realpathSync(parsed.rootPath); } catch { return opts; }
+	if (canonical === parsed.rootPath) return opts;
+	return { ...opts, body: JSON.stringify({ ...parsed, rootPath: canonical }) };
+}
+
 /** Authenticated REST fetch against the E2E gateway. Retries on transient TCP errors. */
 export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	opts = maybeCanonicalizeProjectRoot(path, opts);
 	const injected = await maybeInjectProjectId(path, opts);
 	const maxRetries = 4;
 	const method = (injected.method || opts.method || "GET").toUpperCase();
