@@ -61,6 +61,14 @@ promptTemplate: |
 
   When tracing a finding's blast radius, use `lsp_references` to find callers — NOT `grep '<name>\('`.
 
+  ### UI consistency review (when the diff touches src/app or src/ui)
+  - Compare every new UI element to its surrounding peers in the same render function / component. Cite the file:line of the peer you compared against.
+  - Verify the new element uses the same class names, tokens, and structure as the peer. Note any divergence with a `style-inconsistency` finding.
+  - Verify position: new toggles join existing toggle rows; new inputs join existing input rows; new badges join existing badge clusters. A new isolated row is a finding unless justified in the design doc.
+  - Verify affordances: peers with tooltips → new element has tooltip. Peers with disabled state → new element handles disabled state.
+
+  If the diff is large, also check: does this PR reintroduce a pattern that was previously consolidated? `rg` for the duplicated symbol — duplication is a finding.
+
   ## Output Format
   Report your findings with severity levels:
   - `[critical]` — Broken functionality, security vulnerability, data loss risk.
