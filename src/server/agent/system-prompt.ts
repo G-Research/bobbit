@@ -292,10 +292,15 @@ export interface PromptSection {
 /**
  * Assemble the full system prompt from its parts and write to a temp file.
  *
- * Order:
+ * Order (stable prefix first, volatile sections last, for provider prompt-cache reuse):
  *   1. Global system prompt (config/system-prompt.md)
  *   2. AGENTS.md from the session's working directory (with @refs resolved inline)
- *   3. Goal spec (if session belongs to a goal)
+ *   2.5. Working directory instructions
+ *   3. Tool documentation
+ *   4. Available Skills catalog
+ *   5. Goal spec + role (if session belongs to a goal)
+ *   6. Current Task
+ *   7. Workflow upstream-gate context
  *
  * Returns the path to the assembled prompt file, or undefined if all parts
  * are empty (in which case no --system-prompt should be passed to the agent).
@@ -336,7 +341,20 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		);
 	}
 
-	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat)
+	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching)
+	if (parts.toolDocs?.trim()) {
+		sections.push(parts.toolDocs.trim());
+	}
+
+	// 4. Available Skills (autonomous activation catalog — stable across turns)
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
+		if (skillsSection) sections.push(skillsSection);
+	}
+
+	// 5. Goal spec (merge rolePrompt into goalSpec section for backward compat).
+	// Volatile sections (goal/task/workflow context) follow the stable prefix above
+	// so provider prompt caches reuse the tool docs + skills catalog between turns.
 	{
 		let effectiveGoalSpec = parts.goalSpec || "";
 		if (parts.rolePrompt?.trim()) {
@@ -350,12 +368,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		}
 	}
 
-	// 4. Tool documentation
-	if (parts.toolDocs?.trim()) {
-		sections.push(parts.toolDocs.trim());
-	}
-
-	// 5. Task context
+	// 6. Task context
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = ["# Current Task"];
 		if (parts.taskType) taskLines.push(`\n**Type**: ${parts.taskType}`);
@@ -375,13 +388,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. Available Skills (autonomous activation catalog)
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) sections.push(skillsSection);
-	}
-
-	// 6. Workflow dependency context (accepted upstream gate content)
+	// 7. Workflow dependency context (accepted upstream gate content)
 	if (parts.workflowContext?.trim()) {
 		sections.push(parts.workflowContext.trim());
 	}
@@ -456,7 +463,20 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
-	// 3. Goal spec (separate from role)
+	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse)
+	if (parts.toolDocs?.trim()) {
+		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
+	}
+
+	// 4. Available Skills (stable prefix)
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
+		if (skillsSection) {
+			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
+		}
+	}
+
+	// 5. Goal spec (separate from role — volatile section follows the stable prefix)
 	if (parts.goalSpec?.trim()) {
 		const header = parts.goalTitle
 			? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
@@ -465,17 +485,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
 	}
 
-	// 4. Role prompt
+	// 6. Role prompt
 	if (parts.rolePrompt?.trim()) {
 		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
 	}
 
-	// 7. Tool docs
-	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
-	}
-
-	// 8. Task context
+	// 7. Task context
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = [];
 		if (parts.taskType) taskLines.push(`**Type**: ${parts.taskType}`);
@@ -489,15 +504,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskContent, tokens: estimateTokens(taskContent) });
 	}
 
-	// 8.5. Available Skills
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) {
-			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
-		}
-	}
-
-	// 9. Workflow context
+	// 8. Workflow context
 	if (parts.workflowContext?.trim()) {
 		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
 	}
