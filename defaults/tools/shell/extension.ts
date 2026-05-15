@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { createWriteStream } from "node:fs";
+import { lspHintForBashCommand } from "./bash-lsp-hint.js";
 
 const MAX_BYTES = 50 * 1024; // 50KB output limit
 const MAX_LINES = 2000;
@@ -160,6 +161,15 @@ export default function (pi: ExtensionAPI) {
 			description: Type.Optional(Type.String({ description: "Short label (3-6 words); recommended for multi-line or non-obvious commands." })),
 		}),
 		async execute(_toolCallId, { command, timeout }, abortSignal, onUpdate) {
+			const originalCommand = command;
+			const maybePrependHint = <T extends { content?: Array<{ type: string; text?: string }> }>(result: T): T => {
+				try {
+					const hint = lspHintForBashCommand(originalCommand, result as any);
+					if (!hint) return result;
+					const existing = Array.isArray(result.content) ? result.content : [];
+					return { ...result, content: [{ type: "text" as const, text: hint }, ...existing] };
+				} catch { return result; }
+			};
 			return new Promise((resolve) => {
 				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
 				const { shell, args } = getShellConfig();
@@ -194,7 +204,7 @@ export default function (pi: ExtensionAPI) {
 					if (abortSignal.aborted) {
 						child.kill();
 						clearTimeout(timer);
-						resolve({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } });
+						resolve(maybePrependHint({ content: [{ type: "text" as const, text: "" }], details: { truncated: false } }));
 						return;
 					}
 					abortSignal.addEventListener("abort", abortHandler, { once: true });
@@ -252,10 +262,10 @@ export default function (pi: ExtensionAPI) {
 						output += `\n[Output truncated. Full output saved to ${tempFilePath}]`;
 					}
 
-					resolve({
+					resolve(maybePrependHint({
 						content: [{ type: "text" as const, text: `Exit code: ${cancelled ? "killed" : code}\n${output}` }],
 						details: { truncated, fullOutputPath: tempFilePath },
-					});
+					}));
 				});
 
 				child.on("error", (err) => {
