@@ -142,8 +142,11 @@ export class TeamManager {
 	private idleNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	/** Count of consecutive workers-nudges sent for a goal (goalId → count). Reset on agent_start. */
 	private idleNudgeCount = new Map<string, number>();
-	/** Separate timer for nudging when no workers remain (goalId → timer). */
-	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setInterval>>();
+	/** Separate timer for nudging when no workers remain (goalId → timer). One-shot setTimeouts that reschedule with exponential backoff. */
+	private noWorkersNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/** Count of consecutive no-workers nudges sent for a goal (goalId → count).
+	 *  Reset only by external prompts (source "user" or "system"). */
+	private noWorkersNudgeCount = new Map<string, number>();
 	/** Guard flag: true while an auto-nudge prompt is pending (not yet processed by the agent). */
 	private nudgePending = new Map<string, boolean>();
 	private verificationHarness?: VerificationHarness;
@@ -153,6 +156,8 @@ export class TeamManager {
 	private static readonly MAX_IDLE_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	/** Delay before nudging the idle team lead when no workers remain (ms). */
 	private static readonly NO_WORKERS_NUDGE_DELAY_MS = 300_000;
+	/** Maximum delay between no-workers nudges (ms). Caps the exponential backoff. */
+	private static readonly MAX_NO_WORKERS_NUDGE_DELAY_MS = 12 * 60 * 60 * 1000; // 12h
 	/**
 	 * If any team member is actively streaming, suppress the workers-nudge unless at
 	 * least one has been streaming longer than this threshold. Prevents nagging the
@@ -367,9 +372,10 @@ export class TeamManager {
 		this.idleNudgeCount.delete(goalId);
 		const nwTimer = this.noWorkersNudgeTimers.get(goalId);
 		if (nwTimer) {
-			clearInterval(nwTimer);
+			clearTimeout(nwTimer);
 			this.noWorkersNudgeTimers.delete(goalId);
 		}
+		this.noWorkersNudgeCount.delete(goalId);
 		this.nudgePending.delete(goalId);
 	}
 
@@ -417,13 +423,51 @@ export class TeamManager {
 	 * Each timer checks conditions on every tick and returns early if they don't apply.
 	 */
 	private startIdleNudgeTimer(goalId: string): void {
-		this.clearIdleNudgeTimer(goalId);
+		// Clear any pending timers but PRESERVE counters — callers either come
+		// from teardown (clearIdleNudgeTimer already ran) or from agent_end
+		// (where we want continued backoff). Reset is the job of
+		// clearIdleNudgeTimer / the external-prompt branch of subscribeTeamLeadEvents.
+		const existingWorkers = this.idleNudgeTimers.get(goalId);
+		if (existingWorkers) { clearTimeout(existingWorkers); this.idleNudgeTimers.delete(goalId); }
+		const existingNoWorkers = this.noWorkersNudgeTimers.get(goalId);
+		if (existingNoWorkers) { clearTimeout(existingNoWorkers); this.noWorkersNudgeTimers.delete(goalId); }
+		this.nudgePending.delete(goalId);
 
-		// --- 5-minute no-workers timer (one-shot) ---
-		const nwTimer = setInterval(() => {
+		// --- No-workers timer (one-shot, reschedules with exponential backoff) ---
+		// Each successive nudge (without the lead acting on external input) doubles
+		// the delay: 5m, 10m, 20m, 40m, … capped at MAX_NO_WORKERS_NUDGE_DELAY_MS (12h).
+		// The counter resets only on external (user/system) prompt via
+		// clearIdleNudgeTimer() in subscribeTeamLeadEvents.
+		this.scheduleNoWorkersNudge(goalId);
+
+		// --- Workers timer (one-shot, reschedules with exponential backoff) ---
+		// Each successive nudge (without the lead acting) doubles the delay:
+		// 10m, 20m, 40m, 80m, … capped at MAX_IDLE_NUDGE_DELAY_MS (12h).
+		// The counter resets on external prompt via clearIdleNudgeTimer().
+		this.scheduleWorkersNudge(goalId);
+	}
+
+	/**
+	 * Schedule the next no-workers nudge for a goal using exponential backoff.
+	 * Delay = NO_WORKERS_NUDGE_DELAY_MS * 2^count, capped at MAX_NO_WORKERS_NUDGE_DELAY_MS.
+	 * Aborts cleanly without incrementing the counter if a worker appears before
+	 * the timer fires — the workers-nudge takes over that case.
+	 */
+	private scheduleNoWorkersNudge(goalId: string): void {
+		const count = this.noWorkersNudgeCount.get(goalId) ?? 0;
+		const delay = Math.min(
+			TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count),
+			TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
+		);
+
+		const timer = setTimeout(() => {
+			this.noWorkersNudgeTimers.delete(goalId);
+
 			if (this.shouldSkipNudge(goalId)) return;
-
-			if (this.getActiveWorkers(goalId).length > 0) return; // workers exist — not our concern
+			if (this.getActiveWorkers(goalId).length > 0) {
+				// Workers appeared — workers-nudge owns this case. Don't increment, don't reschedule.
+				return;
+			}
 
 			const entry = this.teams.get(goalId)!;
 			const goal = this.resolveGoal(goalId);
@@ -434,21 +478,27 @@ export class TeamManager {
 				`Check your progress — use task_list and gate_list to review what's done and what remains. ` +
 				`If there's more work to do, spawn agents or do it yourself. ` +
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
+
 			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
-			console.log(`[team-manager] Sent no-workers idle nudge to team lead for goal ${goalId}`);
+			// Tag the session directly so subscribeTeamLeadEvents sees the source
+			// even if SessionManager.enqueuePrompt is mocked or async-delayed in setting it.
+			const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
+			if (tl) tl.lastPromptSource = "auto-nudge";
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
+			this.noWorkersNudgeCount.set(goalId, count + 1);
+			const nextDelay = Math.min(
+				TeamManager.NO_WORKERS_NUDGE_DELAY_MS * Math.pow(2, count + 1),
+				TeamManager.MAX_NO_WORKERS_NUDGE_DELAY_MS,
+			);
+			console.log(
+				`[team-manager] Sent no-workers nudge #${count + 1} to team lead for goal ${goalId}; ` +
+				`next nudge in ${Math.round(nextDelay / 60000)}m`,
+			);
 
-			// One-shot: clear only this timer
-			const t = this.noWorkersNudgeTimers.get(goalId);
-			if (t) { clearInterval(t); this.noWorkersNudgeTimers.delete(goalId); }
-		}, TeamManager.NO_WORKERS_NUDGE_DELAY_MS);
-		this.noWorkersNudgeTimers.set(goalId, nwTimer);
+			this.scheduleNoWorkersNudge(goalId);
+		}, delay);
 
-		// --- Workers timer (one-shot, reschedules with exponential backoff) ---
-		// Each successive nudge (without the lead acting) doubles the delay:
-		// 10m, 20m, 40m, 80m, … capped at MAX_IDLE_NUDGE_DELAY_MS (12h).
-		// The counter resets on agent_start via clearIdleNudgeTimer().
-		this.scheduleWorkersNudge(goalId);
+		this.noWorkersNudgeTimers.set(goalId, timer);
 	}
 
 	/**
@@ -518,7 +568,11 @@ export class TeamManager {
 				`If idle agents have more to do, prompt them to continue.`;
 
 			this.nudgePending.set(goalId, true);
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true });
+			// Tag the session directly so subscribeTeamLeadEvents sees the source
+			// even if SessionManager.enqueuePrompt is mocked or async-delayed in setting it.
+			const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
+			if (tl) tl.lastPromptSource = "auto-nudge";
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
 			this.idleNudgeCount.set(goalId, count + 1);
 			const nextDelay = Math.min(
 				TeamManager.IDLE_NUDGE_DELAY_MS * Math.pow(2, count + 1),
@@ -555,7 +609,21 @@ export class TeamManager {
 				this.startIdleNudgeTimer(goalId);
 			} else if (event.type === "agent_start") {
 				this.nudgePending.delete(goalId);
-				this.clearIdleNudgeTimer(goalId);
+				const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
+				const lastSource = tl?.lastPromptSource ?? "user";
+				if (lastSource === "user" || lastSource === "system") {
+					// External signal — fresh idle cycle starts from base delay.
+					this.clearIdleNudgeTimer(goalId);
+				} else {
+					// Team lead is replying to its own auto-nudge / task-notification / verification.
+					// Cancel pending timers (shouldSkipNudge would block them while streaming anyway),
+					// but PRESERVE counters so backoff continues to grow across cycles.
+					const t1 = this.idleNudgeTimers.get(goalId);
+					if (t1) { clearTimeout(t1); this.idleNudgeTimers.delete(goalId); }
+					const t2 = this.noWorkersNudgeTimers.get(goalId);
+					if (t2) { clearTimeout(t2); this.noWorkersNudgeTimers.delete(goalId); }
+					// idleNudgeCount and noWorkersNudgeCount intentionally preserved.
+				}
 			}
 		});
 
@@ -1067,12 +1135,15 @@ export class TeamManager {
 		}
 
 		try {
+			// Tag the session directly so subscribeTeamLeadEvents sees the source
+			// even if SessionManager is mocked or async-delayed in setting it.
+			teamLeadSession.lastPromptSource = "auto-nudge";
 			if (teamLeadSession.status === "streaming") {
 				// Mid-turn: inject directly as a real-time steer interrupt
-				await this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message);
+				await this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "auto-nudge" });
 			} else {
 				// Idle: enqueue as a steered prompt so it drains immediately
-				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+				this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "auto-nudge" });
 			}
 			console.log(`[team-manager] Notified team lead for goal ${goalId} (status=${teamLeadSession.status}): ${message}`);
 		} catch (err) {
@@ -1094,12 +1165,15 @@ export class TeamManager {
 
 		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status for verification details.`;
 
+		// Tag the session directly so subscribeTeamLeadEvents sees the source
+		// even if SessionManager is mocked or async-delayed in setting it.
+		teamLeadSession.lastPromptSource = "task-notification";
 		if (teamLeadSession.status === "streaming") {
-			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message).catch((err: any) => {
+			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "task-notification" }).catch((err: any) => {
 				console.error(`[team-manager] Failed to steer team lead on task completion for goal ${goalId}:`, err);
 			});
 		} else {
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "task-notification" });
 		}
 		console.log(`[team-manager] Notified team lead of task completion for goal ${goalId}: ${taskTitle} → ${taskState}`);
 	}
