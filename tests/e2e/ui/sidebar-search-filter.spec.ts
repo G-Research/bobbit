@@ -209,9 +209,25 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			{ timeout: 15_000 },
 		).toBe(true);
 
-		// Dispatch via window.dispatchEvent — keyboard.press can be dropped
-		// under heavy parallel load before focus settles. Set both ctrlKey
-		// and metaKey to match the registry's platform-aware ctrlOrMeta check.
+		// Dispatch Ctrl+K via window.dispatchEvent rather than Playwright's
+		// keyboard.press — under heavy parallel load the first Chromium
+		// keystroke can be dropped before focus settles. The app's shortcut
+		// registry listens on `window`, so dispatching there reaches it
+		// reliably. Set BOTH ctrlKey and metaKey so the dispatched event
+		// matches the registry's platform-aware ctrlOrMeta check on macOS
+		// (metaKey) and Linux/Windows (ctrlKey) without per-platform branching.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
+
+		// Search input should be focused — poll for the focus to settle
+		// rather than asserting synchronously against a single render frame.
+		await expect.poll(
+			() => searchInput.evaluate((el) => document.activeElement === el),
+			{ timeout: 5_000 },
+		).toBe(true);
 	});
 
 	test("SB-34: Ctrl+[ toggles sidebar collapse", async ({ page }) => {
@@ -284,6 +300,17 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 			// Dispatch via window.dispatchEvent — keyboard.press can be dropped
 			// under heavy parallel load. Set both ctrlKey and metaKey for
 			// platform-aware ctrlOrMeta matching.
+			await page.evaluate(() => {
+				window.dispatchEvent(new KeyboardEvent("keydown", {
+					key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+				}));
+			});
+
+			const searchInput = page.locator("input[data-search]");
+			await expect.poll(
+				() => searchInput.evaluate((el) => document.activeElement === el),
+				{ timeout: 5_000 },
+			).toBe(true);
 		} finally {
 			await deleteSession(tempSession).catch(() => {});
 		}

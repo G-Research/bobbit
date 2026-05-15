@@ -76,8 +76,15 @@ export interface BgProcess {
 	exited: Promise<void>;
 	/**
 	 * True once the owning agent has observed the exit — either via the
-	 * automatic exit notifier or by explicitly calling `waitForExit`. Used to
-	 * guarantee exactly-once wake-up delivery.
+	 * automatic exit notifier or by explicitly calling `waitForExit` and
+	 * actually seeing the exit. Used to guarantee exactly-once wake-up
+	 * delivery.
+	 *
+	 * NOTE: this flag is set ONLY when the exit is actually observed (auto
+	 * notifier delivers, or a wait races the exit and returns it). It is
+	 * intentionally NOT set merely because a wait was started — a wait that
+	 * times out or aborts before the process exits must NOT suppress the
+	 * eventual auto-notification, otherwise idle agents miss bg completions.
 	 */
 	notified: boolean;
 	/**
@@ -86,6 +93,15 @@ export interface BgProcess {
 	 * session shutdown).
 	 */
 	suppressNotification: boolean;
+	/**
+	 * Count of currently active `waitForExit` calls on this process. The auto
+	 * notifier defers while > 0 because an active wait will deliver the exit
+	 * synchronously to the (mid-turn) owning agent. If every active wait
+	 * settles via timeout/abort without observing the exit, the last one to
+	 * exit `finally` re-arms the auto notifier so an idle agent still gets
+	 * woken when the process eventually exits.
+	 */
+	observingWaits: number;
 }
 
 /**
@@ -220,6 +236,7 @@ export class BgProcessManager {
 			exited,
 			notified: false,
 			suppressNotification: false,
+			observingWaits: 0,
 		};
 
 		let logBytes = 0;
@@ -482,14 +499,11 @@ export class BgProcessManager {
 		}
 		if (signal?.aborted) return { info: this.toInfo(bg), timedOut: false, aborted: true };
 
-		// Claim the exit eagerly: the owning agent is mid-turn and is actively
-		// engaging with this process. Whatever the wait returns (exit/timeout/
-		// abort), the agent will see it and decide next steps — so we must NOT
-		// also wake the session via the auto-notifier when the process exits.
-		// Without this, a `bash_bg create+wait` cycle that completes inside a
-		// streaming turn enqueues a redundant bg-exit prompt that re-runs the
-		// tool call (observed as the transcript-fidelity STREAM_BURST dup).
-		bg.notified = true;
+		// Register as an active observer. While at least one wait is active the
+		// auto notifier defers — but it does NOT mark the process as notified,
+		// so if every wait times out / aborts without observing the exit the
+		// notifier is re-armed below.
+		bg.observingWaits++;
 
 		// Race exit / timeout / abort. We do NOT attach an "exit" listener to the
 		// child — instead we await `bg.exited`, which is resolved by the single
@@ -511,9 +525,9 @@ export class BgProcessManager {
 		try {
 			const winner = await Promise.race([exitP, timeoutP, abortP]);
 			if (winner === "exit" || (bg.status as string) === "exited") {
-				// Acknowledge the exit — auto-notifier (still queued as a microtask)
-				// will see `notified` and become a no-op, guaranteeing exactly-once
-				// wake-up semantics.
+				// Acknowledge the exit — the auto-notifier (still queued as a
+				// microtask) will see `notified` and become a no-op, guaranteeing
+				// exactly-once wake-up semantics.
 				bg.notified = true;
 			}
 			return {
@@ -524,6 +538,20 @@ export class BgProcessManager {
 		} finally {
 			if (timer) clearTimeout(timer);
 			if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+			bg.observingWaits = Math.max(0, bg.observingWaits - 1);
+			// If this wait did not observe the exit (timed out or aborted) but
+			// the process has since exited, the auto-notifier microtask that fired
+			// in the meantime would have deferred while `observingWaits > 0`.
+			// Re-arm it now so the owning agent still gets woken — but only when
+			// no other wait is still active.
+			if (
+				bg.observingWaits === 0
+				&& (bg.status as string) === "exited"
+				&& !bg.notified
+				&& !bg.suppressNotification
+			) {
+				queueMicrotask(() => this.notifyExitIfNeeded(sessionId, bg));
+			}
 		}
 	}
 
@@ -546,6 +574,13 @@ export class BgProcessManager {
 	private notifyExitIfNeeded(sessionId: string, bg: BgProcess): void {
 		if (bg.notified || bg.suppressNotification) return;
 		if (!this.exitNotifier) return;
+		// Defer while a wait is actively observing this process. The waiter is
+		// mid-turn and will deliver the exit synchronously to the owning agent
+		// via its return value. We intentionally do NOT set `notified` here —
+		// if every active wait settles via timeout/abort instead of observing
+		// the exit, the last wait's `finally` re-queues this method so the
+		// idle agent still gets a wake-up.
+		if (bg.observingWaits > 0) return;
 		// Set BEFORE invoking the (potentially async) callback so a concurrent
 		// observer cannot double-notify.
 		bg.notified = true;
