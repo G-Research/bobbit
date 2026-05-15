@@ -919,11 +919,36 @@ export function renderRoleEditor(opts: RoleEditorOptions): TemplateResult {
 	`;
 }
 
+// ============================================================================
+// READ-ONLY INSPECTOR — interactive view state
+//
+// The inspector renders the full shared `renderRoleEditor` with `readOnly:
+// true` so all draft mutations are blocked, but UI-only state (which tab is
+// active, which tool groups are collapsed) is interactive — the user MUST be
+// able to flip between Prompt / Tool Access / Model to inspect a role they
+// might want to customise. Mutating project library state is still impossible
+// because every `onDraftChange` call is a noop.
+// ============================================================================
+let _inspectorRoleName: string | null = null;
+let _inspectorActiveTab: "prompt" | "tools" | "model" = "prompt";
+let _inspectorCollapsedGroups: Set<string> = new Set();
+
 /**
  * Stateless read-only inspector. Renders the same DOM as the editor but with all
- * controls disabled. Used by the goal proposal modal's Roles tab right pane.
+ * data-mutating controls disabled. Tab switching and group collapse remain
+ * interactive (view-only — they do not touch the role itself or the project
+ * library), so the user can inspect prompt, tool access, and model fields in
+ * the goal-draft modal.
  */
 export function renderRoleInspector(opts: RoleInspectorOptions): TemplateResult {
+	if (_inspectorRoleName !== opts.role.name) {
+		_inspectorRoleName = opts.role.name;
+		_inspectorActiveTab = "prompt";
+		// Start with all tool groups collapsed (matches editor first-open).
+		_inspectorCollapsedGroups = new Set<string>(
+			opts.availableTools.map((t) => t.group || "Other"),
+		);
+	}
 	const inspectorDraft: RoleEditorDraft = {
 		label: opts.role.label,
 		promptTemplate: opts.role.promptTemplate,
@@ -931,22 +956,23 @@ export function renderRoleInspector(opts: RoleInspectorOptions): TemplateResult 
 		toolPolicies: { ...(opts.role.toolPolicies ?? {}) },
 		model: opts.role.model ?? "",
 		thinkingLevel: opts.role.thinkingLevel ?? "",
-		activeTab: "prompt",
+		activeTab: _inspectorActiveTab,
 	};
-	// Local UI state for tab/collapsed groups is intentionally non-interactive
-	// in the inspector — the consumer can opt for the full editor with readOnly
-	// when they need tab switching. The inspector exposes the prompt tab by default.
 	const noop = () => {};
 	return renderRoleEditor({
 		role: opts.role,
 		draft: inspectorDraft,
 		availableTools: opts.availableTools,
 		groupPolicies: opts.groupPolicies,
-		collapsedToolGroups: new Set<string>(),
+		collapsedToolGroups: _inspectorCollapsedGroups,
 		callbacks: {
 			onDraftChange: noop,
-			onTabChange: noop,
-			onToggleToolGroup: noop,
+			onTabChange: (tab) => { _inspectorActiveTab = tab; renderApp(); },
+			onToggleToolGroup: (g) => {
+				if (_inspectorCollapsedGroups.has(g)) _inspectorCollapsedGroups.delete(g);
+				else _inspectorCollapsedGroups.add(g);
+				renderApp();
+			},
 		},
 		readOnly: true,
 		scope: opts.scope ?? "goal-draft",

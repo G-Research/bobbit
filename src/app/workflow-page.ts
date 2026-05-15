@@ -49,7 +49,16 @@ type EditorController = {
 	scope: EditorScope;
 	workflowKey: string;
 	onChange: (wf: Workflow) => void;
+	// When true the shared editor renderer outputs the read-only
+	// inspector view: inputs disabled, drag/delete/add affordances
+	// hidden, save chrome suppressed. The inspector consumer never
+	// receives onChange calls (controller.onChange is wired to noop).
+	readOnly?: boolean;
 };
+
+function isReadOnly(): boolean {
+	return editorController?.readOnly === true;
+}
 let editorController: EditorController | null = null;
 
 // Collapse/expand state — all gates start collapsed
@@ -684,22 +693,29 @@ function getVerifySummary(gate: WorkflowGate): string {
 // ============================================================================
 
 function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
+	const readOnly = isReadOnly();
 	const typeIcon = step.type === "command" ? Terminal : step.type === "agent-qa" ? TestTube : MessageSquare;
 	const isVStepExpanded = expandedVStepKeys.has(`${gateIdx}-${stepIdx}`);
 	const isDragging = vstepDragGateIdx === gateIdx && vstepDragStepIdx === stepIdx;
+	const vstepClasses = [
+		"wf-vstep-card",
+		isVStepExpanded ? "vstep-expanded" : "",
+		isDragging ? "vstep-dragging" : "",
+		readOnly ? "wf-vstep-readonly" : "",
+	].filter(Boolean).join(" ");
 	return html`
-		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""} ${isDragging ? "vstep-dragging" : ""}"
-			draggable="true"
-			@dragstart=${(e: DragEvent) => { e.stopPropagation(); handleVStepDragStart(e, gateIdx, stepIdx); }}
-			@dragend=${handleVStepDragEnd}>
+		<div class=${vstepClasses}
+			draggable=${readOnly ? "false" : "true"}
+			@dragstart=${readOnly ? undefined : (e: DragEvent) => { e.stopPropagation(); handleVStepDragStart(e, gateIdx, stepIdx); }}
+			@dragend=${readOnly ? undefined : handleVStepDragEnd}>
 			<div class="wf-vstep-collapsed-header"
 				@click=${(e: Event) => { e.stopPropagation(); toggleVStepExpand(gateIdx, stepIdx); }}
-				@touchstart=${(e: TouchEvent) => handleVStepHeaderTouchStart(e, gateIdx, stepIdx)}
-				@touchmove=${handleVStepTouchMove}
-				@touchend=${handleVStepTouchEnd}
-				@touchcancel=${cancelVStepTouchDrag}>
-				<span class="wf-vstep-grip"
-					@touchstart=${(e: TouchEvent) => handleVStepGripTouchStart(e, gateIdx, stepIdx)}>${icon(GripVertical, "sm")}</span>
+				@touchstart=${readOnly ? undefined : (e: TouchEvent) => handleVStepHeaderTouchStart(e, gateIdx, stepIdx)}
+				@touchmove=${readOnly ? undefined : handleVStepTouchMove}
+				@touchend=${readOnly ? undefined : handleVStepTouchEnd}
+				@touchcancel=${readOnly ? undefined : cancelVStepTouchDrag}>
+				${readOnly ? nothing : html`<span class="wf-vstep-grip"
+					@touchstart=${(e: TouchEvent) => handleVStepGripTouchStart(e, gateIdx, stepIdx)}>${icon(GripVertical, "sm")}</span>`}
 				<span class="wf-vstep-chevron">\u25B8</span>
 				<span class="wf-verify-type-icon">${icon(typeIcon, "sm")}</span>
 				<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
@@ -707,17 +723,18 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 				<span class="wf-vstep-type-label">${step.type || "command"}</span>
 				${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
 				<span class="wf-vstep-spacer"></span>
-				<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
+				${readOnly ? nothing : html`<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
 					const steps = (gate.verify || []).filter((_: any, i: number) => i !== stepIdx);
 					updateGateField(gateIdx, "verify", steps);
-				}}>${icon(Trash2, "sm")}</button>
+				}}>${icon(Trash2, "sm")}</button>`}
 			</div>
 			<div class="wf-vstep-body">
 				<div class="wf-vstep-fields">
 					<div class="wf-identity-row">
 						<label class="wf-field-label">Name</label>
 						<input class="wf-input" style="flex:1;min-width:0;" .value=${step.name || ""} placeholder="Step name"
+							?disabled=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
@@ -726,6 +743,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 							}} />
 						<label class="wf-field-label" style="margin-left:8px;">Type</label>
 						<select class="wf-select" .value=${step.type || "command"}
+							?disabled=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@change=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
@@ -739,6 +757,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						${step.type === "command" ? html`
 							<label class="wf-field-label" style="margin-left:8px;">Expect</label>
 							<select class="wf-select" .value=${step.expect || "success"}
+								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => {
 									const steps = [...(gate.verify || [])];
@@ -752,15 +771,17 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 					</div>
 					${step.type === "command" ? html`
 						<input class="wf-input" .value=${step.run || ""} placeholder="Command to run..."
+							?disabled=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
 								steps[stepIdx] = { ...steps[stepIdx], run: (e.target as HTMLInputElement).value };
 								updateGateField(gateIdx, "verify", steps);
 							}} />
-						<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
+						${readOnly ? nothing : html`<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>`}
 					` : html`
 						<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="${step.type === "agent-qa" ? "QA test prompt..." : "Review prompt..."}"
+							?readonly=${readOnly}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
 								const steps = [...(gate.verify || [])];
@@ -768,9 +789,10 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 								updateGateField(gateIdx, "verify", steps);
 							}}></textarea>
 					`}
-					<div class="wf-vstep-optional-row">
+					${readOnly && !step.optional && !step.label ? nothing : html`<div class="wf-vstep-optional-row">
 						<label class="wf-toggle-compact">
 							<input type="checkbox" .checked=${step.optional === true}
+								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => {
 									const steps = [...(gate.verify || [])];
@@ -782,6 +804,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						</label>
 						${step.optional ? html`
 							<input class="wf-input" style="flex:1;" .value=${step.label || ""} placeholder="UI label (e.g. Enable QA Testing)"
+								?disabled=${readOnly}
 								@click=${(e: Event) => e.stopPropagation()}
 								@input=${(e: Event) => {
 									const steps = [...(gate.verify || [])];
@@ -789,7 +812,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 									updateGateField(gateIdx, "verify", steps);
 								}} />
 						` : nothing}
-					</div>
+					</div>`}
 				</div>
 			</div>
 		</div>
@@ -964,9 +987,12 @@ export function renderWorkflowList(opts: {
 }
 
 /**
- * Stateless, read-only workflow inspector. Renders the same `.wf-gate-card`
- * skeleton as the editor but without inputs, drag handles, or save chrome
- * — suitable for the right pane of the goal-proposal modal's Workflow tab.
+ * Stateless, read-only workflow inspector. Implemented by seeding the same
+ * module-level edit state used by the editor and delegating to the shared
+ * `renderEditView()` with a `readOnly: true` controller. This guarantees
+ * one single source of truth for gate / verification step markup — adding
+ * a field to the editor automatically surfaces it in the inspector with no
+ * forked copy to keep in sync.
  */
 export function renderWorkflowInspector(opts: {
 	workflow: Workflow | null;
@@ -979,87 +1005,33 @@ export function renderWorkflowInspector(opts: {
 			<p class="wf-empty-desc">Pick a workflow from the list to see its gates and verification steps.</p>
 		</div>`;
 	}
-	return html`
-		<div class="wf-container wf-container-embedded wf-inspector" data-testid="workflow-inspector" data-workflow-id=${wf.id}>
-			<div class="wf-edit-identity">
-				<div class="wf-identity-row">
-					<label class="wf-field-label">ID</label>
-					<span class="wf-inspector-value" style="font-family:var(--font-mono,monospace);">${wf.id}</span>
-					<label class="wf-field-label" style="margin-left:8px;">Name</label>
-					<span class="wf-inspector-value" style="flex:1;min-width:0;">${wf.name}</span>
-				</div>
-				${wf.description ? html`<div class="wf-identity-row">
-					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
-					<span class="wf-inspector-value" style="flex:1;min-width:0;white-space:pre-wrap;">${wf.description}</span>
-				</div>` : nothing}
-			</div>
-			<div class="wf-artifacts-list">
-				${(wf.gates || []).map((g, idx) => renderInspectorGate(g, idx))}
-				${(wf.gates || []).length === 0 ? html`<div class="wf-empty"><p class="wf-empty-desc">This workflow has no gates.</p></div>` : nothing}
-			</div>
-		</div>
-	`;
-}
-
-function renderInspectorGate(gate: WorkflowGate, idx: number): TemplateResult {
-	const verifyCount = (gate.verify || []).length;
-	return html`
-		<div class="wf-gate-card expanded wf-gate-readonly" data-gate-id=${gate.id}>
-			<div class="wf-gate-header">
-				<span class="wf-gate-idx">${idx + 1}</span>
-				<span class="wf-gate-name">${gate.name || gate.id || "(unnamed)"}</span>
-				${gate.content ? html`<span class="wf-gate-pill">content</span>` : nothing}
-				${gate.injectDownstream ? html`<span class="wf-gate-pill">inject downstream</span>` : nothing}
-				${verifyCount > 0 ? html`<span class="wf-gate-pill">${verifyCount} verification${verifyCount !== 1 ? "s" : ""}</span>` : nothing}
-			</div>
-			<div class="wf-gate-body">
-				<div class="wf-gate-body-inner">
-					<div class="wf-identity-row">
-						<label class="wf-field-label">ID</label>
-						<span class="wf-inspector-value" style="font-family:var(--font-mono,monospace);">${gate.id || "—"}</span>
-					</div>
-					${gate.dependsOn && gate.dependsOn.length > 0 ? html`
-						<div class="wf-identity-row">
-							<label class="wf-field-label">Depends on</label>
-							<span class="wf-inspector-value">${gate.dependsOn.join(", ")}</span>
-						</div>
-					` : nothing}
-					${verifyCount > 0 ? html`
-						<div class="wf-field">
-							<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
-							<div class="wf-verification-steps">
-								${[...groupStepsByPhase(gate.verify || []).entries()].map(([phase, entries]) => html`
-									<div class="wf-phase-group" data-phase=${phase}>
-										<div class="wf-phase-header"><span>Phase ${phase}</span></div>
-										<div class="wf-phase-body">
-											${entries.map(({ step }) => html`
-												<div class="wf-vstep-card vstep-expanded wf-vstep-readonly">
-													<div class="wf-vstep-collapsed-header">
-														<span class="wf-verify-type-icon">${icon(step.type === "command" ? Terminal : step.type === "agent-qa" ? TestTube : MessageSquare, "sm")}</span>
-														<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
-														<span class="wf-vstep-sep">\u00B7</span>
-														<span class="wf-vstep-type-label">${step.type || "command"}</span>
-														${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
-													</div>
-													<div class="wf-vstep-body">
-														<div class="wf-vstep-fields">
-															${step.type === "command" && step.run ? html`<pre class="wf-inspector-code">${step.run}</pre>` : nothing}
-															${(step.type === "llm-review" || step.type === "agent-qa") && step.prompt ? html`<pre class="wf-inspector-code">${step.prompt}</pre>` : nothing}
-															${step.label ? html`<div class="wf-field-hint">Label: ${step.label}</div>` : nothing}
-														</div>
-													</div>
-												</div>
-											`)}
-										</div>
-									</div>
-								`)}
-							</div>
-						</div>
-					` : nothing}
-				</div>
-			</div>
-		</div>
-	`;
+	const scope: EditorScope = opts.scope ?? "goal-draft";
+	const inspectorKey = `__inspector__:${wf.id}`;
+	const needsReseed = !editorController
+		|| editorController.workflowKey !== inspectorKey
+		|| editorController.readOnly !== true;
+	if (needsReseed) {
+		editorController = { scope, workflowKey: inspectorKey, onChange: () => {}, readOnly: true };
+		selectedWorkflow = null;
+		isNew = false;
+		editId = wf.id;
+		editName = wf.name;
+		editDescription = wf.description;
+		editGates = (wf.gates || []).map((g) => ({
+			...g,
+			dependsOn: [...(g.dependsOn || [])],
+			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			metadata: g.metadata ? { ...g.metadata } : undefined,
+		}));
+		// Expand everything by default so the read-only inspector shows the
+		// full workflow at a glance. Users can still click to collapse.
+		expandedGateIndices = new Set<number>(editGates.map((_, i) => i));
+		expandedVStepKeys = new Set<string>();
+		editGates.forEach((g, gi) => {
+			(g.verify || []).forEach((_, si) => expandedVStepKeys.add(`${gi}-${si}`));
+		});
+	}
+	return renderEditView();
 }
 
 /**
@@ -1075,7 +1047,9 @@ export function renderWorkflowEditor(opts: {
 }): TemplateResult {
 	const scope: EditorScope = opts.scope ?? "goal-draft";
 	const key = opts.workflow.id || "__draft__";
-	const needsReseed = !editorController || editorController.workflowKey !== key;
+	const needsReseed = !editorController
+		|| editorController.workflowKey !== key
+		|| editorController.readOnly === true;
 	if (needsReseed) {
 		editorController = { scope, workflowKey: key, onChange: opts.onChange };
 		selectedWorkflow = null;
@@ -1160,12 +1134,18 @@ function renderListView(): TemplateResult {
 // ============================================================================
 
 function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult {
+	const readOnly = isReadOnly();
 	const steps = gate.verify || [];
 	const grouped = groupStepsByPhase(steps);
 	const allPhases = getAllPhaseNumbers(gateIdx);
 
 	// If no phases at all (no steps, no empty phases), just show phase 0
 	if (allPhases.length === 0 && steps.length === 0) {
+		if (readOnly) {
+			// Inspector: a workflow with zero verification steps just renders
+			// the empty-state hint without drag targets.
+			return html`<div class="wf-phase-group" data-phase="0"><div class="wf-phase-body wf-phase-empty-hint">No verification steps</div></div>`;
+		}
 		return html`
 			<div class="wf-phase-group" data-gate-idx="${gateIdx}" data-phase="0"
 				@dragover=${(e: DragEvent) => handleVStepDragOver(e, 0, 0)}
@@ -1182,14 +1162,14 @@ function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult 
 		const isEmptyTracked = emptyPhases.get(gateIdx)?.has(phase) ?? false;
 		return html`
 			<div class="wf-phase-group" data-gate-idx="${gateIdx}" data-phase="${phase}"
-				@dragover=${(e: DragEvent) => {
+				@dragover=${readOnly ? undefined : (e: DragEvent) => {
 					// Allow drop on empty phase body
 					if (isEmpty) handleVStepDragOver(e, phase, 0);
 				}}
-				@drop=${handleVStepDrop}>
+				@drop=${readOnly ? undefined : handleVStepDrop}>
 				<div class="wf-phase-header">
 					<span>Phase ${phase}</span>
-					${isEmpty && isEmptyTracked ? html`
+					${!readOnly && isEmpty && isEmptyTracked ? html`
 						<button class="wf-phase-delete" title="Remove empty phase" @click=${(e: Event) => {
 							e.stopPropagation();
 							removeEmptyPhase(gateIdx, phase);
@@ -1197,12 +1177,12 @@ function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult 
 					` : nothing}
 				</div>
 				<div class="wf-phase-body">
-					${phaseSteps.length === 0 ? html`<div class="wf-phase-empty-hint">No steps — drag here or add one</div>` : nothing}
+					${phaseSteps.length === 0 && !readOnly ? html`<div class="wf-phase-empty-hint">No steps — drag here or add one</div>` : nothing}
 					${phaseSteps.map((entry, posInPhase) => html`
-						${vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position === posInPhase && vstepDragGateIdx === gateIdx
+						${!readOnly && vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position === posInPhase && vstepDragGateIdx === gateIdx
 							? html`<div class="wf-vstep-drop-indicator"></div>` : nothing}
 						<div
-							@dragover=${(e: DragEvent) => {
+							@dragover=${readOnly ? undefined : (e: DragEvent) => {
 								const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
 								const midY = rect.top + rect.height / 2;
 								const pos = e.clientY < midY ? posInPhase : posInPhase + 1;
@@ -1211,7 +1191,7 @@ function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult 
 							${renderVerifyStepEditor(gate, gateIdx, entry.step, entry.originalIndex)}
 						</div>
 					`)}
-					${vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position >= phaseSteps.length && vstepDragGateIdx === gateIdx
+					${!readOnly && vstepDropTarget && vstepDropTarget.phase === phase && vstepDropTarget.position >= phaseSteps.length && vstepDragGateIdx === gateIdx
 						? html`<div class="wf-vstep-drop-indicator"></div>` : nothing}
 				</div>
 			</div>
@@ -1224,32 +1204,41 @@ function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult 
 // ============================================================================
 
 function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
+	const readOnly = isReadOnly();
 	const isExpanded = expandedGateIndices.has(idx);
 	const isDragging = dragIndex === idx;
 	const verifySummary = getVerifySummary(gate);
 	const verifyCount = (gate.verify || []).length;
+	const gateClasses = [
+		"wf-gate-card",
+		isExpanded ? "expanded" : "",
+		isDragging ? "dragging" : "",
+		readOnly ? "wf-gate-readonly" : "",
+	].filter(Boolean).join(" ");
 
 	return html`
 		${dropTargetIndex === idx && dragIndex !== null && dragIndex !== idx ? html`<div class="wf-drop-indicator"></div>` : nothing}
-		<div class="wf-gate-card ${isExpanded ? "expanded" : ""} ${isDragging ? "dragging" : ""}">
+		<div class=${gateClasses} data-gate-id=${gate.id}>
 			<div class="wf-gate-header"
-				draggable="true"
-				@dragstart=${(e: DragEvent) => handleDragStart(e, idx)}
-				@dragover=${(e: DragEvent) => handleDragOver(e, idx)}
-				@drop=${handleDrop}
-				@dragend=${handleDragEnd}
-				@touchstart=${(e: TouchEvent) => handleHeaderTouchStart(e, idx)}
-				@touchmove=${handleTouchMove}
-				@touchend=${handleTouchEnd}
-				@touchcancel=${cancelTouchDrag}
+				draggable=${readOnly ? "false" : "true"}
+				@dragstart=${readOnly ? undefined : (e: DragEvent) => handleDragStart(e, idx)}
+				@dragover=${readOnly ? undefined : (e: DragEvent) => handleDragOver(e, idx)}
+				@drop=${readOnly ? undefined : handleDrop}
+				@dragend=${readOnly ? undefined : handleDragEnd}
+				@touchstart=${readOnly ? undefined : (e: TouchEvent) => handleHeaderTouchStart(e, idx)}
+				@touchmove=${readOnly ? undefined : handleTouchMove}
+				@touchend=${readOnly ? undefined : handleTouchEnd}
+				@touchcancel=${readOnly ? undefined : cancelTouchDrag}
 				@click=${() => toggleGateExpand(idx)}>
-				<span class="wf-gate-grip"
-					@touchstart=${(e: TouchEvent) => handleGripTouchStart(e, idx)}>${icon(GripVertical, "sm")}</span>
+				${readOnly ? nothing : html`<span class="wf-gate-grip"
+					@touchstart=${(e: TouchEvent) => handleGripTouchStart(e, idx)}>${icon(GripVertical, "sm")}</span>`}
 				<span class="wf-gate-idx">${idx + 1}</span>
 				<span class="wf-gate-chevron">\u25B8</span>
 				<span class="wf-gate-name">${gate.name || "(unnamed)"}</span>
+				${readOnly && gate.content ? html`<span class="wf-gate-pill">content</span>` : nothing}
+				${readOnly && gate.injectDownstream ? html`<span class="wf-gate-pill">inject downstream</span>` : nothing}
 				${verifySummary ? html`<span class="wf-gate-pill">${verifySummary}</span>` : nothing}
-				<button class="wf-gate-delete" @click=${(e: Event) => { e.stopPropagation(); removeGate(idx); }} title="Remove gate">${icon(Trash2, "sm")}</button>
+				${readOnly ? nothing : html`<button class="wf-gate-delete" @click=${(e: Event) => { e.stopPropagation(); removeGate(idx); }} title="Remove gate">${icon(Trash2, "sm")}</button>`}
 			</div>
 
 			<div class="wf-gate-body">
@@ -1257,13 +1246,22 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 					<div class="wf-identity-row">
 						<label class="wf-field-label">ID</label>
 						<input class="wf-input" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
+							?disabled=${readOnly}
 							@input=${(e: Event) => updateGateField(idx, "id", (e.target as HTMLInputElement).value)} />
 						<label class="wf-field-label" style="margin-left:8px;">Name</label>
 						<input class="wf-input" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
+							?disabled=${readOnly}
 							@input=${(e: Event) => updateGateField(idx, "name", (e.target as HTMLInputElement).value)} />
 					</div>
 
-					<div class="wf-toggles-row">
+					${readOnly && gate.dependsOn && gate.dependsOn.length > 0 ? html`
+						<div class="wf-identity-row">
+							<label class="wf-field-label">Depends on</label>
+							<span class="wf-inspector-value">${gate.dependsOn.join(", ")}</span>
+						</div>
+					` : nothing}
+
+					${readOnly ? nothing : html`<div class="wf-toggles-row">
 						<label class="wf-toggle-compact">
 							<input type="checkbox" class="toggle-switch" .checked=${gate.content === true}
 								@change=${(e: Event) => updateGateField(idx, "content", (e.target as HTMLInputElement).checked || undefined)} />
@@ -1276,13 +1274,13 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 							<span>Inject downstream</span>
 							<span class="wf-info-icon" title="Agents working towards subsequent gates have the content attached to this gate injected into their context">i</span>
 						</label>
-					</div>
+					</div>`}
 
 					<div class="wf-field">
 						<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
 						<div class="wf-verification-steps">
 							${renderPhaseGroups(gate, idx)}
-							<div class="wf-phase-actions">
+							${readOnly ? nothing : html`<div class="wf-phase-actions">
 								<button class="wf-criteria-add-btn" title="Add verification step" @click=${(e: Event) => {
 									e.stopPropagation();
 									const steps = [...(gate.verify || []), { name: "", type: "command" as const, run: "" }];
@@ -1292,7 +1290,7 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 									e.stopPropagation();
 									addPhase(idx);
 								}}>Add Phase</button>
-							</div>
+							</div>`}
 						</div>
 					</div>
 				</div>
@@ -1313,8 +1311,16 @@ function autoGrowTextarea(el: HTMLTextAreaElement): void {
 
 function renderEditView(): TemplateResult {
 	const controlled = editorController !== null;
+	const readOnly = isReadOnly();
+	const containerClasses = readOnly
+		? "wf-edit-container wf-container-embedded wf-inspector"
+		: "wf-edit-container";
+	const testId = readOnly ? "workflow-inspector" : "workflow-editor";
 	return html`
-		<div class="wf-edit-container" data-testid="workflow-editor" data-scope=${editorController?.scope ?? "project"}>
+		<div class=${containerClasses}
+			data-testid=${testId}
+			data-scope=${editorController?.scope ?? "project"}
+			data-workflow-id=${editId}>
 			<div class="wf-edit-identity">
 				${controlled ? nothing : html`
 					<div class="flex items-center justify-between mb-1">
@@ -1324,7 +1330,7 @@ function renderEditView(): TemplateResult {
 				`}
 				<div class="wf-identity-row">
 					<label class="wf-field-label">ID</label>
-					${isNew ? html`
+					${isNew && !readOnly ? html`
 						<input class="wf-input" style="width:140px;" .value=${editId} placeholder="e.g. bug-fix"
 							@input=${(e: Event) => { editId = (e.target as HTMLInputElement).value; notifyControlledChange(); renderApp(); }} />
 					` : html`
@@ -1332,18 +1338,21 @@ function renderEditView(): TemplateResult {
 					`}
 					<label class="wf-field-label" style="margin-left:8px;">Name</label>
 					<input class="wf-input" style="flex:1;min-width:0;" .value=${editName} placeholder="Workflow name"
+						?disabled=${readOnly}
 						@input=${(e: Event) => { editName = (e.target as HTMLInputElement).value; notifyControlledChange(); renderApp(); }} />
 				</div>
 				<div class="wf-identity-row">
 					<label class="wf-field-label" style="flex-shrink:0;">Description</label>
 					<textarea class="wf-textarea wf-desc-auto" rows="1" .value=${editDescription} placeholder="What this workflow does"
+						?readonly=${readOnly}
 						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; notifyControlledChange(); autoGrowTextarea(e.target as HTMLTextAreaElement); }}></textarea>
 				</div>
 			</div>
 
 			<div class="wf-artifacts-list">
 				${editGates.map((gate, idx) => renderGateEditor(gate, idx))}
-				${Button({
+				${editGates.length === 0 && readOnly ? html`<div class="wf-empty"><p class="wf-empty-desc">This workflow has no gates.</p></div>` : nothing}
+				${readOnly ? nothing : Button({
 					variant: "secondary" as any,
 					size: "sm",
 					className: "wf-add-gate-btn",

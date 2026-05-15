@@ -279,6 +279,114 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 		}
 	});
 
+	test("role inspector tabs are interactive: Prompt / Tool Access / Model can be switched read-only", async ({ page }) => {
+		test.setTimeout(60_000);
+		const title = `Modal role inspector tabs ${Date.now()}`;
+		const sessionId = await createSession();
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Role inspector tabs interactive." });
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			await page.locator("[data-testid='goal-proposal-tab-roles']").first().click();
+			const rolesPanel = page.locator("[data-testid='goal-proposal-panel-roles']").first();
+			await expect(rolesPanel).toBeVisible();
+
+			const firstRow = rolesPanel.locator(".role-row").first();
+			await expect(firstRow).toBeVisible({ timeout: 15_000 });
+			await firstRow.click();
+
+			const inspector = rolesPanel.locator("[data-testid='role-editor']").first();
+			await expect(inspector).toBeVisible({ timeout: 10_000 });
+
+			// Initially the Prompt tab is active.
+			const promptTab = inspector.locator(".roles-tab", { hasText: "Prompt" }).first();
+			const toolsTab = inspector.locator(".roles-tab", { hasText: "Tool Access" }).first();
+			const modelTab = inspector.locator("[data-testid='roles-tab-model']").first();
+			await expect(promptTab).toHaveClass(/roles-tab--active/);
+
+			// Click Tool Access: active class moves, tool list becomes visible.
+			await toolsTab.click();
+			await expect(toolsTab).toHaveClass(/roles-tab--active/);
+			await expect(promptTab).not.toHaveClass(/roles-tab--active/);
+			await expect(inspector.locator(".roles-access-list").first()).toBeVisible();
+			// All tool-access selects are disabled in the read-only inspector.
+			const firstSelect = inspector.locator(".roles-access-row-select").first();
+			if (await firstSelect.count() > 0) {
+				await expect(firstSelect).toBeDisabled();
+			}
+
+			// Click Model: model tab content renders.
+			await modelTab.click();
+			await expect(modelTab).toHaveClass(/roles-tab--active/);
+			await expect(toolsTab).not.toHaveClass(/roles-tab--active/);
+			await expect(inspector.locator("[data-testid='roles-model-tab']").first()).toBeVisible();
+
+			// Back to Prompt: textarea is read-only (cannot mutate).
+			await promptTab.click();
+			await expect(promptTab).toHaveClass(/roles-tab--active/);
+			const promptEditor = inspector.locator(".roles-prompt-editor").first();
+			await expect(promptEditor).toBeVisible();
+			await expect(promptEditor).toHaveAttribute("readonly", "");
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("workflow inspector DOM shares core gate markup with the main Workflows page editor", async ({ page }) => {
+		test.setTimeout(90_000);
+		const title = `Modal wf parity ${Date.now()}`;
+		const sessionId = await createSession();
+		try {
+			await seedGoalProposal(sessionId, { title, spec: "Workflow inspector parity DOM." });
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			const wfPanel = page.locator("[data-testid='goal-proposal-panel-workflow']").first();
+			await expect(wfPanel).toBeVisible();
+			const inspector = wfPanel.locator("[data-testid='workflow-inspector']").first();
+			await expect(inspector).toBeVisible({ timeout: 10_000 });
+
+			// The inspector must render gate cards via the SHARED renderer
+			// (`renderGateEditor`) — it has the canonical `.wf-gate-card` class
+			// rather than a forked hand-rolled fragment.
+			const gateCards = inspector.locator(".wf-gate-card");
+			const gateCount = await gateCards.count();
+			expect(gateCount, "inspector must render shared .wf-gate-card markup").toBeGreaterThan(0);
+
+			// Capture gate names + workflow id from the modal inspector.
+			const inspectorWfId = await inspector.getAttribute("data-workflow-id");
+			expect(inspectorWfId).toBeTruthy();
+			const inspectorNames: string[] = [];
+			for (let i = 0; i < gateCount; i++) {
+				const nm = (await gateCards.nth(i).locator(".wf-gate-name").first().textContent()) || "";
+				inspectorNames.push(nm.trim());
+			}
+
+			// Now navigate to the Workflows page and open the same workflow in
+			// its editor view. It must use the SAME renderer (`renderEditView`
+			// without readOnly), so `.wf-gate-card` + identical `.wf-gate-name`
+			// strings must appear in the same order.
+			await navigateToHash(page, `#/workflow-edit/${inspectorWfId}`);
+			const editor = page.locator("[data-testid='workflow-editor']").first();
+			await expect(editor).toBeVisible({ timeout: 15_000 });
+			const editorGates = editor.locator(".wf-gate-card");
+			await expect(editorGates.first()).toBeVisible({ timeout: 10_000 });
+			const editorCount = await editorGates.count();
+			expect(editorCount, "main page editor must render shared .wf-gate-card markup").toBe(inspectorNames.length);
+			const editorNames: string[] = [];
+			for (let i = 0; i < editorCount; i++) {
+				const nm = (await editorGates.nth(i).locator(".wf-gate-name").first().textContent()) || "";
+				editorNames.push(nm.trim());
+			}
+			expect(editorNames, "gate name sequence must match across modal inspector and main page editor")
+				.toEqual(inspectorNames);
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("customising the workflow sends `workflow` (not just workflowId) on createGoal", async ({ page }) => {
 		test.setTimeout(60_000);
 		const title = `Modal wf custom ${Date.now()}`;
