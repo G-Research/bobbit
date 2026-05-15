@@ -92,7 +92,7 @@ When `symbolName` is ambiguous (the same name exists in multiple files), pass `p
 lsp_definition({ symbolName: "add", path: "src/math.ts" })
 ```
 
-The tool prefers symbol hits in that file (exact match) and falls back to `hits[0]` if none match.
+The hint path may be the symbol's **definition file** or any **use-site file** — either works. The implementation probes real symbol positions in the workspace while skipping matches inside comments and string literals, then applies same-directory disambiguation: if multiple candidates share the hint directory, the one in that directory wins; if two same-directory matches still disagree, the tool returns an `ambiguous` envelope (see below) rather than silently picking a wrong result. It does **not** silently fall back to `hits[0]` when ambiguity is detected.
 
 ### Ambiguous symbols
 
@@ -180,7 +180,10 @@ When a project runs sessions inside Docker, the supervisor accepts a `SandboxLsp
 - Reverses container paths back to host paths on return values (definition `path`, references, diagnostics) so the agent only ever sees paths relative to its `cwd`.
 - Spawns the LSP child via `docker exec` inside the project's pool container, mirroring how `rpc-bridge.ts::spawnDockerExec` reaches into the sandbox for other processes.
 
-The Bobbit Docker sandbox image ships with `typescript-language-server` pre-installed (see `docker/`). Hosts running sessions without a container — e.g. host-only sessions, the unit-test fixture project — get a **host spawn fallback**: when the bridge cannot resolve a container id for the worktree, the supervisor invokes the factory's plain `spawn()` path against the host filesystem. This is the path that ships today (added in the host-spawn-fallback fix).
+The Bobbit Docker sandbox image ships with `typescript-language-server` pre-installed (see `docker/`). Sessions without a sandbox container follow two distinct paths depending on how the project is configured:
+
+- **Host-only sessions** (project has no `sandbox` key, or `sandbox: host`) — the supervisor spawns the language server directly against the host filesystem, no bridge involved.
+- **Sandbox-required worktrees** (project is configured with `sandbox: docker` or equivalent) — if the bridge cannot resolve a live container for the worktree, the call **fails closed**: the tool returns `lsp_unavailable` with a sandbox-required style message. There is no host-spawn fallback for sandbox-required sessions, because running the language server against the host filesystem would silently produce wrong results (different paths, missing node_modules, stale containers).
 
 > **Scope honesty.** The container ↔ host path translation is wired and exercised by the dispatch helper, but cross-sandbox path round-trips have not been hardened against every edge case (Windows host with Linux container, multi-mount worktrees, etc.). If you see absolute container paths leaking into agent output, that's the area to look at.
 
