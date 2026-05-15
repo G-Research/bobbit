@@ -2830,7 +2830,6 @@ export function doRenderApp(): void {
 	const isTeamLead = activeSession?.role === "team-lead";
 	const editDeleteBtns = (connected && state.remoteAgent && activeSid) ? html`
 		<div class="flex items-center gap-1 shrink-0 relative">
-			${headerToast()}
 			${Button({
 				variant: "ghost",
 				size: "sm",
@@ -3412,7 +3411,8 @@ export function doRenderApp(): void {
 	if (desktop) {
 		teardownMobileScrollTracking();
 		render(html`
-			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
+				${headerToast()}
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">
 					${state.sidebarCollapsed ? html`
 					<div class="w-14 shrink-0 flex items-center justify-center self-stretch" style="background: var(--sidebar);">
@@ -3454,6 +3454,7 @@ export function doRenderApp(): void {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
+				${headerToast()}
 				<div id="app-header"
 					class="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-sm border-b border-border flex flex-col header-shadow">
 					<div class="flex items-center justify-between">
@@ -3477,7 +3478,8 @@ export function doRenderApp(): void {
 		});
 	} else {
 		render(html`
-			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
+			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative">
+				${headerToast()}
 				<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow">
 					${headerLeft()}
 					${headerRight()}

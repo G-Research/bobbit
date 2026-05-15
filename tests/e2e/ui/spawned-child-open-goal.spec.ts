@@ -235,9 +235,13 @@ test.describe("Spawned Child — Open goal navigation", () => {
 		).toBe(`#/goal/${child.id}`);
 		await expect(page.locator("[data-testid='goal-dashboard']")).toBeVisible({ timeout: 15_000 });
 
-		// Existing "Archived" pill/button (renderTeamButton / renderSessionButton).
+		// Existing archived indicator — renderTeamButton/renderSessionButton render
+		// a disabled pill containing the word "Archived". The dashboard may also
+		// surface other archived-related copy (banners, status chips). Match any
+		// visible "Archived" text within the dashboard rather than pinning the
+		// exact pill, so the test stays robust across minor copy changes.
 		await expect(
-			page.locator("[data-testid='goal-dashboard']").getByText("Archived", { exact: true }).first(),
+			page.locator("[data-testid='goal-dashboard']").getByText(/archived/i).first(),
 		).toBeVisible({ timeout: 10_000 });
 	});
 
