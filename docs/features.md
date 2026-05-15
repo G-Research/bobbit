@@ -61,8 +61,11 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 Per-session token usage and cost tracking, aggregated to goal and task level.
 
 - Tracks input tokens, output tokens, cache read/write tokens, and total cost.
-- Updated via `cost_update` WebSocket events broadcast to connected clients.
-- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
+- Derives a **`cacheHitRate`** (`cacheReadTokens / (cacheReadTokens + inputTokens)`) on every read — not stored on disk. `null` for cold sessions or providers that don't report cache counters; rendered as `—` in the UI.
+- The **Cache hit** row in `CostPopover` shows the derived percentage live, updated via `cost_update` WebSocket events.
+- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost` — all responses include `cacheHitRate: number | null`.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 
 ## Prompt Queue
 
