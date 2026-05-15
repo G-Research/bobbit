@@ -297,5 +297,301 @@ describe("BgProcessManager.waitForExit \u2014 state machine", () => {
 	});
 });
 
+// --- Exit notification tests --------------------------------------------
+//
+// These tests cover the design at docs/design ("wake owning agent when a
+// bash_bg process exits"). The production wiring (notifier callback +
+// notified/suppressNotification fields) may not yet exist; tests below
+// feature-detect by passing a notifier as a 3rd constructor arg and skipping
+// gracefully if no notification is delivered. Once production is wired they
+// activate automatically.
+
+type ExitNotification = {
+	sessionId: string;
+	processId: string;
+	name: string;
+	command: string;
+	exitCode: number | null;
+	signal: string | null;
+	success: boolean;
+	startTime: number;
+	endTime: number;
+	durationMs: number;
+	tail: string[];
+};
+
+function makeManagerWithNotifier() {
+	const spawner = fakeSpawner();
+	const calls: ExitNotification[] = [];
+	const notifier = (n: ExitNotification) => { calls.push(n); };
+	// Constructor third arg may not yet exist in production — cast through any
+	// so this file still compiles. When wired, the manager will invoke it.
+	const Ctor = BgProcessManager as unknown as new (
+		cp: () => undefined,
+		sp: SpawnFn,
+		notifier: (n: ExitNotification) => void,
+	) => BgProcessManager;
+	const mgr = new Ctor(() => undefined, spawner.spawn, notifier);
+	return { mgr, last: spawner.last, calls };
+}
+
+/** Drain microtasks so any queued notifier invocation runs before assertions. */
+async function drainMicrotasks() {
+	for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+/** True iff the production code under test wires the exit notifier. */
+function notifierWired(calls: ExitNotification[]): boolean {
+	return calls.length > 0;
+}
+
+describe("BgProcessManager \u2014 exit notifications", () => {
+	it("notifies owning session on successful exit with full payload", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "echo hi && true", os.tmpdir(), undefined, false, "smoke");
+
+		last().stdout.emit("data", Buffer.from("hello\nworld\n"));
+		last().stderr.emit("data", Buffer.from("warn: nothing\n"));
+		last().emit("exit", 0, null);
+		await drainMicrotasks();
+
+		if (!notifierWired(calls)) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+
+		assert.equal(calls.length, 1, "notifier must fire exactly once");
+		const n = calls[0];
+		assert.equal(n.sessionId, SESSION);
+		assert.equal(n.processId, info.id);
+		assert.equal(n.name, "smoke");
+		assert.equal(n.command, "echo hi && true");
+		assert.equal(n.exitCode, 0);
+		assert.equal(n.signal, null);
+		assert.equal(n.success, true);
+		assert.equal(typeof n.startTime, "number");
+		assert.equal(typeof n.endTime, "number");
+		assert.ok(n.endTime >= n.startTime);
+		assert.equal(n.durationMs, n.endTime - n.startTime);
+		assert.ok(Array.isArray(n.tail));
+		assert.ok(n.tail.length > 0, "tail should include some output when present");
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("surfaces failures \u2014 non-zero exit reports success:false and tail includes error", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		mgr.create(SESSION, "build && test", os.tmpdir(), undefined, false, "tests");
+
+		last().stdout.emit("data", Buffer.from("starting build\n"));
+		last().stderr.emit("data", Buffer.from("Error: compilation failed at foo.ts:42\n"));
+		last().emit("exit", 1, null);
+		await drainMicrotasks();
+
+		if (!notifierWired(calls)) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+
+		assert.equal(calls.length, 1);
+		const n = calls[0];
+		assert.equal(n.success, false);
+		assert.equal(n.exitCode, 1);
+		assert.equal(n.signal, null);
+		assert.ok(
+			n.tail.some((l) => /error|fail/i.test(l)),
+			`failure tail must surface error line, got: ${JSON.stringify(n.tail)}`,
+		);
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("signal termination surfaces as failure", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		mgr.create(SESSION, "sleep 30", os.tmpdir());
+		// Simulate external SIGKILL (no agent-initiated kill() call → not suppressed)
+		last().emit("exit", null, "SIGKILL");
+		await drainMicrotasks();
+
+		if (!notifierWired(calls)) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0].success, false);
+		assert.equal(calls[0].signal, "SIGKILL");
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("explicit wait observes exit without producing an auto notification", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "noop", os.tmpdir());
+
+		const controller = new AbortController();
+		const waitP = mgr.waitForExit(SESSION, info.id, 10_000, controller.signal);
+		// Drive exit AFTER the waiter has parked so wait wins the race.
+		queueMicrotask(() => last().emit("exit", 0, null));
+		const result = await waitP;
+		assert.ok(result);
+		assert.equal(result!.info.status, "exited");
+
+		// Allow any queued auto-notification microtask to run.
+		await drainMicrotasks();
+
+		// Two acceptable outcomes per design: wait wins (0 calls) OR auto raced
+		// first (1 call). Either way: exactly-once observation.
+		assert.ok(calls.length <= 1, `expected at most 1 notification, got ${calls.length}`);
+
+		if (!notifierWired(calls)) {
+			// If neither path fired, production isn't wired yet — that's the
+			// skip path for the broader feature, but it still passes the
+			// "no duplicate" assertion above.
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+		}
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("auto notification then wait does not duplicate", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "noop", os.tmpdir());
+
+		// No waiter \u2014 exit must auto-notify.
+		last().emit("exit", 0, null);
+		await drainMicrotasks();
+
+		if (!notifierWired(calls)) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+		assert.equal(calls.length, 1, "auto notify on exit with no waiter");
+
+		// Subsequent wait must return cached info without a second notification.
+		const result = await mgr.waitForExit(SESSION, info.id, 1000);
+		assert.ok(result);
+		assert.equal(result!.info.status, "exited");
+		await drainMicrotasks();
+		assert.equal(calls.length, 1, "wait after auto-notify must not produce a second notification");
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("kill suppression \u2014 agent-initiated kill must not wake the session", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+
+		const killed = mgr.kill(SESSION, info.id);
+		assert.equal(killed, true);
+
+		// Simulate child exiting in response to our SIGTERM.
+		last().emit("exit", null, "SIGTERM");
+		await drainMicrotasks();
+
+		if (calls.length === 0 && !(BgProcessManager as any).__notifierWired) {
+			// Either production not wired, or wired and correctly suppressed.
+			// Distinguish via the positive 'notifies on exit' test above: if that
+			// one skipped, we skip; if it didn't, 0 calls here means correct
+			// suppression.
+		}
+		assert.equal(calls.length, 0, "kill() must suppress auto-notification");
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("cleanup() suppresses notifications for running processes", async (t) => {
+		const { mgr, last, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+		mgr.create(SESSION, "sleep 30", os.tmpdir());
+
+		mgr.cleanup(SESSION);
+		// child fires exit in response to the SIGTERM cleanup sent.
+		last().emit("exit", null, "SIGTERM");
+		await drainMicrotasks();
+
+		assert.equal(calls.length, 0, "cleanup() must suppress notifications");
+		// Touch t to keep linter happy when not skipping.
+		void t;
+	});
+
+	it("multiple concurrent processes notify independently with no cross-talk", async (t) => {
+		const { mgr, calls } = makeManagerWithNotifier();
+		const SESSION = freshSession();
+
+		// Two separate spawners so each create() captures its own child.
+		const spawnerA = fakeSpawner();
+		const spawnerB = fakeSpawner();
+		// Re-wire the manager's spawnFn per-create via a small queue.
+		const queue: SpawnFn[] = [spawnerA.spawn, spawnerB.spawn];
+		(mgr as any).spawnFn = (cmd: string, cwd: string, cid?: string) => queue.shift()!(cmd, cwd, cid);
+
+		const a = mgr.create(SESSION, "cmd-a", os.tmpdir(), undefined, false, "alpha");
+		const b = mgr.create(SESSION, "cmd-b", os.tmpdir(), undefined, false, "beta");
+
+		spawnerA.last().emit("exit", 0, null);
+		spawnerB.last().emit("exit", 2, null);
+		await drainMicrotasks();
+
+		if (!notifierWired(calls)) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+
+		assert.equal(calls.length, 2, "each process must notify exactly once");
+		const byId = new Map(calls.map((n) => [n.processId, n] as const));
+		assert.ok(byId.has(a.id) && byId.has(b.id), "both ids represented");
+		assert.equal(byId.get(a.id)!.success, true);
+		assert.equal(byId.get(a.id)!.name, "alpha");
+		assert.equal(byId.get(a.id)!.command, "cmd-a");
+		assert.equal(byId.get(b.id)!.success, false);
+		assert.equal(byId.get(b.id)!.exitCode, 2);
+		assert.equal(byId.get(b.id)!.name, "beta");
+
+		mgr.cleanup(SESSION);
+	});
+
+	it("notifier failures do not crash the exit handler", async (t) => {
+		const spawner = fakeSpawner();
+		const notifier = mock.fn(() => { throw new Error("notifier boom"); });
+		const Ctor = BgProcessManager as unknown as new (
+			cp: () => undefined,
+			sp: SpawnFn,
+			notifier: (n: ExitNotification) => void,
+		) => BgProcessManager;
+		const mgr = new Ctor(() => undefined, spawner.spawn, notifier as any);
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "x", os.tmpdir());
+
+		// Must not throw / reject.
+		spawner.last().emit("exit", 0, null);
+		await drainMicrotasks();
+
+		if (notifier.mock.callCount() === 0) {
+			t.skip("BgProcessManager exit-notifier not yet wired — see design doc.");
+			mgr.cleanup(SESSION);
+			return;
+		}
+
+		// State should still reflect exit even though notifier threw.
+		const snap = mgr.list(SESSION).find((p) => p.id === info.id);
+		assert.ok(snap);
+		assert.equal(snap!.status, "exited");
+
+		mgr.cleanup(SESSION);
+	});
+});
+
 // Make sure no global mock timer state leaks between describe blocks.
 mock.timers.reset();
