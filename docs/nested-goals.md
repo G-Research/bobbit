@@ -1401,7 +1401,7 @@ not exported and a refactor would entangle three unrelated tool groups.
 
 | Tool | Visual shape |
 |---|---|
-| `goal_spawn_child` (`GoalSpawnChildRenderer.ts`) | Mini goal-proposal card: title, workflow id (or "default"), `planId` chip, collapsible spec excerpt, live `<children-goal-state-pill>` keyed by the new child goal id. |
+| `goal_spawn_child` (`GoalSpawnChildRenderer.ts`) | Mini goal-proposal card: title, workflow id (or "default"), `planId` chip, collapsible spec excerpt, live `<children-goal-state-pill>` keyed by the new child goal id, and an **Open goal →** button (see below). |
 | `goal_plan_propose` (`GoalPlanProposeRenderer.ts`) | **Mirrors `ProposalRenderer.ts`** — header with rev number, steps table (phase / title / collapsible spec), classification badge, criteria-drop red banner, in-chat Approve / Reject buttons (`<children-mutation-approval>`) when `requiresApproval` is set, "Applied ✓" pill when `applied`. Falls back to a spawned-list when the server response carries `fallback: "spawn-children-direct"`. |
 | `goal_plan_status` (`GoalPlanStatusRenderer.ts`) | Compact steps grid; each row carries a live `<children-goal-state-pill>` for the corresponding child goal. |
 | `goal_merge_child` (`GoalMergeChildRenderer.ts`) | Outcome pill: `merged ✓` / `already merged` / `conflict ⚠` / `RTM not passed ✗`. On conflict, an `<expandable-section>` reveals the conflict output. |
@@ -1409,6 +1409,58 @@ not exported and a refactor would entangle three unrelated tool groups.
 | `goal_archive_child` (`GoalArchiveChildRenderer.ts`) | Single-line: child title + `goalIdChip` + `mergedManually ✓` flag when present. |
 | `goal_decide_mutation` (`GoalDecideMutationRenderer.ts`) | Green "Approved" or red "Rejected" pill + truncated `requestId`. The response carries `{ applied }` only today; an `applied steps diff` block is rendered conditionally if a future server response surfaces one. |
 | `goal_set_policy` (`GoalSetPolicyRenderer.ts`) | Key/value rows: divergence policy (with one-line `policyDescription()`) + `maxConcurrentChildren` rendered as a `concurrencyBar()` (1–8 small blocks). |
+
+### `goal_spawn_child` — Open goal navigation
+
+The **Open goal →** button on a `GoalSpawnChildRenderer` card navigates to the
+child's goal dashboard using the canonical `setHashRoute("goal-dashboard",
+childGoalId)` helper (`src/app/routing.ts`), which writes `#/goal/<id>` — the
+pattern that `getRouteFromHash()` matches to `view: "goal-dashboard"`.
+
+**Why `setHashRoute`, not a raw hash write.** A direct `window.location.hash =
+"#goal-dashboard/<id>"` write produces a hash the router doesn't recognise,
+causing it to fall through to the empty landing page. All navigation in the
+app goes through `setHashRoute` — this is the single source of truth for the
+`#/goal/<id>` format.
+
+**Cross-project switching.** A child goal can belong to a different project
+than the one the user is currently viewing. When `handleHashChange()` in
+`src/app/main.ts` resolves the goal and finds its `projectId`, it calls
+`applyProjectPalette(gdGoal.projectId)`, which also updates
+`state.activeProjectId`. This keeps the sidebar filtered to the child's project
+and the breadcrumb correct, even when navigating from a different project's
+context.
+
+**Goal resolution before navigation.** Before mounting the dashboard,
+`handleHashChange()` runs two resolution tiers:
+
+1. **In-state lookup** — `state.goals.find(g => g.id === route.goalId)`. Covers
+   the common case where the child is already in the client's goal list.
+2. **Per-id API fetch** — `GET /api/goals/:id`. Covers goals in other projects,
+   freshly spawned children not yet in the local list, and archived goals.
+
+The fetched goal is merged into `state.goals` so the sidebar can reflect the
+correct project before the first render.
+
+**Archived and blocked children.** Navigation succeeds for goals in any state.
+The dashboard already renders archived goals with a grey `Archived` badge and
+blocked goals with a `Blocked` badge — no special casing is needed in the
+renderer. The router does not gate on goal state.
+
+**Missing or purged goals.** If the goal cannot be resolved via either tier
+(e.g. it was purged, or its project was deleted), `handleHashChange()` shows a
+header toast — `Goal no longer exists (id=<first 8 chars>)` — via
+`showHeaderToast()`, restores the previous hash, and leaves the current view
+unchanged. The user is never dumped onto the empty landing page.
+
+**Invariant.** `goal_spawn_child` always returns a real goal id, never a
+proposal id. The **Open goal →** button is only rendered when `childGoalId` is
+present; the `!childGoalId` short-circuit in `GoalSpawnChildRenderer` ensures
+the button cannot appear for a tool call that returned no id.
+
+Pinned by: `tests/e2e/ui/spawned-child-open-goal.spec.ts` — covers active
+children, cross-project `activeProjectId` switching, archived children,
+blocked children (no-crash), and the missing-goal toast.
 
 Why `goal_plan_propose` mirrors `ProposalRenderer.ts`: a plan-propose call
 IS a goal proposal — it's the parent goal proposing a set of child goals.
