@@ -287,6 +287,41 @@ export function ensureCanonicalLspRule(basePrompt: string): string {
 }
 
 /**
+ * Strip any `## Tool selection — LSP before text search` section(s) from a
+ * markdown fragment, preserving all other content. Used to de-duplicate role
+ * prompts, goal specs, or other appended content that may have inlined the
+ * canonical rule — the protected-core injection in `ensureCanonicalLspRule()`
+ * is the single source of truth for that section in the final assembled
+ * prompt, so any copies in role/goal content would otherwise produce a
+ * duplicate header.
+ *
+ * The canonical section extends from its `## ` header line to (but not
+ * including) the next `# ` / `## ` heading or end of file. Any blank lines
+ * immediately preceding the removed section are also trimmed back so the
+ * surrounding content stays well-formed.
+ */
+export function stripCanonicalLspRule(content: string): string {
+	if (!content || !content.includes(LSP_CANONICAL_TOOL_SELECTION_HEADER)) return content;
+	const lines = content.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i].trim() === LSP_CANONICAL_TOOL_SELECTION_HEADER) {
+			// Trim trailing blank lines previously appended so we don't leave
+			// an awkward gap where the section used to be.
+			while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
+			// Skip the header and the section body until next H1/H2 heading.
+			i++;
+			while (i < lines.length && !/^#{1,2} /.test(lines[i])) i++;
+			continue;
+		}
+		out.push(lines[i]);
+		i++;
+	}
+	return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+/**
  * Return the hard LSP-over-grep tool-selection rule for a given role, or
  * `undefined` when the role is not a code-lookup role or the supplied
  * `rolePrompt` already contains the header (duplication guard).
@@ -326,8 +361,12 @@ export function lspToolSelectionRuleForRole(roleName?: string, rolePrompt?: stri
  * remain exported for backward compatibility with existing tests/callers.
  */
 function effectiveRolePrompt(_roleName?: string, rolePrompt?: string): string | undefined {
-	const base = rolePrompt?.trim();
-	return base ? base : undefined;
+	if (!rolePrompt) return undefined;
+	// De-duplicate the protected-core canonical LSP section if a role prompt
+	// (or project role override) happens to include it. The base prompt is the
+	// single source of truth for that section in the assembled output.
+	const stripped = stripCanonicalLspRule(rolePrompt).trim();
+	return stripped ? stripped : undefined;
 }
 
 /** Default max bytes of skills-catalog markdown to embed in the system prompt. */
@@ -456,9 +495,11 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		);
 	}
 
-	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat)
+	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat).
+	//    Strip the canonical LSP header from goalSpec too — the protected-core
+	//    injection in step 1 owns that section.
 	{
-		let effectiveGoalSpec = parts.goalSpec || "";
+		let effectiveGoalSpec = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
 		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
 		if (role) {
 			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + role;
@@ -591,13 +632,17 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
-	// 3. Goal spec (separate from role)
-	if (parts.goalSpec?.trim()) {
-		const header = parts.goalTitle
-			? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-			: "";
-		const goalContent = (header ? header + "\n\n" : "") + parts.goalSpec.trim();
-		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
+	// 3. Goal spec (separate from role) — strip canonical LSP section if present
+	//    so the inspector view shows the rule only once (in the base section).
+	{
+		const goalBody = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
+		if (goalBody) {
+			const header = parts.goalTitle
+				? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+				: "";
+			const goalContent = (header ? header + "\n\n" : "") + goalBody;
+			sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
+		}
 	}
 
 	// 4. Role prompt (with injected LSP rule for code-lookup roles)
