@@ -41,7 +41,7 @@ import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
-import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { BgProcessManager, type BgProcessExitNotification } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
@@ -548,6 +548,65 @@ export interface GatewayConfig {
 	forceAuth?: boolean;
 }
 
+/**
+ * Format a {@link BgProcessExitNotification} as a human-readable steer/prompt
+ * message for the owning agent. The message includes id, name, exit verdict,
+ * duration, the (truncated) command, a short tail of output (if any), and a
+ * pointer to `bash_bg logs` for the full output.
+ */
+function formatBgExitMessage(n: BgProcessExitNotification): string {
+	const seconds = Math.max(0, Math.round(n.durationMs / 1000));
+	const durationStr = seconds < 60
+		? `${seconds}s`
+		: `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+
+	let verdict: string;
+	if (n.success) {
+		verdict = `success (exit code ${n.exitCode ?? 0})`;
+	} else if (n.signal && n.exitCode !== null && n.exitCode !== 0) {
+		verdict = `failure (exit code ${n.exitCode}, signal ${n.signal})`;
+	} else if (n.signal) {
+		verdict = `failure (signal ${n.signal})`;
+	} else {
+		verdict = `failure (exit code ${n.exitCode === null ? "unknown" : n.exitCode})`;
+	}
+
+	const lines: string[] = [];
+	lines.push(`Background process ${n.processId} (${n.name}) exited: ${verdict} after ${durationStr}.`);
+	lines.push(`Command: ${n.command}`);
+	if (n.tail.length > 0) {
+		lines.push("Output tail:");
+		for (const line of n.tail) lines.push(line);
+	}
+	lines.push(`Use bash_bg logs id="${n.processId}" for full output.`);
+	return lines.join("\n");
+}
+
+/**
+ * Deliver a bg-process exit notification to the owning session, reusing the
+ * existing steer / enqueue plumbing. Idle sessions are woken via
+ * `enqueuePrompt`; streaming sessions receive a live steer. Terminated or
+ * missing sessions are silently ignored.
+ */
+function notifySessionOfBgExit(sessionManager: SessionManager, event: BgProcessExitNotification): void {
+	const session = sessionManager.getSession(event.sessionId);
+	if (!session) return;
+	if (session.status === "terminated") return;
+
+	const message = formatBgExitMessage(event);
+
+	if (session.status === "streaming") {
+		sessionManager.deliverLiveSteer(session.id, message).catch((err) => {
+			console.error(`[bg-process] deliverLiveSteer failed for ${session.id}:`, err);
+		});
+		return;
+	}
+
+	sessionManager.enqueuePrompt(session.id, message, { isSteered: true }).catch((err) => {
+		console.error(`[bg-process] enqueuePrompt failed for ${session.id}:`, err);
+	});
+}
+
 export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
@@ -711,10 +770,14 @@ export function createGateway(config: GatewayConfig) {
 		projectContextManager,
 		toolManager,
 	});
-	const bgProcessManager = new BgProcessManager((sessionId: string) => {
-		const session = sessionManager.getSession(sessionId);
-		return session?.clients;
-	});
+	const bgProcessManager = new BgProcessManager(
+		(sessionId: string) => {
+			const session = sessionManager.getSession(sessionId);
+			return session?.clients;
+		},
+		undefined,
+		(event) => notifySessionOfBgExit(sessionManager, event),
+	);
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();

@@ -60,6 +60,10 @@ export interface BgProcess {
 	status: "running" | "exited";
 	exitCode: number | null;
 	startTime: number;
+	/** Set in the single child `exit` listener. */
+	endTime?: number;
+	/** Signal that terminated the process, if any. */
+	exitSignal?: NodeJS.Signals | string | null;
 	cwd: string;
 	/** If set, process was spawned inside this Docker container */
 	containerId?: string;
@@ -70,7 +74,39 @@ export interface BgProcess {
 	 * `status === 'exited'" — and removes a long-standing flake source.
 	 */
 	exited: Promise<void>;
+	/**
+	 * True once the owning agent has observed the exit — either via the
+	 * automatic exit notifier or by explicitly calling `waitForExit`. Used to
+	 * guarantee exactly-once wake-up delivery.
+	 */
+	notified: boolean;
+	/**
+	 * Set before intentional kill / cleanup so the exit notifier does not wake
+	 * idle agents for a termination they initiated (or that happened during
+	 * session shutdown).
+	 */
+	suppressNotification: boolean;
 }
+
+/**
+ * Payload delivered to the owning agent session when a bg process exits.
+ * Built from an immutable snapshot of the {@link BgProcess} state.
+ */
+export interface BgProcessExitNotification {
+	sessionId: string;
+	processId: string;
+	name: string;
+	command: string;
+	exitCode: number | null;
+	signal: string | null;
+	success: boolean;
+	startTime: number;
+	endTime: number;
+	durationMs: number;
+	tail: string[];
+}
+
+export type ExitNotifier = (notification: BgProcessExitNotification) => void | Promise<void>;
 
 export interface BgProcessInfo {
 	id: string;
@@ -85,6 +121,37 @@ export interface BgProcessInfo {
 
 const MAX_LOG_LINES = 5000;
 const MAX_LOG_BYTES = 512 * 1024; // 512KB per process
+const MAX_COMMAND_CHARS = 500;
+const NOTIFICATION_TAIL_LINES = 20;
+const ERROR_LINE_REGEX = /error|fail|failed|fatal|exception|warning|warn/i;
+
+function truncateCommand(command: string, max = MAX_COMMAND_CHARS): string {
+	if (command.length <= max) return command;
+	return `${command.slice(0, max - 1)}…`;
+}
+
+/**
+ * Pick a small tail of log lines for the exit notification. For failures we
+ * preferentially surface recent error/warning lines (cheap regex scan over
+ * the bounded `bg.log` buffer); otherwise we fall back to the last N lines.
+ * Returns `[]` when the process produced no output.
+ */
+function selectNotificationTail(bg: BgProcess, success: boolean, maxLines = NOTIFICATION_TAIL_LINES): string[] {
+	const log = bg.log;
+	if (log.length === 0) return [];
+
+	if (!success) {
+		// Prefer lines that look like error/warning markers, taken from the
+		// end of the log so the most recent failures win.
+		const errorLines: string[] = [];
+		for (let i = log.length - 1; i >= 0 && errorLines.length < maxLines; i--) {
+			if (ERROR_LINE_REGEX.test(log[i].text)) errorLines.unshift(log[i].text);
+		}
+		if (errorLines.length > 0) return errorLines;
+	}
+
+	return log.slice(-maxLines).map((entry) => entry.text);
+}
 
 // Shell config is provided by the shared shell-util module
 
@@ -99,13 +166,17 @@ export class BgProcessManager {
 	private nextId = 1;
 	/** Spawner — overridable in tests so unit tests don't touch the OS. */
 	private spawnFn: SpawnFn;
+	/** Optional notifier — called once per process exit (unless suppressed). */
+	private exitNotifier?: ExitNotifier;
 
 	constructor(
 		clientsProvider: (sessionId: string) => Set<WebSocket> | undefined,
 		spawnFn: SpawnFn = defaultSpawn,
+		exitNotifier?: ExitNotifier,
 	) {
 		this.clientsProvider = clientsProvider;
 		this.spawnFn = spawnFn;
+		this.exitNotifier = exitNotifier;
 	}
 
 	private broadcast(sessionId: string, msg: ServerMessage): void {
@@ -147,6 +218,8 @@ export class BgProcessManager {
 			cwd,
 			containerId,
 			exited,
+			notified: false,
+			suppressNotification: false,
 		};
 
 		let logBytes = 0;
@@ -207,9 +280,11 @@ export class BgProcessManager {
 
 		// Listen on 'exit' not 'close' — exit fires when the process itself ends,
 		// close waits for all FD holders (grandchildren) to release pipes.
-		child.on("exit", (code) => {
+		child.on("exit", (code, signal) => {
 			bg.status = "exited";
 			bg.exitCode = code;
+			bg.exitSignal = signal ?? null;
+			bg.endTime = Date.now();
 			// Resolve BEFORE broadcast/destroy so any awaiter on `bg.exited`
 			// observes status === 'exited' the moment they're scheduled.
 			resolveExited();
@@ -222,6 +297,12 @@ export class BgProcessManager {
 				processId: id,
 				exitCode: code,
 			} as any);
+
+			// Schedule the agent-facing notification on a microtask so that a
+			// concurrent `waitForExit` (whose awaiter is already queued behind
+			// `bg.exited`) gets a chance to mark the process as observed first,
+			// avoiding a duplicate wake-up.
+			queueMicrotask(() => this.notifyExitIfNeeded(sessionId, bg));
 		});
 
 		if (!this.processes.has(sessionId)) {
@@ -304,6 +385,11 @@ export class BgProcessManager {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg || bg.status !== "running") return false;
 
+		// Suppress wake-up before sending the signal — the exit handler can
+		// fire synchronously on some platforms, so we must set the flag first
+		// to win the race against the notifier microtask.
+		bg.suppressNotification = true;
+
 		try {
 			if (bg.containerId) {
 				// Docker exec: kill the docker exec process on host, which signals the container process
@@ -342,6 +428,8 @@ export class BgProcessManager {
 		if (!map) return;
 		for (const [, bg] of map) {
 			if (bg.status === "running") {
+				// Session is going away — don't wake any agent on the resulting exit.
+				bg.suppressNotification = true;
 				try { bg.child.kill("SIGTERM"); } catch { /* ignore */ }
 			}
 		}
@@ -387,7 +475,11 @@ export class BgProcessManager {
 	async waitForExit(sessionId: string, processId: string, timeoutMs: number, signal?: AbortSignal): Promise<{ info: BgProcessInfo; timedOut: boolean; aborted: boolean } | null> {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg) return null;
-		if (bg.status === "exited") return { info: this.toInfo(bg), timedOut: false, aborted: false };
+		if (bg.status === "exited") {
+			// Mark observed so any not-yet-fired auto-notifier microtask becomes a no-op.
+			bg.notified = true;
+			return { info: this.toInfo(bg), timedOut: false, aborted: false };
+		}
 		if (signal?.aborted) return { info: this.toInfo(bg), timedOut: false, aborted: true };
 
 		// Race exit / timeout / abort. We do NOT attach an "exit" listener to the
@@ -409,6 +501,12 @@ export class BgProcessManager {
 
 		try {
 			const winner = await Promise.race([exitP, timeoutP, abortP]);
+			if (winner === "exit" || (bg.status as string) === "exited") {
+				// Acknowledge the exit — auto-notifier (still queued as a microtask)
+				// will see `notified` and become a no-op, guaranteeing exactly-once
+				// wake-up semantics.
+				bg.notified = true;
+			}
 			return {
 				info: this.toInfo(bg),
 				timedOut: winner === "timeout",
@@ -428,6 +526,49 @@ export class BgProcessManager {
 			if (bg.status === "exited") map.delete(id);
 		}
 		if (map.size === 0) this.processes.delete(sessionId);
+	}
+
+	/**
+	 * Build and dispatch a one-shot exit notification for the owning agent.
+	 * Idempotent — guarded by `bg.notified` / `bg.suppressNotification`. Callback
+	 * failures are logged and swallowed so a buggy notifier cannot crash the
+	 * gateway from inside a child `exit` handler.
+	 */
+	private notifyExitIfNeeded(sessionId: string, bg: BgProcess): void {
+		if (bg.notified || bg.suppressNotification) return;
+		if (!this.exitNotifier) return;
+		// Set BEFORE invoking the (potentially async) callback so a concurrent
+		// observer cannot double-notify.
+		bg.notified = true;
+
+		const signal = bg.exitSignal ?? null;
+		const exitCode = bg.exitCode;
+		const success = exitCode === 0 && !signal;
+		const endTime = bg.endTime ?? Date.now();
+		const notification: BgProcessExitNotification = {
+			sessionId,
+			processId: bg.id,
+			name: bg.name,
+			command: truncateCommand(bg.command),
+			exitCode,
+			signal: signal === null ? null : String(signal),
+			success,
+			startTime: bg.startTime,
+			endTime,
+			durationMs: Math.max(0, endTime - bg.startTime),
+			tail: selectNotificationTail(bg, success),
+		};
+
+		try {
+			const result = this.exitNotifier(notification);
+			if (result && typeof (result as Promise<unknown>).catch === "function") {
+				(result as Promise<unknown>).catch((err) => {
+					console.error(`[bg-process] exit notifier failed for ${bg.id}:`, err);
+				});
+			}
+		} catch (err) {
+			console.error(`[bg-process] exit notifier threw for ${bg.id}:`, err);
+		}
 	}
 
 	private toInfo(bg: BgProcess): BgProcessInfo {
