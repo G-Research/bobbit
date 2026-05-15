@@ -4,7 +4,7 @@
  * See docs/design/multi-repo-components.md §8.5 / §9.2.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, registerProject } from "./e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,26 +35,20 @@ test("multi-repo: POST /api/projects with components + workflows persists struct
 	gitInit(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"));  // data-only
 
-	const res = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify({
-			name: `mr-${Date.now()}`,
-			rootPath: root,
-			components: [
-				{ name: "api", repo: "api", commands: { build: "npm run build", test: "npm test" } },
-				{ name: "web", repo: "web", commands: { build: "vite build" } },
-				{ name: "shared", repo: "shared" },  // data-only
-			],
-			workflows: {
-				simple: {
-					id: "simple", name: "Simple", gates: [{ id: "implementation", name: "Build" }],
-				},
+	const project = await registerProject({
+		name: `mr-${Date.now()}`,
+		rootPath: root,
+		components: [
+			{ name: "api", repo: "api", commands: { build: "npm run build", test: "npm test" } },
+			{ name: "web", repo: "web", commands: { build: "vite build" } },
+			{ name: "shared", repo: "shared" },  // data-only
+		],
+		workflows: {
+			simple: {
+				id: "simple", name: "Simple", gates: [{ id: "implementation", name: "Build" }],
 			},
-		}),
+		},
 	});
-	expect(res.status).toBe(201);
-	const project = await res.json();
 
 	const cfgRes = await fetch(`${base()}/api/projects/${project.id}/config`, { headers: headers() });
 	expect(cfgRes.status).toBe(200);
@@ -73,13 +67,7 @@ test("single-repo POST without components fills default [{name, repo: '.'}]", as
 	gitInit(root);
 
 	const projName = `sr-${Date.now()}`;
-	const res = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify({ name: projName, rootPath: root }),
-	});
-	expect(res.status).toBe(201);
-	const project = await res.json();
+	const project = await registerProject({ name: projName, rootPath: root });
 
 	const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
 	// Wait briefly for the autosave (synchronous in setComponents but defensive).
@@ -97,16 +85,11 @@ test("PUT /api/projects/:id/config with bad workflow step → 400", async () => 
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-bad-"));
 	gitInit(path.join(root, "api"));
 
-	const createRes = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify({
-			name: `bad-${Date.now()}`,
-			rootPath: root,
-			components: [{ name: "api", repo: "api", commands: { build: "npm run build" } }],
-		}),
+	const project = await registerProject({
+		name: `bad-${Date.now()}`,
+		rootPath: root,
+		components: [{ name: "api", repo: "api", commands: { build: "npm run build" } }],
 	});
-	const project = await createRes.json();
 
 	const putRes = await fetch(`${base()}/api/projects/${project.id}/config`, {
 		method: "PUT",
@@ -134,16 +117,11 @@ test("PUT /api/projects/:id/config adds a new component", async () => {
 	gitInit(path.join(root, "api"));
 	gitInit(path.join(root, "web"));
 
-	const createRes = await fetch(`${base()}/api/projects`, {
-		method: "POST",
-		headers: headers(),
-		body: JSON.stringify({
-			name: `upd-${Date.now()}`,
-			rootPath: root,
-			components: [{ name: "api", repo: "api" }],
-		}),
+	const project = await registerProject({
+		name: `upd-${Date.now()}`,
+		rootPath: root,
+		components: [{ name: "api", repo: "api" }],
 	});
-	const project = await createRes.json();
 
 	const putRes = await fetch(`${base()}/api/projects/${project.id}/config`, {
 		method: "PUT",
