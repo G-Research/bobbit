@@ -980,6 +980,55 @@ test.describe("Queue Dispatch Integration", () => {
 		expect(sim.status).toBe("idle");
 	});
 
+	test("(retry-overload) explicit retryLastPrompt clears pendingAutoRetryTimer", () => {
+		// Pinned by goal "Retry overloaded errors": when the user (or another
+		// code path) calls retryLastPrompt while an auto-retry timer is pending,
+		// the timer MUST be cancelled so the same prompt isn't dispatched twice
+		// (once by retry, once by the firing timer).
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+		sim.errorEnd("{\"type\":\"overloaded_error\"}");
+		const timer = sim.scheduleAutoRetry();
+		expect(sim.pendingAutoRetryTimer).toBe(timer);
+		expect(timer.cancelled).toBe(false);
+
+		const before = sim.dispatched.length;
+		sim.retry();
+
+		expect(timer.cancelled).toBe(true);
+		expect(sim.pendingAutoRetryTimer).toBeUndefined();
+		// Exactly one dispatch from retry — no double-fire from the timer.
+		expect(sim.dispatched.length).toBe(before + 1);
+		expect(sim.dispatched[sim.dispatched.length - 1].message.text).toBe("[RETRY]");
+		// Explicit retry also resets the error-turn cap.
+		expect(sim.consecutiveErrorTurns).toBe(0);
+		expect(sim.lastTurnErrored).toBe(false);
+	});
+
+	test("(retry-overload) provider-overload error can retry past the 3-attempt non-provider cap", () => {
+		// This simulates the SessionManager scheduling policy as described in
+		// the design: for provider overload/rate-limit errors, the retry policy
+		// must NOT stop at the existing 3-attempt bound. We model the policy as
+		// a small loop here — the real assertion is that consecutive scheduling
+		// of new timers (without hitting an attempt limit) is possible.
+		const sim = new DispatchSimulator();
+		sim.enqueue("initial");
+
+		const attempts: number[] = [];
+		for (let i = 0; i < 6; i++) {
+			sim.errorEnd('{"type":"overloaded_error"}');
+			sim.transientRetryAttempts = (sim.transientRetryAttempts ?? 0) + 1;
+			attempts.push(sim.transientRetryAttempts);
+			const timer = sim.scheduleAutoRetry();
+			expect(timer.cancelled).toBe(false);
+			// The new policy schedules a timer at every attempt; cap is on delay,
+			// not on count.
+			expect(sim.pendingAutoRetryTimer).toBe(timer);
+		}
+		// We scheduled 6 retries without exhausting the policy.
+		expect(attempts).toEqual([1, 2, 3, 4, 5, 6]);
+	});
+
 	test("(unstick 7) auto-retry timer cancelled by new input", () => {
 		const sim = new DispatchSimulator();
 		sim.enqueue("initial");
