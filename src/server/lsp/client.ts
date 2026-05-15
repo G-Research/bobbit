@@ -54,8 +54,16 @@ export interface LspClientFactory {
  */
 export interface SandboxLspBridge {
 	/** Return a stable bridge scoped to one worktree path, avoiding shared
-	 *  mutable state in multi-project bridges. Falls back to `this`. */
-	resolveForWorktree?(worktreePath: string): SandboxLspBridge;
+	 *  mutable state in multi-project bridges.
+	 *  - Return a non-null `SandboxLspBridge` when the worktree belongs to a
+	 *    sandbox-configured project (fail-closed when no container running).
+	 *  - Return `null` to indicate the worktree is NOT inside any
+	 *    sandbox-configured project; callers must then treat it as a host
+	 *    worktree and skip the sandbox path entirely. Pinned by
+	 *    `tests/lsp/sandbox-bridge-resolve.spec.ts` and the API E2E
+	 *    `tests/e2e/lsp.spec.ts`.
+	 *  - When unimplemented, callers fall back to `this` (legacy contract). */
+	resolveForWorktree?(worktreePath: string): SandboxLspBridge | null;
 	/** Spawn a child inside the sandbox container; return its stdio handles. */
 	spawn(args: {
 		containerId: string;
