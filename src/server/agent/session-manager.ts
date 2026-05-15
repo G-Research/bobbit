@@ -1329,7 +1329,10 @@ export class SessionManager {
 				}
 			}
 			parts = {
-				baseSystemPromptPath: undefined,
+				// Assistant prompt reconstruction must include the base system prompt
+				// so the canonical LSP-before-text-search rule survives respawn /
+				// rebuild paths (not just initial session-setup).
+				baseSystemPromptPath: this.systemPromptPath,
 				cwd: session.cwd,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,
@@ -2803,7 +2806,9 @@ export class SessionManager {
 			}
 
 			const promptPath = this.assemblePrompt(ps.id, {
-				baseSystemPromptPath: undefined,
+				// Restore/respawn path: keep the global base prompt so the canonical
+				// LSP-before-text-search rule reaches restored assistant sessions.
+				baseSystemPromptPath: this.systemPromptPath,
 				cwd: ps.cwd,
 				goalSpec: assistantGoalSpec,
 				goalTitle: assistantDef.promptTitle,

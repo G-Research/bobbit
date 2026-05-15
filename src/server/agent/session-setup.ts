@@ -348,7 +348,10 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
-			baseSystemPromptPath: undefined,
+			// Include the base system prompt so the canonical
+			// `## Tool selection — LSP before text search` section reaches
+			// assistant sessions (goal/project/tool assistants) by default.
+			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
 			goalSpec: assistantGoalSpec,
@@ -369,7 +372,10 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 		}
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
-			baseSystemPromptPath: undefined,
+			// Delegates still get the global base system prompt (containing the
+			// canonical LSP-before-text-search rule). The task spec is layered
+			// on top as goalSpec; AGENTS.md from the worktree is also included.
+			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
 			goalSpec: taskSpec,
