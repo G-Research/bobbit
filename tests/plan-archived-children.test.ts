@@ -203,6 +203,78 @@ describe("computePlanStepsForGoal — archived children visibility", () => {
 	});
 });
 
+describe("computePlanStepsForGoal — formal execution plan liveOnly hides steps whose resolved child is archived or completed", () => {
+	// Regression: when the goal has a formal execution-gate plan (subgoal
+	// verify steps), the formal step nodes are emitted regardless of
+	// whether their resolved child is in the childSynthesis. Under
+	// liveOnly:true the archived/completed child gets filtered out, but
+	// previously the formal step was still rendered as an unresolved
+	// "todo" node — the user explicitly asked for live work only, so a
+	// phantom todo node is wrong. Default mode must still show ALL formal
+	// steps including the archived/completed-resolved ones.
+	function parentWithFormalPlan(): Goal {
+		return goal({
+			id: "PF",
+			title: "Parent with formal plan",
+			workflow: {
+				id: "wf",
+				name: "wf",
+				description: "",
+				gates: [
+					{
+						id: "execution",
+						name: "execution",
+						dependsOn: [],
+						verify: [
+							{ type: "subgoal", subgoal: { planId: "pf-live", title: "Live step" }, phase: 0 } as any,
+							{ type: "subgoal", subgoal: { planId: "pf-archived", title: "Archived step" }, phase: 1 } as any,
+							{ type: "subgoal", subgoal: { planId: "pf-complete", title: "Completed step" }, phase: 2 } as any,
+						],
+					},
+				],
+			} as any,
+		});
+	}
+	const parent = parentWithFormalPlan();
+	const liveChild: Goal = goal({
+		id: "fc-live", title: "Live formal child", parentGoalId: "PF",
+		spawnedFromPlanId: "pf-live", state: "in-progress", createdAt: 1,
+	});
+	const archivedChild: Goal = goal({
+		id: "fc-archived", title: "Archived formal child", parentGoalId: "PF",
+		spawnedFromPlanId: "pf-archived", state: "complete", archived: true, createdAt: 2,
+	});
+	const completeChild: Goal = goal({
+		id: "fc-complete", title: "Completed formal child", parentGoalId: "PF",
+		spawnedFromPlanId: "pf-complete", state: "complete", createdAt: 3,
+	});
+	const allGoals: Goal[] = [parent, liveChild, archivedChild, completeChild];
+
+	it("default INCLUDES all formal steps (live, archived-resolved, completed-resolved)", () => {
+		const steps = computePlanStepsForGoal(parent, allGoals);
+		const planIds = steps.map(s => s.planId).sort();
+		assert.deepEqual(planIds, ["pf-archived", "pf-complete", "pf-live"],
+			`default must keep every formal step including archived+completed; got ${JSON.stringify(planIds)}`);
+	});
+
+	it("liveOnly:true keeps ONLY the formal step whose resolved child is live", () => {
+		const steps = computePlanStepsForGoal(parent, allGoals, { liveOnly: true } as any);
+		const planIds = steps.map(s => s.planId);
+		assert.deepEqual(planIds, ["pf-live"],
+			`liveOnly must drop formal steps whose resolved child is archived/completed; got ${JSON.stringify(planIds)}`);
+		// And the surviving step must still resolve to its live child — no
+		// phantom unresolved-todo node.
+		assert.equal(steps[0].childGoalId, "fc-live");
+	});
+
+	it("liveOnly:true with NO live formal children yields empty plan (no phantom todo nodes)", () => {
+		const goals: Goal[] = [parent, archivedChild, completeChild];
+		const steps = computePlanStepsForGoal(parent, goals, { liveOnly: true } as any);
+		assert.equal(steps.length, 0,
+			`liveOnly must NOT leave phantom unresolved formal-step nodes when every resolved child is archived/completed; got ${JSON.stringify(steps.map(s => s.planId))}`);
+	});
+});
+
 describe("collectDescendants — archived descendants inclusion", () => {
 	it("INCLUDES archived descendants by default (no opts to opt out)", () => {
 		const goals = [

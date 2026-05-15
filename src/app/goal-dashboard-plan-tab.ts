@@ -281,6 +281,22 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 		const anyResolved = childSynthesis.some(c => c.spawnedFromPlanId && formalPlanIds.has(c.spawnedFromPlanId));
 		if (!anyResolved) formalSteps = undefined;
 	}
+	// liveOnly: also drop formal execution-plan steps whose resolved child
+	// is absent from the (already-filtered) childSynthesis. Without this,
+	// archiving/completing a child would leave a phantom unresolved "todo"
+	// formal node behind when the user has explicitly asked for live work
+	// only. Default mode keeps ALL formal steps (including unresolved/
+	// archived/completed) — the helper default stays inclusive.
+	// pinned by tests/plan-archived-children.test.ts::formal execution plan liveOnly hides steps whose resolved child is archived or completed
+	if (opts?.liveOnly && formalSteps && formalSteps.length > 0) {
+		const liveChildPlanIds = new Set(
+			childSynthesis
+				.map(c => c.spawnedFromPlanId)
+				.filter((p): p is string => typeof p === "string" && p.length > 0)
+		);
+		formalSteps = formalSteps.filter(s => liveChildPlanIds.has(s.planId));
+		if (formalSteps.length === 0) formalSteps = undefined;
+	}
 	return buildPlanSteps({ formalSteps, childGoals: childSynthesis });
 }
 
