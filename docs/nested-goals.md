@@ -8,11 +8,14 @@ live in `SUBGOALS-SPEC.md` (root of the repo).
 
 > **Status: experimental.** The nested-goals feature is gated behind a
 > system-scope toggle ("Subgoals" in **Settings → System → General**),
-> default OFF. With the toggle off the entire feature surface — the
+> default OFF. With the toggle off the gated feature surface — the
 > `parent` workflow, the nine `Children`-group tools, the Plan / Children
 > tabs on the goal dashboard, sidebar nesting, mutation-pending cards,
-> and the nested-goal REST routes — is hidden or returns
-> `403 SUBGOALS_DISABLED`. The toggle will be retired and the feature
+> the nested-goal REST routes (spawn-child, plan, integrate-child, pause,
+> resume, policy, mutation), and `GET /api/goals/:id/tree-cost` — is
+> hidden or returns `403 SUBGOALS_DISABLED`. Note:
+> `GET /api/goals/:id/descendants` is **not** gated — it powers the
+> dashboard Plan tab which is core functionality regardless of the toggle. The toggle will be retired and the feature
 > promoted out of experimental status once the parent goal's audit
 > completes. See `docs/design/subgoals-experimental-toggle.md` for the
 > gating implementation.
@@ -711,13 +714,14 @@ every cascade-affecting route. The UI is the cascade-policy authority:
 descendants exist, so the UI can prompt for confirmation.
 
 `POST /api/goals/:id/team/teardown?cascade=true|false` mirrors the same
-contract for stopping a parent's team. With `cascade=false` (the
-default), the server pre-flights the descendant tree (BFS via
+contract for stopping a parent's team. The `?cascade=` parameter is
+**required** — omitting it returns `422 CASCADE_REQUIRED`. With
+`cascade=false`, the server pre-flights the descendant tree (BFS via
 `parentGoalId`, skips archived) and returns
 **409 `{code: "HAS_DESCENDANT_TEAMS", count, descendants:[{id,title}]}`**
 if any descendant goal still has a live team. With `cascade=true`, walks
-descendants depth-first, tears down each team, then the parent;
-returns `{ok: true, toreDown: N, errors: []}`. Each teardown is
+descendants **bottom-up (leaves first)**, tears down each team, then
+the parent; returns `{ok: true, toreDown: N, errors: []}`. Each teardown is
 best-effort (`getTeamState` guard + try/catch) so one missing/error team
 doesn't stop the rest. The client wrapper `teardownTeamWithDialog(goalId)`
 in `src/app/api.ts` pre-flights `cascade=false` and on 409 opens
@@ -1071,8 +1075,10 @@ parent-child merge), `tests/e2e/api-goals-spawn-child-route.spec.ts`
 
 ## Cost rollup
 
-Parent-goal dashboards walk the descendant tree (via the `rootGoalId`
-chain, BFS, depth capped at 32) and sum each goal's accumulated cost.
+Parent-goal dashboards walk the full descendant tree and sum each
+goal's accumulated cost. The implementation uses `walkGoalSubtree`
+from `src/server/agent/goal-subtree.ts` with `{ includeArchived: true }`
+so archived descendants are always counted (cost survives archival).
 
 ```
 GET /api/goals/:id/tree-cost
@@ -1088,9 +1094,8 @@ GET /api/goals/:id/tree-cost
 The handler resolves the rollup root as `goal.rootGoalId ?? goal.id`, so
 a request against a child goal still returns the WHOLE-TREE rollup. The
 breakdown is sorted `depth ASC, createdAt ASC` (root first, deepest
-descendants last). Archived descendants are still counted — cost
-survives archival. Goals belonging to a different tree are excluded by
-the filter `g.id === rootGoalId || g.rootGoalId === rootGoalId`.
+descendants last). The walk uses BFS over `parentGoalId` with a depth
+cap of 32 (cycle-safe). Gated by `requireSubgoalsEnabled()`.
 
 The cache lives on the existing `CostTracker` (per-tracker WeakMap keyed
 by `rootGoalId`). `costTracker.getGeneration()` ticks monotonically on
@@ -1355,12 +1360,12 @@ synthesis just wasn't using it.
 | PATCH | `/api/goals/:id/plan` | `{ proposedSteps: ClassifierPlanStep[] }` | Mutation classifier; 200 `applied`, 200 `requiresApproval`, 400 `INVALID_PLAN_STEP {index}` (per-step shape validation), 400 `SELF_DEPENDENCY` / 400 `UNKNOWN_PLAN_ID {missing}` / 400 `DEPENDS_ON_CYCLE {path}` (per-step `dependsOn` validation), 409 `CRITERIA_DROP` / `RESTRUCTURE_REQUIRES_PAUSE`, 400 `NO_EXECUTION_GATE { code, error, warning }` when the workflow has no execution gate (the `warning` field is always present and describes degraded-execution semantics — see [`goal_plan_propose` execution paths](#goal_plan_propose-execution-paths)). |
 | GET | `/api/goals/:id/plan?gateId=execution` | (query) | Returns `{steps, gateState, frozen, replanCount}` with the same tier preference the harness uses. |
 | POST | `/api/goals/:id/integrate-child/:childId` | `{ force?: boolean }` | Wraps `mergeChild`. 200 `merged`, 409 `conflict`, 409 `RTM_NOT_PASSED` (unless `body.force === true`), 400 `PARENT_MISMATCH`. |
-| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Flips `paused:true` on every (cascaded) descendant, cancels in-flight gate verifications, and `forceAbort`s every streaming session whose `goalId` is in the paused subtree (team-leads, coders, reviewers, `llm-review-*` verifiers). While paused, every spawn path returns 409 `{code:"GOAL_PAUSED", goalId}` and `_bootRespawnSessionlessGoals` skips the goal. See [Pause / resume](#pause--resume). |
+| POST | `/api/goals/:id/pause` | `{ cascade: boolean }` | 422 `CASCADE_REQUIRED` when omitted. Flips `paused:true` on every (cascaded) descendant, cancels in-flight gate verifications, and calls `abortSessionTurn` (soft interrupt — sessions stay registered) on every streaming session whose `goalId` is in the paused subtree. While paused, every spawn path returns 409 `{code:"GOAL_PAUSED", goalId}` and `_bootRespawnSessionlessGoals` skips the goal. See [Pause / resume](#pause--resume). |
 | POST | `/api/goals/:id/resume` | `{ cascade: boolean }` | Same 422 contract as pause. Clears `paused:false` on the subtree; does NOT auto-restart sessions — operator restarts manually via `/team/start`. |
 | POST | `/api/goals/:id/mutation/:requestId/decision` | `{ decision: "approve" \| "reject" }` | 404 `REQUEST_NOT_FOUND`. Bumps `replanCount`; auto-pauses past 5. |
 | PATCH | `/api/goals/:id/policy` | `{ divergencePolicy?, maxConcurrentChildren? }` | Root-only fields. The `goal_state_changed` broadcast carries the new values inline so clients don't need to re-fetch. |
 | DELETE | `/api/goals/:id?cascade=true\|false[&mergedManually=true]` | (query) | 422 `CASCADE_REQUIRED`, 409 `HAS_DESCENDANTS` when `cascade=false`. Optional `mergedManually=true` stamps the target's `state` to `"complete"` before archiving (target-only) so the Plan-tab DAG renders it green; for use after a manual `git merge` of a child whose `ready-to-merge` failed. |
-| POST | `/api/goals/:id/team/teardown?cascade=true\|false` | (query) | 409 `HAS_DESCENDANT_TEAMS` when `cascade=false` and descendants have live teams; `cascade=true` walks descendants depth-first and tears down each team. Best-effort per-goal: returns `{ok, toreDown, errors[]}`. |
+| POST | `/api/goals/:id/team/teardown?cascade=true\|false` | (query) | 422 `CASCADE_REQUIRED` when omitted. 409 `HAS_DESCENDANT_TEAMS` when `cascade=false` and descendants have live teams; `cascade=true` walks descendants **bottom-up (leaves first)** and tears down each team. Best-effort per-goal: returns `{ok, toreDown, errors[]}`. |
 | GET | `/api/goals/:id/tree-cost` | — | BFS rollup; cache keyed by `(rootGoalId, costGeneration)`. |
 
 WS broadcasts: `goal_created` (carries `parentGoalId`), `goal_state_changed`,

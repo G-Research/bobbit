@@ -1754,7 +1754,10 @@ async function handleApiRoute(
 	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
-		json({ error: e.message, stack: e.stack, ...extra }, status);
+		// Log stack trace server-side only; do not send it to clients to avoid
+		// leaking host paths, source line numbers, and implementation details.
+		console.error(`[api] ${status} error:`, e.stack ?? e.message);
+		json({ error: e.message, ...extra }, status);
 	};
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
@@ -4081,6 +4084,11 @@ async function handleApiRoute(
 					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 					if (tl?.branch) agentBranches.push(tl.branch);
 				}
+				// 3. Tear down any active team. Failure is re-thrown so cascadeSubtree
+				// records it in errors[] and does NOT archive this node.
+				if (teamManager.getTeamState(g.id)) {
+					await teamManager.teardownTeam(g.id);
+				}
 				// 4. Archive the goal record.
 				const gm = getGoalManagerForGoal(g.id);
 				await gm.archiveGoal(g.id);
@@ -6322,6 +6330,8 @@ async function handleApiRoute(
 			return;
 		}
 		const cascade = cascadeParam === "true";
+		// Validate goal exists before attempting teardown.
+		if (!getGoalAcrossProjects(goalId)) { json({ error: "Goal not found" }, 404); return; }
 		const tdCtx = projectContextManager.getContextForGoal(goalId);
 		const tdAllGoals = tdCtx?.goalStore.getAll() ?? [];
 

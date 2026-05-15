@@ -39,18 +39,20 @@ test.describe("Sidebar cascade archive", () => {
 		try {
 			await openApp(page);
 
-			// Find the parent goal row in the sidebar by its title.
-			const goalRow = page.locator("div", { hasText: parentTitle }).first();
+			// Find the parent goal row in the sidebar by its data-goal-id attribute
+			// (sidebar-nested-row > sidebar-goal-row structure). Using data-goal-id
+			// is more precise than text matching which can hit broad ancestor divs.
+			const goalRow = page.locator(`[data-testid="sidebar-nested-row"][data-goal-id="${parentId}"]`);
 			await expect(goalRow).toBeVisible({ timeout: 15_000 });
 			await goalRow.hover();
 
 			// The sidebar archive icon is hover-revealed (`hidden group-hover:flex`)
 			// — the button exists in the DOM regardless. We dispatch the click
-			// programmatically to bypass the CSS hide, matching the pattern
-			// used in goal-archive-always-on.spec.ts.
-			const archiveButtons = page.locator('button[title="Archive goal"]');
-			await expect.poll(async () => archiveButtons.count(), { timeout: 5_000 }).toBeGreaterThan(0);
-			await archiveButtons.first().evaluate((el: HTMLElement) => el.click());
+			// programmatically to bypass the CSS hide, scoped to the goal row so
+			// we don't accidentally click an archive button on a different goal.
+			const archiveBtn = goalRow.locator('button[title="Archive goal"]').first();
+			await expect.poll(async () => archiveBtn.count(), { timeout: 5_000 }).toBeGreaterThan(0);
+			await archiveBtn.evaluate((el: HTMLElement) => el.click());
 
 			// Because the parent has 1 descendant, the cascade dialog must
 			// open (NOT the single-goal confirm modal).

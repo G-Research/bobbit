@@ -16,7 +16,7 @@ migration, no schema change — pure feature flag with ~6 gating sites.
 System-scope flags already round-trip through the existing
 `PreferencesStore`
 (`src/server/agent/preferences-store.ts`) via `GET/PUT /api/preferences`
-(`src/server/server.ts:4404` and `:4410`). The two existing toggles
+(the GET/PUT `/api/preferences` handlers in `src/server/server.ts`). The two existing toggles
 (`showTimestamps`, `playAgentFinishSound`) live there as flat keys; we
 follow the same convention.
 
@@ -29,29 +29,29 @@ follow the same convention.
 ### Client side
 
 The two existing toggles are **module-level vars** in
-`src/app/settings-page.ts` (lines 93–95) loaded lazily by
-`loadGeneralSettings()` (line 1818). They are NOT in `state.ts`. We mirror
+`src/app/settings-page.ts` (alongside the existing module-level toggles) loaded lazily by
+`loadGeneralSettings()`. They are NOT in `state.ts`. We mirror
 that pattern for symmetry:
 
 - Add `let settingsSubgoalsEnabled = false;` next to the existing two
-  vars at `src/app/settings-page.ts:93–95`.
-- Extend `loadGeneralSettings()` (around line 1828) to read
+  vars at `src/app/settings-page.ts` (alongside the existing module-level toggle vars).
+- Extend `loadGeneralSettings()` (in `loadGeneralSettings()`) to read
   `prefs.subgoalsEnabled === true`.
 - Add `toggleSubgoalsEnabled()` mirroring `togglePlayFinishSound()`
-  (line 1866).
+  (mirroring the existing toggle handler pattern).
 
 ### Eager mirror to `document.documentElement.dataset` + UI-state hot path
 
 Several gate sites need a synchronous read with no `await`. We mirror
 the value the same way `playAgentFinishSound` does
-(`src/app/main.ts:399`):
+(`src/app/main.ts` (the dataset mirror pattern)):
 
 ```ts
 document.documentElement.dataset.subgoalsEnabled = prefs.subgoalsEnabled === true ? "true" : "false";
 ```
 
-Set on initial preferences load (`src/app/main.ts:382`), the
-`preferences_changed` WS event handler (`src/app/remote-agent.ts:1203`)
+Set on initial preferences load (initial preferences load in `src/app/main.ts`), the
+`preferences_changed` WS event handler (the `preferences_changed` WS event handler in `src/app/remote-agent.ts`)
 and the toggle handler itself (synchronous, before the `gatewayFetch`).
 
 We **do not** add a field to `state.ts` — keeping the flag a thin
@@ -97,7 +97,7 @@ preferences store passed into `computeToolPolicies` — see §7.
 File: `src/app/settings-page.ts`.
 
 Insertion point: between the **"Play sound when an agent finishes"**
-block (lines 1899–1913) and the **"System prompt"** block (lines
+block and the **"System prompt"** block (near
 1914–1928) inside `renderGeneralTab()`.
 
 ```ts
@@ -129,10 +129,10 @@ block (lines 1899–1913) and the **"System prompt"** block (lines
 
 Grep confirms there is no shared `Experimental` / `Beta` pill component
 in `src/ui/components/` — the only `Experimental` matches in the repo
-are unrelated (`DocxArtifact.ts:122`, `AttachmentOverlay.ts:416`). We
+are unrelated (`DocxArtifact.ts`, `AttachmentOverlay.ts`). We
 inline the pill with Tailwind classes (the repo's prevailing approach
 for one-off badges; see e.g. the inline `rev N` chip at
-`src/app/render.ts:813`). If the surface grows we can promote it to a
+`src/app/render.ts` (the `renderGoalForm` section)). If the surface grows we can promote it to a
 component later.
 
 ## 5. UI gates
@@ -146,16 +146,16 @@ toggling ON).
 
 | # | Site | File | Edit |
 |---|------|------|------|
-| 1 | New-goal workflow picker | `src/app/render.ts:855` (the `_cachedWorkflows.map(...)` inside `renderGoalForm`) | Filter `_cachedWorkflows` through `w => w.id !== "parent" \|\| isSubgoalsEnabled()` before the `.map`. Single-line change. |
-| 2 | Plan tab visibility | `src/app/goal-dashboard-tab-visibility.ts::shouldShowPlanTab` (line 29) | Add `if (!isSubgoalsEnabled()) return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false;` to keep formal `goal-plan` gates visible (legacy workflows might still have them) but suppress the "living plan from children" branch. Even simpler form: `if (!isSubgoalsEnabled()) { return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false; }`. **Open question:** do any non-`parent` workflows ship a `goal-plan` gate? Quick grep shows `goal-plan` only in the parent workflow (`seed-default-workflows.ts`). If confirmed, the gate becomes the simpler `if (!isSubgoalsEnabled()) return false;`. |
-| 3 | Children tab visibility | same file, `shouldShowChildrenTab` (line 53) | `if (!isSubgoalsEnabled()) return false;` at top. |
-| 4 | Sidebar nesting | `src/app/sidebar-nesting.ts::buildNestedGoalForest` (line 190) | At top of function, when `!isSubgoalsEnabled()`, return a flat list — every goal becomes its own root with no `children`. Simplest implementation: synthesise a `parentGoalId`-free copy of the input or wrap and bypass the indexing pass. |
+| 1 | New-goal workflow picker | `renderGoalForm` in `src/app/render.ts` (the `_cachedWorkflows.map(...)`) | Filter `_cachedWorkflows` through `w => w.id !== "parent" \|\| isSubgoalsEnabled()` before the `.map`. Single-line change. |
+| 2 | Plan tab visibility | `src/app/goal-dashboard-tab-visibility.ts::shouldShowPlanTab` (at the top of the function) | Add `if (!isSubgoalsEnabled()) return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false;` to keep formal `goal-plan` gates visible (legacy workflows might still have them) but suppress the "living plan from children" branch. Even simpler form: `if (!isSubgoalsEnabled()) { return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false; }`. **Open question:** do any non-`parent` workflows ship a `goal-plan` gate? Quick grep shows `goal-plan` only in the parent workflow (`seed-default-workflows.ts`). If confirmed, the gate becomes the simpler `if (!isSubgoalsEnabled()) return false;`. |
+| 3 | Children tab visibility | same file, `shouldShowChildrenTab` | `if (!isSubgoalsEnabled()) return false;` at top. |
+| 4 | Sidebar nesting | `src/app/sidebar-nesting.ts::buildNestedGoalForest`  | At top of function, when `!isSubgoalsEnabled()`, return a flat list — every goal becomes its own root with no `children`. Simplest implementation: synthesise a `parentGoalId`-free copy of the input or wrap and bypass the indexing pass. |
 | 5 | Mutation-pending message renderer | `src/app/custom-messages.ts:91` (`mutationPendingRenderer`) | The card is only rendered when a `mutation_pending` event arrives. With the server-side gate (§6) the event can't fire when the flag is OFF, so this gate is a *belt-and-braces*. Simplest: in the renderer, return `nothing` if `!isSubgoalsEnabled()`. |
-| 6 | Tree-cost row on dashboard | `src/app/goal-dashboard.ts:1430` (the `renderTreeCostRow` block) | Already self-suppresses when `!hasChildren && !isChild`. With flag OFF no goals are children → naturally returns `nothing`. **No edit required.** Documented for completeness. |
+| 6 | Tree-cost row on dashboard | `renderTreeCostRow` in `src/app/goal-dashboard.ts` | Already self-suppresses when `!hasChildren && !isChild`. With flag OFF no goals are children → naturally returns `nothing`. **No edit required.** Documented for completeness. |
 
 ### Cascade dialogs (no edit required)
 
-The spec claim is correct. `showArchiveGoalDialog` (line 1721) and
+The spec claim is correct. `showArchiveGoalDialog` and
 `showPauseGoalDialog` are only invoked from `deleteGoal()` /
 `handlePauseGoal()` *after* a server pre-flight reports descendants
 (`HAS_DESCENDANTS` 409). With subgoals OFF no goal can have descendants,
@@ -169,17 +169,17 @@ All nine routes live in `src/server/server.ts`. Each gets one extra
 line: `if (!requireSubgoalsEnabled(res)) return;` at the very top of
 the handler (after the path/method match, before any body parsing).
 
-| Route | Method | Path | Handler line |
-|-------|--------|------|--------------|
-| spawn-child | POST | `/api/goals/:id/spawn-child` | `:3443` |
-| plan PATCH | PATCH | `/api/goals/:id/plan` | `:3620` |
-| plan GET | GET | `/api/goals/:id/plan` | `:3768` |
-| integrate-child | POST | `/api/goals/:id/integrate-child/:childId` | `:3816` |
-| pause | POST | `/api/goals/:id/pause` | `:3880` |
-| resume | POST | `/api/goals/:id/resume` | `:3907` |
-| mutation decision | POST | `/api/goals/:id/mutation/:requestId/decision` | `:3933` |
-| policy | PATCH | `/api/goals/:id/policy` | `:4002` |
-| tree-cost | GET | `/api/goals/:goalId/tree-cost` | `:7940` |
+| Route | Method | Path | Module |
+|-------|--------|------|--------|
+| spawn-child | POST | `/api/goals/:id/spawn-child` | `nested-goal-routes.ts` |
+| plan PATCH | PATCH | `/api/goals/:id/plan` | `nested-goal-routes.ts` |
+| plan GET | GET | `/api/goals/:id/plan` | `nested-goal-routes.ts` |
+| integrate-child | POST | `/api/goals/:id/integrate-child/:childId` | `nested-goal-routes.ts` |
+| pause | POST | `/api/goals/:id/pause` | `nested-goal-routes.ts` |
+| resume | POST | `/api/goals/:id/resume` | `nested-goal-routes.ts` |
+| mutation decision | POST | `/api/goals/:id/mutation/:requestId/decision` | `nested-goal-routes.ts` |
+| policy | PATCH | `/api/goals/:id/policy` | `nested-goal-routes.ts` |
+| tree-cost | GET | `/api/goals/:goalId/tree-cost` | `server.ts` (requires subgoals enabled) |
 
 ### Response shape
 
@@ -217,7 +217,7 @@ prefix anywhere).
 `computeToolPolicies` and `computeEffectiveAllowedTools` live in
 `src/server/agent/tool-activation.ts`. Both consult
 `resolveGrantPolicy(toolName, toolGroup, role, toolManager,
-groupPolicyStore)` (line 132). The cleanest gate is one extra layer
+groupPolicyStore)`. The cleanest gate is one extra layer
 inside `resolveGrantPolicy`:
 
 ```ts
@@ -246,7 +246,7 @@ policies) but no signature change. Reject — Option A is simpler.
 ### Why this is sufficient
 
 `computeEffectiveAllowedTools` filters out any tool whose resolved
-policy is `never` (line 302: `if (!isNeverPolicy(policy)) result.push(tool.name)`).
+policy is `never` ( `if (!isNeverPolicy(policy)) result.push(tool.name)`).
 So when the flag is OFF, the agent never sees the nine Children tools
 in its tool registry — same as if the project's
 `tool-group-policies.yaml` declared `Children: never`. Combined with
@@ -408,4 +408,4 @@ Add one paragraph at the very top under the existing intro:
    wired into the existing toggles. No additional plumbing needed.
 6. **Server restart doesn't re-broadcast.** On restart the dataset
    value is set from the initial `/api/preferences` fetch in
-   `main.ts:382`. Same as the other two toggles — no drift risk.
+   `initial preferences load in `main.ts`. Same as the other two toggles — no drift risk.

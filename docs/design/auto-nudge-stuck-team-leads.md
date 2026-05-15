@@ -14,26 +14,24 @@ to recover. This design doc roots the cause and adds two safety nets.
 
 The relevant plumbing in `src/server/agent/team-manager.ts`:
 
-- `notifyTeamLead(goalId, workerSessionId, role, agentId)` (line 1174). Fired
-  from a per-worker `rpcClient.onEvent("agent_end")` listener installed in
-  two places: (a) inside `spawnRole` immediately after the worker is created
-  (~line 1135), and (b) inside `resubscribeTeamEvents()` (~line 427) on
-  every server restart, walking the persisted team store.
-- `nudgePending` (line 150) — a per-goal boolean guard. Set true when an
-  auto-nudge is enqueued; cleared on the team-lead's next `agent_start`
-  (line 703 in `subscribeTeamLeadEvents`). This is the existing throttle.
-- The `kind: "reviewer"` filter — both at re-subscribe (line 421
-  `if (agent.kind === "reviewer" || agent.role === "reviewer") continue`)
-  and inside `notifyTeamLead` itself (line 1184 defensive guard). This is
-  the historical fix for "Reviewer spuriously nudges team-lead" called out
-  in AGENTS.md.
-- `lastNotifyTime` (line 168) — 30 s per-worker debounce inside
-  `notifyTeamLead`.
+- `notifyTeamLead(goalId, workerSessionId, role, agentId)`. Fired
+ from a per-worker `rpcClient.onEvent("agent_end")` listener installed in
+ two places: (a) inside `spawnRole` immediately after the worker is created, and (b) inside `resubscribeTeamEvents()` on
+ every server restart, walking the persisted team store.
+- `nudgePending` — a per-goal boolean guard. Set true when an
+ auto-nudge is enqueued; cleared on the team-lead's next `agent_start` (in `subscribeTeamLeadEvents`). This is the existing throttle.
+- The `kind: "reviewer"` filter — both at re-subscribe (
+ `if (agent.kind === "reviewer" || agent.role === "reviewer") continue`)
+ and inside `notifyTeamLead` itself ( defensive guard). This is
+ the historical fix for "Reviewer spuriously nudges team-lead" called out
+ in AGENTS.md.
+- `lastNotifyTime` — 30 s per-worker debounce inside
+ `notifyTeamLead`.
 - The 10-minute / 5-minute idle-nudge timers (`scheduleWorkersNudge`,
-  `startIdleNudgeTimer`). These are the *long-tail* safety net; their
-  default `IDLE_NUDGE_DELAY_MS = 600_000` ms means **the workers-nudge
-  cannot fire in <10 minutes** even when both lead and worker are fully
-  idle. The 7-minute stall is below this threshold by design.
+ `startIdleNudgeTimer`). These are the *long-tail* safety net; their
+ default `IDLE_NUDGE_DELAY_MS = 600_000` ms means **the workers-nudge
+ cannot fire in <10 minutes** even when both lead and worker are fully
+ idle. The 7-minute stall is below this threshold by design.
 
 ### Failure modes, ranked
 
@@ -60,13 +58,13 @@ the coder's `agent_start` and `agent_end`, the new listener fires for any
 subsequent `agent_end` — but if the coder finished mid-restart, the event
 itself is ephemeral RPC traffic and may have been lost. There is no replay.
 The `kind: "reviewer"` filter is *not* a suspect here — coders are spawned
-with `kind: "worker"` (line 1115 in `spawnRole`) and the filter only
+with `kind: "worker"` (in `spawnRole`) and the filter only
 excludes reviewer role agents.
 
 **(3) Unlikely — team-lead was archived/restarted between coder start and
 finish.** If the lead had been archived the goal would have been in `setupStatus !==
 ready` or had no `teamLeadSessionId`. The boot-respawn for sessionless
-in-progress goals at `_bootRespawnSessionlessGoals` (line 463) would have re-spawned a fresh
+in-progress goals at `_bootRespawnSessionlessGoals` would have re-spawned a fresh
 team-lead, which we'd see in the session list. Neither was reported.
 
 ### Diagnostic instrumentation
@@ -74,17 +72,17 @@ team-lead, which we'd see in the session list. Neither was reported.
 Until we can repro, the design must assume **(1)** is dominant and add a
 watchdog that doesn't depend on the immediate `agent_end` path. We should
 also add a single log line at every `notifyTeamLead` call site (currently
-present at line 1153 — but only on success) so we can correlate
+present — but only on success) so we can correlate
 WS-event-arrival timestamps with the team-lead's own `agent_start` /
 `agent_end` log if a future stall is reported.
 
 Suggested additions (out of scope for this doc, but cheap):
 
 - Log `[team-manager] notifyTeamLead deferred (debounce)` instead of just
-  the existing `[team-manager] Debounced notification for ... ago` so
-  grep can scope to the nudge path.
+ the existing `[team-manager] Debounced notification for ... ago` so
+ grep can scope to the nudge path.
 - Stamp `nudgePending` writes with the message that set them, behind a
-  debug flag. Already covered by existing console.log lines downstream.
+ debug flag. Already covered by existing console.log lines downstream.
 
 ## Section 2 — Watchdog: detect long-idle teams with finished subordinates
 
@@ -105,44 +103,44 @@ private static readonly STUCK_QUIET_THRESHOLD_MS = 5 * 60_000;
 private lastNudgeAtPerGoal = new Map<string, number>();
 
 private startStuckSweep(): void {
-    if (this.stuckSweepTimer) return;
-    this.stuckSweepTimer = setInterval(
-        () => this._stuckSweepTick(),
-        TeamManager.STUCK_SWEEP_INTERVAL_MS,
-    );
-    this.stuckSweepTimer.unref?.(); // never block process exit
+ if (this.stuckSweepTimer) return;
+ this.stuckSweepTimer = setInterval(
+ () => this._stuckSweepTick(),
+ TeamManager.STUCK_SWEEP_INTERVAL_MS,
+ );
+ this.stuckSweepTimer.unref?.(); // never block process exit
 }
 
 private stopStuckSweep(): void {
-    if (!this.stuckSweepTimer) return;
-    clearInterval(this.stuckSweepTimer);
-    this.stuckSweepTimer = null;
+ if (!this.stuckSweepTimer) return;
+ clearInterval(this.stuckSweepTimer);
+ this.stuckSweepTimer = null;
 }
 
 private _stuckSweepTick(): void {
-    const now = Date.now();
-    for (const [goalId, entry] of this.teams) {
-        if (this.shouldSkipNudge(goalId)) continue;        // reuses existing gate
-        if (!entry.teamLeadSessionId) continue;
-        const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
-        if (!lead || lead.status !== "idle") continue;
+ const now = Date.now();
+ for (const [goalId, entry] of this.teams) {
+ if (this.shouldSkipNudge(goalId)) continue; // reuses existing gate
+ if (!entry.teamLeadSessionId) continue;
+ const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
+ if (!lead || lead.status !== "idle") continue;
 
-        const workers = this.getActiveWorkers(goalId);
-        if (workers.length === 0) continue;                // no-workers timer owns this case
-        const allIdle = workers.every((a) => {
-            const s = this.sessionManager.getSession(a.sessionId);
-            return s && s.status === "idle";
-        });
-        if (!allIdle) continue;
+ const workers = this.getActiveWorkers(goalId);
+ if (workers.length === 0) continue; // no-workers timer owns this case
+ const allIdle = workers.every((a) => {
+ const s = this.sessionManager.getSession(a.sessionId);
+ return s && s.status === "idle";
+ });
+ if (!allIdle) continue;
 
-        const leadIdleSince = lead.idleSince ?? lead.lastActivityAt ?? now;
-        if (now - leadIdleSince < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+ const leadIdleSince = lead.idleSince ?? lead.lastActivityAt ?? now;
+ if (now - leadIdleSince < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
 
-        const lastNudge = this.lastNudgeAtPerGoal.get(goalId) ?? 0;
-        if (now - lastNudge < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
+ const lastNudge = this.lastNudgeAtPerGoal.get(goalId) ?? 0;
+ if (now - lastNudge < TeamManager.STUCK_QUIET_THRESHOLD_MS) continue;
 
-        this._fireStuckNudge(goalId, entry, workers, now);
-    }
+ this._fireStuckNudge(goalId, entry, workers, now);
+ }
 }
 ```
 
@@ -159,29 +157,29 @@ If all gates have passed, call `team_complete`.
 ### Throttle key & integration
 
 - **Throttle key:** `goalId`. Reuses the existing `nudgePending` guard
-  (set true in `_fireStuckNudge`, cleared by `subscribeTeamLeadEvents`'s
-  `agent_start` handler at line 703). Adds `lastNudgeAtPerGoal[goalId]`
-  as a *minimum interval* between consecutive stuck-nudges so even if the
-  lead acks-and-returns-to-idle within 5 minutes we don't re-spam. One
-  nudge per stuck *episode*, not per sweep tick.
+ (set true in `_fireStuckNudge`, cleared by `subscribeTeamLeadEvents`'s
+ `agent_start` handler ). Adds `lastNudgeAtPerGoal[goalId]`
+ as a *minimum interval* between consecutive stuck-nudges so even if the
+ lead acks-and-returns-to-idle within 5 minutes we don't re-spam. One
+ nudge per stuck *episode*, not per sweep tick.
 - **Skip conditions** — all delegated to the existing `shouldSkipNudge`
-  helper (line 519), which already covers: missing team-lead, lead
-  streaming or terminated, in-flight verifications, `nudgePending`,
-  archived/complete/shelved goal, **paused goals**, in-flight subgoals
-  via `anyInFlightChild`. We get the "don't nudge paused goals or
-  non-interactive sessions" requirement free.
+ helper, which already covers: missing team-lead, lead
+ streaming or terminated, in-flight verifications, `nudgePending`,
+ archived/complete/shelved goal, **paused goals**, in-flight subgoals
+ via `anyInFlightChild`. We get the "don't nudge paused goals or
+ non-interactive sessions" requirement free.
 - **Lifecycle:** start the sweep at the end of the constructor (after
-  `restoreTeams`); stop in a new `dispose()` method so tests can clean
-  up. Single timer for the whole `TeamManager` (not per-goal) — the
-  sweep cost is `O(activeTeams)` per minute; cheap.
+ `restoreTeams`); stop in a new `dispose()` method so tests can clean
+ up. Single timer for the whole `TeamManager` (not per-goal) — the
+ sweep cost is `O(activeTeams)` per minute; cheap.
 - **Delivery path:** unchanged. `_fireStuckNudge` calls
-  `this.sessionManager.enqueuePrompt(leadId, message, { isSteered: true })`
-  exactly like the existing 10-minute nudge. The lead is idle by
-  precondition, so the streaming branch never runs.
+ `this.sessionManager.enqueuePrompt(leadId, message, { isSteered: true })`
+ exactly like the existing 10-minute nudge. The lead is idle by
+ precondition, so the streaming branch never runs.
 - **Public observability:** none required for v1. The existing
-  `[team-manager] Sent ...` log line is sufficient. Add one more:
-  `[team-manager] Stuck-team watchdog fired for goal ${goalId} after
-  ${minutes}m idle`.
+ `[team-manager] Sent ...` log line is sufficient. Add one more:
+ `[team-manager] Stuck-team watchdog fired for goal ${goalId} after
+ ${minutes}m idle`.
 
 ### Why a separate timer (not lowering `IDLE_NUDGE_DELAY_MS`)
 
@@ -196,9 +194,9 @@ the common case where one worker is still streaming.
 **Already exists.** The cross-tree notification is implemented today via
 `buildParentReadyNotification` in
 `src/server/agent/notify-team-lead-child-passed.ts` and called from
-`verification-harness.ts::notifyTeamLead` (~line 1185). It fires on
+`verification-harness.ts::notifyTeamLead`. It fires on
 `ready-to-merge` `passed` *and* `failed`, sends through the
-`notifyTeamLeadFn` registered in `src/server/server.ts` (~line 967), and
+`notifyTeamLeadFn` registered in `src/server/server.ts`, and
 routes via `enqueuePrompt` / `deliverLiveSteer` on the parent's team-lead.
 
 The current message:
@@ -212,16 +210,16 @@ for Section 3 — the work is verifying it actually fires under the conditions
 of the observed stall and adding regression coverage. Specifically:
 
 1. Confirm via a new test that on a child whose `ready-to-merge` flips to
-   `passed`, the parent's team-lead receives exactly one steered prompt.
+ `passed`, the parent's team-lead receives exactly one steered prompt.
 2. Confirm that if the parent's team-lead is itself idle at the moment of
-   the child's RTM transition, `enqueuePrompt` reliably wakes it (not just
-   queues without dispatch). This is already the contract of
-   `enqueuePrompt({ isSteered: true })` — verify in test by asserting the
-   mock SessionManager's `enqueuePrompt` is called with the parent
-   team-lead's session id.
+ the child's RTM transition, `enqueuePrompt` reliably wakes it (not just
+ queues without dispatch). This is already the contract of
+ `enqueuePrompt({ isSteered: true })` — verify in test by asserting the
+ mock SessionManager's `enqueuePrompt` is called with the parent
+ team-lead's session id.
 3. Confirm the path still fires after a server restart that lands
-   mid-verification (i.e. the `notifyTeamLeadFn` registration in `server.ts`
-   isn't lost).
+ mid-verification (i.e. the `notifyTeamLeadFn` registration in `server.ts`
+ isn't lost).
 
 If item (2) or (3) reveals a gap, we add a child-RTM observer in the new
 watchdog as a defensive fallback: re-checks at each sweep tick whether any
@@ -247,53 +245,53 @@ No changes to `verification-harness.ts`, `goal-manager.ts`, or `server.ts`.
 Restated verbatim from the goal spec, each with a one-line note.
 
 1. **When a team-member coder transitions to idle, the team-lead reliably
-   receives an auto-nudge within 5 seconds. No silent drops on bridge
-   failures or session restarts.** — covered by the existing
-   `notifyTeamLead` path (line 1174); the watchdog is a 5-minute fallback,
-   not the primary. Restart resilience already provided by
-   `resubscribeTeamEvents`.
+ receives an auto-nudge within 5 seconds. No silent drops on bridge
+ failures or session restarts.** — covered by the existing
+ `notifyTeamLead` path; the watchdog is a 5-minute fallback,
+ not the primary. Restart resilience already provided by
+ `resubscribeTeamEvents`.
 2. **When a child goal's `ready-to-merge` passes (or fails), the parent's
-   team-lead receives an auto-nudge.** — already wired via
-   `buildParentReadyNotification` →
-   `verification-harness.notifyTeamLeadFn`. New regression test pins it.
+ team-lead receives an auto-nudge.** — already wired via
+ `buildParentReadyNotification` →
+ `verification-harness.notifyTeamLeadFn`. New regression test pins it.
 3. **Watchdog sweep detects fully-idle teams with finished subordinates
-   after 5 minutes and fires a recovery nudge.** — Section 2 design.
+ after 5 minutes and fires a recovery nudge.** — Section 2 design.
 4. **Throttling prevents spam — one nudge per stuck-state, not per sweep
-   tick.** — `nudgePending` (set on enqueue, cleared on lead's
-   `agent_start`) **plus** `lastNudgeAtPerGoal` (5-minute floor between
-   consecutive stuck-nudges).
+ tick.** — `nudgePending` (set on enqueue, cleared on lead's
+ `agent_start`) **plus** `lastNudgeAtPerGoal` (5-minute floor between
+ consecutive stuck-nudges).
 5. **Existing nudge tests still pass. New tests cover the watchdog and
-   child-RTM paths.** — listed in Section 4.
+ child-RTM paths.** — listed in Section 4.
 6. **AGENTS.md recipe + debugging entry land alongside the code.** —
-   listed in Section 4.
+ listed in Section 4.
 7. **`npm run check` clean. `npm run test:unit` green.** — implementation
-   gate, not a design concern.
+ gate, not a design concern.
 
 ## Section 6 — Risks and open questions
 
 - **`session.idleSince`** — the watchdog reads `lead.idleSince ??
-  lead.lastActivityAt`. We need to confirm the actual field name on
-  `SessionInfo`; if neither exists, fall back to tracking a per-goal
-  `leadIdleSince` map updated from `subscribeTeamLeadEvents`'s
-  `agent_end` handler. Pure-helper test will pin whichever shape we use.
+ lead.lastActivityAt`. We need to confirm the actual field name on
+ `SessionInfo`; if neither exists, fall back to tracking a per-goal
+ `leadIdleSince` map updated from `subscribeTeamLeadEvents`'s
+ `agent_end` handler. Pure-helper test will pin whichever shape we use.
 - **Interaction with `_bootRespawnSessionlessGoals` (boot-respawn for sessionless in-progress goals).** A
-  freshly-respawned team-lead has `idleSince` near `now`, so the watchdog
-  won't fire for 5 minutes — correct behaviour. No change needed.
+ freshly-respawned team-lead has `idleSince` near `now`, so the watchdog
+ won't fire for 5 minutes — correct behaviour. No change needed.
 - **Sweep cost on a large project.** `O(teams)` per minute, each tick is a
-  few map reads + a status check. Negligible up to thousands of teams.
+ few map reads + a status check. Negligible up to thousands of teams.
 - **Should the watchdog also nudge when only *some* workers are idle?** The
-  spec says "any team member is idle". The design above requires *all*
-  workers idle, which is stricter (matches the observed stall mode).
-  Loosening to "any worker idle for 5+ minutes" risks nagging when one
-  worker is finished and another is legitimately streaming. Defer the
-  looser variant until a real stall demonstrates it's needed.
+ spec says "any team member is idle". The design above requires *all*
+ workers idle, which is stricter (matches the observed stall mode).
+ Loosening to "any worker idle for 5+ minutes" risks nagging when one
+ worker is finished and another is legitimately streaming. Defer the
+ looser variant until a real stall demonstrates it's needed.
 - **Confirming Section 1 cause #1 vs #2.** Without logs from the original
-  stall, we can't fully rule out a dropped `agent_end`. The watchdog
-  covers both causes uniformly, so the choice doesn't change the design
-  — but the diagnostic logging suggested in Section 1 is worth landing
-  in the same PR so the next stall is easier to root-cause.
+ stall, we can't fully rule out a dropped `agent_end`. The watchdog
+ covers both causes uniformly, so the choice doesn't change the design
+ — but the diagnostic logging suggested in Section 1 is worth landing
+ in the same PR so the next stall is easier to root-cause.
 - **Section 3 already-implemented status.** If implementation reveals the
-  parent-RTM nudge is *not* actually firing (e.g. the
-  `setTeamLeadNotifier` registration is lost on restart), we will add
-  the defensive re-check in the watchdog as described at the end of
-  Section 3 — but only if a test demonstrates the gap.
+ parent-RTM nudge is *not* actually firing (e.g. the
+ `setTeamLeadNotifier` registration is lost on restart), we will add
+ the defensive re-check in the watchdog as described at the end of
+ Section 3 — but only if a test demonstrates the gap.

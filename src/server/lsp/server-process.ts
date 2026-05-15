@@ -84,10 +84,27 @@ export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 			cwd: containerCwd,
 		});
 	} else {
+		// Host-side fallback: use a scrubbed environment to prevent gateway
+		// secrets (tokens, API keys) from being inherited by the LSP process.
+		// Only pass variables needed for LSP/Node.js to function.
+		const { PATH, HOME, USER, LOGNAME, LANG, TERM, TMPDIR, TEMP, TMP,
+			NODE_PATH, XDG_CONFIG_HOME } = process.env;
+		const scrubbedEnv: Record<string, string> = { NO_COLOR: "1" };
+		if (PATH) scrubbedEnv.PATH = PATH;
+		if (HOME) scrubbedEnv.HOME = HOME;
+		if (USER) scrubbedEnv.USER = USER;
+		if (LOGNAME) scrubbedEnv.LOGNAME = LOGNAME;
+		if (LANG) scrubbedEnv.LANG = LANG;
+		if (TERM) scrubbedEnv.TERM = TERM;
+		if (TMPDIR) scrubbedEnv.TMPDIR = TMPDIR;
+		if (TEMP) scrubbedEnv.TEMP = TEMP;
+		if (TMP) scrubbedEnv.TMP = TMP;
+		if (NODE_PATH) scrubbedEnv.NODE_PATH = NODE_PATH;
+		if (XDG_CONFIG_HOME) scrubbedEnv.XDG_CONFIG_HOME = XDG_CONFIG_HOME;
 		child = spawn(opts.command, opts.args, {
 			cwd: opts.worktreePath,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env, NO_COLOR: "1" },
+			env: scrubbedEnv,
 		});
 	}
 

@@ -139,11 +139,15 @@ subtree are interrupted as intended.
 
 ## Cascade scope
 
-The cascade walk is performed by `listDescendantsLocal(goalId)`, which
-returns all non-archived descendants regardless of lifecycle state. The
-pause loop has only one skip condition — `if (g.paused) continue` — so
-`'todo'`, `'in-progress'`, `'blocked'`, and `'complete'` descendants
-are all covered.
+The cascade walk is performed by `cascadeSubtree` from
+`src/server/agent/goal-subtree.ts`, which uses a BFS over the
+`parentGoalId` chain. The pause cascade uses top-down order so the
+parent's supervisor is paused before its children (preventing respawn
+racing). The loop has only one skip condition — already-paused goals are
+no-ops — so `'todo'`, `'in-progress'`, `'blocked'`, and `'complete'`
+descendants are all covered. See
+[docs/design/hierarchical-cascade.md](hierarchical-cascade.md) for the
+full walk semantics and walk-order rationale.
 
 ---
 
@@ -231,6 +235,6 @@ the cascade vs targeted-pause distinction visible.
 | `abortSessionTurn` | `src/server/agent/session-manager.ts` |
 | `forceAbort` | `src/server/agent/session-manager.ts` |
 | `getAllSessionsRaw` | `src/server/agent/session-manager.ts` |
-| `listDescendantsLocal` | `src/server/agent/nested-goal-routes.ts` |
+| `walkGoalSubtree` / `cascadeSubtree` | `src/server/agent/goal-subtree.ts` |
 | Boot migration | `src/server/agent/goal-manager.ts` |
 | Pause/resume unit tests | `tests/pause-blocked-state.test.ts` |
