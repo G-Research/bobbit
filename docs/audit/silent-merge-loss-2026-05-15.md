@@ -49,23 +49,23 @@ suspect).
 
 | Symbol / route | Verdict | Evidence |
 |---|---|---|
-| `tryHandleNestedGoalRoute(` call site in `handleApiRoute` | present | `grep` at `src/server/server.ts:3719`; pinned by `source-pin-merge-invariants` |
-| `/^\/api\/lsp\/([a-z_]+)$/` dispatch | present | `src/server/server.ts:2143`; pinned |
-| `/api/lsp/_internal/hint-emitted` POST handler | present | `src/server/server.ts:2131`; covered by LSP loopback self-check |
-| `/api/lsp/state` GET handler | present | `src/server/server.ts:2107` |
-| `/api/lsp/stats` GET handler | present | `src/server/server.ts:2173` |
-| `/^\/api\/goals\/([^/]+)\/descendants$/` GET | present | `src/server/server.ts:3738`; pinned |
-| `/^\/api\/goals\/([^/]+)\/tree-cost$/` GET | present | `src/server/server.ts:3753`; pinned |
-| `groupPolicyStore.setSubgoalsEnabledGetter(` boot call | present | `src/server/server.ts:762`; pinned (and also pinned by the older `tests/server-subgoals-getter-wired.test.ts`) |
+| `tryHandleNestedGoalRoute(` call site in `handleApiRoute` | present | confirmed by grep in `src/server/server.ts`; pinned by `source-pin-merge-invariants` |
+| `/^\/api\/lsp\/([a-z_]+)$/` dispatch | present | confirmed by grep in `src/server/server.ts`; pinned |
+| `/api/lsp/_internal/hint-emitted` POST handler | present | confirmed by grep in `src/server/server.ts`; covered by LSP loopback self-check |
+| `/api/lsp/state` GET handler | present | confirmed by grep in `src/server/server.ts` |
+| `/api/lsp/stats` GET handler | present | confirmed by grep in `src/server/server.ts` |
+| `/^\/api\/goals\/([^/]+)\/descendants$/` GET | present | confirmed by grep in `src/server/server.ts`; pinned |
+| `/^\/api\/goals\/([^/]+)\/tree-cost$/` GET | present | confirmed by grep in `src/server/server.ts`; pinned |
+| `groupPolicyStore.setSubgoalsEnabledGetter(` boot call | present | confirmed by grep in `src/server/server.ts`; pinned (and also pinned by the older `tests/server-subgoals-getter-wired.test.ts`) |
 
 ### Proposal modal UI — `src/app/render.ts`
 
 | Symbol | Verdict | Evidence |
 |---|---|---|
-| `data-testid="goal-form-subgoals-toggle"` | present | `render.ts:972`; pinned |
-| `data-testid="goal-form-max-depth"` | present | `render.ts:987`; pinned |
-| `_proposalSubgoalsAllowed` state | present | `render.ts:2440` |
-| `_proposalMaxNestingDepth` state | present | `render.ts:2441` |
+| `data-testid="goal-form-subgoals-toggle"` | present | confirmed by grep in `src/app/render.ts`; pinned |
+| `data-testid="goal-form-max-depth"` | present | confirmed by grep in `src/app/render.ts`; pinned |
+| `_proposalSubgoalsAllowed` state | present | confirmed by grep in `src/app/render.ts` |
+| `_proposalMaxNestingDepth` state | present | confirmed by grep in `src/app/render.ts` |
 | `_goalSubgoalsAllowed` / `_goalMaxNestingDepth` chat-assistant state | present | shares `renderGoalForm` via `_proposalSubgoalsAllowed` / `_proposalMaxNestingDepth`; no separate state to lose |
 
 Note: Part 1 of this goal restyles these controls to match the peer
@@ -78,9 +78,9 @@ source pins above keep working through that change.
 
 | Call site | Verdict |
 |---|---|
-| `team-manager.ts:1702`, `1716`, `1935` (verification events) | present |
-| `server.ts:973` definition + `teamManager.setBroadcastToGoal(broadcastToGoal)` wiring at `1054` | present |
-| `verificationHarness` constructor injection at `server.ts:1087` | present |
+| Verification event broadcasts in `team-manager.ts` | present |
+| `broadcastToGoal` definition + `teamManager.setBroadcastToGoal(broadcastToGoal)` wiring in `server.ts` | present |
+| `verificationHarness` constructor injection in `server.ts` | present |
 
 No silently-dropped broadcast types found — every `broadcastToGoal?.(`
 call site has a corresponding definition and the wiring chain is intact.
@@ -88,10 +88,10 @@ call site has a corresponding definition and the wiring chain is intact.
 ### Sandbox / token wiring
 
 `sandboxScope` references across `src/server/` (probe from goal spec):
-20 hits, all wired through `handleApiRoute` (`server.ts:845`) and the
-LSP cwd-authorisation guard (`lsp/authorize-cwd.ts:32,144,145`). The
-sandbox-guard module references the field for image generation
-session-scope ownership. No silent drops found.
+20 hits, all wired through `handleApiRoute` and the LSP cwd-authorisation
+guard (`src/server/lsp/authorize-cwd.ts`). The sandbox-guard module
+references the field for image generation session-scope ownership. No
+silent drops found.
 
 ### Tool YAML — `defaults/tools/`
 
