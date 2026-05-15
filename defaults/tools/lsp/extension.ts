@@ -209,19 +209,33 @@ export default function (pi: ExtensionAPI) {
 				// that coordinate. The LSP server then resolves to the real
 				// definition the use-site refers to — semantically what the
 				// caller meant by passing the hint.
-				const useSite = tryFindUseSite(symbolName, hint);
-				if (useSite) {
+				//
+				// Textual `\bword\b` matching alone is unsafe: it also hits
+				// comments, string literals, and unrelated identifiers. Probe
+				// each candidate via callLsp("definition", ...) and pick the
+				// first that the language server recognises as a real symbol
+				// reference (non-empty result). Probing with "definition" is
+				// reliable across all three shorthand consumers (definition /
+				// references / hover) — a position with a valid definition
+				// also has valid references and hover.
+				const candidates = findUseSiteCandidates(symbolName, hint);
+				for (const c of candidates) {
+					let probe: unknown;
+					try {
+						probe = await callLsp("definition", { path: hint, line: c.line, character: c.character }, onUpdate);
+					} catch { continue; }
+					if (!isValidProbeResult(probe)) continue;
 					const resolvedArgs: Record<string, unknown> = { ...args };
 					delete resolvedArgs.symbolName;
 					resolvedArgs.path = hint;
-					resolvedArgs.line = useSite.line;
-					resolvedArgs.character = useSite.character;
+					resolvedArgs.line = c.line;
+					resolvedArgs.character = c.character;
 					return {
 						kind: "ok",
 						args: resolvedArgs,
 						resolvedFrom: {
 							symbolName,
-							matched: `${hint}:${useSite.line + 1} (use-site)`,
+							matched: `${hint}:${c.line + 1} (use-site)`,
 						},
 					};
 				}
@@ -272,25 +286,48 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Locate the first occurrence of `symbol` (word-boundary match) in the
-	 * file at `hintRel` (session-cwd-relative). Returns 0-indexed line/char
-	 * of the identifier start, or undefined when the file can't be read or
-	 * the identifier isn't found.
+	 * Enumerate all word-boundary occurrences of `symbol` in `hintRel`
+	 * (session-cwd-relative), in document order. Returns 0-indexed line/char
+	 * of each identifier start. The caller is expected to validate each
+	 * candidate via the language server — purely-textual matches include
+	 * comments, strings, and unrelated identifiers.
 	 */
-	function tryFindUseSite(symbol: string, hintRel: string): { line: number; character: number } | undefined {
+	function findUseSiteCandidates(symbol: string, hintRel: string): Array<{ line: number; character: number }> {
+		const out: Array<{ line: number; character: number }> = [];
 		try {
 			const cwd = process.env.BOBBIT_HOST_CWD ?? process.cwd();
 			const abs = path.resolve(cwd, hintRel);
 			const text = fs.readFileSync(abs, "utf-8");
 			const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const re = new RegExp(`\\b${escaped}\\b`);
+			const re = new RegExp(`\\b${escaped}\\b`, "g");
 			const lines = text.split(/\r?\n/);
 			for (let i = 0; i < lines.length; i++) {
-				const m = re.exec(lines[i]);
-				if (m && typeof m.index === "number") return { line: i, character: m.index };
+				re.lastIndex = 0;
+				let m: RegExpExecArray | null;
+				while ((m = re.exec(lines[i])) !== null) {
+					out.push({ line: i, character: m.index });
+					if (m.index === re.lastIndex) re.lastIndex++; // guard zero-width
+				}
 			}
-		} catch { /* file missing or unreadable — fall back to other heuristics */ }
-		return undefined;
+		} catch { /* file missing or unreadable — caller falls back to other heuristics */ }
+		return out;
+	}
+
+	/**
+	 * A use-site probe is "valid" when the LSP returns a real symbol — a
+	 * non-empty Location array or a non-null/non-error object. Definition
+	 * requests against comments, strings, whitespace, or unrelated words
+	 * resolve to null or [] from typescript-language-server.
+	 */
+	function isValidProbeResult(probe: unknown): boolean {
+		if (probe === null || probe === undefined) return false;
+		if (Array.isArray(probe)) return probe.length > 0;
+		if (typeof probe === "object") {
+			const obj = probe as Record<string, unknown>;
+			if (typeof obj.error === "string") return false;
+			return Object.keys(obj).length > 0;
+		}
+		return false;
 	}
 
 	/** Decorate a successful shorthand result with `resolvedFrom`. */

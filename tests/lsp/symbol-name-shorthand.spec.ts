@@ -18,6 +18,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +27,30 @@ import { TypescriptLspFactory } from "../../src/server/lsp/clients/typescript.ts
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE = path.resolve(__dirname, "..", "fixtures", "lsp-ts");
+
+/**
+ * Use-site disambiguation regression fixture (Finding #2).
+ *
+ * Several textual `add` occurrences appear BEFORE the real import/use
+ * sites — inside line comments, a block comment, and a string literal.
+ * A naive “first word-boundary match wins” resolver would dispatch from
+ * the comment on line 1 and return a wrong/empty definition. The resolver
+ * must probe candidates against the LSP and skip until it finds the
+ * real `import { add }` (line 5) or the call site (line 7).
+ *
+ * Written at setup, removed at teardown — not part of the committed fixture.
+ */
+const COMMENT_FIXTURE_REL = path.join("src", "comment-then-use.ts");
+const COMMENT_FIXTURE_ABS = path.join(FIXTURE, COMMENT_FIXTURE_REL);
+const COMMENT_FIXTURE_SRC =
+	"// add: this leading line comment mentions add but is not a real use.\n" +
+	"// Another comment that names add for the second time.\n" +
+	"/* Block comment also referencing add. */\n" +
+	"const note = \"remember to add salt to the recipe\";\n" +
+	"import { add } from \"./math.js\";\n" +
+	"\n" +
+	"const z = add(10, 20);\n" +
+	"console.log(note, z);\n";
 
 const factory = new TypescriptLspFactory();
 const HAS_LSP = factory.isInstalled();
@@ -85,6 +110,10 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		process.env.BOBBIT_GATEWAY_URL = "http://lsp-shorthand-test.invalid";
 		process.env.BOBBIT_HOST_CWD = FIXTURE;
 
+		// Materialise the comment/string regression fixture before warmup so
+		// typescript-language-server includes it in the project on first index.
+		fs.writeFileSync(COMMENT_FIXTURE_ABS, COMMENT_FIXTURE_SRC, "utf-8");
+
 		// Dynamic-import after env is wired so `resolveGateway()` picks up our values.
 		tools = new Map();
 		const pi = {
@@ -100,6 +129,7 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		await client.ensureDocOpen(path.join(FIXTURE, "src", "math.ts"));
 		await client.ensureDocOpen(path.join(FIXTURE, "src", "index.ts"));
 		await client.ensureDocOpen(path.join(FIXTURE, "src", "adder.ts"));
+		await client.ensureDocOpen(COMMENT_FIXTURE_ABS);
 	});
 
 	after(async () => {
@@ -108,6 +138,7 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		process.env.BOBBIT_GATEWAY_URL = prevEnv.url;
 		process.env.BOBBIT_HOST_CWD = prevEnv.cwd;
 		if (sup) await sup.shutdownAll();
+		try { fs.unlinkSync(COMMENT_FIXTURE_ABS); } catch { /* best-effort */ }
 	});
 
 	/** Parse the JSON payload returned by an extension tool's `asText` wrapper. */
@@ -216,6 +247,40 @@ describe("lsp_* symbolName shorthand (extension)", skip, () => {
 		assert.match(String(res.resolvedFrom.matched), /adder\.ts:/, `path hint must steer resolution to adder.ts; got ${res.resolvedFrom.matched}`);
 		// Definition should also land in adder.ts (the class method body).
 		assert.match(String(res.path), /adder\.ts$/, `definition path should be adder.ts; got ${res.path}`);
+	});
+
+	test("use-site disambiguation ignores `add` mentions in comments/strings", async () => {
+		// Finding #2 regression: comments/strings containing the symbol must
+		// NOT be picked as the use-site. The resolver probes each textual
+		// candidate via callLsp("definition", ...) and accepts only those
+		// the language server recognises as a real symbol reference.
+		const tool = tools.get("lsp_definition")!;
+		const res = payload(await tool.execute("t-comments", {
+			path: "src/comment-then-use.ts",
+			symbolName: "add",
+		}));
+
+		assert.notEqual(res.ambiguous, true, `expected non-ambiguous resolution; got: ${JSON.stringify(res).slice(0, 300)}`);
+		assert.notEqual(res.error, "lsp_symbol_not_found", `expected resolution to succeed; got: ${JSON.stringify(res).slice(0, 300)}`);
+		assert.ok(res.resolvedFrom, "expected shorthand decoration");
+
+		// matched is `<path>:<1-indexed-line> (use-site)` — parse it.
+		const matchedStr = String(res.resolvedFrom.matched);
+		assert.match(matchedStr, /comment-then-use\.ts:/, `use-site must be in the hint file; got ${matchedStr}`);
+		const m = matchedStr.match(/:(\d+)\b/);
+		assert.ok(m, `could not parse matched line: ${matchedStr}`);
+		const matchedLine1 = Number(m![1]);
+		// The leading comment/string occurrences span lines 1–4 (1-indexed).
+		// The first real use is the import on line 5; the call on line 7.
+		assert.ok(matchedLine1 >= 5, `expected use-site line ≥5 (past comments/strings); got line ${matchedLine1}`);
+
+		// The resolved definition must land in math.ts — only a real symbol
+		// reference (not a comment/string) can resolve there.
+		const locs = Array.isArray(res.result)
+			? res.result
+			: (res.path ? [{ path: res.path, range: res.range }] : []);
+		assert.ok(locs.length >= 1, `expected at least one definition; got: ${JSON.stringify(res).slice(0, 300)}`);
+		assert.match(String(locs[0].path), /math\.ts$/, `definition should land in math.ts; got ${locs[0]?.path}`);
 	});
 
 	test("lsp_definition({symbolName:'add'}) without path hint is ambiguous with two `add` symbols", async () => {
