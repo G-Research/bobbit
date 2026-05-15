@@ -2358,6 +2358,78 @@ Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sit
 
 ---
 
+## bg-process exit notifications
+
+When an agent starts a `bash_bg` process and then goes idle, the process can finish without the agent knowing — the agent only learns via a later manual `bash_bg wait/logs` call or an unrelated auto-nudge. To close this gap, `BgProcessManager` delivers an automatic exit notification to the owning session whenever a background process exits without the agent having already observed the exit.
+
+### Delivery mechanism
+
+The notification reuses the existing prompt-queue / nudge plumbing — no new channels were introduced:
+
+- `BgProcessManager` accepts an optional `ExitNotifier` callback at construction time. `server.ts` wires this to `notifySessionOfBgExit()`, which calls `SessionManager.enqueuePrompt(sessionId, message, { isSteered })` after formatting the notification as human-readable text.
+- **Idle sessions**: `isSteered: true` — `enqueuePrompt`'s idle fast-path dispatches the message via `rpcClient.prompt()` immediately, waking the agent.
+- **Streaming/busy sessions**: `isSteered: false` — the message is parked in the prompt queue and delivered as a fresh user turn after the current turn's `agent_end`. This deliberately avoids `deliverLiveSteer()` / `rpcClient.steer()`, which would abort any concurrent `bash_bg wait` mid-turn — the kind of disruption that causes spurious wait aborts in legitimately busy sessions.
+
+The notification is formatted by `formatBgExitMessage()` in `src/server/server.ts`.
+
+### Notification payload
+
+The human-readable message delivered to the agent contains:
+
+| Field | Detail |
+|---|---|
+| Process id | e.g. `bg-3` |
+| Name | The agent-supplied short name (max 3 words) |
+| Exit verdict | `success (exit code 0)` or `failure (exit code N)` / `failure (signal SIGTERM)` |
+| Duration | Rounded to seconds; `1m30s` format for ≥ 1 minute |
+| Command | Original command, truncated to 500 chars with `…` |
+| Output tail | Up to 20 lines (see below) |
+| Log pointer | `Use bash_bg logs id="<id>" for full output.` |
+
+**Tail selection**: For failed processes the tail preferentially surfaces recent lines matching `/error|fail|failed|fatal|exception|warning|warn/i` (reverse scan over the bounded `bg.log` buffer, up to 20 lines). If no such lines exist, or the process succeeded, the last 20 lines of combined stdout+stderr are used. If the process produced no output at all, the tail is omitted.
+
+### Exactly-once semantics
+
+Each `BgProcess` carries two flags that together guarantee the agent is woken at most once per process exit:
+
+- **`notified: boolean`** — set to `true` the first time the exit is delivered (either via auto-notification or via `waitForExit` actually observing the exit). Once set, `notifyExitIfNeeded()` is a no-op.
+- **`suppressNotification: boolean`** — set before an intentional kill or during session cleanup. Prevents any wake-up for a termination that the agent (or the gateway) itself initiated.
+
+The hook point is the single `child.on("exit", ...)` listener in `BgProcessManager.create()`. After updating `status`/`exitCode`/`endTime` and resolving `bg.exited`, it schedules `notifyExitIfNeeded(sessionId, bg)` via `queueMicrotask`, giving a concurrent `waitForExit` one microtask tick to mark `notified = true` first.
+
+### Interaction with `bash_bg wait`
+
+`waitForExit()` marks `bg.notified = true` **only when the wait actually observes the exit** — i.e. the race returns `"exit"` or the process is already exited at call time. This suppresses the auto-notification because there is nothing to wake: the exit is being delivered synchronously to the mid-turn agent via the `wait` return value.
+
+A wait that **times out** or is **aborted** (by a live steer) before the process exits does NOT set `notified`. The `finally` block in `waitForExit` re-arms the notifier via a fresh `queueMicrotask` when the last active wait settles without observing the exit, so the owning agent is still woken when the process eventually finishes.
+
+The `observingWaits` counter tracks how many `waitForExit` calls are currently in flight per process. `notifyExitIfNeeded` defers while `observingWaits > 0` so it does not race the wait that is about to deliver the result.
+
+### Kill and session cleanup suppression
+
+`BgProcessManager.kill(sessionId, processId)` sets `bg.suppressNotification = true` **before** sending the signal, so the exit event (which can fire synchronously on some platforms) is never forwarded to the notifier.
+
+`BgProcessManager.cleanup(sessionId)` (called on session termination) sets `suppressNotification = true` on every still-running process and then kills them. Idle agents that happen to be waiting on a just-terminated session are not spammed.
+
+### Restart behaviour (best-effort)
+
+`BgProcessManager` is in-memory. On gateway restart:
+
+- In-flight bg processes that outlive the restart are no longer tracked — the manager starts fresh and cannot re-attach to orphaned children. A subsequent `bash_bg logs/wait` for those processes will return not-found.
+- If a session is torn down mid-process and then respawned, the new session has no record of the old bg processes. No stale wake-up is delivered — the worst case is a missed notification, not a spurious one.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/server/agent/bg-process-manager.ts` | `BgProcess.notified`, `BgProcess.suppressNotification`, `BgProcess.observingWaits`, `ExitNotifier` type, `notifyExitIfNeeded()`, `selectNotificationTail()` |
+| `src/server/server.ts` | `formatBgExitMessage()` (formats payload), `notifySessionOfBgExit()` (routes to prompt queue), `BgProcessManager` constructor call that wires the `ExitNotifier` |
+| `defaults/tools/shell/extension.ts` | `bash_bg` tool; `waitForExit` call site that marks `notified` on success |
+| `tests/bg-process-manager.test.ts` | Unit tests: notify on exit, notify-once vs `wait`, failure tail, kill suppression, multiple processes, wait timeout re-arm |
+| `tests/e2e/bg-process-exit-notify.spec.ts` | API E2E: idle session woken by bg exit |
+
+---
+
 ## Chat surface UI invariants
 
 Two surfaces in the chat client previously relied on time-based heuristics that gave intermittent, hard-to-repro misbehaviour (scroll snap-back / vibration in idle sessions, stale messages trailing after newer ones on session navigate). Both have been replaced with deterministic invariants the implementation must preserve.
