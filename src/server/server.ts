@@ -1019,10 +1019,13 @@ export function createGateway(config: GatewayConfig) {
 		const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 		try {
+			// source: "verification" so TeamManager.subscribeTeamLeadEvents preserves
+			// idle-nudge backoff counters when the lead replies to this notification
+			// (rather than treating it as a fresh user-driven idle cycle).
 			if (teamLeadSession.status === "streaming") {
-				sessionManager.deliverLiveSteer(team.teamLeadSessionId, message);
+				sessionManager.deliverLiveSteer(team.teamLeadSessionId, message, { source: "verification" });
 			} else {
-				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true });
+				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true, source: "verification" });
 			}
 			console.log(`[verification] Notified team lead for goal ${goalId}: ${message}`);
 		} catch (err) {

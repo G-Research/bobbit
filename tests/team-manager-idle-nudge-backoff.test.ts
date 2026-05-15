@@ -356,3 +356,201 @@ describe("TeamManager — idle-nudge exponential backoff (regression)", () => {
 		t.mock.timers.reset();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// PromptSource semantics — reset vs. preserve behaviour of subscribeTeamLeadEvents
+// ---------------------------------------------------------------------------
+
+describe("TeamManager — PromptSource semantics", () => {
+	it("resets both counters on agent_start when lastPromptSource = 'user'", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
+			addIdleWorker: true,
+		});
+
+		// Seed counters as if several auto-nudges had already fired.
+		(team as any).idleNudgeCount.set("goal-1", 5);
+		(team as any).noWorkersNudgeCount.set("goal-1", 5);
+
+		// External user prompt arrives — mirror real SessionManager behaviour.
+		tlSession.lastPromptSource = "user";
+		fire("agent_start");
+
+		assert.equal((team as any).idleNudgeCount.get("goal-1"), undefined,
+			"workers counter must be cleared on external user prompt");
+		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
+			"no-workers counter must be cleared on external user prompt");
+
+		// Next idle cycle: workers-nudge should fire at the BASE delay again,
+		// proving the counter really was reset (not just the timer cancelled).
+		tlSession.status = "idle";
+		fire("agent_end");
+		t.mock.timers.tick(10 * 60 * 1000 + 1_000);
+		assert.equal(enqueuePrompt.mock.callCount(), 1,
+			"workers-nudge must fire at base 10m delay after counter reset");
+
+		t.mock.timers.reset();
+	});
+
+	it("resets both counters on agent_start when lastPromptSource = 'system'", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
+
+		(team as any).idleNudgeCount.set("goal-1", 3);
+		(team as any).noWorkersNudgeCount.set("goal-1", 7);
+
+		tlSession.lastPromptSource = "system";
+		fire("agent_start");
+
+		assert.equal((team as any).idleNudgeCount.get("goal-1"), undefined,
+			"system-source prompt must reset workers counter");
+		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
+			"system-source prompt must reset no-workers counter");
+
+		t.mock.timers.reset();
+	});
+
+	it("preserves both counters on agent_start when source is auto-nudge / task-notification / verification / agent", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		for (const source of ["auto-nudge", "task-notification", "verification", "agent"] as const) {
+			const { team, tlSession, fire } = await setupTeamWithCapturedEvents();
+			(team as any).idleNudgeCount.set("goal-1", 4);
+			(team as any).noWorkersNudgeCount.set("goal-1", 6);
+
+			tlSession.lastPromptSource = source;
+			fire("agent_start");
+
+			assert.equal((team as any).idleNudgeCount.get("goal-1"), 4,
+				`source="${source}" must preserve workers counter`);
+			assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), 6,
+				`source="${source}" must preserve no-workers counter`);
+		}
+
+		t.mock.timers.reset();
+	});
+
+	it("defaults lastPromptSource to 'user' when callers don't supply source (backward compat)", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, tlSession, sm, fire } = await setupTeamWithCapturedEvents();
+
+		// Caller does NOT pass `source` — mock's default is "user".
+		sm.enqueuePrompt(tlSession.id, "hello", { isSteered: false });
+		assert.equal(tlSession.lastPromptSource, "user",
+			"default source must be 'user' to preserve byte-equal behaviour for legacy callers");
+
+		// And that default DOES reset counters on agent_start.
+		(team as any).idleNudgeCount.set("goal-1", 2);
+		(team as any).noWorkersNudgeCount.set("goal-1", 2);
+		fire("agent_start");
+		assert.equal((team as any).idleNudgeCount.get("goal-1"), undefined,
+			"default 'user' source must reset workers counter");
+		assert.equal((team as any).noWorkersNudgeCount.get("goal-1"), undefined,
+			"default 'user' source must reset no-workers counter");
+
+		t.mock.timers.reset();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cap at MAX_*_NUDGE_DELAY_MS (12h)
+// ---------------------------------------------------------------------------
+
+describe("TeamManager — 12h backoff cap", () => {
+	it("no-workers schedule caps at MAX_NO_WORKERS_NUDGE_DELAY_MS", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+
+		// Force the counter high enough that 2^count * BASE ≫ MAX.
+		(team as any).noWorkersNudgeCount.set("goal-1", 12);
+
+		tlSession.status = "idle";
+		fire("agent_end");
+
+		// Just under 12h — must NOT fire (capped delay is 12h).
+		const TWELVE_H = 12 * 60 * 60 * 1000;
+		t.mock.timers.tick(TWELVE_H - 10_000);
+		assert.equal(enqueuePrompt.mock.callCount(), 0,
+			"capped nudge must not fire before 12h");
+
+		// Crossing 12h — must fire exactly once.
+		t.mock.timers.tick(20_000);
+		assert.equal(enqueuePrompt.mock.callCount(), 1,
+			"capped nudge must fire at the 12h boundary, not at 2^12 * 5m");
+
+		t.mock.timers.reset();
+	});
+
+	it("workers schedule caps at MAX_IDLE_NUDGE_DELAY_MS", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents({
+			addIdleWorker: true,
+		});
+
+		(team as any).idleNudgeCount.set("goal-1", 12);
+
+		tlSession.status = "idle";
+		fire("agent_end");
+
+		const TWELVE_H = 12 * 60 * 60 * 1000;
+		t.mock.timers.tick(TWELVE_H - 10_000);
+		assert.equal(enqueuePrompt.mock.callCount(), 0,
+			"capped workers-nudge must not fire before 12h");
+
+		t.mock.timers.tick(20_000);
+		assert.equal(enqueuePrompt.mock.callCount(), 1,
+			"capped workers-nudge must fire at the 12h boundary");
+
+		t.mock.timers.reset();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Workers appearing aborts the no-workers cycle without incrementing
+// ---------------------------------------------------------------------------
+
+describe("TeamManager — no-workers cycle aborts when workers appear", () => {
+	it("adding a worker before the no-workers timer fires aborts cleanly", async (t) => {
+		t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+
+		const { team, sm, tlSession, enqueuePrompt, fire } = await setupTeamWithCapturedEvents();
+
+		const countBefore = (team as any).noWorkersNudgeCount.get("goal-1") ?? 0;
+
+		tlSession.status = "idle";
+		fire("agent_end");
+
+		// Tick partway through the 5m delay — add an idle worker before deadline.
+		t.mock.timers.tick(60_000);
+		const entry = (team as any).teams.get("goal-1")!;
+		const workerSession = {
+			id: "worker-late", status: "idle", cwd: "/tmp/worker",
+			rpcClient: { prompt: mock.fn(async () => {}), onEvent: mock.fn(() => () => {}) },
+			clients: new Set(),
+		};
+		sm._sessions.set("worker-late", workerSession);
+		entry.agents.push({
+			sessionId: "worker-late", role: "coder", task: "work", createdAt: Date.now(),
+		});
+
+		// Cross the original 5m deadline.
+		t.mock.timers.tick(5 * 60 * 1000 + 1_000);
+
+		// No no-workers nudge was sent, and the counter was NOT incremented.
+		const noWorkersFires = enqueuePrompt.mock.calls.filter((c: any) => {
+			const msg = String(c.arguments[1] ?? "");
+			return msg.includes("no active team agents");
+		}).length;
+		assert.equal(noWorkersFires, 0,
+			"no-workers nudge must not fire once a worker has been added before the deadline");
+		assert.equal((team as any).noWorkersNudgeCount.get("goal-1") ?? 0, countBefore,
+			"aborted no-workers cycle must not increment the counter");
+
+		t.mock.timers.reset();
+	});
+});
