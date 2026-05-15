@@ -169,17 +169,17 @@ All nine routes live in `src/server/server.ts`. Each gets one extra
 line: `if (!requireSubgoalsEnabled(res)) return;` at the very top of
 the handler (after the path/method match, before any body parsing).
 
-| Route | Method | Path | Handler line |
-|-------|--------|------|--------------|
-| spawn-child | POST | `/api/goals/:id/spawn-child` | `:3443` |
-| plan PATCH | PATCH | `/api/goals/:id/plan` | `:3620` |
-| plan GET | GET | `/api/goals/:id/plan` | `:3768` |
-| integrate-child | POST | `/api/goals/:id/integrate-child/:childId` | `:3816` |
-| pause | POST | `/api/goals/:id/pause` | `:3880` |
-| resume | POST | `/api/goals/:id/resume` | `:3907` |
-| mutation decision | POST | `/api/goals/:id/mutation/:requestId/decision` | `:3933` |
-| policy | PATCH | `/api/goals/:id/policy` | `:4002` |
-| tree-cost | GET | `/api/goals/:goalId/tree-cost` | `:7940` |
+| Route | Method | Path | Module |
+|-------|--------|------|--------|
+| spawn-child | POST | `/api/goals/:id/spawn-child` | `nested-goal-routes.ts` |
+| plan PATCH | PATCH | `/api/goals/:id/plan` | `nested-goal-routes.ts` |
+| plan GET | GET | `/api/goals/:id/plan` | `nested-goal-routes.ts` |
+| integrate-child | POST | `/api/goals/:id/integrate-child/:childId` | `nested-goal-routes.ts` |
+| pause | POST | `/api/goals/:id/pause` | `nested-goal-routes.ts` |
+| resume | POST | `/api/goals/:id/resume` | `nested-goal-routes.ts` |
+| mutation decision | POST | `/api/goals/:id/mutation/:requestId/decision` | `nested-goal-routes.ts` |
+| policy | PATCH | `/api/goals/:id/policy` | `nested-goal-routes.ts` |
+| tree-cost | GET | `/api/goals/:goalId/tree-cost` | `server.ts` (requires subgoals enabled) |
 
 ### Response shape
 
