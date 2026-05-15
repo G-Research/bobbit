@@ -82,21 +82,21 @@ function makeFakeBridge(): SandboxLspBridge & {
 }
 
 describe("typescript LSP adapter \u2014 docker sandbox without running container", skip, () => {
-	test("factory.spawn() rejects with lsp_unavailable; no host tsserver is started", async () => {
+	test("factory.spawn() rejects when requireSandbox=true; no host tsserver is started", async () => {
 		const fake = makeFakeBridge();
-		const err: any = await factory.spawn({ worktreePath: FIXTURE, sandbox: fake }).then(
+		const err: any = await factory.spawn({ worktreePath: FIXTURE, sandbox: fake, requireSandbox: true }).then(
 			() => null,
 			(e) => e,
 		);
-		assert.ok(err, "factory.spawn() must reject when sandbox is configured but no container is running");
+		assert.ok(err, "factory.spawn() must reject when sandbox is required but no container is running");
 		assert.equal(
-			err.code,
-			"lsp_unavailable",
-			`expected LspUnavailableError (code=lsp_unavailable). Got code=${err?.code}, message=${err?.message}`,
+			err.name,
+			"LspSandboxRequiredError",
+			`expected LspSandboxRequiredError. Got name=${err?.name}, message=${err?.message}`,
 		);
 		assert.match(
 			String(err.message),
-			/sandbox.*container|container.*sandbox/i,
+			/sandbox required.*container|container.*sandbox required/i,
 			`error must explain the sandbox/no-container situation. Got: ${err.message}`,
 		);
 		// Bridge-level invariants: containerIdForWorktree was consulted, but

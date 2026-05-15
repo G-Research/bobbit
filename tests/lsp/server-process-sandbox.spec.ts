@@ -25,7 +25,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { spawnLspChild } from "../../src/server/lsp/server-process.ts";
+import { LspSandboxRequiredError, spawnLspChild } from "../../src/server/lsp/server-process.ts";
 import type { SandboxLspBridge } from "../../src/server/lsp/client.ts";
 
 function makeNoContainerBridge() {
@@ -49,7 +49,7 @@ function makeNoContainerBridge() {
 }
 
 describe("spawnLspChild — sandbox fail-closed", () => {
-	test("rejects with lsp_unavailable when sandbox is set but no container is running", async () => {
+	test("rejects when sandbox is required but no container is running", async () => {
 		const { bridge, calls } = makeNoContainerBridge();
 		// Use a clearly bogus command path. If the security guard ever
 		// regresses and we fall back to host spawn, the failure mode would be
@@ -61,12 +61,13 @@ describe("spawnLspChild — sandbox fail-closed", () => {
 				command: "/definitely/not/a/real/binary-that-must-not-be-spawned",
 				args: ["--stdio"],
 				sandbox: bridge,
+				requireSandbox: true,
 			}),
 			(err: any) => {
-				assert.equal(err.code, "lsp_unavailable", `expected code=lsp_unavailable, got ${err.code}`);
+				assert.ok(err instanceof LspSandboxRequiredError, `expected LspSandboxRequiredError, got ${err?.name}: ${err?.message}`);
 				assert.match(
 					String(err.message),
-					/sandbox.*no container|no container.*sandbox/i,
+					/sandbox required.*no container|no container.*sandbox required/i,
 					`error message must explain the sandbox/no-container situation. Got: ${err.message}`,
 				);
 				// Ensure the message is NOT a generic ENOENT — that would

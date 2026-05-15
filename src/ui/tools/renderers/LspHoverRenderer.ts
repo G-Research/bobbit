@@ -4,7 +4,14 @@ import { Info } from "lucide";
 import { ensureMarkdownBlock } from "../../lazy/markdown-block.js";
 import { getToolState, isSkippedToolResult, renderHeader } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { parseLspResult, renderLspErrorEnvelope } from "./LspShared.js";
+import {
+	isAmbiguousShorthand,
+	parseLspResult,
+	renderAmbiguousShorthand,
+	renderLspErrorEnvelope,
+	renderResolvedFromBanner,
+	unwrapShorthand,
+} from "./LspShared.js";
 
 interface HoverParams {
 	path: string;
@@ -44,11 +51,18 @@ export class LspHoverRenderer implements ToolRenderer<HoverParams, any> {
 			return { content: html`<div>${renderHeader(state, Info, headerText)}${errEnv}</div>`, isCustom: false };
 		}
 
-		if (data == null || !data.contents) {
+		if (isAmbiguousShorthand(data)) {
+			return { content: html`<div>${renderHeader(state, Info, headerText)}${renderAmbiguousShorthand(data)}</div>`, isCustom: false };
+		}
+
+		const { resolvedFrom, body } = unwrapShorthand(data);
+
+		if (body == null || !body.contents) {
 			return {
 				content: html`
 					<div>
 						${renderHeader(state, Info, headerText)}
+						${renderResolvedFromBanner(resolvedFrom)}
 						<div class="mt-1 text-sm text-muted-foreground italic">No hover info.</div>
 					</div>
 				`,
@@ -60,8 +74,9 @@ export class LspHoverRenderer implements ToolRenderer<HoverParams, any> {
 			content: html`
 				<div>
 					${renderHeader(state, Info, headerText)}
+					${renderResolvedFromBanner(resolvedFrom)}
 					<div class="mt-2 text-xs bg-muted/50 rounded p-3 border border-border max-h-[400px] overflow-y-auto">
-						<markdown-block .content=${data.contents}></markdown-block>
+						<markdown-block .content=${body.contents}></markdown-block>
 					</div>
 				</div>
 			`,

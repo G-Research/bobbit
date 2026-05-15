@@ -15,7 +15,6 @@ import {
 } from "vscode-jsonrpc/lib/node/main.js";
 
 import type { SandboxLspBridge } from "./client.js";
-import { LspUnavailableError } from "./error.js";
 
 const STDERR_RING_BYTES = 64 * 1024;
 
@@ -30,6 +29,12 @@ export interface LspProcessOpts {
 	 *  Callers should supply the container-installed equivalents here.
 	 *  Defaults to `[command, ...args]` when omitted (host-only fallback). */
 	sandboxCmd?: string[];
+	/** Fail closed instead of host-fallback when a sandbox container is
+	 *  required but `sandbox.containerIdForWorktree(worktreePath)` is null.
+	 *  Set by the supervisor for worktrees explicitly marked sandboxed.
+	 *  Host-only / fixture / dev flows leave this unset and keep the
+	 *  legacy host-spawn fallback. */
+	requireSandbox?: boolean;
 }
 
 export interface LspProcess {
@@ -40,6 +45,18 @@ export interface LspProcess {
 }
 
 const localRequire = createRequire(import.meta.url);
+
+/**
+ * Error thrown when a sandboxed worktree requests LSP but no container is
+ * available. We refuse to host-fallback in that case so untrusted sandbox
+ * files never get evaluated by a host-side language server.
+ */
+export class LspSandboxRequiredError extends Error {
+	constructor(worktreePath: string) {
+		super(`LSP spawn refused: sandbox required for worktree ${worktreePath} but no container is available`);
+		this.name = "LspSandboxRequiredError";
+	}
+}
 
 /**
  * Resolve typescript-language-server CLI script (.mjs) from the gateway
@@ -68,25 +85,16 @@ export function resolvePyrightLangserver(): { node: string; cliMjs: string } | n
 
 export async function spawnLspChild(opts: LspProcessOpts): Promise<LspProcess> {
 	let child: ChildProcess;
-	// Sandbox isolation must be fail-closed: when the caller has configured a
-	// sandbox bridge for this worktree but no container is currently running,
-	// we MUST NOT silently spawn the language server on the host. Doing so
-	// would leak a process (running as the gateway user, with full host fs
-	// access) for a project that has explicitly opted into sandbox isolation,
-	// defeating the security boundary. Refuse to start instead — the
-	// supervisor surfaces this as `lsp_unavailable` to the agent, which can
-	// fall back to grep. Non-sandboxed projects (no `opts.sandbox`) still
-	// spawn host language servers normally.
-	// Security review finding (2026-05-15): never reintroduce host fallback
-	// when `opts.sandbox` is set. Pinned by
-	// tests/lsp/server-process-sandbox.spec.ts.
-	if (opts.sandbox) {
-		const cid = opts.sandbox.containerIdForWorktree(opts.worktreePath);
-		if (!cid) {
-			throw new LspUnavailableError(
-				`LSP unavailable: sandbox is configured for worktree ${opts.worktreePath} but no container is running. Refusing to spawn language server on the host.`,
-			);
-		}
+	// Sandbox bridge is best-effort for host-only/dev fixtures, but fail-closed
+	// for worktrees the supervisor explicitly marked sandbox-required. That
+	// preserves normal host LSP behaviour outside sandboxed projects while
+	// preventing sandboxed sessions from silently spawning language servers on
+	// the host when their container is unavailable.
+	const cid = opts.sandbox?.containerIdForWorktree(opts.worktreePath) ?? null;
+	if (opts.requireSandbox && !cid) {
+		throw new LspSandboxRequiredError(opts.worktreePath);
+	}
+	if (opts.sandbox && cid) {
 		const containerCwd = opts.sandbox.toContainerPath(opts.worktreePath);
 		// Use sandboxCmd when provided; host-resolved paths (process.execPath,
 		// gateway node_modules scripts) do not exist inside the container.
