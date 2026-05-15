@@ -78,26 +78,23 @@ test.describe("GitStatusWidget wedge — disconnect-mid-close race", () => {
 		await page.locator('git-status-widget button[data-state="ready"]').click();
 		await expect(page.locator("#git-status-dropdown")).toHaveCount(1);
 
-		// Step 2: click again to start the close animation. The widget sets
-		// `_closing = true` synchronously and adds the closing CSS class, but
-		// the `animationend` listener has not yet fired (200ms animation).
-		await page.locator('git-status-widget button[data-state="ready"]').click();
-		await expect(
-			page.locator("#git-status-dropdown.git-dropdown-closing"),
-		).toHaveCount(1);
-
-		// Step 3: BEFORE the animation completes, disconnect the host from the
-		// DOM and reconnect it. This mirrors AgentInterface re-render churn
-		// briefly flipping `bgProcesses.length > 0 || gitRepoKnown !== 'no'`
-		// false then true again, which yanks the widget out of and back into
-		// its slot.
-		await page.evaluate(() => {
+		// Step 2/3: click again to start the close animation, then disconnect and
+		// reconnect synchronously before the short CSS animation can naturally
+		// finish. This mirrors AgentInterface re-render churn briefly flipping
+		// `bgProcesses.length > 0 || gitRepoKnown !== 'no'` false then true again,
+		// which yanks the widget out of and back into its slot.
+		const sawClosingClass = await page.evaluate(() => {
+			(document.querySelector('git-status-widget button[data-state="ready"]') as HTMLButtonElement).click();
+			const portal = document.getElementById("git-status-dropdown")!;
+			const closing = portal.classList.contains("git-dropdown-closing");
 			const w = document.querySelector("git-status-widget")!;
 			const host = w.parentElement!;
 			host.removeChild(w);
 			// Reconnect — same instance.
 			host.appendChild(w);
+			return closing;
 		});
+		expect(sawClosingClass).toBe(true);
 
 		// Re-acquire the button (Lit re-rendered after reconnection).
 		await page.waitForSelector('git-status-widget button[data-state="ready"]');
