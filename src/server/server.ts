@@ -584,9 +584,20 @@ function formatBgExitMessage(n: BgProcessExitNotification): string {
 
 /**
  * Deliver a bg-process exit notification to the owning session, reusing the
- * existing steer / enqueue plumbing. Idle sessions are woken via
- * `enqueuePrompt`; streaming sessions receive a live steer. Terminated or
+ * existing prompt-queue plumbing. Idle sessions are woken immediately via
+ * `enqueuePrompt`; streaming/busy sessions get the notification queued for
+ * after their current turn (still via `enqueuePrompt`, which on a busy
+ * session simply parks the message in the prompt queue). Terminated or
  * missing sessions are silently ignored.
+ *
+ * NOTE: we deliberately do NOT call `deliverLiveSteer()` here, even when the
+ * session is streaming. `deliverLiveSteer()` aborts any in-flight `bash_bg
+ * wait` so the steer can land — but the bg-exit notification is itself the
+ * payoff of a bg job, and disrupting a sibling `bash_bg wait` mid-turn
+ * causes spurious aborts (notably in mock STREAM_BURST turns that legitimately
+ * use bg create+wait). The goal requirement is to wake idle agents after
+ * their bg job exits; busy agents can pick the notification up when they
+ * next become idle.
  */
 function notifySessionOfBgExit(sessionManager: SessionManager, event: BgProcessExitNotification): void {
 	const session = sessionManager.getSession(event.sessionId);
@@ -595,14 +606,21 @@ function notifySessionOfBgExit(sessionManager: SessionManager, event: BgProcessE
 
 	const message = formatBgExitMessage(event);
 
-	if (session.status === "streaming") {
-		sessionManager.deliverLiveSteer(session.id, message).catch((err) => {
-			console.error(`[bg-process] deliverLiveSteer failed for ${session.id}:`, err);
-		});
-		return;
-	}
-
-	sessionManager.enqueuePrompt(session.id, message, { isSteered: true }).catch((err) => {
+	// Idle: deliver as a steered prompt so the agent wakes immediately and the
+	// notification jumps ahead of any non-steered queue items. enqueuePrompt's
+	// idle/empty-queue fast path dispatches via rpcClient.prompt directly.
+	//
+	// Streaming/busy: queue as a NON-steered prompt. We deliberately do NOT use
+	// `isSteered: true` here, because the session-manager's `tool_execution_end`
+	// handler dequeues steered messages and live-steers them via rpcClient.steer
+	// mid-turn (and `agent_end` does the same on the way out). Either path aborts
+	// in-flight `bash_bg wait` long-polls, which derails legitimate STREAM_BURST /
+	// mock turns that use bash_bg create+wait. A non-steered queued prompt is
+	// picked up by drainQueue AFTER the current turn's `agent_end`, which is the
+	// intended "wake idle agent" semantics: the notification lands as a fresh
+	// user turn once the agent has finished what it was doing.
+	const isSteered = session.status === "idle";
+	sessionManager.enqueuePrompt(session.id, message, { isSteered }).catch((err) => {
 		console.error(`[bg-process] enqueuePrompt failed for ${session.id}:`, err);
 	});
 }

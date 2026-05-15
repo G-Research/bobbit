@@ -193,6 +193,91 @@ test.describe("bash_bg — wake owning agent on bg process exit", () => {
 		}
 	});
 
+	test("streaming session enqueues the wake (does not live-steer / abort waits)", async ({ gateway }) => {
+		const spy = installWakeSpy(gateway.sessionManager);
+		let sessionId: string | undefined;
+		let originalStatus: string | undefined;
+		let session: any;
+		try {
+			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false, assistantType: "role" }),
+			});
+			expect(res.status).toBe(201);
+			({ id: sessionId } = await res.json());
+
+			// Force the session into "streaming" so notifySessionOfBgExit hits the
+			// busy branch. We only need the status flag flipped — no real turn is
+			// running. Restore in finally so session teardown is clean.
+			session = (gateway.sessionManager as any).getSession(sessionId);
+			expect(session).toBeTruthy();
+			originalStatus = session.status;
+			session.status = "streaming";
+
+			// Track whether abortAllWaits is called — it must NOT be, because that
+			// would disrupt an active bash_bg wait on a sibling process.
+			const origAbort = gateway.bgProcessManager.abortAllWaits.bind(gateway.bgProcessManager);
+			let abortCalls = 0;
+			(gateway.bgProcessManager as any).abortAllWaits = (sid: string) => {
+				abortCalls++;
+				return origAbort(sid);
+			};
+
+			spy.events.length = 0;
+
+			try {
+				const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+					method: "POST",
+					body: JSON.stringify({ command: QUICK_CMD, name: "quick-stream" }),
+				});
+				expect(bgRes.status).toBe(201);
+				const bg = await bgRes.json();
+
+				await pollUntil(async () => {
+					const r = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+					const list = await r.json();
+					const proc = list.processes?.find((p: any) => p.id === bg.id);
+					return proc?.status === "exited";
+				}, { timeoutMs: 10_000, intervalMs: 50, label: "streaming bg exited" });
+
+				const wake = await pollUntil(
+					() => spy.events.find((e) =>
+						e.sessionId === sessionId
+						&& /background process .* exited/i.test(e.message),
+					),
+					{ timeoutMs: 3_000, intervalMs: 50, label: "streaming wake event" },
+				);
+
+				// Must be an enqueue — NOT a live steer. Live-steer aborts in-flight
+				// bg waits, which breaks legitimate STREAM_BURST / mock turns that use
+				// bash_bg create+wait in the same turn.
+				expect(wake.kind).toBe("enqueue");
+				expect(wake.message).toMatch(/quick-stream/);
+				// Streaming notifications must NOT be marked steered — a steered queued
+				// row is live-steered by the next tool_execution_end handler, which is
+				// exactly the disruption we are avoiding. Non-steered queued prompts
+				// drain only on agent_end, after the current turn finishes.
+				expect((wake.opts as any)?.isSteered).toBe(false);
+
+				const steers = spy.events.filter((e) =>
+					e.kind === "steer"
+					&& e.sessionId === sessionId
+					&& /background process .* exited/i.test(e.message),
+				);
+				expect(steers).toEqual([]);
+				expect(abortCalls).toBe(0);
+			} finally {
+				(gateway.bgProcessManager as any).abortAllWaits = origAbort;
+			}
+		} finally {
+			spy.restore();
+			if (session && originalStatus !== undefined) session.status = originalStatus;
+			if (sessionId) {
+				await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+			}
+		}
+	});
+
 	test("agent-initiated kill does not produce a wake message", async ({ gateway }) => {
 		const spy = installWakeSpy(gateway.sessionManager);
 		let sessionId: string | undefined;
