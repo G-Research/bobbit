@@ -1438,6 +1438,38 @@ function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
 	`;
 }
 
+/** Hydrate proposal-tab module state from a goal proposal in the preview-panel
+ *  (goal assistant) flow. Mirrors the Workflow / Roles inline hydration block
+ *  from `syncProposalFormState` without touching the title/spec/cwd/workflowId
+ *  state that the preview panel owns separately via `state.previewTitle` etc. */
+let _previewProposalInlineKey: string | null = null;
+function syncPreviewProposalTabsState(): void {
+	const proposal = state.activeProposals.goal?.fields as undefined | {
+		inlineWorkflow?: Workflow;
+		inlineRoles?: Record<string, RoleData>;
+	};
+	const inlineKey = proposal?.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
+	const rolesKey = proposal?.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
+	const key = `${inlineKey}|${rolesKey}`;
+	if (_previewProposalInlineKey === key) return;
+	_previewProposalInlineKey = key;
+	resetProposalTabsState();
+	if (proposal?.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
+		_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
+		_proposalCustomizingWorkflow = true;
+		if (!_selectedWorkflowId) _selectedWorkflowId = _proposalInlineWorkflow.id;
+	}
+	if (proposal?.inlineRoles && typeof proposal.inlineRoles === "object") {
+		for (const [name, role] of Object.entries(proposal.inlineRoles)) {
+			if (role && typeof role === "object") {
+				_proposalInlineRoles[name] = cloneRole(role as RoleData);
+			}
+		}
+		const firstCustomized = Object.keys(_proposalInlineRoles)[0];
+		if (firstCustomized) _proposalSelectedRoleName = firstCustomized;
+	}
+}
+
 function goalPreviewPanel() {
 	// Populate previewProjectId for re-attempt / assistant sessions where it
 	// wasn't seeded by the +New Goal picker. Resolution order:
@@ -1463,8 +1495,12 @@ function goalPreviewPanel() {
 			state.previewProjectId = candidate;
 		}
 	}
+	syncPreviewProposalTabsState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	ensureProposalRolesLoaded();
+	ensureProposalGroupPoliciesLoaded();
+	ensureToolsLoaded();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1495,6 +1531,12 @@ function goalPreviewPanel() {
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
+		// Customised inline workflow / roles from the modal tabs take precedence
+		// over the library workflowId. inlineRoles is only forwarded when non-empty.
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
+			? _proposalInlineRoles as Record<string, unknown>
+			: undefined;
 
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
@@ -1503,7 +1545,9 @@ function goalPreviewPanel() {
 		try {
 			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
 				spec: state.previewSpec,
-				workflowId,
+				workflowId: inlineWorkflowField ? undefined : workflowId,
+				workflow: inlineWorkflowField,
+				inlineRoles: inlineRolesField,
 				reattemptOf: reattemptGoalId || undefined,
 				sandboxed,
 				projectId,
@@ -1536,6 +1580,8 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
+		resetProposalTabsState();
+		_previewProposalInlineKey = null;
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1641,6 +1687,82 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+
+				// ---- Proposal-modal tabs wiring (shared with goalProposalPanel) ----
+				tabbed: true,
+				activeTab: _proposalActiveTab,
+				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
+
+				inlineWorkflow: _proposalInlineWorkflow,
+				customizingWorkflow: _proposalCustomizingWorkflow,
+				onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
+				onCustomizeWorkflow: () => {
+					const src = _cachedWorkflows.find((w) => w.id === _selectedWorkflowId) ?? _cachedWorkflows[0];
+					if (!src) return;
+					_proposalInlineWorkflow = cloneWorkflow(src);
+					_proposalCustomizingWorkflow = true;
+					clearWorkflowEditorController();
+					renderApp();
+				},
+				onResetWorkflow: () => {
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					clearWorkflowEditorController();
+					renderApp();
+				},
+
+				inlineRoles: _proposalInlineRoles,
+				selectedRoleName: _proposalSelectedRoleName,
+				onSelectRole: (name) => {
+					_proposalSelectedRoleName = name;
+					_proposalCustomizingRole = !!_proposalInlineRoles[name];
+					renderApp();
+				},
+				customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
+				onCustomizeRole: () => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					const src = (_proposalRolesCache ?? []).find((r) => r.name === name);
+					if (!src) return;
+					if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
+					_proposalCustomizingRole = true;
+					_proposalRoleEditTab = "prompt";
+					renderApp();
+				},
+				onResetRole: () => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					delete _proposalInlineRoles[name];
+					_proposalCustomizingRole = false;
+					renderApp();
+				},
+				onRoleDraftChange: (patch) => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					const current = _proposalInlineRoles[name];
+					if (!current) return;
+					const next: RoleData = { ...current };
+					if (patch.label !== undefined) next.label = patch.label;
+					if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
+					if (patch.accessory !== undefined) next.accessory = patch.accessory;
+					if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
+					if (patch.model !== undefined) next.model = patch.model;
+					if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
+					_proposalInlineRoles[name] = next;
+					renderApp();
+				},
+				onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
+				onRoleToggleToolGroup: (group) => {
+					if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
+					else _proposalRoleCollapsedGroups.add(group);
+					renderApp();
+				},
+				roleEditTab: _proposalRoleEditTab,
+				roleCollapsedGroups: _proposalRoleCollapsedGroups,
+				roleList: _proposalRolesCache ?? [],
+				roleListLoading: _proposalRolesLoading,
+				availableTools: _availableTools,
+				groupPolicies: _proposalGroupPoliciesCache ?? {},
 			})}
 		</div>
 	`;
