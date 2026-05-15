@@ -32,6 +32,7 @@ import {
 	assembleSystemPrompt,
 	ensureCanonicalLspRule,
 	stripCanonicalLspRule,
+	dedupeCanonicalLspRule,
 	getPromptSections,
 	LSP_CANONICAL_TOOL_SELECTION_HEADER,
 	LSP_CANONICAL_TOOL_SELECTION_RULE,
@@ -524,6 +525,199 @@ describe("stripCanonicalLspRule()", () => {
 
 	it("handles empty/undefined input safely", () => {
 		assert.strictEqual(stripCanonicalLspRule(""), "");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 4d. Global de-duplication across ALL late fragments
+//     (workflowContext + AGENTS.md + toolDocs + taskSpec)
+// ---------------------------------------------------------------------------
+
+describe("dedupeCanonicalLspRule() helper", () => {
+	it("is a no-op when zero or one canonical header is present", () => {
+		assert.strictEqual(dedupeCanonicalLspRule(""), "");
+		assert.strictEqual(dedupeCanonicalLspRule("# Hi\n\nno lsp\n"), "# Hi\n\nno lsp\n");
+		const single = `# Top\n\n${CANONICAL_HEADER}\n\nbody\n`;
+		assert.strictEqual(dedupeCanonicalLspRule(single), single);
+	});
+
+	it("keeps the first canonical section and strips all later duplicates", () => {
+		const input =
+			`# Base\n\n${CANONICAL_HEADER}\n\nfirst body keep\n\n` +
+			`## Other\nother body\n\n` +
+			`${CANONICAL_HEADER}\n\nduplicate body drop\n\n` +
+			`## After\nafter body keep\n`;
+		const out = dedupeCanonicalLspRule(input);
+		assert.strictEqual(count(out, CANONICAL_HEADER), 1);
+		assert.ok(out.includes("first body keep"));
+		assert.ok(out.includes("## Other"));
+		assert.ok(out.includes("other body"));
+		assert.ok(out.includes("## After"));
+		assert.ok(out.includes("after body keep"));
+		assert.ok(!out.includes("duplicate body drop"));
+	});
+
+	it("handles three+ duplicates", () => {
+		const input =
+			`# A\n${CANONICAL_HEADER}\nbody1\n\n` +
+			`## X\nx1\n${CANONICAL_HEADER}\nbody2\n\n` +
+			`## Y\ny1\n${CANONICAL_HEADER}\nbody3\n`;
+		const out = dedupeCanonicalLspRule(input);
+		assert.strictEqual(count(out, CANONICAL_HEADER), 1);
+		assert.ok(out.includes("body1"));
+		assert.ok(!out.includes("body2"));
+		assert.ok(!out.includes("body3"));
+		assert.ok(out.includes("## X"));
+		assert.ok(out.includes("## Y"));
+	});
+});
+
+describe("assembleSystemPrompt — global de-duplication across late fragments", () => {
+	it("workflowContext containing the canonical header does not duplicate", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-workflow-base",
+			"# Acme\n\nBe terse.\n",
+		);
+		const promptPath = assembleSystemPrompt("dedupe-workflow", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "WF Dedupe",
+			goalState: "active",
+			goalSpec: "Implement the thing.\n",
+			workflowContext:
+				"# Upstream Gates\n\n## Gate: Design Document (passed)\n\n" +
+				"Design content quoted from goal spec.\n\n" +
+				CANONICAL_HEADER + "\n\nUpstream-supplied LSP copy.\n",
+			allowedTools: ["read", "bash", "grep"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.strictEqual(
+			count(content, CANONICAL_HEADER),
+			1,
+			"final prompt must contain exactly one canonical section when workflowContext includes it",
+		);
+		assert.ok(content.includes("Design content quoted from goal spec."), "non-LSP workflow content must survive");
+		assert.ok(content.includes("## Gate: Design Document (passed)"), "workflow gate heading must survive");
+	});
+
+	it("taskSpec containing the canonical header does not duplicate", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-task-base",
+			"# Acme\n\nBe terse.\n",
+		);
+		const promptPath = assembleSystemPrompt("dedupe-task", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			taskTitle: "Fix dedupe bug",
+			taskType: "bug-fix",
+			taskSpec:
+				"Steps:\n1. Reproduce.\n2. Fix.\n\n" +
+				CANONICAL_HEADER + "\n\nTask-spec copy of LSP rule.\n",
+			allowedTools: ["read", "bash", "grep"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+		assert.ok(content.includes("1. Reproduce."), "task-spec body must survive");
+		assert.ok(content.includes("2. Fix."), "task-spec body must survive");
+	});
+
+	it("toolDocs containing the canonical header does not duplicate", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-tools-base",
+			"# Acme\n\nBe terse.\n",
+		);
+		const promptPath = assembleSystemPrompt("dedupe-tools", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			toolDocs:
+				"# Tools\n\n- read(path) — read a file.\n\n" +
+				CANONICAL_HEADER + "\n\nTool-doc inlined LSP rule.\n",
+			allowedTools: ["read", "bash", "grep"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.strictEqual(count(content, CANONICAL_HEADER), 1);
+		assert.ok(content.includes("- read(path) — read a file."), "tool-doc body must survive");
+	});
+
+	it("workflowContext + taskSpec + role + goal all containing the header still yield exactly one section", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-many-base",
+			"# Acme\n\nBe terse.\n",
+		);
+		const rolePrompt =
+			"You are a **Coder** agent.\n\n" +
+			"## Your Role\nImplement.\n\n" +
+			CANONICAL_HEADER + "\n\nRole copy.\n";
+		const goalSpec =
+			"Do the thing.\n\n" + CANONICAL_HEADER + "\n\nGoal copy.\n";
+		const workflowContext =
+			"# Upstream Gates\n\n## Gate: Design (passed)\n\n" +
+			"Designed.\n\n" + CANONICAL_HEADER + "\n\nWorkflow copy.\n";
+		const taskSpec =
+			"Step 1.\n\n" + CANONICAL_HEADER + "\n\nTask copy.\n";
+		const toolDocs =
+			"# Tools\n\n- read.\n\n" + CANONICAL_HEADER + "\n\nTool copy.\n";
+
+		const promptPath = assembleSystemPrompt("dedupe-many", {
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Many",
+			goalState: "active",
+			goalSpec,
+			roleName: "coder",
+			rolePrompt,
+			taskTitle: "Multi",
+			taskType: "bug-fix",
+			taskSpec,
+			toolDocs,
+			workflowContext,
+			allowedTools: ["read", "bash", "grep"],
+		});
+		assert.ok(promptPath);
+		const content = fs.readFileSync(promptPath!, "utf-8");
+		assert.strictEqual(
+			count(content, CANONICAL_HEADER),
+			1,
+			"final prompt must have exactly one canonical section across every late fragment",
+		);
+		// Non-LSP content from every fragment must survive.
+		assert.ok(content.includes("Do the thing."));
+		assert.ok(content.includes("You are a **Coder** agent."));
+		assert.ok(content.includes("Implement."));
+		assert.ok(content.includes("Step 1."));
+		assert.ok(content.includes("- read."));
+		assert.ok(content.includes("Designed."));
+		assert.ok(content.includes("## Gate: Design (passed)"));
+	});
+
+	it("getPromptSections() joined output is single-canonical when workflowContext + role contain the header", () => {
+		const basePath = writeCustomPrompt(
+			"dedupe-sections-many",
+			"# Acme\n\nBe terse.\n",
+		);
+		const sections = getPromptSections({
+			baseSystemPromptPath: basePath,
+			cwd: tmpDir,
+			goalTitle: "Many",
+			roleName: "coder",
+			rolePrompt:
+				"You are a **Coder** agent.\n\n" + CANONICAL_HEADER + "\n\nRole copy.\n",
+			taskTitle: "T",
+			taskType: "bug-fix",
+			taskSpec: "Steps.\n\n" + CANONICAL_HEADER + "\n\nTask copy.\n",
+			toolDocs: "# Tools\n\n- read.\n\n" + CANONICAL_HEADER + "\n\nTool copy.\n",
+			workflowContext:
+				"# Upstream Gates\n\n" + CANONICAL_HEADER + "\n\nWorkflow copy.\n",
+		});
+		const joined = sections.map(s => s.content).join("\n\n");
+		assert.strictEqual(
+			count(joined, CANONICAL_HEADER),
+			1,
+			"getPromptSections() joined output must contain exactly one canonical header across every fragment",
+		);
 	});
 });
 

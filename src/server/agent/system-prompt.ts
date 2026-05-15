@@ -322,6 +322,47 @@ export function stripCanonicalLspRule(content: string): string {
 }
 
 /**
+ * Global final-prompt de-duplication: keep the **first** canonical
+ * `## Tool selection — LSP before text search` section in `text` and strip
+ * every subsequent occurrence (with its body) from the remainder.
+ *
+ * This is the last-line-of-defense applied to the fully assembled prompt so
+ * that no late-stage fragment — workflow context, AGENTS.md, tool docs, task
+ * spec, role prompts, goal specs, or anything else concatenated into the
+ * final prompt file — can introduce a duplicate canonical LSP section.
+ *
+ * Non-LSP content (including content between the first occurrence and any
+ * later occurrence) is preserved exactly. If `text` contains zero or one
+ * occurrence of the header, it is returned unchanged.
+ */
+export function dedupeCanonicalLspRule(text: string): string {
+	if (!text) return text;
+	const header = LSP_CANONICAL_TOOL_SELECTION_HEADER;
+	const first = text.indexOf(header);
+	if (first < 0) return text;
+	const second = text.indexOf(header, first + header.length);
+	if (second < 0) return text;
+
+	// Find end-of-section for the first occurrence: scan forward line-by-line
+	// from the line *after* the header to the next H1/H2 heading (or EOF).
+	const lines = text.split("\n");
+	// Locate the line index of the first occurrence.
+	let firstLine = -1;
+	for (let k = 0; k < lines.length; k++) {
+		if (lines[k].trim() === header) { firstLine = k; break; }
+	}
+	if (firstLine < 0) return text;
+	let endLine = firstLine + 1;
+	while (endLine < lines.length && !/^#{1,2} /.test(lines[endLine])) endLine++;
+
+	const kept = lines.slice(0, endLine).join("\n");
+	const rest = lines.slice(endLine).join("\n");
+	const restStripped = stripCanonicalLspRule(rest);
+	if (!restStripped) return kept.replace(/\n+$/, "\n");
+	return (kept + "\n" + restStripped).replace(/\n{3,}/g, "\n\n");
+}
+
+/**
  * Return the hard LSP-over-grep tool-selection rule for a given role, or
  * `undefined` when the role is not a code-lookup role or the supplied
  * `rolePrompt` already contains the header (duplication guard).
@@ -475,10 +516,14 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 
 	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
 	// agents cwd is a container-internal path the host can't read.
+	// Strip the canonical LSP section so an AGENTS.md that happens to include
+	// it cannot produce a duplicate in the final prompt — the base prompt owns
+	// that section.
 	const filesRoot = parts.projectRoot || parts.cwd;
-	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore);
-	if (agentsMd.trim()) {
-		sections.push("# Project AGENTS.md\n\n" + agentsMd.trim());
+	const agentsMdRaw = readAllAgentFiles(filesRoot, parts.projectConfigStore);
+	const agentsMd = stripCanonicalLspRule(agentsMdRaw).trim();
+	if (agentsMd) {
+		sections.push("# Project AGENTS.md\n\n" + agentsMd);
 	}
 
 	// 2.5. Working directory instructions
@@ -512,19 +557,22 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		}
 	}
 
-	// 4. Tool documentation
+	// 4. Tool documentation — strip canonical LSP section to prevent duplicates
+	// from late tool-doc fragments that include LSP-over-grep guidance.
 	if (parts.toolDocs?.trim()) {
-		sections.push(parts.toolDocs.trim());
+		const toolDocs = stripCanonicalLspRule(parts.toolDocs).trim();
+		if (toolDocs) sections.push(toolDocs);
 	}
 
-	// 5. Task context
+	// 5. Task context — strip canonical LSP section from task spec.
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = ["# Current Task"];
 		if (parts.taskType) taskLines.push(`\n**Type**: ${parts.taskType}`);
 		if (parts.taskTitle) taskLines.push(`**Title**: ${parts.taskTitle}`);
 
-		if (parts.taskSpec?.trim()) {
-			taskLines.push(`\n## Task Specification\n${parts.taskSpec.trim()}`);
+		const taskSpec = parts.taskSpec ? stripCanonicalLspRule(parts.taskSpec).trim() : "";
+		if (taskSpec) {
+			taskLines.push(`\n## Task Specification\n${taskSpec}`);
 		}
 
 		if (parts.taskDependsOn && parts.taskDependsOn.length > 0) {
@@ -550,14 +598,21 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		if (skillsSection) sections.push(skillsSection);
 	}
 
-	// 6. Workflow dependency context (accepted upstream gate content)
+	// 6. Workflow dependency context (accepted upstream gate content). Strip
+	// canonical LSP section — upstream gate content (design docs, task specs,
+	// goal specs from other agents) often quotes the canonical header verbatim
+	// and would otherwise produce a duplicate section.
 	if (parts.workflowContext?.trim()) {
-		sections.push(parts.workflowContext.trim());
+		const wf = stripCanonicalLspRule(parts.workflowContext).trim();
+		if (wf) sections.push(wf);
 	}
 
 	if (sections.length === 0) return undefined;
 
-	const combined = sections.join("\n\n---\n\n") + "\n";
+	// Final-output safety dedupe: even with proactive per-fragment stripping
+	// above, run a global pass over the joined prompt so any unforeseen path
+	// that re-introduces the canonical header cannot produce duplicates.
+	const combined = dedupeCanonicalLspRule(sections.join("\n\n---\n\n")) + "\n";
 	bumpCount("assembleSystemPrompt.bytes", combined.length);
 
 	const promptPath = path.join(getPromptsDir(), `${sessionId}.md`);
@@ -592,7 +647,9 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		if (injected) sections.push({ label: "System Prompt", source: "<protected-core>", content: injected, tokens: estimateTokens(injected) });
 	}
 
-	// 2. Agent files (individual sections per file for provenance)
+	// 2. Agent files (individual sections per file for provenance). Strip
+	// canonical LSP section from AGENTS.md content to keep base section as
+	// the single source.
 	const viewerRoot = parts.projectRoot || parts.cwd;
 	if (parts.projectConfigStore) {
 		const dirs = getAllConfigDirectories(viewerRoot, parts.projectConfigStore);
@@ -601,8 +658,9 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 			try {
 				const content = fs.readFileSync(entry.path, "utf-8");
 				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
-				if (resolved.trim()) {
-					sections.push({ label: "Project AGENTS.md", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
+				const cleaned = stripCanonicalLspRule(resolved).trim();
+				if (cleaned) {
+					sections.push({ label: "Project AGENTS.md", source: entry.path, content: cleaned, tokens: estimateTokens(cleaned) });
 				}
 			} catch {
 				// skip unreadable files
@@ -613,8 +671,9 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		const agentsPath = path.join(viewerRoot, "AGENTS.md");
 		if (fs.existsSync(agentsPath)) {
 			const content = readAgentsMd(viewerRoot);
-			if (content.trim()) {
-				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
+			const cleaned = stripCanonicalLspRule(content).trim();
+			if (cleaned) {
+				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: cleaned, tokens: estimateTokens(cleaned) });
 			}
 		}
 	}
@@ -653,17 +712,21 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 7. Tool docs
+	// 7. Tool docs — strip canonical LSP section to keep base section as sole source.
 	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
+		const td = stripCanonicalLspRule(parts.toolDocs).trim();
+		if (td) {
+			sections.push({ label: "Tools", source: "Tool documentation", content: td, tokens: estimateTokens(td) });
+		}
 	}
 
-	// 8. Task context
+	// 8. Task context — strip canonical LSP section from task spec.
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = [];
 		if (parts.taskType) taskLines.push(`**Type**: ${parts.taskType}`);
 		if (parts.taskTitle) taskLines.push(`**Title**: ${parts.taskTitle}`);
-		if (parts.taskSpec?.trim()) taskLines.push(`\n## Task Specification\n${parts.taskSpec.trim()}`);
+		const taskSpec = parts.taskSpec ? stripCanonicalLspRule(parts.taskSpec).trim() : "";
+		if (taskSpec) taskLines.push(`\n## Task Specification\n${taskSpec}`);
 		if (parts.taskDependsOn?.length) {
 			taskLines.push("\n## Dependencies");
 			for (const dep of parts.taskDependsOn) taskLines.push(`- ${dep}`);
@@ -680,9 +743,28 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 9. Workflow context
+	// 9. Workflow context — strip canonical LSP section to prevent duplicates
+	// from upstream gate content (design docs, prior task specs, etc.).
 	if (parts.workflowContext?.trim()) {
-		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
+		const wf = stripCanonicalLspRule(parts.workflowContext).trim();
+		if (wf) {
+			sections.push({ label: "Workflow Context", source: "Upstream gates", content: wf, tokens: estimateTokens(wf) });
+		}
+	}
+
+	// Final safety dedupe across sections: if any section after the first
+	// canonical-bearing section still contains the header, strip it from those
+	// later sections so joined output has exactly one canonical occurrence.
+	let seenCanonical = false;
+	for (let i = 0; i < sections.length; i++) {
+		const s = sections[i];
+		if (!s.content.includes(LSP_CANONICAL_TOOL_SELECTION_HEADER)) continue;
+		if (!seenCanonical) {
+			seenCanonical = true;
+			continue;
+		}
+		const cleaned = stripCanonicalLspRule(s.content).trim();
+		sections[i] = { ...s, content: cleaned, tokens: estimateTokens(cleaned) };
 	}
 
 	return sections;
