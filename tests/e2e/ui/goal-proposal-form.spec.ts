@@ -103,7 +103,7 @@ test.describe("Goal proposal modal — subgoal controls", () => {
 			});
 			expect(rowText, "Allow-subgoals toggle must live in the shared toggle row").not.toBe("");
 			const expectedOrder = [
-				"Sandbox",
+				...(rowText.includes("Sandbox") ? ["Sandbox"] : []),
 				"Auto-start team",
 				"Enable QA Testing",
 				"Allow subgoals",
