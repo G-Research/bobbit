@@ -23,6 +23,12 @@ export interface GrepLikeContentItem {
 
 export interface GrepLikeResult {
 	content?: GrepLikeContentItem[];
+	/**
+	 * MCP-style error flag. When true the tool failed and `content` typically
+	 * carries the error message rather than grep matches — we must NOT treat
+	 * that text as grep output worth annotating with an LSP hint.
+	 */
+	isError?: boolean;
 	[key: string]: unknown;
 }
 
@@ -114,6 +120,29 @@ function buildHint(identifier: string, isCallSite: boolean): string {
 }
 
 /**
+ * Wrap a grep-shaped tool definition so that symbol-shaped queries against
+ * TS/JS source get a one-line `[lsp-hint]` line prepended to the result.
+ *
+ * Lives in this module — not `extension.ts` — so unit tests can exercise it
+ * without dragging in the pi-coding-agent runtime imports.
+ */
+export function wrapGrepWithLspHint<T extends { execute: (...args: any[]) => any }>(def: T): T {
+	const originalExecute = def.execute.bind(def);
+	const wrappedExecute = async (...args: unknown[]): Promise<unknown> => {
+		const result: any = await originalExecute(...(args as Parameters<typeof originalExecute>));
+		const params = args[1] as GrepLikeParams | undefined;
+		const hint = lspHintFor(params, result);
+		if (!hint) return result;
+		const existingContent = Array.isArray(result?.content) ? result.content : [];
+		return {
+			...result,
+			content: [{ type: "text", text: hint }, ...existingContent],
+		};
+	};
+	return { ...def, execute: wrappedExecute as unknown as T["execute"] };
+}
+
+/**
  * Compute the LSP hint for a grep call, or null when no hint applies.
  */
 export function lspHintFor(params: GrepLikeParams | undefined | null, result: GrepLikeResult | undefined | null): string | null {
@@ -122,6 +151,10 @@ export function lspHintFor(params: GrepLikeParams | undefined | null, result: Gr
 	const parsed = parseSymbolPattern(params.pattern);
 	if (!parsed) return null;
 	if (!globIsTsJs(params.glob)) return null;
+	// Suppress hints when the tool surfaced an error result. The `content`
+	// array on an error result is the error message, not grep matches —
+	// prepending an `[lsp-hint]` line would be misleading noise.
+	if (result && (result as GrepLikeResult).isError === true) return null;
 	if (!resultHasOutput(result)) return null;
 	return buildHint(parsed.identifier, parsed.isCallSite);
 }
