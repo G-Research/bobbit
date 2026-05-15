@@ -25,6 +25,8 @@
  * constant; do not move/inline it.
  */
 export const EARLIEST_SIDECAR_TIMESTAMP_MS = Date.UTC(2026, 4, 11, 0, 0, 0);
+/** Back-compat alias for tests/consumers that name the fallback by purpose. */
+export const LEGACY_THRESHOLD_FALLBACK_MS = EARLIEST_SIDECAR_TIMESTAMP_MS;
 
 export interface LegacyTreeCostBreakdownEntry {
 	costUsd: number;

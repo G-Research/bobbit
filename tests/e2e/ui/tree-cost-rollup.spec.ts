@@ -236,22 +236,11 @@ test.describe("Phase 5b — tree cost rollup", () => {
 	// bucket. The bottom Unattributable (legacy) row itself must keep
 	// rendering unchanged so the existing data-testid pin still holds.
 	//
-	// PRODUCTION DEPENDENCIES (NOT YET MERGED — test is `test.fixme`):
-	//   1. `src/server/agent/cost-tracker.ts`
-	//      `getUnattributableLegacyCost()` (or a sibling helper) must
-	//      surface a `firstSeenAt` timestamp so the UI threshold isn't a
-	//      hardcoded date.
-	//   2. `src/server/server.ts` GET /api/goals/:id/tree-cost must include
-	//      that `firstSeenAt` on the `unattributableLegacy` payload.
-	//   3. `src/app/goal-dashboard.ts::renderTreeCostRow` must apply the
-	//      `isLegacyUnattributableTreeCostRow(...)` helper from
-	//      `src/app/tree-cost-legacy.ts` to per-child breakdown rows and
-	//      style them muted-italic + append `(legacy)` to the title cell
-	//      + set a `title` tooltip.
-	//
-	// Once those three land, drop `.fixme` and this test should pass as-is.
+	// Production dependencies are implemented in this goal: server publishes
+	// `unattributableLegacy.firstSeenAt`, and the dashboard applies
+	// `isLegacyUnattributableTreeCostRow(...)` to per-child breakdown rows.
 	// ───────────────────────────────────────────────────────────────────────
-	test.fixme("legacy-zero child row renders muted italic with (legacy) marker; bottom bucket unchanged", async ({ page, gateway }) => {
+	test("legacy-zero child row renders muted italic with (legacy) marker; bottom bucket unchanged", async ({ page, gateway }) => {
 		const projectId = await defaultProjectId();
 		if (!projectId) throw new Error("defaultProjectId() returned undefined");
 
