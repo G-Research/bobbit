@@ -1075,8 +1075,10 @@ parent-child merge), `tests/e2e/api-goals-spawn-child-route.spec.ts`
 
 ## Cost rollup
 
-Parent-goal dashboards walk the descendant tree (via the `rootGoalId`
-chain, BFS, depth capped at 32) and sum each goal's accumulated cost.
+Parent-goal dashboards walk the full descendant tree and sum each
+goal's accumulated cost. The implementation uses `walkGoalSubtree`
+from `src/server/agent/goal-subtree.ts` with `{ includeArchived: true }`
+so archived descendants are always counted (cost survives archival).
 
 ```
 GET /api/goals/:id/tree-cost
@@ -1092,9 +1094,8 @@ GET /api/goals/:id/tree-cost
 The handler resolves the rollup root as `goal.rootGoalId ?? goal.id`, so
 a request against a child goal still returns the WHOLE-TREE rollup. The
 breakdown is sorted `depth ASC, createdAt ASC` (root first, deepest
-descendants last). Archived descendants are still counted — cost
-survives archival. Goals belonging to a different tree are excluded by
-the filter `g.id === rootGoalId || g.rootGoalId === rootGoalId`.
+descendants last). The walk uses BFS over `parentGoalId` with a depth
+cap of 32 (cycle-safe). Gated by `requireSubgoalsEnabled()`.
 
 The cache lives on the existing `CostTracker` (per-tracker WeakMap keyed
 by `rootGoalId`). `costTracker.getGeneration()` ticks monotonically on

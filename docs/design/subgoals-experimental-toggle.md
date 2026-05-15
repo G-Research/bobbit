@@ -30,7 +30,7 @@ follow the same convention.
 
 The two existing toggles are **module-level vars** in
 `src/app/settings-page.ts` (alongside the existing module-level toggles) loaded lazily by
-`loadGeneralSettings()` (line 1818). They are NOT in `state.ts`. We mirror
+`loadGeneralSettings()`. They are NOT in `state.ts`. We mirror
 that pattern for symmetry:
 
 - Add `let settingsSubgoalsEnabled = false;` next to the existing two
@@ -97,7 +97,7 @@ preferences store passed into `computeToolPolicies` — see §7.
 File: `src/app/settings-page.ts`.
 
 Insertion point: between the **"Play sound when an agent finishes"**
-block (lines 1899–1913) and the **"System prompt"** block (lines
+block and the **"System prompt"** block (near
 1914–1928) inside `renderGeneralTab()`.
 
 ```ts
@@ -147,15 +147,15 @@ toggling ON).
 | # | Site | File | Edit |
 |---|------|------|------|
 | 1 | New-goal workflow picker | `renderGoalForm` in `src/app/render.ts` (the `_cachedWorkflows.map(...)`) | Filter `_cachedWorkflows` through `w => w.id !== "parent" \|\| isSubgoalsEnabled()` before the `.map`. Single-line change. |
-| 2 | Plan tab visibility | `src/app/goal-dashboard-tab-visibility.ts::shouldShowPlanTab` (line 29) | Add `if (!isSubgoalsEnabled()) return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false;` to keep formal `goal-plan` gates visible (legacy workflows might still have them) but suppress the "living plan from children" branch. Even simpler form: `if (!isSubgoalsEnabled()) { return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false; }`. **Open question:** do any non-`parent` workflows ship a `goal-plan` gate? Quick grep shows `goal-plan` only in the parent workflow (`seed-default-workflows.ts`). If confirmed, the gate becomes the simpler `if (!isSubgoalsEnabled()) return false;`. |
-| 3 | Children tab visibility | same file, `shouldShowChildrenTab` (line 53) | `if (!isSubgoalsEnabled()) return false;` at top. |
-| 4 | Sidebar nesting | `src/app/sidebar-nesting.ts::buildNestedGoalForest` (line 190) | At top of function, when `!isSubgoalsEnabled()`, return a flat list — every goal becomes its own root with no `children`. Simplest implementation: synthesise a `parentGoalId`-free copy of the input or wrap and bypass the indexing pass. |
+| 2 | Plan tab visibility | `src/app/goal-dashboard-tab-visibility.ts::shouldShowPlanTab` (at the top of the function) | Add `if (!isSubgoalsEnabled()) return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false;` to keep formal `goal-plan` gates visible (legacy workflows might still have them) but suppress the "living plan from children" branch. Even simpler form: `if (!isSubgoalsEnabled()) { return goal.workflow?.gates.some(g => g.id === "goal-plan") ?? false; }`. **Open question:** do any non-`parent` workflows ship a `goal-plan` gate? Quick grep shows `goal-plan` only in the parent workflow (`seed-default-workflows.ts`). If confirmed, the gate becomes the simpler `if (!isSubgoalsEnabled()) return false;`. |
+| 3 | Children tab visibility | same file, `shouldShowChildrenTab` | `if (!isSubgoalsEnabled()) return false;` at top. |
+| 4 | Sidebar nesting | `src/app/sidebar-nesting.ts::buildNestedGoalForest`  | At top of function, when `!isSubgoalsEnabled()`, return a flat list — every goal becomes its own root with no `children`. Simplest implementation: synthesise a `parentGoalId`-free copy of the input or wrap and bypass the indexing pass. |
 | 5 | Mutation-pending message renderer | `src/app/custom-messages.ts:91` (`mutationPendingRenderer`) | The card is only rendered when a `mutation_pending` event arrives. With the server-side gate (§6) the event can't fire when the flag is OFF, so this gate is a *belt-and-braces*. Simplest: in the renderer, return `nothing` if `!isSubgoalsEnabled()`. |
 | 6 | Tree-cost row on dashboard | `renderTreeCostRow` in `src/app/goal-dashboard.ts` | Already self-suppresses when `!hasChildren && !isChild`. With flag OFF no goals are children → naturally returns `nothing`. **No edit required.** Documented for completeness. |
 
 ### Cascade dialogs (no edit required)
 
-The spec claim is correct. `showArchiveGoalDialog` (line 1721) and
+The spec claim is correct. `showArchiveGoalDialog` and
 `showPauseGoalDialog` are only invoked from `deleteGoal()` /
 `handlePauseGoal()` *after* a server pre-flight reports descendants
 (`HAS_DESCENDANTS` 409). With subgoals OFF no goal can have descendants,
@@ -217,7 +217,7 @@ prefix anywhere).
 `computeToolPolicies` and `computeEffectiveAllowedTools` live in
 `src/server/agent/tool-activation.ts`. Both consult
 `resolveGrantPolicy(toolName, toolGroup, role, toolManager,
-groupPolicyStore)` (line 132). The cleanest gate is one extra layer
+groupPolicyStore)`. The cleanest gate is one extra layer
 inside `resolveGrantPolicy`:
 
 ```ts
@@ -246,7 +246,7 @@ policies) but no signature change. Reject — Option A is simpler.
 ### Why this is sufficient
 
 `computeEffectiveAllowedTools` filters out any tool whose resolved
-policy is `never` (line 302: `if (!isNeverPolicy(policy)) result.push(tool.name)`).
+policy is `never` ( `if (!isNeverPolicy(policy)) result.push(tool.name)`).
 So when the flag is OFF, the agent never sees the nine Children tools
 in its tool registry — same as if the project's
 `tool-group-policies.yaml` declared `Children: never`. Combined with

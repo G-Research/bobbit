@@ -1,6 +1,6 @@
 # Reduce UI bundle size — design doc
 
-Status: shipped (HEAD `1741cbf6`)  •  Goal branch: `goal-goal-reduce-ui--0ce41cc6`  •  Author: architect-0938851a
+Status: shipped (HEAD `1741cbf6`) • Goal branch: `goal-goal-reduce-ui--0ce41cc6` • Author: architect-0938851a
 
 ## Outcome
 
@@ -62,13 +62,13 @@ The two categories that must stay clean:
 Captured via `npm run build:ui` after `npm ci`. Top emitted chunks:
 
 ```
-dist/ui/assets/pdf.worker.min-Cpi8b8z3.mjs  1,050.96 kB                       (worker, lazy)
-dist/ui/assets/index-Bz4tEU50.css             344.17 kB │ gzip:  50.28 kB
-dist/ui/assets/anthropic-E_eUeXte.js           94.52 kB │ gzip:  24.30 kB
-dist/ui/assets/client-Sq9UPDIz.js             104.33 kB │ gzip:  28.11 kB
-dist/ui/assets/google-shared-Ceinhjbm.js      269.60 kB │ gzip:  54.86 kB
-dist/ui/assets/mistral-xH6e0y0y.js            836.22 kB │ gzip: 113.52 kB     (!)
-dist/ui/assets/index-DB1RfC0H.js            3,586.09 kB │ gzip: 999.48 kB     (!)
+dist/ui/assets/pdf.worker.min-Cpi8b8z3.mjs 1,050.96 kB (worker, lazy)
+dist/ui/assets/index-Bz4tEU50.css 344.17 kB │ gzip: 50.28 kB
+dist/ui/assets/anthropic-E_eUeXte.js 94.52 kB │ gzip: 24.30 kB
+dist/ui/assets/client-Sq9UPDIz.js 104.33 kB │ gzip: 28.11 kB
+dist/ui/assets/google-shared-Ceinhjbm.js 269.60 kB │ gzip: 54.86 kB
+dist/ui/assets/mistral-xH6e0y0y.js 836.22 kB │ gzip: 113.52 kB (!)
+dist/ui/assets/index-DB1RfC0H.js 3,586.09 kB │ gzip: 999.48 kB (!)
 + small per-provider chunks (google, openai-*, github-copilot-headers, …)
 + KaTeX font assets (~50 woff/woff2/ttf, ~750 kB lazy)
 (!) Some chunks are larger than 500 kB after minification.
@@ -81,7 +81,7 @@ Confirmed: **no static UI imports of `pi-ai/dist/providers/*`** exist in `src/`.
 The current main-chunk bloat comes from three sources, in order:
 
 1. **Route modules eagerly imported in `render.ts`** — settings-page (3,545 LOC), goal-dashboard (2,195), workflow-page (1,159), tool-manager-page (872), search-page (726), role-manager-page (766), staff-page (681), skills-page (333). Total ~10,277 LOC of TypeScript that must run to render any route.
-2. **MarkdownBlock + KaTeX** statically pulled at top of `render.ts:2`. Once `MarkdownBlock.js` is in the graph, KaTeX, marked, highlight.js parsers etc. ride along and are forced into the main chunk.
+2. **MarkdownBlock + KaTeX** statically pulled at top of `render.ts`. Once `MarkdownBlock.js` is in the graph, KaTeX, marked, highlight.js parsers etc. ride along and are forced into the main chunk.
 3. **Tool renderer registry** — `src/ui/tools/index.ts` synchronously imports 30+ renderers and wires them at module load. Several pull in heavy artifacts (`pdfjs-dist`, `docx-preview`, `MarkdownBlock`, `Diff`, `CodeBlock`).
 
 ---
@@ -110,9 +110,9 @@ Edit `src/app/render.ts` to remove eager imports for route page modules and repl
 | 71 | `import { renderSettingsPage } from "./settings-page.js";` | dynamic on `settings` |
 | 72 | `import { renderSearchPage, initSearchPage, resetSearchPage } from "./search-page.js";` | dynamic on `search`; `resetSearchPage` becomes a no-op when module not yet loaded |
 
-`SystemPromptDialog` at `render.ts:2258` is **already** dynamic — leave as is.
+`SystemPromptDialog` at `render.ts` is **already** dynamic — leave as is.
 
-`components-editor.ts` is only imported from `settings-page.ts:33` so it falls out of the main chunk automatically when settings is split.
+`components-editor.ts` is only imported from `settings-page.ts` so it falls out of the main chunk automatically when settings is split.
 
 **Loader helper** — add to `src/app/render.ts`:
 
@@ -120,9 +120,9 @@ Edit `src/app/render.ts` to remove eager imports for route page modules and repl
 // Cache imported page-render functions; re-render once a chunk lands.
 const _pageCache: Record<string, any> = {};
 function lazyPage(key: string, importer: () => Promise<any>, exportName: string) {
-  if (_pageCache[key]) return _pageCache[key]();
-  importer().then((m) => { _pageCache[key] = m[exportName]; renderApp(); });
-  return loadingPlaceholder();
+ if (_pageCache[key]) return _pageCache[key]();
+ importer().then((m) => { _pageCache[key] = m[exportName]; renderApp(); });
+ return loadingPlaceholder();
 }
 ```
 
@@ -155,7 +155,7 @@ src/ui/tools/renderers/GateInspectRenderer.ts:10
 src/ui/tools/artifacts/MarkdownArtifact.ts:6
 src/ui/tools/renderers/GateVerificationLive.ts:11
 src/ui/tools/renderers/VerificationResultRenderer.ts:5
-src/ui/components/VerificationOutputModal.ts:9
+src/ui/components/VerificationOutputModal.ts
 ```
 
 `<markdown-block>` is a custom element registered as a side effect of importing the file. The element is `<markdown-block>` (used inside lit templates). Because it's registered globally once, **a single eager import anywhere in the graph forces the entire KaTeX/marked/highlight.js graph into the main chunk**.
@@ -165,9 +165,9 @@ Strategy: introduce one helper `src/ui/lazy/markdown-block.ts`:
 ```ts
 let loaded = false;
 export function ensureMarkdownBlock(): void {
-  if (loaded) return;
-  loaded = true;
-  import("@mariozechner/mini-lit/dist/MarkdownBlock.js");
+ if (loaded) return;
+ loaded = true;
+ import("@mariozechner/mini-lit/dist/MarkdownBlock.js");
 }
 ```
 
@@ -179,10 +179,10 @@ KaTeX comes in transitively via MarkdownBlock; deferring MarkdownBlock defers Ka
 
 Already dynamic in some sites but **statically imported** at:
 
-- `src/ui/utils/attachment-utils.ts:1,3,4` — `import { parseAsync } from "docx-preview"; import * as pdfjsLib from "pdfjs-dist"`. Pulled by `extract-document.ts:8` (`loadAttachment`), which is registered eagerly in `src/ui/tools/index.ts:3`.
-- `src/ui/dialogs/AttachmentOverlay.ts:4,8`
-- `src/ui/tools/artifacts/PdfArtifact.ts:4`
-- `src/ui/tools/artifacts/DocxArtifact.ts:2`
+- `src/ui/utils/attachment-utils.ts,3,4` — `import { parseAsync } from "docx-preview"; import * as pdfjsLib from "pdfjs-dist"`. Pulled by `extract-document.ts` (`loadAttachment`), which is registered eagerly in `src/ui/tools/index.ts`.
+- `src/ui/dialogs/AttachmentOverlay.ts,8`
+- `src/ui/tools/artifacts/PdfArtifact.ts`
+- `src/ui/tools/artifacts/DocxArtifact.ts`
 
 Pdfjs.worker is already lazy-emitted (see baseline `pdf.worker.min-*.mjs`). The 100+ kB pdfjs main library however currently lands in `index-*.js` because `attachment-utils.ts` is reachable from the eager renderer registry (via `extract-document.ts`).
 
@@ -220,7 +220,7 @@ Lazy candidates (estimated savings):
 | `ScreenshotRenderer` | image-utils only — light, keep eager |
 | `EditProposalRenderer`, `ProposalRenderer` | light — keep eager (they render in proposal panel, hot path) |
 
-`extract-document.ts` and `javascript-repl.ts` self-register via top-level `registerToolRenderer()` calls at module load. To make them truly lazy, drop the side-effect imports at `src/ui/tools/index.ts:2-3` and instead register a **lazy entry** that imports the file when the tool is first encountered.
+`extract-document.ts` and `javascript-repl.ts` self-register via top-level `registerToolRenderer()` calls at module load. To make them truly lazy, drop the side-effect imports at `src/ui/tools/index.ts-3` and instead register a **lazy entry** that imports the file when the tool is first encountered.
 
 ### Expected impact
 
@@ -239,12 +239,12 @@ The 836 kB mistral chunk and 270 kB google-shared chunk are emitted as their own
 Confirmed grep — only static UI imports of `@earendil-works/pi-ai` are types and a few small functions:
 
 ```
-streamSimple             → ui/utils/proxy-utils.ts, ui/components/AgentInterface.ts
-getProviders             → ui/dialogs/SettingsDialog.ts, ui/dialogs/ProvidersModelsTab.ts
+streamSimple → ui/utils/proxy-utils.ts, ui/components/AgentInterface.ts
+getProviders → ui/dialogs/SettingsDialog.ts, ui/dialogs/ProvidersModelsTab.ts
 getModel, modelsAreEqual → ui/dialogs/ModelSelector.ts, ui/components/ProviderKeyInput.ts
-getModel                 → app/remote-agent.ts
-type Model               → ui/index.ts, ui/storage/types.ts, ui/components/MessageEditor.ts, …
-type ToolResultMessage   → many renderers
+getModel → app/remote-agent.ts
+type Model → ui/index.ts, ui/storage/types.ts, ui/components/MessageEditor.ts, …
+type ToolResultMessage → many renderers
 ```
 
 None of these reach `providers/mistral.js` or `providers/google.js` synchronously. They're pulled only via the lazy `register-builtins.js` path when a Mistral / Google model is actually selected.
@@ -267,11 +267,11 @@ Edit `vite.config.ts` (last section of `defineConfig`, line ~280):
 
 ```ts
 build: {
-  outDir: "dist/ui",
-  target: "esnext",                     // emit modern JS, smaller transpilation
-  modulePreload: { polyfill: false },   // ~2 kB; polyfill unused in evergreen browsers
-  // cssCodeSplit defaults to true — confirmed (no override in current config)
-  chunkSizeWarningLimit: 600,           // tighten so bundle regressions are flagged
+ outDir: "dist/ui",
+ target: "esnext", // emit modern JS, smaller transpilation
+ modulePreload: { polyfill: false }, // ~2 kB; polyfill unused in evergreen browsers
+ // cssCodeSplit defaults to true — confirmed (no override in current config)
+ chunkSizeWarningLimit: 600, // tighten so bundle regressions are flagged
 },
 ```
 
@@ -292,19 +292,19 @@ build: {
 
 `npx knip` output (this worktree, full):
 
-- **1 unused dependency**: `acme-client` in `package.json:45`. Server-only candidate; verify before removing. Out of UI bundle scope; keep for separate cleanup.
+- **1 unused dependency**: `acme-client` in `package.json`. Server-only candidate; verify before removing. Out of UI bundle scope; keep for separate cleanup.
 - **8 unlisted dependencies**: `playwright`, `esbuild`, `marked`, `highlight.js` (×4). All transitive — used via `@mariozechner/mini-lit`. No action: adding them to `dependencies` would make builds reproducible but doesn't change bundle size.
 - **81 unused exports** (top items, all sourced from `npx knip`):
-  - `src/app/state.ts`: `renderAppSync`, `addPendingProject`, `removePendingProject`, `GOAL_STATE_COLORS` — confirm and delete.
-  - `src/app/render-helpers.ts`: `escapeHtml`, `renderProjectBadge`, `shortenPath`, `stopTimeRefresh`, `renderSidebarSession`, `goalStateIcon`.
-  - `src/app/goal-dashboard.ts:2193`: `renderAgentPanel`.
-  - `src/app/favicon-badge.ts:109`: `hideFaviconBadge`.
-  - `src/app/dialogs.ts:1208`: `showAssignRoleDialog`.
-  - `src/app/follow-tail.ts:153`: `resetFollowTail`.
-  - `src/ui/components/CostPopover.ts:28`: `CostPopover` (entire class).
-  - `src/ui/bobbit-render.ts`: `drawShadowPixels`, `renderBodyToDataURL`, `renderAccessoryToDataURL`, `renderChatBlobCanvas`.
-  - `src/ui/components/ToolPermissionCard.ts:12`: `ToolPermissionCard` class.
-  - `src/ui/bobbit-sprite-data.ts`: `SHADOW_REST`, `SHADOW_BUSY_FRAMES`, `SHADOW_COMPACT_FRAMES`.
+ - `src/app/state.ts`: `renderAppSync`, `addPendingProject`, `removePendingProject`, `GOAL_STATE_COLORS` — confirm and delete.
+ - `src/app/render-helpers.ts`: `escapeHtml`, `renderProjectBadge`, `shortenPath`, `stopTimeRefresh`, `renderSidebarSession`, `goalStateIcon`.
+ - `src/app/goal-dashboard.ts`: `renderAgentPanel`.
+ - `src/app/favicon-badge.ts`: `hideFaviconBadge`.
+ - `src/app/dialogs.ts`: `showAssignRoleDialog`.
+ - `src/app/follow-tail.ts`: `resetFollowTail`.
+ - `src/ui/components/CostPopover.ts`: `CostPopover` (entire class).
+ - `src/ui/bobbit-render.ts`: `drawShadowPixels`, `renderBodyToDataURL`, `renderAccessoryToDataURL`, `renderChatBlobCanvas`.
+ - `src/ui/components/ToolPermissionCard.ts`: `ToolPermissionCard` class.
+ - `src/ui/bobbit-sprite-data.ts`: `SHADOW_REST`, `SHADOW_BUSY_FRAMES`, `SHADOW_COMPACT_FRAMES`.
 
 **Server-side exports** (unused) are not in the UI bundle but still worth a separate cleanup pass — out of scope for this goal.
 
@@ -324,12 +324,12 @@ Once route splitting (item 1) lands, edit `public/sw.js`:
 
 1. **Build-time chunk discovery**: extend the `bobbit-sw-version` Vite plugin in `vite.config.ts` to read the manifest from `dist/ui/.vite/manifest.json` (Vite generates this when `build.manifest: true`) inside the existing `closeBundle` hook. Resolve the chunk paths for the most-likely-next-routes (`session`, `goal-dashboard`, `chat-panel`) and inject them into `sw.js` via a second placeholder `__BOBBIT_PRECACHE_CHUNKS__` next to the existing `__BOBBIT_BUILD_ID__`.
 2. **SW change** (`public/sw.js:29`): replace the hard-coded `PRECACHE_URLS = ["/", "/index.html", "/manifest.json"]` with the injected list:
-   ```js
-   const PRECACHE_URLS = ["/", "/index.html", "/manifest.json", ...JSON.parse("__BOBBIT_PRECACHE_CHUNKS__")];
-   ```
+ ```js
+ const PRECACHE_URLS = ["/", "/index.html", "/manifest.json", ...JSON.parse("__BOBBIT_PRECACHE_CHUNKS__")];
+ ```
 3. **Add `build.manifest: true`** to `vite.config.ts` build section so the manifest is generated.
 
-Critical: `/assets/*` is currently bypassed by `sw.js` (`if (url.pathname.startsWith("/assets/")) return;` at line 102) — that bypass must remain, but the **install-time** `cache.addAll(PRECACHE_URLS)` writes to the cache once; subsequent fetches still bypass the SW (browser HTTP cache handles them via ETag), which is fine. Pre-caching is beneficial for **offline cold starts**, where the browser cache may be cold but the SW cache survives.
+Critical: `/assets/*` is currently bypassed by `sw.js` (`if (url.pathname.startsWith("/assets/")) return;`) — that bypass must remain, but the **install-time** `cache.addAll(PRECACHE_URLS)` writes to the cache once; subsequent fetches still bypass the SW (browser HTTP cache handles them via ETag), which is fine. Pre-caching is beneficial for **offline cold starts**, where the browser cache may be cold but the SW cache survives.
 
 ### Expected impact
 
@@ -348,7 +348,7 @@ Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fu
 - **Estimated savings**: -300–500 kB gzipped.
 
 ### Task B — MarkdownBlock + KaTeX deferral (item 2a)
-- **Files**: new `src/ui/lazy/markdown-block.ts`. Edit `src/app/render.ts:2`, `src/ui/tools/artifacts/artifacts.ts:2`, `src/ui/tools/renderers/GateInspectRenderer.ts:10`, `src/ui/tools/artifacts/MarkdownArtifact.ts:6`, `src/ui/tools/renderers/GateVerificationLive.ts:11`, `src/ui/tools/renderers/VerificationResultRenderer.ts:5`, `src/ui/components/VerificationOutputModal.ts:9`.
+- **Files**: new `src/ui/lazy/markdown-block.ts`. Edit `src/app/render.ts`, `src/ui/tools/artifacts/artifacts.ts`, `src/ui/tools/renderers/GateInspectRenderer.ts`, `src/ui/tools/artifacts/MarkdownArtifact.ts`, `src/ui/tools/renderers/GateVerificationLive.ts`, `src/ui/tools/renderers/VerificationResultRenderer.ts`, `src/ui/components/VerificationOutputModal.ts`.
 - **Scope**: replace static `import "MarkdownBlock.js"` with `ensureMarkdownBlock()` calls at component construction or first `render()`.
 - **Depends on**: none.
 - **Estimated savings**: -150–250 kB gzipped.
@@ -360,19 +360,19 @@ Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fu
 - **Estimated savings**: enables full effect of Task B; -50–80 kB gzipped on top.
 
 ### Task D — pdfjs / docx-preview deferral (item 2b)
-- **Files**: `src/ui/utils/attachment-utils.ts:1-8`, `src/ui/dialogs/AttachmentOverlay.ts:4,8`, `src/ui/tools/artifacts/PdfArtifact.ts:4,9`, `src/ui/tools/artifacts/DocxArtifact.ts:2`.
+- **Files**: `src/ui/utils/attachment-utils.ts-8`, `src/ui/dialogs/AttachmentOverlay.ts,8`, `src/ui/tools/artifacts/PdfArtifact.ts,9`, `src/ui/tools/artifacts/DocxArtifact.ts`.
 - **Scope**: convert top-level static imports to dynamic `await import()` inside the function that needs them. `pdfjsLib.GlobalWorkerOptions.workerSrc` set inside the dynamic init function.
 - **Depends on**: none (works without Task C; Task C amplifies the effect by also keeping the artifact renderers themselves out of main).
 - **Estimated savings**: -100–150 kB raw / ~40 kB gzipped.
 
 ### Task E — Vite build flags + dead-code sweep (items 4 + 5)
-- **Files**: `vite.config.ts` (build section), plus deletions across `src/app/state.ts`, `src/app/render-helpers.ts`, `src/app/dialogs.ts`, `src/app/follow-tail.ts`, `src/app/favicon-badge.ts`, `src/ui/components/CostPopover.ts`, `src/ui/components/ToolPermissionCard.ts`, `src/ui/bobbit-render.ts`, `src/ui/bobbit-sprite-data.ts`, `src/app/goal-dashboard.ts:2193`.
+- **Files**: `vite.config.ts` (build section), plus deletions across `src/app/state.ts`, `src/app/render-helpers.ts`, `src/app/dialogs.ts`, `src/app/follow-tail.ts`, `src/app/favicon-badge.ts`, `src/ui/components/CostPopover.ts`, `src/ui/components/ToolPermissionCard.ts`, `src/ui/bobbit-render.ts`, `src/ui/bobbit-sprite-data.ts`, `src/app/goal-dashboard.ts`.
 - **Scope**: add `target: "esnext"`, `modulePreload.polyfill: false`, `chunkSizeWarningLimit: 600`. Delete UI-side unused exports listed in scope item 5.
 - **Depends on**: none.
 - **Estimated savings**: -10–35 kB gzipped combined.
 
 ### Task F — SW route-chunk warming + bundle-size assertion test (item 6 + validation)
-- **Files**: `vite.config.ts` (extend `bobbitSwVersion()` plugin, set `build.manifest: true`), `public/sw.js` (line 29), new `tests/bundle-size.spec.ts`.
+- **Files**: `vite.config.ts` (extend `bobbitSwVersion()` plugin, set `build.manifest: true`), `public/sw.js` , new `tests/bundle-size.spec.ts`.
 - **Scope**: inject precache chunk list into SW at build time; add a Node-test that runs `npm run build:ui` (or reads `dist/ui` after a previous build) and asserts `index-*.js` gzipped size ≤ 600 kB and that no non-worker chunk exceeds 500 kB except the known PDF worker.
 - **Depends on**: Task A (route chunks must exist before SW can pre-cache them).
 
@@ -383,11 +383,11 @@ Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fu
 For every PR in the chain:
 
 ```bash
-npm run check                                                          # must pass
-npm run test:unit 2>&1 | tail -5                                       # all green
-npm run test:e2e 2>&1 | tail -5                                        # all green
-npm run build:ui 2>&1 | tail -40                                       # capture chunk sizes
-npx vite-bundle-visualizer 2>&1 | tail -20                             # treemap; attach to PR
+npm run check # must pass
+npm run test:unit 2>&1 | tail -5 # all green
+npm run test:e2e 2>&1 | tail -5 # all green
+npm run build:ui 2>&1 | tail -40 # capture chunk sizes
+npx vite-bundle-visualizer 2>&1 | tail -20 # treemap; attach to PR
 ```
 
 ### Bundle-size assertion (Task F)
@@ -402,20 +402,20 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 test("main UI chunk fits under gzip budget", () => {
-  const assets = join("dist", "ui", "assets");
-  const files = readdirSync(assets);
-  const main = files.find((f) => /^index-.*\.js$/.test(f));
-  assert.ok(main, "no index-*.js emitted — did you run `npm run build:ui`?");
-  const gzipped = gzipSync(readFileSync(join(assets, main))).byteLength;
-  assert.ok(gzipped <= 600 * 1024, `main chunk ${(gzipped / 1024).toFixed(1)} kB > 600 kB budget`);
+ const assets = join("dist", "ui", "assets");
+ const files = readdirSync(assets);
+ const main = files.find((f) => /^index-.*\.js$/.test(f));
+ assert.ok(main, "no index-*.js emitted — did you run `npm run build:ui`?");
+ const gzipped = gzipSync(readFileSync(join(assets, main))).byteLength;
+ assert.ok(gzipped <= 600 * 1024, `main chunk ${(gzipped / 1024).toFixed(1)} kB > 600 kB budget`);
 
-  const oversized = files.filter((f) => {
-    if (!f.endsWith(".js") && !f.endsWith(".mjs")) return false;
-    if (/pdf\.worker/.test(f)) return false;          // worker is unavoidable
-    const sz = gzipSync(readFileSync(join(assets, f))).byteLength;
-    return sz > 500 * 1024;
-  });
-  assert.deepEqual(oversized, [], `chunks above 500 kB gzipped: ${oversized.join(", ")}`);
+ const oversized = files.filter((f) => {
+ if (!f.endsWith(".js") && !f.endsWith(".mjs")) return false;
+ if (/pdf\.worker/.test(f)) return false; // worker is unavoidable
+ const sz = gzipSync(readFileSync(join(assets, f))).byteLength;
+ return sz > 500 * 1024;
+ });
+ assert.deepEqual(oversized, [], `chunks above 500 kB gzipped: ${oversized.join(", ")}`);
 });
 ```
 
@@ -430,20 +430,20 @@ import { test, expect } from "@playwright/test";
 import { launchGateway } from "../gateway-harness.js";
 
 test.describe("route code splitting", () => {
-  test("settings page mounts within 5 s on first navigation", async ({ page }) => {
-    const { url } = await launchGateway();
-    await page.goto(url);
-    await page.waitForSelector("[data-rendered]");
-    // First click — chunk has not been fetched yet.
-    const navStart = Date.now();
-    await page.locator("[title='Settings']").first().click();
-    await page.waitForSelector("[data-testid='settings-page']", { timeout: 5_000 });
-    expect(Date.now() - navStart).toBeLessThan(5_000);
-  });
+ test("settings page mounts within 5 s on first navigation", async ({ page }) => {
+ const { url } = await launchGateway();
+ await page.goto(url);
+ await page.waitForSelector("[data-rendered]");
+ // First click — chunk has not been fetched yet.
+ const navStart = Date.now();
+ await page.locator("[title='Settings']").first().click();
+ await page.waitForSelector("[data-testid='settings-page']", { timeout: 5_000 });
+ expect(Date.now() - navStart).toBeLessThan(5_000);
+ });
 
-  test("goal-dashboard, roles, tools, workflows, skills all mount", async ({ page }) => {
-    // ... navigate to each via hash, assert page-specific marker appears
-  });
+ test("goal-dashboard, roles, tools, workflows, skills all mount", async ({ page }) => {
+ // ... navigate to each via hash, assert page-specific marker appears
+ });
 });
 ```
 
@@ -457,7 +457,7 @@ Verbatim from goal spec:
 
 - Main `index-*.js` ≤ **600 kB gzipped** (≥40% reduction from baseline 999.48 kB).
 - No chunk > 500 kB warning **except**:
-  - `pdf.worker.min-*.mjs` (1,050.96 kB) — pdfjs worker, unavoidable.
+ - `pdf.worker.min-*.mjs` (1,050.96 kB) — pdfjs worker, unavoidable.
 - All existing tests pass; no new flakes.
 - No visible regression in route navigation latency on a fast connection.
 
