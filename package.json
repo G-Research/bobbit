@@ -42,7 +42,8 @@
     "@bobbit/binaries-darwin-x64": "0.9.0",
     "@bobbit/binaries-linux-x64": "0.9.0",
     "@bobbit/binaries-linux-arm64": "0.9.0",
-    "@bobbit/binaries-win32-x64": "0.9.0"
+    "@bobbit/binaries-win32-x64": "0.9.0",
+    "pyright": "^1.1.409"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.74.0",
@@ -79,8 +80,5 @@
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
     "vite": "^7.1.6"
-  },
-  "optionalDependencies": {
-    "pyright": "^1.1.409"
   }
 }
