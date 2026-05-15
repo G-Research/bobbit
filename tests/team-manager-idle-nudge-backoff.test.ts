@@ -202,7 +202,13 @@ async function setupTeamWithCapturedEvents(opts: { addIdleWorker?: boolean } = {
 	goals.set(goal.id, goal);
 	const sm = createMockSessionManager(goals);
 
-	const enqueuePrompt = mock.fn((_sid: string, _msg: string, _o?: any) => {});
+	// Mirror real SessionManager.enqueuePrompt: set lastPromptSource on the
+	// target session. TeamManager.subscribeTeamLeadEvents reads it on
+	// agent_start to decide whether to reset idle-nudge counters.
+	const enqueuePrompt = mock.fn((sid: string, _msg: string, opts?: any) => {
+		const s = sm._sessions.get(sid);
+		if (s) s.lastPromptSource = opts?.source ?? "user";
+	});
 	sm.enqueuePrompt = enqueuePrompt;
 
 	const eventCallbacks: Array<(event: any) => void> = [];

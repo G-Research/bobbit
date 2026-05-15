@@ -480,10 +480,6 @@ export class TeamManager {
 				`If all work is complete and gates are passed, call team_complete to finish the goal.`;
 
 			this.nudgePending.set(goalId, true);
-			// Tag the session directly so subscribeTeamLeadEvents sees the source
-			// even if SessionManager.enqueuePrompt is mocked or async-delayed in setting it.
-			const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
-			if (tl) tl.lastPromptSource = "auto-nudge";
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
 			this.noWorkersNudgeCount.set(goalId, count + 1);
 			const nextDelay = Math.min(
@@ -568,10 +564,6 @@ export class TeamManager {
 				`If idle agents have more to do, prompt them to continue.`;
 
 			this.nudgePending.set(goalId, true);
-			// Tag the session directly so subscribeTeamLeadEvents sees the source
-			// even if SessionManager.enqueuePrompt is mocked or async-delayed in setting it.
-			const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
-			if (tl) tl.lastPromptSource = "auto-nudge";
 			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" });
 			this.idleNudgeCount.set(goalId, count + 1);
 			const nextDelay = Math.min(
@@ -1135,9 +1127,6 @@ export class TeamManager {
 		}
 
 		try {
-			// Tag the session directly so subscribeTeamLeadEvents sees the source
-			// even if SessionManager is mocked or async-delayed in setting it.
-			teamLeadSession.lastPromptSource = "auto-nudge";
 			if (teamLeadSession.status === "streaming") {
 				// Mid-turn: inject directly as a real-time steer interrupt
 				await this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "auto-nudge" });
@@ -1165,9 +1154,6 @@ export class TeamManager {
 
 		const message = `Task "${taskTitle}" transitioned to ${taskState}. Use task_list for result summaries and gate_status for verification details.`;
 
-		// Tag the session directly so subscribeTeamLeadEvents sees the source
-		// even if SessionManager is mocked or async-delayed in setting it.
-		teamLeadSession.lastPromptSource = "task-notification";
 		if (teamLeadSession.status === "streaming") {
 			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "task-notification" }).catch((err: any) => {
 				console.error(`[team-manager] Failed to steer team lead on task completion for goal ${goalId}:`, err);
