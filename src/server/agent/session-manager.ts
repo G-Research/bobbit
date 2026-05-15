@@ -41,7 +41,7 @@ import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import { decideOverflowAction } from "../ws-overflow-guard.js";
 
 import { McpManager } from "../mcp/mcp-manager.js";
-import { isTransientReviewError } from "./verification-logic.js";
+import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
@@ -67,6 +67,7 @@ import {
 	handleSetupFailure,
 	sendDelegatePrompt,
 	DELEGATE_SPAWN_TIMEOUT_MS,
+	nextBackoffDelay,
 } from "./session-setup.js";
 
 const execFileAsync = promisify(execFileCb);
@@ -2023,32 +2024,68 @@ export class SessionManager {
 	}
 
 	/**
-	 * Auto-retry a turn that ended with a transient model/streaming error
-	 * (e.g. malformed tool-call JSON from input_json_delta accumulation, or a
-	 * transport blip matching TRANSIENT_ERROR_PATTERNS). Bounded retries with
-	 * exponential backoff; after the cap, the error surfaces to the user as
-	 * before and they can manually retry.
+	 * Auto-retry a turn that ended with a transient model/streaming error.
+	 *
+	 * Two policies, selected by error class:
+	 *
+	 * - Provider overload / rate-limit (`isProviderBackoffError`, e.g.
+	 *   Anthropic `overloaded_error`, `rate_limit_error`, HTTP 429/529):
+	 *   effectively unbounded retries with exponential backoff capped at
+	 *   5 minutes and ±20% jitter. Overload events can legitimately last
+	 *   10+ minutes; surfacing the error to the user is worse than waiting.
+	 *
+	 * - Other transient glitches (malformed tool-call JSON, ECONNRESET, etc.):
+	 *   bounded 3 attempts at 1s/2s/4s, after which the error surfaces and
+	 *   the user can manually retry.
 	 */
 	private maybeAutoRetryTransient(session: SessionInfo): void {
-		const MAX_ATTEMPTS = 3;
+		const BOUNDED_MAX_ATTEMPTS = 3;
+		const PROVIDER_BACKOFF_MAX_MS = 300_000; // 5 minutes
 		const errMsg = session.lastTurnErrorMessage || "";
 		if (!errMsg) return;
 		if (!isTransientReviewError(errMsg)) return;
 
+		const isBackoff = isProviderBackoffError(errMsg);
 		const attempt = (session.transientRetryAttempts ?? 0) + 1;
-		if (attempt > MAX_ATTEMPTS) {
+
+		if (!isBackoff && attempt > BOUNDED_MAX_ATTEMPTS) {
 			console.warn(
-				`[session-manager] Session ${session.id} exhausted ${MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
+				`[session-manager] Session ${session.id} exhausted ${BOUNDED_MAX_ATTEMPTS} transient auto-retries; surfacing error to user. Last error: ${errMsg.slice(0, 200)}`
 			);
 			session.transientRetryAttempts = 0;
 			return;
 		}
 		session.transientRetryAttempts = attempt;
 
-		const delayMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-		console.log(
-			`[session-manager] Session ${session.id} turn failed transiently (attempt ${attempt}/${MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
-		);
+		const delayMs = isBackoff
+			? nextBackoffDelay(attempt, { baseMs: 1000, maxMs: PROVIDER_BACKOFF_MAX_MS, jitterRatio: 0.2 })
+			: 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s (preserve exact legacy schedule)
+
+		if (isBackoff) {
+			console.log(
+				`[session-manager] Session ${session.id} hit provider overload/rate-limit (attempt ${attempt}); auto-retrying in ${Math.round(delayMs / 1000)}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		} else {
+			console.log(
+				`[session-manager] Session ${session.id} turn failed transiently (attempt ${attempt}/${BOUNDED_MAX_ATTEMPTS}), auto-retrying in ${delayMs / 1000}s. Error: ${errMsg.slice(0, 200)}`
+			);
+		}
+
+		// Visible UI notification while the retry timer is pending. The session
+		// status remains "idle" (set by the agent_end handler) but we broadcast
+		// a synthetic event so the UI can show "Retrying in Xs due to provider
+		// overload…" instead of looking frozen.
+		broadcast(session.clients, {
+			type: "event",
+			data: {
+				type: "auto_retry_pending",
+				reason: isBackoff ? "provider-overload" : "transient-error",
+				retryDelayMs: Math.round(delayMs),
+				attempt,
+				scheduledAt: Date.now(),
+				error: errMsg.slice(0, 200),
+			},
+		});
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = setTimeout(() => {
@@ -5232,6 +5269,13 @@ export class SessionManager {
 			// and we write it here to handle the case where shutdown() races
 			// with a pending agent_end that hasn't flushed to disk yet.
 			this.resolveStoreForSession(id).update(id, { wasStreaming: session.status === "streaming", streamingStartedAt: session.streamingStartedAt });
+
+			// Cancel any pending transient/provider-backoff auto-retry so the
+			// timer doesn't fire after the agent has been stopped.
+			if (session.pendingAutoRetryTimer) {
+				clearTimeout(session.pendingAutoRetryTimer);
+				session.pendingAutoRetryTimer = undefined;
+			}
 
 			session.unsubscribe();
 			await session.rpcClient.stop();
