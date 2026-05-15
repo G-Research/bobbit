@@ -1417,6 +1417,7 @@
       this.mergingPrimary = false;
       this.mergePrimaryError = "";
       this._dropdownEl = null;
+      this._closeToken = 0;
       this._closing = false;
       this._onDocumentClick = (e8) => {
         const target = e8.target;
@@ -1459,11 +1460,15 @@
     _closeDropdown() {
       if (this._closing || !this._dropdownEl) return;
       this._closing = true;
+      const closeToken = ++this._closeToken;
       this._dropdownEl.classList.add("git-dropdown-closing");
-      this._dropdownEl.addEventListener("animationend", () => {
+      const reset = () => {
+        if (closeToken !== this._closeToken) return;
         this._closing = false;
         this.expanded = false;
-      }, { once: true });
+      };
+      this._dropdownEl.addEventListener("animationend", reset, { once: true });
+      this._dropdownEl.addEventListener("animationcancel", reset, { once: true });
     }
     createRenderRoot() {
       return this;
@@ -1477,9 +1482,12 @@
       super.disconnectedCallback();
       document.removeEventListener("click", this._onDocumentClick, true);
       document.removeEventListener("keydown", this._onEscapeKeyDropdown, true);
+      this._closeToken++;
       this._removeDropdown();
       this._removeModal();
       this._removeCommitsModal();
+      this._closing = false;
+      this.expanded = false;
     }
     _removeDropdown() {
       if (this._dropdownEl) {
@@ -1490,19 +1498,35 @@
     _toggle(e8) {
       e8.stopPropagation();
       if (this.loading && !this.branch) return;
-      if (this.expanded && !this._closing) {
+      const hasConnectedDropdown = this._dropdownEl?.isConnected === true;
+      const visiblyOpen = this.expanded && !this._closing && hasConnectedDropdown;
+      if (visiblyOpen) {
         this._closeDropdown();
-      } else if (!this.expanded) {
-        this.expanded = true;
-        this.dispatchEvent(new CustomEvent("git-fetch", {
-          bubbles: true,
-          composed: true
-        }));
-        this.dispatchEvent(new CustomEvent("git-status-dropdown-open", {
-          bubbles: true,
-          composed: true
-        }));
+        return;
       }
+      if (this._dropdownEl && (!hasConnectedDropdown || !this.expanded)) {
+        this._removeDropdown();
+      }
+      this._closeToken++;
+      this._closing = false;
+      this._dropdownEl?.classList.remove("git-dropdown-closing");
+      if (this._dropdownEl) {
+        D(this._renderDropdownContent(), this._dropdownEl);
+        this._positionDropdown();
+      }
+      const wasExpanded = this.expanded;
+      this.expanded = true;
+      if (wasExpanded && !this._dropdownEl) {
+        this.requestUpdate("expanded", false);
+      }
+      this.dispatchEvent(new CustomEvent("git-fetch", {
+        bubbles: true,
+        composed: true
+      }));
+      this.dispatchEvent(new CustomEvent("git-status-dropdown-open", {
+        bubbles: true,
+        composed: true
+      }));
     }
     _statusColor(status) {
       switch (status) {
