@@ -1,42 +1,32 @@
 /**
- * Regression test: TypescriptLspClient must NOT attach a sandbox path-translation
- * bridge when no sandbox container is actually running.
+ * Security regression: TypescriptLspClient must FAIL CLOSED \u2014 not silently
+ * spawn a host language server \u2014 when a sandbox bridge is supplied but no
+ * container is currently running for the worktree.
  *
- * Bug scenario (2026-05-14, sessions `03afb128` Mel Brookpoint and `9150a1de`):
- *   Project declares `sandbox: docker` in project.yaml but no container is up.
- *   `TypescriptLspClient.start()` previously cached
- *     `sandbox?.resolveForWorktree?.(worktreePath) ?? sandbox`
- *   as `this.bridge` unconditionally. For docker-configured projects the
- *   resolver returns a docker bridge because the worktree path matches
- *   `<rootPath>-wt/<branch>`, but `server-process.ts` correctly falls back to
- *   spawning `tsserver` on the host when `containerIdForWorktree()` is null.
- *   The mismatch caused `toUri()` to translate every host path to
- *   `/workspace-wt/<branch>/...` even though tsserver was running on the host,
- *   producing `ENOENT stat '/workspace-wt/...'` during `initialize` and silently
- *   disabling LSP for every TS coder on the project.
+ * History:
+ *   - 2026-05-14 (sessions `03afb128` Mel Brookpoint, `9150a1de`): silent host
+ *     fallback combined with path translation produced `/workspace-wt/...`
+ *     URIs sent to host tsserver, causing ENOENT during initialize. Earlier
+ *     fix: don't translate paths when no container is running, but still
+ *     spawn on the host.
+ *   - 2026-05-15 security review: spawning the language server on the host
+ *     for a project that has opted into sandbox isolation is itself a
+ *     high-severity finding \u2014 it leaks a process running as the gateway
+ *     user with full host filesystem access. Fix: refuse to spawn at all
+ *     when sandbox is configured but no container exists; report
+ *     `lsp_unavailable` so the agent falls back to grep.
  *
- *   Fix: cache the bridge only when `containerIdForWorktree(worktreePath)`
- *   returns a non-null container id; otherwise leave it undefined and use host
- *   paths.
- *
- * This test passes a fake `SandboxLspBridge` whose `resolveForWorktree()` returns
- * a bridge with `containerIdForWorktree() === null` and whose `toContainerPath()`
- * translates to a bogus `/workspace-wt/...` path. If the adapter caches that
- * bridge by mistake, every URI it sends will reference `/workspace-wt/...` and
- * `initialize`/`definition` will fail. The assertions:
- *
- *   1. `toContainerPath()` is NEVER invoked (bridge must remain unattached).
- *   2. `start()` resolves cleanly (no ENOENT from bogus rootUri).
- *   3. `definition()` returns a host file:// path under the fixture directory,
- *      with no `/workspace-wt/` substring leaking through.
+ * This test pins the new behavior at the adapter boundary. A focused unit
+ * test for `spawnLspChild` itself lives in
+ * `tests/lsp/server-process-sandbox.spec.ts`.
  */
-import { test, describe, before, after } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { TypescriptLspFactory } from "../../src/server/lsp/clients/typescript.ts";
-import type { LspClient, SandboxLspBridge } from "../../src/server/lsp/client.ts";
+import type { SandboxLspBridge } from "../../src/server/lsp/client.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE = path.resolve(__dirname, "..", "fixtures", "lsp-ts");
@@ -49,27 +39,23 @@ function makeFakeBridge(): SandboxLspBridge & {
 	toContainerCalls: string[];
 	resolveCalls: string[];
 	containerLookups: string[];
+	spawnCalls: number;
 } {
 	const toContainerCalls: string[] = [];
 	const resolveCalls: string[] = [];
 	const containerLookups: string[] = [];
+	let spawnCalls = 0;
 
 	const inner: SandboxLspBridge = {
 		spawn() {
+			spawnCalls++;
 			throw new Error("sandbox.spawn() must not be called when no container is running");
 		},
 		toContainerPath(hostPath: string): string {
 			toContainerCalls.push(hostPath);
-			// Bogus translation — if this leaks into the LSP request, tsserver will
-			// fail to stat the path and initialize will reject with ENOENT.
 			return `/workspace-wt/goal-fake/${path.basename(hostPath)}`;
 		},
-		toHostPath(p: string): string {
-			if (p.startsWith("/workspace-wt/goal-fake/")) {
-				return path.join(FIXTURE, p.slice("/workspace-wt/goal-fake/".length));
-			}
-			return p;
-		},
+		toHostPath(p: string): string { return p; },
 		containerIdForWorktree(hostWorktreePath: string): string | null {
 			containerLookups.push(hostWorktreePath);
 			return null; // No container running.
@@ -87,61 +73,47 @@ function makeFakeBridge(): SandboxLspBridge & {
 		containerIdForWorktree: inner.containerIdForWorktree,
 	};
 
-	return Object.assign(outer, { toContainerCalls, resolveCalls, containerLookups });
+	return Object.assign(outer, {
+		toContainerCalls,
+		resolveCalls,
+		containerLookups,
+		get spawnCalls() { return spawnCalls; },
+	});
 }
 
-describe("typescript LSP adapter — docker sandbox without running container", skip, () => {
-	let client: LspClient;
-	let fake: ReturnType<typeof makeFakeBridge>;
-	const mathPath = path.join(FIXTURE, "src", "math.ts");
-	const indexPath = path.join(FIXTURE, "src", "index.ts");
-
-	before(async () => {
-		fake = makeFakeBridge();
-		client = await factory.spawn({ worktreePath: FIXTURE, sandbox: fake });
-		// Mirror the base TypeScript adapter integration test: pre-open both files
-		// so the language server has the imported module in its project graph.
-		await client.ensureDocOpen(mathPath);
-		await client.ensureDocOpen(indexPath);
-	});
-
-	after(async () => {
-		if (client) await client.shutdown(true);
-	});
-
-	test("bridge consults containerIdForWorktree and does NOT attach when null", () => {
-		// The adapter must check whether a container actually exists before
-		// caching the bridge for path translation.
+describe("typescript LSP adapter \u2014 docker sandbox without running container", skip, () => {
+	test("factory.spawn() rejects with lsp_unavailable; no host tsserver is started", async () => {
+		const fake = makeFakeBridge();
+		const err: any = await factory.spawn({ worktreePath: FIXTURE, sandbox: fake }).then(
+			() => null,
+			(e) => e,
+		);
+		assert.ok(err, "factory.spawn() must reject when sandbox is configured but no container is running");
+		assert.equal(
+			err.code,
+			"lsp_unavailable",
+			`expected LspUnavailableError (code=lsp_unavailable). Got code=${err?.code}, message=${err?.message}`,
+		);
+		assert.match(
+			String(err.message),
+			/sandbox.*container|container.*sandbox/i,
+			`error must explain the sandbox/no-container situation. Got: ${err.message}`,
+		);
+		// Bridge-level invariants: containerIdForWorktree was consulted, but
+		// neither the in-container spawn nor host-path translation ran.
 		assert.ok(
 			fake.containerLookups.length >= 1,
 			`expected containerIdForWorktree() to be consulted at least once, got ${fake.containerLookups.length} calls`,
 		);
-		// And it must never translate host paths to bogus container paths.
+		assert.equal(
+			fake.spawnCalls,
+			0,
+			"bridge.spawn() must not be invoked when no container is running",
+		);
 		assert.equal(
 			fake.toContainerCalls.length,
 			0,
 			`toContainerPath() must not be called when no container is running. Got calls:\n  ${fake.toContainerCalls.join("\n  ")}`,
-		);
-	});
-
-	test("definition() returns a host file path under the fixture (no /workspace-wt/ leak)", async () => {
-		// "const x = add(1, 2);" — `add` starts at character 10 on line 2 in the existing fixture test.
-		const loc = await client.definition(indexPath, 2, 10);
-		assert.ok(loc, "expected a definition result");
-		assert.ok(
-			!loc!.path.includes("/workspace-wt/"),
-			`definition path must not contain '/workspace-wt/'. Got: ${loc!.path}`,
-		);
-		assert.ok(
-			loc!.path.startsWith(FIXTURE),
-			`definition path must be under the host fixture dir ${FIXTURE}. Got: ${loc!.path}`,
-		);
-		assert.ok(loc!.path.endsWith(path.join("src", "math.ts")), `got ${loc!.path}`);
-		// Final guard: still no translation calls after a real LSP operation.
-		assert.equal(
-			fake.toContainerCalls.length,
-			0,
-			`toContainerPath() must remain uncalled after definition(). Got calls:\n  ${fake.toContainerCalls.join("\n  ")}`,
 		);
 	});
 });

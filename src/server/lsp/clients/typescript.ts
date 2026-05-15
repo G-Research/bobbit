@@ -77,11 +77,11 @@ class TypescriptLspClient implements LspClient {
 		// Resolve a stable per-client bridge to avoid shared mutable state
 		// (lastBridge) when multiple projects have concurrent LSP processes.
 		// Only attach the bridge when a sandbox container is actually running for
-		// this worktree; otherwise spawnLspChild() falls back to a host process and
-		// bridge.toUri() would translate host paths to container paths (e.g.
-		// /workspace-wt/<branch>) that don't exist on the host, breaking
-		// `initialize` with ENOENT. Do not simplify back to an unconditional cache
-		// — bug surfaced by coder sessions 03afb128 / 9150a1de on 2026-05-14.
+		// this worktree. When no container is running, `spawnLspChild()` itself
+		// fails closed with `lsp_unavailable` (security review 2026-05-15: never
+		// silently spawn on the host for a sandbox-configured project). We still
+		// gate `this.bridge` on the container id so that, if start() ever runs
+		// without a bridge being needed, host paths are used unchanged.
 		const resolvedBridge = sandbox?.resolveForWorktree?.(this.worktreePath) ?? sandbox;
 		const containerId = resolvedBridge?.containerIdForWorktree?.(this.worktreePath) ?? null;
 		this.bridge = containerId ? resolvedBridge : undefined;
