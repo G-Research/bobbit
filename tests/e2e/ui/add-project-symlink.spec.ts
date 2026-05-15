@@ -37,9 +37,12 @@ function uniqueDir(label: string): string {
  *  symlinks requires elevated privileges (Windows non-admin). */
 function makeSymlinkPair(label: string): { canonical: string; link: string } | null {
 	const root = uniqueDir(label);
-	const canonical = join(root, "canonical");
+	let canonical = join(root, "canonical");
 	const link = join(root, "link");
 	mkdirSync(canonical, { recursive: true });
+	// Canonicalize via realpath so the value we compare against matches what
+	// the server stores (the server resolves symlinks during register).
+	canonical = realpathSync(canonical);
 	// Write a sentinel file so directory has content.
 	writeFileSync(join(canonical, "marker.txt"), "x");
 	try {
@@ -60,13 +63,26 @@ function makeSymlinkPair(label: string): { canonical: string; link: string } | n
 }
 
 test.describe("Add Project — symlink confirm flow", () => {
+	test.beforeEach(async () => {
+		// Remove all pre-registered projects so the app opens with the
+		// "Add Project" splash screen. The gateway harness now successfully
+		// registers a default project (with acceptCanonical), so without this
+		// cleanup the app navigates directly to the project assistant and the
+		// Add Project flow is never triggered.
+		const res = await apiFetch("/api/projects");
+		const data = await res.json();
+		const projects = data.projects || data || [];
+		for (const p of projects) {
+			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test.afterEach(async () => {
 		// Clean up any projects this spec created.
 		const res = await apiFetch("/api/projects");
 		const data = await res.json();
 		const projects = data.projects || data || [];
 		for (const p of projects) {
-			if (p.name === "default") continue;
 			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
@@ -82,11 +98,13 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Need .bobbit/ to trigger Path A (auto-import → registerProject). Without it,
-		// the path is routed to the project assistant and the symlink check never
-		// runs. Add it on the canonical so it's visible through both views.
+		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
+		// Without it, /api/projects/detect returns hasBobbit=false (since commit 54d5b710
+		// project.yaml is the source of truth) and doContinue takes Path B (project assistant),
+		// so the symlink check in registerProject never runs.
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		// Type the symlinked path.
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
@@ -137,9 +155,10 @@ test.describe("Add Project — symlink confirm flow", () => {
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
 
-		// Add .bobbit so Path A is taken.
+		// Add .bobbit/config/project.yaml so Path A is taken (hasBobbit=true).
 		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
 		await page.locator('input[placeholder="/path/to/project"]').fill(link);
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
