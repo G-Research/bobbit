@@ -18,10 +18,7 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
-import type {
-	AutoRetryPendingEvent,
-	AutoRetryCancelledEvent,
-} from "../server/ws/protocol.js";
+import type { AutoRetryPendingEvent } from "../server/ws/protocol.js";
 
 /** Maps propose_* tool suffix → callback name on RemoteAgent (legacy path).
  *  Slice E will replace this lookup with a flat ProposalType allow-list and
@@ -1873,15 +1870,13 @@ export class RemoteAgent {
 				break;
 			}
 
-			case "auto_retry_cancelled": {
+			case "auto_retry_cancelled":
 				// Server cancelled the pending timer (explicit user retry, new
 				// prompt enqueued, or session termination). Clear the banner.
-				// Shape pinned by `AutoRetryCancelledEvent` in src/server/ws/protocol.ts.
-				const _e = event as AutoRetryCancelledEvent;
-				void _e;
+				// Wire shape pinned by `AutoRetryCancelledEvent` in src/server/ws/protocol.ts;
+				// no field is read today (banner just clears) so no narrowing needed.
 				this._state.autoRetryPending = null;
 				break;
-			}
 
 			case "agent_end": {
 				this.streamingMessageId = undefined;
