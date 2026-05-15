@@ -705,6 +705,110 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 		}
 	});
 
+	test("reset to selected normalizes stale seeded inline-workflow id back to a library workflowId", async ({ page }) => {
+		// Regression guard for stale workflow id after Reset: when a proposal
+		// is seeded with an inlineWorkflow whose id is NOT in the project's
+		// library, hydration sets the selected workflow id to that inline id.
+		// If the user clicks `Reset to selected`, the inline content is
+		// cleared but the selected id used to remain pointing at the inline-
+		// only id. Submit then forwarded that stale id as `workflowId`,
+		// causing a misleading UI / create failure. Reset must snap back to a
+		// real library workflow id (or empty when no library exists).
+		test.setTimeout(60_000);
+		const title = `Modal reset normalizes stale id ${Date.now()}`;
+		const sessionId = await createSession();
+		let createdGoalId: string | undefined;
+		try {
+			await seedGoalProposal(sessionId, {
+				title,
+				spec: "Reset must drop the stale inline-only workflow id.",
+				inlineWorkflow: SAMPLE_INLINE_WORKFLOW,
+			});
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title);
+
+			// Open Workflow tab — editor visible because inline workflow was seeded.
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			const wfPanel = page.locator("[data-testid='goal-proposal-panel-workflow']").first();
+			await expect(wfPanel).toBeVisible();
+
+			const resetBtn = wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first();
+			await expect(resetBtn).toBeVisible({ timeout: 10_000 });
+
+			// Sanity: Goal-tab picker initially shows the inline id (hydration).
+			const wfPicker = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+			await page.locator("[data-testid='goal-proposal-tab-goal']").first().click();
+			await expect(wfPicker).toBeVisible({ timeout: 10_000 });
+			const wfIds: string[] = await wfPicker.evaluate((el: HTMLSelectElement) =>
+				Array.from(el.options).map(o => o.value),
+			);
+			test.skip(wfIds.length < 1, "Need at least one library workflow for this test");
+			expect(wfIds, "inline-only id must not be present in the library picker options")
+				.not.toContain(SAMPLE_INLINE_WORKFLOW.id);
+
+			// Hit Reset to selected on the Workflow tab.
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			await resetBtn.click();
+
+			// Editor gone, Customize back, inspector reflects a real library id.
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-customize']").first(),
+			).toBeVisible({ timeout: 5_000 });
+			await expect(
+				wfPanel.locator("[data-testid='workflow-editor']").first(),
+			).toHaveCount(0);
+
+			// Goal-tab picker must now show a real library id, not the stale inline one.
+			await page.locator("[data-testid='goal-proposal-tab-goal']").first().click();
+			const pickerValue = await wfPicker.inputValue();
+			expect(pickerValue, "picker must not retain the inline-only workflow id")
+				.not.toBe(SAMPLE_INLINE_WORKFLOW.id);
+			expect(wfIds, `picker value (${pickerValue}) must be a real library workflow id`)
+				.toContain(pickerValue);
+
+			// Submit and assert the payload carries the normalized library workflowId
+			// and NO stale inline `workflow` field.
+			let captured: any = null;
+			page.on("request", (req) => {
+				if (
+					req.url().includes("/api/goals") &&
+					!req.url().includes("/api/goals/") &&
+					req.method() === "POST"
+				) {
+					try { captured = JSON.parse(req.postData() || "null"); } catch {}
+				}
+			});
+			const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createBtn).toBeEnabled({ timeout: 5_000 });
+			const respPromise = page.waitForResponse(
+				resp => resp.url().includes("/api/goals")
+					&& resp.request().method() === "POST"
+					&& resp.ok(),
+				{ timeout: 20_000 },
+			);
+			await createBtn.click();
+			await respPromise;
+
+			expect(captured, "POST /api/goals body must be captured").toBeTruthy();
+			expect(captured.workflow, "stale inline workflow must NOT be forwarded after Reset").toBeFalsy();
+			expect(captured.workflowId, "workflowId must not be the stale inline-only id")
+				.not.toBe(SAMPLE_INLINE_WORKFLOW.id);
+			if (captured.workflowId) {
+				expect(wfIds, "submitted workflowId must be a real library workflow id")
+					.toContain(captured.workflowId);
+			}
+
+			await expect.poll(
+				async () => (await findGoalByTitle(title))?.id,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+			createdGoalId = (await findGoalByTitle(title))?.id;
+		} finally {
+			await deleteGoalIfExists(createdGoalId);
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("role inspector Model tab is fully read-only — no picker / clear / test controls", async ({ page }) => {
 		// Pin: when the role inspector is in readOnly mode, the Model tab
 		// must render a static summary, NOT the editable renderModelRow

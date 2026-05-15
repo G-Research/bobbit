@@ -1722,6 +1722,15 @@ function goalPreviewPanel() {
 				onResetWorkflow: () => {
 					_proposalInlineWorkflow = null;
 					_proposalCustomizingWorkflow = false;
+					// If the selected workflow id is from a seeded inline workflow
+					// that is not in the project's library, the user just discarded
+					// the only thing carrying that id. Snap back to a real library
+					// workflow so submit doesn't forward a stale inline-only id as
+					// `workflowId`. See goal-proposal-tabs spec — "Reset to selected
+					// normalizes stale inline id".
+					if (!_cachedWorkflows.some((w) => w.id === _selectedWorkflowId)) {
+						_selectedWorkflowId = _cachedWorkflows[0]?.id ?? "";
+					}
 					clearWorkflowEditorController();
 					renderApp();
 				},
@@ -3281,6 +3290,14 @@ function goalProposalPanel() {
 		onResetWorkflow: () => {
 			_proposalInlineWorkflow = null;
 			_proposalCustomizingWorkflow = false;
+			// Normalize a stale inline-only id back to a real library workflow
+			// — otherwise submit forwards the seeded inline workflow's id as
+			// `workflowId` even though the inline content has been discarded.
+			// See goal-proposal-tabs spec — "Reset to selected normalizes stale
+			// inline id".
+			if (!_cachedWorkflows.some((w) => w.id === _proposalWorkflowId)) {
+				_proposalWorkflowId = _cachedWorkflows[0]?.id ?? "";
+			}
 			clearWorkflowEditorController();
 			renderApp();
 		},
