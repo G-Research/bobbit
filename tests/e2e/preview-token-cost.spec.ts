@@ -4,19 +4,27 @@
  * The v3 marker block is JSON-only ({kind:"preview", url, path}); the html
  * payload never appears in the tool result. To prove this, we issue 50
  * POST /api/preview/mount calls with a 100 KB html body each, build the v3
- * snapshot block from the returned {url, path}, and assert:
- *   - every block ≤ 250 bytes (the v3 contract from snapshot.ts)
+ * snapshot block from the returned {url, relPath}, and assert:
+ *   - every block ≤ 250 bytes  (the canonical v3 contract from snapshot.ts)
  *   - sum across 50 iterations ≤ 50 × 250 = 12 500 bytes
  *
- * The goal spec quotes "< 10 KB" assuming typical install paths
- * (`~/.bobbit/state/preview/<sid>/iter-N.html`, ~70 chars). The Windows
- * E2E harness uses long temp paths
- * (`C:\Users\<user>\AppData\Local\Temp\bobbit-e2e\.e2e-inproc-<...>\state\preview\<sid>\iter-N.html`,
- * ~180 chars), which inflates the `path` field. The per-block 250-byte
- * cap is the canonical contract; the aggregate threshold here uses that
- * cap × 50 so it remains a meaningful regression guard on every OS
- * without Windows-specific sniffing. The crucial property — block size
- * does NOT scale with HTML size — is captured by the per-block assertion.
+ * Normalisation invariant
+ * -----------------------
+ * The `path` field stamped into the v3 block is the **project-root-relative**
+ * identifier `<sessionId>/<entry>` (forward slashes), NOT the host-absolute
+ * path. This is what keeps block size bounded by content shape rather than
+ * by where `bobbitStateDir()` happens to live on disk.
+ *
+ * Earlier revisions of this test bumped the per-block cap (250 → 320 → 400 B)
+ * to absorb canonical macOS tmpdir paths (`/private/var/folders/...`) and
+ * long Windows E2E harness paths
+ * (`C:\Users\...\AppData\Local\Temp\bobbit-e2e\.e2e-inproc-...\state\preview\<sid>\iter-N.html`).
+ * Each bump silently weakened the regression guard. The fix landed in PR #599
+ * review: the agent tool (`defaults/tools/html/extension.ts`) now feeds
+ * `mountResult.relPath` (a short, host-invariant string returned by the
+ * gateway) to `buildPreviewSnapshotV3Block` instead of the host-absolute
+ * `path`. With that in place, the 250 B cap holds on every OS and any future
+ * inflation here is a real regression — DO NOT bump the cap to absorb it.
  *
  * Goal spec §Acceptance criteria #7. Mirrors the unit test in
  * tests/preview-extension.test.ts but exercises the live server endpoint.
@@ -35,7 +43,7 @@ test.afterAll(async () => {
 	await deleteSession(sessionId).catch(() => {});
 });
 
-test("50 × 100 KB mount calls → snapshot blocks sum < 20 KB; each ≤ 400 B", async () => {
+test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 250 B", async () => {
 	test.setTimeout(60_000);
 	const huge = "<p>" + "x".repeat(100_000) + "</p>";
 
@@ -51,32 +59,36 @@ test("50 × 100 KB mount calls → snapshot blocks sum < 20 KB; each ≤ 400 B",
 		const body = await resp.json();
 		expect(typeof body.url).toBe("string");
 		expect(typeof body.path).toBe("string");
+		expect(
+			typeof body.relPath,
+			`iteration ${i}: response should include relPath`,
+		).toBe("string");
+		expect(body.relPath.length).toBeGreaterThan(0);
+		// relPath is host-invariant: always `<sid>/<entry>` with forward slashes.
+		expect(body.relPath).toBe(`${sessionId}/iter-${i}.html`);
 
-		const block = buildPreviewSnapshotV3Block(body.url, body.path);
-		// v3 contract: block must be far smaller than the input HTML (100 KB).
-		// The exact byte count varies by OS/path length — canonicalized macOS
-		// tmpdir paths (/private/var/folders/...) and Windows E2E harness paths
-		// push the host-abs path field over the original 250 B guard. The hard
-		// cap is 400 B; the invariant that actually matters is that the block
-		// does NOT scale with the HTML payload size (still ~250× ratio at 400 B).
+		// Build the v3 block the way the agent tool does in production:
+		// feed the relPath (not the host-abs path) so the block size is
+		// bounded by content shape, not install location.
+		const block = buildPreviewSnapshotV3Block(body.url, body.relPath);
 		expect(
 			block.length,
-			`iteration ${i}: v3 block must be ≤ 400 bytes, got ${block.length}`,
-		).toBeLessThanOrEqual(400);
+			`iteration ${i}: v3 block must be ≤ 250 bytes, got ${block.length}`,
+		).toBeLessThanOrEqual(250);
 		// Block payload must not echo the input HTML.
 		expect(block).not.toContain("xxxxx");
 		blocks.push(block);
 		total += block.length;
 	}
 
-	// Sum across 50 iterations ≤ 20 000 bytes (50 × 400 B per-block cap).
+	// Sum across 50 iterations ≤ 12 500 bytes (50 × 250 B per-block cap).
 	// The HTML payload was 100 KB each ⇒ without v3, the conversation cost
 	// would be ≥ 5 MB; this assertion proves the bytes never enter the
 	// tool-result stream.
 	expect(
 		total,
-		`total snapshot bytes across 50 iterations should be ≤ 20 000, got ${total}`,
-	).toBeLessThanOrEqual(20_000);
+		`total snapshot bytes across 50 iterations should be ≤ 12 500, got ${total}`,
+	).toBeLessThanOrEqual(12_500);
 
 	// Sanity: 50 distinct entries, each block parsable.
 	expect(new Set(blocks).size).toBe(50);
