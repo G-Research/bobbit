@@ -160,27 +160,26 @@ test.describe("GitStatusWidget wedge — disconnect-mid-close race", () => {
 		await page.locator('git-status-widget button[data-state="ready"]').click();
 		await expect(page.locator("#git-status-dropdown")).toHaveCount(1);
 
-		// Start the close animation.
-		await page.locator('git-status-widget button[data-state="ready"]').click();
-		await expect(
-			page.locator("#git-status-dropdown.git-dropdown-closing"),
-		).toHaveCount(1);
-
-		// Dispatch `animationcancel` instead of `animationend`. Per the CSS
-		// Animations spec, this is what fires when an animating element is
-		// removed from the document, when its animation property is changed
-		// out from under it, or when `prefers-reduced-motion` cancels it.
-		// The widget's only state-reset path is the `animationend` listener,
-		// so this should leave it wedged.
-		await page.evaluate(() => {
+		// Start the close animation and dispatch `animationcancel` synchronously,
+		// before the short CSS animation can naturally finish and remove the
+		// portal. Per the CSS Animations spec, this is what fires when an
+		// animating element is removed from the document, when its animation
+		// property is changed out from under it, or when `prefers-reduced-motion`
+		// cancels it. The broken widget only listens for `animationend`, so this
+		// should leave it wedged.
+		const sawClosingClass = await page.evaluate(() => {
+			(document.querySelector('git-status-widget button[data-state="ready"]') as HTMLButtonElement).click();
 			const portal = document.getElementById("git-status-dropdown")!;
+			const closing = portal.classList.contains("git-dropdown-closing");
 			portal.dispatchEvent(
 				new AnimationEvent("animationcancel", {
 					bubbles: true,
 					cancelable: false,
 				}),
 			);
+			return closing;
 		});
+		expect(sawClosingClass).toBe(true);
 
 		// Internal state must reflect "closed" — no closing animation in
 		// flight, dropdown not expanded. Read straight off the Lit instance.
