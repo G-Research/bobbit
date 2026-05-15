@@ -488,6 +488,19 @@ export class VerificationHarness {
 	/** Limits concurrent command steps (type-check, tests) across all goals. */
 	private commandSemaphore = new Semaphore(4);
 
+	/**
+	 * Grace period (ms) given to a `close` event after a command-step timeout
+	 * fires and we SIGKILL the child. If `close` still hasn't fired after this
+	 * window — which can happen when the detached process group has dangling
+	 * stdio inherited by orphaned descendants, or the OS hasn't reaped the
+	 * tree yet — we resolve the step ourselves so verification never hangs.
+	 * Overridable for tests via `_setCommandStepGraceMs`.
+	 */
+	private _commandStepGraceMs = 5000;
+
+	/** Test-only: tighten the post-kill grace period so tests run fast. */
+	_setCommandStepGraceMs(ms: number): void { this._commandStepGraceMs = ms; }
+
 
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
@@ -2966,45 +2979,96 @@ export class VerificationHarness {
 				child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
 			}
 
-			// Manual timeout for the detached path — spawn's `timeout` option
-			// kills only the immediate child; the detached subshell may outlive
-			// it on some platforms. Doing it ourselves keeps the semantics
-			// uniform across modes.
+			// Manual timeout for both modes — spawn's `timeout` option (attached)
+			// or our own (detached) only kills the child; the wait on `close` may
+			// still hang if stdio FDs are inherited by orphaned descendants or the
+			// detached subshell outlives the immediate child. We must guarantee the
+			// step settles whether or not `close` ever fires.
 			let timedOut = false;
+			let resolved = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
-			if (useDetached) {
-				timeoutHandle = setTimeout(() => {
-					timedOut = true;
-					try { if (child.pid) process.kill(child.pid, "SIGKILL"); } catch { /* already dead */ }
-				}, timeoutSec * 1000);
-			}
+			let graceHandle: NodeJS.Timeout | undefined;
 
-			child.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				try { stopTail?.(); } catch { /* ignore */ }
-
+			const readOutputs = (): string => {
 				let outText = stdout;
 				let errText = stderr;
 				if (useDetached && outFile && errFile) {
 					try { outText = fs.readFileSync(outFile, "utf8"); } catch { outText = stdout; }
 					try { errText = fs.readFileSync(errFile, "utf8"); } catch { errText = stderr; }
 				}
-				const output = (outText + "\n" + errText).trim().slice(-5000);
-				const effectiveCode: number | null = timedOut ? null : code;
+				return (outText + "\n" + errText).trim().slice(-5000);
+			};
+
+			const finalize = (result: { passed: boolean; output: string }): void => {
+				if (resolved) return;
+				resolved = true;
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				if (graceHandle) clearTimeout(graceHandle);
+				try { stopTail?.(); } catch { /* ignore */ }
+				resolve(result);
+			};
+
+			const killChildTree = (): void => {
+				if (!child || child.pid == null) return;
+				const pid = child.pid;
+				try {
+					if (useDetached) {
+						// Detached child is its own process-group leader — signal the
+						// whole group so wrapper subshell + descendants die together.
+						try { process.kill(-pid, "SIGKILL"); } catch {
+							try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+						}
+					} else {
+						try { child.kill("SIGKILL"); } catch { /* already dead */ }
+					}
+				} catch { /* ignore */ }
+			};
+
+			const buildTimeoutResult = (): { passed: boolean; output: string } => {
+				const output = readOutputs();
+				const msg = output || `command timed out after ${timeoutSec}s`;
 				if (expectFailure) {
-					resolve(matchExpectFailure(effectiveCode, output, errorPattern));
-					return;
+					return matchExpectFailure(null, msg, errorPattern);
 				}
+				return { passed: false, output: msg };
+			};
+
+			const onTimeout = (): void => {
+				if (resolved) return;
+				timedOut = true;
+				killChildTree();
+				// Give `close` a brief grace window to fire after the kill so we
+				// can include the final flushed output. If it doesn't, resolve
+				// anyway — never let a hung child wedge verification.
+				graceHandle = setTimeout(() => {
+					finalize(buildTimeoutResult());
+				}, this._commandStepGraceMs);
+				try { graceHandle.unref?.(); } catch { /* ignore */ }
+			};
+
+			timeoutHandle = setTimeout(onTimeout, timeoutSec * 1000);
+			try { timeoutHandle.unref?.(); } catch { /* ignore */ }
+
+			child.on("close", (code) => {
+				if (resolved) return;
+				const output = readOutputs();
 				if (timedOut) {
-					resolve({ passed: false, output: output || `command timed out after ${timeoutSec}s` });
+					finalize(buildTimeoutResult());
 					return;
 				}
-				resolve({ passed: code === 0, output: output || `exit code ${code}` });
+				if (expectFailure) {
+					finalize(matchExpectFailure(code, output, errorPattern));
+					return;
+				}
+				finalize({ passed: code === 0, output: output || `exit code ${code}` });
 			});
 			child.on("error", (err) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				try { stopTail?.(); } catch { /* ignore */ }
-				resolve(handleSpawnError(err));
+				if (resolved) return;
+				if (timedOut) {
+					finalize(buildTimeoutResult());
+					return;
+				}
+				finalize(handleSpawnError(err));
 			});
 		});
 	}
