@@ -63,6 +63,7 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 - Tracks input tokens, output tokens, cache read/write tokens, and total cost.
 - Updated via `cost_update` WebSocket events broadcast to connected clients.
 - Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
+- **Tree rollup**: `GET /api/goals/:id/tree-cost` returns cost aggregated across the entire descendant tree, including archived children. Each child's line appears in the breakdown regardless of whether it has been archived — costs are attributed at record time via `goalId` stamping and are never dropped on archive. See [nested-goals.md — Cost rollup](nested-goals.md#cost-rollup) and [rest-api.md](rest-api.md) for the full endpoint contract.
 
 ## Prompt Queue
 

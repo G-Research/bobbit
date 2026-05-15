@@ -4,7 +4,7 @@ User-facing reference for the nested-goal feature. For internal data-model
 details see [goals-workflows-tasks.md](goals-workflows-tasks.md); for
 restart-resilience invariants see the relevant entries in
 [debugging.md](debugging.md). Implementation specs that drove the feature
-live in `SUBGOALS-SPEC.md` (root of the repo).
+are captured in [docs/design/](design/) and the goal specs that drove each subfeature.
 
 > **Status: experimental.** The nested-goals feature is gated behind a
 > system-scope toggle ("Subgoals" in **Settings → System → General**),
@@ -1325,6 +1325,25 @@ is a separate constant).
 Live updates subscribe to `goal_state_changed` and `goal_child_spawned`
 WS events on every visible goal in the tree; the synthesis recomputes on
 each event with a 250ms trailing-edge throttle to avoid layout thrash.
+
+### Live-only filter
+
+The Plan tab shows **all subgoals by default** — archived and completed children render with visual distinction (dimmed, dashed stroke, archived pill) alongside live ones. A toggle button in the top-right corner of the tab lets users narrow to work that is still in flight.
+
+**Toggle states:**
+- `Show all` (default) — every child regardless of state is included. This is the correct view for understanding the full history of a goal.
+- `Live only` — hides archived children AND children whose `state` is in the terminal set (`complete`, `shelved`). Only `todo`, `in-progress`, and `blocked` children remain.
+
+**Implementation** (`src/app/goal-dashboard-plan-tab.ts`):
+- `PLAN_TERMINAL_STATES` (`Set<GoalState>`) centralises the definition of "terminal" so both the candidate-filter and the synthesis filter use the exact same rule.
+- `_isLiveChild(g)` returns `true` iff the child is not archived and its state is not in `PLAN_TERMINAL_STATES`.
+- `_planLiveOnlyGoals: Set<string>` tracks which goal dashboards the user has toggled — keyed by `goalId`, absent from the set means "show all".
+- `computePlanStepsForGoal` accepts `opts.liveOnly?: boolean`; when `true` it filters `childSynthesis` through `_isLiveChild` and also drops formal execution-plan steps whose resolved child is absent from the filtered set (prevents phantom unresolved "todo" nodes for archived/completed formal steps).
+- The toggle button carries `data-testid="plan-live-only-toggle"` and `data-live-only="true|false"` for E2E tests.
+
+**Default is inclusive by design.** The helper default for `liveOnly` is `false` (include everything); callers opt OUT at the call site. Defaults that hide data are the root cause of "archived siblings vanish from the plan" regressions.
+
+Pinned by `tests/plan-archived-children.test.ts` — cases: `computePlanStepsForGoal liveOnly filter` and `formal execution plan liveOnly hides steps whose resolved child is archived or completed`.
 
 ### Living-plan dedupe by `planId`
 

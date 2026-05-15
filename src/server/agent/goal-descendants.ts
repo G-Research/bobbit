@@ -37,6 +37,7 @@ export function collectDescendants<G extends DescendantWalkGoal>(
 	allGoals: readonly G[],
 ): G[] {
 	if (!rootId) return [];
+	// pinned by tests/plan-archived-children.test.ts::collectDescendants includes archived descendants
 	return walkGoalSubtree(rootId, allGoals as unknown as PersistedGoal[], {
 		includeRoot: false,
 		includeArchived: true,

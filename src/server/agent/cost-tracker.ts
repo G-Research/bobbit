@@ -308,10 +308,39 @@ export class CostTracker {
 // Tree cost rollup (tree-cost rollup)
 // ---------------------------------------------------------------------------
 
-/** Cache entry for `computeTreeCost`. Keyed by `rootGoalId`. */
+/** Cache entry for `computeTreeCost`. Keyed by `rootGoalId`.
+ *  Invalidated when ANY of these change:
+ *    - cost mutation     -> `generation` bumps
+ *    - tree shape        -> `treeSignature` differs (goals added / removed /
+ *                           reparented / archived flag flipped within the
+ *                           rooted subtree)
+ *    - fallback resolver -> `hasSessionIdsResolver` differs (caller went
+ *                           from no-fallback to fallback or vice-versa).
+ *                           When a resolver IS supplied we additionally
+ *                           skip the cache entirely below, because its
+ *                           closure state can change between calls in
+ *                           ways we cannot fingerprint. */
 interface TreeCostCacheEntry {
 	generation: number;
+	treeSignature: string;
+	hasSessionIdsResolver: boolean;
 	result: TreeCostBreakdown;
+}
+
+/** Fingerprint the relevant subset of `allGoals` for cache invalidation.
+ *  Includes id + parentGoalId + rootGoalId + archived flag for every goal
+ *  whose `rootGoalId` matches or whose `id` is the root — i.e. anything that
+ *  could possibly be in the rooted subtree. We deliberately avoid hashing
+ *  state/title/createdAt: those don't affect breakdown membership or
+ *  ordering keys outside the walk. */
+function computeTreeSignature(rootGoalId: string, allGoals: TreeCostGoal[]): string {
+	const parts: string[] = [];
+	for (const g of allGoals) {
+		if (g.id !== rootGoalId && g.rootGoalId !== rootGoalId) continue;
+		parts.push(`${g.id}|${g.parentGoalId ?? ""}|${g.rootGoalId ?? ""}|${g.archived ? "a" : ""}|${g.createdAt ?? 0}`);
+	}
+	parts.sort();
+	return `${parts.length}:${parts.join(",")}`;
 }
 
 /**
@@ -354,8 +383,21 @@ export function computeTreeCost(
 ): TreeCostBreakdown {
 	const cache = getCache(costTracker);
 	const generation = costTracker.getGeneration();
+	const hasSessionIdsResolver = !!sessionIdsForGoal;
+	const treeSignature = computeTreeSignature(rootGoalId, allGoals);
 	const cached = cache.get(rootGoalId);
-	if (cached && cached.generation === generation) {
+	// Cache hit ONLY when generation + tree shape + resolver-presence all
+	// match. When a resolver was supplied we additionally bypass caching
+	// on writes below — its closure state can change between calls in
+	// ways we cannot fingerprint, so returning a cached breakdown could
+	// be stale even with matching generation/shape.
+	if (
+		cached &&
+		cached.generation === generation &&
+		cached.treeSignature === treeSignature &&
+		cached.hasSessionIdsResolver === hasSessionIdsResolver &&
+		!hasSessionIdsResolver
+	) {
 		return cached.result;
 	}
 
@@ -372,7 +414,9 @@ export function computeTreeCost(
 			totalTokensOut: 0,
 			breakdown: [],
 		};
-		cache.set(rootGoalId, { generation, result: empty });
+		if (!hasSessionIdsResolver) {
+			cache.set(rootGoalId, { generation, treeSignature, hasSessionIdsResolver, result: empty });
+		}
 		return empty;
 	}
 
@@ -381,6 +425,7 @@ export function computeTreeCost(
 	// because the `rootGoalId` stamp on every persisted goal is consistent
 	// with its `parentGoalId` chain (see goal-manager.createGoal). Include
 	// archived nodes — their cost survives archival.
+	// pinned by tests/cost-tree-archived.test.ts::computeTreeCost includes archived descendants in breakdown
 	const treeMembers = walkGoalSubtree(rootGoalId, allGoals as PersistedGoal[], {
 		includeRoot: true,
 		includeArchived: true,
@@ -452,7 +497,10 @@ export function computeTreeCost(
 		totalTokensOut,
 		breakdown: entries,
 	};
-	cache.set(rootGoalId, { generation, result });
+	// Only cache when no fallback resolver was supplied. See header doc.
+	if (!hasSessionIdsResolver) {
+		cache.set(rootGoalId, { generation, treeSignature, hasSessionIdsResolver, result });
+	}
 	return result;
 }
 
