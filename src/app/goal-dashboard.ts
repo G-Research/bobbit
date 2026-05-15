@@ -130,6 +130,9 @@ interface GoalCost {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	totalCost: number;
+	/** Derived `cacheReadTokens / (cacheReadTokens + inputTokens)`; optional for
+	 *  backwards compatibility with servers that don't emit the field. */
+	cacheHitRate?: number | null;
 }
 let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
