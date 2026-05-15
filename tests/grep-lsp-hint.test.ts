@@ -18,7 +18,14 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { lspHintFor } from "../defaults/tools/_builtins/grep-lsp-hint.ts";
+import {
+	lspHintFor,
+	wrapGrepWithLspHint,
+} from "../defaults/tools/_builtins/grep-lsp-hint.ts";
+
+function errorResult(text: string) {
+	return { isError: true, content: [{ type: "text", text }] };
+}
 
 function grepResult(text: string) {
 	return { content: [{ type: "text", text }] };
@@ -198,6 +205,22 @@ describe("lspHintFor — suppresses hint for non-symbol or non-source cases", ()
 		assert.equal(hint, null);
 	});
 
+	it("isError result with non-empty error text suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "getPersistedSession", glob: "*.ts" },
+			errorResult("ripgrep exited with code 2: regex parse error"),
+		);
+		assert.equal(hint, null);
+	});
+
+	it("isError result for call-site pattern still suppresses hint", () => {
+		const hint = lspHintFor(
+			{ pattern: "archiveGoal\\(", glob: "*.ts" },
+			errorResult("permission denied: /restricted"),
+		);
+		assert.equal(hint, null);
+	});
+
 	it("missing pattern suppresses hint", () => {
 		const hint = lspHintFor({ glob: "*.ts" }, grepResult(SAMPLE_HIT));
 		assert.equal(hint, null);
@@ -233,6 +256,61 @@ describe("lspHintFor — suppresses hint for non-symbol or non-source cases", ()
 			grepResult("src/a.ts:1:foo()"),
 		);
 		assert.equal(hint, null);
+	});
+});
+
+describe("wrapGrepWithLspHint — wrapper prepends hint before grep output", () => {
+	it("prepends hint as first content item when heuristic matches", async () => {
+		const original = {
+			name: "grep",
+			execute: async (_toolCallId: string, _params: unknown) => ({
+				content: [{ type: "text", text: SAMPLE_HIT }],
+			}),
+		};
+		const wrapped: any = wrapGrepWithLspHint(original as any);
+		const out: any = await wrapped.execute("call-1", {
+			pattern: "getPersistedSession",
+			glob: "*.ts",
+		});
+		assert.ok(Array.isArray(out.content));
+		assert.equal(out.content.length, 2);
+		assert.equal(out.content[0].type, "text");
+		assert.ok(out.content[0].text.startsWith("[lsp-hint]"));
+		assert.equal(out.content[1].text, SAMPLE_HIT);
+	});
+
+	it("returns original result untouched when heuristic does not match", async () => {
+		const originalResult = {
+			content: [{ type: "text", text: "docs/x.md:1:..." }],
+		};
+		const original = {
+			name: "grep",
+			execute: async (_toolCallId: string, _params: unknown) => originalResult,
+		};
+		const wrapped: any = wrapGrepWithLspHint(original as any);
+		const out: any = await wrapped.execute("call-1", {
+			pattern: "getPersistedSession",
+			glob: "*.md",
+		});
+		assert.equal(out, originalResult);
+	});
+
+	it("does not prepend hint when underlying execute returns isError", async () => {
+		const originalResult = {
+			isError: true,
+			content: [{ type: "text", text: "ripgrep failed: bad pattern" }],
+		};
+		const original = {
+			name: "grep",
+			execute: async (_toolCallId: string, _params: unknown) => originalResult,
+		};
+		const wrapped: any = wrapGrepWithLspHint(original as any);
+		const out: any = await wrapped.execute("call-1", {
+			pattern: "getPersistedSession",
+			glob: "*.ts",
+		});
+		assert.equal(out, originalResult);
+		assert.equal(out.content.length, 1);
 	});
 });
 
