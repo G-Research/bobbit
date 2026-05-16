@@ -546,6 +546,18 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 	const cached = _workflowCacheByProject.get(projectId);
 	if (cached) {
 		_cachedWorkflows = cached;
+		// Stale-id normalization: if a previously-selected workflow id no
+		// longer exists in the cached list for this project (e.g. user
+		// switched projects, or the workflow was deleted), clear it so the
+		// seeding step below picks a valid first entry. Otherwise the
+		// dropdown shows a phantom selection and submit sends an unknown id.
+		const cachedIds = new Set(cached.map(w => w.id));
+		if (_selectedWorkflowId && !cachedIds.has(_selectedWorkflowId)) {
+			_selectedWorkflowId = "";
+		}
+		if (_proposalWorkflowId && !cachedIds.has(_proposalWorkflowId)) {
+			_proposalWorkflowId = "";
+		}
 		// Seed defaults from the cache too. The async fetch path below also
 		// seeds these, but a new proposal can reset _proposalWorkflowId to ""
 		// in syncProposalFormState() and then hit this cached branch — without
@@ -565,6 +577,14 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		_workflowCacheByProject.set(projectId, wfs);
 		_workflowsLoadingByProject.delete(projectId);
 		_cachedWorkflows = wfs;
+		// Stale-id normalization (matches the cached path above).
+		const wfsIds = new Set(wfs.map(w => w.id));
+		if (_selectedWorkflowId && !wfsIds.has(_selectedWorkflowId)) {
+			_selectedWorkflowId = "";
+		}
+		if (_proposalWorkflowId && !wfsIds.has(_proposalWorkflowId)) {
+			_proposalWorkflowId = "";
+		}
 		// Seed default workflow selection to the first available id when no
 		// explicit choice has been made. The server now requires a real id
 		// (no "general" magic default), so the dropdown must show a valid
