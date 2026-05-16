@@ -1631,6 +1631,19 @@ export function createGateway(config: GatewayConfig) {
 			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
+			// Stop accepting NEW connections AND forcibly terminate existing
+			// keep-alive connections BEFORE we tear down the state stores.
+			// Without this, an HTTP/1.1 keep-alive connection from the client
+			// can still deliver a request to handleApiRoute mid-shutdown (e.g.
+			// during the awaits below), after projectContextManager.closeAll()
+			// has emptied the contexts map — producing spurious `Goal "X" not
+			// found in any project` errors. It also matters for the test
+			// crash/restart path: a stale keep-alive connection on the OLD
+			// server's accept() fd survives port reuse and routes new requests
+			// to the OLD (already torn down) handler closure. Forcibly closing
+			// connections forces clients to reconnect to the NEW server.
+			try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
+			server.close();
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
 			wss.close();
@@ -1644,7 +1657,6 @@ export function createGateway(config: GatewayConfig) {
 				await sandboxManager.shutdownAll();
 			}
 			await sessionManager.cleanupSandboxNetwork();
-			server.close();
 		},
 	};
 }
