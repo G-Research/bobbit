@@ -600,13 +600,26 @@ export function renderSessionRow(session: GatewaySession) {
 	`;
 
 	const navId = `session:${session.id}`;
+	// Keyboard nav can have moved the active row away from this session even
+	// while `state.selectedSessionId` (and thus `activeSessionId()`) still
+	// reports it as active — the route mutations that clear it run async via
+	// `handleHashChange`. The `sidebar-session-active` class and `data-nav-active`
+	// attribute are the single source of truth for "which row is currently the
+	// keyboard cursor / E2E active row", so they MUST respect a non-matching
+	// keyboard-nav override. Without this, two rows can carry the active class
+	// for a few ms after Ctrl+↓ off a session row, and any DOM-order based
+	// active-row query (incl. the sidebar-keyboard-nav E2E) reads the stale
+	// session row instead of the new target. Pinned by
+	// tests/e2e/ui/sidebar-keyboard-nav.spec.ts.
+	const kbOverride = getActiveNavId();
+	const navActive = kbOverride ? kbOverride === navId : active;
 	return html`
 		<div
 			data-session-id="${session.id}"
 			data-nav-id=${navId}
-			data-nav-active=${active ? "true" : "false"}
+			data-nav-active=${navActive ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
-				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+				${navActive ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}

@@ -188,7 +188,12 @@ const test = base;
 test.describe.configure({ mode: "serial" });
 
 test.describe("session-store crash-safety (E2E)", () => {
-	test("v2 shape on first boot: create 5 sessions, restart, all 5 survive with epoch >= 5", async () => {
+	// This test does 2 sequential gateway boots + 5 session creates + reload.
+	// Successful retry-run was 27s; the default 30s test timeout flakes
+	// borderline. A flake retry costs another ~27s, which contributed to the
+	// 900s E2E gate cap blowing. 60s gives ~2x headroom on the slow path.
+	test("v2 shape on first boot: create 5 sessions, restart, all 5 survive with epoch >= 5", async ({}, testInfo) => {
+		testInfo.setTimeout(60_000);
 		const bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-session-recovery-v2-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

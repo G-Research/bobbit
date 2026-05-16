@@ -83,7 +83,12 @@ async function waitForRemoteAgentConnected(page: import("@playwright/test").Page
 }
 
 test.describe("H3 — snapshot ↔ live interleave race", () => {
-	test.setTimeout(180_000);
+	// Tightened from 180_000 → 90_000: when this spec hangs (e.g. createSessionViaUI
+	// hanging on the New-session button) the test burns the entire test timeout
+	// before the retry can run. Empirically successful runs of (B)/(C)/(D) take
+	// 8–20s each, so 90s gives 4–10x headroom while halving wall-time cost of a
+	// hang to fit the 900s E2E gate cap.
+	test.setTimeout(90_000);
 
 	// QUARANTINED: H3-A is flaky on master (HEAD a9b87419 reproducible).
 	// Refinement of PR #520 (5f8207eb "Fix snapshot ↔ live-event race") is
@@ -211,7 +216,10 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 			await page.waitForFunction(
 				() => (window as any).__bobbitState.remoteAgent.state.isStreaming === false,
 				undefined,
-				{ timeout: 60_000 },
+				// Tightened 60_000 → 20_000: 5 outer iters × 60s could exceed the 90s
+				// describe timeout; 20s × 5 = 100s worst case, capped further by
+				// the test timeout. .catch swallows on overrun so coverage retained.
+				{ timeout: 20_000 },
 			).catch(() => {});
 			// Final resync to make sure server view is reflected.
 			await page.evaluate(() => {

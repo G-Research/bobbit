@@ -273,7 +273,17 @@ function writeSidecarPair(bobbitDir: string, sessionId: string, teamGoalId: stri
 const test = base;
 test.describe.configure({ mode: "serial" });
 
+// Each test performs TWO full gateway boots against the same BOBBIT_DIR (boot 1
+// to create the goal, boot 2 to exercise the backfill). A cold boot drags in
+// session-manager restore, LSP supervisor init, search-index open, the
+// background sweeper, and the two-pass cost backfill — easily 10-15s each on a
+// warm machine, and more under full-suite worker contention. The default 30s
+// Playwright test timeout puts these tests right at the edge: targeted runs
+// pass (~22s) but full-suite runs trip the timeout. Bump to 60s — bounded,
+// justified, and shared by both serial tests in the describe block. If a real
+// regression slows boot beyond this we still surface it via the bound.
 test.describe("cost backfill at gateway boot (E2E)", () => {
+	test.setTimeout(60_000);
 	test("stamps mappable legacy entries; unmapped ones surface as unattributableLegacy", async () => {
 		const bobbitDir = join(
 			E2E_TEMP_ROOT,

@@ -68,7 +68,33 @@ async function snapshotMessages(page: import("@playwright/test").Page): Promise<
 		// swap is in the DOM before we query.
 		await Promise.all(Array.from(DB.instances).map((inst) => inst.updateComplete ?? Promise.resolve()));
 	});
-	await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+	// Beyond DeferredBlock: tool cards (and the <expandable-section> inside
+	// proposal cards in particular) are Lit elements whose `updateComplete`
+	// resolves only after their render() has committed to the DOM. Without
+	// awaiting them we can snapshot textContent between Lit's microtask
+	// scheduling and its actual render — that's how a proposal preview
+	// ("proposal #N in stream burst") can appear in the post-refresh DOM but
+	// not in the live DOM that was sampled a beat too early. Drain every
+	// transcript-side custom element's update cycle, then drain it again in
+	// case settling one triggered a parent update. Two passes is enough in
+	// practice (a parent re-render can dirty children, but those children
+	// don't re-dirty the parent here).
+	async function settleLit(): Promise<void> {
+		await page.evaluate(async () => {
+			const sel = [
+				"user-message",
+				"assistant-message",
+				"tool-message",
+				"expandable-section",
+				"markdown-block",
+			].join(", ");
+			const nodes = Array.from(document.querySelectorAll(sel)) as Array<HTMLElement & { updateComplete?: Promise<unknown> }>;
+			await Promise.all(nodes.map((n) => n.updateComplete ?? Promise.resolve()));
+		});
+		await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+	}
+	await settleLit();
+	await settleLit();
 	return await page.evaluate(() => {
 		const sel = "user-message, assistant-message, tool-message";
 		const nodes = Array.from(document.querySelectorAll(sel)) as HTMLElement[];

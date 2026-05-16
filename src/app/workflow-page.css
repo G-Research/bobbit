@@ -998,3 +998,40 @@
 	.wf-gate-pill { font-size: 9px; padding: 1px 4px; }
 	.wf-gate-id { max-width: 100px; }
 }
+
+/* ============================================================================
+ * Reusable-renderer helpers
+ * Used by embeds (e.g. the goal-proposal modal) that consume the exported
+ * renderWorkflowList / renderWorkflowInspector / renderWorkflowEditor
+ * functions. Kept minimal — they add highlight/badging on top of existing
+ * wf-* classes without forking the page DOM.
+ * ============================================================================ */
+.wf-row-selected {
+	background: color-mix(in oklch, var(--primary) 10%, transparent);
+	border-color: var(--primary);
+}
+.wf-row-dirty {
+	color: var(--muted-foreground);
+	font-size: 11px;
+	font-weight: 400;
+	margin-left: 4px;
+}
+.wf-inspector-value {
+	font-size: 13px;
+	color: var(--foreground);
+	padding: 4px 0;
+}
+.wf-inspector-code {
+	margin: 4px 0;
+	padding: 8px;
+	background: var(--muted, color-mix(in oklch, var(--foreground) 5%, transparent));
+	border-radius: 4px;
+	font-family: var(--font-mono, monospace);
+	font-size: 12px;
+	white-space: pre-wrap;
+	overflow-x: auto;
+}
+.wf-gate-readonly .wf-gate-header,
+.wf-vstep-readonly .wf-vstep-collapsed-header {
+	cursor: default;
+}

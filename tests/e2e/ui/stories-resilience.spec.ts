@@ -259,6 +259,13 @@ test.describe("CT-05: Resilience", () => {
 	// ---------------------------------------------------------------
 
 	test("RE-08: Rapid crash-restart cycle stability", async () => {
+		// Three back-to-back crash+restart cycles plus 3 session creations
+		// reliably exceed the default 30s test timeout, which causes
+		// Playwright to close the page mid-cycle and surface as
+		// "Target page, context or browser has been closed" inside
+		// server_restart's page.waitForFunction. The contract under test
+		// is end-to-end resilience, not speed — give it room.
+		test.setTimeout(120_000);
 		s.begin(STORY_RE08);
 
 		// setup — sessions and goals exist

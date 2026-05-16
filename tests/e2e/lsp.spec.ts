@@ -64,24 +64,35 @@ test("POST /api/lsp/diagnostics — clean → dirty → revert", async ({}, test
 		expect(cleanBody.length).toBe(0);
 
 		await fs.writeFile(mathPath, `export function add(a: number, b: number): number {\n\treturn a + b + "oops";\n}\n`, "utf-8");
-		const dirty = await apiFetch("/api/lsp/diagnostics", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ path: "src/math.ts", cwd: FIXTURE }),
-		});
-		const dirtyBody = await dirty.json();
-		expect(Array.isArray(dirtyBody)).toBe(true);
-		expect(dirtyBody.length).toBeGreaterThanOrEqual(1);
+		// Poll /api/lsp/diagnostics until tsserver publishes the type error.
+		// Under full-suite load tsserver can take longer than the per-request
+		// settle window to flush diagnostics for a file it has already analyzed,
+		// returning a stale-but-200 empty array on the first call. We re-request
+		// each tick (cheap, idempotent) — each call re-issues didChange and waits
+		// for a fresh publishDiagnostics. Bounded to avoid hangs.
+		async function fetchDiagnostics(): Promise<unknown[]> {
+			const res = await apiFetch("/api/lsp/diagnostics", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: "src/math.ts", cwd: FIXTURE }),
+			});
+			expect(res.status).toBe(200);
+			const body = await res.json();
+			if (!Array.isArray(body)) throw new Error(`expected array, got ${JSON.stringify(body)}`);
+			return body;
+		}
+		await expect.poll(async () => (await fetchDiagnostics()).length, {
+			message: "dirty file should publish at least one diagnostic",
+			timeout: 15000,
+			intervals: [200, 300, 500, 750, 1000],
+		}).toBeGreaterThanOrEqual(1);
 
 		await fs.writeFile(mathPath, original, "utf-8");
-		const reverted = await apiFetch("/api/lsp/diagnostics", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ path: "src/math.ts", cwd: FIXTURE }),
-		});
-		const revertedBody = await reverted.json();
-		expect(Array.isArray(revertedBody)).toBe(true);
-		expect(revertedBody.length).toBe(0);
+		await expect.poll(async () => (await fetchDiagnostics()).length, {
+			message: "reverted file should publish zero diagnostics",
+			timeout: 15000,
+			intervals: [200, 300, 500, 750, 1000],
+		}).toBe(0);
 	} finally {
 		await fs.writeFile(mathPath, original, "utf-8");
 	}

@@ -5,7 +5,7 @@ import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, render } from "lit";
+import { html, render, nothing, type TemplateResult } from "lit";
 import { ref, createRef } from "lit/directives/ref.js";
 import { reconcileFollowTail } from "./follow-tail.js";
 import { shortcutHint } from "./shortcut-registry.js";
@@ -508,7 +508,20 @@ function renderMobileLanding() {
 // ============================================================================
 
 /** Cached workflows for goal creation dropdown — keyed per-project (workflows are project-scoped). */
-import { fetchWorkflows, type Workflow } from "./api.js";
+import { fetchWorkflows, fetchGroupPolicies, type Workflow, type RoleData } from "./api.js";
+import {
+	renderWorkflowList,
+	renderWorkflowInspector,
+	renderWorkflowEditor,
+	clearWorkflowEditorController,
+} from "./workflow-page.js";
+import {
+	renderRoleList,
+	renderRoleInspector,
+	renderRoleEditor,
+	fetchRolesForProject,
+	type RoleEditorDraft,
+} from "./role-manager-page.js";
 const _workflowCacheByProject = new Map<string, Workflow[]>();
 const _workflowsLoadingByProject = new Set<string>();
 let _cachedWorkflows: Workflow[] = [];
@@ -533,6 +546,29 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 	const cached = _workflowCacheByProject.get(projectId);
 	if (cached) {
 		_cachedWorkflows = cached;
+		// Stale-id normalization: if a previously-selected workflow id no
+		// longer exists in the cached list for this project (e.g. user
+		// switched projects, or the workflow was deleted), clear it so the
+		// seeding step below picks a valid first entry. Otherwise the
+		// dropdown shows a phantom selection and submit sends an unknown id.
+		const cachedIds = new Set(cached.map(w => w.id));
+		if (_selectedWorkflowId && !cachedIds.has(_selectedWorkflowId)) {
+			_selectedWorkflowId = "";
+		}
+		if (_proposalWorkflowId && !cachedIds.has(_proposalWorkflowId)) {
+			_proposalWorkflowId = "";
+		}
+		// Seed defaults from the cache too. The async fetch path below also
+		// seeds these, but a new proposal can reset _proposalWorkflowId to ""
+		// in syncProposalFormState() and then hit this cached branch — without
+		// this seeding the submit would send no workflow id and the server
+		// would fail for projects without a 'general' workflow.
+		if (!_selectedWorkflowId && cached.length > 0) {
+			_selectedWorkflowId = cached[0].id;
+		}
+		if (!_proposalWorkflowId && !_proposalInlineWorkflow && cached.length > 0) {
+			_proposalWorkflowId = cached[0].id;
+		}
 		return;
 	}
 	if (_workflowsLoadingByProject.has(projectId)) return;
@@ -541,6 +577,14 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		_workflowCacheByProject.set(projectId, wfs);
 		_workflowsLoadingByProject.delete(projectId);
 		_cachedWorkflows = wfs;
+		// Stale-id normalization (matches the cached path above).
+		const wfsIds = new Set(wfs.map(w => w.id));
+		if (_selectedWorkflowId && !wfsIds.has(_selectedWorkflowId)) {
+			_selectedWorkflowId = "";
+		}
+		if (_proposalWorkflowId && !wfsIds.has(_proposalWorkflowId)) {
+			_proposalWorkflowId = "";
+		}
 		// Seed default workflow selection to the first available id when no
 		// explicit choice has been made. The server now requires a real id
 		// (no "general" magic default), so the dropdown must show a valid
@@ -548,7 +592,7 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		if (!_selectedWorkflowId && wfs.length > 0) {
 			_selectedWorkflowId = wfs[0].id;
 		}
-		if (!_proposalWorkflowId && wfs.length > 0) {
+		if (!_proposalWorkflowId && !_proposalInlineWorkflow && wfs.length > 0) {
 			_proposalWorkflowId = wfs[0].id;
 		}
 		renderApp();
@@ -827,6 +871,41 @@ interface GoalFormConfig {
 	/** Invoked when the user changes the "Max depth" input. `null` means the
 	 *  user cleared the field (inherit system pref). */
 	onMaxNestingDepthChange?: (value: number | null) => void;
+
+	// ---- Proposal-modal tabs (Goal / Workflow / Roles) ----
+	/** When true, wrap the form body in a tabbed surface with Workflow + Roles
+	 *  tabs alongside Goal. The footer stays outside the panels so submit/dismiss
+	 *  remain visible on every tab. */
+	tabbed?: boolean;
+	activeTab?: ProposalTab;
+	onTabChange?: (tab: ProposalTab) => void;
+
+	/** Draft-scoped customised workflow. When non-null the submit path forwards
+	 *  it as `workflow` instead of `workflowId`. */
+	inlineWorkflow?: Workflow | null;
+	onInlineWorkflowChange?: (wf: Workflow | null) => void;
+	/** True when the right pane of the Workflow tab should render the editor
+	 *  instead of the read-only inspector. */
+	customizingWorkflow?: boolean;
+	onCustomizeWorkflow?: () => void;
+	onResetWorkflow?: () => void;
+
+	/** Draft-scoped per-role override map keyed by role name. */
+	inlineRoles?: Record<string, RoleData>;
+	selectedRoleName?: string | null;
+	onSelectRole?: (name: string) => void;
+	customizingRole?: boolean;
+	onCustomizeRole?: () => void;
+	onResetRole?: () => void;
+	onRoleDraftChange?: (patch: Partial<RoleEditorDraft>) => void;
+	onRoleEditorTabChange?: (tab: "prompt" | "tools" | "model") => void;
+	onRoleToggleToolGroup?: (group: string) => void;
+	roleEditTab?: "prompt" | "tools" | "model";
+	roleCollapsedGroups?: ReadonlySet<string>;
+	roleList?: RoleData[];
+	roleListLoading?: boolean;
+	availableTools?: ToolInfo[];
+	groupPolicies?: Record<string, string>;
 }
 
 function renderGoalForm(config: GoalFormConfig) {
@@ -864,8 +943,14 @@ function renderGoalForm(config: GoalFormConfig) {
 	});
 
 	const goalRev = state.activeProposals.goal?.rev ?? 0;
-	return html`
-		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
+	const tabbed = !!config.tabbed;
+	const activeTab: ProposalTab = config.activeTab ?? "goal";
+	const goalBody = html`
+		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5"
+			role=${tabbed ? "tabpanel" : nothing}
+			id=${tabbed ? "goal-proposal-panel-goal" : nothing}
+			aria-labelledby=${tabbed ? "goal-proposal-tab-goal" : nothing}
+			data-testid=${tabbed ? "goal-proposal-panel-goal" : nothing}>
 			${goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
 			${noWorkflows ? html`
 				<div
@@ -1132,6 +1217,8 @@ function renderGoalForm(config: GoalFormConfig) {
 				}
 			</div>
 		</div>
+	`;
+	const footer = html`
 		<div class="shrink-0 flex flex-col gap-3 px-5 py-3 border-t border-border">
 			<div class="flex items-center justify-end gap-2">
 				${config.streaming ? streamingBadge() : ""}
@@ -1162,6 +1249,263 @@ function renderGoalForm(config: GoalFormConfig) {
 			</div>
 		</div>
 	`;
+	if (!tabbed) {
+		return html`${goalBody}${footer}`;
+	}
+	const onTabChange = (t: ProposalTab) => config.onTabChange?.(t);
+	const onTabKey = (e: KeyboardEvent) => {
+		const order: ProposalTab[] = ["goal", "workflow", "roles"];
+		const i = order.indexOf(activeTab);
+		if (e.key === "ArrowRight") { e.preventDefault(); onTabChange(order[(i + 1) % order.length]); }
+		else if (e.key === "ArrowLeft") { e.preventDefault(); onTabChange(order[(i - 1 + order.length) % order.length]); }
+		else if (e.key === "Home") { e.preventDefault(); onTabChange(order[0]); }
+		else if (e.key === "End") { e.preventDefault(); onTabChange(order[order.length - 1]); }
+	};
+	const tabCls = (selected: boolean) => "px-3 py-1.5 text-xs font-medium border-b-2 transition-colors " + (selected
+		? "border-primary text-foreground"
+		: "border-transparent text-muted-foreground hover:text-foreground");
+	// Static literal testids so the source-pin tests can detect them via text search.
+	const tabBar = html`
+		<div role="tablist" aria-label="Goal proposal sections"
+			class="shrink-0 flex items-center gap-1 px-5 pt-2 border-b border-border">
+			<button
+				role="tab"
+				id="goal-proposal-tab-goal"
+				data-testid="goal-proposal-tab-goal"
+				aria-selected=${activeTab === "goal" ? "true" : "false"}
+				aria-controls="goal-proposal-panel-goal"
+				tabindex=${activeTab === "goal" ? 0 : -1}
+				class=${tabCls(activeTab === "goal")}
+				@click=${() => onTabChange("goal")}
+				@keydown=${onTabKey}
+			>Goal</button>
+			<button
+				role="tab"
+				id="goal-proposal-tab-workflow"
+				data-testid="goal-proposal-tab-workflow"
+				aria-selected=${activeTab === "workflow" ? "true" : "false"}
+				aria-controls="goal-proposal-panel-workflow"
+				tabindex=${activeTab === "workflow" ? 0 : -1}
+				class=${tabCls(activeTab === "workflow")}
+				@click=${() => onTabChange("workflow")}
+				@keydown=${onTabKey}
+			>Workflow</button>
+			<button
+				role="tab"
+				id="goal-proposal-tab-roles"
+				data-testid="goal-proposal-tab-roles"
+				aria-selected=${activeTab === "roles" ? "true" : "false"}
+				aria-controls="goal-proposal-panel-roles"
+				tabindex=${activeTab === "roles" ? 0 : -1}
+				class=${tabCls(activeTab === "roles")}
+				@click=${() => onTabChange("roles")}
+				@keydown=${onTabKey}
+			>Roles</button>
+		</div>
+	`;
+	const panel = activeTab === "goal"
+		? goalBody
+		: activeTab === "workflow"
+			? renderProposalWorkflowTab(config)
+			: renderProposalRolesTab(config);
+	return html`${tabBar}${panel}${footer}`;
+}
+
+// ============================================================================
+// PROPOSAL MODAL — WORKFLOW TAB
+//
+// Reuses renderWorkflowList / renderWorkflowInspector / renderWorkflowEditor
+// exported from src/app/workflow-page.ts so the DOM matches the main Workflows
+// page exactly. The editor runs in `goal-draft` scope: every mutation flows
+// back through `config.onInlineWorkflowChange` and NEVER mutates the project
+// workflow store.
+// ============================================================================
+function renderProposalWorkflowTab(config: GoalFormConfig): TemplateResult {
+	const selectedId = config.workflowId;
+	const workflows = _cachedWorkflows;
+	const inline = config.inlineWorkflow ?? null;
+	const customizing = !!config.customizingWorkflow && !!inline;
+	const selectedLibrary = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
+	const displayWf = inline ?? selectedLibrary;
+	const dirtyIds = new Set<string>();
+	if (inline) dirtyIds.add(inline.id);
+	return html`
+		<div class="flex-1 overflow-hidden flex min-h-0"
+			role="tabpanel"
+			id="goal-proposal-panel-workflow"
+			aria-labelledby="goal-proposal-tab-workflow"
+			data-testid="goal-proposal-panel-workflow">
+			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
+				${workflows.length === 0
+					? html`<p class="text-xs text-muted-foreground">No workflows available for this project.</p>`
+					: renderWorkflowList({
+						workflows,
+						selectedId,
+						dirtyIds,
+						onSelect: (wf) => {
+							const ev = new Event("change");
+							Object.defineProperty(ev, "target", { value: { value: wf.id } });
+							config.onWorkflowChange(ev);
+							config.onResetWorkflow?.();
+						},
+						scope: "goal-draft",
+					})}
+			</div>
+			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
+				<div class="flex items-center justify-end gap-2">
+					${customizing
+						? Button({
+								variant: "ghost",
+								size: "sm",
+								onClick: () => config.onResetWorkflow?.(),
+								children: html`<span data-testid="goal-proposal-workflow-reset">Reset to selected</span>`,
+						  })
+						: Button({
+								variant: "secondary",
+								size: "sm",
+								onClick: () => config.onCustomizeWorkflow?.(),
+								disabled: !selectedLibrary,
+								children: html`<span data-testid="goal-proposal-workflow-customize">Customize for this goal</span>`,
+						  })}
+				</div>
+				${customizing && inline
+					? renderWorkflowEditor({
+						workflow: inline,
+						onChange: (wf) => config.onInlineWorkflowChange?.(wf),
+						scope: "goal-draft",
+					})
+					: renderWorkflowInspector({ workflow: displayWf, scope: "goal-draft" })}
+			</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// PROPOSAL MODAL — ROLES TAB
+//
+// Reuses renderRoleList / renderRoleInspector / renderRoleEditor exported
+// from src/app/role-manager-page.ts. Customisations are kept in a
+// per-role-name map (`inlineRoles`) and only the subset the user actually
+// touched is forwarded to createGoal at submit time.
+// ============================================================================
+function renderProposalRolesTab(config: GoalFormConfig): TemplateResult {
+	const roles = config.roleList ?? [];
+	const selectedName = config.selectedRoleName ?? null;
+	const inlineMap = config.inlineRoles ?? {};
+	const customizedNames = new Set(Object.keys(inlineMap));
+	const selectedLibraryRole = roles.find((r) => r.name === selectedName) ?? roles[0] ?? null;
+	const inlineSelected = selectedName ? inlineMap[selectedName] : undefined;
+	const displayRole = inlineSelected ?? selectedLibraryRole;
+	const customizing = !!config.customizingRole && !!inlineSelected;
+	const availableTools = config.availableTools ?? [];
+	const groupPolicies = config.groupPolicies ?? {};
+	const draft: RoleEditorDraft | null = displayRole ? {
+		label: displayRole.label,
+		promptTemplate: displayRole.promptTemplate,
+		accessory: displayRole.accessory ?? "none",
+		toolPolicies: { ...(displayRole.toolPolicies ?? {}) },
+		model: displayRole.model ?? "",
+		thinkingLevel: displayRole.thinkingLevel ?? "",
+		activeTab: config.roleEditTab ?? "prompt",
+	} : null;
+	return html`
+		<div class="flex-1 overflow-hidden flex min-h-0"
+			role="tabpanel"
+			id="goal-proposal-panel-roles"
+			aria-labelledby="goal-proposal-tab-roles"
+			data-testid="goal-proposal-panel-roles">
+			<div class="w-64 shrink-0 border-r border-border overflow-y-auto p-3">
+				${config.roleListLoading
+					? html`<p class="text-xs text-muted-foreground">Loading roles…</p>`
+					: roles.length === 0
+						? html`<p class="text-xs text-muted-foreground">No roles available.</p>`
+						: renderRoleList({
+							roles,
+							selectedName,
+							customizedNames,
+							onSelect: (r) => config.onSelectRole?.(r.name),
+							scope: "goal-draft",
+						})}
+			</div>
+			<div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 min-w-0">
+				<div class="flex items-center justify-end gap-2">
+					${displayRole ? (customizing
+						? Button({
+								variant: "ghost",
+								size: "sm",
+								onClick: () => config.onResetRole?.(),
+								children: html`<span data-testid="goal-proposal-role-reset">Reset to default</span>`,
+						  })
+						: Button({
+								variant: "secondary",
+								size: "sm",
+								onClick: () => config.onCustomizeRole?.(),
+								children: html`<span data-testid="goal-proposal-role-customize">Customize for this goal</span>`,
+						  })) : nothing}
+				</div>
+				${displayRole && draft
+					? (customizing
+						? renderRoleEditor({
+							role: displayRole,
+							draft,
+							availableTools,
+							groupPolicies,
+							collapsedToolGroups: config.roleCollapsedGroups ?? new Set<string>(),
+							callbacks: {
+								onDraftChange: (patch) => config.onRoleDraftChange?.(patch),
+								onTabChange: (tab) => config.onRoleEditorTabChange?.(tab),
+								onToggleToolGroup: (g) => config.onRoleToggleToolGroup?.(g),
+							},
+							scope: "goal-draft",
+						})
+						: renderRoleInspector({
+							role: displayRole,
+							availableTools,
+							groupPolicies,
+							scope: "goal-draft",
+						}))
+					: html`<p class="text-xs text-muted-foreground">Select a role from the list to inspect or customise it.</p>`}
+			</div>
+		</div>
+	`;
+}
+
+/** Hydrate proposal-tab module state from a goal proposal in the preview-panel
+ *  (goal assistant) flow. Mirrors the Workflow / Roles inline hydration block
+ *  from `syncProposalFormState` without touching the title/spec/cwd/workflowId
+ *  state that the preview panel owns separately via `state.previewTitle` etc. */
+let _previewProposalInlineKey: string | null = null;
+function syncPreviewProposalTabsState(): void {
+	const slot = state.activeProposals.goal;
+	const proposal = slot?.fields as undefined | {
+		inlineWorkflow?: Workflow;
+		inlineRoles?: Record<string, RoleData>;
+	};
+	// Identity keyed by sessionId + initial inline payload, NOT mutable title/
+	// spec; otherwise streaming token updates would wipe the user's active tab
+	// and any draft customisations. Same proposal session => keep tabs.
+	const inlineKey = proposal?.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
+	const rolesKey = proposal?.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
+	const key = `${slot?.sessionId || ""}|${inlineKey}|${rolesKey}`;
+	if (_previewProposalInlineKey === key) return;
+	// NOTE: resetProposalTabsState() clears _previewProposalInlineKey, so set
+	// it AFTER the reset.
+	resetProposalTabsState();
+	_previewProposalInlineKey = key;
+	if (proposal?.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
+		_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
+		_proposalCustomizingWorkflow = true;
+		if (!_selectedWorkflowId) _selectedWorkflowId = _proposalInlineWorkflow.id;
+	}
+	if (proposal?.inlineRoles && typeof proposal.inlineRoles === "object") {
+		for (const [name, role] of Object.entries(proposal.inlineRoles)) {
+			if (role && typeof role === "object") {
+				_proposalInlineRoles[name] = cloneRole(role as RoleData);
+			}
+		}
+		const firstCustomized = Object.keys(_proposalInlineRoles)[0];
+		if (firstCustomized) _proposalSelectedRoleName = firstCustomized;
+	}
 }
 
 function goalPreviewPanel() {
@@ -1189,8 +1533,12 @@ function goalPreviewPanel() {
 			state.previewProjectId = candidate;
 		}
 	}
+	syncPreviewProposalTabsState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	ensureProposalRolesLoaded();
+	ensureProposalGroupPoliciesLoaded();
+	ensureToolsLoaded();
 
 	const handleCreateGoal = async () => {
 		const trimmedTitle = state.previewTitle.trim();
@@ -1221,6 +1569,12 @@ function goalPreviewPanel() {
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
+		// Customised inline workflow / roles from the modal tabs take precedence
+		// over the library workflowId. inlineRoles is only forwarded when non-empty.
+		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
+			? _proposalInlineRoles as Record<string, unknown>
+			: undefined;
 
 		// Await the server FIRST. If it rejects, leave the assistant session,
 		// draft, gateway.sessionId, and form state intact so the user can edit
@@ -1229,7 +1583,9 @@ function goalPreviewPanel() {
 		try {
 			goal = await createGoal(trimmedTitle, state.previewCwd.trim(), {
 				spec: state.previewSpec,
-				workflowId,
+				workflowId: inlineWorkflowField ? undefined : workflowId,
+				workflow: inlineWorkflowField,
+				inlineRoles: inlineRolesField,
 				reattemptOf: reattemptGoalId || undefined,
 				sandboxed,
 				projectId,
@@ -1262,6 +1618,8 @@ function goalPreviewPanel() {
 		_goalSandboxed = false;
 		_goalAutoStartTeam = true;
 		_assistantEnabledOptionalSteps = [];
+		resetProposalTabsState();
+		_previewProposalInlineKey = null;
 		if (sessionId) {
 			deleteGoalDraft(sessionId);
 		}
@@ -1354,7 +1712,17 @@ function goalPreviewPanel() {
 					if (sid) saveGoalDraft(sid);
 					renderApp();
 				},
-				onWorkflowChange: (e: Event) => { _selectedWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+				onWorkflowChange: (e: Event) => {
+					_selectedWorkflowId = (e.target as HTMLSelectElement).value;
+					// Changing the picker selects a different library workflow; any
+					// prior goal-draft inline workflow customisation is for the old
+					// selection and must be cleared so submit doesn't ship stale
+					// inline content alongside the newly-selected workflowId.
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					clearWorkflowEditorController();
+					renderApp();
+				},
 				onSandboxChange: (e: Event) => { _goalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 				onSpecEditToggle: () => { state.previewSpecEditMode = !state.previewSpecEditMode; renderApp(); },
 				onOptionalStepsChange: (steps) => { _assistantEnabledOptionalSteps = steps; renderApp(); },
@@ -1367,6 +1735,91 @@ function goalPreviewPanel() {
 				onCreate: handleCreateGoal,
 				streaming: isProposalStreaming("goal_proposal"),
 				commentable: true,
+
+				// ---- Proposal-modal tabs wiring (shared with goalProposalPanel) ----
+				tabbed: true,
+				activeTab: _proposalActiveTab,
+				onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
+
+				inlineWorkflow: _proposalInlineWorkflow,
+				customizingWorkflow: _proposalCustomizingWorkflow,
+				onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
+				onCustomizeWorkflow: () => {
+					const src = _cachedWorkflows.find((w) => w.id === _selectedWorkflowId) ?? _cachedWorkflows[0];
+					if (!src) return;
+					_proposalInlineWorkflow = cloneWorkflow(src);
+					_proposalCustomizingWorkflow = true;
+					clearWorkflowEditorController();
+					renderApp();
+				},
+				onResetWorkflow: () => {
+					_proposalInlineWorkflow = null;
+					_proposalCustomizingWorkflow = false;
+					// If the selected workflow id is from a seeded inline workflow
+					// that is not in the project's library, the user just discarded
+					// the only thing carrying that id. Snap back to a real library
+					// workflow so submit doesn't forward a stale inline-only id as
+					// `workflowId`. See goal-proposal-tabs spec — "Reset to selected
+					// normalizes stale inline id".
+					if (!_cachedWorkflows.some((w) => w.id === _selectedWorkflowId)) {
+						_selectedWorkflowId = _cachedWorkflows[0]?.id ?? "";
+					}
+					clearWorkflowEditorController();
+					renderApp();
+				},
+
+				inlineRoles: _proposalInlineRoles,
+				selectedRoleName: _proposalSelectedRoleName,
+				onSelectRole: (name) => {
+					_proposalSelectedRoleName = name;
+					_proposalCustomizingRole = !!_proposalInlineRoles[name];
+					renderApp();
+				},
+				customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
+				onCustomizeRole: () => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					const src = proposalRolesList().find((r) => r.name === name);
+					if (!src) return;
+					if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
+					_proposalCustomizingRole = true;
+					_proposalRoleEditTab = "prompt";
+					renderApp();
+				},
+				onResetRole: () => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					delete _proposalInlineRoles[name];
+					_proposalCustomizingRole = false;
+					renderApp();
+				},
+				onRoleDraftChange: (patch) => {
+					const name = _proposalSelectedRoleName;
+					if (!name) return;
+					const current = _proposalInlineRoles[name];
+					if (!current) return;
+					const next: RoleData = { ...current };
+					if (patch.label !== undefined) next.label = patch.label;
+					if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
+					if (patch.accessory !== undefined) next.accessory = patch.accessory;
+					if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
+					if (patch.model !== undefined) next.model = patch.model;
+					if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
+					_proposalInlineRoles[name] = next;
+					renderApp();
+				},
+				onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
+				onRoleToggleToolGroup: (group) => {
+					if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
+					else _proposalRoleCollapsedGroups.add(group);
+					renderApp();
+				},
+				roleEditTab: _proposalRoleEditTab,
+				roleCollapsedGroups: _proposalRoleCollapsedGroups,
+				roleList: proposalRolesList(),
+				roleListLoading: proposalRolesLoading(),
+				availableTools: _availableTools,
+				groupPolicies: _proposalGroupPoliciesCache ?? {},
 			})}
 		</div>
 	`;
@@ -2435,17 +2888,206 @@ let _proposalSandboxed = false;
 let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
+/**
+ * Identity key for resetting proposal-tab + inline-customisation state.
+ *
+ * Reset is keyed by the proposal slot's `sessionId` (and the *initial*
+ * inlineWorkflow/inlineRoles hydration payload) — NOT by mutable title/spec/
+ * cwd/workflow fields. Otherwise every keystroke that streams in from the
+ * agent (or any same-proposal field bump) would wipe the user's active tab
+ * and any draft workflow/role customisations. Same proposal => keep tabs.
+ */
+let _proposalTabsInitializedFrom: string | null = null;
 // Per-goal subgoal controls. null means "inherit system preference" — only forwarded
 // to createGoal when the user actually touched the control.
 let _proposalSubgoalsAllowed: boolean | null = null;
 let _proposalMaxNestingDepth: number | null = null;
 
+// ----------------------------------------------------------------------------
+// Proposal-modal tabs state (Goal / Workflow / Roles).
+//
+// `_proposalInlineWorkflow` is the draft-scoped customised workflow — when
+// non-null, the submit path forwards it as `workflow` instead of
+// `workflowId`. `_proposalInlineRoles` is the draft-scoped per-role override
+// map keyed by role name; the submit path forwards it as `inlineRoles` when
+// non-empty. Neither mutates the project workflow/role store.
+//
+// Regression context: commit 46e21256 silently dropped the inline-workflow
+// + inline-roles editor surface from this file. This is its replacement —
+// a tabbed UI reusing the main Workflows/Roles page renderers. Pinned by
+// tests/source-pin-merge-invariants.test.ts.
+// ----------------------------------------------------------------------------
+type ProposalTab = "goal" | "workflow" | "roles";
+let _proposalActiveTab: ProposalTab = "goal";
+let _proposalInlineWorkflow: Workflow | null = null;
+let _proposalInlineRoles: Record<string, RoleData> = {};
+let _proposalSelectedRoleName: string | null = null;
+let _proposalCustomizingWorkflow = false;
+let _proposalCustomizingRole = false;
+// Role-editor draft state for the role currently being customised in the
+// goal-draft modal scope (separate from the page-shell module state in
+// role-manager-page.ts).
+let _proposalRoleEditTab: "prompt" | "tools" | "model" = "prompt";
+let _proposalRoleCollapsedGroups = new Set<string>();
+// Role data caches for the modal, project-scoped: roles can be customised per
+// project, so we must key the cache by `projectId` ("" for system scope) and
+// re-fetch when the selected project changes. Mirrors the main Roles page's
+// `fetchRolesScoped()` semantics — must use `/api/roles?projectId=...`, not
+// the global `/api/roles`, otherwise project overrides aren't visible.
+const _proposalRolesCacheByProject = new Map<string, RoleData[]>();
+const _proposalRolesLoadingByProject = new Set<string>();
+let _proposalGroupPoliciesCache: Record<string, string> | null = null;
+let _proposalGroupPoliciesLoading = false;
+
+function proposalRolesProjectKey(): string {
+	return state.previewProjectId || "";
+}
+
+/** Read-only accessor: roles list for the modal's currently-selected project. */
+function proposalRolesList(): RoleData[] {
+	return _proposalRolesCacheByProject.get(proposalRolesProjectKey()) ?? [];
+}
+
+function proposalRolesLoading(): boolean {
+	return _proposalRolesLoadingByProject.has(proposalRolesProjectKey());
+}
+
+function ensureProposalRolesLoaded(): void {
+	const key = proposalRolesProjectKey();
+	if (_proposalRolesCacheByProject.has(key) || _proposalRolesLoadingByProject.has(key)) return;
+	_proposalRolesLoadingByProject.add(key);
+	fetchRolesForProject(key || undefined)
+		.then((list) => {
+			_proposalRolesCacheByProject.set(key, list);
+			_proposalRolesLoadingByProject.delete(key);
+			// Only update selection / re-render if the user hasn't switched
+			// projects since this fetch started.
+			if (proposalRolesProjectKey() === key && !_proposalSelectedRoleName && list.length > 0) {
+				_proposalSelectedRoleName = list[0].name;
+			}
+			renderApp();
+		})
+		.catch(() => {
+			_proposalRolesCacheByProject.set(key, []);
+			_proposalRolesLoadingByProject.delete(key);
+			renderApp();
+		});
+}
+
+function ensureProposalGroupPoliciesLoaded(): void {
+	if (_proposalGroupPoliciesCache !== null || _proposalGroupPoliciesLoading) return;
+	_proposalGroupPoliciesLoading = true;
+	fetchGroupPolicies().then((gp) => {
+		_proposalGroupPoliciesCache = gp;
+		_proposalGroupPoliciesLoading = false;
+		renderApp();
+	}).catch(() => {
+		_proposalGroupPoliciesCache = {};
+		_proposalGroupPoliciesLoading = false;
+		renderApp();
+	});
+}
+
+/** Deep-clone a Workflow so editor mutations never touch the cached library copy. */
+function cloneWorkflow(wf: Workflow): Workflow {
+	return {
+		...wf,
+		gates: (wf.gates || []).map((g) => ({
+			...g,
+			dependsOn: [...(g.dependsOn || [])],
+			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			metadata: g.metadata ? { ...g.metadata } : undefined,
+		})),
+	};
+}
+
+/** Deep-clone a RoleData so editor mutations never touch the cached library copy. */
+function cloneRole(r: RoleData): RoleData {
+	return {
+		...r,
+		toolPolicies: { ...(r.toolPolicies ?? {}) },
+	};
+}
+
+/** Reset all proposal-tab module state. Called when the proposal is dismissed
+ *  or successfully accepted, and when syncing from a new proposal payload.
+ *
+ *  Also clears the hydration identity keys (`_proposalTabsInitializedFrom`,
+ *  `_previewProposalInlineKey`) so that the *next* proposal in the same
+ *  session re-hydrates even when its inline workflow/roles payload happens
+ *  to match the previous one byte-for-byte. Forgetting to clear these keys
+ *  caused a silent regression: dismiss/accept left the stale key in place,
+ *  so a follow-up proposal with identical inline payload but a different
+ *  title/spec was treated as "same proposal", hydration was skipped, and
+ *  the inline workflow/roles were silently omitted on accept. */
+function resetProposalTabsState(): void {
+	_proposalActiveTab = "goal";
+	_proposalInlineWorkflow = null;
+	_proposalInlineRoles = {};
+	_proposalSelectedRoleName = null;
+	_proposalCustomizingWorkflow = false;
+	_proposalCustomizingRole = false;
+	_proposalRoleEditTab = "prompt";
+	_proposalRoleCollapsedGroups = new Set<string>();
+	_proposalTabsInitializedFrom = null;
+	_previewProposalInlineKey = null;
+	clearWorkflowEditorController();
+}
+
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string; parentGoalId?: string };
-	if (!proposal) return;
-	// Use a simple identity check to avoid re-initializing on every render
-	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
+	const slot = state.activeProposals.goal;
+	const proposal = slot?.fields as undefined | {
+		title: string;
+		spec: string;
+		cwd?: string;
+		workflow?: string;
+		options?: string;
+		parentGoalId?: string;
+		inlineWorkflow?: Workflow;
+		inlineRoles?: Record<string, RoleData>;
+	};
+	if (!slot || !proposal) return;
+
+	// --- Tab + inline-customisation reset identity ---------------------------
+	// Keyed by sessionId + initial inline payload. Mutable title/spec/cwd/
+	// workflow/options must NOT trigger a tab reset, otherwise the user loses
+	// their active tab + draft workflow/role edits every time the agent streams
+	// a token. See `_proposalTabsInitializedFrom` comment above.
+	const inlineKey = proposal.inlineWorkflow ? JSON.stringify(proposal.inlineWorkflow) : "";
+	const rolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
+	const tabsKey = `${slot.sessionId}|${inlineKey}|${rolesKey}`;
+	if (_proposalTabsInitializedFrom !== tabsKey) {
+		// Hydrate proposal-tab state: agent-supplied inlineWorkflow / inlineRoles
+		// pre-populate the Workflow / Roles tabs so the user can inspect and tweak
+		// the customisations before accepting. Reset every other tab control to
+		// defaults so a fresh proposal (different sessionId) doesn't leak prior
+		// draft state.
+		// NOTE: resetProposalTabsState() also clears _proposalTabsInitializedFrom,
+		// so we must set it AFTER the reset, not before.
+		resetProposalTabsState();
+		_proposalTabsInitializedFrom = tabsKey;
+		if (proposal.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
+			_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
+			_proposalCustomizingWorkflow = true;
+		}
+		if (proposal.inlineRoles && typeof proposal.inlineRoles === "object") {
+			for (const [name, role] of Object.entries(proposal.inlineRoles)) {
+				if (role && typeof role === "object") {
+					_proposalInlineRoles[name] = cloneRole(role as RoleData);
+				}
+			}
+			const firstCustomized = Object.keys(_proposalInlineRoles)[0];
+			if (firstCustomized) {
+				_proposalSelectedRoleName = firstCustomized;
+			}
+		}
+	}
+
+	// --- Mutable field sync (title/spec/cwd/workflow/options/parent) ---------
+	// This is allowed to refresh on every proposal update; it does NOT touch
+	// tab state or inline-customisation drafts.
+	const key = `${slot.sessionId}|${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}`;
 	if (_proposalInitializedFrom === key) return;
 	_proposalInitializedFrom = key;
 	_proposalTitle = proposal.title;
@@ -2455,6 +3097,9 @@ function syncProposalFormState(): void {
 	const proposalProject = state.previewProjectId ? state.projects.find(p => p.id === state.previewProjectId) : undefined;
 	_proposalCwd = proposal.cwd || proposalProject?.rootPath || "";
 	_proposalWorkflowId = proposal.workflow || "";
+	if (!_proposalWorkflowId && _proposalInlineWorkflow) {
+		_proposalWorkflowId = _proposalInlineWorkflow.id;
+	}
 	_proposalSpecEditMode = false;
 	_proposalEnabledOptionalSteps = proposal.options
 		? proposal.options.split(",").map(s => s.trim()).filter(Boolean)
@@ -2492,6 +3137,9 @@ function goalProposalPanel() {
 	syncProposalFormState();
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
+	ensureProposalRolesLoaded();
+	ensureProposalGroupPoliciesLoaded();
+	ensureToolsLoaded();
 	const subgoalsEnabled = document.documentElement.dataset.subgoalsEnabled === "true";
 	const maxNestingDepth = parseInt(document.documentElement.dataset.maxNestingDepth || "3", 10);
 
@@ -2530,9 +3178,17 @@ function goalProposalPanel() {
 				const maxNestingDepthField = subgoalsEnabled && _proposalMaxNestingDepth !== null
 					? _proposalMaxNestingDepth
 					: undefined;
+				// Customised inline workflow takes precedence over the library
+				// workflowId. inlineRoles is only forwarded when non-empty.
+				const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
+				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
+					? _proposalInlineRoles as Record<string, unknown>
+					: undefined;
 				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
 					spec: _proposalSpec,
-					workflowId,
+					workflowId: inlineWorkflowField ? undefined : workflowId,
+					workflow: inlineWorkflowField,
+					inlineRoles: inlineRolesField,
 					sandboxed,
 					projectId,
 					enabledOptionalSteps,
@@ -2557,6 +3213,7 @@ function goalProposalPanel() {
 			_proposalParentGoalId = "";
 			_proposalSubgoalsAllowed = null;
 			_proposalMaxNestingDepth = null;
+			resetProposalTabsState();
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -2582,6 +3239,7 @@ function goalProposalPanel() {
 		_proposalParentGoalId = "";
 		_proposalSubgoalsAllowed = null;
 		_proposalMaxNestingDepth = null;
+		resetProposalTabsState();
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
 		if (sid && dismissed) markProposalDismissed(sid, dismissed);
@@ -2610,7 +3268,17 @@ function goalProposalPanel() {
 		onSpecChange: (e: Event) => { _proposalSpec = (e.target as HTMLTextAreaElement).value; },
 		onCwdChange: (v) => { _proposalCwd = v; renderApp(); },
 		onCwdSelect: (v) => { _proposalCwd = v; renderApp(); },
-		onWorkflowChange: (e: Event) => { _proposalWorkflowId = (e.target as HTMLSelectElement).value; renderApp(); },
+		onWorkflowChange: (e: Event) => {
+			_proposalWorkflowId = (e.target as HTMLSelectElement).value;
+			// Changing the picker selects a different library workflow; any
+			// prior goal-draft inline workflow customisation is for the old
+			// selection and must be cleared so submit doesn't ship stale
+			// inline content alongside the newly-selected workflowId.
+			_proposalInlineWorkflow = null;
+			_proposalCustomizingWorkflow = false;
+			clearWorkflowEditorController();
+			renderApp();
+		},
 		onSandboxChange: (e: Event) => { _proposalSandboxed = (e.target as HTMLInputElement).checked; renderApp(); },
 		onSpecEditToggle: () => { _proposalSpecEditMode = !_proposalSpecEditMode; renderApp(); },
 		onOptionalStepsChange: (steps) => { _proposalEnabledOptionalSteps = steps; renderApp(); },
@@ -2648,6 +3316,90 @@ function goalProposalPanel() {
 			_proposalMaxNestingDepth = value;
 			renderApp();
 		},
+
+		// ---- Proposal-modal tabs wiring ----
+		tabbed: true,
+		activeTab: _proposalActiveTab,
+		onTabChange: (tab) => { _proposalActiveTab = tab; renderApp(); },
+
+		inlineWorkflow: _proposalInlineWorkflow,
+		customizingWorkflow: _proposalCustomizingWorkflow,
+		onInlineWorkflowChange: (wf) => { _proposalInlineWorkflow = wf; renderApp(); },
+		onCustomizeWorkflow: () => {
+			const src = _cachedWorkflows.find((w) => w.id === _proposalWorkflowId) ?? _cachedWorkflows[0];
+			if (!src) return;
+			_proposalInlineWorkflow = cloneWorkflow(src);
+			_proposalCustomizingWorkflow = true;
+			clearWorkflowEditorController();
+			renderApp();
+		},
+		onResetWorkflow: () => {
+			_proposalInlineWorkflow = null;
+			_proposalCustomizingWorkflow = false;
+			// Normalize a stale inline-only id back to a real library workflow
+			// — otherwise submit forwards the seeded inline workflow's id as
+			// `workflowId` even though the inline content has been discarded.
+			// See goal-proposal-tabs spec — "Reset to selected normalizes stale
+			// inline id".
+			if (!_cachedWorkflows.some((w) => w.id === _proposalWorkflowId)) {
+				_proposalWorkflowId = _cachedWorkflows[0]?.id ?? "";
+			}
+			clearWorkflowEditorController();
+			renderApp();
+		},
+
+		inlineRoles: _proposalInlineRoles,
+		selectedRoleName: _proposalSelectedRoleName,
+		onSelectRole: (name) => {
+			_proposalSelectedRoleName = name;
+			_proposalCustomizingRole = !!_proposalInlineRoles[name];
+			renderApp();
+		},
+		customizingRole: _proposalCustomizingRole && !!_proposalSelectedRoleName && !!_proposalInlineRoles[_proposalSelectedRoleName],
+		onCustomizeRole: () => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			const src = proposalRolesList().find((r) => r.name === name);
+			if (!src) return;
+			if (!_proposalInlineRoles[name]) _proposalInlineRoles[name] = cloneRole(src);
+			_proposalCustomizingRole = true;
+			_proposalRoleEditTab = "prompt";
+			renderApp();
+		},
+		onResetRole: () => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			delete _proposalInlineRoles[name];
+			_proposalCustomizingRole = false;
+			renderApp();
+		},
+		onRoleDraftChange: (patch) => {
+			const name = _proposalSelectedRoleName;
+			if (!name) return;
+			const current = _proposalInlineRoles[name];
+			if (!current) return;
+			const next: RoleData = { ...current };
+			if (patch.label !== undefined) next.label = patch.label;
+			if (patch.promptTemplate !== undefined) next.promptTemplate = patch.promptTemplate;
+			if (patch.accessory !== undefined) next.accessory = patch.accessory;
+			if (patch.toolPolicies !== undefined) next.toolPolicies = patch.toolPolicies;
+			if (patch.model !== undefined) next.model = patch.model;
+			if (patch.thinkingLevel !== undefined) next.thinkingLevel = patch.thinkingLevel;
+			_proposalInlineRoles[name] = next;
+			renderApp();
+		},
+		onRoleEditorTabChange: (tab) => { _proposalRoleEditTab = tab; renderApp(); },
+		onRoleToggleToolGroup: (group) => {
+			if (_proposalRoleCollapsedGroups.has(group)) _proposalRoleCollapsedGroups.delete(group);
+			else _proposalRoleCollapsedGroups.add(group);
+			renderApp();
+		},
+		roleEditTab: _proposalRoleEditTab,
+		roleCollapsedGroups: _proposalRoleCollapsedGroups,
+		roleList: proposalRolesList(),
+		roleListLoading: proposalRolesLoading(),
+		availableTools: _availableTools,
+		groupPolicies: _proposalGroupPoliciesCache ?? {},
 	});
 }
 

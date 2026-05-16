@@ -347,9 +347,14 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			try {
+				// Parent-scoped route enforces server-side that the target is a
+				// DIRECT child of `goalId` — prevents a team-lead from archiving
+				// arbitrary goals by supplying their id. See server.ts
+				// `archiveChildMatch` handler.
 				let q = `?cascade=${params.cascade ? "true" : "false"}`;
 				if (params.mergedManually === true) q += "&mergedManually=true";
-				return ok(await api("DELETE", `/api/goals/${params.childGoalId}${q}`));
+				const path = `/api/goals/${encodeURIComponent(goalId!)}/archive-child/${encodeURIComponent(params.childGoalId)}${q}`;
+				return ok(await api("DELETE", path));
 			} catch (e: any) { return err(e.message); }
 		},
 	});

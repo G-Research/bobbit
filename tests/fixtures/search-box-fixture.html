@@ -237,6 +237,25 @@ window.clearEvents = () => { _events.length = 0; };
 window.getActiveElement = () => document.activeElement?.id || document.activeElement?.tagName;
 window.isControlsRowVisible = () => controlsRow.style.opacity === "1";
 
+// Deterministic test helpers — let tests drive the debounce contract without
+// depending on real-time scheduling under load. The production handler is
+// unchanged; these only provide a way to synchronously dispatch input events
+// and to flush the pending debounce timer.
+window.dispatchInput = (value) => {
+  searchInput.value = value;
+  searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+};
+window.hasPendingDebounce = () => _debounceTimer !== null;
+window.flushDebounce = () => {
+  if (_debounceTimer !== null) {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = null;
+    _fireEvent("search-input", { query: _query });
+    return true;
+  }
+  return false;
+};
+
 // SearchResults API
 window.setResultsState = (state) => { _resultsData = { ..._resultsData, ...state }; _renderResults(); };
 window.getResultsHTML = () => resultsRoot.innerHTML;
