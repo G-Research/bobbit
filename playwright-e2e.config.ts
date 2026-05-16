@@ -17,12 +17,16 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Retries policy: 3 everywhere for now. Real bugs fail all 4 attempts;
-// flakes (Windows-FS races, goal-assistant cold-start timeouts) absorb
-// the retry. Will tighten back to 0 once the flake floor is fully fixed.
+// Retries policy: 1 retry. Previously 3 — with ~1200 tests and a 900s
+// wall-clock verification gate cap, each retry on a real failure cost up
+// to 4× test duration; even a small persistent flake cluster could push
+// the suite past the gate (the locally-observed 1050/1234 in ~17min that
+// motivated this change). With retries=1 a single transient flake is still
+// absorbed (the original reason for >0), but the worst-case multiplier is
+// halved. Tighten to 0 once the flake floor is fully fixed.
 export default defineConfig({
 	timeout: 30_000,
-	retries: 3,
+	retries: 1,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain
@@ -32,8 +36,11 @@ export default defineConfig({
 	// Lowered from 6 to 4: empirically, 6 workers triggered FS-contention
 	// flakes (POST /api/sessions → 500 under worktree setup races) without
 	// providing a meaningful wall-clock win once browser project is capped
-	// at 3 anyway.
-	workers: 4,
+	// at 3 anyway. Per-project caps (api=4, browser=3) still apply, so the
+	// FS-contention regime is not re-entered; the top-level cap of 5 only
+	// matters at the project boundary where api and browser briefly
+	// interleave during teardown/spinup of the next project.
+	workers: 5,
 	// `line` reporter streams one line per test completion to stdout, with
 	// no batching — unlike `list` which redraws in place and buffers heavily
 	// when stdout is not a TTY (the verification-harness tailer sees nothing
