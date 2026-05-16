@@ -1034,6 +1034,93 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 		}
 	});
 
+	test("cached workflows path: default workflowId is seeded for a fresh proposal (regression for ensureWorkflowsLoaded cached branch)", async ({ page }) => {
+		// Regression: ensureWorkflowsLoaded() only seeded _selectedWorkflowId /
+		// _proposalWorkflowId in the async fetch path. Once workflows were
+		// cached for the project, a NEW proposal with no explicit `workflow`
+		// field would hit the cached branch after syncProposalFormState() had
+		// reset _proposalWorkflowId to "". The submit then went out with no
+		// workflowId, and the server (which no longer has a `general` magic
+		// default) rejected projects that lack `general`. Pin: a second back-
+		// to-back proposal in the same browser context still submits with a
+		// valid workflowId. See render.ts::ensureWorkflowsLoaded.
+		test.setTimeout(90_000);
+		const sessionA = await createSession();
+		const sessionB = await createSession();
+		const titleA = `Modal cached wf A ${Date.now()}`;
+		const titleB = `Modal cached wf B ${Date.now()}`;
+		let createdA: string | undefined;
+		let createdB: string | undefined;
+		try {
+			// --- First proposal: warms the workflow cache for the project. ---
+			await seedGoalProposal(sessionA, { title: titleA, spec: "Warm cache." });
+			await openSession(page, sessionA);
+			await waitForProposalForm(page, titleA);
+			const wfPicker = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+			await expect(wfPicker).toBeVisible({ timeout: 10_000 });
+			// Wait for the picker to actually have a populated option (i.e. the
+			// fetch path has resolved and populated the per-project cache).
+			await expect.poll(
+				async () => (await wfPicker.inputValue()).length > 0,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+
+			// --- Second proposal: same page, same project cache, NO explicit
+			// workflow on the seed. This is the cached-branch regression repro.
+			await seedGoalProposal(sessionB, { title: titleB, spec: "Cached branch repro." });
+			await openSession(page, sessionB);
+			await waitForProposalForm(page, titleB);
+
+			// Picker must show a valid default workflow id (not empty).
+			const wfPickerB = page.locator("[data-testid='goal-proposal-panel-goal'] select").first();
+			await expect(wfPickerB).toBeVisible({ timeout: 10_000 });
+			await expect.poll(
+				async () => (await wfPickerB.inputValue()).length > 0,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+			const defaultId = await wfPickerB.inputValue();
+			expect(defaultId, "cached path must seed a default workflowId on a fresh proposal").toBeTruthy();
+
+			// Submit B and capture the POST body — workflowId must be present.
+			let capturedB: any = null;
+			page.on("request", (req) => {
+				if (
+					req.url().includes("/api/goals") &&
+					!req.url().includes("/api/goals/") &&
+					req.method() === "POST"
+				) {
+					try { capturedB = JSON.parse(req.postData() || "null"); } catch {}
+				}
+			});
+			const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createBtn).toBeEnabled({ timeout: 5_000 });
+			const respPromise = page.waitForResponse(
+				resp => resp.url().includes("/api/goals")
+					&& resp.request().method() === "POST"
+					&& resp.ok(),
+				{ timeout: 20_000 },
+			);
+			await createBtn.click();
+			await respPromise;
+
+			expect(capturedB, "POST /api/goals body must be captured").toBeTruthy();
+			expect(capturedB.workflowId, "cached path must forward a real workflowId on submit").toBe(defaultId);
+			expect(capturedB.workflow, "no customisation — inline workflow must be omitted").toBeFalsy();
+
+			await expect.poll(
+				async () => (await findGoalByTitle(titleB))?.id,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+			createdB = (await findGoalByTitle(titleB))?.id;
+			createdA = (await findGoalByTitle(titleA))?.id;
+		} finally {
+			await deleteGoalIfExists(createdA);
+			await deleteGoalIfExists(createdB);
+			await deleteSession(sessionA);
+			await deleteSession(sessionB);
+		}
+	});
+
 	test("roles tab loads project-scoped roles via /api/roles?projectId=...", async ({ page }) => {
 		// Regression guard: the modal's roles loader used to be unscoped
 		// (`gatewayFetch("/api/roles")` with a single global cache), which

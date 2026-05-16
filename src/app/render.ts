@@ -546,6 +546,17 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 	const cached = _workflowCacheByProject.get(projectId);
 	if (cached) {
 		_cachedWorkflows = cached;
+		// Seed defaults from the cache too. The async fetch path below also
+		// seeds these, but a new proposal can reset _proposalWorkflowId to ""
+		// in syncProposalFormState() and then hit this cached branch — without
+		// this seeding the submit would send no workflow id and the server
+		// would fail for projects without a 'general' workflow.
+		if (!_selectedWorkflowId && cached.length > 0) {
+			_selectedWorkflowId = cached[0].id;
+		}
+		if (!_proposalWorkflowId && !_proposalInlineWorkflow && cached.length > 0) {
+			_proposalWorkflowId = cached[0].id;
+		}
 		return;
 	}
 	if (_workflowsLoadingByProject.has(projectId)) return;
@@ -561,7 +572,7 @@ function ensureWorkflowsLoaded(projectId?: string): void {
 		if (!_selectedWorkflowId && wfs.length > 0) {
 			_selectedWorkflowId = wfs[0].id;
 		}
-		if (!_proposalWorkflowId && wfs.length > 0) {
+		if (!_proposalWorkflowId && !_proposalInlineWorkflow && wfs.length > 0) {
 			_proposalWorkflowId = wfs[0].id;
 		}
 		renderApp();
