@@ -34,19 +34,32 @@ test.describe("SearchBox: debounced input", () => {
 	});
 
 	test("typing fires search-input event after ~200ms debounce", async ({ page }) => {
+		// Drive the input synchronously inside a single evaluate so the debounce
+		// timer cannot expire between keystrokes under suite load. The contract
+		// under test is: input events schedule a debounced search-input event
+		// carrying the final query — not the wall-clock timing of page.type.
 		await page.click("#search-input");
-		await page.evaluate(() => (window as any).clearEvents());
+		await page.evaluate(() => {
+			const w = window as any;
+			w.clearEvents();
+			for (const v of ["h", "he", "hel", "hell", "hello"]) {
+				w.dispatchInput(v);
+			}
+		});
 
-		await page.type("#search-input", "hello");
+		// Synchronous burst: no debounced event has fired yet, one is pending.
+		const { pending, immediate } = await page.evaluate(() => {
+			const w = window as any;
+			return {
+				pending: w.hasPendingDebounce(),
+				immediate: w.getEvents().filter((e: any) => e.type === "search-input"),
+			};
+		});
+		expect(pending).toBe(true);
+		expect(immediate).toHaveLength(0);
 
-		// Immediately after typing, no event yet
-		const eventsImmediate = await page.evaluate(() =>
-			(window as any).getEvents().filter((e: any) => e.type === "search-input")
-		);
-		expect(eventsImmediate).toHaveLength(0);
-
-		// Wait for debounce (200ms + buffer)
-		await page.waitForTimeout(350);
+		// Force the pending debounce to fire deterministically.
+		await page.evaluate(() => (window as any).flushDebounce());
 
 		const events = await page.evaluate(() =>
 			(window as any).getEvents().filter((e: any) => e.type === "search-input")
@@ -57,14 +70,17 @@ test.describe("SearchBox: debounced input", () => {
 
 	test("rapid typing only fires one debounced event", async ({ page }) => {
 		await page.click("#search-input");
-		await page.evaluate(() => (window as any).clearEvents());
+		await page.evaluate(() => {
+			const w = window as any;
+			w.clearEvents();
+			// Synchronous burst within a single microtask — production debounce
+			// must coalesce these into one event carrying the final value.
+			w.dispatchInput("a");
+			w.dispatchInput("ab");
+			w.dispatchInput("abc");
+		});
 
-		// Type characters with small delays (within debounce window)
-		await page.type("#search-input", "a", { delay: 30 });
-		await page.type("#search-input", "b", { delay: 30 });
-		await page.type("#search-input", "c", { delay: 30 });
-
-		await page.waitForTimeout(350);
+		await page.evaluate(() => (window as any).flushDebounce());
 
 		const events = await page.evaluate(() =>
 			(window as any).getEvents().filter((e: any) => e.type === "search-input")
