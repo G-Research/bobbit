@@ -159,6 +159,28 @@ export function getVisibleNavOrder(): string[] {
 // OPEN / NAVIGATE
 // ============================================================================
 
+/** Hashes recently authored by `openForNavItem` (directly or via its async
+ *  tail, e.g. `connectToSession`'s deferred `setHashRoute`). The hashchange
+ *  override-clear listener consults this set so a *stale* tail from an
+ *  earlier press cannot clobber the override the latest press just set.
+ *
+ *  Without this guard, rapid Ctrl+↑/↓ across a session row + any other kind
+ *  reliably drops a keystroke: the session navigation's async hash commit
+ *  fires after the next press has already updated the override, the hash
+ *  doesn't match the new override's `navIdToHash`, and the listener clears
+ *  it — causing `getActiveNavId()` to fall back to `selectedSessionId` and
+ *  re-report the previous (session) row. Pinned by
+ *  tests/e2e/ui/sidebar-keyboard-nav.spec.ts. */
+const _recentNavHashes = new Set<string>();
+function _noteAuthoredHash(h: string | null): void {
+	if (!h) return;
+	_recentNavHashes.add(h);
+	// 2s is long enough to cover the slowest realistic async tail
+	// (connectToSession's dynamic import + WS reconnect) without leaking
+	// authorship into a subsequent unrelated user navigation.
+	setTimeout(() => { _recentNavHashes.delete(h); }, 2000);
+}
+
 /** Route to (or otherwise open) the destination for a nav item, and remember
  *  it as the keyboard-active row so the sidebar can highlight it. */
 export function openForNavItem(item: NavItem): void {
@@ -166,6 +188,10 @@ export function openForNavItem(item: NavItem): void {
 	// Set the override BEFORE mutating the route, so the hashchange listener
 	// always sees a matching hash + override pair and never spuriously clears.
 	state.keyboardNavActiveId = navId;
+	// Remember the hash this nav will (eventually) land on, so a stale async
+	// hash commit from an earlier openForNavItem can't trigger the
+	// override-clear listener and drop the keystroke.
+	_noteAuthoredHash(navIdToHash(navId));
 	switch (item.kind) {
 		case "session":
 			// Fire-and-forget. selectSession (sync) sets hash + selectedSessionId;
@@ -248,9 +274,13 @@ export function installKeyboardNavOverrideClearListener(): void {
 		const o = state.keyboardNavActiveId;
 		if (!o) return;
 		const expected = navIdToHash(o);
-		if (expected && window.location.hash !== expected) {
-			state.keyboardNavActiveId = null;
-			renderApp();
-		}
+		const current = window.location.hash;
+		if (!expected || current === expected) return;
+		// Stale hash commit from an earlier openForNavItem's async tail
+		// (e.g. connectToSession's deferred setHashRoute). The override the
+		// LATEST press set is still the user's intent — don't clobber it.
+		if (_recentNavHashes.has(current)) return;
+		state.keyboardNavActiveId = null;
+		renderApp();
 	});
 }
