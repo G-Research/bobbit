@@ -41,6 +41,29 @@ export const TRANSIENT_ERROR_PATTERNS = [
 	// promotes recovery to `_rerunLlmReviewStep`, which rebuilds the kickoff
 	// from the workflow step definition and drives a fresh review session.
 	"Agent did not call verification_result after server restart and reminder",
+	// Provider overload / rate-limit / quota-throttle conditions. These are
+	// transient too, but `isProviderBackoffError()` classifies them more
+	// narrowly so SessionManager can select an unbounded retry policy.
+	"overloaded_error",
+	"rate_limit_error",
+];
+
+/**
+ * Regex patterns that indicate a provider overload / rate-limit / quota
+ * throttle. Distinct from the JSON-glitch regexes — these warrant
+ * effectively unbounded retry with long backoff rather than a bounded
+ * burst of 3 attempts.
+ */
+export const PROVIDER_BACKOFF_REGEXES: RegExp[] = [
+	// HTTP 429 (rate limit) and 529 (Anthropic overload) in any common SDK
+	// phrasing: "HTTP 429", "status 429", "statusCode: 429", "status code 429".
+	// NB: must list 429 and 529 explicitly — an earlier `5?29` shorthand also
+	// matched bogus "HTTP 29" and missed 429 entirely.
+	/\b(?:HTTP|status(?:[ _-]?code)?:?)\s*(?:429|529)\b/i,
+	// Provider error type markers (also covered as literal substrings above,
+	// but kept here for completeness when matched via the classifier).
+	/overloaded_error/i,
+	/rate_limit_error/i,
 ];
 
 // ---------------------------------------------------------------------------
@@ -181,12 +204,32 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 
 function matchesAnyTransient(output: string): boolean {
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
-	return TRANSIENT_ERROR_REGEXES.some(re => re.test(output));
+	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
+	// Provider overload / rate-limit conditions (HTTP 429/529 phrasings) are
+	// transient too — keep `isTransientReviewError()` as the single source of
+	// truth so any consumer that gates on "transient" also covers these.
+	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
 /** Check if an LLM review error output matches a transient failure pattern. */
 export function isTransientReviewError(output: string): boolean {
 	return matchesAnyTransient(output);
+}
+
+/**
+ * Narrow classifier for provider overload / rate-limit / quota throttle
+ * conditions that warrant an effectively unbounded retry with long backoff
+ * (capped at 5 min) rather than the default bounded 3-attempt policy.
+ *
+ * `isTransientReviewError()` returns true for these too — they are
+ * transient — but SessionManager uses this narrower check to pick the
+ * unbounded policy.
+ */
+export function isProviderBackoffError(output: string): boolean {
+	if (!output) return false;
+	if (output.includes("overloaded_error")) return true;
+	if (output.includes("rate_limit_error")) return true;
+	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
 /** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */

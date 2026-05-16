@@ -48,6 +48,7 @@ before(() => {
 				JSON.stringify({
 					url: `/preview/${SID}/inline.html`,
 					path: `/state/preview/${SID}/inline.html`,
+					relPath: `${SID}/inline.html`,
 					entry: "inline.html",
 					mtime: 1714512345678,
 				}),
@@ -121,6 +122,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 					body: {
 						url: `/preview/${SID}/report.html`,
 						path: filePath,
+						relPath: `${SID}/report.html`,
 						entry: "report.html",
 						mtime: 1714512345678,
 					},
@@ -142,7 +144,10 @@ describe("preview_open extension (v3 mount contract)", () => {
 			assert.ok(parsed && parsed.kind === "preview");
 			if (parsed && parsed.kind === "preview") {
 				assert.match(parsed.url, /^\/preview\//);
-				assert.strictEqual(parsed.path, filePath);
+				// The snapshot block carries the host-invariant relPath form, NOT
+				// the host-absolute path — that's what keeps the v3 block under
+				// the 250 B cap regardless of where the project lives on disk.
+				assert.strictEqual(parsed.path, `${SID}/report.html`);
 			}
 
 			const mountPosts = fetchCalls.filter(
@@ -217,14 +222,12 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.strictEqual(body.file, undefined);
 	});
 
-	it("v3 marker block is constant-size and ≤ 250 bytes for typical session id + entry", async () => {
-		// Direct builder test — simulate a real (longest-realistic) host path.
+	it("v3 marker block is constant-size and ≤ 250 bytes for the canonical normalised path", async () => {
+		// Canonical normalised form — `<sid>/<entry>` regardless of host OS.
+		// This is what the extension feeds the builder in production.
 		const url = `/preview/${SID}/report.html`;
-		const hostPath =
-			"/Users/jane.developer/Library/Application Support/bobbit/state/preview/" +
-			SID +
-			"/report.html";
-		const block = buildPreviewSnapshotV3Block(url, hostPath);
+		const relPath = `${SID}/report.html`;
+		const block = buildPreviewSnapshotV3Block(url, relPath);
 		assert.ok(
 			block.length <= 250,
 			`v3 block must be ≤ 250 bytes, got ${block.length} (${block})`,
@@ -232,6 +235,28 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 		const parsed = parseSnapshot(block);
 		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.path, relPath);
+		}
+	});
+
+	it("builder still round-trips on long legacy host-absolute paths (contract preserved)", async () => {
+		// The builder accepts any non-empty string for backwards compatibility
+		// with archived sessions that recorded the legacy host-abs `path` form.
+		// Such blocks may be > 250 B — the cap only holds when callers pass the
+		// canonical relPath form. This test pins the parse-round-trip contract.
+		const url = `/preview/${SID}/report.html`;
+		const legacyHostPath =
+			"/Users/jane.developer/Library/Application Support/bobbit/state/preview/" +
+			SID +
+			"/report.html";
+		const block = buildPreviewSnapshotV3Block(url, legacyHostPath);
+		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const parsed = parseSnapshot(block);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.path, legacyHostPath);
+		}
 	});
 
 	it("token cost: snapshot block is constant-size for huge HTML payloads", async () => {
@@ -239,8 +264,42 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const huge = "<p>" + "x".repeat(100_000) + "</p>";
 		const res = await tool.execute("call-huge", { html: huge });
 		assert.strictEqual(res.content.length, 2);
-		// Snapshot block must NOT scale with input size.
-		assert.ok(res.content[1].text.length < 500, `snapshot was ${res.content[1].text.length} bytes`);
+		// Snapshot block must NOT scale with input size, AND must stay under the
+		// canonical 250 B per-block cap because the extension now feeds the
+		// builder the host-invariant relPath form rather than the host-absolute
+		// path. See `defaults/tools/html/extension.ts`.
+		assert.ok(
+			res.content[1].text.length <= 250,
+			`snapshot was ${res.content[1].text.length} bytes (cap 250)`,
+		);
 		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+	});
+
+	it("extension falls back to host-absolute path when gateway response omits relPath (older gateway)", async () => {
+		const tool = getTool();
+		// Simulate an older gateway build that doesn't populate `relPath`.
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/inline.html`,
+						path: `/old-gateway/state/preview/${SID}/inline.html`,
+						// no relPath field
+						entry: "inline.html",
+						mtime: 1714512345678,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+		const res = await tool.execute("call-fallback", { html: "<p>x</p>" });
+		assert.strictEqual(res.content.length, 2);
+		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const parsed = parseSnapshot(res.content[1].text);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.path, `/old-gateway/state/preview/${SID}/inline.html`);
+		}
 	});
 });

@@ -1,6 +1,26 @@
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 
+/** Server-scheduled retry timer for a transient or provider-overload failure.
+ *  Wrapped as an agent event in `{ type: "event", data: AutoRetryPendingEvent }`. */
+export interface AutoRetryPendingEvent {
+	type: "auto_retry_pending";
+	/** "provider-overload" → 429 / explicit backoff hint; "transient-error" → other retryable. */
+	reason: "provider-overload" | "transient-error";
+	retryDelayMs: number;
+	attempt: number;
+	scheduledAt: number;
+	error?: string;
+}
+
+/** Server cancelled a pending auto-retry timer.
+ *  Wrapped as an agent event in `{ type: "event", data: AutoRetryCancelledEvent }`. */
+export interface AutoRetryCancelledEvent {
+	type: "auto_retry_cancelled";
+	reason: "explicit-retry" | "new-prompt" | "terminated" | "shutdown";
+	cancelledAt: number;
+}
+
 /** A message waiting in the server-side prompt queue */
 export interface QueuedMessage {
 	id: string;

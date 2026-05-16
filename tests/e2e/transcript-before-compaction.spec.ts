@@ -215,13 +215,15 @@ test.describe("GET /api/sessions/:id/transcript/before-compaction", () => {
 
 		const otherRoot = path.join(gateway.bobbitDir, "other-proj-precomp");
 		fs.mkdirSync(otherRoot, { recursive: true });
-		const createResp = await fetch(`${base()}/api/projects`, {
-			method: "POST",
-			headers: authHeaders(),
-			body: JSON.stringify({ name: "other-precomp", rootPath: otherRoot, upsert: true, acceptCanonical: true, __e2e_seed_skip__: true }),
+		// Use the shared helper so rootPath is canonicalized (handles the macOS
+		// /var → /private/var tmpdir symlink) and acceptCanonical:true is set.
+		const { registerProject } = await import("./e2e-setup.js");
+		const otherProj = await registerProject({
+			name: "other-precomp",
+			rootPath: otherRoot,
+			upsert: true,
+			seedWorkflows: false,
 		});
-		expect(createResp.ok).toBe(true);
-		const otherProj = await createResp.json();
 		const otherProjectId = otherProj.id;
 		expect(otherProjectId).toBeTruthy();
 		expect(otherProjectId).not.toBe(reg?.list?.()?.[0]?.id);

@@ -205,6 +205,52 @@ export interface PipelineContext {
 
 // ── Retry helper ───────────────────────────────────────────────────────────
 
+/**
+ * Pure exponential-backoff delay calculator.
+ *
+ * - `attempt` is 1-based. Raw delay = `baseMs * 2 ** (attempt - 1)`.
+ * - Raw delay is capped at `maxMs` BEFORE jitter is applied.
+ * - When `jitterRatio > 0`, a symmetric multiplier in
+ *   `[1 - jitterRatio, 1 + jitterRatio]` is applied (using `random()`,
+ *   default `Math.random`).
+ * - Final delay is clamped to `[0, maxMs]` so jitter can never exceed the
+ *   configured cap.
+ *
+ * Used by `SessionManager.maybeAutoRetryTransient()` for provider
+ * overload/rate-limit backoff. Pure — no I/O, no timers — to keep the
+ * scheduling logic in session-manager and the math here testable in
+ * isolation.
+ */
+export function nextBackoffDelay(
+	attempt: number,
+	opts?: {
+		baseMs?: number;
+		maxMs?: number;
+		jitterRatio?: number;
+		random?: () => number;
+	},
+): number {
+	const baseMs = opts?.baseMs ?? 1000;
+	const maxMs = opts?.maxMs ?? Number.POSITIVE_INFINITY;
+	const jitterRatio = Math.max(0, opts?.jitterRatio ?? 0);
+	const random = opts?.random ?? Math.random;
+
+	const safeAttempt = Math.max(1, Math.floor(attempt));
+	// Cap the exponent so 2^n stays finite for very large attempt counts.
+	const exponent = Math.min(safeAttempt - 1, 60);
+	const raw = baseMs * Math.pow(2, exponent);
+	const capped = Math.min(raw, maxMs);
+
+	let delay = capped;
+	if (jitterRatio > 0) {
+		const multiplier = 1 + (random() * 2 - 1) * jitterRatio;
+		delay = capped * multiplier;
+	}
+	if (delay < 0) delay = 0;
+	if (delay > maxMs) delay = maxMs;
+	return delay;
+}
+
 export async function withRetry<T>(
 	fn: () => Promise<T>,
 	opts: { retries: number; delays: number[]; label: string; sessionId: string },

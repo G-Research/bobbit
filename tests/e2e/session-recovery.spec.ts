@@ -118,6 +118,9 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		// Register the default project at the bobbitDir, mirroring the in-process
 		// harness. The session-store under test lives at
 		// `<rootPath>/.bobbit/state/sessions.json`.
+		// acceptCanonical:true handles the macOS /var → /private/var tmpdir symlink
+		// (bobbitDir lives under tmpdir()). Without it the server rejects with 400
+		// symlink_root and the rest of this fixture has nothing to register against.
 		const resp = await fetch(`${baseURL}/api/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },

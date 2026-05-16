@@ -102,11 +102,12 @@ test.describe("Goal proposal spec survives navigate-away/back", () => {
 		await waitForHealth();
 	});
 
-	// FIXME: regressed somewhere in the master-merge pipeline — rendered
-	// spec body comes back as "_No spec content yet_" after a nav-away/back.
-	// The rehydrate path appears to drop the spec field. Out of scope for
-	// the LSP goal; original behaviour is covered by
-	// tests/proposal-rehydrate.test.ts at the unit layer.
+	// FIXME: after nav-away/back the rehydrated goal-proposal panel renders
+	// `_No spec content yet_` instead of the spec body. Out of scope for
+	// PR #599 (auto-retry); tracked in docs/design/proposal-spec-rehydrate.md.
+	// Server-side rehydrate parsing is locked by
+	// `tests/proposal-rehydrate.test.ts`; the bug is client-side (see the
+	// linked design note for hypotheses A/B/C and the diagnostic plan).
 	test.fixme("@repro spec body persists after sidebar nav + return", async ({ page }) => {
 		await openGoalAssistantWithProposal(page);
 

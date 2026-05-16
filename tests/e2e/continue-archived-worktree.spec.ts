@@ -77,13 +77,14 @@ test.describe("Continue-Archived from worktree-backed source", () => {
 	let projectId: string;
 
 	test.beforeAll(async () => {
-		const base = join(tmpdir(), `bobbit-e2e-cont-wt-${process.pid}-${Date.now()}`);
-		const rawRepo = join(base, "repo");
-		mkdirSync(rawRepo, { recursive: true });
-		// macOS tmpdir is a symlink (/var → /private/var). Both the project
-		// rootPath and the session cwd must be canonical so they match
-		// post-canonicalisation on the server side.
-		repoPath = realpathSync(rawRepo);
+		// Canonicalize the tmpdir up-front so all downstream paths (project
+		// rootPath, session cwd, worktreePath, slugifyCwd output) speak the
+		// same canonical form. On macOS tmpdir() returns /var/folders/...
+		// which is a symlink to /private/var/folders/...; mixing the two
+		// breaks worktree allocation and slug-equality assertions below.
+		const base = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-${process.pid}-${Date.now()}`;
+		repoPath = join(base, "repo");
+		mkdirSync(repoPath, { recursive: true });
 		execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath });
 		execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath });
 		execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath });

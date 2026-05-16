@@ -20,7 +20,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -44,14 +44,11 @@ const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 // local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
 // is outside the git repo — otherwise isGitRepo() returns true for the project
 // rootPath and sessions auto-create worktrees (slow, conflicts with git state).
-// Use realpathSync so macOS symlinked /var/folders/... resolves to /private/var/...
-// before any project rootPath is constructed. This avoids symlink_root rejections
-// in tests that create sub-projects from bobbitDir-derived paths.
 const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 	? "/tmp"
 	: process.platform === "win32"
 		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(realpathSync(tmpdir()), "bobbit-e2e");
+		: join(tmpdir(), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -88,12 +85,15 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
-		// Canonicalize: see gateway-harness.ts for the same rationale
-		// (/var/folders -> /private/var/folders on macOS).
+		// Canonicalize: see gateway-harness.ts for the full rationale
+		// (/var/folders → /private/var/folders on macOS; mixing symlink and
+		// canonical forms breaks POST /api/projects symlink_root checks AND
+		// the preview-mount path-guard containment check, producing 400 instead
+		// of 404 for missing files).
 		try {
 			const { realpathSync } = await import("node:fs");
 			bobbitDir = realpathSync(bobbitDir);
-		} catch { /* fall back */ }
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Seed projects.json. The server no longer auto-registers a default project,
 		// so we register one explicitly via the API after startup (see below) to
 		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
@@ -199,11 +199,12 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				// `acceptCanonical: true` is required on macOS where `os.tmpdir()`
-				// returns `/var/folders/...` which is a symlink to `/private/var/...`.
-				// Without it, the registry rejects the rootPath with `symlink_root`
-				// and the harness boots with zero projects — silently breaking
-				// every test that relies on `apiFetch` auto-injecting a projectId.
+				// acceptCanonical=true is needed on macOS, where TMPDIR
+				// (/var/folders/...) is a symlink to /private/var/folders/...
+				// Without it, the server rejects the register with a
+				// SymlinkProjectRootError 400 and the harness silently runs
+				// with zero registered projects — every POST /api/sessions
+				// or /api/goals then 400s with "projectId required".
 				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }

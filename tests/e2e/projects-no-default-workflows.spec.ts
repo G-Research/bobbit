@@ -6,7 +6,7 @@
  * See docs/internals.md and the "No default workflow scaffold" design doc.
  */
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base } from "./e2e-setup.js";
+import { readE2EToken, base, registerProject } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -53,18 +53,15 @@ test.describe("No default workflow scaffold", () => {
 		gitInit(root);
 
 		const projName = `nodef-a-${Date.now()}`;
-		const res = await fetch(`${base()}/api/projects`, {
-			method: "POST",
-			headers: headers(),
-			body: JSON.stringify({
-				name: projName,
-				rootPath: root,
-				components: [{ name: projName, repo: "." }],
-				// NOTE: no `workflows` field
-			}),
+		// seedWorkflows:false suppresses apiFetch's auto-seed helper, which would
+		// otherwise PUT a baseline workflows block into the fresh project and
+		// defeat the "zero workflows" invariant under test.
+		const project = await registerProject({
+			name: projName,
+			rootPath: root,
+			components: [{ name: projName, repo: "." }],
+			seedWorkflows: false,
 		});
-		expect([200, 201]).toContain(res.status);
-		const project = await res.json();
 
 		// Wait briefly for the autosave to flush.
 		const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
@@ -99,17 +96,12 @@ test.describe("No default workflow scaffold", () => {
 			},
 		};
 
-		const res = await fetch(`${base()}/api/projects`, {
-			method: "POST",
-			headers: headers(),
-			body: JSON.stringify({
-				name: projName,
-				rootPath: root,
-				components: [{ name: projName, repo: "." }],
-				workflows: inlineWorkflows,
-			}),
+		await registerProject({
+			name: projName,
+			rootPath: root,
+			components: [{ name: projName, repo: "." }],
+			workflows: inlineWorkflows,
 		});
-		expect([200, 201]).toContain(res.status);
 
 		const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
@@ -134,17 +126,12 @@ test.describe("No default workflow scaffold", () => {
 		gitInit(root);
 
 		const projName = `nodef-c-${Date.now()}`;
-		const res = await fetch(`${base()}/api/projects`, {
-			method: "POST",
-			headers: headers(),
-			body: JSON.stringify({
-				name: projName,
-				rootPath: root,
-				components: [{ name: projName, repo: "." }],
-			}),
+		const project = await registerProject({
+			name: projName,
+			rootPath: root,
+			components: [{ name: projName, repo: "." }],
+			seedWorkflows: false,
 		});
-		expect([200, 201]).toContain(res.status);
-		const project = await res.json();
 
 		const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
 		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
