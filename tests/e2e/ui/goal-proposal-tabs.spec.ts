@@ -907,6 +907,133 @@ test.describe("Proposal modal tabs — Goal / Workflow / Roles", () => {
 		}
 	});
 
+	test("inline hydration re-fires for a follow-up proposal in the same session (reset-key bug)", async ({ page }) => {
+		// Regression guard: `_proposalTabsInitializedFrom` / `_previewProposalInlineKey`
+		// are hydration identity keys. Dismiss/accept used to clear most tab
+		// state via `resetProposalTabsState()` but leave these keys in place.
+		// Then if the SAME session received another proposal whose inline
+		// workflow/roles payload was byte-identical to the previous one but
+		// whose title/spec differed, the identity key matched the stale value
+		// → `syncProposalFormState` and `syncPreviewProposalTabsState` skipped
+		// the inline-hydration block entirely → the Workflow/Roles tabs stayed
+		// unhydrated → the inline payload was silently omitted on accept.
+		//
+		// Fix: clear both keys inside `resetProposalTabsState()` and set them
+		// AFTER the reset at the two sync sites.
+		test.setTimeout(90_000);
+		const title1 = `Modal hydrate retry A ${Date.now()}`;
+		const title2 = `Modal hydrate retry B ${Date.now()}`;
+		const sessionId = await createSession();
+		let createdGoalId: string | undefined;
+		try {
+			// --- 1) Seed first proposal with inlineWorkflow + inlineRoles. -------
+			await seedGoalProposal(sessionId, {
+				title: title1,
+				spec: "First spec.",
+				inlineWorkflow: SAMPLE_INLINE_WORKFLOW,
+				inlineRoles: SAMPLE_INLINE_ROLES,
+			});
+			await openSession(page, sessionId);
+			await waitForProposalForm(page, title1);
+
+			// Workflow tab is hydrated → editor + Reset button visible.
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			const wfPanel = page.locator("[data-testid='goal-proposal-panel-workflow']").first();
+			await expect(wfPanel).toBeVisible();
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+			).toBeVisible({ timeout: 15_000 });
+
+			// Roles tab is hydrated → `coder` role marked customized.
+			await page.locator("[data-testid='goal-proposal-tab-roles']").first().click();
+			const rolesPanel = page.locator("[data-testid='goal-proposal-panel-roles']").first();
+			await expect(
+				rolesPanel.locator(".role-row[data-role-name='coder'].role-row--customized").first(),
+			).toBeVisible({ timeout: 15_000 });
+
+			// --- 2) Dismiss the first proposal. ----------------------------------
+			const dismissBtn = page.getByRole("button", { name: "Dismiss", exact: true }).first();
+			await expect(dismissBtn).toBeVisible();
+			await dismissBtn.click();
+
+			// Proposal panel disappears.
+			await expect(
+				page.locator("input[placeholder='Goal title']"),
+			).toHaveCount(0, { timeout: 10_000 });
+
+			// --- 3) Seed a SECOND proposal — same inline payload, different ------
+			//     title + spec. This is the bug repro: the stale identity key
+			//     (sessionId + serialized inline payload) is byte-identical to
+			//     the first proposal, so without the fix, hydration is skipped.
+			await seedGoalProposal(sessionId, {
+				title: title2,
+				spec: "Second spec — totally different from first.",
+				inlineWorkflow: SAMPLE_INLINE_WORKFLOW,
+				inlineRoles: SAMPLE_INLINE_ROLES,
+			});
+
+			// Modal re-appears with the new title.
+			await waitForProposalForm(page, title2);
+
+			// --- 4) Hydration must have fired AGAIN — Workflow tab editor live. --
+			await page.locator("[data-testid='goal-proposal-tab-workflow']").first().click();
+			await expect(
+				wfPanel.locator("[data-testid='goal-proposal-workflow-reset']").first(),
+			).toBeVisible({ timeout: 15_000 });
+			await expect(
+				wfPanel.locator("[data-testid='workflow-editor']").first(),
+			).toBeVisible({ timeout: 5_000 });
+
+			// Roles tab also rehydrated.
+			await page.locator("[data-testid='goal-proposal-tab-roles']").first().click();
+			await expect(
+				rolesPanel.locator(".role-row[data-role-name='coder'].role-row--customized").first(),
+			).toBeVisible({ timeout: 15_000 });
+
+			// --- 5) Submit and assert inline payloads ride along. ----------------
+			let captured: any = null;
+			page.on("request", (req) => {
+				if (
+					req.url().includes("/api/goals") &&
+					!req.url().includes("/api/goals/") &&
+					req.method() === "POST"
+				) {
+					try { captured = JSON.parse(req.postData() || "null"); } catch {}
+				}
+			});
+
+			const createBtn = page.locator("button").filter({ hasText: "Create Goal" }).first();
+			await expect(createBtn).toBeEnabled({ timeout: 5_000 });
+			const respPromise = page.waitForResponse(
+				resp => resp.url().includes("/api/goals")
+					&& resp.request().method() === "POST"
+					&& resp.ok(),
+				{ timeout: 20_000 },
+			);
+			await createBtn.click();
+			await respPromise;
+
+			expect(captured, "POST /api/goals body must be captured").toBeTruthy();
+			expect(captured.workflow, "inline workflow must ride along on the SECOND proposal")
+				.toBeTruthy();
+			expect(typeof captured.workflow).toBe("object");
+			expect(captured.workflow.id, "inline workflow must carry the seeded id")
+				.toBe(SAMPLE_INLINE_WORKFLOW.id);
+			expect(captured.inlineRoles, "inlineRoles must ride along on the SECOND proposal")
+				.toBeTruthy();
+			expect(Object.keys(captured.inlineRoles)).toContain("coder");
+
+			await expect.poll(
+				async () => (await findGoalByTitle(title2))?.id,
+				{ timeout: 10_000 },
+			).toBeTruthy();
+			createdGoalId = (await findGoalByTitle(title2))?.id;
+		} finally {
+			await deleteGoalIfExists(createdGoalId);
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("roles tab loads project-scoped roles via /api/roles?projectId=...", async ({ page }) => {
 		// Regression guard: the modal's roles loader used to be unscoped
 		// (`gatewayFetch("/api/roles")` with a single global cache), which

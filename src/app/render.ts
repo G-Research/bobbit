@@ -1457,8 +1457,10 @@ function syncPreviewProposalTabsState(): void {
 	const rolesKey = proposal?.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
 	const key = `${slot?.sessionId || ""}|${inlineKey}|${rolesKey}`;
 	if (_previewProposalInlineKey === key) return;
-	_previewProposalInlineKey = key;
+	// NOTE: resetProposalTabsState() clears _previewProposalInlineKey, so set
+	// it AFTER the reset.
 	resetProposalTabsState();
+	_previewProposalInlineKey = key;
 	if (proposal?.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
 		_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
 		_proposalCustomizingWorkflow = true;
@@ -2977,7 +2979,16 @@ function cloneRole(r: RoleData): RoleData {
 }
 
 /** Reset all proposal-tab module state. Called when the proposal is dismissed
- *  or successfully accepted, and when syncing from a new proposal payload. */
+ *  or successfully accepted, and when syncing from a new proposal payload.
+ *
+ *  Also clears the hydration identity keys (`_proposalTabsInitializedFrom`,
+ *  `_previewProposalInlineKey`) so that the *next* proposal in the same
+ *  session re-hydrates even when its inline workflow/roles payload happens
+ *  to match the previous one byte-for-byte. Forgetting to clear these keys
+ *  caused a silent regression: dismiss/accept left the stale key in place,
+ *  so a follow-up proposal with identical inline payload but a different
+ *  title/spec was treated as "same proposal", hydration was skipped, and
+ *  the inline workflow/roles were silently omitted on accept. */
 function resetProposalTabsState(): void {
 	_proposalActiveTab = "goal";
 	_proposalInlineWorkflow = null;
@@ -2987,6 +2998,8 @@ function resetProposalTabsState(): void {
 	_proposalCustomizingRole = false;
 	_proposalRoleEditTab = "prompt";
 	_proposalRoleCollapsedGroups = new Set<string>();
+	_proposalTabsInitializedFrom = null;
+	_previewProposalInlineKey = null;
 	clearWorkflowEditorController();
 }
 
@@ -3014,13 +3027,15 @@ function syncProposalFormState(): void {
 	const rolesKey = proposal.inlineRoles ? JSON.stringify(proposal.inlineRoles) : "";
 	const tabsKey = `${slot.sessionId}|${inlineKey}|${rolesKey}`;
 	if (_proposalTabsInitializedFrom !== tabsKey) {
-		_proposalTabsInitializedFrom = tabsKey;
 		// Hydrate proposal-tab state: agent-supplied inlineWorkflow / inlineRoles
 		// pre-populate the Workflow / Roles tabs so the user can inspect and tweak
 		// the customisations before accepting. Reset every other tab control to
 		// defaults so a fresh proposal (different sessionId) doesn't leak prior
 		// draft state.
+		// NOTE: resetProposalTabsState() also clears _proposalTabsInitializedFrom,
+		// so we must set it AFTER the reset, not before.
 		resetProposalTabsState();
+		_proposalTabsInitializedFrom = tabsKey;
 		if (proposal.inlineWorkflow && typeof proposal.inlineWorkflow === "object" && (proposal.inlineWorkflow as Workflow).id) {
 			_proposalInlineWorkflow = cloneWorkflow(proposal.inlineWorkflow as Workflow);
 			_proposalCustomizingWorkflow = true;
