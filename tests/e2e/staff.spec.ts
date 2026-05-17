@@ -225,47 +225,9 @@ test.describe("Staff Agents — REST API", () => {
 		expect(gitTrigger.enabled).toBe(false);
 	});
 
-	test("POST /api/staff/:id/wake enqueues prompt on existing permanent session", async () => {
-		const staff = await apiCreateStaff(token, {
-			name: "Wakeable Agent",
-			systemPrompt: "You can be woken.",
-			cwd: gitCwd(),
-		});
-		cleanupStaffIds.push(staff.id);
-		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
-
-		// First wake — should return the permanent session ID
-		const wakeRes = await apiFetch(`/api/staff/${staff.id}/wake`, {
-			method: "POST",
-			body: JSON.stringify({ prompt: "Hello, wake up!" }),
-		});
-		expect(wakeRes.status).toBe(201);
-		const wakeData = await wakeRes.json();
-		expect(wakeData.sessionId).toBe(staff.currentSessionId);
-
-		// Verify the session has staffId
-		const sessionRes = await apiFetch(`/api/sessions/${wakeData.sessionId}`, {
-		});
-		expect(sessionRes.ok).toBe(true);
-		const session = await sessionRes.json();
-		expect(session.staffId).toBe(staff.id);
-
-		// Verify the staff agent's lastWakeAt is updated
-		const staffRes = await apiFetch(`/api/staff/${staff.id}`, {
-		});
-		const updatedStaff = await staffRes.json();
-		expect(updatedStaff.lastWakeAt).toBeGreaterThan(0);
-		expect(updatedStaff.currentSessionId).toBe(wakeData.sessionId);
-
-		// Second wake — should return the same session ID
-		const wake2Res = await apiFetch(`/api/staff/${staff.id}/wake`, {
-			method: "POST",
-			body: JSON.stringify({ prompt: "Second prompt" }),
-		});
-		expect(wake2Res.status).toBe(201);
-		const wake2Data = await wake2Res.json();
-		expect(wake2Data.sessionId).toBe(staff.currentSessionId);
-	});
+	// NOTE: `POST /api/staff/:id/wake` was removed by the staff-inbox migration
+	// (docs/design/staff-inbox.md §7.2). The equivalent surface is
+	// `POST /api/staff/:id/inbox` — covered by `tests/e2e/inbox-api.spec.ts`.
 
 	test("GET /api/staff/:id/sessions returns 410 (deprecated)", async () => {
 		const histRes = await apiFetch(`/api/staff/${sharedStaff.id}/sessions`, {
@@ -308,9 +270,10 @@ test.describe("Staff Agents — REST API", () => {
 		});
 		expect(delRes.status).toBe(404);
 
-		const wakeRes = await apiFetch(`/api/staff/nonexistent-id-12345/wake`, {
+		// Wake endpoint is gone (staff-inbox migration). Use inbox POST for the 404 check.
+		const wakeRes = await apiFetch(`/api/staff/nonexistent-id-12345/inbox`, {
 			method: "POST",
-			body: JSON.stringify({ prompt: "hello" }),
+			body: JSON.stringify({ title: "test", prompt: "hello" }),
 		});
 		expect(wakeRes.status).toBe(404);
 
@@ -320,28 +283,10 @@ test.describe("Staff Agents — REST API", () => {
 		expect(sessionsRes.status).toBe(410);
 	});
 
-	test("Paused staff agent cannot be woken", async () => {
-		const staff = await apiCreateStaff(token, {
-			name: "Paused Agent",
-			systemPrompt: "I am paused.",
-			cwd: gitCwd(),
-		});
-		cleanupStaffIds.push(staff.id);
-		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
-
-		// Pause the agent
-		await apiFetch(`/api/staff/${staff.id}`, {
-			method: "PUT",
-			body: JSON.stringify({ state: "paused" }),
-		});
-
-		// Attempt to wake should fail
-		const wakeRes = await apiFetch(`/api/staff/${staff.id}/wake`, {
-			method: "POST",
-			body: JSON.stringify({ prompt: "wake up!" }),
-		});
-		expect(wakeRes.status).toBe(400);
-	});
+	// Removed: "Paused staff agent cannot be woken" — the wake endpoint is gone
+	// and inbox enqueueing intentionally does NOT check `state` (entries
+	// accumulate for paused staff and are delivered only when the staff
+	// reactivates). See docs/design/staff-inbox.md §2.1.
 
 	// ----- Pinned tests for fix-staff-sandbox-model design contract -----
 	//
@@ -488,48 +433,10 @@ test.describe("Staff Agents — REST API", () => {
 		expect(fetched.sandboxed).toBe(false);
 	});
 
-	test("POST /api/staff/:id/wake refreshes worktree from primary branch", async () => {
-		// Get staff details to find worktreePath
-		const getRes = await apiFetch(`/api/staff/${sharedStaff.id}`, {});
-		const staff = await getRes.json();
-		const worktreePath = staff.worktreePath;
-		if (!worktreePath) {
-			console.warn("No worktreePath on shared staff — skipping refresh test");
-			return;
-		}
-
-		const { execFileSync } = await import("node:child_process");
-		const fs = await import("node:fs");
-		const path = await import("node:path");
-
-		// Set up origin pointing to the test repo itself so git fetch/rebase work
-		try {
-			execFileSync("git", ["remote", "add", "origin", gitCwd()], { cwd: gitCwd(), stdio: "pipe" });
-		} catch { /* already exists */ }
-		execFileSync("git", ["fetch", "origin"], { cwd: gitCwd(), stdio: "pipe" });
-
-		// Detect primary branch name and set symbolic ref
-		const primaryBranch = execFileSync("git", ["branch", "--show-current"], { cwd: gitCwd(), encoding: "utf-8" }).trim();
-		execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${primaryBranch}`], { cwd: gitCwd(), stdio: "pipe" });
-
-		// Create a unique marker commit on the test repo's primary branch
-		const marker = `wake-refresh-${Date.now()}`;
-		fs.writeFileSync(path.join(gitCwd(), `${marker}.txt`), marker);
-		execFileSync("git", ["add", `${marker}.txt`], { cwd: gitCwd(), stdio: "pipe" });
-		execFileSync("git", ["commit", "-m", `test: ${marker}`], { cwd: gitCwd(), stdio: "pipe" });
-
-		// Wake the staff agent — triggers refreshWorktree (fetch + rebase onto primary)
-		const wakeRes = await apiFetch(`/api/staff/${sharedStaff.id}/wake`, {
-			method: "POST",
-			body: JSON.stringify({ prompt: "refresh test" }),
-		});
-		expect(wakeRes.status).toBe(201);
-
-		// The /wake endpoint awaits refreshWorktree() before responding 201,
-		// so by the time we're here the rebase is already complete.
-
-		// Verify the marker commit is now in the worktree's log
-		const log = execFileSync("git", ["log", "--oneline", "-5"], { cwd: worktreePath, encoding: "utf-8" });
-		expect(log).toContain(marker);
-	});
+	// Removed: "POST /api/staff/:id/wake refreshes worktree from primary branch"
+	// — worktree refresh now lives inside `StaffManager.ensureSessionForStaff`,
+	// which is invoked by the InboxNudger when it decides to deliver a digest.
+	// It is no longer synchronously triggered by a REST call, so the timing
+	// assertions don't fit the new architecture. Refresh behaviour itself is
+	// preserved (moved verbatim into the helper).
 });

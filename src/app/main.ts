@@ -545,7 +545,7 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
 			const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
@@ -605,7 +605,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen || state.inboxPanelOpen);
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -629,7 +629,7 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {

@@ -201,7 +201,6 @@ describe("cronMatches", () => {
 describe("TriggerEngine", () => {
 	function makeMockStaffManager(staffList: any[] = []) {
 		const triggerUpdates: any[] = [];
-		const wakeHistory: any[] = [];
 		return {
 			listStaff: () => staffList,
 			updateTriggerState: (staffId: string, triggerId: string, update: any) => {
@@ -213,11 +212,7 @@ describe("TriggerEngine", () => {
 					}
 				}
 			},
-			wake: async (staffId: string, prompt: string) => {
-				wakeHistory.push({ staffId, prompt });
-			},
 			triggerUpdates,
-			wakeHistory,
 		};
 	}
 
@@ -225,6 +220,30 @@ describe("TriggerEngine", () => {
 		return {
 			getSession: (id: string) => sessions[id] || null,
 		};
+	}
+
+	/**
+	 * Records every `enqueue` call so each test can assert on the staff id,
+	 * source, and (where relevant) the title/prompt that the trigger composed.
+	 */
+	function makeMockInboxManager() {
+		const enqueueHistory: any[] = [];
+		return {
+			enqueue: (staffId: string, input: { title: string; prompt: string; context?: string; source: any }) => {
+				const entry = { id: `entry-${enqueueHistory.length}`, staffId, ...input, state: "pending", createdAt: Date.now() };
+				enqueueHistory.push({ staffId, ...input });
+				return entry;
+			},
+			enqueueHistory,
+		};
+	}
+
+	function makeEngine(staffList: any[], sessions: Record<string, any> = {}) {
+		const mgr = makeMockStaffManager(staffList);
+		const sessionMgr = makeMockSessionManager(sessions);
+		const inbox = makeMockInboxManager();
+		const engine = new TriggerEngine(mgr as any, sessionMgr as any, inbox as any);
+		return { engine, mgr, sessionMgr, inbox };
 	}
 
 	describe("schedule trigger", () => {
@@ -249,16 +268,16 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const sessionMgr = makeMockSessionManager();
-			const engine = new TriggerEngine(mgr as any, sessionMgr as any);
+			const { engine, inbox } = makeEngine([staff]);
 
 			// Access private tick via any
 			(engine as any).tick();
 
-			assert.equal(mgr.wakeHistory.length, 1);
-			assert.equal(mgr.wakeHistory[0].staffId, "staff-1");
-			assert.ok(mgr.wakeHistory[0].prompt.includes("Do the thing"));
+			assert.equal(inbox.enqueueHistory.length, 1);
+			assert.equal(inbox.enqueueHistory[0].staffId, "staff-1");
+			assert.ok(inbox.enqueueHistory[0].prompt.includes("Do the thing"));
+			assert.equal(inbox.enqueueHistory[0].source.type, "trigger");
+			assert.equal(inbox.enqueueHistory[0].source.triggerId, "t1");
 		});
 
 		it("does not fire when cron does not match", () => {
@@ -281,10 +300,9 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 
 		it("does not re-fire in the same minute", () => {
@@ -311,10 +329,9 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 
 		it("does not fire for disabled trigger", () => {
@@ -335,10 +352,9 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 
 		it("skips schedule trigger with no cron expression", () => {
@@ -357,10 +373,9 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 	});
 
@@ -382,13 +397,15 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 
-		it("skips staff with currently streaming session", () => {
+		// Post-staff-inbox: the streaming/starting skip in `tick()` is intentionally
+		// removed. The trigger engine now appends to the JSON-backed inbox without
+		// touching session state. The InboxNudger separately gates on session.status.
+		it("fires even when the staff session is streaming (no skip)", () => {
 			const now = new Date();
 			const staff = {
 				id: "staff-1",
@@ -401,15 +418,40 @@ describe("TriggerEngine", () => {
 						type: "schedule",
 						config: { cron: `${now.getMinutes()} ${now.getHours()} * * *` },
 						enabled: true,
+						prompt: "work",
 					},
 				],
 			};
 
 			const sessions = { "session-active": { status: "streaming" } };
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager(sessions) as any);
+			const { engine, inbox } = makeEngine([staff], sessions);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 1);
+			assert.equal(inbox.enqueueHistory[0].staffId, "staff-1");
+		});
+
+		it("fires even when the staff session is starting (no skip)", () => {
+			const now = new Date();
+			const staff = {
+				id: "staff-1",
+				name: "Test",
+				state: "active",
+				currentSessionId: "session-active",
+				triggers: [
+					{
+						id: "t1",
+						type: "schedule",
+						config: { cron: `${now.getMinutes()} ${now.getHours()} * * *` },
+						enabled: true,
+						prompt: "work",
+					},
+				],
+			};
+
+			const sessions = { "session-active": { status: "starting" } };
+			const { engine, inbox } = makeEngine([staff], sessions);
+			(engine as any).tick();
+			assert.equal(inbox.enqueueHistory.length, 1);
 		});
 
 		it("fires for staff with idle session", () => {
@@ -431,10 +473,9 @@ describe("TriggerEngine", () => {
 			};
 
 			const sessions = { "session-idle": { status: "idle" } };
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager(sessions) as any);
+			const { engine, inbox } = makeEngine([staff], sessions);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 1);
+			assert.equal(inbox.enqueueHistory.length, 1);
 		});
 	});
 
@@ -456,17 +497,15 @@ describe("TriggerEngine", () => {
 				],
 			};
 
-			const mgr = makeMockStaffManager([staff]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine, inbox } = makeEngine([staff]);
 			(engine as any).tick();
-			assert.equal(mgr.wakeHistory.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 	});
 
 	describe("start and stop", () => {
 		it("start sets up interval, stop clears it", () => {
-			const mgr = makeMockStaffManager([]);
-			const engine = new TriggerEngine(mgr as any, makeMockSessionManager() as any);
+			const { engine } = makeEngine([]);
 			engine.start();
 			// Engine should have an interval handle
 			assert.ok((engine as any).intervalHandle !== null);
