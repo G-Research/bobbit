@@ -734,6 +734,16 @@ export function createGateway(config: GatewayConfig) {
 	staffManager.setInboxManager(inboxManager);
 	sessionManager.setInboxNudger(inboxNudger);
 
+	// One-shot migration: heal sessions that lost their `staffId` association
+	// before the staffId-persistence fix landed. Idempotent — sessions that
+	// already carry `staffId` are skipped. Logs loudly per backfilled session
+	// so the underlying bug doesn't get masked next time.
+	try {
+		sessionManager.backfillStaffIds(staffManager);
+	} catch (err) {
+		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
+	}
+
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
 	triggerEngine.start();
 	inboxNudger.start();
