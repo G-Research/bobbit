@@ -1,0 +1,122 @@
+name: inbox_list
+description: "List inbox entries for this staff agent. Defaults to pending entries."
+summary: "List inbox entries for the staff agent"
+params: [state?, limit?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Inbox
+docs: |-
+  Optional: `state` (one of `pending`, `completed`, `failed`, `cancelled`; defaults to `pending`), `limit` (default 50). Returns entries in FIFO order. Only available to staff sessions.
+detail_docs: >-
+  ## Purpose
+
+
+  List inbox entries for the staff agent running this session. The inbox is the
+  staff agent's persistent queue of work items: triggers (cron/git), manual
+  enqueues from the UI, and external API enqueues all append entries to it.
+
+  Use this tool after being woken with an `[INBOX]` prompt to discover what
+  pending work the system has queued, then process each entry with
+  `inbox_complete` or `inbox_dismiss`.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `state` | string | No | Filter by state. One of `pending`, `completed`,
+  `failed`, `cancelled`. Defaults to `pending`. |
+
+  | `limit` | number | No | Maximum number of entries to return. Defaults to
+  50. |
+
+
+  ## Returns
+
+
+  An object `{ entries: InboxEntry[] }` where each entry contains:
+
+  - `id` — unique entry identifier (UUID).
+
+  - `staffId` — the owning staff agent's id.
+
+  - `source` — `{ type: "trigger" | "manual_api" | "manual_ui", triggerId?,
+  actorId? }`.
+
+  - `title` — short label.
+
+  - `prompt` — body delivered to the agent (the actual work description).
+
+  - `context` — optional structured context (e.g. git log, file diff).
+
+  - `state` — `pending`, `completed`, `failed`, or `cancelled`.
+
+  - `createdAt` — epoch milliseconds.
+
+  - `completedAt` — set when the entry reached a terminal state.
+
+  - `result` — staff-written summary on `completed`.
+
+  - `error` — dismissal reason on `failed` / `cancelled`.
+
+
+  ## When to Use
+
+
+  - **After an `[INBOX]` wake prompt** — call with no args to see pending work.
+
+  - **Checking history** — pass `state="completed"` (or `failed` / `cancelled`)
+  to inspect past entries.
+
+  - **Idempotency check** — before doing work, scan completed entries to detect
+  whether the same task has already been handled.
+
+
+  ## When NOT to Use
+
+
+  - **Outside a staff session** — this tool is only registered when the session
+  has a `staffId`. It will not be available in normal goal/team sessions.
+
+
+  ## Examples
+
+
+  ```
+
+  # See pending work
+
+  inbox_list()
+
+
+  # Look at recent completions
+
+  inbox_list(state="completed", limit=10)
+
+
+  # Look at recent dismissals
+
+  inbox_list(state="failed")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **FIFO order** — entries are returned in insertion order (oldest first).
+
+  - **No coalescing** — two triggers firing close together produce two distinct
+  entries. The agent is responsible for deduping when the underlying work is
+  the same (e.g. by checking memory or completed entries first).
+
+  - **Terminal entries persist** — completed/failed/cancelled entries are kept
+  until the user prunes them via the UI. They are searchable history.
+
+  - **Staff-only** — the tool is not registered on non-staff sessions, so this
+  call will fail with "tool not found" if you somehow obtain access from a
+  team/goal session.
