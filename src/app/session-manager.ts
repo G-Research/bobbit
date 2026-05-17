@@ -1,5 +1,6 @@
 import { ChatPanel } from "../ui/index.js";
 import { startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
@@ -860,8 +861,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
 
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
@@ -1485,8 +1489,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
 
 		// ── Bind the agent to the early ChatPanel (created before connect
 		// to show the "Connecting…" shell instantly).
@@ -2226,6 +2233,7 @@ export function backToSessions(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
 	state.appView = "authenticated";
@@ -2250,6 +2258,7 @@ export function disconnectGateway(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
 	teardownMobileScrollTracking();
