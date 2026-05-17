@@ -279,6 +279,15 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
 
+## Toolbar / sidebar buttons missing shortcut hints in `title`
+
+- **Symptom**: hovering a toolbar or sidebar button on a freshly-booted app shows a bare label (e.g. `New goal`, `Terminate session`, `Collapse preview`) instead of the labelled-with-shortcut form (`New goal (Alt+G)`, etc.). A second render — any WS event, sessions poll, hash change, or user input — fixes it. Under heavy parallel e2e load this race accounted for the largest single category of toolbar-locator flakes.
+- **Root cause**: `initApp()` in `src/app/main.ts` calls `renderApp()` early to mount the UI shell. At that point no shortcut has been registered yet, so every `${shortcutHint(id)}` interpolation in templates evaluates to `""` and Lit stamps the bare title. Shortcut registration (`registerShortcut(...)` calls plus `await loadSavedBindings(); startListening();`) runs further down `initApp()`, but pre-fix no `renderApp()` followed it — the stale titles stayed in the DOM until something else triggered a re-render.
+- **Fix**: a single `renderApp()` call in `initApp()` immediately after `loadSavedBindings()` / `startListening()` and the `document.body.dataset.shortcutsReady = "1"` marker. Lit diffs and only restamps the changed `title` attributes, so the extra pass is cheap. Search the file for the `Refresh ${shortcutHint(...)} evaluations` comment if you need to find the exact line.
+- **Do not remove it.** The call looks redundant next to the early `renderApp()` at the top of `initApp()` — it is not. The early render happens **before** shortcut registration; this one happens **after**, and is the only render guaranteed to see the registered bindings.
+- **Pinning test**: `tests/shortcut-hint-titles-render.spec.ts` (with fixture `tests/fixtures/shortcut-hint-titles-render-entry.ts`). It simulates the boot order — first render with no shortcuts, then registration, then second render — and asserts the second render stamps the title with the `(Alt+G)` suffix. Deleting the post-registration `renderApp()` call must fail this test.
+- **Related flake cleanup**: this race was "flake category A" in the PR 600 investigation — ~10 e2e tests (`api-error-modal`, `goal-accept-failure-keeps-assistant`, `goal-creation`, `goal-form-tooltips`, `proposal-inline-comments`, `proposal-tools`, `stories-goal-routing`) that waited on `button[title='New goal (Alt+G)']`. Other flake categories (createSession 201→400 server race, tail-chat scroll drift, cold-start timeouts) are independent.
+
 ## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
 - **Symptom (master pre-fix)**: in a streaming session, the chat stops following the bottom mid-stream, and/or the Jump-to-bottom pill appears even when scrollTop is already at the bottom. Both regressions also reproduce on iOS PWA.
