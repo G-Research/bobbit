@@ -493,6 +493,13 @@ export class SessionManager {
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
+	/**
+	 * Optional inbox nudger. Wired late from `server.ts` boot via
+	 * `setInboxNudger` so the nudger's `onAgentStart` hook can clear its
+	 * per-staff `nudgePending` flag when a staff session begins streaming
+	 * a turn. Stays null on test paths that don't construct a nudger.
+	 */
+	private _inboxNudger: import("./inbox-nudger.js").InboxNudger | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
@@ -534,6 +541,10 @@ export class SessionManager {
 
 	setSandboxManager(manager: SandboxManager | null): void {
 		this.sandboxManager = manager;
+	}
+
+	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
+		this._inboxNudger = nudger;
 	}
 
 	/**
@@ -1857,6 +1868,17 @@ export class SessionManager {
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			// Clear the inbox nudger's per-staff guard so a fresh batch can be
+			// delivered next time the staff goes idle with pending entries.
+			// Hook fires for every session that starts a turn; the nudger
+			// itself filters down to staff sessions via its own staff lookup.
+			if (this._inboxNudger && session.staffId) {
+				try {
+					this._inboxNudger.onAgentStart(session.id);
+				} catch (err) {
+					console.warn(`[session-manager] inboxNudger.onAgentStart failed for ${session.id}:`, err);
+				}
+			}
 		} else if (event.type === "agent_end") {
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {

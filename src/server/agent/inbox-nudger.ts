@@ -126,6 +126,16 @@ export class InboxNudger {
 			const msg =
 				`[INBOX] You have ${count} pending ${word}. ` +
 				`Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.`;
+			// `lastWakeAt` is now owned by the nudger — the sole driver of staff
+			// wakes post-inbox (the legacy public method on StaffManager is
+			// removed; see docs/design/staff-inbox.md §9). Persists across
+			// restart for UI "last seen" displays. Set before enqueuePrompt so even if
+			// delivery fails the user can see the attempt timestamp.
+			try {
+				this.staffManager.updateStaff(staff.id, { lastWakeAt: Date.now() });
+			} catch (err) {
+				console.warn(`[inbox-nudger] updateStaff(lastWakeAt) failed for ${staff.id} (non-fatal):`, err);
+			}
 			await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true });
 		} catch (err) {
 			// Allow the next tick to retry.

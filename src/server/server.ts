@@ -73,6 +73,9 @@ const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
+import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
+import { InboxNudger } from "./agent/inbox-nudger.js";
+import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
@@ -696,8 +699,44 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.configCascade = configCascade;
 
 	const staffManager = new StaffManager(projectContextManager);
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
+
+	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
+	// `inboxNudger` ticks every 15s to deliver digests to idle staff.
+	//   - `InboxManager` resolves the per-project store via `projectContextManager`.
+	//   - `InboxNudger` looks up pending entries via a cross-project store adapter
+	//     (its dep type is the single-project `InboxStore`, but staff records are
+	//     globally unique so we route `listPending` through the PCM).
+	//   - Wiring order: construct InboxManager → construct InboxNudger →
+	//     inboxManager.setNudger(inboxNudger) → staffManager.setInboxManager(
+	//     inboxManager) → sessionManager.setInboxNudger(inboxNudger) → start.
+	const inboxManager = new InboxManager(projectContextManager, staffManager, (event) => broadcastToAll(event));
+	const crossProjectInboxStore: InboxStore = {
+		listPending: (staffId: string): InboxEntry[] => {
+			for (const ctx of projectContextManager.all()) {
+				if (ctx.staffStore.get(staffId)) return ctx.inboxStore.listPending(staffId);
+			}
+			return [];
+		},
+		// Unused by nudger but required to satisfy the `InboxStore` shape.
+		put: () => { /* nudger does not write */ },
+		get: () => undefined,
+		list: () => [],
+		update: () => false,
+		remove: () => false,
+		removeAll: () => { /* handled by InboxManager.removeAll */ },
+	} as unknown as InboxStore;
+	const inboxNudger = new InboxNudger({
+		sessionManager,
+		staffManager,
+		inboxStore: crossProjectInboxStore,
+	});
+	inboxManager.setNudger(inboxNudger);
+	staffManager.setInboxManager(inboxManager);
+	sessionManager.setInboxNudger(inboxNudger);
+
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
 	triggerEngine.start();
+	inboxNudger.start();
 	// Placeholder task store for TeamManager construction. Real goal/task operations
 	// route through the per-project context (see TeamManager.getTasksForSession). The
 	// first registered project's store is used when available, otherwise a server-
@@ -822,7 +861,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1400,6 +1439,7 @@ export function createGateway(config: GatewayConfig) {
 		async shutdown() {
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
+			inboxNudger.stop();
 			wss.close();
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
@@ -1564,6 +1604,7 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
+	inboxManager?: InboxManager,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -8128,19 +8169,145 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/staff/:id/wake — manually trigger a wake cycle
-	const staffWakeMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/wake$/);
-	if (staffWakeMatch && req.method === "POST") {
-		const id = staffWakeMatch[1];
+	// ── Staff inbox endpoints ──────────────────────────────────────
+	// `POST /api/staff/:id/wake` was deleted as part of the staff-inbox migration
+	// (see docs/design/staff-inbox.md §7.2). UI/external integrations now hit
+	// `POST /api/staff/:id/inbox` with `source.type = "manual_ui" | "manual_api"`.
+
+	// GET /api/staff/:id/inbox?state=pending&limit=50
+	const staffInboxListMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox$/);
+	if (staffInboxListMatch && req.method === "GET") {
+		const id = staffInboxListMatch[1];
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const rawState = url.searchParams.get("state");
+		const allowedStates: ReadonlyArray<InboxEntry["state"]> = ["pending", "completed", "failed", "cancelled"];
+		const state = rawState && (allowedStates as readonly string[]).includes(rawState)
+			? (rawState as InboxEntry["state"])
+			: undefined;
+		const limitRaw = url.searchParams.get("limit");
+		const limit = limitRaw != null ? Math.max(0, parseInt(limitRaw, 10) || 0) : undefined;
+		const entries = inboxManager.listForStaff(id, state, limit);
+		json({ entries });
+		return;
+	}
+
+	// POST /api/staff/:id/inbox
+	if (staffInboxListMatch && req.method === "POST") {
+		const id = staffInboxListMatch[1];
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
 		const body = await readBody(req);
+		if (!body || typeof body.title !== "string" || !body.title.trim()) {
+			json({ error: "Missing title" }, 400);
+			return;
+		}
+		if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+			json({ error: "Missing prompt" }, 400);
+			return;
+		}
+		const sourceType = body.source?.type === "manual_ui" || body.source?.type === "trigger"
+			? body.source.type
+			: "manual_api";
+		const actorId = typeof body.source?.actorId === "string" ? body.source.actorId : undefined;
 		try {
-			const sessionId = await staffManager.wake(id, body?.prompt, sessionManager);
-			json({ sessionId }, 201);
+			const entry = inboxManager.enqueue(id, {
+				title: body.title,
+				prompt: body.prompt,
+				context: typeof body.context === "string" ? body.context : undefined,
+				source: { type: sourceType, actorId },
+			});
+			json({ entry }, 201);
 		} catch (err) {
 			jsonError(400, err);
 		}
+		return;
+	}
+
+	// POST /api/staff/:id/inbox/:entryId/complete
+	const staffInboxCompleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/complete$/);
+	if (staffInboxCompleteMatch && req.method === "POST") {
+		const [, id, entryId] = staffInboxCompleteMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const body = await readBody(req);
+		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+			json({ error: "Missing sessionId" }, 400);
+			return;
+		}
+		const session = sessionManager.getSession(body.sessionId);
+		if (!session || session.staffId !== id) {
+			json({ error: "Forbidden: session does not belong to this staff" }, 403);
+			return;
+		}
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.state !== "pending") {
+			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
+			return;
+		}
+		try {
+			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body.summary === "string" ? body.summary : undefined);
+			json({ entry });
+		} catch (err) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// POST /api/staff/:id/inbox/:entryId/dismiss
+	const staffInboxDismissMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/dismiss$/);
+	if (staffInboxDismissMatch && req.method === "POST") {
+		const [, id, entryId] = staffInboxDismissMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const body = await readBody(req);
+		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+			json({ error: "Missing sessionId" }, 400);
+			return;
+		}
+		const session = sessionManager.getSession(body.sessionId);
+		if (!session || session.staffId !== id) {
+			json({ error: "Forbidden: session does not belong to this staff" }, 403);
+			return;
+		}
+		if (body.outcome !== "failed" && body.outcome !== "cancelled") {
+			json({ error: "outcome must be 'failed' or 'cancelled'" }, 400);
+			return;
+		}
+		if (typeof body.reason !== "string" || !body.reason.trim()) {
+			json({ error: "Missing reason" }, 400);
+			return;
+		}
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.state !== "pending") {
+			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
+			return;
+		}
+		try {
+			const entry = inboxManager.transitionToTerminal(id, entryId, body.outcome, body.reason);
+			json({ entry });
+		} catch (err) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// DELETE /api/staff/:id/inbox/:entryId
+	const staffInboxDeleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)$/);
+	if (staffInboxDeleteMatch && req.method === "DELETE") {
+		const [, id, entryId] = staffInboxDeleteMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const ok = inboxManager.remove(id, entryId);
+		if (!ok) { json({ error: "Inbox entry not found" }, 404); return; }
+		json({ ok: true });
 		return;
 	}
 
