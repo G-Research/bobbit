@@ -5975,8 +5975,8 @@ async function handleApiRoute(
 		const ps = sessionManager.getPersistedSession(archivedId);
 		if (!ps) { json({ error: "session not found" }, 404); return; }
 		if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
-		if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
-			json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
+		if (ps.goalId || ps.delegateOf || ps.teamGoalId) {
+			json({ error: "goal, delegate, or team sessions cannot be continued" }, 422);
 			return;
 		}
 		if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
@@ -5988,7 +5988,7 @@ async function handleApiRoute(
 		// sessions whose persisted `agentSessionFile` was never populated.
 		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
 		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
 		const { randomUUID } = await import("node:crypto");
 
@@ -6059,6 +6059,16 @@ async function handleApiRoute(
 			console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
 		}
 
+		// Clone the proposal-draft directory (live file + history snapshots).
+		// Schema-agnostic recursive copy — see `proposal-files.ts` for layout.
+		// On WS auth the rehydrate broadcast iterates the new session's dir and
+		// feeds the panel automatically; no extra wiring needed here.
+		try {
+			copyProposalDirIfPresent(archivedId, newSessionId, bobbitStateDir());
+		} catch (err) {
+			console.warn(`[continue-archived] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
 		const createOpts: any = {
 			sessionId: newSessionId,
@@ -6079,12 +6089,21 @@ async function handleApiRoute(
 			createOpts.roleName = role.name;
 			createOpts.role = role.name;
 			createOpts.accessory = role.accessory;
+		} else if (ps.role) {
+			// Persisted role name without a registered Role definition (e.g. the
+			// generic "assistant" role assigned to assistant sessions). Propagate
+			// it + the persisted accessory so the new session inherits its identity.
+			createOpts.role = ps.role;
+			createOpts.roleName = ps.role;
+			if (ps.accessory) createOpts.accessory = ps.accessory;
+		} else if (ps.accessory) {
+			createOpts.accessory = ps.accessory;
 		}
 
 		let newSession;
 		try {
 			newSession = await sessionManager.createSession(
-				projCwd, undefined, undefined, undefined, createOpts,
+				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
@@ -6110,6 +6129,7 @@ async function handleApiRoute(
 			cwd: newSession.cwd,
 			status: newSession.status,
 			title: continuedTitle,
+			assistantType: ps.assistantType,
 		}, 201);
 		return;
 	}
