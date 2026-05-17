@@ -35,6 +35,15 @@ export class InboxEntryRow extends LitElement {
 		return this;
 	}
 
+	updated(changedProps: Map<string, unknown>): void {
+		super.updated(changedProps);
+		// Reflect entry.state to the host as `data-state` so external selectors
+		// (Playwright tests, CSS) can target rows by lifecycle state without
+		// piercing into the light-DOM children.
+		if (this.entry?.state) this.setAttribute("data-state", this.entry.state);
+		if (this.entry?.id) this.setAttribute("data-entry-id", this.entry.id);
+	}
+
 	private _emit(eventName: string): void {
 		this.dispatchEvent(new CustomEvent(eventName, {
 			detail: { entryId: this.entry.id },

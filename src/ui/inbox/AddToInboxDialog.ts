@@ -33,6 +33,17 @@ export class AddToInboxDialog extends LitElement {
 		return this;
 	}
 
+	connectedCallback(): void {
+		super.connectedCallback();
+		// Light DOM means `static styles` doesn't apply to the host. Set the
+		// host-level layout inline so Playwright's toBeVisible() finds the
+		// element and so the backdrop fills the viewport via the host box.
+		this.style.position = "fixed";
+		this.style.inset = "0";
+		this.style.zIndex = "100";
+		this.style.display = "block";
+	}
+
 	private _close(): void {
 		this.dispatchEvent(new CustomEvent("inbox-add-close", { bubbles: true, composed: true }));
 	}
