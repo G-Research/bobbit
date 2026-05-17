@@ -8,11 +8,12 @@
 //   2. shortcut registration (registerShortcut("new-goal") at line ~651);
 //   3. startListening() + `document.body.dataset.shortcutsReady = "1"` (~717).
 //
-// After step 3 NO `renderApp()` is called in production code — so the title
-// stays stale. The pinning test asserts that, after the full boot sequence,
-// the button's title contains the `(Alt+G)` suffix. It fails on current
-// master (bug reproduced) and passes once main.ts adds the missing
-// post-registration `renderApp()` call.
+// After step 3 a second `renderApp()` runs (~line 724 of main.ts — the fix
+// for the original stale-title bug). The pinning test asserts that, after
+// the full boot sequence including that final render, the button's title
+// contains the `(Alt+G)` suffix. Remove the final render call from
+// src/app/main.ts AND the page.evaluate block in the spec and the bug
+// returns.
 import { html, render } from "lit";
 import { registerShortcut, shortcutHint, startListening } from "../../src/app/shortcut-registry.js";
 
