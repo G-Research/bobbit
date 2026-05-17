@@ -8,6 +8,7 @@ import { refreshGateStatusForGoal } from "./api.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
@@ -1435,6 +1436,27 @@ export class RemoteAgent {
 			case "team_agent_finished":
 				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) finished`, "team");
 				break;
+
+			case "inbox.entry.added": {
+				const sid = (msg as any).staffId as string;
+				const entry = (msg as any).entry;
+				if (sid && entry) applyInboxEntryAdded(sid, entry);
+				break;
+			}
+
+			case "inbox.entry.updated": {
+				const sid = (msg as any).staffId as string;
+				const entry = (msg as any).entry;
+				if (sid && entry) applyInboxEntryUpdated(sid, entry);
+				break;
+			}
+
+			case "inbox.entry.removed": {
+				const sid = (msg as any).staffId as string;
+				const entryId = (msg as any).entryId as string;
+				if (sid && entryId) applyInboxEntryRemoved(sid, entryId);
+				break;
+			}
 
 			case "preferences_changed":
 				this._applyPreferences(msg.preferences);

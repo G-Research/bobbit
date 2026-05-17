@@ -46,6 +46,18 @@ export interface PersistedStaff {
 	 * Legacy records loaded without this field normalise to `false`.
 	 */
 	sandboxed: boolean;
+	/**
+	 * What the InboxNudger does to context before injecting a wake digest.
+	 * - "preserve" — leave conversation context as-is (long-running threads).
+	 * - "compact"  — run /compact before nudging (default).
+	 *
+	 * Optional at the type level so creation paths can omit it; both load
+	 * normalisation (see `StaffStore.load`) and put-time normalisation
+	 * (see `StaffStore.put`) coerce missing/invalid values to "compact".
+	 * A future "clear" policy (terminate + respawn) is deferred — see
+	 * docs/design/staff-inbox.md §10.
+	 */
+	contextPolicy?: "preserve" | "compact";
 }
 
 /**
@@ -72,6 +84,10 @@ export class StaffStore {
 						if (s.id) {
 							// Legacy records lack `sandboxed`; normalise to false.
 							s.sandboxed = !!s.sandboxed;
+							// Legacy records lack `contextPolicy`; normalise to "compact".
+							if (s.contextPolicy !== "preserve" && s.contextPolicy !== "compact") {
+								s.contextPolicy = "compact";
+							}
 							this.staff.set(s.id, s);
 						}
 					}
@@ -95,6 +111,11 @@ export class StaffStore {
 	}
 
 	put(staff: PersistedStaff): void {
+		// Normalise contextPolicy on every write so the in-memory record
+		// always carries a real value. Mirrors the load-side normalisation.
+		if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact") {
+			staff.contextPolicy = "compact";
+		}
 		this.staff.set(staff.id, staff);
 		this.save();
 	}

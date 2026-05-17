@@ -1274,6 +1274,7 @@ export interface StaffAgent {
 	currentSessionId?: string;
 	projectId?: string;
 	sandboxed?: boolean;
+	contextPolicy?: "preserve" | "compact";
 }
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
@@ -1339,7 +1340,7 @@ export async function createStaffAgent(data: { name: string; description: string
 	}
 }
 
-export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory">>): Promise<boolean> {
+export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy">>): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`, {
 			method: "PUT",
@@ -1366,17 +1367,35 @@ export async function deleteStaffAgent(id: string): Promise<boolean> {
 	}
 }
 
-export async function wakeStaffAgent(id: string, prompt?: string): Promise<{ sessionId: string } | null> {
+/**
+ * Manually enqueue an inbox entry against a staff agent. Replaces the
+ * legacy `wakeStaffAgent` — the "Wake Now" button and the
+ * AddToInboxDialog both target this endpoint. The agent picks up the
+ * entry via the InboxNudger once it goes idle.
+ *
+ * Returns the created entry on success, or null on error (a connection
+ * error modal is shown).
+ */
+export async function enqueueInboxManual(
+	staffId: string,
+	input: { title: string; prompt: string; context?: string; source?: { type?: "manual_api" | "manual_ui"; actorId?: string } },
+): Promise<{ entry: { id: string; staffId: string; title: string; prompt: string; state: string; createdAt: number } } | null> {
 	try {
-		const res = await gatewayFetch(`/api/staff/${id}/wake`, {
+		const body = {
+			title: input.title,
+			prompt: input.prompt,
+			context: input.context,
+			source: input.source ?? { type: "manual_ui" as const },
+		};
+		const res = await gatewayFetch(`/api/staff/${staffId}/inbox`, {
 			method: "POST",
-			body: JSON.stringify({ prompt }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		return await res.json();
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
-		showConnectionError("Failed to wake staff agent", message, { code, stack });
+		showConnectionError("Failed to enqueue inbox entry", message, { code, stack });
 		return null;
 	}
 }

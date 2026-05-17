@@ -1,3 +1,5 @@
+import type { InboxEntry } from "../agent/inbox-store.js";
+
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 
@@ -111,6 +113,9 @@ export type ServerMessage =
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
+	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; seq?: number; ts?: number }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }
