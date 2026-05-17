@@ -92,7 +92,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const qs = new URLSearchParams();
 				qs.set("state", params.state ?? "pending");
-				if (params.limit !== undefined) qs.set("limit", String(params.limit));
+				// Apply the documented default (50) when the agent omits limit, so a
+				// busy staff inbox cannot dump unbounded entries into context.
+				qs.set("limit", String(params.limit ?? 50));
 				return ok(await api("GET", `/api/staff/${staffId}/inbox?${qs}`));
 			} catch (e: any) { return err(e.message); }
 		},
