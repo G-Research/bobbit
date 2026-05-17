@@ -1036,3 +1036,18 @@ Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call si
   `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
   CLI codepath is writing the file directly without routing through
   `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.
+
+## Trigger fired but staff didn't wake
+
+- **Symptom**: a cron / git trigger fires (visible in `lastFired` / `lastSeenSha` advancing) but the staff session never produces a new turn. Pre-inbox, the trigger silently dropped while the session was `streaming`/`starting`; that path is gone (`POST /api/staff/:id/wake` deleted, `TriggerEngine.wakingInProgress` field removed). Triggers now always enqueue.
+- **First check**: `cat <projectStateDir>/inbox/<staffId>.json` — if a pending entry is there, the trigger ran fine; the question is why the nudger hasn't delivered it.
+- **WS sanity**: an `inbox.entry.added` frame should hit every connected client within ~50 ms of the enqueue. Missing means `InboxManager.broadcastToAll` isn't wired, or the trigger engine errored before calling `enqueue` (check server logs for `[trigger-engine] Failed to enqueue inbox entry`).
+- **Nudger gating**: `InboxNudger.tickOne` skips when (a) `staff.state !== "active"`, (b) `staff.currentSessionId` is unset, (c) `session.status !== "idle"`, (d) `nudgePending` is already set for that staff, or (e) the pending list is empty. The tick is 15 s, so worst-case latency on the idle→nudge edge is ~15 s + compact time (when `contextPolicy === "compact"`).
+- **Stuck `nudgePending`**: cleared in `InboxNudger.onAgentStart(sessionId)` via the session-manager hook. If the agent never enters `streaming` (e.g. provider error before the first token), the flag stays set and silences re-nudges until the next successful turn or server restart. Catch in `applyPolicyThenNudge` clears it on thrown exceptions but not on `enqueuePrompt` silently parking the prompt.
+- See [docs/staff-inbox.md](staff-inbox.md) for the full lifecycle.
+
+## Staff context-policy save bounces back
+
+- **Symptom**: changing the Context Policy radio on the staff edit page and clicking Save shows the new value briefly, then the form re-renders with the old value.
+- **Fix shipped in the staff-inbox release**: `PUT /api/staff/:id` now forwards `contextPolicy` (`"preserve"` \| `"compact"`) through to `StaffStore.update`. Pre-fix builds dropped it on the allow-list.
+- **If seen again**: check `server.ts` `PUT /api/staff/:id` handler still threads `body.contextPolicy` into the update payload; `staff-store.ts` `update()` normalises any other value to `"compact"`. The radio binding is in `src/app/staff-page.ts` (`editContextPolicy` field).

@@ -1,8 +1,8 @@
 # Staff Inbox Queue — Design
 
-Goal: introduce a first-class **inbox** for staff agents — a persistent, per-staff ordered queue of work items that decouples triggers from agent wakes.
+> **Status: shipped.** Operational documentation lives in [docs/staff-inbox.md](../staff-inbox.md). This page is the original design record — kept verbatim for historical reference. Where this doc and the operator doc disagree, the operator doc and the source code win.
 
-Status: design (pre-implementation). Coder picks this up under the `implementation` gate.
+Goal: introduce a first-class **inbox** for staff agents — a persistent, per-staff ordered queue of work items that decouples triggers from agent wakes.
 
 ---
 
