@@ -29,6 +29,19 @@ import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendin
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
+
+/**
+ * Returns true when the given session id refers to a session that is already
+ * archived (present in `state.archivedSessions`). Proposal-panel submit
+ * handlers use this to skip the `DELETE /api/sessions/:id` teardown call —
+ * when the user resubmits a proposal from an *archived* session view the
+ * session is already gone server-side and the DELETE would 404 + surface as
+ * an error toast.
+ */
+function isSessionArchived(sessionId: string | null | undefined): boolean {
+	if (!sessionId) return false;
+	return state.archivedSessions.some((s) => s.id === sessionId);
+}
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
@@ -1159,7 +1172,7 @@ function goalPreviewPanel() {
 			});
 		}
 
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -1312,7 +1325,7 @@ function rolePreviewPanel() {
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "role");
 
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -1847,7 +1860,7 @@ function staffPreviewPanel() {
 		});
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "staff");
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}

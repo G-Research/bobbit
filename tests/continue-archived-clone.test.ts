@@ -19,7 +19,11 @@ import { randomUUID } from "node:crypto";
 
 import { formatAgentSessionFilePath, slugifyCwd, formatAgentTimestamp } from "../src/server/agent/agent-session-path.js";
 import { sessionFileCopy, CrossRealmCopyError } from "../src/server/agent/session-fs.js";
-import { copyToolContentDirIfPresent } from "../src/server/agent/continue-archived.js";
+import {
+	copyToolContentDirIfPresent,
+	copyProposalDirIfPresent,
+	cleanupFailedContinue,
+} from "../src/server/agent/continue-archived.js";
 
 function tmpDir(label: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-${label}-`));
@@ -191,6 +195,148 @@ describe("copyToolContentDirIfPresent", () => {
 			const dstRoot = path.join(stateDir, "tool-content", "dst-id");
 			assert.equal(fs.readFileSync(path.join(dstRoot, "0", "1.txt"), "utf-8"), "block-1-content");
 			assert.equal(fs.readFileSync(path.join(dstRoot, "top.txt"), "utf-8"), "top-content");
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── copyProposalDirIfPresent + cleanupFailedContinue ─────────────────────
+//
+// These helpers underpin Path B of the reopen-archived-proposals design:
+// continuing an archived assistant session must clone the source's
+// `<stateDir>/proposal-drafts/<sessionId>/` directory verbatim (live
+// `<type>.{md,yaml}` plus the entire `<type>.history/<rev>.<ext>` snapshot
+// tree) so the new agent picks up the in-progress draft and rev counter
+// without colliding. The cleanup helper must remove the cloned dir when
+// the continue flow fails part-way through.
+
+function seedDraft(stateDir: string, sessionId: string): void {
+	const root = path.join(stateDir, "proposal-drafts", sessionId);
+	fs.mkdirSync(path.join(root, "goal.history"), { recursive: true });
+	fs.writeFileSync(path.join(root, "goal.md"), "live draft contents\n");
+	fs.writeFileSync(path.join(root, "goal.history", "1.md"), "snapshot rev 1\n");
+	fs.writeFileSync(path.join(root, "goal.history", "2.md"), "snapshot rev 2\n");
+}
+
+describe("copyProposalDirIfPresent", () => {
+	it("clones the live file plus every history snapshot byte-identical", () => {
+		const stateDir = tmpDir("proposal-clone");
+		try {
+			seedDraft(stateDir, "src");
+
+			copyProposalDirIfPresent("src", "dst", stateDir);
+
+			const srcRoot = path.join(stateDir, "proposal-drafts", "src");
+			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
+
+			for (const rel of ["goal.md", "goal.history/1.md", "goal.history/2.md"]) {
+				const a = fs.readFileSync(path.join(srcRoot, rel));
+				const b = fs.readFileSync(path.join(dstRoot, rel));
+				assert.ok(b.equals(a), `mismatch for ${rel}`);
+			}
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("is a silent no-op when the source directory is absent", () => {
+		const stateDir = tmpDir("proposal-clone-missing");
+		try {
+			copyProposalDirIfPresent("nope", "dst", stateDir);
+			assert.ok(!fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("is idempotent \u2014 running twice does not throw and leaves the clone intact", () => {
+		const stateDir = tmpDir("proposal-clone-idem");
+		try {
+			seedDraft(stateDir, "src");
+			copyProposalDirIfPresent("src", "dst", stateDir);
+			// Second call must not throw; existing destination is overwritten.
+			copyProposalDirIfPresent("src", "dst", stateDir);
+
+			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
+			assert.equal(
+				fs.readFileSync(path.join(dstRoot, "goal.md"), "utf-8"),
+				"live draft contents\n",
+			);
+			assert.equal(
+				fs.readFileSync(path.join(dstRoot, "goal.history", "1.md"), "utf-8"),
+				"snapshot rev 1\n",
+			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not touch sibling sessions' drafts", () => {
+		const stateDir = tmpDir("proposal-clone-isolation");
+		try {
+			seedDraft(stateDir, "src");
+			seedDraft(stateDir, "other");
+
+			copyProposalDirIfPresent("src", "dst", stateDir);
+
+			// "other" remains untouched
+			const otherFile = path.join(stateDir, "proposal-drafts", "other", "goal.md");
+			assert.equal(fs.readFileSync(otherFile, "utf-8"), "live draft contents\n");
+			assert.ok(fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("cleanupFailedContinue (proposal-dir branch)", () => {
+	it("removes the cloned proposal-drafts directory", () => {
+		const stateDir = tmpDir("cleanup-proposal");
+		try {
+			seedDraft(stateDir, "src");
+			copyProposalDirIfPresent("src", "dst", stateDir);
+			const dstRoot = path.join(stateDir, "proposal-drafts", "dst");
+			assert.ok(fs.existsSync(dstRoot));
+
+			cleanupFailedContinue(undefined, "dst", stateDir);
+
+			assert.ok(!fs.existsSync(dstRoot));
+			// Source must remain intact — cleanup only touches the new session id.
+			assert.ok(fs.existsSync(path.join(stateDir, "proposal-drafts", "src")));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes the cloned .jsonl, tool-content dir, and proposal dir together", () => {
+		const stateDir = tmpDir("cleanup-multi");
+		try {
+			seedDraft(stateDir, "src");
+			copyProposalDirIfPresent("src", "dst", stateDir);
+
+			// Seed a tool-content dir and a placeholder destJsonl too.
+			const toolDir = path.join(stateDir, "tool-content", "dst");
+			fs.mkdirSync(toolDir, { recursive: true });
+			fs.writeFileSync(path.join(toolDir, "0.json"), "{}");
+			const destJsonl = path.join(stateDir, "session.jsonl");
+			fs.writeFileSync(destJsonl, "irrelevant\n");
+
+			cleanupFailedContinue(destJsonl, "dst", stateDir);
+
+			assert.ok(!fs.existsSync(destJsonl));
+			assert.ok(!fs.existsSync(toolDir));
+			assert.ok(!fs.existsSync(path.join(stateDir, "proposal-drafts", "dst")));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("is best-effort when the directory is already gone", () => {
+		const stateDir = tmpDir("cleanup-noop");
+		try {
+			// Must not throw even though nothing was ever cloned.
+			cleanupFailedContinue(undefined, "missing", stateDir);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

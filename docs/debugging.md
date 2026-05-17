@@ -122,6 +122,18 @@ Loading an archived session shows `claude-opus-4-6` (the client-side placeholder
 
 See [docs/internals.md — Archived-session state push on auth](internals.md#archived-session-state-push-on-auth).
 
+## Archived proposal draft missing after continue / resubmit
+
+User opens an archived assistant session, expects to see a "Resubmit `<type>` proposal" button on the footer or a draft carried over by `POST /api/sessions/:id/continue`, and gets nothing.
+
+- **Resubmit button missing**: the footer shows only "Continue in New Session". Check `GET /api/sessions/:id/proposals` directly — if `proposals` is empty, no draft exists on disk. Most likely cause: the draft was deleted at archive time by an older `session-manager.ts::terminateSession` that has not been updated. The current code defers proposal-drafts cleanup to `purgeOneSession` (7-day purge); the `terminateSession` path must skip the directory. If the endpoint is missing from the server entirely, the client falls back to the no-draft footer silently — verify the `^/api/sessions/([^/]+)/proposals$` route is registered.
+- **Continue returned 422 for an assistant session**: the `assistantType` guard was re-introduced. The current handler only blocks `goalId` / `delegateOf` / `teamGoalId`; assistant sessions are accepted and the response echoes `assistantType`.
+- **Continued session has no draft**: server logs surface `[continue-archived] proposal-dir copy failed (non-fatal): …` when `copyProposalDirIfPresent` (in `src/server/agent/continue-archived.ts`) throws. The copy is intentionally non-fatal so the underlying `.jsonl` continue still succeeds; check disk permissions on `<stateDir>/proposal-drafts/`. Also confirm `cleanupFailedContinue` did not run prematurely — it nukes both the cloned `.jsonl` and the cloned proposal-drafts directory.
+- **Toast "DELETE /api/sessions/<id> returned 404" on resubmit**: the `isSessionArchived` guard in `src/app/render.ts` is missing or bypassed. The submit handlers in the goal / project / role / tool / staff proposal panels must short-circuit the post-accept session teardown when the parent is already in `state.archivedSessions`.
+- E2E coverage: `tests/e2e/ui/archived-proposal-resubmit.spec.ts` (Path A + Path B + reload persistence + no-draft fallback), `tests/e2e/continue-archived-assistant.spec.ts` (server-side clone happy paths + cross-realm rejection regression).
+
+See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full design and where each piece lives.
+
 ## Session persistence
 
 - Check `<project-root>/.bobbit/state/sessions.json` (per-project, not centralized)

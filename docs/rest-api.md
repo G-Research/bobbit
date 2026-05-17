@@ -59,7 +59,8 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 | `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. On failure: file unchanged, returns 4xx with structured error. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Restore a prior revision snapshot. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a non-negative integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. |
-| `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on session terminate. |
+| `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
+| `GET` | `/api/sessions/:id/proposals` | List every parsed proposal draft for the session in one call. Returns `200 { proposals: Array<{ proposalType, fields, rev }> }`; `proposals` is empty when the per-session directory is absent or empty. Mirrors the WS `proposal_update {source:"rehydrate"}` broadcast as a one-shot REST call — used by fast-path session switch-backs (no fresh WS auth, so the broadcast doesn't run) and by the archived-session footer to decide whether to surface a "Resubmit `<type>` proposal" button (see [docs/archived-proposal-reopen.md](archived-proposal-reopen.md)). `400` on invalid sessionId; `500` on unexpected enumeration failure. |
 
 #### Error response shape
 
@@ -807,6 +808,8 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 **Request body**: empty (or absent). A legacy `mode` field is tolerated but ignored — there is no Summary vs Full distinction any more, and no transcript truncation. See [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) for the design rationale.
 
+**Assistant sessions are accepted.** Sessions with `assistantType` set (one of `goal | role | tool | staff | project`) can be continued; the new session inherits the source's `assistantType`, persisted `role`, and `accessory`, and the proposal-draft directory — live `<type>.{md,yaml}` plus the `<type>.history/<rev>.<ext>` snapshot tree — is cloned verbatim into the new session's slot via `copyProposalDirIfPresent` (a sibling of `copyToolContentDirIfPresent` in `src/server/agent/continue-archived.ts`). The standard WS `auth_ok` rehydrate broadcast surfaces the draft in the proposal panel without extra wiring. See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the user-facing flow. Coding-agent guards (`goalId`, `delegateOf`, `teamGoalId`) remain in place — those sessions still return **422**.
+
 **Success response** (`201 Created`):
 
 ```json
@@ -814,11 +817,12 @@ The generation resets to 0 on server restart. Clients should initialize their tr
   "id": "<new session id>",
   "cwd": "<new session working directory>",
   "status": "<idle | streaming | ...>",
-  "title": "Continued: <original title>"
+  "title": "Continued: <original title>",
+  "assistantType": "<goal | role | tool | staff | project | null>"
 }
 ```
 
-The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt.
+The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over.
 
 **Error responses**:
 
@@ -827,10 +831,10 @@ The new session's title is marked as generated, which prevents the first-message
 | `404` | Archived session not found, or its transcript (`.jsonl`) is missing on disk and `recoverSessionFile` cannot locate it |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
-| `422` | Source is a goal, delegate, team member, or assistant session — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
-| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied) — the destination file is unlinked and no session row is created. See server logs. |
+| `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set) — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
+| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied) — the destination file is unlinked and no session row (including any partially-cloned proposal-drafts directory) is created. See server logs. |
 
-**Scope gate**: The endpoint refuses goal-linked, delegate, team, and assistant sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead.
+**Scope gate**: The endpoint refuses goal-linked, delegate, and team-member sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead. Assistant sessions (`assistantType` set) are explicitly **not** in this gate — see the previous paragraph for the carry-over semantics.
 
 **Cross-realm rejection**: `sessionFileCopy` (`src/server/agent/session-fs.ts`) supports host↔host and same-project sandboxed↔same-project sandboxed copies only. Host↔sandbox and cross-project sandboxed copies throw `CrossRealmCopyError`, which the handler maps to **422**. The user can re-register the project with matching sandbox config and retry. See [docs/internals.md — Continue-Archived sessions](internals.md#continue-archived-sessions) for the full mechanism.
 
