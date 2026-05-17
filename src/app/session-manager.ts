@@ -225,6 +225,13 @@ function createDraftManager<T>(config: {
 				const draft = await loadDraftFromServer(sessionId, config.type);
 				if (!draft) return false;
 				config.restore(sessionId, draft as T);
+				// Pin the contract: after a successful restore, schedule a render
+				// so the fast-path connectToSession (which fire-and-forgets this
+				// promise) repaints the proposal panel with the rehydrated state.
+				// The slow path already renders implicitly in connectToSession's
+				// terminal finally{}; this keeps both paths symmetric. Pinned by
+				// tests/proposal-rehydrate-client.test.ts.
+				renderApp();
 				return true;
 			} catch (err) {
 				console.error(`[${config.type}-draft] Failed to restore draft:`, err);
