@@ -776,7 +776,7 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 - `goalId`, `teamGoalId`, `teamLeadSessionId`, `delegateOf` - guaranteed absent because the scope gate rejects those source types up front
 - Task/gate signals, streaming state, tool state
 
-**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, no `assistantType`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table.
+**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted — the new session inherits `assistantType`, `role`, and `accessory`, and the source's proposal-draft directory is cloned into the new session's slot so the resumed agent picks up the in-progress draft. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the assistant-continue flow.
 
 **Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
@@ -933,7 +933,7 @@ Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
     staff.yaml
 ```
 
-Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write, cleaned up on session archive by `session-manager.ts::terminateSession` (fire-and-forget `fs.rm`).
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write. Cleanup is deferred to `purgeOneSession` at the 7-day mark (alongside the `.jsonl` purge) rather than session archive — the [archived-proposal-reopen flows](archived-proposal-reopen.md) (Path A in-place resubmit, Path B continue-assistant) read drafts off disk for archived sessions, so the directory must outlive the live session.
 
 Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
 
@@ -1018,7 +1018,7 @@ The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolPro
 
 On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed - a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
 
-Session archive cleans the directory: `session-manager.ts::terminateSession` fire-and-forgets `fs.rm` of the per-session dir. An in-flight `editProposalFile` racing with cleanup is harmless - `unlink` on a missing dir is a no-op.
+Session purge cleans the directory: `session-manager.ts::purgeOneSession` fire-and-forgets `fsp.rm` of the per-session dir at the 7-day mark. Archive itself no longer touches the drafts (see [archived-proposal-reopen.md](archived-proposal-reopen.md) for the rationale — archived assistant sessions must keep their drafts on disk so the user can resubmit or continue them). An in-flight `editProposalFile` racing with cleanup is harmless - `unlink` on a missing dir is a no-op.
 
 ### Accept lifecycle
 

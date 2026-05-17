@@ -4562,11 +4562,12 @@ export class SessionManager {
 			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
 		} catch { /* ignore */ }
 
-		// Clean up per-session proposal-drafts directory (fire-and-forget).
-		// Same pattern as eagerDeleteRemoteSessionBranch — never blocks; missing
-		// dir is harmless. See docs/design/editable-proposals.md §4.
-		fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", id), { recursive: true, force: true })
-			.catch(err => console.warn(`[session-manager] proposal-drafts cleanup failed for ${id}:`, err));
+		// NOTE: proposal-drafts cleanup is deferred to purgeOneSession (the
+		// 7-day purge mark). Both Path A (in-place resubmit) and Path B
+		// (continue assistant) of the reopen-archived-proposals design read
+		// these drafts off disk for archived sessions, so they must survive
+		// archive. See docs/design/editable-proposals.md §4 + the design doc
+		// `reopen-archived-proposals.md`.
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();
@@ -4774,6 +4775,17 @@ export class SessionManager {
 			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
 				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
 			});
+		}
+
+		// Delete per-session proposal-drafts directory. Deferred from archive
+		// (terminateSession) so that archived sessions retain their drafts long
+		// enough for the reopen-archived-proposals flows (Path A in-place
+		// resubmit + Path B continue-assistant). Best-effort — missing dir is
+		// harmless. See docs/design/editable-proposals.md §4.
+		try {
+			await fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", ps.id), { recursive: true, force: true });
+		} catch (err) {
+			console.warn(`[session-manager] proposal-drafts purge failed for ${ps.id}:`, err);
 		}
 
 		// Delete session prompt file
