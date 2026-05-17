@@ -216,7 +216,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 
 Staff agents are project-scoped permanent sessions: every record carries a `projectId`, lives in that project's `staff.json`, and renders in a dedicated collapsible **Staff** sub-section under the owning project in the sidebar (see [internals.md — Staff agents in the sidebar](internals.md#staff-agents-in-the-sidebar)). The staff-creation **assistant session** (`assistantType: "staff"`) is a normal session and appears in that project's Sessions list while open — it is not a staff agent until `propose_staff` is accepted.
 
-For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md).
+For the user-facing model (lifecycle, immutable sandbox mode, legacy records) see [staff-agents.md](staff-agents.md). For the inbox queue that owns trigger fan-in and the agent-only state-transition endpoints below, see [staff-inbox.md](staff-inbox.md).
 
 | Method | Path | Description |
 |---|---|---|
@@ -224,10 +224,14 @@ For the user-facing model (lifecycle, immutable sandbox mode, legacy records) se
 | `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }`. Consumed by the sidebar's orphan banner. |
 | `GET` | `/api/staff/:id` | Get a single staff agent definition (includes the persisted `sandboxed` boolean) |
 | `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd, triggers?, roleId?, projectId?, sandboxed? }`). `sandboxed` defaults to `false`; the value is persisted on the record and cannot be changed afterwards. Subject to the [project resolution contract](#project-resolution-contract). |
-| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId }`). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId, contextPolicy }`). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). `contextPolicy` accepts `"preserve"` or `"compact"` (see [staff-inbox.md](staff-inbox.md#contextpolicy)); other values are ignored. |
 | `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, and re-indexes search; the existing worktree branch is preserved (the next wake rebases against the new project's primary branch). Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing or not a non-empty string; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
-| `POST` | `/api/staff/:id/wake` | Manually trigger a staff agent's wake cycle |
+| `GET` | `/api/staff/:id/inbox` | List inbox entries for a staff agent. Query: `state` (`pending` \| `completed` \| `failed` \| `cancelled`, default returns all), `limit` (default unbounded). Returns `{ entries: InboxEntry[] }` in FIFO order. See [staff-inbox.md](staff-inbox.md#rest-surface). |
+| `POST` | `/api/staff/:id/inbox` | Enqueue a new inbox entry. Body: `{ title, prompt, context?, source?: { type?: "manual_api" \| "manual_ui" \| "trigger", actorId? } }`. `source.type` defaults to `manual_api`. Returns `201 { entry: InboxEntry }`. Replaces the deleted `POST /api/staff/:id/wake` route. |
+| `POST` | `/api/staff/:id/inbox/:entryId/complete` | Agent-only: mark a `pending` entry as `completed`. Body: `{ sessionId, summary? }`. `sessionId` is verified to belong to the same staff (403 otherwise). 409 if the entry is not pending. Returns `{ entry }`. |
+| `POST` | `/api/staff/:id/inbox/:entryId/dismiss` | Agent-only: mark a `pending` entry as `failed` or `cancelled`. Body: `{ sessionId, outcome: "failed" \| "cancelled", reason }`. `reason` is required and non-empty. Same 403 / 409 rules as `complete`. |
+| `DELETE` | `/api/staff/:id/inbox/:entryId` | Prune an entry of any state. Returns `{ ok: true }` or 404. |
 | `GET` | `/api/staff/:id/sessions` | **Deprecated (410)**. Use `GET /api/staff/:id` instead. |
 
 ### Projects
