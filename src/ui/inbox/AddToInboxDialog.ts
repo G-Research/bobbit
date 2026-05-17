@@ -1,4 +1,4 @@
-import { html, LitElement, css } from "lit";
+import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 /**
@@ -21,23 +21,16 @@ export class AddToInboxDialog extends LitElement {
 	@state() private _submitting = false;
 	@state() private _error: string | null = null;
 
-	static styles = css`
-		:host {
-			position: fixed;
-			inset: 0;
-			z-index: 100;
-		}
-	`;
-
 	createRenderRoot() {
 		return this;
 	}
 
 	connectedCallback(): void {
 		super.connectedCallback();
-		// Light DOM means `static styles` doesn't apply to the host. Set the
-		// host-level layout inline so Playwright's toBeVisible() finds the
-		// element and so the backdrop fills the viewport via the host box.
+		// Light DOM: a `static styles` block targeting :host would never apply,
+		// so layout has to be set inline on the host. Without this, the custom
+		// element defaults to display:inline with a zero bounding box and
+		// Playwright's toBeVisible() reports it as hidden.
 		this.style.position = "fixed";
 		this.style.inset = "0";
 		this.style.zIndex = "100";

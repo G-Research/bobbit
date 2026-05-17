@@ -284,4 +284,45 @@ test.describe("Staff inbox — REST API", () => {
 		expect(res.status).not.toBe(200);
 		expect(res.status).not.toBe(201);
 	});
+
+	test("PUT /api/staff/:id round-trips contextPolicy (compact → preserve → compact)", async () => {
+		const staff = await createStaff("Inbox contextPolicy");
+		cleanupStaffIds.push(staff.id);
+
+		// Default after creation is "compact" (the migration default).
+		const initial = await (await apiFetch(`/api/staff/${staff.id}`)).json();
+		expect(initial.contextPolicy === undefined || initial.contextPolicy === "compact").toBe(true);
+
+		// Flip to "preserve" via PUT and confirm the response reflects the change.
+		const flipRes = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ contextPolicy: "preserve" }),
+		});
+		expect(flipRes.status).toBe(200);
+		const flipped = await flipRes.json();
+		expect(flipped.contextPolicy).toBe("preserve");
+
+		// Persisted to disk: a fresh GET reads back "preserve".
+		const reread = await (await apiFetch(`/api/staff/${staff.id}`)).json();
+		expect(reread.contextPolicy).toBe("preserve");
+
+		// Flip back to "compact" — confirms both directions wire through.
+		const backRes = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ contextPolicy: "compact" }),
+		});
+		expect(backRes.status).toBe(200);
+		const back = await backRes.json();
+		expect(back.contextPolicy).toBe("compact");
+
+		// Bogus values are dropped, leaving the previously-saved value intact.
+		const bogusRes = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ contextPolicy: "clear", name: "Inbox contextPolicy renamed" }),
+		});
+		expect(bogusRes.status).toBe(200);
+		const afterBogus = await bogusRes.json();
+		expect(afterBogus.contextPolicy).toBe("compact");
+		expect(afterBogus.name).toBe("Inbox contextPolicy renamed");
+	});
 });

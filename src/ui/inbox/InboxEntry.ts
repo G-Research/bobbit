@@ -39,7 +39,9 @@ export class InboxEntryRow extends LitElement {
 		super.updated(changedProps);
 		// Reflect entry.state to the host as `data-state` so external selectors
 		// (Playwright tests, CSS) can target rows by lifecycle state without
-		// piercing into the light-DOM children.
+		// piercing into the light-DOM children. Only fire on `entry` changes —
+		// `busy` toggles don't affect these attributes.
+		if (!changedProps.has("entry")) return;
 		if (this.entry?.state) this.setAttribute("data-state", this.entry.state);
 		if (this.entry?.id) this.setAttribute("data-entry-id", this.entry.id);
 	}

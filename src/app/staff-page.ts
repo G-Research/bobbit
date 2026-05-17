@@ -81,7 +81,7 @@ function showEdit(agent: StaffAgent): void {
 	editCwd = agent.cwd;
 	editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 	editMemory = agent.memory || "";
-	editContextPolicy = ((agent as unknown as { contextPolicy?: "preserve" | "compact" }).contextPolicy) === "preserve" ? "preserve" : "compact";
+	editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
 	wakeFeedback = null;
 	saving = false;
 	deleting = false;
@@ -101,7 +101,7 @@ export function navigateToStaffEdit(staffId: string): void {
 		editCwd = agent.cwd;
 		editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 		editMemory = agent.memory || "";
-		editContextPolicy = ((agent as unknown as { contextPolicy?: "preserve" | "compact" }).contextPolicy) === "preserve" ? "preserve" : "compact";
+		editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
 		wakeFeedback = null;
 		saving = false;
 		deleting = false;
@@ -142,7 +142,7 @@ async function handleSave(): Promise<void> {
 		triggers: editTriggers,
 		memory: editMemory,
 		contextPolicy: editContextPolicy,
-	} as Parameters<typeof updateStaffAgent>[1]);
+	});
 	// Save session appearance (color, accessory)
 	if (selectedStaff.currentSessionId) {
 		const sid = selectedStaff.currentSessionId;

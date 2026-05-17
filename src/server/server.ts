@@ -8155,6 +8155,10 @@ async function handleApiRoute(
 				triggers: body.triggers,
 				memory: body.memory,
 				roleId: body.roleId,
+				contextPolicy:
+					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
+						? body.contextPolicy
+						: undefined,
 			});
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
 			json(staffManager.getStaff(id));

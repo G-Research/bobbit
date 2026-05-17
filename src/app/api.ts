@@ -1274,6 +1274,7 @@ export interface StaffAgent {
 	currentSessionId?: string;
 	projectId?: string;
 	sandboxed?: boolean;
+	contextPolicy?: "preserve" | "compact";
 }
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
@@ -1339,7 +1340,7 @@ export async function createStaffAgent(data: { name: string; description: string
 	}
 }
 
-export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory">>): Promise<boolean> {
+export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy">>): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`, {
 			method: "PUT",
