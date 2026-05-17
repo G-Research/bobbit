@@ -716,6 +716,12 @@ async function initApp() {
 		document.body.dataset.shortcutsReady = "1";
 	}
 
+	// Refresh ${shortcutHint(...)} evaluations that were stamped as "" by the
+	// early renderApp() at the top of initApp(): at that point no shortcut had
+	// been registered yet, so toolbar/sidebar titles like "New goal" were missing
+	// their "(Alt+G)" suffix until some incidental state change re-rendered.
+	renderApp();
+
 	// Sync preferences when the page becomes visible (covers cross-device
 	// changes when the user switches back to this tab/app).
 	document.addEventListener("visibilitychange", async () => {
