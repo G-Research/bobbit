@@ -165,4 +165,24 @@ export class InboxManager {
 		}
 		return ok;
 	}
+
+	/**
+	 * Wipe the entire inbox for a staff (used by `StaffManager.deleteStaff`).
+	 * Resolves the owning store via `resolveStore`; falls back to a scan of
+	 * every project's `inboxStore` when the staff record has already been
+	 * removed from `staffStore` (e.g. delete order is `staffStore.remove`
+	 * before `inboxManager.removeAll`). No WS event — clients learn via the
+	 * staff deletion broadcast.
+	 */
+	removeAll(staffId: string): void {
+		const store = this.resolveStore(staffId);
+		if (store) {
+			store.removeAll(staffId);
+			return;
+		}
+		// Fall back: staff record already gone — wipe any orphaned inbox file.
+		for (const ctx of this.pcm.all()) {
+			ctx.inboxStore.removeAll(staffId);
+		}
+	}
 }

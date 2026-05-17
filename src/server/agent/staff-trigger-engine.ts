@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { StaffManager } from "./staff-manager.js";
 import type { SessionManager } from "./session-manager.js";
+import type { InboxManager } from "./inbox-manager.js";
 import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
 
 /**
@@ -96,13 +97,17 @@ export function cronMatches(expr: string, date: Date): boolean {
  */
 export class TriggerEngine {
 	private intervalHandle: ReturnType<typeof setInterval> | null = null;
-	/** Staff IDs currently in the process of waking (prevents concurrent wake race) */
-	private wakingInProgress = new Set<string>();
 
 	constructor(
 		private staffManager: StaffManager,
 		private sessionManager: SessionManager,
-	) {}
+		private inboxManager: InboxManager,
+	) {
+		// `sessionManager` kept on the instance for future use (e.g. trigger
+		// preflight checks that need session state). `fireTrigger` itself no
+		// longer touches it — enqueueing is pure I/O against the inbox store.
+		void this.sessionManager;
+	}
 
 	start(): void {
 		this.tick();
@@ -123,14 +128,10 @@ export class TriggerEngine {
 		for (const staff of allStaff) {
 			if (staff.state !== "active") continue;
 
-			// Skip if a wake is already in-flight for this staff (async race guard)
-			if (this.wakingInProgress.has(staff.id)) continue;
-
-			// Skip if the staff's permanent session is currently busy (streaming or starting)
-			if (staff.currentSessionId) {
-				const session = this.sessionManager.getSession(staff.currentSessionId);
-				if (session && (session.status === "streaming" || session.status === "starting")) continue;
-			}
+			// No streaming/starting skip and no in-flight guard — enqueueing is
+			// synchronous against the JSON-backed inbox store, so there is no
+			// race to gate. The InboxNudger separately decides when to deliver
+			// the accumulated work to the agent.
 
 			for (const trigger of staff.triggers) {
 				if (!trigger.enabled) continue;
@@ -158,7 +159,7 @@ export class TriggerEngine {
 			if (lastFiredMinute === currentMinute) return false;
 		}
 
-		void this.fireTrigger(staff, trigger);
+		this.fireTrigger(staff, trigger);
 		return true;
 	}
 
@@ -203,7 +204,7 @@ export class TriggerEngine {
 
 			// Always update lastSeenSha before firing
 			this.staffManager.updateTriggerState(staff.id, trigger.id, { lastSeenSha: sha });
-			void this.fireTrigger(staff, trigger, context);
+			this.fireTrigger(staff, trigger, context);
 			return true;
 		}
 
@@ -212,10 +213,16 @@ export class TriggerEngine {
 		return false;
 	}
 
-	private async fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): Promise<void> {
+	/**
+	 * Append a new entry to the staff's inbox. Synchronous — returns once
+	 * the JSON file has been written. `InboxManager.enqueue` calls
+	 * `nudger.poke(staffId)` so an already-idle staff is woken on the next
+	 * microtask; otherwise the 15 s nudger tick picks it up the next time
+	 * the staff goes idle.
+	 */
+	private fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): void {
 		console.log(`[trigger-engine] Firing ${trigger.type} trigger "${trigger.id}" for staff "${staff.name}"`);
 
-		this.wakingInProgress.add(staff.id);
 		this.staffManager.updateTriggerState(staff.id, trigger.id, { lastFired: Date.now() });
 
 		let prompt = trigger.prompt || `Trigger fired: ${trigger.type}`;
@@ -223,12 +230,16 @@ export class TriggerEngine {
 			prompt += "\n\n" + extraContext;
 		}
 
+		const titleHint = trigger.config.cron ?? trigger.config.branch ?? trigger.id;
 		try {
-			await this.staffManager.wake(staff.id, prompt, this.sessionManager);
+			this.inboxManager.enqueue(staff.id, {
+				title: `${trigger.type}: ${titleHint}`,
+				prompt,
+				context: extraContext,
+				source: { type: "trigger", triggerId: trigger.id },
+			});
 		} catch (err) {
-			console.error(`[trigger-engine] Failed to wake staff "${staff.name}":`, err);
-		} finally {
-			this.wakingInProgress.delete(staff.id);
+			console.error(`[trigger-engine] Failed to enqueue inbox entry for staff "${staff.name}":`, err);
 		}
 	}
 }
