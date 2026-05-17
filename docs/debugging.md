@@ -145,6 +145,19 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 - Failed restores create dormant entries that revive on client connect
 - **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
 
+## Staff inbox tools missing after restart / `[INBOX]` completion silently fails
+
+- **Symptoms**: a staff agent woken by `[INBOX]` reports `Tool inbox_complete not found` / `Tool inbox_list not found`; `GET /api/sessions/:id` returns a body with no `staffId` field; the REST fallback `POST /api/staff/:staffId/inbox/:entryId/complete` returns `403 Forbidden: session does not belong to this staff`. Inbox entries stay pending forever and re-fire on every trigger.
+- **Root cause**: the three inbox tools in `defaults/tools/inbox/extension.ts` are gated by `BOBBIT_STAFF_ID` in the agent process env. That env var is set from `PersistedSession.staffId` on every (re)spawn (`session-manager.ts::restoreSession` → `bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId`). Pre-fix, `StaffManager` mutated `session.staffId = id` only in memory, so the field never reached disk and was undefined after any respawn / compaction / server restart.
+- **Quick diagnostic**: `jq '.sessions[] | select(.title == "<staff name>") | {id, staffId, cwd}' .bobbit/state/sessions.json` — if `staffId` is null/missing on a session whose `title` matches a staff `name`, you've hit the bug.
+- **Resolution path**: should auto-heal on next server restart via `src/server/agent/staff-backfill.ts`. A loud warn log will appear: `[staff-backfill] backfilling staffId="..." for session=...`. If it doesn't fire, check that the session's `title` exactly matches a staff `name` AND its `worktreePath` (or `cwd`) matches the staff's `worktreePath`. The backfill is conservative and refuses title-only matches.
+- **Spawn-path wires** (must all be present for new sessions to persist correctly):
+  - `session-manager.ts::createSession` opts → both plan builders carry `staffId: opts?.staffId,`.
+  - `staff-manager.ts` passes `staffId: id` (and `staffId` on the scheduled-wake path) to both `createSession` call sites.
+  - `session-setup.ts::persistOnce` writes `staffId: plan.staffId` into `PersistedSession`.
+  - `session-manager.ts::restoreSession` reads `ps.staffId` and sets `bridgeOptions.env.BOBBIT_STAFF_ID`.
+- **Pinning test**: `tests/staff-session-staffid-persistence.test.ts` covers spawn-path forwarding, `SessionStore` round-trip, backfill idempotency, and source-level guards for the read/write field.
+
 ## `system-prompt.md` not customised
 
 - Resolver: `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` returns the user override at `<bobbitConfigDir>/system-prompt.md` only if that file exists, otherwise falls back to the shipped `dist/server/defaults/system-prompt.md`.

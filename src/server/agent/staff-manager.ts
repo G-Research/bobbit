@@ -195,11 +195,12 @@ export class StaffManager {
 				// `model`/`thinkingLevel` overrides would be silently ignored.
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: id },
-				// CRITICAL: thread staffId through opts → plan → persistOnce so the
-				// field lands in PersistedSession at spawn time and survives every
-				// respawn path. Without this, on respawn `restoreSession` reads
-				// `ps.staffId = undefined` → no `BOBBIT_STAFF_ID` env → the three inbox
-				// tools refuse to register (see `defaults/tools/inbox/extension.ts`).
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
+				// through opts → plan → persistOnce so it lands in PersistedSession.
+				// Without this, on respawn `restoreSession` reads `ps.staffId =
+				// undefined` → no `BOBBIT_STAFF_ID` env → inbox tools refuse to
+				// register (see `defaults/tools/inbox/extension.ts`).
 				staffId: id,
 				sandboxed: effectiveSandboxed,
 				sandboxBranch: effectiveSandboxed ? branchName : undefined,
@@ -445,8 +446,9 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: staffId },
-				// See createStaff: persist staffId in PersistedSession so respawn
-				// wakes the agent with `BOBBIT_STAFF_ID` set and inbox tools register.
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
+				// `createStaff` above.
 				staffId,
 				sandboxed: staff.sandboxed,
 				sandboxBranch: staff.sandboxed ? staff.branch : undefined,

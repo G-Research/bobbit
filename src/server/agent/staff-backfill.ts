@@ -1,6 +1,11 @@
 /**
  * One-shot backfill migration for sessions that lost their `staffId`
- * association before the staffId-persistence fix landed.
+ * association before the staffId-persistence fix landed. For sessions
+ * created AFTER the fix this migration is a no-op — `staffId` already
+ * round-trips through `createSession` opts → plan → `persistOnce`. See
+ * `session-manager.ts::createSession` (both plan builders) and
+ * `staff-manager.ts` (both `createSession` call sites) for the spawn-path
+ * wires; `tests/staff-session-staffid-persistence.test.ts` pins them.
  *
  * Background: prior to the fix, `StaffManager` set `session.staffId = id`
  * purely in memory — `SessionManager.createSession()` never accepted `staffId`
@@ -10,17 +15,18 @@
  * `defaults/tools/inbox/extension.ts` silently refused to register the three
  * inbox tools.
  *
- * This helper walks every project context's `SessionStore`, finds sessions
- * with no `staffId` whose `title` matches a known staff `name` AND whose
- * `worktreePath` / `cwd` matches the staff's worktree, and writes the
- * association back via `store.update(id, { staffId })`.
+ * Match algorithm: walk every project context's `SessionStore`, find
+ * sessions with no `staffId` whose `title` matches a known staff `name`
+ * AND whose `worktreePath` / `cwd` matches the staff's `worktreePath`
+ * (with a `cwd === cwd` fallback for staff that lack `worktreePath`).
+ * Title alone is too weak — a bare title match WITHOUT the path agreement
+ * is NOT enough to trigger a backfill. Healed via `store.update(id, { staffId })`.
  *
  * Behaviour contract:
+ *   - **Runs once at server boot**, from `createGateway` in `server.ts`
+ *     after `StaffManager` is wired and all project contexts are loaded.
  *   - **Idempotent**: sessions that already carry `staffId` are skipped.
  *     Running the migration twice is a no-op.
- *   - **Conservative match**: title alone is too weak; we require title +
- *     (worktreePath or cwd) agreement. A bare title match WITHOUT the path
- *     agreement is NOT enough to trigger a backfill.
  *   - **Loud logging**: warn-level log per backfilled session so the
  *     underlying bug doesn't get masked next time.
  *

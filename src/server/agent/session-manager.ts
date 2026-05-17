@@ -3170,6 +3170,9 @@ export class SessionManager {
 				cwd,
 				goalId,
 				taskId: opts?.taskId,
+				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
+				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
+				// without it `BOBBIT_STAFF_ID` is lost on respawn and the inbox tools refuse to register.
 				staffId: opts?.staffId,
 				worktreePath,
 				repoPath,
@@ -3228,6 +3231,8 @@ export class SessionManager {
 			goalId,
 			assistantType,
 			taskId: opts?.taskId,
+			// Load-bearing wire: same contract as the worktree branch above.
+			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
