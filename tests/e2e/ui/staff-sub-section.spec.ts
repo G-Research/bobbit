@@ -17,7 +17,7 @@
  *     project (not flat-merged into the SES bucket).
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, gitCwd, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, defaultProject, defaultProjectId } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 const STAFF_SECTION_LOCATOR = (page: import("@playwright/test").Page) =>
@@ -46,9 +46,8 @@ test.describe("Per-project Staff sub-section", () => {
 	});
 
 	test("staff row appears inside Staff sub-section (not in Sessions); reload persists; archive removes", async ({ page }) => {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
-		const cwd = gitCwd();
+		const project = await defaultProject();
+		const pid = project.id;
 
 		const name = `SubSectionBot${Date.now()}`;
 		const resp = await apiFetch("/api/staff", {
@@ -56,7 +55,7 @@ test.describe("Per-project Staff sub-section", () => {
 			body: JSON.stringify({
 				name,
 				systemPrompt: "You are a sidebar test bot.",
-				cwd,
+				cwd: project.rootPath,
 				projectId: pid,
 			}),
 		});
@@ -171,9 +170,8 @@ test.describe("Per-project Staff sub-section", () => {
 	});
 
 	test("search filters staff inside the sub-section", async ({ page }) => {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
-		const cwd = gitCwd();
+		const project = await defaultProject();
+		const pid = project.id;
 
 		const tag = Date.now();
 		const matchName = `MatchableBot${tag}`;
@@ -181,7 +179,7 @@ test.describe("Per-project Staff sub-section", () => {
 		for (const n of [matchName, otherName]) {
 			const r = await apiFetch("/api/staff", {
 				method: "POST",
-				body: JSON.stringify({ name: n, systemPrompt: "x", cwd, projectId: pid }),
+				body: JSON.stringify({ name: n, systemPrompt: "x", cwd: project.rootPath, projectId: pid }),
 			});
 			expect(r.status).toBe(201);
 			const s = await r.json();
@@ -208,14 +206,13 @@ test.describe("Per-project Staff sub-section", () => {
 	test("PATCH /api/staff/:id { projectId } moves the row under the target project", async ({ page }) => {
 		// Orphan-banner fix path: PATCH endpoint moves the staff into a project,
 		// after which the row should appear inside that project's Staff sub-section.
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
-		const cwd = gitCwd();
+		const project = await defaultProject();
+		const pid = project.id;
 
 		const name = `OrphanBot${Date.now()}`;
 		const resp = await apiFetch("/api/staff", {
 			method: "POST",
-			body: JSON.stringify({ name, systemPrompt: "orphan test bot.", cwd, projectId: pid }),
+			body: JSON.stringify({ name, systemPrompt: "orphan test bot.", cwd: project.rootPath, projectId: pid }),
 		});
 		expect(resp.status).toBe(201);
 		const staff = await resp.json();
@@ -237,14 +234,13 @@ test.describe("Per-project Staff sub-section", () => {
 	});
 
 	test("collapsed sidebar surfaces staff under a dedicated STAFF bucket (not in SES)", async ({ page }) => {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
-		const cwd = gitCwd();
+		const project = await defaultProject();
+		const pid = project.id;
 
 		const name = `CollapsedBot${Date.now()}`;
 		const resp = await apiFetch("/api/staff", {
 			method: "POST",
-			body: JSON.stringify({ name, systemPrompt: "x", cwd, projectId: pid }),
+			body: JSON.stringify({ name, systemPrompt: "x", cwd: project.rootPath, projectId: pid }),
 		});
 		expect(resp.status).toBe(201);
 		const staff = await resp.json();
