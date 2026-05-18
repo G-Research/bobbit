@@ -111,7 +111,7 @@ export class InboxPanel extends LitElement {
 		const isEmpty = pending.length === 0 && terminal.length === 0;
 
 		return html`
-			<div class="inbox-panel" style="display:flex;flex-direction:column;height:100%;min-height:0;">
+			<div class="inbox-panel" style="position:relative;overflow:hidden;display:flex;flex-direction:column;height:100%;min-height:0;">
 				<div class="inbox-panel-header" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;">
 					<div style="font-size:13px;font-weight:600;color:var(--foreground);">Inbox</div>
 					<button
