@@ -71,6 +71,17 @@ async function postStaff(body: Record<string, unknown>): Promise<StaffCreateResu
 	return { status: res.status, text, json };
 }
 
+async function putStaff(id: string, body: Record<string, unknown>): Promise<StaffCreateResult> {
+	const res = await rawApiFetch(`/api/staff/${id}`, {
+		method: "PUT",
+		body: JSON.stringify(body),
+	});
+	const text = await res.text();
+	let json: any = undefined;
+	try { json = text ? JSON.parse(text) : undefined; } catch { /* keep text only */ }
+	return { status: res.status, text, json };
+}
+
 async function deleteStaff(id: string): Promise<void> {
 	await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
 }
@@ -250,5 +261,74 @@ test.describe("staff cwd parity regressions", () => {
 			created.status,
 			`STAFF_CWD_PARITY_MISMATCHED_CWD_400: projectId=${projectA.id} with cwd from projectId=${projectB.id} must be rejected. body=${created.text}`,
 		).toBe(400);
+	});
+
+	test("PUT /api/staff/:id rejects cwd outside the staff project and preserves stored cwd", async () => {
+		const root = makeTempRoot("put-reject");
+		cleanupDirs.push(root);
+		const projectADir = makePlainDir(root, "project-a");
+		const projectBDir = makePlainDir(root, "project-b");
+		const arbitraryDir = makePlainDir(root, "outside-registered-projects");
+		const projectA = await createProject(`staff-cwd-put-a-${Date.now()}`, projectADir);
+		const projectB = await createProject(`staff-cwd-put-b-${Date.now()}`, projectBDir);
+		cleanupProjectIds.push(projectA.id, projectB.id);
+
+		const created = await postStaff({
+			name: "Update cwd guard staff",
+			systemPrompt: "Do not accept cwd edits outside this project.",
+			projectId: projectA.id,
+			cwd: projectA.rootPath,
+		});
+		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+		expect(created.status, `STAFF_CWD_PARITY_UPDATE_GUARD_SETUP: staff creation failed. body=${created.text}`).toBe(201);
+		const staffId = created.json.id;
+		const originalCwd = created.json.cwd;
+
+		for (const [label, cwd] of [
+			["different registered project", projectB.rootPath],
+			["unregistered temp dir", arbitraryDir],
+			["blank cwd", "   "],
+		] as const) {
+			const updated = await putStaff(staffId, { cwd });
+			expect(
+				updated.status,
+				`STAFF_CWD_PARITY_UPDATE_GUARD_400: PUT cwd=${label} must be rejected. body=${updated.text}`,
+			).toBe(400);
+
+			const storedRes = await apiFetch(`/api/staff/${staffId}`);
+			expect(storedRes.status, `STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: staff should remain readable after rejected ${label}`).toBe(200);
+			const stored = await storedRes.json();
+			expect(
+				normalisePath(stored.cwd),
+				`STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: rejected ${label} must not mutate stored cwd`,
+			).toBe(normalisePath(originalCwd));
+		}
+	});
+
+	test("PUT /api/staff/:id accepts cwd inside the staff project", async () => {
+		const root = makeTempRoot("put-accept");
+		cleanupDirs.push(root);
+		const projectDir = makePlainDir(root, "project-a");
+		const subdir = join(projectDir, "packages", "app");
+		mkdirSync(subdir, { recursive: true });
+		const project = await createProject(`staff-cwd-put-accept-${Date.now()}`, projectDir);
+		cleanupProjectIds.push(project.id);
+
+		const created = await postStaff({
+			name: "Update cwd allowed staff",
+			systemPrompt: "Allow cwd edits inside this project.",
+			projectId: project.id,
+			cwd: project.rootPath,
+		});
+		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+		expect(created.status, `STAFF_CWD_PARITY_UPDATE_ALLOWED_SETUP: staff creation failed. body=${created.text}`).toBe(201);
+
+		const updated = await putStaff(created.json.id, { cwd: subdir });
+		expect(
+			updated.status,
+			`STAFF_CWD_PARITY_UPDATE_ALLOWED: PUT cwd to a subdirectory inside projectId=${project.id} should succeed. body=${updated.text}`,
+		).toBe(200);
+		expect(normalisePath(updated.json.cwd), "STAFF_CWD_PARITY_UPDATE_ALLOWED: stored cwd should update to the project subdirectory").toBe(normalisePath(subdir));
+		expect(updated.json.projectId, "STAFF_CWD_PARITY_UPDATE_ALLOWED: staff should remain attached to its project").toBe(project.id);
 	});
 });
