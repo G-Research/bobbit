@@ -82,6 +82,17 @@ async function putStaff(id: string, body: Record<string, unknown>): Promise<Staf
 	return { status: res.status, text, json };
 }
 
+async function patchStaff(id: string, body: Record<string, unknown>): Promise<StaffCreateResult> {
+	const res = await rawApiFetch(`/api/staff/${id}`, {
+		method: "PATCH",
+		body: JSON.stringify(body),
+	});
+	const text = await res.text();
+	let json: any = undefined;
+	try { json = text ? JSON.parse(text) : undefined; } catch { /* keep text only */ }
+	return { status: res.status, text, json };
+}
+
 async function deleteStaff(id: string): Promise<void> {
 	await apiFetch(`/api/staff/${id}`, { method: "DELETE" }).catch(() => {});
 }
@@ -261,6 +272,83 @@ test.describe("staff cwd parity regressions", () => {
 			created.status,
 			`STAFF_CWD_PARITY_MISMATCHED_CWD_400: projectId=${projectA.id} with cwd from projectId=${projectB.id} must be rejected. body=${created.text}`,
 		).toBe(400);
+	});
+
+	test("PUT /api/staff/:id allows orphaned legacy field edits when cwd is unchanged", async () => {
+		const root = makeTempRoot("orphan-unchanged");
+		cleanupDirs.push(root);
+		const projectDir = makePlainDir(root, "legacy-project");
+		const project = await createProject(`staff-cwd-orphan-unchanged-${Date.now()}`, projectDir);
+		cleanupProjectIds.push(project.id);
+
+		const created = await postStaff({
+			name: "Legacy orphan staff",
+			description: "Original description",
+			systemPrompt: "Original prompt.",
+			projectId: project.id,
+			cwd: project.rootPath,
+		});
+		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+		expect(created.status, `STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SETUP: staff creation failed. body=${created.text}`).toBe(201);
+		const originalCwd = created.json.cwd;
+
+		const orphaned = await patchStaff(created.json.id, { projectId: "system" });
+		expect(orphaned.status, `STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SETUP: staff re-home to system project failed. body=${orphaned.text}`).toBe(200);
+		expect(orphaned.json.projectId, "STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SETUP: test staff should simulate a system-project legacy orphan").toBe("system");
+
+		const updated = await putStaff(created.json.id, {
+			name: "Renamed legacy orphan",
+			description: "Updated description",
+			systemPrompt: "Updated prompt.",
+			cwd: `${originalCwd}   `,
+		});
+		expect(
+			updated.status,
+			`STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd from the edit page should not require a registered project. body=${updated.text}`,
+		).toBe(200);
+		expect(updated.json.name).toBe("Renamed legacy orphan");
+		expect(updated.json.description).toBe("Updated description");
+		expect(updated.json.systemPrompt).toBe("Updated prompt.");
+		expect(updated.json.cwd, "STAFF_CWD_PARITY_ORPHAN_UNCHANGED_SAVE: unchanged cwd must not be rewritten just because the UI re-sent it").toBe(originalCwd);
+	});
+
+	test("PUT /api/staff/:id rejects orphaned legacy cwd changes and preserves stored cwd", async () => {
+		const root = makeTempRoot("orphan-change");
+		cleanupDirs.push(root);
+		const projectDir = makePlainDir(root, "legacy-project");
+		const newCwd = makePlainDir(root, "new-cwd");
+		const project = await createProject(`staff-cwd-orphan-change-${Date.now()}`, projectDir);
+		cleanupProjectIds.push(project.id);
+
+		const created = await postStaff({
+			name: "Legacy orphan cwd guard",
+			description: "Original description",
+			systemPrompt: "Original prompt.",
+			projectId: project.id,
+			cwd: project.rootPath,
+		});
+		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+		expect(created.status, `STAFF_CWD_PARITY_ORPHAN_CHANGE_SETUP: staff creation failed. body=${created.text}`).toBe(201);
+		const staffId = created.json.id;
+		const originalCwd = created.json.cwd;
+
+		const orphaned = await patchStaff(staffId, { projectId: "system" });
+		expect(orphaned.status, `STAFF_CWD_PARITY_ORPHAN_CHANGE_SETUP: staff re-home to system project failed. body=${orphaned.text}`).toBe(200);
+
+		const updated = await putStaff(staffId, {
+			name: "Should not persist",
+			cwd: newCwd,
+		});
+		expect(
+			updated.status,
+			`STAFF_CWD_PARITY_ORPHAN_CHANGE_400: orphaned staff cwd changes must still be rejected. body=${updated.text}`,
+		).toBe(400);
+
+		const storedRes = await apiFetch(`/api/staff/${staffId}`);
+		expect(storedRes.status, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: staff should remain readable after rejected cwd change").toBe(200);
+		const stored = await storedRes.json();
+		expect(stored.name, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected update must not mutate other fields").toBe("Legacy orphan cwd guard");
+		expect(stored.cwd, "STAFF_CWD_PARITY_ORPHAN_CHANGE_PRESERVE: rejected cwd change must not mutate stored cwd").toBe(originalCwd);
 	});
 
 	test("PUT /api/staff/:id rejects cwd outside the staff project and preserves stored cwd", async () => {
