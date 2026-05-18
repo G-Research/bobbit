@@ -182,22 +182,27 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
 		// Workflows already seeded above via direct project.yaml write.
-		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"Authorization": `Bearer ${token}`,
-				},
-				// acceptCanonical=true is needed on macOS, where TMPDIR
-				// (/var/folders/...) is a symlink to /private/var/folders/...
-				// Without it, the server rejects the register with a
-				// SymlinkProjectRootError 400 and the harness silently runs
-				// with zero registered projects — every POST /api/sessions
-				// or /api/goals then 400s with "projectId required".
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
-			});
-		} catch { /* best-effort */ }
+		const defaultProjectRegister = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${token}`,
+			},
+			// acceptCanonical=true is needed on macOS, where TMPDIR
+			// (/var/folders/...) is a symlink to /private/var/folders/...
+			// Without it, the server rejects the register with a
+			// SymlinkProjectRootError 400 and the harness must fail loudly;
+			// otherwise every POST /api/sessions or /api/goals then 400s with
+			// "projectId required".
+			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+		});
+		if (!defaultProjectRegister.ok) {
+			const body = await defaultProjectRegister.text().catch(() => "<failed to read body>");
+			throw new Error(
+				`[in-process-harness] default project registration failed: ` +
+				`${defaultProjectRegister.status} ${defaultProjectRegister.statusText} body=${body || "<empty>"}`,
+			);
+		}
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.
