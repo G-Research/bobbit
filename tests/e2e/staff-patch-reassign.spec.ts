@@ -9,7 +9,7 @@
  *  - GET /api/staff/orphaned returns staff with system / missing projectId
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, gitCwd, readE2EToken } from "./e2e-setup.js";
+import { apiFetch, readE2EToken } from "./e2e-setup.js";
 
 test.describe("PATCH /api/staff/:id — re-home to project", () => {
 	let token: string;
@@ -33,9 +33,10 @@ test.describe("PATCH /api/staff/:id — re-home to project", () => {
 		const projA = projects[0];
 
 		// Register a second project rooted at a fresh dir.
-		const projBRoot = gitCwd() + "-projB-" + Date.now();
-		const { mkdirSync } = await import("node:fs");
-		mkdirSync(projBRoot, { recursive: true });
+		const { mkdtempSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir } = await import("node:os");
+		const projBRoot = mkdtempSync(join(tmpdir(), `bobbit-e2e-projB-${Date.now()}-`));
 		const projBResp = await apiFetch("/api/projects", {
 			method: "POST",
 			body: JSON.stringify({ name: `patch-target-${Date.now()}`, rootPath: projBRoot }),
@@ -43,14 +44,12 @@ test.describe("PATCH /api/staff/:id — re-home to project", () => {
 		expect(projBResp.ok).toBeTruthy();
 		const projB = await projBResp.json();
 
-		// Staff creation needs a real git repo for worktree setup, so use gitCwd()
-		// for the cwd. projectId still pins ownership.
 		const createResp = await apiFetch("/api/staff", {
 			method: "POST",
 			body: JSON.stringify({
 				name: `patch-staff-${Date.now()}`,
 				systemPrompt: "y",
-				cwd: gitCwd(),
+				cwd: projA.rootPath,
 				projectId: projA.id,
 			}),
 		});

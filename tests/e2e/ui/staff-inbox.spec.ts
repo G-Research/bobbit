@@ -21,7 +21,7 @@
  * inline so the team lead can route follow-up.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, gitCwd, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, defaultProject } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 test.describe("Staff inbox panel", () => {
@@ -34,16 +34,14 @@ test.describe("Staff inbox panel", () => {
 	});
 
 	async function createStaff(name: string): Promise<{ id: string; currentSessionId?: string }> {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
-		const cwd = gitCwd();
+		const project = await defaultProject();
 		const resp = await apiFetch("/api/staff", {
 			method: "POST",
 			body: JSON.stringify({
 				name,
 				systemPrompt: "Inbox panel test bot.",
-				cwd,
-				projectId: pid,
+				cwd: project.rootPath,
+				projectId: project.id,
 			}),
 		});
 		expect(resp.status, `create staff ${name}`).toBe(201);

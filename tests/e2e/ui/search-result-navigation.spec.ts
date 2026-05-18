@@ -31,7 +31,7 @@ import {
 	connectWs,
 	agentEndPredicate,
 	waitForSessionStatus,
-	gitCwd,
+	defaultProject,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { pollUntil } from "../test-utils/cleanup.js";
@@ -97,9 +97,10 @@ async function sendWsMessage(sessionId: string, text: string): Promise<void> {
 }
 
 async function createStaff(data: { name: string; systemPrompt: string }): Promise<{ id: string; currentSessionId?: string }> {
+	const project = await defaultProject();
 	const res = await apiFetch("/api/staff", {
 		method: "POST",
-		body: JSON.stringify({ ...data, cwd: gitCwd() }),
+		body: JSON.stringify({ ...data, cwd: project.rootPath, projectId: project.id }),
 	});
 	if (res.status !== 201) {
 		const txt = await res.text();

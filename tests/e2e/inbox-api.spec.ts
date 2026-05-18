@@ -12,15 +12,17 @@
  * (no coalescing) so the tests can assert ordering and per-entry transitions.
  */
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, gitCwd, readE2EToken } from "./e2e-setup.js";
+import { apiFetch, defaultProject, readE2EToken } from "./e2e-setup.js";
 
 async function createStaff(name: string) {
+	const project = await defaultProject();
 	const res = await apiFetch("/api/staff", {
 		method: "POST",
 		body: JSON.stringify({
 			name,
 			systemPrompt: "Inbox test agent.",
-			cwd: gitCwd(),
+			cwd: project.rootPath,
+			projectId: project.id,
 		}),
 	});
 	expect(res.status).toBe(201);
