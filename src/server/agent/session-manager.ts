@@ -38,7 +38,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
-import { shouldSkipRemotePush, detectPrimaryBranch } from "../skills/git.js";
+import { shouldSkipRemotePush, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -67,6 +67,7 @@ import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
+	type SandboxWiringOptions,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -74,11 +75,16 @@ import {
 	sendDelegatePrompt,
 	DELEGATE_SPAWN_TIMEOUT_MS,
 	nextBackoffDelay,
+	applySandboxCwdOffset,
+	normalizeSandboxCwdOffset,
+	relativeSandboxCwdOffset,
 } from "./session-setup.js";
 
 const execFileAsync = promisify(execFileCb);
 
-
+function isSandboxContainerPath(cwd?: string): boolean {
+	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+}
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
@@ -983,6 +989,58 @@ export class SessionManager {
 		}
 	}
 
+	private async resolveSandboxCwdOffset(
+		cwd: string,
+		projectId?: string,
+		goalId?: string,
+		explicitOffset?: string,
+	): Promise<string | undefined> {
+		const explicit = normalizeSandboxCwdOffset(explicitOffset);
+		if (explicit) return explicit;
+		if (!cwd || isSandboxContainerPath(cwd)) return undefined;
+
+		// Goal/team sessions often pass a host worktree cwd without worktreeOpts.
+		// Prefer the goal's stable repo/worktree metadata when available.
+		if (goalId) {
+			const goal = this.resolveGoal(goalId);
+			const goalCwd = goal?.cwd || cwd;
+			const goalWorktreeOffset = relativeSandboxCwdOffset(goal?.worktreePath, goalCwd);
+			if (goalWorktreeOffset) return goalWorktreeOffset;
+			const goalRepoOffset = relativeSandboxCwdOffset(goal?.repoPath, goalCwd);
+			if (goalRepoOffset) return goalRepoOffset;
+		}
+
+		try {
+			if (await isGitRepo(cwd)) {
+				const repoRoot = await getRepoRoot(cwd);
+				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
+				if (repoOffset) return repoOffset;
+			}
+		} catch {
+			// Fall back to project-root containment below.
+		}
+
+		if (projectId && this.projectContextManager) {
+			const project = this.projectContextManager.getOrCreate(projectId)?.project;
+			const projectRoot = project?.rootPath;
+			if (projectRoot) {
+				try {
+					if (await isGitRepo(projectRoot)) {
+						const repoRoot = await getRepoRoot(projectRoot);
+						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
+						if (repoOffset) return repoOffset;
+					}
+				} catch {
+					// Project may be non-git; project-relative offset still works for /workspace.
+				}
+				const projectOffset = relativeSandboxCwdOffset(projectRoot, cwd);
+				if (projectOffset) return projectOffset;
+			}
+		}
+
+		return undefined;
+	}
+
 	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
@@ -998,7 +1056,7 @@ export class SessionManager {
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }
+		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
 		if (!this.projectConfigStore) return false;
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
@@ -1059,10 +1117,10 @@ export class SessionManager {
 				opts.sandboxBranch,
 				opts.sandboxBaseBranch,
 			);
-			bridgeOptions.cwd = worktreePath;
-		} else if (!bridgeOptions.cwd || !bridgeOptions.cwd.startsWith("/")) {
-			// Regular (non-goal) sessions default to /workspace
-			bridgeOptions.cwd = "/workspace";
+			bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+		} else if (!isSandboxContainerPath(bridgeOptions.cwd)) {
+			// Regular no-worktree sessions run from the project clone in /workspace.
+			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
@@ -2834,9 +2892,12 @@ export class SessionManager {
 						const sandbox = this.sandboxManager.get(ps.projectId);
 						if (sandbox) {
 							try {
-								// Derive worktree name from the persisted cwd, not the branch name
-								// e.g. /workspace-wt/session/s-9241bb92 → session/s-9241bb92
-								const worktreeName = ps.cwd!.replace(/^\/workspace-wt\//, "");
+								// Derive the container worktree root, not a cwd subdirectory offset.
+								// e.g. /workspace-wt/session/s-9241bb92/packages/app → session/s-9241bb92
+								const branchWorktreeRoot = `/workspace-wt/${ps.branch}`;
+								const worktreeName = (ps.cwd === branchWorktreeRoot || ps.cwd!.startsWith(`${branchWorktreeRoot}/`))
+									? ps.branch
+									: ps.cwd!.replace(/^\/workspace-wt\//, "");
 								await sandbox.createWorktree(worktreeName, ps.branch);
 								console.log(`[session-manager] Sandbox worktree recovered for ${ps.id}: ${ps.cwd}`);
 								recovered = true;
@@ -3104,7 +3165,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -3112,6 +3173,9 @@ export class SessionManager {
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
+		const sandboxCwdOffset = opts?.sandboxed
+			? await this.resolveSandboxCwdOffset(cwd, projectId, goalId, opts?.sandboxCwdOffset)
+			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -3209,6 +3273,7 @@ export class SessionManager {
 				projectId,
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
+				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
 				initialModel: opts?.initialModel,
@@ -3267,6 +3332,7 @@ export class SessionManager {
 			projectId,
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
+			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
 			initialModel: opts?.initialModel,
