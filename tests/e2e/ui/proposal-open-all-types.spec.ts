@@ -5,7 +5,7 @@
  * tab/pane for every active proposal slot, not just goal/project.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, gitCwd } from "../e2e-setup.js";
+import { apiFetch } from "../e2e-setup.js";
 import type { Locator, Page } from "@playwright/test";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
@@ -297,7 +297,10 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 			await expectProposalTabAndPane(page, proposal);
 
 			const panel = proposalPane(page, proposal);
-			await panel.locator('input[type="text"]').nth(1).fill(gitCwd());
+			const worktreeToggle = panel.locator('[data-testid="staff-proposal-worktree-checkbox"]');
+			await expect(worktreeToggle).toBeChecked({ timeout: 5_000 });
+			await worktreeToggle.uncheck();
+			await expect(panel.locator('[data-testid="staff-proposal-worktree-mode"]')).toContainText("project directory", { timeout: 5_000 });
 			const createButton = panel.getByRole("button", { name: /Create Staff/ }).first();
 			await expect(createButton).toBeEnabled({ timeout: 5_000 });
 			await createButton.click();
