@@ -31,7 +31,7 @@ export class AddToInboxDialog extends LitElement {
 		// so layout has to be set inline on the host. Without this, the custom
 		// element defaults to display:inline with a zero bounding box and
 		// Playwright's toBeVisible() reports it as hidden.
-		this.style.position = "fixed";
+		this.style.position = "absolute";
 		this.style.inset = "0";
 		this.style.zIndex = "100";
 		this.style.display = "block";
@@ -84,14 +84,14 @@ export class AddToInboxDialog extends LitElement {
 			<div
 				class="add-to-inbox-backdrop"
 				@click=${this._close}
-				style="position:fixed;inset:0;background:color-mix(in oklch, var(--background) 50%, transparent);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;"
+				style="position:absolute;inset:0;background:color-mix(in oklch, var(--background) 50%, transparent);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:100;"
 			>
 				<div
 					class="add-to-inbox-dialog"
 					role="dialog"
 					aria-label="Add to inbox"
 					@click=${(e: Event) => e.stopPropagation()}
-					style="background:var(--card,var(--background));color:var(--foreground);border:1px solid var(--border);border-radius:8px;padding:18px;width:min(520px, 90vw);box-shadow:0 8px 24px color-mix(in oklch, var(--foreground) 12%, transparent);display:flex;flex-direction:column;gap:12px;"
+					style="background:var(--card,var(--background));color:var(--foreground);border:1px solid var(--border);border-radius:8px;padding:18px;width:min(520px, calc(100% - 24px));max-height:calc(100% - 24px);overflow:auto;box-sizing:border-box;box-shadow:0 8px 24px color-mix(in oklch, var(--foreground) 12%, transparent);display:flex;flex-direction:column;gap:12px;"
 				>
 					<div style="display:flex;align-items:center;justify-content:space-between;">
 						<h2 style="margin:0;font-size:14px;font-weight:600;">Add to inbox</h2>
@@ -110,7 +110,7 @@ export class AddToInboxDialog extends LitElement {
 							.value=${this._title}
 							@input=${(e: Event) => { this._title = (e.target as HTMLInputElement).value; }}
 							placeholder="e.g. Investigate slow queries"
-							style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font-size:13px;"
+							style="width:100%;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font-size:13px;"
 						/>
 					</div>
 					<div>
@@ -121,7 +121,7 @@ export class AddToInboxDialog extends LitElement {
 							.value=${this._prompt}
 							@input=${(e: Event) => { this._prompt = (e.target as HTMLTextAreaElement).value; }}
 							placeholder="What should the agent do?"
-							style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font-size:13px;font-family:inherit;resize:vertical;min-height:120px;"
+							style="width:100%;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font-size:13px;font-family:inherit;resize:vertical;min-height:120px;"
 						></textarea>
 					</div>
 					${this._error
