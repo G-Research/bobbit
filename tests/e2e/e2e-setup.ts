@@ -639,6 +639,24 @@ export async function defaultProjectId(): Promise<string | undefined> {
 	)).id;
 }
 
+export async function defaultProject(): Promise<{ id: string; rootPath: string; name?: string }> {
+	const id = await defaultProjectId();
+	if (!id) throw new Error(`defaultProject failed to resolve id port=${port()} bobbitDir=${bobbitDir()}`);
+	const state = await readLiveProjectState();
+	if (!state.ok) {
+		throw new Error(`defaultProject failed to list projects: ${formatLiveProjectState(state)} port=${port()} bobbitDir=${bobbitDir()}`);
+	}
+	const project = state.projects.find(pr => pr.id === id && !pr.hidden);
+	if (!project?.rootPath) {
+		throw new Error(`defaultProject ${id} missing rootPath: ${formatLiveProjectState(state)} port=${port()} bobbitDir=${bobbitDir()}`);
+	}
+	return { id, rootPath: project.rootPath, name: project.name };
+}
+
+export async function defaultProjectRootPath(): Promise<string> {
+	return (await defaultProject()).rootPath;
+}
+
 /**
  * Create a session via REST, return its ID. Defaults cwd to a non-git temp dir.
  *

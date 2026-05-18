@@ -1,10 +1,6 @@
 import { test, expect } from "../gateway-harness.js";
 import { openApp } from "./ui-helpers.js";
-import { apiFetch, defaultProjectId } from "../e2e-setup.js";
-import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { apiFetch, defaultProject } from "../e2e-setup.js";
 
 test.use({ viewport: { width: 375, height: 667 } });
 
@@ -21,21 +17,15 @@ test.use({ viewport: { width: 375, height: 667 } });
 // Skipped here so unrelated bug-fix branches can pass E2E. Restore once the
 // sidebar DOM nesting on mobile is fixed; a separate goal tracks the real fix.
 test.skip("staff appears inside the project's Staff sub-section on mobile", async ({ page }) => {
-  // Staff creation needs a git repo for worktree setup — create a temp one
-  const gitDir = join(tmpdir(), `bobbit-e2e-staff-git-${Date.now()}`);
-  mkdirSync(gitDir, { recursive: true });
-  execFileSync("git", ["init"], { cwd: gitDir, stdio: "pipe" });
-  execFileSync("git", ["commit", "-m", "init", "--allow-empty"], { cwd: gitDir, stdio: "pipe" });
-
-  const pid = await defaultProjectId();
-  expect(pid).toBeTruthy();
+  const project = await defaultProject();
+  const pid = project.id;
 
   // Create a staff agent so the staff row renders
   const staffName = `MobileBot${Date.now()}`;
   const res = await apiFetch("/api/staff", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: staffName, systemPrompt: "You are a test bot.", cwd: gitDir, projectId: pid }),
+    body: JSON.stringify({ name: staffName, systemPrompt: "You are a test bot.", cwd: project.rootPath, projectId: pid }),
   });
   expect(res.ok).toBe(true);
 

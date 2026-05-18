@@ -1,5 +1,5 @@
 import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, gitCwd, apiFetch } from "./e2e-setup.js";
+import { readE2EToken, base, defaultProject, apiFetch } from "./e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).
@@ -24,12 +24,20 @@ async function apiCreateStaff(
 		description?: string;
 		systemPrompt: string;
 		cwd?: string;
+		projectId?: string;
+		sandboxed?: boolean;
 		triggers?: Array<{ type: string; config: Record<string, unknown>; enabled: boolean; prompt?: string }>;
 	},
 ): Promise<any> {
+	const body: Record<string, unknown> = { ...data };
+	if (!body.cwd && !body.projectId) {
+		const project = await defaultProject();
+		body.cwd = project.rootPath;
+		body.projectId = project.id;
+	}
 	const res = await apiFetch("/api/staff", {
 		method: "POST",
-		body: JSON.stringify(data),
+		body: JSON.stringify(body),
 	});
 	expect(res.status).toBe(201);
 	return res.json();
@@ -61,7 +69,6 @@ test.describe("Staff Agents — REST API", () => {
 			name: "Shared Test Agent",
 			description: "Shared for multiple tests",
 			systemPrompt: "You are a shared test agent.",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(sharedStaff.id);
 		if (sharedStaff.currentSessionId) cleanupSessionIds.push(sharedStaff.currentSessionId);
@@ -77,7 +84,6 @@ test.describe("Staff Agents — REST API", () => {
 			name: "Test Warden",
 			description: "A test staff agent",
 			systemPrompt: "You are a test warden.",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -138,7 +144,7 @@ test.describe("Staff Agents — REST API", () => {
 		expect(staff.id).toBe(sharedStaff.id);
 		expect(staff.name).toBe("Shared Test Agent");
 		expect(staff.description).toBe("Shared for multiple tests");
-		expect(staff.cwd).toBe(gitCwd());
+		expect(staff.cwd).toBe((await defaultProject()).rootPath);
 	});
 
 	test("PUT /api/staff/:id updates fields", async () => {
@@ -162,7 +168,6 @@ test.describe("Staff Agents — REST API", () => {
 		const created = await apiCreateStaff(token, {
 			name: "Deletable Agent",
 			systemPrompt: "To be deleted.",
-			cwd: gitCwd(),
 		});
 		const sessionId = created.currentSessionId;
 		expect(sessionId).toBeTruthy();
@@ -189,7 +194,6 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "Triggered Agent",
 			systemPrompt: "You have triggers.",
-			cwd: gitCwd(),
 			triggers: [
 				{ type: "schedule", config: { cron: "0 9 * * *" }, enabled: true, prompt: "Good morning" },
 				{ type: "manual", config: {}, enabled: true },
@@ -319,7 +323,6 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "NoSandboxField Bot",
 			systemPrompt: "x",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -333,12 +336,14 @@ test.describe("Staff Agents — REST API", () => {
 	});
 
 	test("POST /api/staff with sandboxed: false explicitly → GET returns false", async () => {
+		const project = await defaultProject();
 		const res = await apiFetch("/api/staff", {
 			method: "POST",
 			body: JSON.stringify({
 				name: "ExplicitFalseSandbox Bot",
 				systemPrompt: "x",
-				cwd: gitCwd(),
+				cwd: project.rootPath,
+				projectId: project.id,
 				sandboxed: false,
 			}),
 		});
@@ -361,7 +366,6 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "PersistedSandbox Bot",
 			systemPrompt: "x",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -386,7 +390,6 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "ImmutableSandbox Bot",
 			systemPrompt: "x",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);
@@ -417,7 +420,6 @@ test.describe("Staff Agents — REST API", () => {
 		const staff = await apiCreateStaff(token, {
 			name: "NoPutPath Bot",
 			systemPrompt: "x",
-			cwd: gitCwd(),
 		});
 		cleanupStaffIds.push(staff.id);
 		if (staff.currentSessionId) cleanupSessionIds.push(staff.currentSessionId);

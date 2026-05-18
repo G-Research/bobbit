@@ -38,6 +38,10 @@ export interface PersistedStaff {
 	currentSessionId?: string;
 	worktreePath?: string;
 	branch?: string;
+	/** Primary repo/container root used to provision the staff worktree. */
+	repoPath?: string;
+	/** Multi-repo staff worktrees keyed by component repo name. */
+	repoWorktrees?: Record<string, string>;
 	projectId?: string;
 	/**
 	 * Per-staff sandbox preference. Chosen at creation, persisted on the record,
