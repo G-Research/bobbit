@@ -260,7 +260,10 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 	test.describe.configure({ timeout: 90_000 });
 
 	for (const proposal of CASES) {
-		test(`${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`, async ({ page }) => {
+		const title = proposal.type === "staff"
+			? "Staff proposal card opens a Staff tab, rehydrates, and dismisses from a normal session"
+			: `${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`;
+		test(title, async ({ page }) => {
 			await openApp(page);
 			await createSessionViaUI(page);
 			await expectNormalChatSession(page);

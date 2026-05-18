@@ -10,6 +10,8 @@ export interface ToolRenderResult {
 export interface ToolRenderContext {
 	/** The tool_use ID from the assistant message block. */
 	toolUseId?: string;
+	/** Raw `input` payload from tool_use/toolCall blocks, when present. */
+	toolCallInput?: unknown;
 	/** The gateway session ID that issued the tool call. */
 	sessionId?: string;
 	/**
