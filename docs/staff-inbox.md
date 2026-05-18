@@ -272,6 +272,30 @@ pane. It is mounted in `src/app/render.ts` whenever the active session has
 - **Per-session open state** is hydrated from `localStorage`. Reloading the
   page keeps the panel open or collapsed exactly as you left it.
 
+### Mobile add dialog scoping
+
+On mobile, `src/app/render.ts` renders chat and unified-panel tabs inside a
+horizontally translated `.preview-slider__track`. Because a transformed
+ancestor can become the containing block for positioned descendants, a
+viewport-fixed add dialog would size and center against the widened slider
+track instead of the visible inbox pane.
+
+The manual composer is therefore intentionally pane-scoped rather than
+viewport-scoped:
+
+- `InboxPanel` renders `<add-to-inbox-dialog>` inside its internal
+  `.inbox-panel` root, which is `position: relative` and clips overflow.
+- The dialog host and `.add-to-inbox-backdrop` use `position: absolute; inset: 0`
+  so the backdrop covers only the inbox pane and the dialog stays centered
+  within that pane at narrow widths.
+- Desktop uses the same pane-scoped dialog, preserving the existing behavior of
+  overlaying the inbox/unified panel rather than the whole browser viewport.
+
+The mobile regression is pinned in `tests/e2e/ui/staff-inbox.spec.ts`: the test
+opens the Inbox pane, opens "+ Add to inbox", verifies the transformed slider
+track is wider than the visible pane, and asserts both the dialog host and
+backdrop bounding boxes stay inside `[data-testid="inbox-panel-root"]`.
+
 There is **no sidebar badge** and no pending-count indicator anywhere in the
 sidebar. The staff session continues to appear as a normal staff-section
 entry; the only inbox UI surface is the panel attached to the session view.
