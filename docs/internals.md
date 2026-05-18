@@ -123,7 +123,7 @@ Store resolution **never falls back to a default project**. Every operation reso
 
 1. **Entity-based resolution** - `getContextForGoal(goalId)`, `getContextForSession(sessionId)`: scans all project contexts to find the owning project. Returns `null` if not found; callers throw or return 404.
 2. **Explicit projectId** - `getOrCreate(projectId)`: used when the caller already knows the target project (e.g. from a session's `projectId` field).
-3. **Explicit-required on creation** - `POST /api/sessions`, `POST /api/goals`, and `POST /api/staff` resolve the target project at the top of the handler via the `resolveProjectForRequest` helper in `src/server/agent/resolve-project.ts`. Resolution order: explicit `body.projectId` → `body.cwd` matching a registered project's `rootPath` → **400 Bad Request**. There is no creation-time default. Once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
+3. **Explicit-required on creation** - `POST /api/sessions`, `POST /api/goals`, and `POST /api/staff` resolve the target project at the top of the handler via the `resolveProjectForRequest` helper in `src/server/agent/resolve-project.ts`. Resolution order: explicit `body.projectId` → `body.cwd` inside a registered project's `rootPath` → **400 Bad Request**. There is no creation-time default. Once created, the entity's `projectId` is set and all subsequent operations resolve through paths 1 or 2.
 
 `ProjectContextManager` no longer exposes `getDefault()`, `getDefaultOrNull()`, `getDefaultProjectId()`, or `getDefaultProjectIdOrNull()`; `ProjectRegistry` no longer exposes `ensureDefaultProject()`. Any code path that needs a project must either resolve it explicitly (via `resolveProjectForRequest`, an entity lookup, or a threaded `projectId` parameter) or return 400. The only remaining reference to a "first registered project" is in `state-migration.ts`, and it is migration-only - see the block comment on `migrateToPerProjectState()` and the State migration section below.
 
@@ -134,7 +134,7 @@ Store resolution **never falls back to a default project**. Every operation reso
 | Condition | Body |
 |---|---|
 | Neither `projectId` nor `cwd` provided | `{"error":"projectId required: no projectId was provided and cwd (\"\") does not match any registered project"}` |
-| `cwd` provided but no registered project has that `rootPath` | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
+| `cwd` provided but no registered project contains it | `{"error":"projectId required: no projectId was provided and cwd (\"<cwd>\") does not match any registered project"}` |
 | `projectId` provided but unknown | `{"error":"Invalid project"}` (pre-existing) |
 
 Callers should always pass an explicit `projectId` when one is available. `cwd`-only resolution exists to support agent tools and external scripts that only know a filesystem path.
@@ -461,12 +461,12 @@ The deprecated `color` field is migrated on load: its value is copied to both `c
 
 Selecting a palette seeds the color fields from `PALETTE_PRIMARY_COLORS`; the user can then override colors independently.
 
-### Session & goal scoping
+### Session, goal, and staff scoping
 
-- `PersistedSession` and `PersistedGoal` carry an optional `projectId` field.
-- Session/goal list APIs accept `?projectId=` query parameter for filtering.
-- Worktrees for goals are created relative to the project's `rootPath`, not the server CWD.
-- Session CWD defaults to the project's `rootPath`.
+- `PersistedSession`, `PersistedGoal`, and `PersistedStaff` carry an optional `projectId` field.
+- Session/goal/staff list APIs accept `?projectId=` query parameter for filtering where applicable.
+- Worktrees for goals and staff are created relative to the owning project's `rootPath`, not the server CWD.
+- Session and no-worktree staff cwd default to the project's `rootPath`; worktree-backed staff run in the matching project-derived worktree/subdirectory.
 
 ### Multi-repo & components
 
@@ -589,7 +589,8 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 | Regular (sandbox) | Yes | `session/s-{uuid8}` |
 | Goal sessions | Yes | `goal/<branch-name>` |
 | Team agent sessions | Yes | Per-agent branch within goal |
-| Assistant sessions (goal, project, tool) | No | N/A - conversational only, no code edits |
+| Assistant sessions (goal, project, role, tool, staff) | No | N/A - conversational only, no code edits |
+| Staff permanent sessions | Auto when supported; no-worktree on `worktree:false` or non-git projects | `staff-<name>-<id>` when a worktree is used |
 
 **Pool branch namespace.** Pool entries pre-create worktrees under the `pool/_pool-<id>` branch prefix (was `session/_pool-*` pre-Phase 3). The `pool/` namespace lets the boot sweeper distinguish pool entries from session worktrees by branch prefix alone, and prevents pool entries from polluting the user's session branch list. Both prefixes (`pool/_pool-*` and the legacy `session/_pool-*`) are recognised on startup so sweeping is idempotent across version upgrades.
 
@@ -598,7 +599,7 @@ Every non-goal, non-assistant session automatically gets its own git worktree br
 ```
 # Single-repo project (today, unchanged)
 <rootPath>/                      # primary worktree
-<rootPath>-wt/<branch>/          # session/goal/staff worktree
+<rootPath>-wt/<branch>/          # session/goal/staff worktree when used
 
 # Multi-repo project
 <rootPath>/                      # container holding sibling repos
@@ -637,7 +638,7 @@ This means crash recovery doesn't require the user to manually clean up pool det
 
 **Lifecycle:**
 
-1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal/staff branch as appropriate). **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, and team member spawning.
+1. **Creation**: When `POST /api/sessions` creates a non-goal, non-assistant session in a git repo, the server auto-generates worktree options. For host sessions, the pool claim (or fallback `git worktree add`) creates the branch. For sandbox sessions, `ProjectSandbox.createWorktree()` creates it inside the container. In multi-repo projects, this provisions a worktree set (one per configured repo) at the `pool/_pool-<id>` branch; all repos share the same branch name; on first claim the pool entry's `pool/_pool-<id>` is renamed once to `session/<id8>` (or the goal branch as appropriate). Staff worktrees are provisioned by `StaffManager` directly and use the same project worktree-root/base-ref/component setup helpers when auto mode chooses a worktree. **Subdirectory projects**: When a project's `rootPath` is a subdirectory of a git repo (e.g. `/repo/packages/my-app`), worktrees are still created at the git repo root level (full checkout), but the session `cwd` is offset to the corresponding subdirectory within the worktree. The `worktreePath` remains the worktree root (for cleanup). This offset is computed via `path.relative(repoRoot, project.rootPath)` and applied consistently in goal creation, `executeWorktreeAsync`, pool claims, staff provisioning, and team member spawning.
 2. **Working**: The agent works in the worktree directory (or subdirectory for offset projects). The git status widget shows ahead/behind master, and push/pull controls work the same as for goal branches.
 3. **Cleanup**: On session terminate or archive, the worktree and branch are removed via `cleanupWorktree()` (host) or `ProjectSandbox.removeWorktree()` (sandbox).
 4. **Orphan detection**: Orphaned `session/*` worktrees (from ungraceful shutdowns where cleanup didn't run) are **not** removed automatically on startup. Use Settings → Maintenance tab to preview orphaned worktrees and clean them up manually. The REST API (`GET /api/maintenance/orphaned-worktrees`) lists orphans; `POST /api/maintenance/cleanup-worktrees` removes them after validation.
@@ -654,16 +655,19 @@ This means crash recovery doesn't require the user to manually clean up pool det
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
-**Staff agent worktrees:** Staff agents get a permanent worktree at creation time. Because staff sessions are long-lived (they persist across wake/sleep cycles rather than being recreated), their worktrees can become stale over time. To address this, `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff: it rebases the worktree branch onto the primary branch and re-runs **per-component** `worktree_setup_command` hooks (e.g. `npm ci`). Sandboxed staff agents skip the host-side refresh - their container-internal worktrees are managed via `sandboxBranch`, which is passed to `createSession()` during staff creation and legacy migration so the container creates the worktree properly.
+#### Staff agent worktrees
 
-**Per-component `worktree_setup_command`.** When provisioning any worktree (pool prebuild, on-demand creation, or staff wake refresh), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** - `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently - failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
+Staff agents are always project-scoped, but a worktree is conditional. Creation defaults to auto mode: if the project supports worktrees (single git repo or complete multi-repo set), `StaffManager` creates a long-lived `staff-<name>-<id>` worktree and records `worktreePath`/`branch` metadata. If the caller sends `worktree:false` or the project is not git-backed, staff creation succeeds without a worktree and the permanent session runs from the project root/subdirectory. Worktree-backed staff can become stale over time, so `StaffManager.refreshWorktree()` runs on each wake cycle for non-sandboxed staff with a `worktreePath`: it rebases the worktree branch onto the primary/base ref and re-runs **per-component** `worktree_setup_command` hooks (e.g. `npm ci`). Sandboxed staff preserve the same branch/offset inside the container via `sandboxBranch`; no-worktree sandboxed staff run from `/workspace` plus the project-relative offset.
+
+**Per-component `worktree_setup_command`.** When provisioning or refreshing any worktree (pool prebuild, on-demand creation, staff creation, or staff wake refresh), `runComponentSetups()` (`worktree-setup.ts`) iterates `components[]` in declared order. For each component with a `worktree_setup_command:`, it runs that command in the **component's root path** - `<worktree>/<component.repo>/<component.relative_path>` (with `<repo>` collapsing to nothing when `.`). 2-minute timeout per command, non-fatal on error (logs warning, worktree is still usable). Each command runs independently - failure of one component's setup does not skip others. **No deduplication**: if multiple components in the same repo each define `worktree_setup_command: npm ci`, it runs once per component. Authors who don't want that should structure their components accordingly. `SOURCE_REPO` is set to the matching primary path so `cp -r "$SOURCE_REPO/node_modules" .` works as today. Components without the field (including all data-only components) are silently skipped.
 
 **Single source of truth: `components[*].worktreeSetupCommand`.** The legacy top-level `worktree_setup_command` field in `project.yaml` is migrated onto the default component by `state-migration/migrate-project-yaml.ts` and never read again. The legacy `setupCommand` parameter on `createWorktree` / `createWorktreeSet` and the `setupWorktreeDeps` helper have been removed; every site invokes `runComponentSetups()` directly:
 
 | Site | When it runs | How components are resolved |
 |---|---|---|
 | `WorktreePool._fill()` (single-repo and multi-repo) | After every successful pool prebuild, before the entry is published into the pool | `componentsResolver: () => Component[]` closure passed at construction - invoked **fresh per fill** so live edits to `project.yaml` take effect on the next replenishment without a server restart |
-| `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff, after rebasing the worktree onto the primary branch | `ctx.projectConfigStore.getComponents()` |
+| `StaffManager.provisionStaffWorktree()` | On staff creation when auto/explicit worktree mode is supported | `ctx.projectConfigStore.getComponents()` |
+| `StaffManager.refreshWorktree()` | On each wake cycle for non-sandboxed staff with `worktreePath`, after rebasing the worktree onto the primary branch/base ref | `ctx.projectConfigStore.getComponents()` |
 | `goal-manager.ts::setupWorktree` (single-repo and multi-repo) | When the pool is empty/disabled or claim fails, after `createWorktree` / `createWorktreeSet` succeeds | `componentsResolver(goal.projectId)` |
 | `session-setup.ts::executeWorktreeAsync` (single-repo on-demand) | Fallback `createWorktree` path when the pool is empty | `ctx.projectConfigStore.getComponents()` - honours each component's `relativePath` via `componentRoot()` |
 
@@ -712,7 +716,7 @@ Bobbit creates four classes of remote branch and is responsible for deleting eac
 | `session/*` | Auto worktree on session create | `eagerDeleteRemoteSessionBranch` (fire-and-forget from `session-manager.ts::terminateSession`) | On archive, iff non-delegate AND fully merged into `origin/<primary>`. Unmerged branches fall back to the 7-day `purgeOneSession` cleanup. |
 | `goal/<branch-name>` | Goal creation | `deleteRemoteGoalBranches` in `server.ts` (DELETE `/api/goals/:id` handler) | On goal archive. |
 | `goal-goal-<slug>-<id>-<role>-<short>` | Per-role team agent worktree | Same handler - agent branch names are **snapshotted into a `string[]` before `teamManager.teardownTeam` runs**, because teardown mutates `entry.agents` in place via `dismissRole`'s `splice`. | On goal archive. |
-| `staff-*` | Staff agent creation | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
+| `staff-*` | Staff agent creation when worktree auto/explicit mode is supported | `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` | On staff dismiss. |
 
 **Test-mode gate:** every push-delete call - existing (`cleanupWorktree`) and new (`deleteRemoteGoalBranches`, `eagerDeleteRemoteSessionBranch`) - short-circuits when `shouldSkipRemotePush()` returns true (`BOBBIT_TEST_NO_PUSH=1`). The eager session helper checks this flag *before* invoking `git merge-base --is-ancestor`, so test mode never touches git at all.
 
@@ -848,15 +852,15 @@ The per-project "+ goal" button on each project row bypasses the popover - the p
 
 #### Staff agents in the sidebar
 
-Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and owns a long-lived worktree on a `staff-<name>-<id>` branch. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
+Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and runs either in the project root/subdirectory or in a project-derived `staff-<name>-<id>` worktree. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
 
 The sub-section is always present, even when the project has zero staff, so users have a stable place to create their first one. Its header carries a `Bot` icon, the **Staff** label, and two action buttons that mirror the project header's quick-actions: **Manage staff** (`List` icon → `#/staff`) and **New staff** (`Plus` icon → `startNewStaffFlow(e, project.id)`). Individual staff rows get the same active / unread / last-activity treatment as ordinary sessions, plus a hover-action pencil that opens `#/staff/<id>`. Staff whose current session is archived under a goal render in that goal's archived sub-section instead, never duplicated into Staff.
 
 **Staff are not merged into Sessions.** Created staff agents live exclusively in the Staff sub-section. The staff-creation **assistant session** (`assistantType: "staff"`) is a transient normal session and shows up in the project's Sessions list while open — only the persisted staff record that results from accepting `propose_staff` moves into Staff. This split was the point of restoring the sub-section: a previous experiment that synthesised staff rows into Sessions made staff feel like ordinary disposable sessions and hid the fact that they are long-lived, profile-backed agents.
 
-The collapsed (icon-only) sidebar buckets staff under their owning project group alongside goals and ungrouped sessions; there is no global staff tail list. The project header retains the same **Manage staff** / **New staff** quick-action buttons (redundant with the sub-section header but useful when the sub-section is collapsed) — **New staff** calls `createStaffAssistantSession({ projectId, cwd })` so the creation assistant always lands in the right project context, no second project picker and no `propose_staff(cwd)` re-link dance after the fact.
+The collapsed (icon-only) sidebar buckets staff under their owning project group alongside goals and ungrouped sessions; there is no global staff tail list. The project header retains the same **Manage staff** / **New staff** quick-action buttons (redundant with the sub-section header but useful when the sub-section is collapsed) — **New staff** calls `createStaffAssistantSession({ projectId, cwd })` so the creation assistant always lands in the right project context, no second project picker and no `propose_staff(cwd)` re-link dance after the fact. When the proposal panel accepts `propose_staff`, it resolves the project from the proposal session, not from whichever project is currently active in the sidebar, so reloads and project switches cannot submit a blank cwd that falls back to the server cwd.
 
-**Orphan handling.** Legacy records can land in two broken states: missing `projectId` outright, or persisted under `SYSTEM_PROJECT_ID` (from the pre-change server-scope carve-out). `StaffManager.listOrphaned()` returns both kinds on startup and the sidebar surfaces them in a one-off orphan banner above the project list, with a one-click **Assign to project…** action that calls `PATCH /api/staff/:id { projectId }`. The handler moves the persisted record between per-project stores, re-indexes search, and preserves the existing worktree branch (the next wake rebases against the new project's primary branch). Orphaned staff are never silently dropped from the UI. See [rest-api.md — Staff Agents](rest-api.md#staff-agents) for the endpoint contract.
+**Orphan handling.** Legacy records can land in two broken states: missing `projectId` outright, or persisted under `SYSTEM_PROJECT_ID` (from the pre-change server-scope carve-out). `StaffManager.listOrphaned()` returns both kinds on startup and the sidebar surfaces them in a one-off orphan banner above the project list, with a one-click **Assign to project…** action that calls `PATCH /api/staff/:id { projectId }`. The handler moves the persisted record between per-project stores, re-indexes search, sets `cwd` to the target project root, and clears old `currentSessionId`/worktree metadata so stale paths from the previous project cannot survive reassignment. Orphaned staff are never silently dropped from the UI. See [rest-api.md — Staff Agents](rest-api.md#staff-agents) for the endpoint contract.
 
 **Collapse state is per-project**: The Sessions section collapse toggle is stored per-project, not globally. Collapsing Sessions in Project A does not affect Project B. State is persisted as a collapsed-project-ID set in localStorage (`bobbit-collapsed-ungrouped`). Default state is expanded for all projects. Access via `isUngroupedExpanded(projectId)` / `setUngroupedExpanded(projectId, value)` in `state.ts`. The Staff sub-section uses the same per-project pattern: `isStaffExpanded(projectId)` / `setStaffSectionExpanded(projectId, value)` backed by localStorage key `bobbit-collapsed-staff`, also consulted by the keyboard-navigation expand/collapse helpers in `src/app/sidebar-nav.ts` (kind `staff-header`).
 
@@ -1908,10 +1912,11 @@ A sandbox is never created for a project that has not asked for one. The image b
 
 **Agent spawn:**
 
-1. `ProjectSandbox.createWorktree(name, branch, baseBranch?)` creates a git worktree at `/workspace-wt/<name>` inside the container via `docker exec`
-2. A post-commit hook is installed in each worktree for mandatory push-to-remote (durability)
-3. RpcBridge spawns the agent via `docker exec -i -w <containerCwd> <containerId>` - the `-w` flag sets the container process working directory so the agent CLI's `process.cwd()` resolves to the correct worktree path (without it, docker exec defaults to the container's WORKDIR `/workspace`, which is wrong for worktree sessions)
-4. Delegates inherit parent sandbox config
+1. When a branch is supplied, `ProjectSandbox.createWorktree(name, branch, baseBranch?)` creates a git worktree at `/workspace-wt/<name>` inside the container via `docker exec`.
+2. A post-commit hook is installed in each worktree for mandatory push-to-remote (durability).
+3. When no branch is supplied (for example, sandboxed staff with `worktree:false`), the agent runs from `/workspace` instead of `/workspace-wt`.
+4. RpcBridge spawns the agent via `docker exec -i -w <containerCwd> <containerId>` - the `-w` flag sets the container process working directory so the agent CLI's `process.cwd()` resolves to the correct project-derived path. Subdirectory projects keep their relative offset under either `/workspace` or `/workspace-wt/<branch>`.
+5. Delegates inherit parent sandbox config.
 
 **Session termination:**
 
@@ -1969,13 +1974,13 @@ Sandbox containers include a git credential helper so agents can `git push` and 
 
 ### Worktree management
 
-Sandboxed agents use standard git worktrees inside the project container - the same model as non-sandbox mode. No shared bare repos or team remotes are needed.
+Sandboxed agents use standard git worktrees inside the project container when their runtime asks for a worktree, and otherwise run directly from the project clone at `/workspace`. Both modes preserve the project-relative cwd offset, so a project rooted at a subdirectory launches under `/workspace/<offset>` or `/workspace-wt/<branch>/<offset>`. No shared bare repos or team remotes are needed.
 
 **Worktree creation** (`ProjectSandbox.createWorktree()`):
 
 1. Creates a worktree at `/workspace-wt/<name>` branching from the specified base
 2. Installs a post-commit hook that pushes to the remote after every commit (durability - ensures commits survive container loss)
-3. Called during agent spawn via `applySandboxWiring()`
+3. Called during agent spawn via `applySandboxWiring()` only when the session/staff runtime carries a sandbox branch
 
 **Multi-repo containers.** Multi-repo projects mount `rootPath` (the container of sibling repos) at `/workspace`; each repo lives at `/workspace/<repo>/`. `docker-args.ts` host-path rewriting understands the new layout. `ProjectSandbox.createWorktree()` returns a worktree set in multi-repo mode. Per-component `worktree_setup_command` runs inside the container at the component's path. The pool prebuild also works inside the sandbox.
 
