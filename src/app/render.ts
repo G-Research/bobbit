@@ -1864,31 +1864,47 @@ function describeCron(cron: string): string {
 	return cron ? `Custom: ${cron}` : "";
 }
 
+function staffPreviewSessionId(): string | undefined {
+	return state.activeProposals.staff?.sessionId || activeSessionId();
+}
+
+function staffPreviewProjectId(sessionId = staffPreviewSessionId()): string | undefined {
+	if (!sessionId) return undefined;
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	if (session?.projectId) return session.projectId;
+	const activeId = activeSessionId();
+	if (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId) {
+		return state.chatPanel?.agentInterface?.projectId || undefined;
+	}
+	return undefined;
+}
+
 function activeProjectForStaffPreview() {
-	return state.activeProjectId
-		? state.projects.find(p => p.id === state.activeProjectId)
+	const projectId = staffPreviewProjectId();
+	return projectId
+		? state.projects.find(p => p.id === projectId)
 		: undefined;
 }
 
-function effectiveStaffPreviewCwd(): string | undefined {
+function effectiveStaffPreviewCwd(project = activeProjectForStaffPreview()): string | undefined {
 	const explicitCwd = state.staffPreviewCwd.trim();
 	if (explicitCwd) return explicitCwd;
-	return activeProjectForStaffPreview()?.rootPath || undefined;
+	return project?.rootPath || undefined;
 }
 
-function seedStaffPreviewCwdFromProject(): void {
+function seedStaffPreviewCwdFromProject(project = activeProjectForStaffPreview()): void {
 	if (state.staffPreviewCwdEdited || state.staffPreviewCwd.trim()) return;
-	const projectRoot = activeProjectForStaffPreview()?.rootPath;
-	if (projectRoot) state.staffPreviewCwd = projectRoot;
+	if (project?.rootPath) state.staffPreviewCwd = project.rootPath;
 }
 
 function staffPreviewPanel() {
 	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
-	seedStaffPreviewCwdFromProject();
-	const streaming = isProposalStreaming("staff_proposal");
 	const staffProject = activeProjectForStaffPreview();
-	const effectiveCwd = effectiveStaffPreviewCwd();
+	seedStaffPreviewCwdFromProject(staffProject);
+	const streaming = isProposalStreaming("staff_proposal");
+	const effectiveCwd = effectiveStaffPreviewCwd(staffProject);
 	queueMicrotask(() => {
 		reconcileFollowTail(staffPromptPreviewRef.value);
 		reconcileFollowTail(staffPromptTextareaRef.value);
@@ -1896,7 +1912,7 @@ function staffPreviewPanel() {
 	const handleCreateStaff = async () => {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
-		const proposalSessionId = state.activeProposals.staff?.sessionId ?? activeSessionId();
+		const proposalSessionId = staffPreviewSessionId();
 		const isStaffAssistant = state.assistantType === "staff";
 
 		let triggers: any[] = [];
@@ -1905,7 +1921,11 @@ function staffPreviewPanel() {
 		} catch { /* keep empty */ }
 
 		const sandboxed = _staffSandboxed;
-		const cwd = effectiveStaffPreviewCwd();
+		const submitProjectId = staffPreviewProjectId();
+		const submitProject = submitProjectId
+			? state.projects.find(p => p.id === submitProjectId)
+			: undefined;
+		const cwd = effectiveStaffPreviewCwd(submitProject);
 		const result = await createStaffAgent({
 			name: trimmedName,
 			description: state.staffPreviewDescription,
@@ -1913,7 +1933,7 @@ function staffPreviewPanel() {
 			cwd,
 			worktree: state.staffPreviewWorktree,
 			triggers,
-			projectId: state.activeProjectId || undefined,
+			projectId: submitProjectId,
 			sandboxed,
 		});
 		if (!result) return;
