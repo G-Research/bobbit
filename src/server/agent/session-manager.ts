@@ -63,6 +63,7 @@ import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from 
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import { WorktreePool } from "./worktree-pool.js";
+import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
@@ -3083,7 +3084,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -3169,6 +3170,10 @@ export class SessionManager {
 				cwd,
 				goalId,
 				taskId: opts?.taskId,
+				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
+				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
+				// without it `BOBBIT_STAFF_ID` is lost on respawn and the inbox tools refuse to register.
+				staffId: opts?.staffId,
 				worktreePath,
 				repoPath,
 				branch,
@@ -3226,6 +3231,9 @@ export class SessionManager {
 			goalId,
 			assistantType,
 			taskId: opts?.taskId,
+			// Load-bearing wire: same contract as the worktree branch above.
+			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
+			staffId: opts?.staffId,
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
@@ -5317,6 +5325,19 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");
 		}
+	}
+
+	/**
+	 * One-shot migration: heal sessions that lost their `staffId` association
+	 * before the staffId-persistence fix landed. Delegates to the standalone
+	 * `backfillStaffIds` helper in `staff-backfill.ts` so the algorithm can
+	 * be unit-tested without dragging in `SessionManager`'s dependency graph.
+	 *
+	 * See `staff-backfill.ts` for the full behavioural contract.
+	 */
+	backfillStaffIds(staffManager: import("./staff-backfill.js").BackfillStaffManager): number {
+		if (!this.projectContextManager) return 0;
+		return backfillStaffIdsImpl(this.projectContextManager, staffManager);
 	}
 
 	async shutdown(): Promise<void> {

@@ -195,10 +195,22 @@ export class StaffManager {
 				// `model`/`thinkingLevel` overrides would be silently ignored.
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: id },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
+				// through opts → plan → persistOnce so it lands in PersistedSession.
+				// Without this, on respawn `restoreSession` reads `ps.staffId =
+				// undefined` → no `BOBBIT_STAFF_ID` env → inbox tools refuse to
+				// register (see `defaults/tools/inbox/extension.ts`).
+				staffId: id,
 				sandboxed: effectiveSandboxed,
 				sandboxBranch: effectiveSandboxed ? branchName : undefined,
 				projectId,
 			});
+			// Belt-and-braces in-memory sync. `createSession` already propagates
+			// `staffId` to the persisted record via the plan, but the live
+			// `SessionInfo` object is built inside `executePlan` and doesn't
+			// currently mirror the field back — keep this assignment until the
+			// next refactor wires it through `SessionInfo` directly.
 			session.staffId = id;
 			sessionManager.setTitle(session.id, staff.name);
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
@@ -434,6 +446,10 @@ export class StaffManager {
 				rolePrompt: fullPrompt,
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: staffId },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
+				// `createStaff` above.
+				staffId,
 				sandboxed: staff.sandboxed,
 				sandboxBranch: staff.sandboxed ? staff.branch : undefined,
 				projectId: found.projectId,
