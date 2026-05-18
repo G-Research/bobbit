@@ -8192,10 +8192,15 @@ async function handleApiRoute(
 				json({ error: "Missing projectId" }, 400);
 				return;
 			}
-			const targetProject = projectRegistry.get(body.projectId);
+			const targetProjectId = body.projectId.trim();
+			const targetProject = projectRegistry.get(targetProjectId);
 			if (!targetProject) { json({ error: "Project not found" }, 404); return; }
+			if (targetProject.hidden || targetProject.id === SYSTEM_PROJECT_ID) {
+				json({ error: "projectId must reference a registered project" }, 400);
+				return;
+			}
 			try {
-				const staff = staffManager.reassignProject(id, body.projectId);
+				const staff = await staffManager.reassignProject(id, targetProjectId, sessionManager);
 				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
 				json(staff);
 			} catch (err: any) {

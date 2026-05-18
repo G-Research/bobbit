@@ -96,27 +96,54 @@ export class StaffManager {
 	 * search under the new project. Used by the orphan banner's "Assign to
 	 * project…" flow.
 	 *
-	 * Note: worktree path and branch are preserved as-is — those live on disk
-	 * under the original project's worktree root. Refreshing the worktree on
-	 * the next wake will rebase against whatever primary branch is canonical
-	 * for the new project.
+	 * Project changes intentionally drop runtime metadata from the previous
+	 * project. The next staff wake creates a fresh session rooted at the target
+	 * project instead of continuing from the old cwd/worktree.
 	 */
-	reassignProject(staffId: string, newProjectId: string): PersistedStaff | null {
+	async reassignProject(staffId: string, newProjectId: string, sessionManager?: SessionManager): Promise<PersistedStaff | null> {
 		const found = this.findStoreForStaff(staffId);
 		if (!found) return null;
+		const newCtx = this.pcm.getOrCreate(newProjectId);
+		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+		if (newCtx.project.hidden || newCtx.project.id === SYSTEM_PROJECT_ID) {
+			throw new Error("Cannot re-assign staff to a hidden or system project");
+		}
 		if (found.projectId === newProjectId && found.staff.projectId === newProjectId) {
 			return found.staff;
 		}
-		const newCtx = this.pcm.getOrCreate(newProjectId);
-		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+
+		const oldSessionId = found.staff.currentSessionId;
+		if (oldSessionId && sessionManager) {
+			try {
+				const terminated = await sessionManager.terminateSession(oldSessionId);
+				if (!terminated) sessionManager.storeArchive(oldSessionId);
+			} catch (err) {
+				console.warn(`[staff-manager] Failed to terminate old session ${oldSessionId} while re-assigning staff ${staffId}:`, err);
+				try { sessionManager.storeArchive(oldSessionId); } catch { /* best-effort */ }
+			}
+		}
 
 		// Pull from old search index, drop from old store.
 		const oldCtx = this.pcm.getOrCreate(found.projectId);
 		oldCtx?.searchIndex?.removeStaff(staffId);
 		found.store.remove(staffId);
 
-		// Re-home: clone with updated projectId and put into the new project's store.
-		const moved: PersistedStaff = { ...found.staff, projectId: newProjectId, updatedAt: Date.now() };
+		// Re-home: clone with updated projectId/cwd, but do not carry runtime
+		// metadata from the previous project's cwd/worktree/session.
+		const {
+			worktreePath: _worktreePath,
+			branch: _branch,
+			repoPath: _repoPath,
+			repoWorktrees: _repoWorktrees,
+			currentSessionId: _currentSessionId,
+			...rest
+		} = found.staff;
+		const moved: PersistedStaff = {
+			...rest,
+			cwd: newCtx.project.rootPath,
+			projectId: newProjectId,
+			updatedAt: Date.now(),
+		};
 		newCtx.staffStore.put(moved);
 		newCtx.searchIndex?.indexStaff(moved, newProjectId);
 		return moved;
@@ -234,6 +261,18 @@ export class StaffManager {
 		return [{ repo: ".", repoPath, worktreePath: staff.worktreePath }];
 	}
 
+	private staffSessionWorktreeMeta(staff: PersistedStaff, projectId?: string): { worktreePath: string; branch?: string; repoPath?: string; repoWorktrees?: Record<string, string> } | undefined {
+		if (!staff.worktreePath) return undefined;
+		const ctx = projectId ? this.pcm.getOrCreate(projectId) : undefined;
+		const repoPath = staff.repoPath ?? ctx?.project.rootPath;
+		return {
+			worktreePath: staff.worktreePath,
+			...(staff.branch ? { branch: staff.branch } : {}),
+			...(repoPath ? { repoPath } : {}),
+			...(staff.repoWorktrees ? { repoWorktrees: staff.repoWorktrees } : {}),
+		};
+	}
+
 	private async cleanupStaffWorktree(staff: PersistedStaff, projectId?: string): Promise<void> {
 		const entries = this.staffWorktreeEntries(staff, projectId);
 		if (entries.length === 0) return;
@@ -346,9 +385,8 @@ export class StaffManager {
 			// next refactor wires it through `SessionInfo` directly.
 			session.staffId = id;
 			sessionManager.setTitle(session.id, staff.name);
-			if (staff.worktreePath) {
-				sessionManager.updateSessionMeta(session.id, { worktreePath: staff.worktreePath });
-			}
+			const worktreeMeta = this.staffSessionWorktreeMeta(staff, projectId);
+			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
 			store.update(id, { currentSessionId: session.id });
 			staff.currentSessionId = session.id;
@@ -593,9 +631,8 @@ export class StaffManager {
 			});
 			session.staffId = staffId;
 			sessionManager.setTitle(session.id, staff.name);
-			if (staff.worktreePath) {
-				sessionManager.updateSessionMeta(session.id, { worktreePath: staff.worktreePath });
-			}
+			const worktreeMeta = this.staffSessionWorktreeMeta(staff, found.projectId);
+			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
 			store.update(staffId, { currentSessionId: session.id });
 			staff.currentSessionId = session.id;
