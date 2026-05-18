@@ -56,7 +56,11 @@ function extractProposalBody(
 function projectRootForSession(sessionId: string): string {
 	const session = state.gatewaySessions.find(s => s.id === sessionId)
 		|| state.archivedSessions.find(s => s.id === sessionId);
-	const projectId = session?.projectId || state.activeProjectId;
+	let projectId = session?.projectId;
+	const activeId = activeSessionId();
+	if (!projectId && (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId)) {
+		projectId = state.chatPanel?.agentInterface?.projectId;
+	}
 	if (!projectId) return "";
 	return state.projects.find(p => p.id === projectId)?.rootPath || "";
 }
