@@ -9,7 +9,9 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "./e2e-setup.js";
 
-async function listVisibleProjects(): Promise<Array<{ id: string; hidden?: boolean }>> {
+test.describe.configure({ mode: "serial" });
+
+async function listVisibleProjects(): Promise<Array<{ id: string; name?: string; hidden?: boolean }>> {
 	const resp = await apiFetch("/api/projects");
 	expect(resp.status).toBe(200);
 	const body = await resp.json();
@@ -45,6 +47,25 @@ test("createGoal without explicit projectId survives default project deletion", 
 	let goalId: string | undefined;
 	try {
 		const goal = await createGoal({ title: "Default Project Loss Repro" });
+		goalId = goal.id as string;
+		expect(goalId).toBeTruthy();
+	} finally {
+		if (goalId) await deleteGoal(goalId);
+	}
+});
+
+test("one test may drain all visible projects", async () => {
+	await drainVisibleProjects();
+});
+
+test("the next test sees a restored default project with workflows", async () => {
+	const projects = await listVisibleProjects();
+	const defaultProject = projects.find(p => p.name === "default");
+	expect(defaultProject?.id, "harness default project should be restored between tests").toBeTruthy();
+
+	let goalId: string | undefined;
+	try {
+		const goal = await createGoal({ title: "Default Project Restore Repro" });
 		goalId = goal.id as string;
 		expect(goalId).toBeTruthy();
 	} finally {

@@ -115,12 +115,19 @@ export function gitCwd(): string {
  * does NOT retry. Use `readE2ETokenAsync()` from new code; over time we'd
  * like every caller to be async so we can retry transient FS errors.
  */
+function envToken(): string | undefined {
+	const t = process.env.BOBBIT_TOKEN?.trim();
+	return t && t.length >= 64 ? t : undefined;
+}
+
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
 	try {
 		return readFileSync(p, "utf-8").trim();
 	} catch (err: any) {
 		if (err?.code === "ENOENT") {
+			const fallback = envToken();
+			if (fallback) return fallback;
 			throw new Error(
 				`E2E token missing at ${p}. ` +
 				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
@@ -156,6 +163,8 @@ export async function readE2ETokenAsync(): Promise<string> {
 		}
 	}
 	if (lastErr?.code === "ENOENT") {
+		const fallback = envToken();
+		if (fallback) return fallback;
 		throw new Error(
 			`E2E token missing at ${p} (after 6 retries). ` +
 			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
@@ -496,6 +505,43 @@ function formatLiveProjectState(state: LiveProjectState): string {
 	return safeJson({ ok: true, status: state.status, rawKind: state.rawKind, projects: state.projects });
 }
 
+async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: string): Promise<void> {
+	try {
+		const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+		const headers = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${token()}`,
+		};
+		let current: Record<string, any> = {};
+		try {
+			const cfgResp = await fetch(`${base()}/api/projects/${projectId}/config`, { headers });
+			if (cfgResp.ok) current = await cfgResp.json();
+		} catch { /* fall back to additive seed */ }
+		const existingWorkflows = current.workflows && typeof current.workflows === "object" && !Array.isArray(current.workflows)
+			? current.workflows as Record<string, unknown>
+			: {};
+		const workflows = { ...testWorkflows(), ...existingWorkflows };
+		const existingComponents = Array.isArray(current.components) ? current.components : [];
+		const componentNames = new Set(existingComponents.map((c: any) => c?.name).filter((name: unknown): name is string => typeof name === "string"));
+		const components = componentNames.has(TEST_DEFAULT_COMPONENT.name)
+			? existingComponents
+			: [...existingComponents, TEST_DEFAULT_COMPONENT];
+		const resp = await fetch(`${base()}/api/projects/${projectId}/config`, {
+			method: "PUT",
+			headers,
+			body: JSON.stringify({ components, workflows }),
+		});
+		if (!resp.ok) {
+			throw new Error(`${resp.status} ${resp.statusText} body=${await responseText(resp)}`);
+		}
+	} catch (err) {
+		throw new Error(
+			`E2E default project workflow seed failed (${reason}): ` +
+			`${err instanceof Error ? err.message : String(err)} port=${port()} bobbitDir=${bobbitDir()}`,
+		);
+	}
+}
+
 async function registerHarnessDefaultProject(reason: string): Promise<ProjectSummary> {
 	const p = port();
 	const request = { name: "default", rootPath: bobbitDir(), upsert: true, acceptCanonical: true };
@@ -540,6 +586,7 @@ async function registerHarnessDefaultProject(reason: string): Promise<ProjectSum
 		);
 	}
 	_defaultProjectIdCache[p] = project.id;
+	await seedHarnessDefaultProjectWorkflows(project.id, reason);
 	return project;
 }
 

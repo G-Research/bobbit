@@ -147,6 +147,12 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		});
 
 		const port = await gw.start();
+		const gatewayUrl = `http://127.0.0.1:${port}`;
+
+		// Set env so e2e-setup.ts helpers and in-process mock agents target this worker's server.
+		process.env.E2E_PORT = String(port);
+		process.env.BOBBIT_GATEWAY_URL = gatewayUrl;
+		process.env.BOBBIT_TOKEN = token;
 
 		// Register the server CWD as a project via REST so existing tests that
 		// rely on a pre-existing "default" project at projects[0] keep working.
@@ -166,15 +172,7 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.
-		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`, "utf-8");
-
-		// Set env so e2e-setup.ts helpers target this worker's server
-		process.env.E2E_PORT = String(port);
-
-		// cli.ts normally writes .bobbit/state/gateway-url so agent subprocesses
-		// can discover the gateway. When running in-process we must do that
-		// ourselves — tests that exercise tool-grant-request rely on it.
-		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), gatewayUrl, "utf-8");
 
 		const info: GatewayInfo = {
 			port,
