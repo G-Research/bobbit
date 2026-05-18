@@ -910,13 +910,13 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ## Editable proposals
 
-Every `propose_*` payload (`goal`, `project`, `workflow`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+Every `propose_*` payload (`goal`, `project`, `role`, `tool`, `staff`) is mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth; the in-memory `state.activeProposals[type]` slot is a parsed projection rebuilt on every change. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
 
 ### Why
 
 Agents previously had to re-emit the entire payload via `propose_*` to tweak one field. For a fully-elaborated `propose_project` call (components, workflows, gate DAGs, verify steps) this meant streaming kilobytes of YAML to change a single command string - expensive in tokens and wall-clock time, and easy to drift between successive emissions. The file-on-disk model lets `edit_proposal` patch the draft in place using the same `old_text`/`new_text` contract the agent already uses for source code, with atomic rollback so a malformed edit cannot corrupt the stored form.
 
-The refactor also unified the six per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, workflow's gate graph, goal's spec markdown) are unchanged - only the surrounding plumbing was rewritten.
+The refactor also unified the per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every supported type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, role/tool/staff preview forms, goal's spec markdown) are unchanged - only the surrounding plumbing was rewritten.
 
 Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
 
@@ -927,13 +927,12 @@ Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
   <sessionId>/
     goal.md         # markdown body + YAML frontmatter (title/cwd/workflow/options)
     project.yaml    # native YAML matching the propose_project arg shape
-    workflow.yaml
     role.yaml
     tool.yaml
     staff.yaml
 ```
 
-Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write. Cleanup is deferred to `purgeOneSession` at the 7-day mark (alongside the `.jsonl` purge) rather than session archive — the [archived-proposal-reopen flows](archived-proposal-reopen.md) (Path A in-place resubmit, Path B continue-assistant) read drafts off disk for archived sessions, so the directory must outlive the live session.
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other four files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write. Cleanup is deferred to `purgeOneSession` at the 7-day mark (alongside the `.jsonl` purge) rather than session archive — the [archived-proposal-reopen flows](archived-proposal-reopen.md) (Path A in-place resubmit, Path B continue-assistant) read drafts off disk for archived sessions, so the directory must outlive the live session.
 
 Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
 
@@ -964,7 +963,7 @@ Per-type metadata lives in `src/server/proposals/proposal-types.ts`: `filename`,
 
 ### Unified client state
 
-The six legacy slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit slots for `tool`/`workflow`) are collapsed into one map in `src/app/state.ts`:
+The legacy per-type slots (`activeGoalProposal`, `activeProjectProposal`, `activeRoleProposal`, `activeStaffProposal`, plus the implicit `tool` slot) are collapsed into one map in `src/app/state.ts`:
 
 ```ts
 activeProposals: Partial<Record<ProposalType, ProposalSlot>>;
@@ -983,7 +982,7 @@ interface ProposalSlot {
 - `mergeFields(prev, incoming)` - streaming shallow-merge. Project carries `components` and `workflows` forward when the partial omits them; goal carries the markdown body across frontmatter-only deltas; the others use a plain spread.
 - `onFirstEmit(slot, opts)` - tab auto-select on the first emit (e.g. project flips `previewPanelActiveTab="project"`, mobile flips the assistant tab).
 - `validate(fields)` - returns blocking errors that disable the submit button.
-- `accept(slot)` - reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/staff/tool/workflow accept endpoints) are unchanged.
+- `accept(slot)` - reserved hook; current accept paths (`createGoal`, `acceptProjectProposal`, role/tool/staff save flows) are unchanged.
 
 Unified draft + dismissal helpers in `src/app/proposal-helpers.ts` replace the per-type ad-hoc managers:
 
@@ -991,6 +990,16 @@ Unified draft + dismissal helpers in `src/app/proposal-helpers.ts` replace the p
 - `markProposalDismissed(sid, type, fields)` / `isProposalDismissed(sid, type, fields)` / `clearProposalDismissed(sid, type)`
 
 LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId}`; the legacy `bobbit-goal-proposal-dismissed-<sid>` key is migrated once on first read.
+
+### Panel routing and tabs
+
+`state.activeProposals[type]` is the routing source for every proposal surface. A proposal is openable when the active session has a slot for one of the supported `ProposalType`s (`goal`, `project`, `role`, `tool`, `staff`); `assistantType` does not filter the slot.
+
+Normal sessions render active slots in the unified panel. Tab order is deterministic: `Chat`, then `Preview`, `Review`, and `Inbox` when those surfaces are present, then active proposal tabs in `PROPOSAL_TYPES` order. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
+
+Assistant sessions keep the split chat/preview UX, but the preview pane can render any active proposal slot. Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
+
+The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, reveals the same tab/pane routing, then either restores the requested snapshot (`rev`) or replays legacy `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
 
 ### Flow: `propose_*` → file-seed → broadcast → parsed projection
 
@@ -1022,7 +1031,7 @@ Session purge cleans the directory: `session-manager.ts::purgeOneSession` fire-a
 
 ### Accept lifecycle
 
-The per-type accept handlers (`createGoal`, `acceptProjectProposal`, etc.) are unchanged. After a successful accept, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
+The per-type submit/completion handlers (`createGoal`, `acceptProjectProposal`, role/staff save flows, the tool completion flow, etc.) are unchanged and render from the same panel implementations outside assistant sessions. When a handler accepts or saves a proposal, the client fires `DELETE /api/sessions/:id/proposal/:type` which deletes the file and broadcasts `proposal_cleared`; the unified callback then drops the slot from `state.activeProposals`. The matching `deleteProposalDraft(sid, type)` clears the local-draft side state.
 
 ### Tool surface
 
@@ -1080,15 +1089,17 @@ The Preview-mode markdown body of goal, role, and staff proposals is mounted via
 |---|---|
 | `src/server/proposals/proposal-files.ts` | Atomic file API (`writeProposalFile`, `editProposalFile`, `parseProposalFile`, `deleteProposalFile`). |
 | `src/server/proposals/proposal-types.ts` | Per-type plugins: filename, serialize, parse, requiredFields. |
-| `src/server/server.ts` | Four REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[/edit\|/seed]`). |
+| `src/server/server.ts` | Proposal-draft REST handlers (regex-routed at `/api/sessions/:id/proposal/:type[...]`). |
 | `src/server/ws/protocol.ts` | `proposal_update` / `proposal_cleared` server messages. |
 | `src/server/ws/handler.ts` | Rehydrate-on-attach. |
 | `src/server/agent/session-manager.ts::terminateSession` | Per-session directory cleanup. |
 | `src/app/proposal-registry.ts` | `ProposalType`, `ProposalSlot`, `ProposalTypePlugin`, `PROPOSAL_TYPE_REGISTRY`. |
 | `src/app/proposal-helpers.ts` | Unified draft + dismissal helpers. |
 | `src/app/state.ts::activeProposals` | Unified slot map. |
-| `src/app/session-manager.ts::remote.onProposal` | Unified WS-driven callback. |
+| `src/app/render.ts` | Unified panel tabs and `proposalPanelForType(type)` routing. |
+| `src/app/session-manager.ts::remote.onProposal` | Unified WS-driven callback and `proposal-open` handling. |
 | `src/app/remote-agent.ts` | WS dispatch + legacy `_checkToolProposals` dual-fire. |
+| `src/ui/tools/renderers/ProposalRenderer.ts` | `propose_*` cards and the generic "Open proposal" event. |
 | `defaults/tools/proposals/{view,edit}_proposal.yaml` | Tool descriptors. |
 | `defaults/tools/proposals/extension.ts` | Tool registration; `propose_*` `execute()` POSTs to `/seed`. |
 
@@ -1099,7 +1110,8 @@ The Preview-mode markdown body of goal, role, and staff proposals is mounted via
 - `tests/proposal-helpers.test.ts` - unit: unified draft + dismissal.
 - `tests/e2e/proposal-edit-api.spec.ts` - API E2E: edit-before-propose, restart survival, malformed-edit rollback (SHA-256 byte-equal pre/post).
 - `tests/e2e/ui/proposal-edit-flow.spec.ts` - browser E2E: project propose → edit → accept happy path.
-- `tests/e2e/ui/proposal-types-uX-parity.spec.ts` - parametrised across all six types: dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, restart survival.
+- `tests/e2e/ui/proposal-types-uX-parity.spec.ts` - parametrised proposal UX parity: dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, restart survival.
+- `tests/e2e/ui/proposal-open-all-types.spec.ts` - browser E2E proving every supported proposal type opens, rehydrates, dismisses, and exposes its tab from a normal session.
 
 ---
 
@@ -2439,7 +2451,7 @@ Each was added to fix a symptom but masked a deeper race introduced by an earlie
 
 ### Proposal panel scroll lock invariant
 
-The six proposal panels (`goal`, `project`, `role`, `tool`, `staff`, `workflow` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` - the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
+The five proposal panels (`goal`, `project`, `role`, `tool`, `staff` in `src/app/render.ts`) re-render on every streamed delta of a `propose_*` tool_use block. Lit's `.value=` rewrite of the spec/prompt `<textarea>` and the markdown-block parent `<div>` resets `scrollTop` and the textarea's selection range on each commit, so without intervention a user who scrolls up to read mid-spec gets snapped back to the top on the next delta and an in-progress textarea edit loses its caret. The fix mirrors the chat scroll lock invariant rather than refactoring `AgentInterface` - the chat path has subtle invariants and the regression risk of a shared helper outweighs the duplication cost.
 
 The logic lives in **`src/app/follow-tail.ts`** (`reconcileFollowTail(el)`), called from a `queueMicrotask` at the end of each panel's render so it fires after the synchronous DOM commit but before paint. The same three rules apply:
 
@@ -2451,7 +2463,7 @@ Lock state is stored in a module-private `WeakMap<HTMLElement, LockState>` keyed
 
 Textarea selection (`selectionStart` / `selectionEnd`) is captured on `select`, `keyup`, and `click`, then re-applied via `setSelectionRange(...)` after every reconcile branch (positive delta, zero delta, and shrink) - `setSelectionRange` is a state mutation per the WHATWG spec and applies even when the textarea is not the active element, so the caret is in the right place when focus returns. The DOMException some browsers throw on detached/hidden inputs is swallowed.
 
-**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. The six panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start - exactly when the user would perceive a snap.
+**Timing choice.** Reconciliation runs in a `queueMicrotask` scheduled by each panel function, not via the parent `LitElement`'s `updateComplete` Promise. Proposal panels are plain functions returning `html\`\`` templates, so they have no `updateComplete` of their own; the microtask runs after the parent's synchronous render commit and before paint, which is the tightest deterministic hook available. A `ResizeObserver` would also work but adds an asynchronous tick before the first reconcile after stream-start - exactly when the user would perceive a snap.
 
 When modifying proposal-panel scroll behaviour: route through `reconcileFollowTail` rather than touching `scrollTop` or `setSelectionRange` directly; do not introduce timer-based intent heuristics; do not widen the 5px tail. See `src/app/follow-tail.ts` and the panel render functions in `src/app/render.ts`. Behavioural twin test: `tests/follow-tail.spec.ts`.
 
@@ -2459,11 +2471,11 @@ When modifying proposal-panel scroll behaviour: route through `reconcileFollowTa
 
 `state.proposalStreamingByTag: Record<string, boolean>` (in `src/app/state.ts`) tracks whether each proposal panel is currently receiving streamed deltas. Keyed by the `tag` from `PROPOSAL_PARSERS` - `goal_proposal`, `project_proposal`, `role_proposal`, `tool_proposal`, `staff_proposal`. Read via the `isProposalStreaming(tag)` accessor.
 
-A per-tag map rather than a single boolean because the six panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
+A per-tag map rather than a single boolean because proposal panels can be in independent lifecycle states (e.g. an active `goal_proposal` and `project_proposal` simultaneously) and a scalar would force them to share a flag. The map also makes bulk-clear on session change cheap.
 
 **Why the flag exists.** Without it the Create / Apply / Save buttons are clickable mid-stream and a user can submit before the spec/title has finished streaming, producing a goal/role/tool with truncated content. The flag drives (a) the `disabled` state of each panel's primary submit, (b) the `streamingBadge()` + `STREAMING_BORDER` indicator, and (c) consumers in `session-manager.ts` that may want to suppress destructive side-effects on streaming-mode fires.
 
-**Writer (single owner): `RemoteAgent` in `src/app/remote-agent.ts`.** Set to `true` inside `_checkToolProposals(message, streaming=true)` immediately before the per-tag `callback(input, streaming)` fan-out. Cleared on the matching block-finish branch (`!streaming && blockId` - the `_processedProposalIds.add(blockId)` site, reached on `case "message_end"` and on full re-scans), and bulk-cleared on `case "agent_end"` and `RemoteAgent.reset()` so an aborted/errored turn never leaves the flag stuck on. Readers are the seven panel render functions in `src/app/render.ts`; they call `isProposalStreaming("<tag>_proposal")` once at the top.
+**Writer (single owner): `RemoteAgent` in `src/app/remote-agent.ts`.** Set to `true` inside `_checkToolProposals(message, streaming=true)` immediately before the per-tag `callback(input, streaming)` fan-out. Cleared on the matching block-finish branch (`!streaming && blockId` - the `_processedProposalIds.add(blockId)` site, reached on `case "message_end"` and on full re-scans), and bulk-cleared on `case "agent_end"` and `RemoteAgent.reset()` so an aborted/errored turn never leaves the flag stuck on. Readers are the proposal panel render functions in `src/app/render.ts`; they call `isProposalStreaming("<tag>_proposal")` once at the top.
 
 **WebSocket reconnect.** The resume path (`{type:"resume", fromSeq}`) replays missed events through the same handler, so a replayed `message_update` re-sets the flag and a replayed `message_end` clears it - no extra logic. The resume-gap fallback (`get_messages`) re-scans the snapshot with `_checkToolProposals(m, false)`, which hits the block-finish branch for any propose_* block in the snapshot and clears any stale flag. The `agent_end` / `reset()` bulk-clears are the final safety net on hard disconnect or session change. Cross-session isolation: `state.proposalStreamingByTag` is a singleton on the global `state` object cleared on `reset()`, which fires on session switch.
 

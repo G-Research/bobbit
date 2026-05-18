@@ -51,7 +51,7 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 
 In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}` so the agent can tweak them via `view_proposal` / `edit_proposal` without re-emitting the full payload. The file is the single source of truth; the in-memory client slot (`state.activeProposals[type]`) is a parsed projection. See [docs/internals.md — Editable proposals](internals.md#editable-proposals) and [docs/design/editable-proposals.md](design/editable-proposals.md).
 
-`<type>` is one of `goal | project | workflow | role | tool | staff`. `goal` files are markdown with YAML frontmatter; the others are native YAML.
+`<type>` is one of `goal | project | role | tool | staff`. `goal` files are markdown with YAML frontmatter; the others are native YAML.
 
 | Method | Path | Description |
 |---|---|---|
