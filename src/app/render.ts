@@ -1864,10 +1864,31 @@ function describeCron(cron: string): string {
 	return cron ? `Custom: ${cron}` : "";
 }
 
+function activeProjectForStaffPreview() {
+	return state.activeProjectId
+		? state.projects.find(p => p.id === state.activeProjectId)
+		: undefined;
+}
+
+function effectiveStaffPreviewCwd(): string | undefined {
+	const explicitCwd = state.staffPreviewCwd.trim();
+	if (explicitCwd) return explicitCwd;
+	return activeProjectForStaffPreview()?.rootPath || undefined;
+}
+
+function seedStaffPreviewCwdFromProject(): void {
+	if (state.staffPreviewCwdEdited || state.staffPreviewCwd.trim()) return;
+	const projectRoot = activeProjectForStaffPreview()?.rootPath;
+	if (projectRoot) state.staffPreviewCwd = projectRoot;
+}
+
 function staffPreviewPanel() {
 	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
+	seedStaffPreviewCwdFromProject();
 	const streaming = isProposalStreaming("staff_proposal");
+	const staffProject = activeProjectForStaffPreview();
+	const effectiveCwd = effectiveStaffPreviewCwd();
 	queueMicrotask(() => {
 		reconcileFollowTail(staffPromptPreviewRef.value);
 		reconcileFollowTail(staffPromptTextareaRef.value);
@@ -1884,11 +1905,13 @@ function staffPreviewPanel() {
 		} catch { /* keep empty */ }
 
 		const sandboxed = _staffSandboxed;
+		const cwd = effectiveStaffPreviewCwd();
 		const result = await createStaffAgent({
 			name: trimmedName,
 			description: state.staffPreviewDescription,
 			systemPrompt: state.staffPreviewPrompt,
-			cwd: state.staffPreviewCwd,
+			cwd,
+			worktree: state.staffPreviewWorktree,
 			triggers,
 			projectId: state.activeProjectId || undefined,
 			sandboxed,
@@ -1896,6 +1919,7 @@ function staffPreviewPanel() {
 		if (!result) return;
 
 		_staffSandboxed = false;
+		state.staffPreviewWorktree = true;
 		clearProposalReviewState(proposalSessionId, "staff");
 		delete state.activeProposals.staff;
 		recomputeAssistantHasProposal();
@@ -1956,17 +1980,47 @@ function staffPreviewPanel() {
 						}}
 					></textarea>
 				</div>
-				<div>
+				<div data-testid="staff-proposal-cwd-field">
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-					${Input({
-						type: "text",
-						value: state.staffPreviewCwd,
-						placeholder: (state as any).defaultCwd || "(server default)",
-						onInput: (e: Event) => {
+					<input
+						type="text"
+						data-testid="staff-proposal-cwd-input"
+						class="flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm md:text-sm text-foreground shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30"
+						.value=${state.staffPreviewCwd}
+						placeholder=${staffProject?.rootPath || "Project working directory"}
+						@input=${(e: Event) => {
 							state.staffPreviewCwd = (e.target as HTMLInputElement).value;
 							state.staffPreviewCwdEdited = true;
-						},
-					})}
+						}}
+					/>
+					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-cwd-hint">
+						${staffProject
+							? html`Selected project: <span class="font-medium text-foreground/80">${staffProject.name}</span> · <code class="text-[10px]">${staffProject.rootPath}</code>`
+							: effectiveCwd
+								? html`Using <code class="text-[10px]">${effectiveCwd}</code>`
+								: "No project cwd is available; the server will validate the request."}
+					</p>
+				</div>
+				<div data-testid="staff-proposal-worktree-control">
+					<label class="flex items-center gap-2 cursor-pointer">
+						<input
+							type="checkbox"
+							data-testid="staff-proposal-worktree-checkbox"
+							.checked=${state.staffPreviewWorktree}
+							@change=${(e: Event) => {
+								state.staffPreviewWorktree = (e.target as HTMLInputElement).checked;
+								renderApp();
+							}}
+						/>
+						<span class="text-xs text-muted-foreground font-medium">Create worktree when supported</span>
+						<span title="Uses an isolated project worktree for git-backed projects. Turn off to run directly in the project directory."
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
+					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-worktree-mode">
+						${state.staffPreviewWorktree
+							? "Auto: Bobbit will use a project worktree when supported."
+							: "Opt-out: this staff agent will run in the project directory."}
+					</p>
 				</div>
 				<div>
 					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists) ? "opacity-40 pointer-events-none" : ""}">

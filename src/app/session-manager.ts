@@ -53,6 +53,34 @@ function extractProposalBody(
 	return String((fields as any).prompt ?? "");
 }
 
+function projectRootForSession(sessionId: string): string {
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	const projectId = session?.projectId || state.activeProjectId;
+	if (!projectId) return "";
+	return state.projects.find(p => p.id === projectId)?.rootPath || "";
+}
+
+function proposalCwdOrProjectRoot(proposalCwd: unknown, sessionId: string): string {
+	const cwd = typeof proposalCwd === "string" ? proposalCwd : "";
+	return cwd.trim() ? cwd : projectRootForSession(sessionId);
+}
+
+function resetStaffProposalPreview(sessionId: string): void {
+	state.staffPreviewName = "";
+	state.staffPreviewDescription = "";
+	state.staffPreviewPrompt = "";
+	state.staffPreviewTriggers = "[]";
+	state.staffPreviewCwd = projectRootForSession(sessionId);
+	state.staffPreviewWorktree = true;
+	state.staffPreviewNameEdited = false;
+	state.staffPreviewDescriptionEdited = false;
+	state.staffPreviewPromptEdited = false;
+	state.staffPreviewTriggersEdited = false;
+	state.staffPreviewCwdEdited = false;
+	state.assistantHasProposal = false;
+}
+
 // ============================================================================
 // SESSION CACHE — reuse ChatPanel + RemoteAgent on revisit
 // ============================================================================
@@ -1324,7 +1352,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
 			if (!state.staffPreviewPromptEdited) state.staffPreviewPrompt = proposal.prompt;
 			if (!state.staffPreviewTriggersEdited) state.staffPreviewTriggers = proposal.triggers || "[]";
-			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposal.cwd || "";
+			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposalCwdOrProjectRoot(proposal.cwd, sessionId);
 			state.assistantHasProposal = true;
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
@@ -1804,17 +1832,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.toolPreviewRendererHtml = "";
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
-				state.staffPreviewName = "";
-				state.staffPreviewDescription = "";
-				state.staffPreviewPrompt = "";
-				state.staffPreviewTriggers = "[]";
-				state.staffPreviewCwd = "";
-				state.staffPreviewNameEdited = false;
-				state.staffPreviewDescriptionEdited = false;
-				state.staffPreviewPromptEdited = false;
-				state.staffPreviewTriggersEdited = false;
-				state.staffPreviewCwdEdited = false;
-				state.assistantHasProposal = false;
+				resetStaffProposalPreview(sessionId);
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;

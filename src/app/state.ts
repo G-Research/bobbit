@@ -351,6 +351,7 @@ export const state = {
 	staffPreviewPrompt: "",
 	staffPreviewTriggers: "[]",
 	staffPreviewCwd: "",
+	staffPreviewWorktree: true,
 	staffPreviewNameEdited: false,
 	staffPreviewDescriptionEdited: false,
 	staffPreviewPromptEdited: false,
