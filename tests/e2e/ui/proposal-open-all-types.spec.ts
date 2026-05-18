@@ -5,7 +5,7 @@
  * tab/pane for every active proposal slot, not just goal/project.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, gitCwd } from "../e2e-setup.js";
 import type { Locator, Page } from "@playwright/test";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
@@ -228,7 +228,7 @@ async function dismissProposal(page: Page, proposal: ProposalCase, sessionId: st
 	const beforeOtherSlots = await otherProposalSlots(page, proposal.type);
 	const panel = proposalPane(page, proposal);
 	await expect(panel).toBeVisible({ timeout: 5_000 });
-	const dismiss = panel.getByRole("button", { name: "Dismiss" }).first();
+	const dismiss = panel.getByRole("button", { name: /^Dismiss$/ }).first();
 	await expect(
 		dismiss,
 		`${proposal.label} proposal pane should expose a Dismiss action in normal sessions`,
@@ -294,6 +294,7 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 			await expectProposalTabAndPane(page, proposal);
 
 			const panel = proposalPane(page, proposal);
+			await panel.locator('input[type="text"]').nth(1).fill(gitCwd());
 			const createButton = panel.getByRole("button", { name: /Create Staff/ }).first();
 			await expect(createButton).toBeEnabled({ timeout: 5_000 });
 			await createButton.click();
