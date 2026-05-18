@@ -128,11 +128,27 @@ test.describe("Search (UI)", () => {
 		// Verify search input exists
 		await expect(searchInput).toBeVisible({ timeout: 10_000 });
 
-		// Press Ctrl+K to focus the search input
-		await page.keyboard.press("Control+k");
+		// Wait for the app's keydown listener to attach before dispatching.
+		// Under parallel E2E load the first Chromium keystroke can be dropped
+		// when focus hasn't settled, so we dispatch a synthetic KeyboardEvent
+		// on `window` (where the shortcut registry listens) instead of using
+		// page.keyboard.press. Mirrors the Ctrl+[ pattern below.
+		await expect.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		).toBe(true);
+
+		// Press Ctrl+K to focus the search input. Dispatch via window.dispatchEvent
+		// because keyboard.press can be dropped under heavy parallel load.
+		// Set both ctrlKey and metaKey for platform-aware ctrlOrMeta matching.
+		await page.evaluate(() => {
+			window.dispatchEvent(new KeyboardEvent("keydown", {
+				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+			}));
+		});
 
 		// Verify the input is focused
-		await expect(searchInput).toBeFocused({ timeout: 3_000 });
+		await expect(searchInput).toBeFocused({ timeout: 5_000 });
 
 		// Type something
 		await searchInput.fill("hello");

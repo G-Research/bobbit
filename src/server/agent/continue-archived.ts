@@ -34,6 +34,24 @@ export function copyToolContentDirIfPresent(srcId: string, dstId: string, stateD
 	fs.cpSync(src, dst, { recursive: true });
 }
 
+/**
+ * Recursively copy `<stateDir>/proposal-drafts/<srcId>/` to
+ * `<stateDir>/proposal-drafts/<dstId>/` if the source directory exists.
+ * Silent no-op when absent.
+ *
+ * Mirrors {@link copyToolContentDirIfPresent} but for the proposal-draft
+ * directory layout owned by `proposal-files.ts` (live `<type>.{md,yaml}`
+ * plus `<type>.history/<rev>.<ext>` snapshots). Schema-agnostic recursive
+ * copy — the new session inherits the entire draft + history verbatim.
+ */
+export function copyProposalDirIfPresent(srcId: string, dstId: string, stateDir: string): void {
+	const src = path.join(stateDir, "proposal-drafts", srcId);
+	if (!fs.existsSync(src)) return;
+	const dst = path.join(stateDir, "proposal-drafts", dstId);
+	fs.mkdirSync(dst, { recursive: true });
+	fs.cpSync(src, dst, { recursive: true });
+}
+
 /** Best-effort cleanup after a failed continue-archived flow. */
 export function cleanupFailedContinue(destPath: string | undefined, newSessionId: string, stateDir: string): void {
 	if (destPath) {
@@ -41,6 +59,10 @@ export function cleanupFailedContinue(destPath: string | undefined, newSessionId
 	}
 	try {
 		const dir = path.join(stateDir, "tool-content", newSessionId);
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+	} catch { /* best-effort */ }
+	try {
+		const dir = path.join(stateDir, "proposal-drafts", newSessionId);
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 	} catch { /* best-effort */ }
 }

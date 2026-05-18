@@ -2,6 +2,15 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Verification step stuck in `running`
+
+- **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
+- **Cause**: Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pid, sig)` only target the immediate child shell, not its descendants. The shell dies; everything it spawned keeps running. The harness's `child.on("close")` races against orphans holding stdio open.
+- **Fix (tree-kill)**: all command-step spawns in `verification-harness.ts::runCommandStep` go through `src/server/agent/spawn-tree.ts::spawnTracked`, which puts the child in its own process group (POSIX `detached: true`, pgid === child.pid) and reaps the whole tree via `process.kill(-pgid, sig)` on POSIX or `taskkill /T /F /PID <pid>` on Windows. SIGTERM is sent first, then SIGKILL escalates after `killGraceMs` (default 5000ms; cancellation passes 1000ms). The helper owns the timeout timer — never re-add `spawn({ timeout })`; see the file header for the rationale.
+- **Three integration points**: (1) per-step timeout — `spawnTracked({ timeoutMs, onTimeout })`; (2) user/agent cancellation and post-restart recovery — both route through `killTreeByPid(pid, "SIGKILL")` against the persisted step pid; (3) gateway shutdown — `killAllTracked("SIGKILL")` walks the in-flight registry. All three docker-exec, detached, and attached-pipe spawn sites in `runCommandStep` use the same primitive.
+- **Confirm a kill**: poll `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`, so ~5s on timeout, ~1s on cancel). `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty in the same window. The failed step's `output` ends with `— killed subprocess tree`.
+- **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.
@@ -113,6 +122,18 @@ Loading an archived session shows `claude-opus-4-6` (the client-side placeholder
 
 See [docs/internals.md — Archived-session state push on auth](internals.md#archived-session-state-push-on-auth).
 
+## Archived proposal draft missing after continue / resubmit
+
+User opens an archived assistant session, expects to see a "Resubmit `<type>` proposal" button on the footer or a draft carried over by `POST /api/sessions/:id/continue`, and gets nothing.
+
+- **Resubmit button missing**: the footer shows only "Continue in New Session". Check `GET /api/sessions/:id/proposals` directly — if `proposals` is empty, no draft exists on disk. Most likely cause: the draft was deleted at archive time by an older `session-manager.ts::terminateSession` that has not been updated. The current code defers proposal-drafts cleanup to `purgeOneSession` (7-day purge); the `terminateSession` path must skip the directory. If the endpoint is missing from the server entirely, the client falls back to the no-draft footer silently — verify the `^/api/sessions/([^/]+)/proposals$` route is registered.
+- **Continue returned 422 for an assistant session**: the `assistantType` guard was re-introduced. The current handler only blocks `goalId` / `delegateOf` / `teamGoalId`; assistant sessions are accepted and the response echoes `assistantType`.
+- **Continued session has no draft**: server logs surface `[continue-archived] proposal-dir copy failed (non-fatal): …` when `copyProposalDirIfPresent` (in `src/server/agent/continue-archived.ts`) throws. The copy is intentionally non-fatal so the underlying `.jsonl` continue still succeeds; check disk permissions on `<stateDir>/proposal-drafts/`. Also confirm `cleanupFailedContinue` did not run prematurely — it nukes both the cloned `.jsonl` and the cloned proposal-drafts directory.
+- **Toast "DELETE /api/sessions/<id> returned 404" on resubmit**: the `isSessionArchived` guard in `src/app/render.ts` is missing or bypassed. The submit handlers in the goal / project / role / tool / staff proposal panels must short-circuit the post-accept session teardown when the parent is already in `state.archivedSessions`.
+- E2E coverage: `tests/e2e/ui/archived-proposal-resubmit.spec.ts` (Path A + Path B + reload persistence + no-draft fallback), `tests/e2e/continue-archived-assistant.spec.ts` (server-side clone happy paths + cross-realm rejection regression).
+
+See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full design and where each piece lives.
+
 ## Session persistence
 
 - Check `<project-root>/.bobbit/state/sessions.json` (per-project, not centralized)
@@ -123,6 +144,19 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
 - **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
+
+## Staff inbox tools missing after restart / `[INBOX]` completion silently fails
+
+- **Symptoms**: a staff agent woken by `[INBOX]` reports `Tool inbox_complete not found` / `Tool inbox_list not found`; `GET /api/sessions/:id` returns a body with no `staffId` field; the REST fallback `POST /api/staff/:staffId/inbox/:entryId/complete` returns `403 Forbidden: session does not belong to this staff`. Inbox entries stay pending forever and re-fire on every trigger.
+- **Root cause**: the three inbox tools in `defaults/tools/inbox/extension.ts` are gated by `BOBBIT_STAFF_ID` in the agent process env. That env var is set from `PersistedSession.staffId` on every (re)spawn (`session-manager.ts::restoreSession` → `bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId`). Pre-fix, `StaffManager` mutated `session.staffId = id` only in memory, so the field never reached disk and was undefined after any respawn / compaction / server restart.
+- **Quick diagnostic**: `jq '.sessions[] | select(.title == "<staff name>") | {id, staffId, cwd}' .bobbit/state/sessions.json` — if `staffId` is null/missing on a session whose `title` matches a staff `name`, you've hit the bug.
+- **Resolution path**: should auto-heal on next server restart via `src/server/agent/staff-backfill.ts`. A loud warn log will appear: `[staff-backfill] backfilling staffId="..." for session=...`. If it doesn't fire, check that the session's `title` exactly matches a staff `name` AND its `worktreePath` (or `cwd`) matches the staff's `worktreePath`. The backfill is conservative and refuses title-only matches.
+- **Spawn-path wires** (must all be present for new sessions to persist correctly):
+  - `session-manager.ts::createSession` opts → both plan builders carry `staffId: opts?.staffId,`.
+  - `staff-manager.ts` passes `staffId: id` (and `staffId` on the scheduled-wake path) to both `createSession` call sites.
+  - `session-setup.ts::persistOnce` writes `staffId: plan.staffId` into `PersistedSession`.
+  - `session-manager.ts::restoreSession` reads `ps.staffId` and sets `bridgeOptions.env.BOBBIT_STAFF_ID`.
+- **Pinning test**: `tests/staff-session-staffid-persistence.test.ts` covers spawn-path forwarding, `SessionStore` round-trip, backfill idempotency, and source-level guards for the read/write field.
 
 ## `system-prompt.md` not customised
 
@@ -156,7 +190,17 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
   1. `[session-manager] Session … implicit unstick from enqueuePrompt (consecutiveErrorTurns=…)` or `… from deliverLiveSteer` log lines — if missing, the call didn't reach the helper. Steers must route through `SessionManager.deliverLiveSteer()` (see the abort/steer section above).
   2. `consecutiveErrorTurns` on the session info — if it's ≥ 3, the cap is parking. Click Retry or fix the upstream.
   3. Team-lead nudges to an errored worker: no longer suppressed in `team-manager.ts` (the old `if (teamLeadSession.lastTurnErrored) return;` guard was removed). SessionManager is now the single source of truth for error-state policy.
-- **Related**: previous mitigation was pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + bounded auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`). That path still exists for quick in-band recovery; the implicit-unstick path is the structural fallback when the whitelist doesn't match.
+- **Related**: pattern-matching on error text via `TRANSIENT_ERROR_PATTERNS` + auto-retry (`transientRetryAttempts`, `maybeAutoRetryTransient`) handles transient in-band recovery. See [docs/auto-retry.md](auto-retry.md) for the full policy. The implicit-unstick path is the structural fallback when the whitelist doesn't match.
+
+## Provider overload / rate-limit: session appears frozen with no retry banner
+
+- **Symptom**: turn ended with `overloaded_error` or `rate_limit_error` (or `HTTP 429/529`); session is `idle` but the UI shows no retry banner and nothing happens.
+- **Expected behaviour**: `maybeAutoRetryTransient` schedules an exponential-backoff retry automatically and broadcasts `auto_retry_pending`. The banner reads *"Retrying in ~Xs due to provider overload…"*.
+- **Diagnosis**:
+  1. Check server log for `[session-manager] Session … hit provider overload/rate-limit`. If missing, `isProviderBackoffError` didn't match — verify the error string contains `overloaded_error`, `rate_limit_error`, or an HTTP 429/529 phrase.
+  2. Check `session.pendingAutoRetryTimer` is set (non-null). If the timer fired but the retry itself failed again, look for `[session-manager] Auto-retry failed for session` in the log.
+  3. Banner missing despite `auto_retry_pending` being broadcast? Check `state.autoRetryPending` in `remote-agent.ts` — the `case "auto_retry_pending"` handler must have run. If it did, verify `AgentInterface` re-renders on `auto_retry_pending` events (see `AgentInterface._handleEvent`).
+- See [docs/auto-retry.md](auto-retry.md) for the full policy, cancellation triggers, and test coverage.
 
 ## "Setting up worktree…" banner missing on a brand-new session / preparing UX absent
 
@@ -259,6 +303,15 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
+
+## Toolbar / sidebar buttons missing shortcut hints in `title`
+
+- **Symptom**: hovering a toolbar or sidebar button on a freshly-booted app shows a bare label (e.g. `New goal`, `Terminate session`, `Collapse preview`) instead of the labelled-with-shortcut form (`New goal (Alt+G)`, etc.). A second render — any WS event, sessions poll, hash change, or user input — fixes it. Under heavy parallel e2e load this race accounted for the largest single category of toolbar-locator flakes.
+- **Root cause**: `initApp()` in `src/app/main.ts` calls `renderApp()` early to mount the UI shell. At that point no shortcut has been registered yet, so every `${shortcutHint(id)}` interpolation in templates evaluates to `""` and Lit stamps the bare title. Shortcut registration (`registerShortcut(...)` calls plus `await loadSavedBindings(); startListening();`) runs further down `initApp()`, but pre-fix no `renderApp()` followed it — the stale titles stayed in the DOM until something else triggered a re-render.
+- **Fix**: a single `renderApp()` call in `initApp()` immediately after `loadSavedBindings()` / `startListening()` and the `document.body.dataset.shortcutsReady = "1"` marker. Lit diffs and only restamps the changed `title` attributes, so the extra pass is cheap. Search the file for the `Refresh ${shortcutHint(...)} evaluations` comment if you need to find the exact line.
+- **Do not remove it.** The call looks redundant next to the early `renderApp()` at the top of `initApp()` — it is not. The early render happens **before** shortcut registration; this one happens **after**, and is the only render guaranteed to see the registered bindings.
+- **Pinning test**: `tests/shortcut-hint-titles-render.spec.ts` (with fixture `tests/fixtures/shortcut-hint-titles-render-entry.ts`). It simulates the boot order — first render with no shortcuts, then registration, then second render — and asserts the second render stamps the title with the `(Alt+G)` suffix. Deleting the post-registration `renderApp()` call must fail this test.
+- **Related flake cleanup**: this race was "flake category A" in the PR 600 investigation — ~10 e2e tests (`api-error-modal`, `goal-accept-failure-keeps-assistant`, `goal-creation`, `goal-form-tooltips`, `proposal-inline-comments`, `proposal-tools`, `stories-goal-routing`) that waited on `button[title='New goal (Alt+G)']`. Other flake categories (createSession 201→400 server race, tail-chat scroll drift, cold-start timeouts) are independent.
 
 ## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
@@ -1025,3 +1078,18 @@ Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call si
   `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
   CLI codepath is writing the file directly without routing through
   `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.
+
+## Trigger fired but staff didn't wake
+
+- **Symptom**: a cron / git trigger fires (visible in `lastFired` / `lastSeenSha` advancing) but the staff session never produces a new turn. Pre-inbox, the trigger silently dropped while the session was `streaming`/`starting`; that path is gone (`POST /api/staff/:id/wake` deleted, `TriggerEngine.wakingInProgress` field removed). Triggers now always enqueue.
+- **First check**: `cat <projectStateDir>/inbox/<staffId>.json` — if a pending entry is there, the trigger ran fine; the question is why the nudger hasn't delivered it.
+- **WS sanity**: an `inbox.entry.added` frame should hit every connected client within ~50 ms of the enqueue. Missing means `InboxManager.broadcastToAll` isn't wired, or the trigger engine errored before calling `enqueue` (check server logs for `[trigger-engine] Failed to enqueue inbox entry`).
+- **Nudger gating**: `InboxNudger.tickOne` skips when (a) `staff.state !== "active"`, (b) `staff.currentSessionId` is unset, (c) `session.status !== "idle"`, (d) `nudgePending` is already set for that staff, or (e) the pending list is empty. The tick is 15 s, so worst-case latency on the idle→nudge edge is ~15 s + compact time (when `contextPolicy === "compact"`).
+- **Stuck `nudgePending`**: cleared in `InboxNudger.onAgentStart(sessionId)` via the session-manager hook. If the agent never enters `streaming` (e.g. provider error before the first token), the flag stays set and silences re-nudges until the next successful turn or server restart. Catch in `applyPolicyThenNudge` clears it on thrown exceptions but not on `enqueuePrompt` silently parking the prompt.
+- See [docs/staff-inbox.md](staff-inbox.md) for the full lifecycle.
+
+## Staff context-policy save bounces back
+
+- **Symptom**: changing the Context Policy radio on the staff edit page and clicking Save shows the new value briefly, then the form re-renders with the old value.
+- **Fix shipped in the staff-inbox release**: `PUT /api/staff/:id` now forwards `contextPolicy` (`"preserve"` \| `"compact"`) through to `StaffStore.update`. Pre-fix builds dropped it on the allow-list.
+- **If seen again**: check `server.ts` `PUT /api/staff/:id` handler still threads `body.contextPolicy` into the update payload; `staff-store.ts` `update()` normalises any other value to `"compact"`. The radio binding is in `src/app/staff-page.ts` (`editContextPolicy` field).

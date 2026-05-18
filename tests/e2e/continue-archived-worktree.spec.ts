@@ -32,7 +32,7 @@
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, connectWs, agentEndPredicate } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
-import { mkdirSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,7 +77,12 @@ test.describe("Continue-Archived from worktree-backed source", () => {
 	let projectId: string;
 
 	test.beforeAll(async () => {
-		const base = join(tmpdir(), `bobbit-e2e-cont-wt-${process.pid}-${Date.now()}`);
+		// Canonicalize the tmpdir up-front so all downstream paths (project
+		// rootPath, session cwd, worktreePath, slugifyCwd output) speak the
+		// same canonical form. On macOS tmpdir() returns /var/folders/...
+		// which is a symlink to /private/var/folders/...; mixing the two
+		// breaks worktree allocation and slug-equality assertions below.
+		const base = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-${process.pid}-${Date.now()}`;
 		repoPath = join(base, "repo");
 		mkdirSync(repoPath, { recursive: true });
 		execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath });

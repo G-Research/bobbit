@@ -208,6 +208,20 @@ The `gate_signal` REST handler enumerates the verification step list **synchrono
 
 Command-type steps (`npm run test:e2e`, type-check, etc.) survive a gateway restart via a detached-spawn + atomic exit-file scheme, with a `bootEpoch`-based correctness floor so a step from a previous gateway lifetime can never falsely lock the gate behind HTTP 409 `Verification already in progress`. Full design and the symbol-level map are in [docs/verification-restart.md](verification-restart.md); symptom→fix lookup in [debugging.md — HTTP 409 after gateway restart](debugging.md#http-409-verification-already-in-progress-after-gateway-restart). Pinned by `tests/verification-harness-restart.test.ts` and `tests/e2e/verification-restart-resignal.spec.ts`.
 
+#### Subprocess tree-kill primitive
+
+Node's `child_process.spawn(..., { timeout })` and direct `process.kill(child.pid, sig)` only signal the immediate child shell. Anything that shell forked (npm, playwright, Chromium, docker exec’d in-container processes) keeps running, and the harness’s `child.on("close")` races against the orphans holding stdio open. Symptom: a command step stuck in `running` long past its configured timeout, with descendants still visible in `ps`.
+
+`src/server/agent/spawn-tree.ts` solves this with an owned timer and a real tree kill. The contract is small:
+
+- `spawnTracked(cmd, args, opts) → TrackedChild` — spawns with `detached: true` on POSIX so the child becomes its own process-group leader (`pgid === child.pid`). Reaps via `process.kill(-pgid, sig)` on POSIX, `taskkill /T /F /PID <pid>` on Windows. SIGTERM is sent first, then SIGKILL escalates after `killGraceMs` (default 5000ms; cancellation passes 1000ms). The helper owns the `setTimeout` (`.unref()`'d), clears it on close, and invokes the caller’s `onTimeout` before killing. The returned `TrackedChild` exposes `killTree(signal?, graceMsOverride?)`, `killed()`, `timedOut()`.
+- `killTreeByPid(pid, signal?)` — same tree-kill semantics keyed by a persisted pid (no `ChildProcess` handle). Used by user/agent cancellation and by post-restart recovery against the pid recorded in `active-verifications.json`.
+- `killAllTracked(signal?)` — walks an internal registry and reaps every in-flight tracked child. Called on gateway shutdown so a restart never strands Chromium/playwright trees.
+
+The three `spawn` sites in `VerificationHarness.runCommandStep` (docker-exec, detached restart-survivor, attached-pipe) all route through `spawnTracked`. Cancellation polling, the recovery sweep, and shutdown all route through the same primitive. **Never reintroduce `spawn({ timeout })`** — the file header in `spawn-tree.ts` documents why and the same rule applies to any new caller that spawns a shell which may itself spawn descendants (test runners, browser drivers, package managers). Reuse the helper.
+
+Confirm a kill by polling `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`). Failed-by-timeout steps emit `— killed subprocess tree` as their final output line. Pinned by `tests/verification-harness-timeout.test.ts` (unit) and `tests/e2e/verification-timeout.spec.ts` (E2E). Symptom→fix lookup in [debugging.md — Verification step stuck in `running`](debugging.md#verification-step-stuck-in-running).
+
 ### Config resolution (3-tier hierarchy)
 
 `ConfigResolver` (`config-resolver.ts`) provides hierarchical config resolution across three tiers:
@@ -762,7 +776,7 @@ Archived, non-goal, non-delegate sessions render a "Continue in New Session" but
 - `goalId`, `teamGoalId`, `teamLeadSessionId`, `delegateOf` - guaranteed absent because the scope gate rejects those source types up front
 - Task/gate signals, streaming state, tool state
 
-**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, no `assistantType`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table.
+**Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted — the new session inherits `assistantType`, `role`, and `accessory`, and the source's proposal-draft directory is cloned into the new session's slot so the resumed agent picks up the in-progress draft. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the assistant-continue flow.
 
 **Lossless transcript carry-over**: Continue-Archived used to render the archived transcript back to plain text and inject it into the new session's system prompt as `seedContext`, capped at 128 KB - any non-trivial session was truncated. The endpoint now clones the source `.jsonl` byte-for-byte and lets the agent CLI rehydrate from it via `switch_session`, the same mechanism `restoreSession()` uses for live-session restart. Full transcript fidelity, no byte budget, no system-prompt section, no Summary vs Full distinction. Full design rationale: [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md).
 
@@ -919,7 +933,7 @@ Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
     staff.yaml
 ```
 
-Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write, cleaned up on session archive by `session-manager.ts::terminateSession` (fire-and-forget `fs.rm`).
+Goal is the only markdown format; the body after the frontmatter is the goal `spec`. The other five files are native YAML (no JSON-stringified structured fields - see [Native-YAML project.yaml fields](#native-yaml-projectyaml-fields)). Per-session directories are created lazily on first write. Cleanup is deferred to `purgeOneSession` at the 7-day mark (alongside the `.jsonl` purge) rather than session archive — the [archived-proposal-reopen flows](archived-proposal-reopen.md) (Path A in-place resubmit, Path B continue-assistant) read drafts off disk for archived sessions, so the directory must outlive the live session.
 
 Path safety: `sessionId` is validated against `/^[A-Za-z0-9_-]+$/` and `type` against the union literal, so no traversal is possible.
 
@@ -1004,7 +1018,7 @@ The live `propose_*` tool-use scanner in `src/app/remote-agent.ts::_checkToolPro
 
 On WS `auth_ok` / session attach, `src/server/ws/handler.ts` enumerates `.bobbit/state/proposal-drafts/<sessionId>/`, parses each surviving file, and emits one `proposal_update { source: "rehydrate" }` per draft to the freshly-attached client. Because the file IS the source of truth, no separate persistence layer is needed - a server restart mid-edit, a browser reload, or a session resume all yield the same broadcasted projection.
 
-Session archive cleans the directory: `session-manager.ts::terminateSession` fire-and-forgets `fs.rm` of the per-session dir. An in-flight `editProposalFile` racing with cleanup is harmless - `unlink` on a missing dir is a no-op.
+Session purge cleans the directory: `session-manager.ts::purgeOneSession` fire-and-forgets `fsp.rm` of the per-session dir at the 7-day mark. Archive itself no longer touches the drafts (see [archived-proposal-reopen.md](archived-proposal-reopen.md) for the rationale — archived assistant sessions must keep their drafts on disk so the user can resubmit or continue them). An in-flight `editProposalFile` racing with cleanup is harmless - `unlink` on a missing dir is a no-op.
 
 ### Accept lifecycle
 
@@ -2138,7 +2152,7 @@ Agent calls preview_open({html|file})
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
           {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
-        ]
+        ]  // path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
    └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
        {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
@@ -2150,7 +2164,7 @@ User clicks Open on widget #N (PreviewRenderer.ts):
 
 ### Key design decisions
 
-- **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
+- **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The `path` field is the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes) rather than the host-absolute path — keeping block size bounded by content shape, not install location. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
 - **Cookie auth for the content origin** - `bobbit_session` cookie scopes `/preview/<sid>/...` requests, so iframe loads, asset fetches, and "Open in new tab" all authenticate without URL tokens.

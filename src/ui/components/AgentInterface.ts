@@ -20,7 +20,7 @@ import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./ContinueSessionChooser.js";
-import { state as appState } from "../../app/state.js";
+import { state as appState, renderApp } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
@@ -121,17 +121,82 @@ export class AgentInterface extends LitElement {
 		// session-manager's connectToSession, not on the remote-agent _state.
 		if (this.goalId) return false;
 		if (this.delegateOf) return false;
-		if (this.assistantType) return false;
 		if (this.teamGoalId) return false;
 		if (!this.projectId) return false;
 		const known = appState?.projects?.some((p: any) => p.id === this.projectId);
 		return !!known;
 	}
 
+	/**
+	 * Proposal types currently present on disk for this archived session
+	 * (e.g. `["goal"]`, `["role"]`). Populated lazily once `canContinueArchived`
+	 * becomes truthy via a one-shot `GET /api/sessions/:id/proposals`. Drives
+	 * the context-aware archived footer: when non-empty the footer surfaces a
+	 * "Resubmit <type> proposal" button alongside the standard
+	 * "Continue in new session" button.
+	 */
+	@state() private _archivedProposalTypes: string[] = [];
+	/** Tracks the session id we last fetched proposals for, to prevent re-entry. */
+	private _archivedProposalsFetchedFor: string | null = null;
+
+	private async _refreshArchivedProposalTypes(sessionId: string): Promise<void> {
+		if (this._archivedProposalsFetchedFor === sessionId) return;
+		this._archivedProposalsFetchedFor = sessionId;
+		try {
+			const resp = await gatewayFetch(`/api/sessions/${sessionId}/proposals`);
+			if (!resp.ok) {
+				this._archivedProposalTypes = [];
+				return;
+			}
+			const data = await resp.json().catch(() => null);
+			const proposals = Array.isArray(data?.proposals) ? data.proposals : Array.isArray(data) ? data : [];
+			const types: string[] = [];
+			for (const p of proposals) {
+				let t: string | undefined;
+				if (typeof p === "string") t = p;
+				else if (p && typeof p === "object") {
+					if (typeof p.proposalType === "string") t = p.proposalType;
+					else if (typeof p.type === "string") t = p.type;
+				}
+				if (t && !types.includes(t)) types.push(t);
+			}
+			this._archivedProposalTypes = types;
+		} catch {
+			this._archivedProposalTypes = [];
+		}
+	}
+
+	private _maybeRefreshArchivedProposals(): void {
+		if (!this.canContinueArchived || this.nonInteractive) return;
+		const sid = this.session?.sessionId;
+		if (!sid) return;
+		if (this._archivedProposalsFetchedFor === sid) return;
+		// Fire-and-forget — render() does not await.
+		void this._refreshArchivedProposalTypes(sid);
+	}
+
+	/**
+	 * Path A — surface the existing proposal panel in the preview pane without
+	 * spawning a new session. Drafts have already been rehydrated into
+	 * `state.activeProposals[type]` by `connectToSession`; we just need to flip
+	 * the visible tab.
+	 */
+	private _openProposalPanel(type: string): void {
+		const s = appState as any;
+		if (this.assistantType) {
+			s.assistantTab = "preview";
+		} else {
+			s.previewPanelTab = type;
+		}
+		renderApp();
+		this.requestUpdate();
+	}
+
 	private async _openContinueChooser() {
 		const chooser = document.createElement("continue-session-chooser") as any;
 		chooser.sessionId = this.session?.sessionId ?? "";
 		chooser.messageCount = this.session?.state?.messages?.length ?? 0;
+		chooser.proposalTypes = [...this._archivedProposalTypes];
 		document.body.appendChild(chooser);
 
 		const cleanup = () => {
@@ -540,7 +605,18 @@ export class AgentInterface extends LitElement {
 		// Re-subscribe when session property changes
 		if (changedProperties.has("session")) {
 			this.setupSessionSubscription();
+			// Reset cached proposal-type fetch — the next render's effect will
+			// refetch under the new session id (or no-op if the session is live).
+			const newSid = this.session?.sessionId;
+			if (this._archivedProposalsFetchedFor !== newSid) {
+				this._archivedProposalsFetchedFor = null;
+				this._archivedProposalTypes = [];
+			}
 		}
+		// Lazily populate the archived-session proposal-type list when we know
+		// the session is read-only and continuable. Fire-and-forget; the result
+		// triggers a follow-up render via @state.
+		this._maybeRefreshArchivedProposals();
 	}
 
 	override async connectedCallback() {
@@ -830,6 +906,12 @@ export class AgentInterface extends LitElement {
 			}
 			if ((ev as any).type === "render") {
 				// Generic re-render request (e.g. tool permission card added)
+				this._updateAndPin();
+				return;
+			}
+			if ((ev as any).type === "auto_retry_pending" || (ev as any).type === "auto_retry_cancelled") {
+				// Auto-retry banner state changed — re-render so the banner appears
+				// (pending) or disappears (cancelled / consumed by next agent_start).
 				this._updateAndPin();
 				return;
 			}
@@ -1256,6 +1338,37 @@ export class AgentInterface extends LitElement {
 					</div>
 				` : nothing}
 
+				${(() => {
+					const pending = (state as any).autoRetryPending as null | {
+						reason: "provider-overload" | "transient-error";
+						retryDelayMs: number;
+						attempt: number;
+						scheduledAt: number;
+						error?: string;
+					};
+					if (!pending) return nothing;
+					const secs = Math.max(1, Math.round(pending.retryDelayMs / 1000));
+					const label = pending.reason === "provider-overload"
+						? `Retrying in ~${secs}s due to provider overload…`
+						: `Retrying in ~${secs}s after transient error…`;
+					const detail = `attempt #${pending.attempt}`;
+					return html`
+						<div
+							class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm"
+							data-testid="auto-retry-banner"
+							data-reason=${pending.reason}
+							data-attempt=${String(pending.attempt)}
+							data-retry-delay-ms=${String(pending.retryDelayMs)}
+						>
+							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+							</svg>
+							<span>${label}</span>
+							<span class="opacity-60">(${detail})</span>
+						</div>
+					`;
+				})()}
+
 			</div>
 		`;
 	}
@@ -1660,13 +1773,27 @@ export class AgentInterface extends LitElement {
 						${this.canContinueArchived && !this.nonInteractive && !(state as any).isPreparing ? html`
 						<div class="flex flex-col items-center gap-2 px-4 py-6" style="border-top:1px solid var(--border);" data-continue-archived-footer>
 							<div class="text-xs text-muted-foreground">This session is archived.</div>
-							<button
-								type="button"
-								class="px-3 py-1.5 text-sm rounded-md text-white"
-								style="background:var(--primary,#3b82f6);border:1px solid var(--primary,#3b82f6);"
-								data-action="continue-archived"
-								@click=${() => this._openContinueChooser()}
-							>Continue in New Session</button>
+							<div class="flex items-center gap-2 flex-wrap justify-center">
+								${this._archivedProposalTypes.length > 0 ? html`
+								<button
+									type="button"
+									class="px-3 py-1.5 text-sm rounded-md text-white"
+									style="background:var(--primary,#3b82f6);border:1px solid var(--primary,#3b82f6);"
+									data-action="resubmit-proposal"
+									data-proposal-type=${this._archivedProposalTypes[0]}
+									@click=${() => this._openProposalPanel(this._archivedProposalTypes[0])}
+								>Resubmit ${this._archivedProposalTypes[0]} proposal</button>
+								` : nothing}
+								<button
+									type="button"
+									class="px-3 py-1.5 text-sm rounded-md"
+									style=${this._archivedProposalTypes.length > 0
+										? "background:transparent;border:1px solid var(--border);color:var(--foreground);"
+										: "background:var(--primary,#3b82f6);border:1px solid var(--primary,#3b82f6);color:#fff;"}
+									data-action="continue-archived"
+									@click=${() => this._openContinueChooser()}
+								>Continue in New Session</button>
+							</div>
 						</div>
 						` : nothing}
 						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"

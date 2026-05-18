@@ -277,7 +277,7 @@ A second test asserts byte-equality versus the **current** handler output by imp
 
 ### Injection point
 
-`src/server/agent/system-prompt.ts::assembleSystemPrompt`. Insert as a new `5.5. Available Skills` block, between `5. Task context` and `6. Workflow dependency context` — late enough that role/goal context wins for attention, early enough that the agent sees it before tool docs scroll past.
+`src/server/agent/system-prompt.ts::assembleSystemPrompt`. The skills catalog is section 5 in the current assembly order — after tool docs (section 4) and before the volatile goal/role section (section 6). This placement keeps the catalog in the **stable prefix** (sections 1–5) so provider prompt caches can reuse it across team spawns and between turns. An earlier design placed skills at position 5.5 between task context and workflow context; that order was superseded when the stable-prefix reordering was introduced (see `docs/features.md — System Prompt Assembly`).
 
 The block is also reflected in `getPromptSections()` so the inspector shows it.
 

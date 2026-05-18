@@ -123,7 +123,7 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
-		const bobbitDir = join(
+		let bobbitDir = join(
 			E2E_TEMP_ROOT,
 			`.e2e-browser-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
 		);
@@ -131,6 +131,15 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
+		// project rootPaths derived from it, preview-mount baseDir) see the real
+		// path. On macOS /var/folders → /private/var/folders; mixing the symlink
+		// path with the canonical form breaks the path-guard containment check
+		// (missing files report 400→03 instead of 404).
+		try {
+			const { realpathSync } = await import("node:fs");
+			bobbitDir = realpathSync(bobbitDir);
+		} catch { /* not all platforms / first-call edge cases — fall back */ }
 		// Pre-create subdirectories that the server writes into. Under heavy
 		// parallel load on Windows, concurrent first-use of these dirs races
 		// with scaffolding and produces spurious ENOENT — creating them up
@@ -264,7 +273,13 @@ export const test = base.extend<{ failureContext: void }, { enableMcp: boolean; 
 					"Content-Type": "application/json",
 					"Authorization": `Bearer ${token}`,
 				},
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true }),
+				// acceptCanonical=true is needed on macOS, where TMPDIR
+				// (/var/folders/...) is a symlink to /private/var/folders/...
+				// Without it, the server rejects the register with a
+				// SymlinkProjectRootError 400 and the harness silently runs
+				// with zero registered projects — every POST /api/sessions
+				// or /api/goals then 400s with "projectId required".
+				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
 			});
 		} catch { /* best-effort */ }
 

@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { InboxManager } from "./inbox-manager.js";
 import { SYSTEM_PROJECT_ID } from "./project-registry.js";
 import { createWorktree, cleanupWorktree, resolveBaseRef } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
@@ -17,10 +18,21 @@ function sanitiseBranchName(name: string): string {
 
 export class StaffManager {
 	private pcm: ProjectContextManager;
+	private inboxManager: InboxManager | null = null;
 
 	constructor(pcm: ProjectContextManager) {
 		this.pcm = pcm;
 		this.logOrphansOnce();
+	}
+
+	/**
+	 * Late-bound inbox manager wiring — set from `server.ts` boot after both
+	 * `StaffManager` and `InboxManager` are constructed. Used solely by
+	 * `deleteStaff` to wipe the per-staff inbox file. The nudger never
+	 * touches `StaffManager.inboxManager`; it has its own direct binding.
+	 */
+	setInboxManager(inboxManager: InboxManager): void {
+		this.inboxManager = inboxManager;
 	}
 
 	/**
@@ -183,10 +195,22 @@ export class StaffManager {
 				// `model`/`thinkingLevel` overrides would be silently ignored.
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: id },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
+				// through opts → plan → persistOnce so it lands in PersistedSession.
+				// Without this, on respawn `restoreSession` reads `ps.staffId =
+				// undefined` → no `BOBBIT_STAFF_ID` env → inbox tools refuse to
+				// register (see `defaults/tools/inbox/extension.ts`).
+				staffId: id,
 				sandboxed: effectiveSandboxed,
 				sandboxBranch: effectiveSandboxed ? branchName : undefined,
 				projectId,
 			});
+			// Belt-and-braces in-memory sync. `createSession` already propagates
+			// `staffId` to the persisted record via the plan, but the live
+			// `SessionInfo` object is built inside `executePlan` and doesn't
+			// currently mirror the field back — keep this assignment until the
+			// next refactor wires it through `SessionInfo` directly.
 			session.staffId = id;
 			sessionManager.setTitle(session.id, staff.name);
 			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
@@ -237,6 +261,9 @@ export class StaffManager {
 			memory?: string;
 			roleId?: string;
 			currentSessionId?: string;
+			contextPolicy?: "preserve" | "compact";
+			/** Updated by `InboxNudger.applyPolicyThenNudge`; no longer mutated by `StaffManager`. */
+			lastWakeAt?: number;
 		},
 	): boolean {
 		// Auto-assign UUIDs to triggers missing IDs
@@ -285,6 +312,14 @@ export class StaffManager {
 		store.remove(id);
 		const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
 		searchIndex?.removeStaff(id);
+
+		// Wipe the per-staff inbox file. No-op if the inbox manager isn't wired
+		// (test paths that construct StaffManager directly without server.ts).
+		try {
+			this.inboxManager?.removeAll(id);
+		} catch (err) {
+			console.error(`[staff-manager] inbox removeAll failed for staff ${id}:`, err);
+		}
 		return true;
 	}
 
@@ -375,23 +410,32 @@ export class StaffManager {
 	}
 
 	/**
-	 * Wake a staff agent: enqueue a prompt on its permanent session.
-	 * If the session doesn't exist yet (legacy migration), create one first.
-	 * If the session subprocess is terminated, restore it before enqueuing.
+	 * Ensure the staff agent has a live, ready-to-use session, returning its id.
+	 *
+	 * Three branches:
+	 *   1. **Legacy migration** — `currentSessionId` is missing. Create a fresh
+	 *      permanent session with the staff's system prompt + pinned memory.
+	 *   2. **Subprocess recovery** — the session exists but its agent CLI has
+	 *      exited (status `terminated`). Restore it via `ensureSessionAlive`;
+	 *      if that fails the session record itself is gone, clear
+	 *      `currentSessionId` and recurse into the legacy-migration branch.
+	 *   3. **Healthy** — session is live. Just refresh the worktree (rebase +
+	 *      deps) so the agent runs on the current primary branch.
+	 *
+	 * Sandbox init (`sandboxManager.ensureForProject`) and `refreshWorktree`
+	 * always run before returning so the session is ready to receive prompts.
+	 * Throws if the staff isn't `active`.
+	 *
+	 * Replaces the deleted public `wake()` method — the inbox nudger now
+	 * decides *when* to wake; this helper handles the *how*.
 	 */
-	async wake(
-		staffId: string,
-		prompt: string | undefined,
-		sessionManager: SessionManager,
-	): Promise<string> {
+	async ensureSessionForStaff(staffId: string, sessionManager: SessionManager): Promise<string> {
 		const found = this.findStoreForStaff(staffId);
 		if (!found) throw new Error("Staff agent not found");
 		const { store, staff } = found;
-		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot wake`);
+		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot ensure session`);
 
-		const wakePrompt = prompt || "You have been woken. Review your memory and carry out your mission.";
-
-		// Legacy migration: if no permanent session exists, create one
+		// Branch 1: legacy migration — no permanent session yet, create one
 		if (!staff.currentSessionId) {
 			let fullPrompt = staff.systemPrompt;
 			if (staff.memory) {
@@ -400,40 +444,39 @@ export class StaffManager {
 			const sessionCwd = staff.worktreePath ?? staff.cwd;
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
-				// See companion call site in createStaff — roleName must flow so role-keyed
-				// model/thinking-level overrides apply at spawn.
 				roleName: staff.roleId,
 				env: { BOBBIT_STAFF_ID: staffId },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
+				// `createStaff` above.
+				staffId,
 				sandboxed: staff.sandboxed,
 				sandboxBranch: staff.sandboxed ? staff.branch : undefined,
+				projectId: found.projectId,
 			});
 			session.staffId = staffId;
 			sessionManager.setTitle(session.id, staff.name);
 			await sessionManager.persistSessionMetadata(session);
-			store.update(staffId, { currentSessionId: session.id, lastWakeAt: Date.now() });
-
-			await sessionManager.enqueuePrompt(session.id, wakePrompt);
-			console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${session.id} (legacy migration)`);
+			store.update(staffId, { currentSessionId: session.id });
+			staff.currentSessionId = session.id;
+			console.log(`[staff-manager] Created permanent session for staff "${staff.name}" (${staffId}) → ${session.id} (legacy migration)`);
 			return session.id;
 		}
 
-		// Ensure the session subprocess is alive (restore if terminated)
+		// Branch 2: subprocess recovery
 		const session = sessionManager.getSession(staff.currentSessionId);
 		if (!session || session.status === "terminated") {
 			try {
 				await sessionManager.ensureSessionAlive(staff.currentSessionId);
 			} catch {
-				// Session was deleted — clear and recreate
 				console.log(`[staff-manager] Session ${staff.currentSessionId} unrecoverable, creating new one for "${staff.name}"`);
 				store.update(staffId, { currentSessionId: undefined as any });
 				staff.currentSessionId = undefined as any;
-				return this.wake(staffId, prompt, sessionManager);
+				return this.ensureSessionForStaff(staffId, sessionManager);
 			}
 		}
 
-		// Lazy per-project sandbox init before waking. Idempotent; no-op for
-		// non-sandboxed staff. Errors are per-project — waking staff in
-		// project A will not be blocked by a broken sandbox in project B.
+		// Branch 3: healthy — lazy per-project sandbox init + worktree refresh
 		if (staff.sandboxed) {
 			const sm = sessionManager.getSandboxManager?.();
 			if (sm) {
@@ -446,16 +489,8 @@ export class StaffManager {
 			}
 		}
 
-		// Refresh the worktree before waking (rebase + deps)
 		await this.refreshWorktree(staff, found.projectId);
 
-		// Enqueue the wake prompt on the existing session
-		await sessionManager.enqueuePrompt(staff.currentSessionId, wakePrompt);
-
-		// Update last wake time
-		store.update(staffId, { lastWakeAt: Date.now() });
-
-		console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${staff.currentSessionId}`);
 		return staff.currentSessionId;
 	}
 }

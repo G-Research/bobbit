@@ -29,6 +29,19 @@ import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendin
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
+
+/**
+ * Returns true when the given session id refers to a session that is already
+ * archived (present in `state.archivedSessions`). Proposal-panel submit
+ * handlers use this to skip the `DELETE /api/sessions/:id` teardown call —
+ * when the user resubmits a proposal from an *archived* session view the
+ * session is already gone server-side and the DELETE would 404 + surface as
+ * an error toast.
+ */
+function isSessionArchived(sessionId: string | null | undefined): boolean {
+	if (!sessionId) return false;
+	return state.archivedSessions.some((s) => s.id === sessionId);
+}
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
@@ -40,6 +53,8 @@ import "../ui/components/SearchResults.js";
 import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
+// Register inbox panel web components
+import "../ui/inbox/InboxPanel.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
@@ -1157,7 +1172,7 @@ function goalPreviewPanel() {
 			});
 		}
 
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -1310,7 +1325,7 @@ function rolePreviewPanel() {
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "role");
 
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -1845,7 +1860,7 @@ function staffPreviewPanel() {
 		});
 		// Slice E: drop the on-disk proposal file once accepted.
 		if (sessionId) void deleteProposalFile(sessionId, "staff");
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -2482,17 +2497,19 @@ function hasUnifiedPanel(): boolean {
 		state.isPreviewSession ||
 		state.activeProposals.goal != null ||
 		state.activeProposals.project != null ||
-		state.reviewPanelOpen
+		state.reviewPanelOpen ||
+		state.inboxPanelOpen
 	);
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
-	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
+function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project" | "inbox"> {
+	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project" | "inbox"> = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
 	if (state.activeProposals.goal != null) tabs.push("goal");
 	if (state.activeProposals.project != null) tabs.push("project");
+	if (state.inboxPanelOpen) tabs.push("inbox");
 	return tabs;
 }
 
@@ -2954,6 +2971,14 @@ export function doRenderApp(): void {
 						@click=${() => { state.previewPanelTab = "project"; renderApp(); }}
 					>Project <span class="goal-tab-dot"></span></button>
 				` : ""}
+				${state.inboxPanelOpen ? html`
+					<button
+						class="goal-tab-pill ${state.previewPanelTab === "inbox" ? "goal-tab-pill--active" : ""}"
+						title="Inbox"
+						@click=${() => { state.previewPanelTab = "inbox"; renderApp(); }}
+						data-testid="inbox-tab-pill"
+					>Inbox${state.inboxEntries.filter((e) => e.state === "pending").length > 0 ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+				` : ""}
 			</div>
 		`;
 	};
@@ -3064,24 +3089,51 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const inboxPaneContent = () => {
+		const sid = activeSessionId() || "";
+		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+		const staffId = sess?.staffId || "";
+		return html`
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="inbox-panel-root">
+				<inbox-panel
+					.entries=${state.inboxEntries}
+					.staffId=${staffId}
+					.sessionId=${sid}
+					.addDialogOpen=${state.inboxAddDialogOpen}
+					@inbox-open-add=${() => { state.inboxAddDialogOpen = true; renderApp(); }}
+					@inbox-add-close=${() => { state.inboxAddDialogOpen = false; renderApp(); }}
+					@inbox-add-submitted=${() => { state.inboxAddDialogOpen = false; renderApp(); }}
+				></inbox-panel>
+			</div>
+		`;
+	};
+
 	const unifiedPreviewPanel = () => {
 		// Auto-correct tab if the active tab's content is no longer available
 		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : (state.inboxPanelOpen ? "inbox" : "preview")));
 		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
 			state.previewPanelActiveTab = "goal";
+		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.inboxPanelOpen) {
+			state.previewPanelActiveTab = "inbox";
 		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
 		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
 			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
 				: (state.activeProposals.goal != null ? "goal"
-				: (state.reviewPanelOpen ? "review" : "preview"));
+				: (state.reviewPanelOpen ? "review"
+				: (state.inboxPanelOpen ? "inbox" : "preview")));
+		} else if (state.previewPanelActiveTab === "inbox" && !state.inboxPanelOpen) {
+			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
+				: (state.reviewPanelOpen ? "review"
+				: (state.activeProposals.goal != null ? "goal" : "preview"));
 		}
 
 		const showPreviewTab = state.isPreviewSession;
 		const showGoalTab = state.activeProposals.goal != null;
 		const showReviewTab = state.reviewPanelOpen;
 		const showProjectTab = state.activeProposals.project != null;
+		const showInboxTab = state.inboxPanelOpen;
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
@@ -3116,6 +3168,14 @@ export function doRenderApp(): void {
 								@click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
 							>Project <span class="goal-tab-dot"></span></button>
 						` : ""}
+						${showInboxTab ? html`
+							<button
+								class="goal-tab-pill ${state.previewPanelActiveTab === "inbox" ? "goal-tab-pill--active" : ""}"
+								title="Inbox"
+								data-testid="inbox-tab-unified"
+								@click=${() => { state.previewPanelActiveTab = "inbox"; renderApp(); }}
+							>Inbox${state.inboxEntries.filter((e) => e.state === "pending").length > 0 ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+						` : ""}
 					</div>
 					<div class="flex items-center gap-0.5">
 						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
@@ -3137,7 +3197,9 @@ export function doRenderApp(): void {
 							? goalProposalPanel()
 							: state.previewPanelActiveTab === "project" && showProjectTab
 								? projectProposalPanel()
-								: ""}
+								: state.previewPanelActiveTab === "inbox" && showInboxTab
+									? inboxPaneContent()
+									: ""}
 			</div>
 		`;
 	};
@@ -3148,7 +3210,7 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project") => {
+	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project" | "inbox") => {
 		if (tab === "chat") return state.chatPanel;
 		if (tab === "preview" && state.isPreviewSession) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
@@ -3161,6 +3223,9 @@ export function doRenderApp(): void {
 		}
 		if (tab === "project" && state.activeProposals.project != null) {
 			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
+		}
+		if (tab === "inbox" && state.inboxPanelOpen) {
+			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${inboxPaneContent()}</div>`;
 		}
 		return html``;
 	};

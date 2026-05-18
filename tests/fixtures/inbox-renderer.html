@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>InboxToolRenderers fixture</title>
+<style>
+	body { font-family: sans-serif; padding: 8px; }
+	.font-mono { font-family: ui-monospace, monospace; }
+	.text-muted-foreground { color: #888; }
+	.text-destructive { color: #c00; }
+	.text-xs { font-size: 11px; }
+	.text-sm { font-size: 13px; }
+	.hidden { display: none; }
+	.max-h-0 { max-height: 0; }
+	.overflow-hidden { overflow: hidden; }
+	.font-medium { font-weight: 500; }
+	.flex { display: flex; }
+	.items-center { align-items: center; }
+	.gap-1 { gap: 4px; }
+	.gap-2 { gap: 8px; }
+	.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.flex-1 { flex: 1; }
+	.min-w-0 { min-width: 0; }
+	.shrink-0 { flex-shrink: 0; }
+	.ml-1 { margin-left: 4px; }
+	.ml-auto { margin-left: auto; }
+	.mt-1 { margin-top: 4px; }
+	.mt-2 { margin-top: 8px; }
+	.space-y-1 > * + * { margin-top: 4px; }
+	.py-0\.5 { padding-top: 2px; padding-bottom: 2px; }
+	.px-1\.5 { padding-left: 6px; padding-right: 6px; }
+	.py-0\.5 { padding-top: 2px; padding-bottom: 2px; }
+	.rounded { border-radius: 4px; }
+	.line-through { text-decoration: line-through; }
+	.inline-block { display: inline-block; }
+	.inline-flex { display: inline-flex; }
+	.bg-muted { background: #eee; }
+	.bg-blue-500\/20 { background: rgba(59,130,246,0.2); }
+	.bg-green-500\/20 { background: rgba(34,197,94,0.2); }
+	.bg-red-500\/20 { background: rgba(239,68,68,0.2); }
+	.text-blue-600 { color: #2563eb; }
+	.text-green-600 { color: #16a34a; }
+	.text-red-600 { color: #dc2626; }
+	.text-foreground { color: #111; }
+	.text-amber-600 { color: #d97706; }
+	.transition-all { transition: all 300ms; }
+	.duration-300 { transition-duration: 300ms; }
+</style>
+</head>
+<body>
+<div id="list"></div>
+<div id="complete"></div>
+<div id="dismiss"></div>
+<script src="./inbox-renderer-bundle.js"></script>
+</body>
+</html>
