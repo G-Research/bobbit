@@ -13,14 +13,18 @@ import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
 import { pollUntil as pollUntilCleanup } from "./test-utils/cleanup.js";
 
-const SLOW_WORKFLOW_ID = `test-cancel-verif-${Date.now()}`;
+let slowWorkflowId = "";
+
+function makeSlowWorkflowId(): string {
+	return `test-cancel-verif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 /** Create a workflow with a slow verification command so we can cancel mid-flight. */
-async function createSlowWorkflow(): Promise<void> {
+async function createSlowWorkflow(workflowId: string): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
-			id: SLOW_WORKFLOW_ID,
+			id: workflowId,
 			name: "Test Cancel Verification",
 			description: "Workflow with slow command for cancel-verification tests",
 			gates: [
@@ -41,11 +45,20 @@ async function createSlowWorkflow(): Promise<void> {
 		}),
 	});
 	expect(res.status).toBe(201);
+
+	// Wait on the same read path that goal creation uses before tests create
+	// goals from the freshly-written workflow.
+	await pollUntilCleanup(async () => {
+		const visible = await apiFetch(`/api/workflows/${workflowId}`);
+		if (visible.status === 404) return false;
+		expect(visible.status).toBe(200);
+		return true;
+	}, { timeoutMs: 5_000, intervalMs: 50, label: "cancel-verification workflow visible" });
 }
 
 /** Delete the slow workflow (cleanup). */
-async function deleteSlowWorkflow(): Promise<void> {
-	await apiFetch(`/api/workflows/${SLOW_WORKFLOW_ID}`, { method: "DELETE" }).catch(() => {});
+async function deleteSlowWorkflow(workflowId: string): Promise<void> {
+	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => {});
 }
 
 /** Get active verifications for a goal. */
@@ -81,18 +94,20 @@ async function pollUntil<T>(
 test.describe("Cancel Verification API", () => {
 	test.setTimeout(60_000);
 
-	test.beforeAll(async () => {
-		await createSlowWorkflow();
+	test.beforeEach(async () => {
+		slowWorkflowId = makeSlowWorkflowId();
+		await createSlowWorkflow(slowWorkflowId);
 	});
 
-	test.afterAll(async () => {
-		await deleteSlowWorkflow();
+	test.afterEach(async () => {
+		await deleteSlowWorkflow(slowWorkflowId);
+		slowWorkflowId = "";
 	});
 
 	test("cancel a running verification returns cancelled: true", async () => {
 		const goal = await createGoal({
 			title: `Cancel Running Verif ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
@@ -134,7 +149,7 @@ test.describe("Cancel Verification API", () => {
 	test("cancel when nothing is running returns cancelled: false (idempotent)", async () => {
 		const goal = await createGoal({
 			title: `Cancel Idle Verif ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
@@ -164,7 +179,7 @@ test.describe("Cancel Verification API", () => {
 	test("cancel on shelved goal returns 400", async () => {
 		const goal = await createGoal({
 			title: `Cancel Shelved Verif ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
@@ -192,7 +207,7 @@ test.describe("Cancel Verification API", () => {
 	test("cancel on archived goal returns 409", async () => {
 		const goal = await createGoal({
 			title: `Cancel Archived Verif ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
@@ -219,7 +234,7 @@ test.describe("Cancel Verification API", () => {
 	test("re-signal after cancel succeeds (no 409)", async () => {
 		const goal = await createGoal({
 			title: `Re-signal After Cancel ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
@@ -279,7 +294,7 @@ test.describe("Cancel Verification API", () => {
 	test("double cancel is idempotent", async () => {
 		const goal = await createGoal({
 			title: `Double Cancel ${Date.now()}`,
-			workflowId: SLOW_WORKFLOW_ID,
+			workflowId: slowWorkflowId,
 			worktree: false,
 		});
 		const goalId = goal.id;
