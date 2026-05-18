@@ -82,10 +82,10 @@ test.describe("Staff inbox panel", () => {
 	}
 
 	test("mobile add-to-inbox dialog/backdrop stay within inbox pane", async ({ page }) => {
-		await page.setViewportSize({ width: 375, height: 667 });
 		const staff = await createStaff(`InboxBot-${Date.now()}`);
 
 		await openApp(page);
+		await page.setViewportSize({ width: 375, height: 667 });
 		await navigateToStaffSession(page, staff.id);
 
 		const inboxTab = page.locator("[data-testid='inbox-tab-pill']").first();
