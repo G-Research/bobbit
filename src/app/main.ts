@@ -26,6 +26,7 @@ import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { doRenderApp } from "./render.js";
+import { PROPOSAL_TYPES } from "./proposal-registry.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
@@ -56,6 +57,10 @@ setRenderApp(doRenderApp);
 // state.goals can also force them into the expanded state (the normal
 // auto-expand path only fires for goals the server has confirmed).
 (window as any).__bobbitExpandedGoals = expandedGoals;
+
+function hasActiveProposalPanel(): boolean {
+	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
+}
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
@@ -546,7 +551,7 @@ async function initApp() {
 		allowInInput: true,
 		handler: () => {
 			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
-			const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
+			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
@@ -605,7 +610,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen || state.inboxPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -629,7 +634,7 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {
@@ -637,10 +642,14 @@ async function initApp() {
 					state.previewPanelFullscreen = false;
 					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else {
+				} else if (state.isPreviewSession) {
 					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;
+				} else {
+					// Proposal/review/inbox-only panels have no fullscreen surface.
+					const collapsed = localStorage.getItem(key) === "true";
+					localStorage.setItem(key, collapsed ? "false" : "true");
 				}
 				renderApp();
 			}
