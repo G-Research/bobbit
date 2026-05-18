@@ -4159,8 +4159,8 @@ export class SessionManager {
 		}
 	}
 
-	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string }): boolean {
+	/** Update session metadata fields and persist. */
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
@@ -4171,6 +4171,18 @@ export class SessionManager {
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
+		if (updates.repoPath !== undefined) session.repoPath = updates.repoPath;
+		if (updates.branch !== undefined) session.branch = updates.branch;
+		if (updates.repoWorktrees !== undefined) {
+			const repoPath = updates.repoPath ?? session.repoPath;
+			session.repoWorktrees = repoPath
+				? Object.entries(updates.repoWorktrees).map(([repo, worktreePath]) => ({
+					repo,
+					repoPath: repo === "." ? repoPath : path.join(repoPath, repo),
+					worktreePath,
+				}))
+				: undefined;
+		}
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
 		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
 		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
