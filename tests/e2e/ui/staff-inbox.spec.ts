@@ -68,6 +68,73 @@ test.describe("Staff inbox panel", () => {
 		return sid;
 	}
 
+	type Box = { x: number; y: number; width: number; height: number };
+
+	function formatBox(box: Box): string {
+		return `x=${Math.round(box.x)} y=${Math.round(box.y)} w=${Math.round(box.width)} h=${Math.round(box.height)}`;
+	}
+
+	function containsBox(outer: Box, inner: Box, tolerance = 1): boolean {
+		return inner.x >= outer.x - tolerance
+			&& inner.y >= outer.y - tolerance
+			&& inner.x + inner.width <= outer.x + outer.width + tolerance
+			&& inner.y + inner.height <= outer.y + outer.height + tolerance;
+	}
+
+	test("mobile add-to-inbox dialog/backdrop stay within inbox pane", async ({ page }) => {
+		await page.setViewportSize({ width: 375, height: 667 });
+		const staff = await createStaff(`InboxBot-${Date.now()}`);
+
+		await openApp(page);
+		await navigateToStaffSession(page, staff.id);
+
+		const inboxTab = page.locator("[data-testid='inbox-tab-pill']").first();
+		await expect(inboxTab, "mobile inbox tab should appear for staff sessions").toBeVisible({ timeout: 20_000 });
+		await inboxTab.click();
+
+		const inboxPane = page.locator("[data-testid='inbox-panel-root']").first();
+		await expect(inboxPane).toBeVisible({ timeout: 5_000 });
+		await expect.poll(async () => {
+			const box = await inboxPane.boundingBox();
+			const viewport = page.viewportSize();
+			if (!box || !viewport) return false;
+			return Math.abs(box.x) <= 2 && Math.abs(box.x + box.width - viewport.width) <= 2;
+		}, { timeout: 5_000, intervals: [50, 100, 200] }).toBe(true);
+
+		await inboxPane.locator("button.inbox-add-btn").click();
+		const dialogHost = page.locator("add-to-inbox-dialog");
+		const backdrop = page.locator(".add-to-inbox-backdrop");
+		await expect(dialogHost).toBeVisible({ timeout: 5_000 });
+		await expect(backdrop).toBeVisible({ timeout: 5_000 });
+
+		const paneBox = await inboxPane.boundingBox();
+		const hostBox = await dialogHost.boundingBox();
+		const backdropBox = await backdrop.boundingBox();
+		const trackBox = await page.locator(".preview-slider__track").boundingBox();
+		expect(paneBox, "inbox pane should have a bounding box").not.toBeNull();
+		expect(hostBox, "dialog host should have a bounding box").not.toBeNull();
+		expect(backdropBox, "dialog backdrop should have a bounding box").not.toBeNull();
+		expect(trackBox, "mobile preview slider track should have a bounding box").not.toBeNull();
+
+		expect(
+			trackBox!.width,
+			"mobile preview slider track should be wider than the visible inbox pane for this regression check",
+		).toBeGreaterThan(paneBox!.width + 10);
+
+		const debug = `pane=${formatBox(paneBox!)} host=${formatBox(hostBox!)} backdrop=${formatBox(backdropBox!)} track=${formatBox(trackBox!)}`;
+		expect(
+			containsBox(paneBox!, hostBox!),
+			`dialog/backdrop should stay within mobile inbox pane: host escaped; ${debug}`,
+		).toBe(true);
+		expect(
+			containsBox(paneBox!, backdropBox!),
+			`dialog/backdrop should stay within mobile inbox pane: backdrop escaped; ${debug}`,
+		).toBe(true);
+
+		await page.mouse.click(paneBox!.x + 8, paneBox!.y + 8);
+		await expect(dialogHost).toHaveCount(0, { timeout: 5_000 });
+	});
+
 	test("inbox panel renders on staff session, manual enqueue appears in Pending, persists across reload", async ({ page }) => {
 		const staff = await createStaff(`InboxBot-${Date.now()}`);
 
