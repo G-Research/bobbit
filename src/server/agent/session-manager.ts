@@ -125,6 +125,17 @@ function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
 }
 
+/** Provenance of a prompt enqueued into a session. Read by TeamManager on
+ *  agent_start to decide whether to reset idle-nudge backoff counters.
+ *  Only "user" and "system" reset the counter; everything else preserves it. */
+export type PromptSource =
+	| "user"
+	| "auto-nudge"
+	| "task-notification"
+	| "verification"
+	| "system"
+	| "agent";
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -212,6 +223,10 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** Provenance of the last prompt enqueued to this session. Set by
+	 *  enqueuePrompt / deliverLiveSteer. Defaults to "user" when callers
+	 *  don't supply a source. Read by TeamManager.subscribeTeamLeadEvents. */
+	lastPromptSource?: PromptSource;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
 		resolve: (result: { granted: boolean; tools?: string[] }) => void;
@@ -1409,9 +1424,13 @@ export class SessionManager {
 		modelText?: string;
 		/** Resolved slash-skill expansions, in original-text order. UI-only metadata. */
 		skillExpansions?: SkillExpansion[];
+		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
+		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
+		source?: PromptSource;
 	}): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
+		session.lastPromptSource = opts?.source ?? "user";
 
 		// modelText is what the model sees; text is the user's verbatim input.
 		// When no expansions, both are equal and dispatch is byte-equal to today.
@@ -1528,9 +1547,10 @@ export class SessionManager {
 	 * Returns the underlying rpcClient.steer() promise so callers can await
 	 * or attach their own error handler.
 	 */
-	deliverLiveSteer(sessionId: string, message: string): Promise<unknown> {
+	deliverLiveSteer(sessionId: string, message: string, opts?: { source?: PromptSource }): Promise<unknown> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
+		session.lastPromptSource = opts?.source ?? "user";
 
 		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
 		// there is no live turn to inject into, so we either dispatch a regular
@@ -1554,7 +1574,7 @@ export class SessionManager {
 			);
 			// enqueuePrompt handles its own state-clear + pending-timer cancel +
 			// prefix application; we just route through it with the raw message.
-			return this.enqueuePrompt(sessionId, message, { isSteered: true });
+			return this.enqueuePrompt(sessionId, message, { isSteered: true, source: opts?.source });
 		}
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.

@@ -4,6 +4,8 @@ Status: implemented. Shipped under the goal *Scope notifications to human attent
 
 The canonical predicate lives at [`src/app/notification-policy.ts`](../../src/app/notification-policy.ts). Pinning tests: [`tests/notification-policy.spec.ts`](../../tests/notification-policy.spec.ts) (unit, 9-row table) and [`tests/e2e/ui/notification-policy.spec.ts`](../../tests/e2e/ui/notification-policy.spec.ts) (browser E2E).
 
+Sections 1–8 cover the UI-side predicate (beep / favicon badge / sidebar dot). Section 9 covers a sibling concern on the server side: how often `TeamManager` nudges an idle team-lead session. Both are about *not* spamming whichever consumer (human or team-lead bot) is listening for a turn-finished signal.
+
 ## 1. User-visible problem
 
 The "agent finished" cue — beep + favicon badge + sidebar unread dot — used to fire on **every** `streaming → idle` transition of a background session, and on every `agent_end` for the active session. With team goals enabled this produced a constant trickle of noise that had nothing to do with the human:
@@ -113,7 +115,62 @@ The team-goal filter is then replaced by a call to `needsHumanAttention`. Behavi
 
 The browser E2E uses three test-only window hooks installed by `src/app/main.ts`: `__bobbitState`, `__bobbitRenderApp`, and `__bobbitExpandedGoals`. They are documented in [docs/testing-strategy.md — Test-only window hooks](../testing-strategy.md#test-only-window-hooks).
 
-## 8. Key files
+## 9. Team-lead idle-nudge backoff
+
+A sibling notification mechanism on the server side: when a team-lead session goes idle mid-goal, `TeamManager` periodically prompts ("nudges") it to check in on workers or wrap up. That cadence has its own correctness problem and its own fix.
+
+Tests: [`tests/team-manager-idle-nudge-backoff.test.ts`](../../tests/team-manager-idle-nudge-backoff.test.ts). Diagnostic entry: [docs/debugging.md — Auto-nudge cadence never escapes base delay](../debugging.md#auto-nudge-cadence-never-escapes-base-delay).
+
+### 9.1 The bug
+
+`TeamManager` runs two parallel idle-nudge schedulers keyed by goal id:
+
+- **Workers nudge** (`scheduleWorkersNudge` in `src/server/agent/team-manager.ts`) — fires when the lead is idle while workers are still active. Base delay `IDLE_NUDGE_DELAY_MS = 10m`.
+- **No-workers nudge** (`scheduleNoWorkersNudge` in the same file) — fires when the lead is idle with zero active workers. Base delay `NO_WORKERS_NUDGE_DELAY_MS = 5m`.
+
+Both are supposed to back off exponentially (`base * 2^count`) up to a 12h cap. They didn't. The pre-fix reset rule was "the lead did something productive ⇒ reset counter", and detected "did something" by listening for `agent_start` on the lead's RPC client in `subscribeTeamLeadEvents`. But `agent_start` *also* fires when the lead is replying to its own auto-nudge — even a one-token "still waiting". The loop:
+
+1. Lead idle → nudge sent at base delay (5m / 10m).
+2. Lead's RPC client starts streaming the reply → `agent_start` → counter reset to 0.
+3. Lead's turn ends → `agent_end` → fresh nudge scheduled at base delay.
+4. Repeat forever.
+
+An overnight unattended goal therefore absorbed one nudge every 5 or 10 minutes regardless of the configured cap. The exponential ceiling was dead code.
+
+### 9.2 The fix: prompt provenance
+
+The missing discrimination is "the lead is replying to its own nudge" vs "the lead got fresh external input" — both manifest as `agent_start`. So every prompt now carries a provenance tag.
+
+`SessionManager.enqueuePrompt` and `SessionManager.deliverLiveSteer` (in `src/server/agent/session-manager.ts`) accept an `opts.source: PromptSource` option. The most recent value is persisted on `SessionInfo.lastPromptSource`. `TeamManager.subscribeTeamLeadEvents` reads it on the lead's `agent_start` and decides whether to reset the backoff counters.
+
+| `PromptSource` | Set by | Resets counters? |
+|---|---|---|
+| `"user"` *(default)* | UI / WS handler, REST callers — every existing caller without an explicit `source` | **yes** |
+| `"system"` | reserved | **yes** |
+| `"auto-nudge"` | `TeamManager.scheduleWorkersNudge`, `scheduleNoWorkersNudge`, `notifyTeamLead` | no |
+| `"task-notification"` | `TeamManager.notifyTeamLeadOfTaskCompletion` | no |
+| `"verification"` | `VerificationHarness` team-lead notifier wired in `src/server/server.ts::setTeamLeadNotifier` callback | no |
+| `"agent"` | reserved | no |
+
+On the lead's `agent_start`:
+
+- `"user"` or `"system"` ⇒ `clearIdleNudgeTimer(goalId)` — full reset: both counter maps cleared, both timers cancelled. Next `agent_end` schedules at base delay.
+- Anything else ⇒ cancel any pending timers but **preserve** `idleNudgeCount` / `noWorkersNudgeCount`. Next `agent_end` schedules at the next exponential step.
+
+The `"user"` default means existing callers that never set `source` keep current semantics — a human typing into the team-lead chat still resets the counters, exactly as expected. The new tag is opt-in for the small set of internal call sites that are bobbit talking to itself.
+
+### 9.3 No-workers nudge is now exponential too
+
+Pre-fix, the no-workers path was a flat `setInterval(5min)` with no counter. It is now a `scheduleNoWorkersNudge` setTimeout chain that mirrors `scheduleWorkersNudge`: each fire computes the next delay as `NO_WORKERS_NUDGE_DELAY_MS * 2^count` capped at `MAX_NO_WORKERS_NUDGE_DELAY_MS = 12h`, and increments the counter only on actual send. The callback aborts cleanly — without incrementing, without rescheduling itself — if a worker has appeared in the meantime, since the workers-nudge path owns that case from then on.
+
+Concrete cadence under unattended overnight (no human input, no productive lead activity):
+
+- **No workers**: 5m, 15m, 35m, 75m, 155m, 315m, 635m, 12h, 12h, … — ≤9 nudges in 24h.
+- **Workers active, none streaming beyond `LONG_STREAMING_THRESHOLD_MS`**: 10m, 30m, 70m, 150m, 12h, … — ≤6 nudges in 24h.
+
+The first nudge of a fresh idle period still arrives at the base delay, so genuinely abandoned goals aren't silently ignored.
+
+## 10. Key files
 
 | File | Role |
 |---|---|

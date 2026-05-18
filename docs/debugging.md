@@ -865,6 +865,14 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.
 
+## Auto-nudge cadence never escapes base delay
+
+Symptom: an unattended team-lead session receives idle nudges roughly every 5 or 10 minutes overnight, regardless of the documented 12h exponential-backoff cap.
+
+Cause: pre-fix `TeamManager.subscribeTeamLeadEvents` treated every `agent_start` on the lead's RPC client as "the lead did something productive" and reset the backoff counter. But `agent_start` also fires when the lead is replying to its own auto-nudge — so the counter reset on every cycle and the exponential ceiling was dead code.
+
+Fix: prompts now carry a `PromptSource` (declared in `src/server/agent/session-manager.ts`, persisted as `SessionInfo.lastPromptSource`). Only `"user"` / `"system"` sources reset `idleNudgeCount` / `noWorkersNudgeCount` on the next `agent_start`; `"auto-nudge"` / `"task-notification"` / `"verification"` preserve them so `scheduleWorkersNudge` / `scheduleNoWorkersNudge` keep stepping up. See [docs/design/notification-policy.md — Team-lead idle-nudge backoff](design/notification-policy.md#9-team-lead-idle-nudge-backoff) for the full mechanism. Pinning test: `tests/team-manager-idle-nudge-backoff.test.ts`.
+
 ## `bash_bg wait` not interrupted by steer
 
 A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process itself is **not** killed; only the wait call resolves with `{ aborted: true }`. Diagnose:
