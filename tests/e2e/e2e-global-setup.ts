@@ -42,15 +42,12 @@ export default function globalSetup() {
 	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
 	const uiDir = join(projectRoot, "dist", "ui");
 
-	// V8 compile cache root — each Playwright worker enables its own
-	// per-worker subdir below this root in its fixture setup (see
-	// gateway-harness.ts / in-process-harness.ts). A single shared cache dir
-	// across all 3 concurrent browser workers cold-importing the same dist
-	// files produced spurious "SyntaxError: module X does not provide an
-	// export Y" on the first run after a build (race between two workers
-	// rename()-ing the same cache file). Per-worker subdirs avoid the race
-	// entirely while still keeping the cache warm for re-runs.
-	const cacheRoot = join(tmpdir(), "bobbit-e2e-v8cache");
+	// V8 compile cache root — each Playwright run gets a fresh parent, and
+	// each worker enables its own subdir below it (see gateway-harness.ts /
+	// in-process-harness.ts). A shared cache dir across concurrent workers —
+	// or across rebuilds when Windows reuses a worker pid — produced spurious
+	// "SyntaxError: module X does not provide an export Y" on first import.
+	const cacheRoot = join(tmpdir(), "bobbit-e2e-v8cache", `run-${process.pid}-${Date.now()}`);
 	try { mkdirSync(cacheRoot, { recursive: true }); } catch { /* best-effort */ }
 	process.env.BOBBIT_E2E_V8CACHE_ROOT = cacheRoot;
 	// Explicitly DO NOT set NODE_COMPILE_CACHE here — workers set their own
