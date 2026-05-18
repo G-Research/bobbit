@@ -8216,20 +8216,32 @@ async function handleApiRoute(
 					json({ error: "cwd must be a non-empty string" }, 400);
 					return;
 				}
-				const staffProjectId = typeof staff.projectId === "string" && staff.projectId.trim().length > 0
-					? staff.projectId.trim()
-					: undefined;
-				const staffProject = staffProjectId ? projectRegistry.get(staffProjectId) : undefined;
-				if (!staffProject || staffProject.hidden || staffProject.id === SYSTEM_PROJECT_ID) {
-					json({ error: "Staff agent is not attached to a registered project" }, 400);
-					return;
-				}
 				const requestedCwd = body.cwd.trim();
-				cwdUpdate = requestedCwd;
-				const cwdProject = projectRegistry.findByCwd(requestedCwd);
-				if (!cwdProject || cwdProject.id !== staffProject.id) {
-					json({ error: "cwd must be inside the staff agent's project" }, 400);
-					return;
+				const normalizeCwdForComparison = (value: string): string => {
+					let resolved = path.resolve(value.trim());
+					try { resolved = fs.realpathSync(resolved); } catch { /* compare textual path when legacy cwd no longer exists */ }
+					let normalized = resolved.replace(/\\/g, "/");
+					if (process.platform === "win32") normalized = normalized.toLowerCase();
+					return normalized.replace(/\/+$/, "");
+				};
+				const existingCwd = typeof staff.cwd === "string" ? staff.cwd : "";
+				const isUnchangedCwd = existingCwd.trim().length > 0
+					&& normalizeCwdForComparison(requestedCwd) === normalizeCwdForComparison(existingCwd);
+				if (!isUnchangedCwd) {
+					const staffProjectId = typeof staff.projectId === "string" && staff.projectId.trim().length > 0
+						? staff.projectId.trim()
+						: undefined;
+					const staffProject = staffProjectId ? projectRegistry.get(staffProjectId) : undefined;
+					if (!staffProject || staffProject.hidden || staffProject.id === SYSTEM_PROJECT_ID) {
+						json({ error: "Staff agent is not attached to a registered project" }, 400);
+						return;
+					}
+					const cwdProject = projectRegistry.findByCwd(requestedCwd);
+					if (!cwdProject || cwdProject.id !== staffProject.id) {
+						json({ error: "cwd must be inside the staff agent's project" }, 400);
+						return;
+					}
+					cwdUpdate = requestedCwd;
 				}
 			}
 
