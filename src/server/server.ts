@@ -1286,7 +1286,7 @@ export function createGateway(config: GatewayConfig) {
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
@@ -1309,7 +1309,12 @@ export function createGateway(config: GatewayConfig) {
 								});
 							}
 							for (const st of ctx.staffStore.getAll()) {
-								sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+								sweepStaff.push({
+									id: st.id,
+									branch: st.branch,
+									worktreePath: st.worktreePath,
+									repoWorktrees: st.repoWorktrees,
+								});
 							}
 						}
 						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
@@ -8122,12 +8127,29 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
-		const cwd = body.cwd || config.defaultCwd;
-		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
+		const explicitCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		const explicitProjectId = typeof body.projectId === "string" && body.projectId.trim().length > 0
+			? body.projectId.trim()
+			: undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: explicitProjectId, cwd: explicitCwd });
 		if (!resolved.ok) {
 			json({ error: resolved.error }, resolved.status);
 			return;
 		}
+		if (resolved.project.hidden || resolved.projectId === SYSTEM_PROJECT_ID) {
+			json({ error: "projectId required: staff agents must be created in a registered project" }, 400);
+			return;
+		}
+		if (explicitCwd && explicitProjectId) {
+			const cwdProject = projectRegistry.findByCwd(explicitCwd);
+			if (!cwdProject || cwdProject.id !== resolved.projectId) {
+				json({ error: "cwd must be inside the selected project" }, 400);
+				return;
+			}
+		}
+		const cwd = explicitCwd ?? resolved.project.rootPath;
 		const projectId = resolved.projectId;
 		try {
 			const staff = await staffManager.createStaff(
@@ -8136,7 +8158,13 @@ async function handleApiRoute(
 				body.systemPrompt,
 				cwd,
 				sessionManager,
-				{ triggers: body.triggers, roleId: body.roleId, projectId, sandboxed: body.sandboxed },
+				{
+					triggers: body.triggers,
+					roleId: body.roleId,
+					projectId,
+					sandboxed: body.sandboxed === true,
+					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
+				},
 			);
 			json(staff, 201);
 		} catch (err: any) {
