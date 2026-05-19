@@ -1,3 +1,7 @@
+import { execSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect } from "./in-process-harness.js";
 import {
 	apiFetch,
@@ -9,6 +13,36 @@ import {
 	type WsMsg,
 } from "./e2e-setup.js";
 import { pollUntil } from "./test-utils/cleanup.js";
+
+const PROJECT_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+
+/**
+ * This spec exercises server WS hydration through the in-process harness,
+ * which imports compiled files from dist/server. The shared E2E global setup
+ * only builds when dist is missing, so a persistent worktree can otherwise run
+ * these regression tests against a stale pre-hydration server build.
+ */
+function ensureFreshServerBuild(): void {
+	const sourceFiles = [
+		"src/server/agent/session-manager.ts",
+		"src/server/ws/handler.ts",
+		"src/server/ws/protocol.ts",
+	].map((p) => resolve(PROJECT_ROOT, p));
+	const outputFiles = [
+		"dist/server/agent/session-manager.js",
+		"dist/server/ws/handler.js",
+		"dist/server/ws/protocol.js",
+	].map((p) => resolve(PROJECT_ROOT, p));
+
+	const missingOutput = outputFiles.some((p) => !existsSync(p));
+	const newestSource = Math.max(...sourceFiles.map((p) => statSync(p).mtimeMs));
+	const oldestOutput = missingOutput ? 0 : Math.min(...outputFiles.map((p) => statSync(p).mtimeMs));
+	if (!missingOutput && oldestOutput >= newestSource) return;
+
+	execSync("npm run build:server", { cwd: PROJECT_ROOT, stdio: "inherit" });
+}
+
+ensureFreshServerBuild();
 
 const TOTAL_COST = 2.5;
 
