@@ -1406,10 +1406,13 @@ export class AgentInterface extends LitElement {
 				} satisfies Usage,
 			);
 
-		// Prefer server-authoritative cost when available (via cost_update WS messages)
+		// Server-authoritative cumulative cost is the only session-cost source of truth.
+		// Visible message usage is a compacted-window subset and must not drive the footer.
 		const serverCost = (this.session as any)?.state?.serverCost;
-		const costValue = serverCost?.totalCost ?? totals.cost?.total;
-		const costText = costValue ? formatCost(costValue) : "";
+		const serverCostTotal = typeof serverCost?.totalCost === "number" && Number.isFinite(serverCost.totalCost)
+			? serverCost.totalCost
+			: undefined;
+		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
@@ -1637,7 +1640,7 @@ export class AgentInterface extends LitElement {
 						<div style="font-weight:600;margin-bottom:6px;">Session</div>
 						${row("Messages", msgCount)}
 						${row("Turns", turnCount)}
-						${row("Total cost", totals.cost?.total ? formatCost(totals.cost.total) : "—")}
+						${row("Total cost", serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "—")}
 						${row("Total input", formatTokenCount(totals.input))}
 						${row("Total output", formatTokenCount(totals.output))}
 						${totals.cacheRead ? row("Total cache read", formatTokenCount(totals.cacheRead)) : nothing}
