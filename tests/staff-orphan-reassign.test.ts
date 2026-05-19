@@ -88,7 +88,7 @@ describe("StaffManager.listOrphaned", () => {
 });
 
 describe("StaffManager.reassignProject", () => {
-	it("moves a staff record between per-project stores", () => {
+	it("moves a staff record between per-project stores", async () => {
 		const pcm = makePcm(["proj-a", "proj-b"]);
 		const ctxA = pcm._ctx.get("proj-a");
 		const ctxB = pcm._ctx.get("proj-b");
@@ -98,14 +98,14 @@ describe("StaffManager.reassignProject", () => {
 			memory: "", createdAt: 0, updatedAt: 0, projectId: "proj-a",
 		});
 		const mgr = new StaffManager(pcm as any);
-		const moved = mgr.reassignProject("moving", "proj-b");
+		const moved = await mgr.reassignProject("moving", "proj-b");
 		assert.ok(moved, "reassignProject must return the moved record");
 		assert.strictEqual(moved!.projectId, "proj-b");
 		assert.strictEqual(ctxA.staffStore.get("moving"), undefined, "old store must drop record");
 		assert.strictEqual(ctxB.staffStore.get("moving")?.projectId, "proj-b", "new store must own record");
 	});
 
-	it("re-homes a system-project staff to a real project", () => {
+	it("re-homes a system-project staff to a real project", async () => {
 		const pcm = makePcm([SYSTEM_PROJECT_ID, "proj-a"]);
 		const sysCtx = pcm._ctx.get(SYSTEM_PROJECT_ID);
 		sysCtx.staffStore.put({
@@ -116,7 +116,7 @@ describe("StaffManager.reassignProject", () => {
 		const mgr = new StaffManager(pcm as any);
 		assert.strictEqual(mgr.listOrphaned().length, 1, "starts as orphan");
 
-		const moved = mgr.reassignProject("orphan1", "proj-a");
+		const moved = await mgr.reassignProject("orphan1", "proj-a");
 		assert.strictEqual(moved!.projectId, "proj-a");
 		const ctxA = pcm._ctx.get("proj-a");
 		assert.ok(ctxA.staffStore.get("orphan1"), "new store must own record");
@@ -124,13 +124,13 @@ describe("StaffManager.reassignProject", () => {
 		assert.strictEqual(mgr.listOrphaned().length, 0, "no orphans remain");
 	});
 
-	it("returns null when the staff id doesn't exist", () => {
+	it("returns null when the staff id doesn't exist", async () => {
 		const pcm = makePcm(["proj-a"]);
 		const mgr = new StaffManager(pcm as any);
-		assert.strictEqual(mgr.reassignProject("missing-id", "proj-a"), null);
+		assert.strictEqual(await mgr.reassignProject("missing-id", "proj-a"), null);
 	});
 
-	it("throws when target project is unknown", () => {
+	it("throws when target project is unknown", async () => {
 		const pcm = makePcm(["proj-a"]);
 		const ctxA = pcm._ctx.get("proj-a");
 		ctxA.staffStore.put({
@@ -139,6 +139,6 @@ describe("StaffManager.reassignProject", () => {
 			memory: "", createdAt: 0, updatedAt: 0, projectId: "proj-a",
 		});
 		const mgr = new StaffManager(pcm as any);
-		assert.throws(() => mgr.reassignProject("stuck", "no-such-project"), /not found/i);
+		await assert.rejects(() => mgr.reassignProject("stuck", "no-such-project"), /not found/i);
 	});
 });
