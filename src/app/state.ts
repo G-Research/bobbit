@@ -321,8 +321,9 @@ export const state = {
 	previewPanelEntry: "" as string,
 	previewPanelFullscreen: false,
 
-	// Dynamic per-session side-panel workspace. Legacy assistantTab / previewPanelTab
-	// values are mirrored into activePanelTabId in render.ts for compatibility.
+	// Dynamic per-session side-panel workspace. panelTabs / activePanelTabId are
+	// compatibility mirrors for the active session's keyed workspace below.
+	panelTabsBySession: {} as Record<string, PanelWorkspaceTab[]>,
 	panelTabs: [] as PanelWorkspaceTab[],
 	activePanelTabId: "chat",
 	panelWorkspaceActiveBySession: {} as Record<string, string>,

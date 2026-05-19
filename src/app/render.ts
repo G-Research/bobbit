@@ -62,14 +62,21 @@ import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
+	activePanelTabIdForSession,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
 	findPanelTab,
 	firstContentPanelTab,
+	isHistoricalProposalTab,
 	panelContentTabs,
 	panelTabIdFromLegacy,
+	panelTabsForSession,
+	panelWorkspaceSessionKey,
 	proposalPanelTabId,
 	reviewPanelTabId,
+	reviewTitleFromPanelTab,
+	setActivePanelTabIdForSession,
+	setPanelTabsForSession,
 	type LegacyPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
@@ -750,10 +757,11 @@ function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
 	const fallback = findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID)
 		?? firstContentPanelTab(tabs)
 		?? findPanelTab(tabs, CHAT_PANEL_TAB_ID);
-	if (fallback && (state.activePanelTabId === removedId || !findPanelTab(tabs, state.activePanelTabId))) {
+	const activeId = activePanelTabIdForSession(state, workspaceSessionId());
+	if (fallback && (activeId === removedId || !findPanelTab(tabs, activeId))) {
 		setUnifiedActiveTab(fallback);
 	}
-	if (state.previewPanelTab === type && fallback) {
+	if (state.previewPanelTab === type && fallback && activeId === removedId) {
 		setUnifiedActiveTab(fallback);
 	}
 }
@@ -2655,7 +2663,7 @@ function currentAssistantProposalType(): ProposalType | null {
 }
 
 function workspaceSessionId(): string {
-	return activeSessionId() || "__no-session__";
+	return panelWorkspaceSessionKey(activeSessionId());
 }
 
 function previewWorkspaceKey(): string {
@@ -2729,22 +2737,55 @@ function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string
 	};
 }
 
-function mergeHistoricalPreviewTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
-	const sessionId = activeSessionId() || "";
+function panelTabSessionId(tab: PanelWorkspaceTab): string {
+	const source = tab.source as Record<string, unknown>;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	return recordValue(source, "sessionId") || recordValue(tabState, "sessionId");
+}
+
+function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: string): PanelWorkspaceTab | null {
+	if (!isHistoricalProposalTab(tab) || tab.source.type !== "proposal") return null;
+	const tabSessionId = panelTabSessionId(tab);
+	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
+	if (sessionId && !tabSessionId) return null;
+	const rev = typeof tab.state?.rev === "number" ? tab.state.rev : tab.source.rev;
+	return {
+		...tab,
+		id: proposalPanelTabId(tab.source.proposalType, rev),
+		kind: "proposal",
+		title: tab.title || `${tab.label || tab.source.proposalType} Proposal rev ${rev}`,
+		label: tab.label || `${tab.source.proposalType} r${rev}`,
+		legacyTab: tab.source.proposalType,
+		source: {
+			...tab.source,
+			sessionId: tabSessionId || sessionId,
+			rev,
+			historical: true,
+		},
+		state: {
+			...(tab.state || {}),
+			rev,
+			historical: true,
+		},
+	};
+}
+
+function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
+	const sessionId = workspaceSessionId();
 	const seen = new Set(derivedTabs.map((tab) => tab.id));
-	const historicalTabs: PanelWorkspaceTab[] = [];
-	for (const rawTab of state.panelTabs) {
-		const tab = normalizeHistoricalPreviewTab(rawTab, sessionId);
+	const storedExtraTabs: PanelWorkspaceTab[] = [];
+	for (const rawTab of panelTabsForSession(state, sessionId)) {
+		const tab = normalizeHistoricalPreviewTab(rawTab, sessionId) ?? normalizeHistoricalProposalTab(rawTab, sessionId);
 		if (!tab || seen.has(tab.id)) continue;
 		seen.add(tab.id);
-		historicalTabs.push(tab);
+		storedExtraTabs.push(tab);
 	}
-	if (historicalTabs.length === 0) return derivedTabs;
+	if (storedExtraTabs.length === 0) return derivedTabs;
 	const liveIndex = derivedTabs.findIndex((tab) => tab.id === LIVE_PREVIEW_PANEL_TAB_ID);
 	const insertAt = liveIndex >= 0 ? liveIndex + 1 : Math.min(1, derivedTabs.length);
 	return [
 		...derivedTabs.slice(0, insertAt),
-		...historicalTabs,
+		...storedExtraTabs,
 		...derivedTabs.slice(insertAt),
 	];
 }
@@ -2803,7 +2844,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 			});
 			if (!response.ok) throw new Error(`preview restore failed: ${response.status}`);
 			const data = await response.json().catch(() => ({} as any));
-			if (state.activePanelTabId !== tab.id) return;
+			if (activePanelTabIdForSession(state, sessionId) !== tab.id) return;
 			state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : entry;
 			state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
 			markPreviewTabMounted(tab);
@@ -2818,8 +2859,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 
 function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	const sid = workspaceSessionId();
-	state.activePanelTabId = tab.id;
-	state.panelWorkspaceActiveBySession[sid] = tab.id;
+	setActivePanelTabIdForSession(state, sid, tab.id);
 	(state as any).previewPanelTab = tab.legacyTab;
 	state.assistantTab = tab.kind === "chat" ? "chat" : "preview";
 	if (tab.kind !== "chat") {
@@ -2830,8 +2870,8 @@ function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 		(state as any).previewPanelActiveTab = "preview";
 		restoreHistoricalPreviewTab(tab);
 	}
-	if (tab.kind === "review" && tab.source.type === "review") {
-		state.reviewActiveTab = tab.source.title || tab.source.reviewTitle || "";
+	if (tab.kind === "review") {
+		state.reviewActiveTab = reviewTitleFromPanelTab(tab);
 	}
 }
 
@@ -2862,21 +2902,22 @@ function legacyRequestedTab(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab | unde
 
 function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	const sid = workspaceSessionId();
-	const storedId = state.panelWorkspaceActiveBySession[sid] || state.activePanelTabId;
+	const storedId = activePanelTabIdForSession(state, sid);
 	const storedTab = findPanelTab(tabs, storedId);
 	const storedHistoricalPreview = storedTab?.kind === "preview" && storedTab.id !== LIVE_PREVIEW_PANEL_TAB_ID && !storedTab.id.startsWith("preview:live");
+	const storedHistoricalArtifact = storedHistoricalPreview || isHistoricalProposalTab(storedTab);
 	const previewKey = previewWorkspaceKey();
 	if (previewKey && state.panelWorkspacePreviewKeyBySession[sid] !== previewKey) {
 		state.panelWorkspacePreviewKeyBySession[sid] = previewKey;
 		const previewTab = findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID);
-		if (previewTab && !storedHistoricalPreview) {
+		if (previewTab && !storedHistoricalArtifact) {
 			setUnifiedActiveTab(previewTab);
 			return;
 		}
 	}
 
 	const requestedTab = legacyRequestedTab(tabs);
-	if (requestedTab && !storedHistoricalPreview && (!storedTab || storedTab.kind === "chat" || state.previewPanelTab !== "chat" || state.assistantTab === "preview")) {
+	if (requestedTab && !storedHistoricalArtifact && (!storedTab || storedTab.kind === "chat" || state.previewPanelTab !== "chat" || state.assistantTab === "preview")) {
 		setUnifiedActiveTab(requestedTab);
 		return;
 	}
@@ -2890,7 +2931,9 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 
 /** Ordered list of available unified panel tabs for the current session. */
 function unifiedPanelTabs(): UnifiedPanelTab[] {
-	const tabs = mergeHistoricalPreviewTabs(buildPanelWorkspaceTabs({
+	const sessionId = workspaceSessionId();
+	const tabs = mergeStoredPanelTabs(buildPanelWorkspaceTabs({
+		sessionId,
 		isPreviewSession: state.isPreviewSession,
 		previewEntry: state.previewPanelEntry,
 		activeProposalTypes: activeProposalTypes(),
@@ -2900,7 +2943,7 @@ function unifiedPanelTabs(): UnifiedPanelTab[] {
 		inboxPanelOpen: state.inboxPanelOpen,
 		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
 	}));
-	state.panelTabs = tabs;
+	setPanelTabsForSession(state, sessionId, tabs);
 	ensureUnifiedActiveTab(tabs);
 	return tabs;
 }
@@ -2925,7 +2968,8 @@ function hasUnifiedPanel(): boolean {
 /** Index of activePanelTabId within unifiedPanelTabs(). Clamps to a valid tab. */
 function unifiedTabIndex(): number {
 	const tabs = unifiedPanelTabs();
-	const idx = tabs.findIndex((tab) => tab.id === state.activePanelTabId);
+	const activeId = activePanelTabIdForSession(state, workspaceSessionId());
+	const idx = tabs.findIndex((tab) => tab.id === activeId);
 	if (idx >= 0) return idx;
 	const fallback = tabs[0];
 	if (fallback) setUnifiedActiveTab(fallback);
@@ -3498,7 +3542,7 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview" && state.isPreviewSession) return htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewTitle = tab.source.type === "review" ? (tab.source.title || tab.source.reviewTitle || "") : "";
+			const reviewTitle = reviewTitleFromPanelTab(tab);
 			if (reviewTitle && state.reviewActiveTab !== reviewTitle) {
 				state.reviewActiveTab = reviewTitle;
 			}

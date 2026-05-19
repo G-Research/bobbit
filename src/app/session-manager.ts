@@ -1,5 +1,5 @@
 import { ChatPanel } from "../ui/index.js";
-import { startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -1467,16 +1467,21 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
-			revealActiveProposalPanel(type, sessionId);
+			const numericRev = typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
+			if (numericRev) {
+				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev });
+			} else {
+				revealActiveProposalPanel(type, sessionId);
+			}
 
 			// Snapshot-restore branch — server is authoritative; the broadcast
 			// rebuilds the slot via remote.onProposal. We also fan out to the
 			// legacy per-type callback so per-form state (state.previewTitle
 			// etc.) is populated.
-			if (typeof rev === "number" && Number.isFinite(rev) && rev > 0) {
+			if (numericRev) {
 				try {
 					const { restoreProposalSnapshot } = await import("./api.js");
-					const res = await restoreProposalSnapshot(sessionId, type, rev);
+					const res = await restoreProposalSnapshot(sessionId, type, numericRev);
 					if (res && (res as any).ok) {
 						const restoredFields = (res as any).fields as Record<string, unknown> | undefined;
 						if (restoredFields) {
@@ -1489,6 +1494,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 							};
 							const legacyCb = legacyMap[type];
 							if (legacyCb) legacyCb(restoredFields, false);
+							selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: restoredFields });
 						}
 					} else {
 						console.warn(`[proposal] restore failed:`, res);

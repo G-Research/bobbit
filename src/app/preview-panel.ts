@@ -1,5 +1,18 @@
 import { state, renderApp, activeSessionId } from "./state.js";
-import { LIVE_PREVIEW_PANEL_TAB_ID, type LegacyPanelTab, type PanelWorkspaceTab } from "./panel-workspace.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	INBOX_PANEL_TAB_ID,
+	LIVE_PREVIEW_PANEL_TAB_ID,
+	activePanelTabIdForSession,
+	panelTabsForSession,
+	proposalPanelTabId,
+	reviewPanelTabId,
+	reviewTitleFromPanelTab,
+	setActivePanelTabIdForSession,
+	setPanelTabsForSession,
+	type LegacyPanelTab,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
 
 // WP-E: SSE subscription to per-session preview mount events.
 // The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
@@ -11,6 +24,8 @@ type PanelWorkspaceOptions = {
 	select?: boolean;
 	setAssistantTab?: boolean;
 	clearCollapse?: boolean;
+	rev?: number;
+	fields?: Record<string, unknown>;
 };
 
 const PROPOSAL_LABELS: Record<string, string> = {
@@ -30,37 +45,19 @@ function safeBaseName(path: string | undefined): string {
 	return clean.split("/").filter(Boolean).pop() || clean || "";
 }
 
-function reviewTabId(title: string): string {
-	return `review:${encodeURIComponent(title)}`;
+function panelSessionId(sessionId: string | undefined): string {
+	return sessionId || activeSessionId() || "";
 }
 
-function activePanelTabId(s: any): string {
-	return typeof s.activePanelTabId === "string" ? s.activePanelTabId
-		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
-		: "";
+function mutablePanelTabs(s: any, sessionId: string): PanelWorkspaceTab[] {
+	return panelTabsForSession(s, sessionId);
 }
 
-function mutablePanelTabs(s: any): PanelWorkspaceTab[] | null {
-	if (Array.isArray(s.panelWorkspace?.tabs)) return s.panelWorkspace.tabs as PanelWorkspaceTab[];
-	if (Array.isArray(s.panelTabs)) return s.panelTabs as PanelWorkspaceTab[];
-	if (Object.prototype.hasOwnProperty.call(s, "panelTabs")) {
-		s.panelTabs = [];
-		return s.panelTabs as PanelWorkspaceTab[];
-	}
-	return null;
-}
-
-function upsertPanelTabState(s: any, tab: PanelWorkspaceTab): void {
-	const tabs = mutablePanelTabs(s);
-	if (!tabs) return;
+function upsertPanelTabState(s: any, sessionId: string, tab: PanelWorkspaceTab): void {
+	const tabs = mutablePanelTabs(s, sessionId);
 	const idx = tabs.findIndex(t => t?.id === tab.id);
 	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
 	else tabs.push(tab);
-}
-
-function setActivePanelTabState(s: any, tabId: string): void {
-	if ("activePanelTabId" in s) s.activePanelTabId = tabId;
-	if (s.panelWorkspace && typeof s.panelWorkspace === "object") s.panelWorkspace.activeTabId = tabId;
 }
 
 function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWorkspaceOptions): void {
@@ -88,10 +85,7 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 		return;
 	}
 	if (tab.kind === "review") {
-		const source = tab.source as Record<string, unknown>;
-		const title = typeof source.reviewTitle === "string" ? source.reviewTitle
-			: typeof source.title === "string" ? source.title
-			: tab.title.replace(/^Review:\s*/, "");
+		const title = reviewTitleFromPanelTab(tab);
 		s.reviewPanelOpen = true;
 		s.reviewActiveTab = title;
 		s.previewPanelActiveTab = "review";
@@ -133,28 +127,27 @@ async function notifyOptionalPanelWorkspaceModule(action: "select" | "close", de
 
 export function selectPanelWorkspaceTab(tab: PanelWorkspaceTab, options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
-	upsertPanelTabState(s, tab);
+	const sessionId = panelSessionId(options.sessionId);
+	upsertPanelTabState(s, sessionId, tab);
 	if (options.select !== false) {
-		setActivePanelTabState(s, tab.id);
-		const sid = options.sessionId || activeSessionId();
-		if (sid && s.panelWorkspaceActiveBySession && typeof s.panelWorkspaceActiveBySession === "object") {
-			s.panelWorkspaceActiveBySession[sid] = tab.id;
-		}
+		setActivePanelTabIdForSession(s, sessionId, tab.id);
 	}
 	applyLegacySelection(s, tab, options);
-	if (options.clearCollapse !== false) clearCollapseKey(options.sessionId || activeSessionId() || undefined);
-	const detail = { tab, activeTabId: options.select === false ? activePanelTabId(s) : tab.id, options };
+	if (options.clearCollapse !== false) clearCollapseKey(sessionId || undefined);
+	const detail = { tab, activeTabId: options.select === false ? activePanelTabIdForSession(s, sessionId) : tab.id, options };
 	emitPanelWorkspaceEvent("select", detail);
 	void notifyOptionalPanelWorkspaceModule("select", detail);
 }
 
 export function removePanelWorkspaceTabs(ids: string[], options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
+	const sessionId = panelSessionId(options.sessionId);
 	const idSet = new Set(ids);
-	for (const holder of [s, s.panelWorkspace].filter(Boolean)) {
-		if (!Array.isArray(holder.tabs ?? holder.panelTabs)) continue;
-		const key = Array.isArray(holder.tabs) ? "tabs" : "panelTabs";
-		holder[key] = holder[key].filter((tab: PanelWorkspaceTab) => !idSet.has(tab.id));
+	const tabs = panelTabsForSession(s, sessionId);
+	const kept = tabs.filter((tab: PanelWorkspaceTab) => !idSet.has(tab.id));
+	setPanelTabsForSession(s, sessionId, kept);
+	if (s.panelWorkspace && typeof s.panelWorkspace === "object" && Array.isArray(s.panelWorkspace.tabs)) {
+		s.panelWorkspace.tabs = kept;
 	}
 	const detail = { tabIds: ids, options };
 	emitPanelWorkspaceEvent("close", detail);
@@ -203,36 +196,44 @@ export function selectHtmlPreviewTab(args: {
 }
 
 export function selectProposalWorkspaceTab(type: string, options: PanelWorkspaceOptions = {}): void {
-	const sessionId = options.sessionId || activeSessionId() || "";
+	const sessionId = panelSessionId(options.sessionId);
+	const rev = typeof options.rev === "number" && Number.isFinite(options.rev) && options.rev > 0
+		? Math.trunc(options.rev)
+		: undefined;
+	const baseTitle = PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
 	selectPanelWorkspaceTab({
-		id: `proposal:${type}`,
+		id: proposalPanelTabId(type, rev),
 		kind: "proposal",
-		title: PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`,
-		label: PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type,
+		title: rev ? `${baseTitle} rev ${rev}` : baseTitle,
+		label: rev ? `${baseTitle.replace(/ Proposal$/, "")} r${rev}` : (PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type),
 		legacyTab: type as LegacyPanelTab,
-		source: { type: "proposal", proposalType: type as any, sessionId },
+		source: { type: "proposal", proposalType: type as any, sessionId, rev, historical: rev != null },
+		state: {
+			rev,
+			fields: options.fields,
+			historical: rev != null,
+		},
 	}, { ...options, sessionId });
 }
 
 export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceOptions = {}): void {
-	const sessionId = options.sessionId || activeSessionId() || "";
+	const sessionId = panelSessionId(options.sessionId);
 	selectPanelWorkspaceTab({
-		id: reviewTabId(title),
+		id: reviewPanelTabId(title),
 		kind: "review",
 		title: `Review: ${title}`,
 		label: `Review: ${title}`,
 		legacyTab: "review",
-		source: { type: "review", reviewTitle: title, sessionId },
+		source: { type: "review", title, reviewTitle: title, sessionId },
 	}, { ...options, sessionId });
 }
 
 export function closeReviewWorkspaceTabs(titles?: string[], options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
-	const existingTabs = Array.isArray(s.panelWorkspace?.tabs) ? s.panelWorkspace.tabs
-		: Array.isArray(s.panelTabs) ? s.panelTabs
-		: [];
+	const sessionId = panelSessionId(options.sessionId);
+	const existingTabs = panelTabsForSession(s, sessionId);
 	const ids = titles && titles.length > 0
-		? titles.map(reviewTabId)
+		? titles.map(reviewPanelTabId)
 		: existingTabs
 			.filter((tab: PanelWorkspaceTab) => tab?.kind === "review" || tab?.id?.startsWith("review:"))
 			.map((tab: PanelWorkspaceTab) => tab.id);
@@ -267,10 +268,10 @@ export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions =
 		}
 	}
 	if (s.inboxPanelOpen || (Array.isArray(s.inboxEntries) && s.inboxEntries.length > 0)) {
-		selectPanelWorkspaceTab({ id: "inbox", kind: "inbox", title: "Inbox", label: "Inbox", legacyTab: "inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
+		selectPanelWorkspaceTab({ id: INBOX_PANEL_TAB_ID, kind: "inbox", title: "Inbox", label: "Inbox", legacyTab: "inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
 		return;
 	}
-	selectPanelWorkspaceTab({ id: "chat", kind: "chat", title: "Chat", label: "Chat", legacyTab: "chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
+	selectPanelWorkspaceTab({ id: CHAT_PANEL_TAB_ID, kind: "chat", title: "Chat", label: "Chat", legacyTab: "chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
 }
 
 /** Start an SSE subscription to preview-events for the given session. */

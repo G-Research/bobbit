@@ -132,6 +132,21 @@ function previewTabId(toolUseId: string | undefined, blockIndex: number, parsed:
 	return `preview:snapshot:${hashString(stable)}`;
 }
 
+function restorableSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | undefined): ParsedSnapshot {
+	if (parsed.kind === "preview") {
+		if (typeof params?.file === "string" && params.file) return { kind: "file", path: params.file };
+		if (typeof params?.html === "string") return { kind: "inline", html: params.html };
+	}
+	return parsed;
+}
+
+function mountBodyForSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | undefined): Record<string, unknown> | null {
+	const restorable = restorableSnapshot(parsed, params);
+	if (restorable.kind === "file") return { file: restorable.path };
+	if (restorable.kind === "inline") return { html: restorable.html };
+	return null;
+}
+
 function previewTabSource(
 	params: PreviewOpenParams | undefined,
 	parsed: ParsedSnapshot,
@@ -139,9 +154,11 @@ function previewTabSource(
 	toolUseId: string | undefined,
 	blockIndex: number,
 ): Record<string, unknown> {
+	const restorable = restorableSnapshot(parsed, params);
 	const source: Record<string, unknown> = {
 		type: "preview_open",
-		snapshotKind: parsed.kind,
+		snapshotKind: restorable.kind,
+		markerKind: parsed.kind,
 		toolUseId,
 		blockIndex,
 		entry,
@@ -149,25 +166,31 @@ function previewTabSource(
 	};
 	if (parsed.kind === "preview") {
 		source.url = parsed.url;
-		source.path = parsed.path;
-	} else if (parsed.kind === "file") {
-		source.path = parsed.path;
-	} else {
+		source.snapshotUrl = parsed.url;
+		source.snapshotPath = parsed.path;
+	}
+	if (restorable.kind === "file") {
+		source.path = restorable.path;
+	} else if (restorable.kind === "inline") {
 		source.inline = true;
+	} else {
+		source.path = restorable.path;
 	}
 	return source;
 }
 
-function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined): Record<string, unknown> {
+function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined, params: PreviewOpenParams | undefined): Record<string, unknown> {
+	const restorable = restorableSnapshot(parsed, params);
 	const state: Record<string, unknown> = {
-		snapshotKind: parsed.kind,
+		snapshotKind: restorable.kind,
+		markerKind: parsed.kind,
 		entry,
 		mtime,
 		url,
 	};
-	if (parsed.kind === "inline") state.snapshotHtml = parsed.html;
-	else if (parsed.kind === "file") state.snapshotFile = parsed.path;
-	else {
+	if (restorable.kind === "inline") state.snapshotHtml = restorable.html;
+	else if (restorable.kind === "file") state.snapshotFile = restorable.path;
+	if (parsed.kind === "preview") {
 		state.snapshotUrl = parsed.url;
 		state.snapshotPath = parsed.path;
 	}
@@ -263,16 +286,14 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				// across the renderer's lifetime.
 				let entryFromPost: string | undefined;
 				let mtimeFromPost: number | undefined;
-				if (parsed.kind !== "preview") {
-					const postBody: Record<string, unknown> = parsed.kind === "file"
-						? { file: parsed.path }
-						: { html: parsed.html };
+				const postBody = mountBodyForSnapshot(parsed, params);
+				if (postBody) {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 						method: "POST",
 						body: JSON.stringify(postBody),
 					});
 					if (!postResp.ok) {
-						if (parsed.kind === "file" && (postResp.status === 400 || postResp.status === 404)) {
+						if ("file" in postBody && (postResp.status === 400 || postResp.status === 404)) {
 							btn.textContent = "File no longer available";
 							btn.disabled = true;
 							return;
@@ -317,7 +338,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						title: previewTabTitle(params, parsed, entry),
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index),
-						state: previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined),
+						state: previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined, params),
 						select: true,
 					});
 					renderApp();

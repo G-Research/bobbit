@@ -27,7 +27,7 @@ export interface PanelWorkspaceTab {
 			params?: Record<string, unknown>;
 			[key: string]: unknown;
 		}
-		| { type: "proposal"; proposalType: ProposalType; sessionId?: string }
+		| { type: "proposal"; proposalType: ProposalType; sessionId?: string; rev?: number; historical?: boolean; [key: string]: unknown }
 		| { type: "review"; title?: string; reviewTitle?: string; sessionId?: string }
 		| { type: "inbox"; sessionId?: string };
 	state?: Record<string, unknown>;
@@ -36,6 +36,7 @@ export interface PanelWorkspaceTab {
 export const CHAT_PANEL_TAB_ID = "chat";
 export const LIVE_PREVIEW_PANEL_TAB_ID = "preview:live";
 export const INBOX_PANEL_TAB_ID = "inbox";
+export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
 
 const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	goal: "Goal",
@@ -45,12 +46,103 @@ const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	staff: "Staff",
 };
 
-export function proposalPanelTabId(type: ProposalType): string {
-	return `proposal:${type}`;
+export function panelWorkspaceSessionKey(sessionId: string | null | undefined): string {
+	return sessionId || PANEL_WORKSPACE_NO_SESSION_KEY;
+}
+
+function activeMirrorSessionKey(stateLike: any): string {
+	const sid = typeof stateLike?.selectedSessionId === "string" && stateLike.selectedSessionId
+		? stateLike.selectedSessionId
+		: typeof stateLike?.remoteAgent?.gatewaySessionId === "string" && stateLike.remoteAgent.gatewaySessionId
+		? stateLike.remoteAgent.gatewaySessionId
+		: undefined;
+	return panelWorkspaceSessionKey(sid);
+}
+
+function ensurePanelTabsBySession(stateLike: any): Record<string, PanelWorkspaceTab[]> {
+	if (!stateLike.panelTabsBySession || typeof stateLike.panelTabsBySession !== "object" || Array.isArray(stateLike.panelTabsBySession)) {
+		stateLike.panelTabsBySession = {};
+	}
+	return stateLike.panelTabsBySession as Record<string, PanelWorkspaceTab[]>;
+}
+
+export function panelTabsForSession(stateLike: any, sessionId: string | null | undefined): PanelWorkspaceTab[] {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const bySession = ensurePanelTabsBySession(stateLike);
+	if (!Array.isArray(bySession[sid])) bySession[sid] = [];
+	if (activeMirrorSessionKey(stateLike) === sid) stateLike.panelTabs = bySession[sid];
+	return bySession[sid];
+}
+
+export function setPanelTabsForSession(stateLike: any, sessionId: string | null | undefined, tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const bySession = ensurePanelTabsBySession(stateLike);
+	bySession[sid] = tabs;
+	if (activeMirrorSessionKey(stateLike) === sid) stateLike.panelTabs = tabs;
+	return tabs;
+}
+
+export function activePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined): string {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const activeBySession = stateLike?.panelWorkspaceActiveBySession;
+	if (activeBySession && typeof activeBySession === "object" && typeof activeBySession[sid] === "string") {
+		return activeBySession[sid];
+	}
+	const tabs = stateLike?.panelTabsBySession?.[sid];
+	if (
+		activeMirrorSessionKey(stateLike) === sid &&
+		typeof stateLike?.activePanelTabId === "string" &&
+		Array.isArray(tabs) &&
+		tabs.some((tab: PanelWorkspaceTab) => tab?.id === stateLike.activePanelTabId)
+	) {
+		return stateLike.activePanelTabId;
+	}
+	return CHAT_PANEL_TAB_ID;
+}
+
+export function setActivePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined, tabId: string): void {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	if (!stateLike.panelWorkspaceActiveBySession || typeof stateLike.panelWorkspaceActiveBySession !== "object" || Array.isArray(stateLike.panelWorkspaceActiveBySession)) {
+		stateLike.panelWorkspaceActiveBySession = {};
+	}
+	stateLike.panelWorkspaceActiveBySession[sid] = tabId;
+	if (activeMirrorSessionKey(stateLike) === sid) stateLike.activePanelTabId = tabId;
+	if (stateLike.panelWorkspace && typeof stateLike.panelWorkspace === "object") stateLike.panelWorkspace.activeTabId = tabId;
+}
+
+export function proposalPanelTabId(type: ProposalType | string, rev?: number): string {
+	return typeof rev === "number" && Number.isFinite(rev) && rev > 0
+		? `proposal:${type}:rev:${Math.trunc(rev)}`
+		: `proposal:${type}`;
+}
+
+export function proposalRevisionFromPanelTab(tab: PanelWorkspaceTab | undefined | null): number | undefined {
+	const stateRev = tab?.state?.rev;
+	if (typeof stateRev === "number" && Number.isFinite(stateRev) && stateRev > 0) return stateRev;
+	if (tab?.source?.type === "proposal" && typeof tab.source.rev === "number" && Number.isFinite(tab.source.rev) && tab.source.rev > 0) return tab.source.rev;
+	const match = /^proposal:[^:]+:rev:(\d+)$/.exec(tab?.id || "");
+	return match ? Number(match[1]) : undefined;
+}
+
+export function isHistoricalProposalTab(tab: PanelWorkspaceTab | undefined | null): boolean {
+	return tab?.kind === "proposal" && proposalRevisionFromPanelTab(tab) != null;
 }
 
 export function reviewPanelTabId(title: string): string {
-	return `review:${title}`;
+	return `review:${encodeURIComponent(title)}`;
+}
+
+export function reviewTitleFromPanelTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab) return "";
+	if (tab.source?.type === "review") {
+		if (typeof tab.source.reviewTitle === "string") return tab.source.reviewTitle;
+		if (typeof tab.source.title === "string") return tab.source.title;
+	}
+	const encoded = tab.id.startsWith("review:") ? tab.id.slice("review:".length) : "";
+	if (encoded) {
+		try { return decodeURIComponent(encoded); } catch { return encoded; }
+	}
+	return tab.title.replace(/^Review:\s*/, "");
 }
 
 export function assistantProposalType(assistantType: string | null | undefined): ProposalType | null {
@@ -72,6 +164,7 @@ export function assistantProposalType(assistantType: string | null | undefined):
 }
 
 export interface BuildPanelWorkspaceTabsInput {
+	sessionId?: string;
 	isPreviewSession: boolean;
 	previewEntry: string;
 	activeProposalTypes: ProposalType[];
@@ -89,7 +182,7 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 		title: "Chat",
 		label: "Chat",
 		legacyTab: "chat",
-		source: { type: "chat" },
+		source: { type: "chat", sessionId: input.sessionId },
 	}];
 
 	if (input.isPreviewSession) {
@@ -100,7 +193,7 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 			title: `Preview: ${entry}`,
 			label: "Preview",
 			legacyTab: "preview",
-			source: { type: "preview", entry },
+			source: { type: "preview", entry, sessionId: input.sessionId },
 		});
 	}
 
@@ -117,7 +210,7 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 			title: `${label} Proposal`,
 			label,
 			legacyTab: type,
-			source: { type: "proposal", proposalType: type },
+			source: { type: "proposal", proposalType: type, sessionId: input.sessionId },
 		});
 	}
 
@@ -129,7 +222,7 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 				title: `Review: ${title}`,
 				label: `Review: ${title}`,
 				legacyTab: "review",
-				source: { type: "review", title },
+				source: { type: "review", title, reviewTitle: title, sessionId: input.sessionId },
 			});
 		}
 	}
@@ -141,7 +234,7 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 			title: input.inboxHasPending ? "Inbox: pending items" : "Inbox",
 			label: "Inbox",
 			legacyTab: "inbox",
-			source: { type: "inbox" },
+			source: { type: "inbox", sessionId: input.sessionId },
 		});
 	}
 
@@ -154,7 +247,15 @@ export function panelContentTabs(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[]
 
 export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | undefined): PanelWorkspaceTab | undefined {
 	if (!id) return undefined;
-	return tabs.find((tab) => tab.id === id);
+	const exact = tabs.find((tab) => tab.id === id);
+	if (exact) return exact;
+	if (id.startsWith("review:")) {
+		const rawTitle = id.slice("review:".length);
+		let decodedTitle = rawTitle;
+		try { decodedTitle = decodeURIComponent(rawTitle); } catch { /* keep raw */ }
+		return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === decodedTitle);
+	}
+	return undefined;
 }
 
 export function firstContentPanelTab(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab | undefined {

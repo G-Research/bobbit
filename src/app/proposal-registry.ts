@@ -10,6 +10,8 @@
  * unused for Slice E and reserved for future work.
  */
 
+import { panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession, type PanelWorkspaceTab } from "./panel-workspace.js";
+
 // NOTE: We do NOT import `./state.js` at module load — state.ts touches
 // `localStorage` at module init which would break node-only unit tests of
 // the registry's pure mergeFields helpers. The onFirstEmit hooks lazy-import
@@ -126,23 +128,19 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 
 function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
 	const s = getState();
-	const tab = {
-		id: `proposal:${type}`,
+	const tab: PanelWorkspaceTab = {
+		id: proposalPanelTabId(type),
 		kind: "proposal",
 		title: PROPOSAL_TAB_LABELS[type],
+		label: PROPOSAL_TAB_LABELS[type].replace(/ Proposal$/, ""),
+		legacyTab: type,
 		source: { type: "proposal", proposalType: type, sessionId },
 	};
-	const tabs = Array.isArray(s.panelWorkspace?.tabs) ? s.panelWorkspace.tabs
-		: Array.isArray(s.panelTabs) ? s.panelTabs
-		: Object.prototype.hasOwnProperty.call(s, "panelTabs") ? (s.panelTabs = [])
-		: null;
-	if (tabs) {
-		const idx = tabs.findIndex((t: any) => t?.id === tab.id);
-		if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
-		else tabs.push(tab);
-	}
-	if ("activePanelTabId" in s) s.activePanelTabId = tab.id;
-	if (s.panelWorkspace && typeof s.panelWorkspace === "object") s.panelWorkspace.activeTabId = tab.id;
+	const tabs = panelTabsForSession(s, sessionId);
+	const idx = tabs.findIndex((t: any) => t?.id === tab.id);
+	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
+	else tabs.push(tab);
+	setActivePanelTabIdForSession(s, sessionId, tab.id);
 	try {
 		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
 			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
