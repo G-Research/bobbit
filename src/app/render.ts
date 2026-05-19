@@ -68,6 +68,7 @@ import {
 	findPanelTab,
 	firstContentPanelTab,
 	isHistoricalProposalTab,
+	isLivePreviewTab,
 	panelContentTabs,
 	panelTabIdFromLegacy,
 	panelTabsForSession,
@@ -2771,7 +2772,7 @@ function previewSessionIdFromTab(tab: PanelWorkspaceTab): string {
 
 function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string): PanelWorkspaceTab | null {
 	if (!tab || tab.kind !== "preview") return null;
-	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return null;
+	if (isLivePreviewTab(tab)) return null;
 	const tabSessionId = previewSessionIdFromTab(tab);
 	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
 	if (sessionId && !tabSessionId) return null;
@@ -2838,13 +2839,29 @@ function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: strin
 	};
 }
 
+function snapshotPreviewTitle(title: string): string {
+	return /\s\(snapshot\)$/.test(title) ? title : `${title} (snapshot)`;
+}
+
+function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab {
+	if (tab.kind !== "preview") return tab;
+	const liveTab = findPanelTab(derivedTabs, LIVE_PREVIEW_PANEL_TAB_ID);
+	if (!liveTab) return tab;
+	const liveTitle = liveTab.title || liveTab.label;
+	const tabTitle = tab.title || tab.label;
+	if (!liveTitle || tabTitle !== liveTitle) return tab;
+	const title = snapshotPreviewTitle(tabTitle);
+	return { ...tab, title, label: title };
+}
+
 function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
 	const sessionId = workspaceSessionId();
 	const seen = new Set(derivedTabs.map((tab) => tab.id));
 	const storedExtraTabs: PanelWorkspaceTab[] = [];
 	for (const rawTab of panelTabsForSession(state, sessionId)) {
-		const tab = normalizeHistoricalPreviewTab(rawTab, sessionId) ?? normalizeHistoricalProposalTab(rawTab, sessionId);
-		if (!tab || seen.has(tab.id)) continue;
+		const normalizedTab = normalizeHistoricalPreviewTab(rawTab, sessionId) ?? normalizeHistoricalProposalTab(rawTab, sessionId);
+		if (!normalizedTab || seen.has(normalizedTab.id)) continue;
+		const tab = disambiguateStoredPreviewTab(normalizedTab, derivedTabs);
 		seen.add(tab.id);
 		storedExtraTabs.push(tab);
 	}
@@ -2972,7 +2989,7 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	const sid = workspaceSessionId();
 	const storedId = activePanelTabIdForSession(state, sid);
 	const storedTab = findPanelTab(tabs, storedId);
-	const storedHistoricalPreview = storedTab?.kind === "preview" && storedTab.id !== LIVE_PREVIEW_PANEL_TAB_ID && !storedTab.id.startsWith("preview:live");
+	const storedHistoricalPreview = storedTab?.kind === "preview" && !isLivePreviewTab(storedTab);
 	const storedHistoricalArtifact = storedHistoricalPreview || isHistoricalProposalTab(storedTab);
 	const previewKey = previewWorkspaceKey();
 	if (previewKey && state.panelWorkspacePreviewKeyBySession[sid] !== previewKey) {
