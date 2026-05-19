@@ -4,6 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+	ASK_ENVELOPE_PREFIX_REGEX,
 	ASK_ENVELOPE_REGEX,
 	buildAskResponseEnvelope,
 	findAskResponseAnswers,
@@ -42,6 +43,11 @@ describe("ask-envelope — regex", () => {
 		assert.equal(ASK_ENVELOPE_REGEX.exec(text), null);
 	});
 
+	it("rejects bad charset in id (newlines)", () => {
+		const text = `[ask_user_choices_response tool_use_id=abc\ndef]\n{"answers":[]}`;
+		assert.equal(ASK_ENVELOPE_REGEX.exec(text), null);
+	});
+
 	it("accepts ids with letters, digits, underscore, hyphen", () => {
 		const text = `[ask_user_choices_response tool_use_id=tool-abc_123]\n{"answers":[]}`;
 		const m = ASK_ENVELOPE_REGEX.exec(text);
@@ -55,6 +61,27 @@ describe("ask-envelope — regex", () => {
 		assert.ok(m, `composite ask envelope regex should accept tool_use_id=${COMPOSITE_TOOL_USE_ID}`);
 		assert.equal(m![1], COMPOSITE_TOOL_USE_ID);
 		assert.equal(m![2], `{"answers":[]}`);
+	});
+});
+
+describe("ask-envelope — prefix regex", () => {
+	it("accepts composite ids with a pipe delimiter", () => {
+		const text = `[ask_user_choices_response tool_use_id=${COMPOSITE_TOOL_USE_ID}]\n{"answers":[]}`;
+		assert.equal(
+			ASK_ENVELOPE_PREFIX_REGEX.test(text),
+			true,
+			`prefix detection should accept composite ask response envelope for tool_use_id=${COMPOSITE_TOOL_USE_ID}`,
+		);
+	});
+
+	it("rejects unsafe whitespace in ids", () => {
+		const text = `[ask_user_choices_response tool_use_id=abc def]\n{"answers":[]}`;
+		assert.equal(ASK_ENVELOPE_PREFIX_REGEX.test(text), false);
+	});
+
+	it("rejects marker not at position 0", () => {
+		const text = `prefix [ask_user_choices_response tool_use_id=${COMPOSITE_TOOL_USE_ID}]\n{"answers":[]}`;
+		assert.equal(ASK_ENVELOPE_PREFIX_REGEX.test(text), false);
 	});
 });
 

@@ -61,6 +61,7 @@
  * UI primitives
  * -------------
  *  ask_user_choices         Single-select widget.
+ *  ask_user_choices_composite Single-select widget with composite tool_use_id.
  *  ask_user_choices_multi   Multi-select widget.
  *
  * Steer (RPC, not a prompt-text trigger)
@@ -90,6 +91,14 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { execSync } from "node:child_process";
+
+// Keep explicitly aligned with src/shared/ask-envelope.ts. This file is .mjs
+// and is used directly by E2E mock-agent processes, so it cannot import the TS
+// shared module without extra loader wiring.
+const ASK_TOOL_USE_ID_PATTERN = "[A-Za-z0-9_|-]+";
+const ASK_RESPONSE_ENVELOPE_REGEX = new RegExp(
+	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
+);
 
 /**
  * @typedef {Object} MockAgentOptions
@@ -431,6 +440,9 @@ export class MockAgentCore {
 		if (lower.includes("ask_user_choices_multi")) {
 			return { askUserChoices: "multi" };
 		}
+		if (lower.includes("ask_user_choices_composite") || lower.includes("ask user choices composite")) {
+			return { askUserChoices: "composite" };
+		}
 		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
 			// Signals the mock agent to emit a non-blocking ask_user_choices tool_use.
 			// The tool returns {status:"posted", tool_use_id} synchronously; answers arrive
@@ -567,7 +579,10 @@ export class MockAgentCore {
 			if (toolAction.askUserChoices === "errorThenRetry") {
 				await this._handleAskUserChoicesErrorThenRetry();
 			} else {
-				await this._handleAskUserChoices(toolAction.askUserChoices === "multi");
+				await this._handleAskUserChoices(
+					toolAction.askUserChoices === "multi",
+					{ compositeId: toolAction.askUserChoices === "composite" },
+				);
 			}
 		} else if (toolAction && toolAction.liveUpdateProposal) {
 			await this._handleLiveUpdateProposal();
@@ -1101,12 +1116,14 @@ export class MockAgentCore {
 		}
 	}
 
-	async _handleAskUserChoices(multi = false) {
+	async _handleAskUserChoices(multi = false, { compositeId = false } = {}) {
 		// Non-blocking model: the ask_user_choices tool returns immediately with
 		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
 		// answers arrive in a *later* prompt as an envelope user message — see
 		// `_handleAskResponseEnvelope` below.
-		const toolId = `tool_ask_${Date.now()}`;
+		const toolId = compositeId
+			? `tool_ask_${Date.now()}|fc_${Math.random().toString(36).slice(2, 8)}`
+			: `tool_ask_${Date.now()}`;
 
 		const questions = multi
 			? [
@@ -1230,7 +1247,7 @@ export class MockAgentCore {
 	 * text message so E2E tests can observe the round-trip.
 	 */
 	async _handleAskResponseEnvelope(text) {
-		const m = /^\[ask_user_choices_response tool_use_id=([A-Za-z0-9_-]+)\]\n([\s\S]+)$/.exec(text);
+		const m = ASK_RESPONSE_ENVELOPE_REGEX.exec(text);
 		if (!m) return;
 		const toolUseId = m[1];
 		let answers = null;
