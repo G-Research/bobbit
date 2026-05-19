@@ -194,94 +194,91 @@ test.describe("Reopenable preview widgets (browser E2E)", () => {
 
 	test("v3 reopen imperatively refreshes preview panel state (stale-panel fix)", async ({ page }) => {
 		// Regression test: clicking Open on a v3-snapshot preview_open card must
-		// update state.previewPanelEntry / state.previewPanelMtime imperatively,
-		// because the SSE channel only fires on new mount writes — v3 reopens
-		// reuse the existing mount and would otherwise leave the panel stale.
+		// update state.previewPanelEntry / state.previewPanelMtime imperatively.
+		// Dynamic historical preview tabs may remount inline/file snapshots when
+		// the original tool params are restorable; non-restorable v3 snapshots still
+		// use the existing mount metadata without posting.
 		await gotoAndWait(page);
 
 		const sid = "22222222-2222-2222-2222-222222222222";
 		const entryA = "index-A.html";
 		const entryB = "index-B.html";
+		const entryC = "index-C.html";
+		const fileB = "/tmp/preview/index-B.html";
+		const htmlA = "<p>A restored inline payload</p>";
 		const snapA = MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${sid}/${entryA}`, path: `/state/preview/${sid}/${entryA}`, entry: entryA });
 		const snapB = MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${sid}/${entryB}`, path: `/state/preview/${sid}/${entryB}`, entry: entryB });
-
-		function makeV3Result(text: string, toolCallId: string) {
-			return {
-				role: "toolResult",
-				toolCallId,
-				toolName: "preview_open",
-				isError: false,
-				content: [
-					{ type: "text", text: "Preview panel is open and will auto-update." },
-					{ type: "text", text },
-				],
-				timestamp: Date.now(),
-			};
-		}
+		const snapC = MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${sid}/${entryC}`, path: `/state/preview/${sid}/${entryC}`, entry: entryC });
 
 		await page.evaluate(() => {
 			const container = document.getElementById("container")!;
-			container.innerHTML = '<div id="slot-a"></div><div id="slot-b"></div>';
+			container.innerHTML = '<div id="slot-a"></div><div id="slot-b"></div><div id="slot-c"></div>';
 		});
 
 		await page.evaluate(
-			([sid, snapA, snapB]) => {
+			([sid, snapA, snapB, snapC, htmlA, fileB]) => {
 				const w = window as any;
+				const result = (toolCallId: string, snapshot: string) => ({
+					role: "toolResult",
+					toolCallId,
+					toolName: "preview_open",
+					isError: false,
+					content: [
+						{ type: "text", text: "Preview panel is open and will auto-update." },
+						{ type: "text", text: snapshot },
+					],
+					timestamp: Date.now(),
+				});
 				w.__renderPreview(
 					document.getElementById("slot-a")!,
-					{ html: "<p>A</p>" },
-					{
-						role: "toolResult",
-						toolCallId: "tool-A",
-						toolName: "preview_open",
-						isError: false,
-						content: [
-							{ type: "text", text: "Preview panel is open and will auto-update." },
-							{ type: "text", text: snapA },
-						],
-						timestamp: Date.now(),
-					},
+					{ html: htmlA },
+					result("tool-A", snapA),
 					false,
 					{ sessionId: sid, toolUseId: "tool-A" },
 				);
 				w.__renderPreview(
 					document.getElementById("slot-b")!,
-					{ html: "<p>B</p>" },
-					{
-						role: "toolResult",
-						toolCallId: "tool-B",
-						toolName: "preview_open",
-						isError: false,
-						content: [
-							{ type: "text", text: "Preview panel is open and will auto-update." },
-							{ type: "text", text: snapB },
-						],
-						timestamp: Date.now(),
-					},
+					{ file: fileB },
+					result("tool-B", snapB),
 					false,
 					{ sessionId: sid, toolUseId: "tool-B" },
 				);
+				w.__renderPreview(
+					document.getElementById("slot-c")!,
+					undefined,
+					result("tool-C", snapC),
+					false,
+					{ sessionId: sid, toolUseId: "tool-C" },
+				);
 			},
-			[sid, snapA, snapB] as const,
+			[sid, snapA, snapB, snapC, htmlA, fileB] as const,
 		);
 
-		await page.evaluate(async () => {
-			await (window as any).__resetPreviewState();
-			(window as any).__resetFetchCalls();
-		});
+		await page.evaluate(async ([entryA, entryB]) => {
+			const w = window as any;
+			w.__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && url.includes("/api/preview/mount")) {
+					const body = JSON.parse(init.body || "{}");
+					if (body.file) return { status: 200, body: { ok: true, entry: entryB, mtime: 20 } };
+					if (body.html) return { status: 200, body: { ok: true, entry: entryA, mtime: 30 } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			await w.__resetPreviewState();
+			w.__resetFetchCalls();
+		}, [entryA, entryB] as const);
 
 		// Simulate the user already having previewed B (panel currently shows B).
 		await page.locator("#slot-b [data-preview-open-btn]").click();
 		await expect(page.locator("#slot-b [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
 		let st = await page.evaluate(() => (window as any).__getPreviewState());
 		expect(st.previewPanelEntry).toBe(entryB);
-		const mtimeAfterB = st.previewPanelMtime;
-		expect(mtimeAfterB).toBeGreaterThan(0);
+		expect(st.previewPanelMtime).toBe(20);
 
-		// v3 reopen MUST NOT POST to /api/preview/mount — server already has the mount.
 		let calls = await page.evaluate(() => (window as any).__getFetchCalls());
-		const postsB = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
-		expect(postsB.length).toBe(0);
+		let posts = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
+		expect(posts.length).toBe(1);
+		expect(JSON.parse(posts[0].body)).toEqual({ file: fileB });
 
 		// Now click Open on the FIRST card (A). Bug repro: panel state stays at B.
 		await page.evaluate(() => (window as any).__resetFetchCalls());
@@ -290,22 +287,26 @@ test.describe("Reopenable preview widgets (browser E2E)", () => {
 
 		st = await page.evaluate(() => (window as any).__getPreviewState());
 		expect(st.previewPanelEntry).toBe(entryA);
-		expect(st.previewPanelMtime).toBeGreaterThanOrEqual(mtimeAfterB);
+		expect(st.previewPanelMtime).toBe(30);
 
 		calls = await page.evaluate(() => (window as any).__getFetchCalls());
-		const postsA = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
-		expect(postsA.length).toBe(0);
+		posts = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
+		expect(posts.length).toBe(1);
+		expect(JSON.parse(posts[0].body)).toEqual({ html: htmlA });
 		const patchA = calls.filter((c: any) => c.method === "PATCH" && c.url.includes("/api/sessions/"));
 		expect(patchA.length).toBeGreaterThanOrEqual(1);
 
-		// Idempotence: clicking Open on A again still keeps entry == A and bumps mtime.
-		const mtimeAfterA = st.previewPanelMtime;
-		await page.locator("#slot-a [data-preview-open-btn]").click();
-		await expect(page.locator("#slot-a [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+		// A v3 card without restorable inline/file params still refreshes stale panel
+		// state from the snapshot entry, but does not POST a new mount.
+		await page.evaluate(() => (window as any).__resetFetchCalls());
+		await page.locator("#slot-c [data-preview-open-btn]").click();
+		await expect(page.locator("#slot-c [data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
 		st = await page.evaluate(() => (window as any).__getPreviewState());
-		expect(st.previewPanelEntry).toBe(entryA);
-		expect(st.previewPanelMtime).toBeGreaterThanOrEqual(mtimeAfterA);
-		void makeV3Result;
+		expect(st.previewPanelEntry).toBe(entryC);
+		expect(st.previewPanelMtime).toBeGreaterThan(30);
+		calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		posts = calls.filter((c: any) => c.method === "POST" && c.url.includes("/api/preview/mount"));
+		expect(posts.length).toBe(0);
 	});
 
 	test("placeholder is stable while preview_open chunk loads (lazy registry)", async ({ page }) => {

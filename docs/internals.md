@@ -999,11 +999,11 @@ LocalStorage key for dismissal is `bobbit-${type}-proposal-dismissed-${sessionId
 
 `state.activeProposals[type]` is the routing source for every proposal surface. A proposal is openable when the active session has a slot for one of the supported `ProposalType`s (`goal`, `project`, `role`, `tool`, `staff`); `assistantType` does not filter the slot.
 
-Normal sessions render active slots in the unified panel. Tab order is deterministic: `Chat`, then `Preview`, `Review`, and `Inbox` when those surfaces are present, then active proposal tabs in `PROPOSAL_TYPES` order. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
+Normal and assistant sessions render active slots through the same workspace dispatcher. Tab order is deterministic: `Chat`, then `Preview` when present, active proposal tabs in `PROPOSAL_TYPES` order, then `Review` and `Inbox` tabs when those surfaces are present. Proposal labels are `Goal`, `Project`, `Role`, `Tool`, and `Staff`; each live proposal tab shows the existing proposal dot. Desktop tabs and the mobile slider use the same tab list.
 
-Assistant sessions keep the split chat/preview UX, but the preview pane can render any active proposal slot. Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
+Matching assistant types use their normal preview surface; non-matching active slots route through `proposalPanelForType(type)`. `role`, `tool`, and `staff` therefore reuse `rolePreviewPanel()`, `toolPreviewPanel()`, and `staffPreviewPanel()` outside assistant sessions instead of introducing duplicate forms.
 
-The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, reveals the same tab/pane routing, then either restores the requested snapshot (`rev`) or replays legacy `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
+The `ProposalRenderer` "Open proposal" button dispatches `proposal-open { type, rev | fields }`. `session-manager.ts` clears any dismissal fingerprint, selects the live proposal tab for the current rev, or reads an older snapshot into a read-only historical workspace tab. Legacy archived cards without a rev marker still replay `fields`. Rehydrated drafts (`proposal_update { source: "rehydrate" }`) and archived-session resubmit/continue flows feed the same `remote.onProposal(type, fields, ...)` path, so restored sessions do not need type-specific reopen code.
 
 ### Flow: `propose_*` → file-seed → broadcast → parsed projection
 
@@ -1049,24 +1049,25 @@ Descriptors: `defaults/tools/proposals/{view,edit}_proposal.yaml`. Implementatio
 
 ### REST endpoints
 
-Five endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
+Six endpoints, full reference in [docs/rest-api.md - Proposal drafts](rest-api.md#proposal-drafts):
 
 - `GET /api/sessions/:id/proposal/:type` - read raw body
+- `GET /api/sessions/:id/proposal/:type/snapshot?rev=N` - read a historical snapshot without mutating the live draft
 - `POST /api/sessions/:id/proposal/:type/seed` - called by `propose_*` `execute()`
 - `POST /api/sessions/:id/proposal/:type/edit` - surgical edit
-- `POST /api/sessions/:id/proposal/:type/restore` - restore prior revision snapshot (writes new snapshot at `currentRev+1`)
+- `POST /api/sessions/:id/proposal/:type/restore` - explicit mutating rollback (writes new snapshot at `currentRev+1`)
 - `DELETE /api/sessions/:id/proposal/:type` - clean up after accept
 
 ### Revision snapshots
 
-Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also writes an immutable per-rev snapshot alongside the live draft. This makes the chat transcript a navigable timeline: the "Open proposal" button on every `propose_*` and `edit_proposal` tool card restores the panel to *exactly* the revision that existed immediately after that call.
+Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also writes an immutable per-rev snapshot alongside the live draft. This makes the chat transcript a navigable timeline: the "Open proposal" button on current cards selects the live editable proposal tab, while older cards open read-only historical tabs populated from the exact snapshot that existed immediately after that call.
 
-**Why.** Before snapshots, the panel only ever held the latest revision on disk. Users couldn't tell which revision was live, and clicking the *original* propose card after later edits silently re-dispatched the original payload - destroying every later edit. Snapshots make rollback explicit (a real `rev = currentRev + 1` write that appears in the timeline) and reversible.
+**Why.** Before snapshots, the panel only ever held the latest revision on disk. Users couldn't tell which revision was live, and clicking the *original* propose card after later edits silently re-dispatched the original payload - destroying every later edit. Snapshot reads let users inspect history without clobbering live drafts; the explicit restore API remains available when a caller really wants to roll the live draft back.
 
 - **On-disk layout.** Snapshots live under `<stateDir>/proposal-drafts/<sessionId>/<type>.history/<rev>.<ext>`. Filename grammar `^(\d+)\.(md|yaml)$`; integer rev recovered by `readdir` + `parseInt` (no metadata file). Cleaned up with the rest of the per-session draft directory on session terminate - no separate retention logic.
 - **Rev counter source of truth.** Server-side, implicit. `latestRev()` scans the history dir; `writeSnapshot` writes `latestRev() + 1`. The server stamps `rev` on every `proposal_update` WS event (`source: "seed" | "edit" | "restore" | "rehydrate"`) - clients overwrite `slot.rev` with the server value, never client-increment.
-- **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult` and route the "Open proposal" button through `POST /api/sessions/:id/proposal/:type/restore` `{rev}`. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
-- **Restore semantics.** `restoreSnapshot` reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The rollback itself is therefore a real revision - monotonic counter, no silent state loss.
+- **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult`. Latest/current cards select the live proposal tab; older cards call `GET /api/sessions/:id/proposal/:type/snapshot?rev=<n>` and populate a read-only `proposal:<type>:rev:<n>` tab. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
+- **Restore semantics.** `restoreSnapshot` remains the explicit mutating rollback API: it reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The normal UI history-browsing path does not call it.
 - **Non-fatal snapshot failures.** Snapshot-write failures (disk full, permission denied) leave the live draft committed and broadcast `rev: 0`. Clients treat `rev: 0` as "snapshot system unavailable" - the panel still renders, but the rev badge and "Open proposal" snapshot path are disabled. Mid-restore crash between live rename and snapshot write is benign: the next write recomputes `latestRev` from the dir and picks the same number, overwriting consistently.
 - **Edit failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot - the rev counter only advances on successful disk writes. The `EditProposalRenderer` shows the error code on failed cards but no "Open proposal" button.
 - **Streaming partials don't bump rev.** The dual-fire `_checkToolProposals` streaming path emits in-memory `proposal_update` events from in-flight tool calls; only the gateway-side `seed` POST writes the file. Rev advances exactly once per completed tool call.
@@ -2151,7 +2152,7 @@ Agent process → message_update (full content)
 
 ## Preview snapshots & reopening
 
-The `preview_open` tool drives a single live preview side-panel in the UI. Each call overwrites the panel - there are no tabs, no history slots. But every past `preview_open` widget in chat history renders an **Open** button that re-hydrates the preview on demand by re-posting to the same mount endpoint, so users can flip between previous previews without re-running the agent.
+The `preview_open` tool drives one live server mount per session, rendered through the dynamic side-panel workspace. Each new call updates the live preview tab through SSE, and past `preview_open` widgets render an **Open** button that creates/selects a source-derived historical preview tab. Restorable inline/file snapshots remount into the same live mount when selected; non-restorable v3 snapshots still select their tab by entry/mtime, so users can switch between previous preview artifacts without re-running the agent.
 
 ### Why
 
@@ -2175,12 +2176,16 @@ Agent calls preview_open({html|file})
        {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
 
 User clicks Open on widget #N (PreviewRenderer.ts):
-   └─→ parse v3 marker → POST /api/preview/mount?sessionId=... {html|file}
-   └─→ same endpoint the extension uses; SSE picks up; iframe re-renders.
+   └─→ parse v3 marker + original tool params
+   └─→ create/select a source-derived preview tab in the per-session workspace
+   └─→ if inline/file bytes are restorable, POST /api/preview/mount?sessionId=...
+       {html|file}; otherwise select by recorded entry/mtime and reuse the
+       existing mount path.
 ```
 
 ### Key design decisions
 
+- **Dynamic side-panel workspace** - regular and assistant sessions share the same tab model for chat, previews, proposals, reviews, and inbox. The live preview tab tracks SSE updates; historical `preview_open` cards create/select distinct preview tabs while still rendering through the one live server mount per session.
 - **Constant-size snapshots (≤ 250 bytes)** - tool_result holds only `{kind:"preview", url, path}` wrapped in the v3 marker, so iteration cost is independent of HTML size. The `path` field is the host-invariant `<sessionId>/<entry>` form (forward slashes on all OSes) rather than the host-absolute path — keeping block size bounded by content shape, not install location. The agent can refresh a 5000-line report 50 times without the bytes ever entering its context.
 - **Bytes never re-enter agent context** - the content origin serves files from `<stateDir>/preview/<sid>/` on disk; tool_result holds only the URL/path. This is the structural fix to the v1 token-bloat problem.
 - **v1/v2 markers preserved in renderer-only code paths** - archived sessions still parse and reopen via the same mount endpoint (with `{html}` or `{file}` payloads recovered from the legacy block). New code emits only v3.
@@ -2199,8 +2204,10 @@ User clicks Open on widget #N (PreviewRenderer.ts):
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
 | `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
 | `src/server/agent/truncate-large-content.ts` | Recognises v1/v2/v3 markers (via `PREVIEW_SNAPSHOT_MARKERS`); v3 blocks always small so lazy-load only fires on legacy archived sessions |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch: v3 → mount endpoint; v1/v2 → mount endpoint with `{html}`/`{file}` (read-only legacy) |
-| `src/app/preview-panel.ts` | EventSource SSE subscription + bootstrap GET |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button dispatch; creates/selects source-derived preview tabs; remounts v1/v2 and restorable v3 inline/file snapshots |
+| `src/app/panel-workspace.ts` | Per-session tab IDs/source metadata for chat, preview, proposal, review, and inbox tabs |
+| `src/app/preview-panel.ts` | EventSource SSE subscription, bootstrap GET, and workspace tab selection helpers |
+| `src/app/render.ts` | Shared side-panel dispatcher, desktop tab strip, mobile tab bar/slider |
 | `tests/preview-{mount,cookie,content-route,extension,renderer}*`, `tests/e2e/preview-{mount-route,token-cost}.spec.ts`, `tests/e2e/ui/preview-{happy-path,new-tab,archived-snapshot}.spec.ts` | Unit, API E2E, browser E2E coverage |
 
 ---

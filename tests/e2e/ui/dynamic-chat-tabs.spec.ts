@@ -15,6 +15,7 @@ const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
 const PREVIEW_TAB_RE = /^(HTML )?Preview(:|$)/i;
+const PROJECT_PROPOSAL_TAB_RE = /^Project( Proposal)?/i;
 const CHAT_TAB_RE = /^Chat$/i;
 
 const REVIEW_DOCS = [
@@ -56,20 +57,36 @@ async function openGoalAssistantProposal(page: Page): Promise<string> {
 
 async function openGoalAssistantProposalViaApi(page: Page): Promise<string> {
 	await openApp(page);
-	const resp = await apiFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "goal" }),
-	});
-	const bodyText = await resp.text();
-	expect(resp.status, `create goal assistant via API: ${bodyText}`).toBe(201);
-	const sessionId = JSON.parse(bodyText).id as string;
-	expect(sessionId, "goal assistant API session id should be valid").toMatch(/^[a-f0-9-]{36}$/);
-
-	await navigateToHash(page, `#/session/${sessionId}`);
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	const sessionId = await createRegularSessionViaApi(page, { assistantType: "goal" });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for dynamic chat tabs mobile testing");
 	await expectGoalProposalPanel(page, "mobile goal proposal panel should be visible before opening mixed tabs");
 	return sessionId;
+}
+
+async function createRegularSessionViaApi(
+	page: Page,
+	options: { assistantType?: string } = {},
+): Promise<string> {
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd(), ...options }),
+	});
+	const bodyText = await resp.text();
+	expect(resp.status, `create session via API: ${bodyText}`).toBe(201);
+	const sessionId = JSON.parse(bodyText).id as string;
+	expect(sessionId, "API session id should be valid").toMatch(/^[a-f0-9-]{36}$/);
+
+	await navigateToSession(page, sessionId);
+	return sessionId;
+}
+
+async function navigateToSession(page: Page, sessionId: string): Promise<void> {
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
+		{ timeout: 10_000, message: `selected session should be ${sessionId}` },
+	).toBe(sessionId);
 }
 
 async function sessionIdFromHash(page: Page): Promise<string> {
@@ -145,7 +162,7 @@ async function visiblePanelTabLabels(page: Page): Promise<string[]> {
 	return (await visiblePanelTabs(page)).map((tab) => tab.label);
 }
 
-async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; label: string }>> {
+async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>> {
 	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
 		.map((button, index) => {
 			const el = button as HTMLElement;
@@ -153,9 +170,47 @@ async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; labe
 			const rect = el.getBoundingClientRect();
 			if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return null;
 			const label = (button.getAttribute("title") || button.textContent || "").replace(/\s+/g, " ").trim();
-			return label ? { index, label } : null;
+			return label ? {
+				index,
+				label,
+				title: (button.getAttribute("data-panel-tab-title") || "").replace(/\s+/g, " ").trim(),
+				id: button.getAttribute("data-panel-tab-id") || "",
+				kind: button.getAttribute("data-panel-tab-kind") || "",
+				active: button.classList.contains("goal-tab-pill--active"),
+			} : null;
 		})
-		.filter(Boolean) as Array<{ index: number; label: string }>);
+		.filter(Boolean) as Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>);
+}
+
+async function visiblePreviewTabPresentations(page: Page): Promise<Array<{ text: string; tooltip: string; dataTitle: string; id: string }>> {
+	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
+		.map((button) => {
+			const el = button as HTMLElement;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return null;
+			if (button.getAttribute("data-panel-tab-kind") !== "preview") return null;
+			const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+			return {
+				text: normalize(button.textContent),
+				tooltip: normalize(button.getAttribute("title")),
+				dataTitle: normalize(button.getAttribute("data-panel-tab-title")),
+				id: normalize(button.getAttribute("data-panel-tab-id")),
+			};
+		})
+		.filter(Boolean) as Array<{ text: string; tooltip: string; dataTitle: string; id: string }>);
+}
+
+async function expectPreviewTabsExposeUserFacingSourceNames(page: Page, sources: RegExp[], errorPrefix: string): Promise<void> {
+	try {
+		await expect.poll(async () => {
+			const tabs = await visiblePreviewTabPresentations(page);
+			return sources.every((source) => tabs.some((tab) => source.test(tab.text) || source.test(tab.tooltip)));
+		}, { timeout: 5_000, message: `${errorPrefix}: preview tab text or tooltip should include each preview artifact source` }).toBe(true);
+	} catch {
+		const tabs = await visiblePreviewTabPresentations(page);
+		throw new Error(`${errorPrefix}: preview tabs must expose artifact-derived user-facing names; presentations=${JSON.stringify(tabs)}`);
+	}
 }
 
 async function waitForGoalAndPreviewTabs(page: Page): Promise<void> {
@@ -196,11 +251,18 @@ async function selectTopLevelTab(page: Page, label: RegExp, errorPrefix: string)
 	if (!match) {
 		throw new Error(`${errorPrefix}: expected selectable top-level tab ${label}; visible tabs were: ${tabs.map((tab) => tab.label).join(", ") || "<none>"}`);
 	}
-	const tab = page.locator(PANEL_TAB_SELECTOR).nth(match.index);
-	await tab.evaluate((el) => (el as HTMLElement).scrollIntoView({ block: "nearest", inline: "center" }));
-	await expect(tab, `${errorPrefix}: matched tab ${match.label} should be visible before click`).toBeVisible({ timeout: 5_000 });
-	await tab.click();
+	await clickTopLevelTabByIndex(page, match.index, errorPrefix);
 	return match.label;
+}
+
+async function selectTopLevelTabByTitle(page: Page, title: RegExp, errorPrefix: string): Promise<string> {
+	const tabs = await visiblePanelTabs(page);
+	const match = tabs.find((tab) => title.test(tab.title));
+	if (!match) {
+		throw new Error(`${errorPrefix}: expected selectable top-level tab title ${title}; visible tabs were: ${tabs.map((tab) => `${tab.label} [${tab.title}]`).join(", ") || "<none>"}`);
+	}
+	await clickTopLevelTabByIndex(page, match.index, errorPrefix);
+	return match.title;
 }
 
 async function clickTopLevelTabByIndex(page: Page, index: number, errorPrefix: string): Promise<void> {
@@ -289,6 +351,96 @@ async function openPreviewSnapshotToolCard(page: Page, size: number, ordinal: nu
 	await expect(button, `${errorPrefix}: clicking preview_open tool card ${ordinal} should acknowledge that it opened`).toHaveText(/Opened/, { timeout: 5_000 });
 	await expectPreviewContains(page, expectedText, `${errorPrefix}: opening preview_open tool card ${ordinal} should select that snapshot immediately`);
 	return expectedText;
+}
+
+async function appendSyntheticToolCard(
+	page: Page,
+	args: { toolId: string; toolName: string; input: Record<string, unknown>; resultContent: string[] },
+): Promise<void> {
+	await page.evaluate(({ toolId, toolName, input, resultContent }) => {
+		const agent = (window as any).bobbitState?.remoteAgent;
+		if (!agent?.appendMessage) throw new Error("remote agent is not ready for synthetic tool card injection");
+		const now = Date.now();
+		agent.appendMessage({
+			id: `assistant-${toolId}`,
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: toolName, arguments: input, input }],
+			timestamp: now,
+		});
+		agent.appendMessage({
+			id: `tool-result-${toolId}`,
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError: false,
+			content: resultContent.map((text) => ({ type: "text", text })),
+			timestamp: now + 1,
+		});
+	}, args);
+}
+
+async function mountV3PreviewEntry(page: Page, sessionId: string, entry: string, bodyText: string): Promise<{ url: string; path: string; entry: string }> {
+	const baseUrl = new URL(page.url()).origin;
+	const result = await page.evaluate(async ({ baseUrl, sessionId, entry, bodyText }) => {
+		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
+			method: "POST",
+			credentials: "include",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ entry, html: `<!DOCTYPE html><html><body><h1>${bodyText}</h1></body></html>` }),
+		});
+		return { status: r.status, text: await r.text() };
+	}, { baseUrl, sessionId, entry, bodyText });
+	expect(result.status, `mount v3 preview entry ${entry}: ${result.text}`).toBe(200);
+	const parsed = JSON.parse(result.text) as { url: string; path?: string; relPath?: string; entry: string };
+	return { url: parsed.url, path: parsed.relPath || parsed.path || `${sessionId}/${entry}`, entry: parsed.entry };
+}
+
+async function appendV3PreviewToolCard(page: Page, sessionId: string, toolId: string, entry: string, bodyText: string): Promise<string> {
+	const mounted = await mountV3PreviewEntry(page, sessionId, entry, bodyText);
+	const snapshot = `__preview_snapshot_v3__\n${JSON.stringify({ kind: "preview", url: mounted.url, path: mounted.path })}\n`;
+	await appendSyntheticToolCard(page, {
+		toolId,
+		toolName: "preview_open",
+		input: {},
+		resultContent: ["Preview panel is open and will auto-update.", snapshot],
+	});
+	return bodyText;
+}
+
+async function deliverReviewToolResult(page: Page, payload: Record<string, unknown>): Promise<void> {
+	await page.evaluate((payload) => {
+		const agent = (window as any).bobbitState?.remoteAgent;
+		if (!agent?._checkReviewToolResult) throw new Error("remote agent review parser is not ready");
+		agent._checkReviewToolResult({
+			role: "toolResult",
+			content: [{ type: "text", text: JSON.stringify(payload) }],
+		}, true);
+	}, payload);
+}
+
+async function seedProjectProposalRevision(page: Page, sessionId: string, fields: Record<string, unknown>): Promise<number> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+		method: "POST",
+		body: JSON.stringify({ args: fields }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `seed project proposal revision: ${text}`).toBe(200);
+	const body = JSON.parse(text) as { rev?: number };
+	expect(typeof body.rev, `seed response should include rev: ${text}`).toBe("number");
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.project?.rev ?? 0),
+		{ timeout: 10_000, message: `project proposal rev ${body.rev} should hydrate in the UI` },
+	).toBe(body.rev);
+	return body.rev!;
+}
+
+async function appendProjectProposalToolCard(page: Page, toolId: string, fields: Record<string, unknown>, rev: number): Promise<void> {
+	await appendSyntheticToolCard(page, {
+		toolId,
+		toolName: "propose_project",
+		input: fields,
+		resultContent: [`Project proposal submitted.\n__proposal_rev_v1__:${rev}`],
+	});
 }
 
 async function expectReviewDocumentAccessible(page: Page, title: string, body: string, errorPrefix: string): Promise<void> {
@@ -415,6 +567,204 @@ test.describe("Dynamic chat tabs", () => {
 		await buttons.nth(1).click();
 		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopening the second preview_open tool card should restore the second snapshot");
 		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: Goal proposal tab should remain accessible after reopening the second preview snapshot");
+	});
+
+	test("per-session workspaces isolate historical preview tabs and restore them when switching back", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionA = await createRegularSessionViaApi(page);
+		const firstPreviewText = await openPreviewSnapshotToolCard(page, 13, 1, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		const secondPreviewText = await openPreviewSnapshotToolCard(page, 31, 2, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session A should expose both historical preview tabs before switching away",
+		);
+
+		const sessionB = await createRegularSessionViaApi(page);
+		await expect.poll(
+			async () => (await visiblePanelTabLabels(page)).filter((label) => PREVIEW_TAB_RE.test(label)).length,
+			{ timeout: 5_000, message: "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B must not inherit session A preview tabs" },
+		).toBe(0);
+
+		await sendChatMessage(page, "REVIEW_OPEN", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		await expect(page.getByText("Done. Used review_open tool.").first(), "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: review_open should finish before asserting session B tabs").toBeVisible({ timeout: 15_000 });
+		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B review should be available only in session B");
+
+		await navigateToSession(page, sessionA);
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switching back to session A should restore its historical preview tabs",
+		);
+		await expect.poll(
+			async () => (await visiblePanelTabLabels(page)).filter((label) => reviewTabRe("Test Document").test(label)).length,
+			{ timeout: 5_000, message: "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B review tab must not bleed back into session A" },
+		).toBe(0);
+		const restoredTexts = await collectPreviewTabTexts(page, 2, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		expect(restoredTexts.some((text) => text.includes(firstPreviewText))).toBe(true);
+		expect(restoredTexts.some((text) => text.includes(secondPreviewText))).toBe(true);
+
+		await navigateToSession(page, sessionB);
+		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switching back to session B should restore its own review tab");
+	});
+
+	test("review document titles with reserved characters stay selectable after close and reopen", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		await createRegularSessionViaApi(page);
+		const reservedTitle = "Doc / A?x#y%";
+		await deliverReviewToolResult(page, {
+			action: "review_open",
+			title: reservedTitle,
+			markdown: `# ${reservedTitle}\n\nReserved title body.`,
+			replace: true,
+		});
+		await deliverReviewToolResult(page, {
+			action: "review_open",
+			title: "Plain Doc",
+			markdown: "# Plain Doc\n\nPlain body.",
+			replace: true,
+		});
+
+		await waitForTopLevelTabCounts(
+			page,
+			[
+				{ name: "Reserved review", match: reviewTabRe(reservedTitle), min: 1 },
+				{ name: "Plain review", match: reviewTabRe("Plain Doc"), min: 1 },
+			],
+			"DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reserved-character and plain review docs should both be top-level tabs",
+		);
+		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
+		await expectReviewDocumentAccessible(page, "Plain Doc", "Plain body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
+
+		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reserved title should be active before close");
+		await page.locator("review-pane button.review-tab", { hasText: reservedTitle }).locator(".review-tab-close").click();
+		await expect.poll(
+			async () => (await visiblePanelTabLabels(page)).filter((label) => reviewTabRe(reservedTitle).test(label)).length,
+			{ timeout: 10_000, message: "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: closing the reserved title should remove its top-level tab" },
+		).toBe(0);
+
+		await deliverReviewToolResult(page, {
+			action: "review_open",
+			title: reservedTitle,
+			markdown: `# ${reservedTitle}\n\nReserved title body reopened.`,
+			replace: true,
+		});
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "Reserved review", match: reviewTabRe(reservedTitle), min: 1 }],
+			"DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reopening the reserved title should recreate one selectable top-level tab",
+		);
+		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body reopened.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
+	});
+
+	test("multiple preview tabs expose source-derived visible labels or tooltips", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		await appendV3PreviewToolCard(page, sessionId, "tool-label-a", "label-a.html", "Preview Label A Content");
+		await appendV3PreviewToolCard(page, sessionId, "tool-label-b", "label-b.html", "Preview Label B Content");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: two preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
+		await buttons.nth(0).click();
+		await buttons.nth(1).click();
+
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: opening two preview artifacts should expose two preview tabs",
+		);
+		await expectPreviewTabsExposeUserFacingSourceNames(
+			page,
+			[/^Preview:\s*label-a\.html$/i, /^Preview:\s*label-b\.html$/i],
+			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG",
+		);
+	});
+
+	test("historical v3 preview tool-card reopen restores A and B as independent tabs", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const firstPreviewText = await appendV3PreviewToolCard(page, sessionId, "tool-v3-a", "v3-a.html", "V3 Preview A Content");
+		const secondPreviewText = await appendV3PreviewToolCard(page, sessionId, "tool-v3-b", "v3-b.html", "V3 Preview B Content");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: two v3 preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
+		await buttons.nth(0).click();
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: opening preview A should show A content");
+		await buttons.nth(1).click();
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: opening preview B should show B content");
+
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: opening A and B should create two top-level historical preview tabs",
+		);
+
+		await buttons.nth(0).click();
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: reopening A from its tool card should restore A, not latest B");
+		await selectTopLevelTabByTitle(page, /Preview:\s*v3-b\.html/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: selecting B tab should show B content after A was reopened");
+		await selectTopLevelTabByTitle(page, /Preview:\s*v3-a\.html/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: selecting A tab should show A content after selecting B");
+	});
+
+	test("proposal revisions of the same type open as distinct tabs while the live proposal stays accessible", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const rev1Fields = { name: "Revision One Project", root_path: "/tmp/revision-one", build_command: "echo old" };
+		const rev1 = await seedProjectProposalRevision(page, sessionId, rev1Fields);
+		await appendProjectProposalToolCard(page, "tool-project-rev-1", rev1Fields, rev1);
+
+		const rev2Fields = { name: "Revision Two Project", root_path: "/tmp/revision-two", build_command: "echo new" };
+		const rev2 = await seedProjectProposalRevision(page, sessionId, rev2Fields);
+		await appendProjectProposalToolCard(page, "tool-project-rev-2", rev2Fields, rev2);
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.project?.fields?.name ?? ""),
+			{ timeout: 10_000, message: "DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: live proposal should be at rev 2 before opening a historical revision" },
+		).toBe("Revision Two Project");
+
+		await selectTopLevelTab(page, PROJECT_PROPOSAL_TAB_RE, "DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: live project proposal tab should be selectable before opening history");
+		await expect(page.locator('[data-panel="project-proposal"]').getByText("Revision Two Project").first()).toBeVisible({ timeout: 10_000 });
+
+		const openButtons = page.locator('[data-testid="proposal-open-button"]');
+		await expect(openButtons, "DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: rev 1 and rev 2 proposal cards should both expose Open proposal").toHaveCount(2, { timeout: 15_000 });
+		await openButtons.nth(0).click();
+
+		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "proposal" && PROJECT_PROPOSAL_TAB_RE.test(tab.label)).length, {
+			timeout: 10_000,
+			message: "DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: opening rev 1 should create/select a distinct historical proposal tab without replacing the live project tab",
+		}).toBeGreaterThanOrEqual(2);
+
+		const proposalTabs = (await visiblePanelTabs(page)).filter((tab) => tab.kind === "proposal" && PROJECT_PROPOSAL_TAB_RE.test(tab.label));
+		const panelTexts: string[] = [];
+		for (const tab of proposalTabs) {
+			await clickTopLevelTabByIndex(page, tab.index, "DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG");
+			const panel = page.locator('[data-panel="project-proposal"]').first();
+			await expect(panel).toBeVisible({ timeout: 10_000 });
+			panelTexts.push((await panel.textContent()) || "");
+		}
+		expect(
+			panelTexts.some((text) => text.includes("Revision One Project")),
+			`DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: no proposal tab rendered rev 1; panel texts were ${JSON.stringify(panelTexts)}`,
+		).toBe(true);
+		expect(
+			panelTexts.some((text) => text.includes("Revision Two Project")),
+			`DYNAMIC_CHAT_TABS_PROPOSAL_REVISIONS_BUG: no proposal tab kept the live rev 2 accessible; panel texts were ${JSON.stringify(panelTexts)}`,
+		).toBe(true);
 	});
 
 	test("multiple review documents coexist as top-level tabs with a proposal and preview", async ({ page }) => {

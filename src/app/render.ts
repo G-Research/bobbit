@@ -73,6 +73,7 @@ import {
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
 	proposalPanelTabId,
+	proposalRevisionFromPanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
@@ -2443,6 +2444,57 @@ function proposalPanelForWorkspaceType(type: ProposalType) {
 	return proposalPanelForType(type);
 }
 
+function proposalFieldText(value: unknown): string {
+	if (value == null) return "";
+	if (typeof value === "string") return value;
+	try { return JSON.stringify(value, null, 2) ?? String(value); } catch { return String(value); }
+}
+
+const PROPOSAL_TITLE_FIELD: Record<ProposalType, string> = {
+	goal: "title",
+	project: "name",
+	role: "name",
+	tool: "tool",
+	staff: "name",
+};
+
+function historicalProposalPanel(tab: PanelWorkspaceTab) {
+	if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
+	const type = tab.source.proposalType;
+	const rev = proposalRevisionFromPanelTab(tab);
+	const fields = tab.state?.fields && typeof tab.state.fields === "object" && !Array.isArray(tab.state.fields)
+		? tab.state.fields as Record<string, unknown>
+		: undefined;
+	if (!fields) {
+		return html`
+			<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel=${`${type}-proposal`} data-historical-proposal="true">
+				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
+					Loading proposal revision${rev ? ` ${rev}` : ""}…
+				</div>
+			</div>
+		`;
+	}
+	const titleKey = PROPOSAL_TITLE_FIELD[type];
+	const title = proposalFieldText(fields[titleKey]) || `${type.charAt(0).toUpperCase()}${type.slice(1)} proposal`;
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full overflow-hidden" data-panel=${`${type}-proposal`} data-historical-proposal="true">
+			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0 border-b border-border">
+				<div class="text-sm font-medium truncate">${title}</div>
+				${rev ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${rev}</span>` : ""}
+				<span class="text-[11px] text-muted-foreground shrink-0">historical snapshot</span>
+			</div>
+			<div class="flex-1 min-h-0 overflow-auto p-5 flex flex-col gap-4">
+				${Object.entries(fields).map(([key, value]) => html`
+					<div data-field=${key}>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${key}</label>
+						<pre class="text-sm whitespace-pre-wrap break-words rounded-md border border-border bg-secondary/30 p-3 text-foreground/90">${proposalFieldText(value) || "—"}</pre>
+					</div>
+				`)}
+			</div>
+		</div>
+	`;
+}
+
 // ============================================================================
 // GOAL PROPOSAL PANEL (non-assistant inline panel)
 // ============================================================================
@@ -2716,11 +2768,12 @@ function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string
 	if (sessionId && !tabSessionId) return null;
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const source = tab.source as Record<string, unknown>;
+	const title = tab.title || `Preview: ${basename(entry) || "inline.html"}`;
 	return {
 		...tab,
 		kind: "preview",
-		title: tab.title || `Preview: ${basename(entry) || "inline.html"}`,
-		label: tab.label || "Preview",
+		title,
+		label: tab.label && tab.label !== "Preview" ? tab.label : title,
 		legacyTab: "preview",
 		source: {
 			...source,
@@ -2749,6 +2802,12 @@ function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: strin
 	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
 	if (sessionId && !tabSessionId) return null;
 	const rev = typeof tab.state?.rev === "number" ? tab.state.rev : tab.source.rev;
+	if (typeof rev !== "number" || !Number.isFinite(rev) || rev <= 0) return null;
+	const activeSlot = state.activeProposals[tab.source.proposalType];
+	const activeRev = activeSlot?.sessionId === sessionId && typeof activeSlot.rev === "number" && Number.isFinite(activeSlot.rev) && activeSlot.rev > 0
+		? Math.trunc(activeSlot.rev)
+		: undefined;
+	if (activeRev != null && Math.trunc(rev) >= activeRev) return null;
 	return {
 		...tab,
 		id: proposalPanelTabId(tab.source.proposalType, rev),
@@ -3375,17 +3434,24 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => html`
+	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
+		tab.kind === "preview" ? (tab.title || tab.label || "Preview") : tab.label
+	);
+
+	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
+		const label = panelTabButtonLabel(tab);
+		return html`
 		<button
 			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
-			title=${tab.label}
+			title=${label}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${tab.title}
 			data-testid=${testId}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-		>${tab.label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+		>${label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
 	`;
+	};
 
 	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => panelTabButton(
 		tab,
@@ -3534,7 +3600,10 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const proposalPanelContent = (type: ProposalType) => {
+	const proposalPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
+		const type = tab.source.proposalType;
+		if (isHistoricalProposalTab(tab)) return historicalProposalPanel(tab);
 		if (state.activeProposals[type] == null && type !== currentAssistantProposalType()) return "";
 		return proposalPanelForWorkspaceType(type);
 	};
@@ -3550,7 +3619,7 @@ export function doRenderApp(): void {
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
-			return proposalPanelContent(tab.source.proposalType);
+			return proposalPanelContent(tab);
 		}
 		return "";
 	};
