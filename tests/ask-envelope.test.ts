@@ -11,6 +11,8 @@ import {
 	parseAskResponseEnvelope,
 } from "../src/shared/ask-envelope.ts";
 
+const COMPOSITE_TOOL_USE_ID = "call_abc|fc_def";
+
 describe("ask-envelope — regex", () => {
 	it("matches a well-formed envelope", () => {
 		const text = `[ask_user_choices_response tool_use_id=toolu_abc123]\n{"answers":[]}`;
@@ -46,6 +48,14 @@ describe("ask-envelope — regex", () => {
 		assert.ok(m);
 		assert.equal(m![1], "tool-abc_123");
 	});
+
+	it("accepts composite ids with a pipe delimiter", () => {
+		const text = `[ask_user_choices_response tool_use_id=${COMPOSITE_TOOL_USE_ID}]\n{"answers":[]}`;
+		const m = ASK_ENVELOPE_REGEX.exec(text);
+		assert.ok(m, `composite ask envelope regex should accept tool_use_id=${COMPOSITE_TOOL_USE_ID}`);
+		assert.equal(m![1], COMPOSITE_TOOL_USE_ID);
+		assert.equal(m![2], `{"answers":[]}`);
+	});
 });
 
 describe("ask-envelope — build/parse round-trip", () => {
@@ -74,6 +84,15 @@ describe("ask-envelope — build/parse round-trip", () => {
 	it("parse rejects malformed answer entries", () => {
 		const text = `[ask_user_choices_response tool_use_id=t1]\n${JSON.stringify({ answers: [{ question: "x", selected: 42, other_text: null }] })}`;
 		assert.equal(parseAskResponseEnvelope(text), null);
+	});
+
+	it("parses composite ids with a pipe delimiter", () => {
+		const answers = [{ question: "Q", selected: "A", other_text: null }];
+		const text = buildAskResponseEnvelope(COMPOSITE_TOOL_USE_ID, answers);
+		const parsed = parseAskResponseEnvelope(text);
+		assert.ok(parsed, `parseAskResponseEnvelope should accept composite tool_use_id=${COMPOSITE_TOOL_USE_ID}`);
+		assert.equal(parsed!.toolUseId, COMPOSITE_TOOL_USE_ID);
+		assert.deepEqual(parsed!.answers, answers);
 	});
 });
 
@@ -106,6 +125,15 @@ describe("ask-envelope — isAskResponseEnvelope", () => {
 	it("false when marker is present but not at position 0", () => {
 		const msg = { role: "user", content: `prefix\n[ask_user_choices_response tool_use_id=t1]\n{"answers":[]}` };
 		assert.equal(isAskResponseEnvelope(msg), false);
+	});
+
+	it("true for composite-id user envelope text", () => {
+		const msg = { role: "user", content: buildAskResponseEnvelope(COMPOSITE_TOOL_USE_ID, []) };
+		assert.equal(
+			isAskResponseEnvelope(msg),
+			true,
+			`isAskResponseEnvelope should hide composite ask response envelope for tool_use_id=${COMPOSITE_TOOL_USE_ID}`,
+		);
 	});
 });
 
@@ -174,5 +202,21 @@ describe("ask-envelope — findAskResponseAnswers", () => {
 			{ role: "user", content: buildAskResponseEnvelope("t1", answers) },
 		];
 		assert.deepEqual(findAskResponseAnswers(messages, "t1"), answers);
+	});
+
+	it("routes answers for a matching composite tool_use id", () => {
+		const answers = [{ question: "Q", selected: "A", other_text: null }];
+		const messages = [
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: COMPOSITE_TOOL_USE_ID, name: "ask_user_choices", input: { questions: [] } }],
+			},
+			{ role: "user", content: buildAskResponseEnvelope(COMPOSITE_TOOL_USE_ID, answers) },
+		];
+		assert.deepEqual(
+			findAskResponseAnswers(messages, COMPOSITE_TOOL_USE_ID),
+			answers,
+			`findAskResponseAnswers should route answers for composite tool_use_id=${COMPOSITE_TOOL_USE_ID}`,
+		);
 	});
 });
