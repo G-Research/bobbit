@@ -2801,6 +2801,12 @@ function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: strin
 	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
 	if (sessionId && !tabSessionId) return null;
 	const rev = typeof tab.state?.rev === "number" ? tab.state.rev : tab.source.rev;
+	if (typeof rev !== "number" || !Number.isFinite(rev) || rev <= 0) return null;
+	const activeSlot = state.activeProposals[tab.source.proposalType];
+	const activeRev = activeSlot?.sessionId === sessionId && typeof activeSlot.rev === "number" && Number.isFinite(activeSlot.rev) && activeSlot.rev > 0
+		? Math.trunc(activeSlot.rev)
+		: undefined;
+	if (activeRev != null && Math.trunc(rev) >= activeRev) return null;
 	return {
 		...tab,
 		id: proposalPanelTabId(tab.source.proposalType, rev),

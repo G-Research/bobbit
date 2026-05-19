@@ -49,6 +49,14 @@ function panelSessionId(sessionId: string | undefined): string {
 	return sessionId || activeSessionId() || "";
 }
 
+function activeProposalRevForSession(type: string, sessionId: string): number | undefined {
+	const slot = (state as any).activeProposals?.[type];
+	if (!slot) return undefined;
+	if (sessionId && typeof slot.sessionId === "string" && slot.sessionId && slot.sessionId !== sessionId) return undefined;
+	const rev = slot.rev;
+	return typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
+}
+
 function mutablePanelTabs(s: any, sessionId: string): PanelWorkspaceTab[] {
 	return panelTabsForSession(s, sessionId);
 }
@@ -197,9 +205,11 @@ export function selectHtmlPreviewTab(args: {
 
 export function selectProposalWorkspaceTab(type: string, options: PanelWorkspaceOptions = {}): void {
 	const sessionId = panelSessionId(options.sessionId);
-	const rev = typeof options.rev === "number" && Number.isFinite(options.rev) && options.rev > 0
+	const requestedRev = typeof options.rev === "number" && Number.isFinite(options.rev) && options.rev > 0
 		? Math.trunc(options.rev)
 		: undefined;
+	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
+	const rev = activeRev === requestedRev ? undefined : requestedRev;
 	const baseTitle = PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
 	selectPanelWorkspaceTab({
 		id: proposalPanelTabId(type, rev),
@@ -208,11 +218,11 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		label: rev ? `${baseTitle.replace(/ Proposal$/, "")} r${rev}` : (PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type),
 		legacyTab: type as LegacyPanelTab,
 		source: { type: "proposal", proposalType: type as any, sessionId, rev, historical: rev != null },
-		state: {
+		state: rev != null ? {
 			rev,
 			fields: options.fields,
-			historical: rev != null,
-		},
+			historical: true,
+		} : {},
 	}, { ...options, sessionId });
 }
 

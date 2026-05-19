@@ -1468,25 +1468,67 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
 			const numericRev = typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
-			const historicalFields = fields && typeof fields === "object" && !Array.isArray(fields)
+			const proposalFields = fields && typeof fields === "object" && !Array.isArray(fields)
 				? fields as Record<string, unknown>
 				: undefined;
+			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
+				goal: remote.onGoalProposal,
+				role: remote.onRoleProposal,
+				tool: remote.onToolProposal,
+				staff: remote.onStaffProposal,
+				project: remote.onProjectProposal,
+			};
+			const openLiveProposal = (liveFields?: Record<string, unknown>, liveRev?: number) => {
+				revealActiveProposalPanel(type, sessionId);
+				if (!liveFields) {
+					renderApp();
+					return;
+				}
+				const cb = callbackMap[type];
+				if (cb) cb(liveFields, /* streaming */ false);
+				if (remote.onProposal) {
+					remote.onProposal(type, liveFields, false, liveRev);
+				}
+			};
+
 			if (numericRev) {
-				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: historicalFields });
+				const activeSlot = state.activeProposals[type];
+				const activeRev = activeSlot?.sessionId === sessionId && typeof activeSlot.rev === "number" && Number.isFinite(activeSlot.rev) && activeSlot.rev > 0
+					? Math.trunc(activeSlot.rev)
+					: undefined;
+				if (activeRev === numericRev) {
+					openLiveProposal(proposalFields ?? activeSlot?.fields, activeRev);
+					return;
+				}
+				if ((activeRev == null || numericRev > activeRev) && proposalFields) {
+					openLiveProposal(proposalFields, numericRev);
+					return;
+				}
+
+				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: proposalFields });
 				renderApp();
-				if (historicalFields) return;
+				if (proposalFields) return;
 				try {
 					const { readProposalSnapshot } = await import("./api.js");
 					const res = await readProposalSnapshot(sessionId, type, numericRev);
 					if (res && (res as any).ok && (res as any).fields) {
-						selectProposalWorkspaceTab(type, {
-							sessionId,
-							select: true,
-							setAssistantTab: true,
-							rev: numericRev,
-							fields: (res as any).fields as Record<string, unknown>,
-						});
-						renderApp();
+						const snapshotFields = (res as any).fields as Record<string, unknown>;
+						const latestSlot = state.activeProposals[type];
+						const latestRev = latestSlot?.sessionId === sessionId && typeof latestSlot.rev === "number" && Number.isFinite(latestSlot.rev) && latestSlot.rev > 0
+							? Math.trunc(latestSlot.rev)
+							: undefined;
+						if (latestRev == null || numericRev >= latestRev) {
+							openLiveProposal(snapshotFields, numericRev);
+						} else {
+							selectProposalWorkspaceTab(type, {
+								sessionId,
+								select: true,
+								setAssistantTab: true,
+								rev: numericRev,
+								fields: snapshotFields,
+							});
+							renderApp();
+						}
 					} else {
 						console.warn(`[proposal] snapshot read failed:`, res);
 					}
@@ -1496,22 +1538,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				return;
 			}
 
-			revealActiveProposalPanel(type, sessionId);
-
 			// Legacy fields path (archived sessions with no rev marker).
-			if (!fields) return;
-			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
-				goal: remote.onGoalProposal,
-				role: remote.onRoleProposal,
-				tool: remote.onToolProposal,
-				staff: remote.onStaffProposal,
-				project: remote.onProjectProposal,
-			};
-			const cb = callbackMap[type];
-			if (cb) cb(fields, /* streaming */ false);
-			if (remote.onProposal) {
-				remote.onProposal(type, fields as Record<string, unknown>, false);
-			}
+			openLiveProposal(proposalFields);
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 
