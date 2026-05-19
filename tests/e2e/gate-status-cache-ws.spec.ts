@@ -11,15 +11,18 @@ import {
 
 test.describe("Gate status WebSocket broadcast", () => {
 	test("gate_status_changed is broadcast when a gate passes", async () => {
-		// Create a session so we can connect a WebSocket
-		const sessionId = await createSession();
+		let sessionId: string | undefined;
 		let goalId: string | undefined;
-		const conn = await connectWs(sessionId);
+		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		try {
-			// Create a goal with the "general" workflow
+			// Create a goal with the "general" workflow, then attach a matching
+			// goal-session socket. Goal broadcasts intentionally skip unrelated
+			// regular sessions.
 			const goal = await createGoal({ title: `WS Gate Test ${Date.now()}`, workflowId: "general" });
 			goalId = goal.id;
+			sessionId = await createSession({ goalId });
+			conn = await connectWs(sessionId);
 
 			// Signal the design-doc gate (no dependencies, has LLM review that auto-passes with mock agent)
 			const signalResp = await apiFetch(`/api/goals/${goalId}/gates/design-doc/signal`, {
@@ -31,7 +34,7 @@ test.describe("Gate status WebSocket broadcast", () => {
 			expect(signalResp.status).toBe(201);
 
 			// Wait for gate_status_changed WS message
-			const wsMsg = await conn.waitFor(
+			const wsMsg = await conn!.waitFor(
 				(m) =>
 					m.type === "gate_status_changed" &&
 					m.goalId === goalId &&
@@ -51,9 +54,9 @@ test.describe("Gate status WebSocket broadcast", () => {
 			const gateData = await gateResp.json();
 			expect(gateData.status).toBe("passed");
 		} finally {
-			conn.close();
+			conn?.close();
 			if (goalId) await deleteGoal(goalId);
-			await deleteSession(sessionId);
+			if (sessionId) await deleteSession(sessionId);
 		}
 	});
 });

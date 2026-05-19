@@ -972,26 +972,22 @@ export function createGateway(config: GatewayConfig) {
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
-	// Broadcast a message to WebSocket clients belonging to a specific goal
+	// Broadcast a message to WebSocket clients belonging to a specific goal.
+	// Recipients are the matching goal's session sockets plus explicit
+	// `/ws/viewer` dashboard sockets. Regular non-goal sessions are skipped so
+	// gate/team events do not wake unrelated tabs.
 	function broadcastToGoal(goalId: string, event: any): void {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
-					const sid = (ws as any).sessionId as string | undefined;
-					if (sid) {
-						const session = sessionManager.getSession(sid);
-						if (session?.teamGoalId === goalId || session?.goalId === goalId) {
-							ws.send(data);
-							continue;
-						}
-						// Session is associated with a different goal — skip it
-						if (session?.teamGoalId || session?.goalId) continue;
-					}
-					// Fallback: send to clients with no goal association
-					// (e.g. the user's browser session viewing the goal dashboard)
-					ws.send(data);
+				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				const sid = (ws as any).sessionId as string | undefined;
+				if (sid) {
+					const session = sessionManager.getSession(sid);
+					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
+					continue;
 				}
+				if ((ws as any).isViewer) ws.send(data);
 			}
 			return;
 		}
@@ -1003,39 +999,52 @@ export function createGateway(config: GatewayConfig) {
 		let scanned = 0;
 		let recipients = 0;
 		let matchedGoal = 0;
+		let viewer = 0;
 		let fallback = 0;
 		let skipped = 0;
+		let skippedNonGoalSession = 0;
+		let skippedOtherGoal = 0;
+		let skippedUnknownSession = 0;
+		let skippedUnscoped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
-				const sid = (ws as any).sessionId as string | undefined;
-				if (sid) {
-					const session = sessionManager.getSession(sid);
-					if (session?.teamGoalId === goalId || session?.goalId === goalId) {
-						ws.send(data);
-						recipients++;
-						matchedGoal++;
-						continue;
-					}
-					// Session is associated with a different goal — skip it
-					if (session?.teamGoalId || session?.goalId) { skipped++; continue; }
+			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			const sid = (ws as any).sessionId as string | undefined;
+			if (sid) {
+				const session = sessionManager.getSession(sid);
+				if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+					ws.send(data);
+					recipients++;
+					matchedGoal++;
+					continue;
 				}
-				// Fallback: send to clients with no goal association
-				// (e.g. the user's browser session viewing the goal dashboard)
+				skipped++;
+				if (!session) skippedUnknownSession++;
+				else if (session.teamGoalId || session.goalId) skippedOtherGoal++;
+				else skippedNonGoalSession++;
+				continue;
+			}
+			if ((ws as any).isViewer) {
 				ws.send(data);
 				recipients++;
-				fallback++;
-			} else {
-				skipped++;
+				viewer++;
+				continue;
 			}
+			skipped++;
+			skippedUnscoped++;
 		}
 		getCpuDiagnostics().recordWsBroadcast("server:broadcastToGoal", wsEventType(event), {
 			frames: 1,
 			scanned,
 			recipients,
 			matchedGoal,
+			viewer,
 			fallback,
 			skipped,
+			skippedNonGoalSession,
+			skippedOtherGoal,
+			skippedUnknownSession,
+			skippedUnscoped,
 			bytes: Buffer.byteLength(data) * recipients,
 			stringifyMs,
 			sendMs: performance.now() - sendStart,
