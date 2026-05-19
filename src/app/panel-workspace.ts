@@ -35,8 +35,20 @@ export interface PanelWorkspaceTab {
 
 export const CHAT_PANEL_TAB_ID = "chat";
 export const LIVE_PREVIEW_PANEL_TAB_ID = "preview:live";
+export const LEGACY_LIVE_PREVIEW_PANEL_TAB_ID = "preview";
 export const INBOX_PANEL_TAB_ID = "inbox";
 export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
+
+export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
+	if (!tab || tab.kind !== "preview") return false;
+	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return true;
+	const source = tab.source as Record<string, unknown> | undefined;
+	return source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
+}
+
+function normalizePanelTabId(id: string): string {
+	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID ? LIVE_PREVIEW_PANEL_TAB_ID : id;
+}
 
 const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	goal: "Goal",
@@ -86,7 +98,7 @@ export function activePanelTabIdForSession(stateLike: any, sessionId: string | n
 	const sid = panelWorkspaceSessionKey(sessionId);
 	const activeBySession = stateLike?.panelWorkspaceActiveBySession;
 	if (activeBySession && typeof activeBySession === "object" && typeof activeBySession[sid] === "string") {
-		return activeBySession[sid];
+		return normalizePanelTabId(activeBySession[sid]);
 	}
 	const tabs = stateLike?.panelTabsBySession?.[sid];
 	if (
@@ -248,6 +260,7 @@ export function panelContentTabs(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[]
 
 export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | undefined): PanelWorkspaceTab | undefined {
 	if (!id) return undefined;
+	id = normalizePanelTabId(id);
 	const exact = tabs.find((tab) => tab.id === id);
 	if (exact) return exact;
 	if (id.startsWith("review:")) {

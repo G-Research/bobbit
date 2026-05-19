@@ -689,6 +689,33 @@ test.describe("Dynamic chat tabs", () => {
 		);
 	});
 
+	test("same-name live and historical preview tabs are visually disambiguated", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, {
+			entry: "inline.html",
+			bodyText: "Live Inline Preview Content",
+		});
+		await appendV3PreviewToolCard(page, sessionId, "tool-inline-snapshot", "inline.html", "Historical Inline Preview Content");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: inline preview tool card should render an Open button").toHaveCount(1, { timeout: 15_000 });
+		await buttons.first().click();
+
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: live and historical inline previews should both be selectable",
+		);
+		const labels = (await visiblePreviewTabPresentations(page)).map((tab) => tab.text || tab.tooltip);
+		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html");
+		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html (snapshot)");
+		expect(new Set(labels).size, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: duplicate preview labels: ${JSON.stringify(labels)}`).toBe(labels.length);
+	});
+
 	test("historical v3 preview tool-card reopen restores A and B as independent tabs", async ({ page }) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1280, height: 800 });
