@@ -22,13 +22,49 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { isPoolBranch } from "./worktree-pool.js";
 import { cleanupWorktree } from "../skills/git.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 
 const execFile = promisify(execFileCb);
+
+function childErrorCode(err: unknown): string {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
+}
+
+function gitChildLabel(args: readonly string[]): string {
+	const [cmd, sub] = args;
+	if (cmd === "worktree" && sub) return `git worktree ${sub}`;
+	return cmd ? `git ${cmd}` : "git";
+}
+
+async function execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+	if (!cpuDiagnosticsEnabled()) {
+		return await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+	}
+	const start = performance.now();
+	let success = 0;
+	let errorCode = "none";
+	try {
+		const result = await execFile("git", args, options) as unknown as { stdout: string; stderr: string };
+		success = 1;
+		return result;
+	} catch (err) {
+		errorCode = childErrorCode(err);
+		throw err;
+	} finally {
+		getCpuDiagnostics().recordChildProcess(gitChildLabel(args), performance.now() - start, {
+			success,
+			errorCode,
+			timeoutMs: typeof options?.timeout === "number" ? options.timeout : 0,
+		});
+	}
+}
 
 export interface SweepProject {
 	id: string;
@@ -89,125 +125,146 @@ export async function sweepOrphanedWorktrees(opts: {
 	sessions: SweepRecord[];
 	staff: SweepRecord[];
 }): Promise<SweepResult> {
+	const diagEnabled = cpuDiagnosticsEnabled();
+	const diagStart = diagEnabled ? performance.now() : 0;
+	const diagCounters = diagEnabled ? {
+		projects: opts.projects.length,
+		reposScanned: 0,
+		worktreesSeen: 0,
+		reclaimed: 0,
+		cleaned: 0,
+		repaired: 0,
+		errors: 0,
+	} : undefined;
 	let reclaimed = 0;
 	let cleaned = 0;
 	let repaired = 0;
 
-	// Build the set of branches/paths owned by live (non-archived) records.
-	const ownedBranches = new Set<string>();
-	const ownedPaths = new Set<string>();
-	const branchToExpectedPath = new Map<string, string>();
-	for (const rec of [...opts.goals, ...opts.sessions, ...opts.staff]) {
-		if (rec.archived) continue;
-		if (rec.branch) ownedBranches.add(rec.branch);
-		const np = normalize(rec.worktreePath);
-		if (np) ownedPaths.add(np);
-		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
-		// Multi-repo: each per-repo worktree is separately owned. The branch is
-		// shared across repos so we only add to ownedPaths.
-		if (rec.repoWorktrees) {
-			for (const wp of Object.values(rec.repoWorktrees)) {
-				const n = normalize(wp);
-				if (n) ownedPaths.add(n);
-			}
-		}
-	}
-
-	for (const project of opts.projects) {
-		if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
-
-		// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
-		// is reconciled against the goal/session/staff record map. Single-repo
-		// projects have one entry with `repoPath === project.rootPath`.
-		const repoList = (project.repos && project.repos.length > 0)
-			? project.repos.map(r => r === "." ? project.rootPath : path.join(project.rootPath, r))
-			: [project.rootPath];
-
-		const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
-		for (const repoPath of repoList) {
-			if (!fs.existsSync(repoPath)) continue;
-			// Only sweep if THIS directory is itself a git repo (has its own .git).
-			// Without this check, `git worktree list` walks upward to find a parent
-			// repo and returns the parent's worktrees — which the sweeper would
-			// then try to clean. Catastrophic if rootPath is, say, a test fixture
-			// nested inside a real bobbit checkout.
-			if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
-			try {
-				const { stdout } = await execFile("git", ["worktree", "list", "--porcelain"], {
-					cwd: repoPath,
-					timeout: 10_000,
-				});
-				for (const wt of parseWorktreeList(stdout)) {
-					worktrees.push({ ...wt, repoPath });
+	try {
+		// Build the set of branches/paths owned by live (non-archived) records.
+		const ownedBranches = new Set<string>();
+		const ownedPaths = new Set<string>();
+		const branchToExpectedPath = new Map<string, string>();
+		for (const rec of [...opts.goals, ...opts.sessions, ...opts.staff]) {
+			if (rec.archived) continue;
+			if (rec.branch) ownedBranches.add(rec.branch);
+			const np = normalize(rec.worktreePath);
+			if (np) ownedPaths.add(np);
+			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+			// Multi-repo: each per-repo worktree is separately owned. The branch is
+			// shared across repos so we only add to ownedPaths.
+			if (rec.repoWorktrees) {
+				for (const wp of Object.values(rec.repoWorktrees)) {
+					const n = normalize(wp);
+					if (n) ownedPaths.add(n);
 				}
-			} catch {
-				// Not a git repo, or git unavailable — skip this repo.
 			}
 		}
 
-		for (const wt of worktrees) {
-			const wtPathNorm = normalize(wt.path);
-			if (!wtPathNorm) continue;
+		for (const project of opts.projects) {
+			if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
 
-			// Skip the primary worktree(s) of any configured repo.
-			if (wtPathNorm === normalize(wt.repoPath)) continue;
+			// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
+			// is reconciled against the goal/session/staff record map. Single-repo
+			// projects have one entry with `repoPath === project.rootPath`.
+			const repoList = (project.repos && project.repos.length > 0)
+				? project.repos.map(r => r === "." ? project.rootPath : path.join(project.rootPath, r))
+				: [project.rootPath];
 
-			const branch = wt.branch;
-
-			// Pool branch — leave for `WorktreePool.reclaimOrphaned` to absorb.
-			// We just count it as "reclaimed" so logs reflect what's happening.
-			if (branch && isPoolBranch(branch)) {
-				reclaimed++;
-				continue;
+			const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
+			for (const repoPath of repoList) {
+				if (diagCounters) diagCounters.reposScanned++;
+				if (!fs.existsSync(repoPath)) continue;
+				// Only sweep if THIS directory is itself a git repo (has its own .git).
+				// Without this check, `git worktree list` walks upward to find a parent
+				// repo and returns the parent's worktrees — which the sweeper would
+				// then try to clean. Catastrophic if rootPath is, say, a test fixture
+				// nested inside a real bobbit checkout.
+				if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
+				try {
+					const { stdout } = await execGit(["worktree", "list", "--porcelain"], {
+						cwd: repoPath,
+						timeout: 10_000,
+					});
+					for (const wt of parseWorktreeList(stdout)) {
+						worktrees.push({ ...wt, repoPath });
+						if (diagCounters) diagCounters.worktreesSeen++;
+					}
+				} catch {
+					// Not a git repo, or git unavailable — skip this repo.
+				}
 			}
 
-			// Active record owns this worktree (by branch or path).
-			const ownedByBranch = !!(branch && ownedBranches.has(branch));
-			const ownedByPath = ownedPaths.has(wtPathNorm);
+			for (const wt of worktrees) {
+				const wtPathNorm = normalize(wt.path);
+				if (!wtPathNorm) continue;
 
-			if (ownedByBranch || ownedByPath) {
-				// Multi-repo: a per-repo path explicitly listed in any record's
-				// `repoWorktrees` is active in this repo — do NOT treat path drift
-				// against the record's flat container path as a repair signal.
-				if (ownedByPath) {
+				// Skip the primary worktree(s) of any configured repo.
+				if (wtPathNorm === normalize(wt.repoPath)) continue;
+
+				const branch = wt.branch;
+
+				// Pool branch — leave for `WorktreePool.reclaimOrphaned` to absorb.
+				// We just count it as "reclaimed" so logs reflect what's happening.
+				if (branch && isPoolBranch(branch)) {
+					reclaimed++;
+					if (diagCounters) diagCounters.reclaimed++;
 					continue;
 				}
-				// Path drift — record says worktree is at X, git says it's at Y.
-				// Try `git worktree repair` to bring them back into sync.
-				if (ownedByBranch && branch) {
-					const expected = branchToExpectedPath.get(branch);
-					if (expected && normalize(expected) !== wtPathNorm) {
-						try {
-							await execFile("git", ["worktree", "repair", wt.path], {
-								cwd: wt.repoPath,
-								timeout: 15_000,
-							});
-							repaired++;
-						} catch {
-							// Repair failed — leave as-is; the running session will
-							// surface its own error if it tries to use a stale path.
+
+				// Active record owns this worktree (by branch or path).
+				const ownedByBranch = !!(branch && ownedBranches.has(branch));
+				const ownedByPath = ownedPaths.has(wtPathNorm);
+
+				if (ownedByBranch || ownedByPath) {
+					// Multi-repo: a per-repo path explicitly listed in any record's
+					// `repoWorktrees` is active in this repo — do NOT treat path drift
+					// against the record's flat container path as a repair signal.
+					if (ownedByPath) {
+						continue;
+					}
+					// Path drift — record says worktree is at X, git says it's at Y.
+					// Try `git worktree repair` to bring them back into sync.
+					if (ownedByBranch && branch) {
+						const expected = branchToExpectedPath.get(branch);
+						if (expected && normalize(expected) !== wtPathNorm) {
+							try {
+								await execGit(["worktree", "repair", wt.path], {
+									cwd: wt.repoPath,
+									timeout: 15_000,
+								});
+								repaired++;
+								if (diagCounters) diagCounters.repaired++;
+							} catch {
+								// Repair failed — leave as-is; the running session will
+								// surface its own error if it tries to use a stale path.
+							}
 						}
 					}
+					continue;
 				}
-				continue;
-			}
 
-			// No owner — branch is from a pre-rename crash or stale pool entry.
-			// Skip session/goal/* prefixed branches whose owner record may have
-			// been deleted; cleanup is harmless because the branch is unowned.
-			if (!branch) continue; // detached worktree; leave alone.
+				// No owner — branch is from a pre-rename crash or stale pool entry.
+				// Skip session/goal/* prefixed branches whose owner record may have
+				// been deleted; cleanup is harmless because the branch is unowned.
+				if (!branch) continue; // detached worktree; leave alone.
 
-			try {
-				await cleanupWorktree(wt.repoPath, wt.path, branch, true);
-				cleaned++;
-				console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
-			} catch (err) {
-				console.warn(`[sweeper] Failed to clean orphan worktree ${wt.path}:`, err);
+				try {
+					await cleanupWorktree(wt.repoPath, wt.path, branch, true);
+					cleaned++;
+					if (diagCounters) diagCounters.cleaned++;
+					console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
+				} catch (err) {
+					if (diagCounters) diagCounters.errors++;
+					console.warn(`[sweeper] Failed to clean orphan worktree ${wt.path}:`, err);
+				}
 			}
 		}
-	}
 
-	return { reclaimed, cleaned, repaired };
+		return { reclaimed, cleaned, repaired };
+	} finally {
+		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-sweeper:sweep", performance.now() - diagStart, diagCounters);
+	}
 }
 
 /** Helper for tests that want to run the sweeper against a single project's stdout. */

@@ -14,19 +14,74 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs } from "./docker-args.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
 
 const execFileAsync = promisify(execFileCb);
+const DOCKER_BIN = "docker";
 
 /** Env config for docker commands — suppresses MSYS path mangling on Windows. */
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
+
+function childErrorCode(err: unknown): string {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
+}
+
+function dockerOperation(args: readonly string[]): string {
+	const cmd = args[0] || "docker";
+	if (cmd !== "exec") return cmd;
+	let i = 1;
+	while (i < args.length) {
+		const arg = args[i];
+		if (arg === "-w" || arg === "-e" || arg === "-u") { i += 2; continue; }
+		if (arg?.startsWith("-")) { i += 1; continue; }
+		break;
+	}
+	const inner = args[i + 1] || "unknown";
+	const innerSub = args[i + 2];
+	if (inner === "git" && innerSub) return `exec git ${innerSub}`;
+	return `exec ${inner}`;
+}
+
+function dockerChildLabel(args: readonly string[]): string {
+	const op = dockerOperation(args);
+	if (op.startsWith("exec git")) return "docker exec git";
+	if (op.startsWith("exec ")) return "docker exec";
+	return `docker ${args[0] || "command"}`;
+}
+
+async function execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
+	if (!cpuDiagnosticsEnabled()) {
+		return await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+	}
+	const start = performance.now();
+	let success = 0;
+	let errorCode = "none";
+	try {
+		const result = await execFileAsync(DOCKER_BIN, args, options) as unknown as { stdout: string; stderr: string };
+		success = 1;
+		return result;
+	} catch (err) {
+		errorCode = childErrorCode(err);
+		throw err;
+	} finally {
+		getCpuDiagnostics().recordChildProcess(dockerChildLabel(args), performance.now() - start, {
+			operation: dockerOperation(args),
+			success,
+			errorCode,
+			timeoutMs: typeof options?.timeout === "number" ? options.timeout : 0,
+		});
+	}
+}
 
 // ── Docker resource limits ─────────────────────────────────────────────────
 
@@ -46,8 +101,8 @@ export async function getDockerResourceLimits(): Promise<DockerResourceLimits | 
 	if (_cachedDockerLimits !== undefined) return _cachedDockerLimits;
 
 	try {
-		const { stdout } = await execFileAsync(
-			"docker", ["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
+		const { stdout } = await execDocker(
+			["info", "--format", "{{.NCPU}} {{.MemTotal}}"],
 			{ timeout: 5_000, env: DOCKER_ENV },
 		);
 		const parts = stdout.trim().split(/\s+/);
@@ -201,7 +256,7 @@ export class ProjectSandbox {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
 			// Permission denied — create as root and chown to node
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -310,7 +365,7 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", container]);
 		} catch {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				`mkdir -p ${container} && chown node:node ${container}`,
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -425,6 +480,9 @@ export class ProjectSandbox {
 	/** Start periodic health checks. Safe to call multiple times. */
 	startHealthMonitor(intervalMs = 20_000): void {
 		this.stopHealthMonitor();
+		if (cpuDiagnosticsEnabled()) {
+			getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { starts: 1, intervalMs });
+		}
 		this._healthInterval = setInterval(() => {
 			this._healthCheck().catch(err => {
 				console.warn(`[project-sandbox] Health check error for project ${this.options.projectId}:`, err?.message || err);
@@ -437,6 +495,9 @@ export class ProjectSandbox {
 		if (this._healthInterval) {
 			clearInterval(this._healthInterval);
 			this._healthInterval = null;
+			if (cpuDiagnosticsEnabled()) {
+				getCpuDiagnostics().recordTimer("project-sandbox:healthMonitor", 0, { stops: 1 });
+			}
 		}
 	}
 
@@ -456,33 +517,58 @@ export class ProjectSandbox {
 	}
 
 	private async _healthCheck(): Promise<void> {
-		if (this._recovering) return;
-		// Skip if never initialized (still in first-time startup)
-		if (this._status === "starting") return;
-		// If status is "ready", check container health; if "error", retry recovery
-		if (this._status === "ready") {
-			if (!this.containerId) return;
-			const isRunning = await this._isContainerRunning(this.containerId);
-			if (isRunning) return;
-		}
-
-		// Container is dead or previous recovery failed — begin recovery
-		this._recovering = true;
-		const oldContainerId = this.containerId ?? "unknown";
-		this._status = "error";
-
-		console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
-		this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
-
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		const counters = diagEnabled ? {
+			ticks: 1,
+			skippedRecovering: 0,
+			skippedStarting: 0,
+			skippedNoContainer: 0,
+			inspectCalls: 0,
+			running: 0,
+			dead: 0,
+			recoveryAttempts: 0,
+			recovered: 0,
+			recoveryErrors: 0,
+		} : undefined;
 		try {
-			await this.init();
-			console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
-			this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
-		} catch (err: any) {
-			console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
-			// Will retry on next poll cycle — _recovering resets so next cycle can try again
+			if (this._recovering) { if (counters) counters.skippedRecovering = 1; return; }
+			// Skip if never initialized (still in first-time startup)
+			if (this._status === "starting") { if (counters) counters.skippedStarting = 1; return; }
+			// If status is "ready", check container health; if "error", retry recovery
+			if (this._status === "ready") {
+				if (!this.containerId) { if (counters) counters.skippedNoContainer = 1; return; }
+				if (counters) counters.inspectCalls = 1;
+				const isRunning = await this._isContainerRunning(this.containerId);
+				if (isRunning) { if (counters) counters.running = 1; return; }
+				if (counters) counters.dead = 1;
+			}
+
+			// Container is dead or previous recovery failed — begin recovery
+			this._recovering = true;
+			const oldContainerId = this.containerId ?? "unknown";
+			this._status = "error";
+			if (counters) counters.recoveryAttempts = 1;
+
+			console.log(`[project-sandbox] Container ${oldContainerId.substring(0, 12)} died for project ${this.options.projectId}, attempting recovery...`);
+			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+
+			try {
+				await this.init();
+				if (counters) counters.recovered = 1;
+				console.log(`[project-sandbox] Container recovered for project ${this.options.projectId} (new container: ${this.containerId!.substring(0, 12)})`);
+				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+			} catch (err: any) {
+				if (counters) counters.recoveryErrors = 1;
+				console.error(`[project-sandbox] Recovery failed for project ${this.options.projectId}:`, err?.message || err);
+				// Will retry on next poll cycle — _recovering resets so next cycle can try again
+			} finally {
+				this._recovering = false;
+			}
 		} finally {
-			this._recovering = false;
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("project-sandbox:healthCheck", performance.now() - diagStart, counters);
+			}
 		}
 	}
 
@@ -496,7 +582,7 @@ export class ProjectSandbox {
 				const wtList = await this._dockerExec(this.containerId, ["sh", "-c", "ls -d /workspace-wt/session/* 2>/dev/null || echo '(none)'"]);
 				console.log(`[project-sandbox] Pre-shutdown worktrees in ${this.containerId.substring(0, 12)}: ${wtList.trim()}`);
 			} catch { /* best-effort audit */ }
-			await execFileAsync("docker", ["stop", this.containerId], {
+			await execDocker(["stop", this.containerId], {
 				timeout: 30_000,
 				env: DOCKER_ENV,
 			});
@@ -512,14 +598,14 @@ export class ProjectSandbox {
 		const volumeName = this._volumeName();
 		if (this.containerId) {
 			try {
-				await execFileAsync("docker", ["rm", "-f", this.containerId], {
+				await execDocker(["rm", "-f", this.containerId], {
 					timeout: 15_000,
 					env: DOCKER_ENV,
 				});
 			} catch { /* already gone */ }
 		}
 		try {
-			await execFileAsync("docker", ["volume", "rm", "-f", volumeName], {
+			await execDocker(["volume", "rm", "-f", volumeName], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -579,7 +665,7 @@ export class ProjectSandbox {
 			} else {
 				// Stopped — try to start it
 				try {
-					await execFileAsync("docker", ["start", existingId], {
+					await execDocker(["start", existingId], {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
@@ -650,7 +736,7 @@ export class ProjectSandbox {
 			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		}
 
-		const { stdout } = await execFileAsync("docker", dockerArgs, {
+		const { stdout } = await execDocker(dockerArgs, {
 			timeout: 60_000,
 			env: DOCKER_ENV,
 		});
@@ -664,7 +750,7 @@ export class ProjectSandbox {
 
 		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
 		try {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -674,7 +760,7 @@ export class ProjectSandbox {
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
-			await execFileAsync("docker", [
+			await execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
 				"mount --bind /dev/null /proc/1/environ 2>/dev/null || chmod 0400 /proc/1/environ 2>/dev/null || true",
 			], { timeout: 10_000, env: DOCKER_ENV });
@@ -840,7 +926,7 @@ export class ProjectSandbox {
 
 	private async _findContainerByLabel(label: string): Promise<string | null> {
 		try {
-			const { stdout } = await execFileAsync("docker", [
+			const { stdout } = await execDocker([
 				"ps", "-a",
 				"--filter", `label=${label}`,
 				"--format", "{{.ID}}",
@@ -867,8 +953,8 @@ export class ProjectSandbox {
 	private async _isContainerImageStale(containerId: string, imageTag: string): Promise<boolean> {
 		try {
 			const [containerImg, currentImg] = await Promise.all([
-				execFileAsync("docker", ["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
-				execFileAsync("docker", ["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(["inspect", "--format", "{{.Image}}", containerId], { timeout: 5_000, env: DOCKER_ENV }),
+				execDocker(["inspect", "--format", "{{.Id}}", imageTag], { timeout: 5_000, env: DOCKER_ENV }),
 			]);
 			const a = containerImg.stdout.trim();
 			const b = currentImg.stdout.trim();
@@ -881,7 +967,7 @@ export class ProjectSandbox {
 
 	private async _isContainerRunning(containerId: string): Promise<boolean> {
 		try {
-			const { stdout } = await execFileAsync("docker", [
+			const { stdout } = await execDocker([
 				"inspect", "--format", "{{.State.Running}}", containerId,
 			], {
 				timeout: 5_000,
@@ -895,7 +981,7 @@ export class ProjectSandbox {
 
 	private async _removeContainer(containerId: string): Promise<void> {
 		try {
-			await execFileAsync("docker", ["rm", "-f", containerId], {
+			await execDocker(["rm", "-f", containerId], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
@@ -918,7 +1004,7 @@ export class ProjectSandbox {
 		}
 		execArgs.push(containerId, ...args);
 
-		const { stdout } = await execFileAsync("docker", execArgs, {
+		const { stdout } = await execDocker(execArgs, {
 			timeout: opts?.timeout ?? 60_000,
 			env: DOCKER_ENV,
 			maxBuffer: 10 * 1024 * 1024,

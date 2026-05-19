@@ -13,6 +13,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { componentRoot } from "./worktree-paths.js";
 import type { Component } from "../agent/project-config-store.js";
 
@@ -39,38 +41,51 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 export async function runComponentSetups(opts: RunComponentSetupsOpts): Promise<void> {
-	// Global escape hatch — used by E2E/CI to skip slow npm/pip installs in
-	// freshly-claimed pool/staff worktrees. Mirrors the legacy gate that lived
-	// inside `createWorktree` before per-component setup was the canonical path.
-	if (process.env.BOBBIT_SKIP_NPM_CI) return;
-	for (const c of opts.components) {
-		if (!c.worktreeSetupCommand) continue;  // data-only or no hook
+	const diagEnabled = cpuDiagnosticsEnabled();
+	const diagStart = diagEnabled ? performance.now() : 0;
+	const counters = diagEnabled ? { components: opts.components.length, skippedByEnv: 0, commands: 0, successes: 0, failures: 0 } : undefined;
+	try {
+		// Global escape hatch — used by E2E/CI to skip slow npm/pip installs in
+		// freshly-claimed pool/staff worktrees. Mirrors the legacy gate that lived
+		// inside `createWorktree` before per-component setup was the canonical path.
+		if (process.env.BOBBIT_SKIP_NPM_CI) { if (counters) counters.skippedByEnv = 1; return; }
+		for (const c of opts.components) {
+			if (!c.worktreeSetupCommand) continue;  // data-only or no hook
+			if (counters) counters.commands++;
 
-		const cwd = componentRoot(c, opts.branchContainer);
-		const sourceRepo = path.join(
-			opts.primaryWorktreeRoot,
-			c.repo === "." ? "" : c.repo,
-			c.relativePath ?? "",
-		);
-		const env: NodeJS.ProcessEnv = { ...process.env, SOURCE_REPO: sourceRepo };
+			const cwd = componentRoot(c, opts.branchContainer);
+			const sourceRepo = path.join(
+				opts.primaryWorktreeRoot,
+				c.repo === "." ? "" : c.repo,
+				c.relativePath ?? "",
+			);
+			const env: NodeJS.ProcessEnv = { ...process.env, SOURCE_REPO: sourceRepo };
 
-		// Test hook: when BOBBIT_TEST_RECORD_SETUP is set, append an audit
-		// line to the file pointed at by the env var. The browser E2E for
-		// multi-repo flows uses this to assert per-component invocation
-		// without standing up a real npm/dependency install.
-		const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
-		if (recordPath) {
+			// Test hook: when BOBBIT_TEST_RECORD_SETUP is set, append an audit
+			// line to the file pointed at by the env var. The browser E2E for
+			// multi-repo flows uses this to assert per-component invocation
+			// without standing up a real npm/dependency install.
+			const recordPath = process.env.BOBBIT_TEST_RECORD_SETUP;
+			if (recordPath) {
+				try {
+					fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+					fs.appendFileSync(recordPath, `${c.name}\t${cwd}\t${sourceRepo}\t${c.worktreeSetupCommand}\n`);
+				} catch { /* test-only — don't fail the worktree on audit IO errors */ }
+			}
+
+			const componentStart = diagEnabled ? performance.now() : 0;
 			try {
-				fs.mkdirSync(path.dirname(recordPath), { recursive: true });
-				fs.appendFileSync(recordPath, `${c.name}\t${cwd}\t${sourceRepo}\t${c.worktreeSetupCommand}\n`);
-			} catch { /* test-only — don't fail the worktree on audit IO errors */ }
+				await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), TIMEOUT_MS, `[worktree-setup] ${c.name}`);
+				if (counters) counters.successes++;
+				console.log(`[worktree-setup] ${c.name}: ok`);
+				if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:component", performance.now() - componentStart, { commands: 1, successes: 1, failures: 0 });
+			} catch (err) {
+				if (counters) counters.failures++;
+				if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:component", performance.now() - componentStart, { commands: 1, successes: 0, failures: 1 });
+				console.warn(`[worktree-setup] ${c.name}: failed (non-fatal):`, err);
+			}
 		}
-
-		try {
-			await withTimeout(opts.exec(c.worktreeSetupCommand, cwd, env), TIMEOUT_MS, `[worktree-setup] ${c.name}`);
-			console.log(`[worktree-setup] ${c.name}: ok`);
-		} catch (err) {
-			console.warn(`[worktree-setup] ${c.name}: failed (non-fatal):`, err);
-		}
+	} finally {
+		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-setup:run", performance.now() - diagStart, counters);
 	}
 }
