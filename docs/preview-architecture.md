@@ -3,7 +3,8 @@
 The preview side-panel renders agent-authored HTML alongside the chat. This
 document covers the v3 architecture introduced by the embedded-html-preview
 rewrite — a per-session content mount served from a cookie-authed origin path,
-with SSE-driven hot reload.
+with SSE-driven hot reload. The browser renders that mount inside the dynamic
+per-session side-panel workspace shared by regular and assistant sessions.
 
 ## Mental model
 
@@ -28,6 +29,40 @@ Old paths and concepts that are gone:
 - `<stateDir>/preview-<sid>.meta.json` (file-mode sidecar)
 - `BOBBIT_HOST_CWD` translation in the `preview_open` extension
 - `/api/preview/render` and `/api/preview/asset` routes
+
+## Side-panel workspace integration
+
+The UI no longer treats preview as a single hard-coded panel slot.
+`src/app/panel-workspace.ts`, `src/app/preview-panel.ts`, and
+`src/app/render.ts` maintain a per-session tab collection that can contain chat,
+HTML preview, proposal, review, and inbox tabs at the same time. Assistant
+sessions and regular sessions use the same dispatcher, so a goal assistant can
+show `Goal Proposal` beside `Preview: inline.html` instead of one clobbering the
+other.
+
+Preview tab identity is artifact-derived:
+
+- The live preview tab is `preview:live`, titled `Preview: <entry>` such as
+  `Preview: inline.html` or `Preview: report.html`. It tracks the one live
+  server mount for the active session and updates whenever SSE reports a new
+  `entry` / `mtime`.
+- Historical `preview_open` tool cards create/select separate tabs such as
+  `preview:tool:<toolUseId>:<blockIndex>`, titled from the file, entry, or
+  `inline.html`. These tabs preserve the chat artifact identity even though the
+  server still has one live mount per session.
+- Desktop renders the content tabs in a horizontally scrollable strip. Mobile
+  exposes the same tab set through the header tab bar and slider track; there is
+  no desktop-only preview capability.
+
+Selecting a historical inline/file preview remounts that snapshot into the live
+per-session mount, then marks the historical tab as the mounted tab. If a v3
+snapshot has only the recorded mount entry and mtime, selecting it still opens
+the distinct tab and points the iframe at that entry; no server remount is
+needed and no SSE event is expected. Reopen failures stay local to the tab/card:
+missing file snapshots disable with "File no longer available", parse or fetch
+errors leave the button retryable and log `[PreviewRenderer] reopen failed`, and
+background tab-remount failures log `[panel-workspace] preview tab restore
+failed` without changing preview serving semantics.
 
 ## Per-session mount
 
@@ -284,7 +319,9 @@ the same `pickEntry()` helper the content route uses.
 
 Single source of truth: `defaults/tools/html/snapshot.ts`.
 
-The `preview_open` tool stamps the result with a constant-size marker block:
+The `preview_open` tool stamps the result with a constant-size marker block.
+The marker identifies the preview artifact for reopenable tool-card tabs; it
+does not create a second server mount.
 
 ```
 __preview_snapshot_v3__
@@ -292,8 +329,12 @@ __preview_snapshot_v3__
 ```
 
 ≤ 250 bytes per block, regardless of HTML size. The renderer parses the
-marker via `parseSnapshot()` and uses `url` / `path` to drive the **Open**
-button on archived tool cards.
+marker via `parseSnapshot()` and uses `url` / `path` plus the original tool
+params to drive the **Open** button on tool cards. Opening a card selects a
+source-derived preview tab immediately. If the original call still carries
+`html` or `file`, the renderer can remount that snapshot into the live mount;
+otherwise a v3 card selects the tab by recorded entry/mtime and points the
+iframe at the existing mount path.
 
 **`path` is host-invariant.** The field carries the project-root-relative
 `<sessionId>/<entry>` identifier (forward slashes on every OS), not the
@@ -313,9 +354,9 @@ sessions:
 
 | Marker | Payload | Renderer behaviour |
 |---|---|---|
-| `__preview_snapshot_v1__` | raw inline HTML | Reopen via `POST /api/preview/mount {html}` |
-| `__preview_snapshot_v2__` | `{kind:"file",path}` | Reopen via `POST /api/preview/mount {file}` |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path}` | Mount already populated; SSE will deliver the entry |
+| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}` |
+| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}` |
+| `__preview_snapshot_v3__` | `{kind:"preview",url,path}` | Create/select a historical preview tab; remount from original `html`/`file` params when available, otherwise select by recorded entry/mtime |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`
@@ -431,8 +472,10 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/shared/preview-bridge-scripts.ts` | Theme/swipe bridge scripts injected into HTML responses |
 | `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps v3 marker |
 | `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot` |
-| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; v1/v2/v3 dispatch |
-| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, mtime bump |
+| `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; v1/v2/v3 dispatch; source-derived historical preview tabs |
+| `src/app/panel-workspace.ts` | Per-session tab IDs and source metadata for chat/preview/proposal/review/inbox tabs |
+| `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, selection helpers for live and historical preview tabs |
+| `src/app/render.ts` | Shared workspace dispatcher, desktop tab strip, mobile tab bar/slider, iframe content |
 
 ## Acceptance properties
 
@@ -443,5 +486,9 @@ back the preview tree sees the same bytes the gateway just wrote.
 - "Open in new tab" works because the cookie has `Path=/`.
 - Edits to the mount fan out via SSE within ~50 ms (debounce window in
   `watchMount`).
+- The live preview tab updates from SSE without clobbering proposal, review,
+  or inbox tabs in the same session workspace.
+- Historical `preview_open` cards create/select distinct preview tabs while
+  still rendering through the one live server mount for the session.
 - Archived sessions with v1 / v2 markers continue to render an Open button
   that re-stamps the mount via `POST /api/preview/mount`.

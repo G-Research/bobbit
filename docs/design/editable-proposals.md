@@ -602,8 +602,8 @@ six post-refactor types.
 |---|---|---|
 | Draft persistence across reload | `goalDraft.save/restore` (`session-manager.ts:233`) writes server-side draft via `/api/sessions/:id/draft?type=goal`. | Replaced by file-on-disk + `saveProposalDraft`. The draft table also keeps the per-type form-mirror fields (assistantTab, edited flags) keyed by `(sessionId, type)` to preserve current UX. Restore on session resume. |
 | Dismissal stickiness | `markProposalDismissed/isProposalDismissed` (`session-manager.ts:118-130`) keyed by `bobbit-goal-proposal-dismissed-<sid>`, fingerprint `(title+spec)`. | `markProposalDismissed(sid, type, fields)` in `proposal-helpers.ts`; per-type fingerprint = stable `JSON.stringify(fields)` hash. |
-| "Open proposal" tool-card button | `proposal-open` CustomEvent → `callbackMap[type]` in session-manager:1222. | Same DOM event, dispatch goes to `remote.onProposal(type, fields, false)`. Each type's plugin handles tab-switch in `onFirstEmit`. |
-| First-proposal auto-select | goal: sets `previewPanelActiveTab="goal"`, mobile flips `previewPanelTab="goal"`. project: sets `="project"`. role/tool/staff/workflow: rely on `assistantTab="preview"`. | `plugin.onFirstEmit` per type — implementations lifted verbatim from current code. Centralised guard `isFirstEmit = prev == null`. |
+| "Open proposal" tool-card button | `proposal-open` CustomEvent → `callbackMap[type]` in session-manager. | Same DOM event; current rev selects the live proposal workspace tab, older revs read `GET /snapshot` into read-only historical tabs, and legacy cards without rev still replay `fields`. |
+| First-proposal auto-select | goal/project/role/tool/staff select their source-derived proposal workspace tab and update legacy `previewPanel*` / `assistantTab` mirrors for compatibility. | `plugin.onFirstEmit` per type — implementations lifted from the legacy behavior but routed through the dynamic workspace. Centralised guard `isFirstEmit = prev == null`. |
 | Streaming shallow-merge | Project-only today (`session-manager.ts:1185-1192` shallow-merge for `components` / `workflows`). | `plugin.mergeFields()` — project keeps the components/workflows carry-forward; other types use a plain object spread by default; goal-spec body is preserved by frontmatter-aware merge in the goal plugin. |
 | Streaming flag + scroll preservation | `state.proposalStreamingByTag[<tag>_proposal]` written in `_checkToolProposals`; bulk-cleared on `agent_end`/`reset()`. `reconcileFollowTail` handles scroll. | Unchanged. The new `ProposalSlot.streaming` is a per-slot mirror; `proposalStreamingByTag` continues to drive `streamingBadge()` / `STREAMING_BORDER` for legacy panels that read by tag. Sole writer is still `_checkToolProposals` so the existing E2E (`proposal-panel-streaming.spec.ts`, `proposal-panel-subsection-diff.spec.ts`) passes unchanged. |
 | Per-session scoping | `if (activeSessionId() !== sessionId) return;` guard in every `onXProposal`; `state.activeProjectProposal.sessionId` carry. | Single guard at top of `onProposal`. The on-disk file path is per-session by construction; switching sessions clears the in-memory slot via `setupSessionSubscription` reset (already does this for goal/project/role today). |
@@ -799,13 +799,14 @@ After this design shipped, a follow-up extended the on-disk model with
 immutable per-rev snapshots so the chat transcript becomes a navigable
 timeline of proposal revisions. Each successful `seed` and `edit` write
 also writes `<type>.history/<rev>.<ext>`; the server stamps a monotonic
-`rev` on every `proposal_update` WS event, and a new
-`POST /api/sessions/:id/proposal/:type/restore` endpoint lets the chat
-card "Open proposal" buttons roll the live draft back to a specific
-snapshot (writing a new snapshot at `currentRev + 1` so the rollback is
-itself a revision — no silent data loss). A new `EditProposalRenderer`
-gives `edit_proposal` calls a proper card with a compact diff and an
-"Open proposal" button. Tool-result text carries a
+`rev` on every `proposal_update` WS event. Chat-card "Open proposal"
+buttons now open the live editable tab for the current rev or read an older
+revision through `GET /api/sessions/:id/proposal/:type/snapshot?rev=N` into
+a read-only historical workspace tab. The mutating
+`POST /api/sessions/:id/proposal/:type/restore` endpoint remains available
+for explicit rollback flows, but ordinary history browsing is non-mutating.
+A new `EditProposalRenderer` gives `edit_proposal` calls a proper card with
+a compact diff and an "Open proposal" button. Tool-result text carries a
 `__proposal_rev_v1__:<n>` marker the renderers parse to wire the button.
 
 Full design: [docs/design/proposal-revision-snapshots.md](./proposal-revision-snapshots.md).
