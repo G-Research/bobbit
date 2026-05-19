@@ -52,8 +52,11 @@ import {
 	detectJsonValidationError,
 	describeProviderBackoff,
 	isPreImplementationGate,
+	isProviderBackoffError,
+	shouldRetryVerificationStep,
 	shouldSuppressRestartInterrupt,
 } from "./verification-logic.js";
+import { nextBackoffDelay } from "./session-setup.js";
 import { Semaphore } from "./semaphore.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
@@ -469,6 +472,29 @@ export async function buildReviewPrompt(
 	sections.push(contextLines.join("\n"));
 
 	return sections.join("\n");
+}
+
+/**
+ * Cap on the longest delay between verification-step retries when the
+ * failure is a provider rate-limit / overload. The retry loop itself runs
+ * indefinitely for those — only the gap between attempts is bounded.
+ */
+const PROVIDER_BACKOFF_RETRY_MAX_MS = 15 * 60 * 1000;
+
+/**
+ * Inter-attempt delay for verification-step retries. Reuses `nextBackoffDelay`
+ * from session-setup so we share one exponential-backoff implementation.
+ *
+ * - `isBackoff=true` (provider rate-limit / overload): exponential growth
+ *   capped at 15 min with ±20% jitter, paired with an unbounded retry loop
+ *   in the caller.
+ * - `isBackoff=false`: legacy 2s/4s/8s schedule (`nextBackoffDelay` with no
+ *   cap and no jitter), paired with the legacy 3-attempt bound in the caller.
+ */
+function verificationRetryDelayMs(attempt: number, isBackoff: boolean): number {
+	return isBackoff
+		? nextBackoffDelay(attempt, { baseMs: 2000, maxMs: PROVIDER_BACKOFF_RETRY_MAX_MS, jitterRatio: 0.2 })
+		: nextBackoffDelay(attempt, { baseMs: 2000 });
 }
 
 export class VerificationHarness {
@@ -1043,7 +1069,9 @@ export class VerificationHarness {
 		}
 
 		const startedAt = Date.now();
-		const maxAttempts = 3;
+		// Mirror the main verification loop: bounded 3 attempts for ordinary
+		// transient errors, unbounded retry for provider rate-limit / overload.
+		const maxBoundedAttempts = 3;
 		let result: { passed: boolean; output: string; sessionId?: string } = { passed: false, output: "Re-run failed." };
 
 		// Resolve project vars and substitute the prompt template
@@ -1054,7 +1082,7 @@ export class VerificationHarness {
 		const agentVars: Record<string, string> = ctx.signal.metadata || {};
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		for (let attempt = 1; ; attempt++) {
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
@@ -1068,10 +1096,20 @@ export class VerificationHarness {
 				ctx.goalSpec, ctx.allGateStates, goalId,
 				undefined, ctx.gate,
 			);
-			if (result.passed || !isTransientReviewError(result.output) || attempt === maxAttempts) break;
-			const delayMs = 2000 * Math.pow(2, attempt - 1);
-			console.log(`[verification] Re-run "${stepName}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-			await new Promise(r => setTimeout(r, delayMs));
+			const decision = shouldRetryVerificationStep({
+				passed: result.passed, output: result.output,
+				attempt, maxBoundedAttempts,
+				isTransient: isTransientReviewError,
+			});
+			if (decision === "break") break;
+			const isBackoff = isProviderBackoffError(result.output);
+			const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+			const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+			console.log(`[verification] Re-run "${stepName}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+			await this._sleepCancellable(delayMs, () => {
+				const g = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+				return !!(g && (g.state === "complete" || g.state === "shelved"));
+			});
 		}
 
 		return {
@@ -1109,11 +1147,13 @@ export class VerificationHarness {
 		const agentVars: Record<string, string> = ctx.signal.metadata || {};
 		const prompt = this.substituteVars(stepDef.prompt || "", ctx.builtinVars, projectVars, agentVars, ctx.allGateStates);
 
-		// QA agents are expensive (5-15 min each) — only retry once on true infrastructure failures,
-		// not on "no verdict tag" (which means the agent burned its budget without producing results).
-		const maxAttempts = 2;
+		// QA agents are expensive (5-15 min each) — for ordinary transient
+		// infrastructure failures only retry once. Provider rate-limit /
+		// overload errors still retry indefinitely with exponential backoff
+		// (cap 15 min), matching the main verification loop.
+		const maxBoundedAttempts = 2;
 		let result: { passed: boolean; output: string; sessionId?: string; artifact?: any } = { passed: false, output: "Re-run failed." };
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		for (let attempt = 1; ; attempt++) {
 			// Check if goal completed/shelved before retrying
 			const goalCheck = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 			if (goalCheck && (goalCheck.state === "complete" || goalCheck.state === "shelved")) {
@@ -1125,8 +1165,20 @@ export class VerificationHarness {
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
 			);
-			if (result.passed || !isTransientQaError(result.output) || attempt === maxAttempts) break;
-			await new Promise(r => setTimeout(r, 5000));
+			const decision = shouldRetryVerificationStep({
+				passed: result.passed, output: result.output,
+				attempt, maxBoundedAttempts,
+				isTransient: isTransientQaError,
+			});
+			if (decision === "break") break;
+			const isBackoff = isProviderBackoffError(result.output);
+			const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+			const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+			console.log(`[verification] Re-run QA "${stepName}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+			await this._sleepCancellable(delayMs, () => {
+				const g = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
+				return !!(g && (g.state === "complete" || g.state === "shelved"));
+			});
 		}
 
 		return { name: stepName, type: "agent-qa", passed: result.passed, output: result.output, duration_ms: Date.now() - startedAt };
@@ -1267,6 +1319,22 @@ export class VerificationHarness {
 	/** Register a callback to notify the team lead agent when verification completes. */
 	setTeamLeadNotifier(fn: (goalId: string, message: string) => void): void {
 		this.notifyTeamLeadFn = fn;
+	}
+
+	/**
+	 * Sleep that can be aborted between chunks. Used between verification-step
+	 * retry attempts so a 15-minute provider-backoff wait still observes
+	 * goal-state changes (cancel, shelve, complete) within a few seconds
+	 * rather than blocking the loop.
+	 */
+	private async _sleepCancellable(totalMs: number, isCancelled: () => boolean): Promise<void> {
+		const CHUNK_MS = 2000;
+		const deadline = Date.now() + totalMs;
+		while (Date.now() < deadline) {
+			if (isCancelled()) return;
+			const remaining = deadline - Date.now();
+			await new Promise(r => setTimeout(r, Math.min(CHUNK_MS, remaining)));
+		}
 	}
 
 	/**
@@ -1858,8 +1926,13 @@ export class VerificationHarness {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								const maxAttempts = 3;
-								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+								// Non-backoff transients (JSON glitches, ECONNRESET, etc.) keep
+								// the legacy 3-attempt cap. Provider rate-limit / overload
+								// errors retry indefinitely with exponential backoff capped at
+								// 15 min — user corporate-subscription quotas can exceed any
+								// finite bound, and the right answer is to wait, not fail.
+								const maxBoundedAttempts = 3;
+								for (let attempt = 1; ; attempt++) {
 									if (active.cancelled) break;
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
@@ -1871,11 +1944,17 @@ export class VerificationHarness {
 									if (qaResult.artifact) {
 										artifact = qaResult.artifact;
 									}
-									const isTransient = isTransientQaError(qaResult.output);
-									if (qaResult.passed || !isTransient || attempt === maxAttempts) break;
-									const delayMs = 2000 * Math.pow(2, attempt - 1);
-									console.log(`[verification] Agent QA "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-									await new Promise(r => setTimeout(r, delayMs));
+									const decision = shouldRetryVerificationStep({
+										passed: qaResult.passed, output: qaResult.output,
+										attempt, maxBoundedAttempts,
+										isTransient: isTransientQaError,
+									});
+									if (decision === "break") break;
+									const isBackoff = isProviderBackoffError(qaResult.output);
+									const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+									console.log(`[verification] Agent QA "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+									await this._sleepCancellable(delayMs, () => !!active.cancelled);
 								}
 							}
 						} else {
@@ -1884,8 +1963,11 @@ export class VerificationHarness {
 								result = { passed: true, output: "LLM review skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
-								const maxAttempts = 3;
-								for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+								// See agent-qa branch above for the bounded vs. unbounded
+								// retry rationale — kept symmetric so both review paths
+								// survive a long provider rate-limit / overload window.
+								const maxBoundedAttempts = 3;
+								for (let attempt = 1; ; attempt++) {
 									if (active.cancelled) break;
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
@@ -1894,11 +1976,17 @@ export class VerificationHarness {
 										goalSpec, allGateStates, signal.goalId, stepSessionId,
 										gate,
 									);
-									const isTransient = isTransientReviewError(result.output);
-									if (result.passed || !isTransient || attempt === maxAttempts) break;
-									const delayMs = 2000 * Math.pow(2, attempt - 1);
-									console.log(`[verification] LLM review "${step.name}" failed transiently (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs / 1000}s...`);
-									await new Promise(r => setTimeout(r, delayMs));
+									const decision = shouldRetryVerificationStep({
+										passed: result.passed, output: result.output,
+										attempt, maxBoundedAttempts,
+										isTransient: isTransientReviewError,
+									});
+									if (decision === "break") break;
+									const isBackoff = isProviderBackoffError(result.output);
+									const delayMs = verificationRetryDelayMs(attempt, isBackoff);
+									const attemptLabel = isBackoff ? `attempt ${attempt}, provider backoff — unbounded` : `attempt ${attempt}/${maxBoundedAttempts}`;
+									console.log(`[verification] LLM review "${step.name}" failed transiently (${attemptLabel}), retrying in ${Math.round(delayMs / 1000)}s...`);
+									await this._sleepCancellable(delayMs, () => !!active.cancelled);
 								}
 							}
 						}

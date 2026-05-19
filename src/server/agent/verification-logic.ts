@@ -233,6 +233,36 @@ export function isProviderBackoffError(output: string): boolean {
 }
 
 /**
+ * Decide whether a verification-step retry loop should attempt another
+ * pass given the latest result, or break out.
+ *
+ * Returns `"break"` for terminal outcomes (passed, non-transient failure,
+ * or the bounded-attempt budget has been exhausted for a non-backoff
+ * transient). Returns `"retry"` when the loop should sleep and try again
+ * — either because we're still within the bounded budget for a transient
+ * error, or because the failure is a provider rate-limit / overload that
+ * warrants unbounded retry.
+ *
+ * Pure — no I/O — so the harness retry loops can delegate the decision
+ * here and unit tests can exercise every branch without spinning up a
+ * SessionManager.
+ */
+export type RetryDecision = "break" | "retry";
+export function shouldRetryVerificationStep(args: {
+	passed: boolean;
+	output: string;
+	attempt: number;
+	maxBoundedAttempts: number;
+	isTransient: (output: string) => boolean;
+}): RetryDecision {
+	if (args.passed) return "break";
+	if (!args.isTransient(args.output)) return "break";
+	const isBackoff = isProviderBackoffError(args.output);
+	if (isBackoff) return "retry"; // unbounded for rate-limit / overload
+	return args.attempt >= args.maxBoundedAttempts ? "break" : "retry";
+}
+
+/**
  * Minimal session snapshot — just the fields needed to surface an active
  * provider backoff. Defined locally (rather than importing SessionInfo) so
  * this stays in the pure-logic module and is trivially testable.

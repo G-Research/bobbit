@@ -26,6 +26,7 @@ import {
 	// Used by SessionManager to pick the unbounded backoff policy.
 	isProviderBackoffError,
 	describeProviderBackoff,
+	shouldRetryVerificationStep,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -898,5 +899,106 @@ describe("isCommandStepSkippable", () => {
 		// patterns count as unresolved templates.
 		assert.equal(isCommandStepSkippable("find . -exec echo {} \\;"), null);
 		assert.equal(isCommandStepSkippable("awk '{print $1}'"), null);
+	});
+});
+
+// ===================================================================
+// shouldRetryVerificationStep — bounded vs. unbounded retry decision
+// ===================================================================
+
+describe("shouldRetryVerificationStep", () => {
+	const transient = (out: string) =>
+		out.includes("ECONNRESET") || out.includes("rate_limit_error") || out.includes("overloaded_error") || out.includes("HTTP 429");
+
+	it("breaks immediately on success", () => {
+		const d = shouldRetryVerificationStep({
+			passed: true, output: "", attempt: 1, maxBoundedAttempts: 3, isTransient: transient,
+		});
+		assert.equal(d, "break");
+	});
+
+	it("breaks for a non-transient failure regardless of attempt", () => {
+		const d = shouldRetryVerificationStep({
+			passed: false, output: "TypeError: foo is not a function",
+			attempt: 1, maxBoundedAttempts: 3, isTransient: transient,
+		});
+		assert.equal(d, "break");
+	});
+
+	it("retries within the bounded budget for an ordinary transient", () => {
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false, output: "Error: read ECONNRESET",
+				attempt: 1, maxBoundedAttempts: 3, isTransient: transient,
+			}),
+			"retry",
+		);
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false, output: "Error: read ECONNRESET",
+				attempt: 2, maxBoundedAttempts: 3, isTransient: transient,
+			}),
+			"retry",
+		);
+	});
+
+	it("breaks when the bounded budget is exhausted for a non-backoff transient", () => {
+		const d = shouldRetryVerificationStep({
+			passed: false, output: "Error: read ECONNRESET",
+			attempt: 3, maxBoundedAttempts: 3, isTransient: transient,
+		});
+		assert.equal(d, "break");
+	});
+
+	it("retries INDEFINITELY for provider rate-limit (rate_limit_error)", () => {
+		// Same input that would break a non-backoff loop at attempt=10 still
+		// retries when the failure is a provider rate-limit.
+		const out = '{"type":"rate_limit_error","message":"You have exceeded your quota"}';
+		for (const attempt of [1, 3, 10, 100, 1_000_000]) {
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false, output: out,
+					attempt, maxBoundedAttempts: 3, isTransient: transient,
+				}),
+				"retry",
+				`expected unbounded retry at attempt ${attempt}`,
+			);
+		}
+	});
+
+	it("retries INDEFINITELY for provider overload (overloaded_error)", () => {
+		const out = '{"type":"overloaded_error","message":"Overloaded"}';
+		for (const attempt of [1, 3, 10, 100]) {
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false, output: out,
+					attempt, maxBoundedAttempts: 3, isTransient: transient,
+				}),
+				"retry",
+			);
+		}
+	});
+
+	it("retries INDEFINITELY for HTTP 429", () => {
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false, output: "HTTP 429 Too Many Requests",
+				attempt: 50, maxBoundedAttempts: 3, isTransient: transient,
+			}),
+			"retry",
+		);
+	});
+
+	it("isTransient predicate gates everything — if the caller's predicate says no, break wins even for rate_limit_error", () => {
+		// The caller-supplied predicate is the gate on whether *anything* is
+		// retried — provider-backoff classification only changes the budget.
+		const neverTransient = () => false;
+		assert.equal(
+			shouldRetryVerificationStep({
+				passed: false, output: "rate_limit_error",
+				attempt: 1, maxBoundedAttempts: 3, isTransient: neverTransient,
+			}),
+			"break",
+		);
 	});
 });
