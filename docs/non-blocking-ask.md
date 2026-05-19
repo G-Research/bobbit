@@ -55,9 +55,13 @@ When the UI submits answers, the server appends a `role: "user"` message whose t
 {"answers":[{"question":"...","selected":"...","other_text":null}, ...]}
 ```
 
-The marker line is at position 0. The newline separates it from a JSON body with an `answers` array. For multi-select questions `selected` is an array; for single-select it's a string (including the literal `"Other"` when the user picked the free-text option, with `other_text` carrying the typed value).
+The marker line must be at position 0; if any text precedes it, the message is not an envelope. The newline separates it from a JSON body with an `answers` array. For multi-select questions `selected` is an array; for single-select it's a string (including the literal `"Other"` when the user picked the free-text option, with `other_text` carrying the typed value).
 
-The format is the single source of truth and lives in [`src/shared/ask-envelope.ts`](../src/shared/ask-envelope.ts), shared between server and UI:
+`tool_use_id` is an opaque exact-match value. It may be a simple ID such as `tool-abc_123` or a composite live-tool ID using the safe `|` delimiter, for example `call_abc|fc_def`. The canonical safe charset is letters, digits, `_`, `-`, and `|`; whitespace and newlines in IDs are invalid. Consumers should never split, trim, or normalize the ID before matching.
+
+The envelope is an internal transcript control message. It is persisted as a regular user message and enqueued through the normal prompt path so it wakes the agent and survives restarts, but normal chat rendering hides it. The answered ask card is the human-readable representation.
+
+The parser/formatter and accepted ID charset are the single source of truth and live in [`src/shared/ask-envelope.ts`](../src/shared/ask-envelope.ts), shared between server and UI:
 
 - `ASK_ENVELOPE_REGEX` — full match, captures `tool_use_id` and JSON body.
 - `ASK_ENVELOPE_PREFIX_REGEX` — cheap prefix test (used by the render filter).
@@ -81,12 +85,13 @@ without appending a second envelope. This handles two realistic cases:
 
 ## Prompt-injection guard
 
-The envelope format is reserved for the user/UI layer. Two guards prevent an agent from spoofing an answer:
+The envelope format is reserved for the user/UI layer. Three guards prevent an agent from spoofing an answer:
 
 1. **Role check.** `isAskResponseEnvelope` and `findAskResponseAnswers` in `ask-envelope.ts` only accept messages whose role is `user` or `user-with-attachments`. An assistant message whose text happens to contain the marker is ignored.
-2. **Causality check.** `findAskResponseAnswers` first locates the `ask_user_choices` tool_use block matching the `tool_use_id`. An envelope without a preceding tool_use with that id is rejected. This prevents a transcript-only attack where an earlier message claims to answer a question that was never asked.
+2. **Shape check.** The parser requires the marker at position 0, a newline, a JSON body, and an ID from the canonical safe charset. Composite IDs with `|` are accepted; whitespace and newlines are not.
+3. **Causality check.** `findAskResponseAnswers` first locates the `ask_user_choices` tool_use block matching the `tool_use_id`. An envelope without a preceding tool_use with that id is rejected. This prevents a transcript-only attack where an earlier message claims to answer a question that was never asked.
 
-The tool documentation (`defaults/tools/ask/ask_user_choices.yaml`) also instructs the LLM never to emit the marker itself. Combined with the role gate this makes spoofing a non-issue.
+The tool documentation (`defaults/tools/ask/ask_user_choices.yaml`) also instructs the LLM never to emit the marker itself. Combined with these guards this makes spoofing a non-issue.
 
 ## Multi-tab behavior
 
@@ -156,7 +161,7 @@ The `tab_label` validation rules themselves are documented in `defaults/tools/as
 
 ## Rendering note
 
-Envelope user messages are hidden from the **rendered** transcript by `src/ui/components/AgentInterface.ts` (via `isAskResponseEnvelope`). They're still present in the `.jsonl` and still sent to the LLM — the agent sees them on its next turn as part of history. The UI omits them because the answered widget card is the human-readable representation; showing both would be redundant.
+Envelope user messages are internal transcript control messages hidden from the **rendered** transcript by `src/ui/components/AgentInterface.ts` (via `isAskResponseEnvelope`). They must remain in the `.jsonl` and the LLM history — persistence preserves answered state across reloads, and enqueueing the user message wakes the agent. The UI omits them because the answered widget card is the human-readable representation; showing both would be redundant.
 
 ## File map
 
