@@ -10,14 +10,14 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const CLI_PATH = path.join(REPO_ROOT, "dist", "server", "cli.js");
 const MOCK_AGENT_PATH = path.join(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
-const WORKLOADS = new Set(["idle", "stream", "multi-tabs", "goal-team", "worktree-pool"]);
+const WORKLOADS = new Set(["idle", "stream", "multi-tabs", "goal-team", "goal-fanout", "worktree-pool"]);
 const DEFAULT_DURATION_SEC = 60;
 const DEFAULT_RUNS = 3;
 const SMOKE_DURATION_SEC = 5;
 const DEFAULT_FLUSH_MS = 1000;
 
 function usage() {
-	return `Usage: node scripts/bench-server-cpu.mjs --workload <idle|stream|multi-tabs|goal-team|worktree-pool> [options]
+	return `Usage: node scripts/bench-server-cpu.mjs --workload <idle|stream|multi-tabs|goal-team|goal-fanout|worktree-pool> [options]
 
 Options:
   --workload <name>       Workload to run (default: idle, or idle in --smoke)
@@ -26,7 +26,7 @@ Options:
   --out <path>            Benchmark JSONL output (default: artifacts/cpu/<workload>.jsonl)
   --summary-out <path>    Summary JSON output (default: <out>.summary.json)
   --sessions <n>          Stream workload sessions (default: 1)
-  --tabs <n>              Multi-tabs WebSocket clients (default: 5)
+  --tabs <n>              Multi-tabs WebSocket clients; goal-fanout unrelated session clients (default: 5)
   --agents <n>            Goal-team worker agents (default: 3)
   --goals <n>             Worktree-pool goals to create (default: 3)
   --flush-ms <ms>         BOBBIT_CPU_DIAG_FLUSH_MS (default: 1000; smoke: 250)
@@ -37,6 +37,7 @@ Options:
 Examples:
   npm run build:server
   node scripts/bench-server-cpu.mjs --workload idle --duration 60 --runs 3 --out artifacts/cpu/idle.jsonl
+  node scripts/bench-server-cpu.mjs --workload goal-fanout --tabs 5 --agents 3 --duration 60 --runs 3 --out artifacts/cpu/goal-fanout.jsonl
   node scripts/bench-server-cpu.mjs --smoke --out artifacts/cpu/smoke.jsonl
 `;
 }
@@ -239,6 +240,11 @@ export function summarizeDiagnostics(samples, opts = {}) {
 				prev.frames += frames;
 				prev.bytes += bytes;
 				prev.recipients += recipients;
+				for (const [name, value] of Object.entries(stats)) {
+					if (["frames", "count", "sends", "bytes", "totalBytes", "recipients", "recipientCount"].includes(name)) continue;
+					const n = numeric(value);
+					if (n !== null) prev[name] = (prev[name] ?? 0) + n;
+				}
 				wsTypes[type] = prev;
 			}
 		}
@@ -268,6 +274,7 @@ export function summarizeDiagnostics(samples, opts = {}) {
 		wsByteCount,
 		wsBytesPerSec: durationSec ? round(wsByteCount / durationSec) : null,
 		wsRecipientCount,
+		wsRecipientsPerSec: durationSec ? round(wsRecipientCount / durationSec) : null,
 		childProcessCount: childCount,
 		restRoutes,
 		wsTypes,
@@ -761,6 +768,92 @@ async function driveGoalTeam(ctx, deadline) {
 	}
 }
 
+function goalBroadcastMessages(conn, goalId) {
+	return conn.messages.filter((msg) => msg?.goalId === goalId && typeof msg.type === "string" && (
+		msg.type.startsWith("gate_") || msg.type.startsWith("team_") || msg.type.startsWith("goal_")
+	));
+}
+
+async function driveGoalFanout(ctx, deadline) {
+	const conns = [];
+	const unrelatedConns = [];
+	let spawned = 0;
+	let polls = 0;
+	let signals = 0;
+	let signalErrors = 0;
+	const roles = ["coder", "reviewer", "test-engineer", "docs-writer", "qa-tester"];
+	try {
+		const goal = await createGoal(ctx, { title: `CPU Goal Fanout ${Date.now()}` });
+		const viewerConn = await connectWs(ctx, "/ws/viewer");
+		conns.push(viewerConn);
+		const goalSessionId = await createSession(ctx, { goalId: goal.id, title: "CPU fanout goal observer" });
+		const goalConn = await connectWs(ctx, `/ws/${goalSessionId}`);
+		conns.push(goalConn);
+		for (let i = 0; i < ctx.opts.tabs; i++) {
+			const unrelatedSessionId = await createSession(ctx, { title: `CPU fanout unrelated ${i + 1}` });
+			const unrelatedConn = await connectWs(ctx, `/ws/${unrelatedSessionId}`);
+			unrelatedConns.push(unrelatedConn);
+			conns.push(unrelatedConn);
+		}
+
+		await apiJson(ctx, `/api/goals/${goal.id}/team/start`, { method: "POST" });
+		for (let i = 0; i < ctx.opts.agents; i++) {
+			const role = roles[i % roles.length];
+			try {
+				await apiJson(ctx, `/api/goals/${goal.id}/team/spawn`, {
+					method: "POST",
+					body: JSON.stringify({ role, task: `STAY_BUSY:500 CPU goal-fanout worker ${i + 1}` }),
+				});
+				spawned++;
+			} catch (err) {
+				if (spawned === 0) throw err;
+			}
+		}
+
+		let nextSignalAt = 0;
+		while (Date.now() < deadline) {
+			if (Date.now() >= nextSignalAt) {
+				const res = await safeApi(ctx, `/api/goals/${goal.id}/gates/design-doc/signal`, {
+					method: "POST",
+					body: JSON.stringify({ content: `# Benchmark design ${signals + 1}\n\nCPU fanout signal ${Date.now()}.` }),
+				});
+				if (res.ok) signals++;
+				else signalErrors++;
+				nextSignalAt = Date.now() + 1200;
+			}
+			await Promise.all([
+				safeApi(ctx, `/api/goals/${goal.id}`),
+				safeApi(ctx, `/api/goals/${goal.id}/team`),
+				safeApi(ctx, `/api/goals/${goal.id}/gates`),
+				safeApi(ctx, `/api/goals/${goal.id}/verifications/active`),
+			]);
+			polls += 4;
+			await sleep(Math.min(500, Math.max(50, deadline - Date.now())));
+		}
+		await safeApi(ctx, `/api/goals/${goal.id}/team/teardown`, { method: "POST" });
+
+		const viewerGoalEvents = goalBroadcastMessages(viewerConn, goal.id).length;
+		const goalSessionEvents = goalBroadcastMessages(goalConn, goal.id).length;
+		const unrelatedGoalEvents = unrelatedConns.reduce((n, conn) => n + goalBroadcastMessages(conn, goal.id).length, 0);
+		return {
+			ok: viewerGoalEvents > 0 && goalSessionEvents > 0,
+			goalId: goal.id,
+			unrelatedSessions: unrelatedConns.length,
+			spawnedAgents: spawned,
+			signals,
+			signalErrors,
+			polls,
+			viewerGoalEvents,
+			goalSessionEvents,
+			unrelatedGoalEvents,
+			wsFrames: conns.reduce((n, c) => n + c.frames, 0),
+			wsBytes: conns.reduce((n, c) => n + c.bytes, 0),
+		};
+	} finally {
+		closeAll(conns);
+	}
+}
+
 async function driveWorktreePool(ctx, deadline) {
 	const createdGoals = [];
 	let polls = 0;
@@ -796,6 +889,7 @@ async function driveWorkload(ctx) {
 		case "stream": return driveStream(ctx, deadline);
 		case "multi-tabs": return driveMultiTabs(ctx, deadline);
 		case "goal-team": return driveGoalTeam(ctx, deadline);
+		case "goal-fanout": return driveGoalFanout(ctx, deadline);
 		case "worktree-pool": return driveWorktreePool(ctx, deadline);
 		default: throw new Error(`Unsupported workload: ${ctx.opts.workload}`);
 	}
@@ -914,6 +1008,7 @@ export function aggregateRuns(metadata, runResults) {
 	const rest = runResults.map((r) => r.metrics?.restP95Ms).filter((v) => Number.isFinite(v));
 	const wsFrames = runResults.map((r) => r.metrics?.wsFramesPerSec).filter((v) => Number.isFinite(v));
 	const wsBytes = runResults.map((r) => r.metrics?.wsBytesPerSec).filter((v) => Number.isFinite(v));
+	const wsRecipients = runResults.map((r) => r.metrics?.wsRecipientsPerSec).filter((v) => Number.isFinite(v));
 	return {
 		kind: "benchmark_summary",
 		generatedAt: nowIso(),
@@ -927,6 +1022,7 @@ export function aggregateRuns(metadata, runResults) {
 		restP95Ms: round(percentile(rest, 95)),
 		wsFramesPerSec: round(median(wsFrames)),
 		wsBytesPerSec: round(median(wsBytes)),
+		wsRecipientsPerSec: round(median(wsRecipients)),
 		diagnosticsPaths: runResults.map((r) => r.diagnosticsPath),
 		runSummaries: runResults.map((r) => ({
 			run: r.run,

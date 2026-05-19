@@ -5,7 +5,7 @@ import { parseArgs, summarizeDiagnostics, aggregateRuns } from "../scripts/bench
 describe("bench-server-cpu CLI parsing", () => {
 	it("parses workload options and derived summary path", () => {
 		const opts = parseArgs([
-			"--workload", "multi-tabs",
+			"--workload", "goal-fanout",
 			"--duration", "12",
 			"--runs", "2",
 			"--out", "artifacts/cpu/multi.jsonl",
@@ -13,7 +13,7 @@ describe("bench-server-cpu CLI parsing", () => {
 			"--flush-ms=500",
 		]);
 
-		assert.equal(opts.workload, "multi-tabs");
+		assert.equal(opts.workload, "goal-fanout");
 		assert.equal(opts.durationSec, 12);
 		assert.equal(opts.runs, 2);
 		assert.equal(opts.tabs, 7);
@@ -60,7 +60,7 @@ describe("bench-server-cpu summary generation", () => {
 				cpuPct: 6,
 				delayP95Ms: 8,
 				rest: { "GET /api/sessions": { count: 3, p95Ms: 7, bytes: 200 } },
-				ws: { "goal:gate_status_changed": { frames: 1, bytes: 100, recipients: 2 } },
+				ws: { "goal:gate_status_changed": { frames: 1, bytes: 100, recipients: 2, scanned: 5, matchedGoal: 1, fallback: 1 } },
 			},
 		], { durationSec: 2 });
 
@@ -74,6 +74,11 @@ describe("bench-server-cpu summary generation", () => {
 		assert.equal(summary.wsFramesPerSec, 2.5);
 		assert.equal(summary.wsByteCount, 500);
 		assert.equal(summary.wsBytesPerSec, 250);
+		assert.equal(summary.wsRecipientCount, 6);
+		assert.equal(summary.wsRecipientsPerSec, 3);
+		assert.equal(summary.wsTypes["goal:gate_status_changed"].scanned, 5);
+		assert.equal(summary.wsTypes["goal:gate_status_changed"].matchedGoal, 1);
+		assert.equal(summary.wsTypes["goal:gate_status_changed"].fallback, 1);
 	});
 
 	it("aggregates run summaries with command metadata", () => {
@@ -89,6 +94,7 @@ describe("bench-server-cpu summary generation", () => {
 		assert.equal(aggregate.workload, "idle");
 		assert.equal(aggregate.successfulRuns, 2);
 		assert.equal(aggregate.medianCpuPct, 3);
+		assert.equal(aggregate.wsRecipientsPerSec, null);
 		assert.deepEqual(aggregate.diagnosticsPaths, ["a.jsonl", "b.jsonl"]);
 	});
 });
