@@ -371,19 +371,31 @@ export const LSP_CANONICAL_TOOL_SELECTION_RULE =
  * `## Tool selection — LSP before text search` section. If the base prompt
  * already contains the header (e.g. it came from `defaults/system-prompt.md`
  * or a project override that preserved the rule), it is returned unchanged.
- * Otherwise the canonical rule is appended after the base prompt with a blank
- * line separator.
+ * Otherwise the canonical rule is inserted near the top of the base prompt:
+ * after the opening identity paragraph when one exists, or before the first
+ * top-level heading for heading-first prompts.
  *
  * This is the protected-core injection that prevents a project
  * `.bobbit/config/system-prompt.md` override from accidentally suppressing
- * the LSP-over-grep guidance.
+ * the LSP-over-grep guidance while keeping the rule early enough for agents
+ * to reliably follow it.
  */
 export function ensureCanonicalLspRule(basePrompt: string): string {
 	if (basePrompt.includes(LSP_CANONICAL_TOOL_SELECTION_HEADER)) return basePrompt;
-	const trimmed = basePrompt.trimEnd();
-	return trimmed
-		? `${trimmed}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`
-		: `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
+	const trimmed = basePrompt.trim();
+	if (!trimmed) return `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
+
+	const firstHeading = trimmed.search(/^# /m);
+	if (firstHeading === 0) {
+		return `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n\n${trimmed}\n`;
+	}
+	if (firstHeading > 0) {
+		const preamble = trimmed.slice(0, firstHeading).trimEnd();
+		const rest = trimmed.slice(firstHeading).trimStart();
+		return `${preamble}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n\n${rest}\n`;
+	}
+
+	return `${trimmed}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
 }
 
 /**
@@ -646,8 +658,8 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	}
 
 	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching).
-	// Strip canonical LSP section to prevent duplicates from late tool-doc fragments
-	// that include LSP-over-grep guidance.
+	// Strip canonical LSP section to keep the protected base section as sole source
+	// and prevent duplicates from late tool-doc fragments that include LSP-over-grep guidance.
 	if (parts.toolDocs?.trim()) {
 		const toolDocs = stripCanonicalLspRule(parts.toolDocs).trim();
 		if (toolDocs) sections.push(toolDocs);
@@ -662,13 +674,14 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 	// 5. Goal spec (merge rolePrompt into goalSpec section for backward compat).
 	// Volatile sections (goal/task/workflow context) follow the stable prefix above
 	// so provider prompt caches reuse the tool docs + skills catalog between turns.
-	// Strip the canonical LSP header from goalSpec too — the protected-core
-	// injection in step 1 owns that section.
+	// Strip canonical LSP sections from all volatile fragments; protected-core
+	// injection in step 1 owns that guidance.
 	{
 		let effectiveGoalSpec = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
 		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
-		if (role) {
-			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + role;
+		const cleanRole = role ? stripCanonicalLspRule(role).trim() : "";
+		if (cleanRole) {
+			effectiveGoalSpec = (effectiveGoalSpec ? effectiveGoalSpec + "\n\n---\n\n" : "") + cleanRole;
 		}
 		if (effectiveGoalSpec.trim()) {
 			const header = parts.goalTitle
@@ -684,6 +697,7 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		const nesting = buildNestingContextSection(parts.nestingContext);
 		if (nesting) sections.push(nesting);
 	}
+
 
 	// 6. Task context — strip canonical LSP section from task spec.
 	if (parts.taskTitle || parts.taskType) {
@@ -708,15 +722,12 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 
 	// 6.5. LSP symbol-lookup hint — superseded by the canonical
 	// `## Tool selection — LSP before text search` section in the base system
-	// prompt (`defaults/system-prompt.md`). The hint is no longer appended here
-	// to avoid duplicate competing LSP sections in the final prompt.
-	// `buildLspSymbolLookupHint` remains exported for backward compatibility.
+	// prompt. `buildLspSymbolLookupHint` remains exported for backward compatibility.
 	void buildLspSymbolLookupHint;
 
 	// 7. Workflow dependency context (accepted upstream gate content). Strip
-	// canonical LSP section — upstream gate content (design docs, task specs,
-	// goal specs from other agents) often quotes the canonical header verbatim
-	// and would otherwise produce a duplicate section.
+	// canonical LSP section to prevent duplicates from upstream gate content
+	// (design docs, task specs, goal specs from other agents may quote it verbatim).
 	if (parts.workflowContext?.trim()) {
 		const wf = stripCanonicalLspRule(parts.workflowContext).trim();
 		if (wf) sections.push(wf);
@@ -807,7 +818,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	}
 
 	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse).
-	// Strip canonical LSP section to keep the base section as the sole source.
+	// Strip canonical LSP section to keep the System Prompt section as sole source.
 	if (parts.toolDocs?.trim()) {
 		const td = stripCanonicalLspRule(parts.toolDocs).trim();
 		if (td) {
@@ -823,8 +834,9 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 5. Goal spec (separate from role) — strip canonical LSP section if present
-	// so the inspector view shows the rule only once (in the base section).
+	// 5. Goal spec (separate from role — volatile section follows the stable prefix).
+	// Strip canonical LSP section if present so the inspector view shows the rule
+	// only once (in the System Prompt section).
 	{
 		const goalBody = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
 		if (goalBody) {
@@ -836,11 +848,12 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 6. Role prompt (with injected LSP rule for code-lookup roles)
+	// 6. Role prompt (with injected LSP rule for code-lookup roles) — strip canonical LSP section if present.
 	{
 		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
-		if (role) {
-			sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: role, tokens: estimateTokens(role) });
+		const cleanRole = role ? stripCanonicalLspRule(role).trim() : "";
+		if (cleanRole) {
+			sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: cleanRole, tokens: estimateTokens(cleanRole) });
 		}
 	}
 
@@ -853,7 +866,6 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 	}
 
 	// 7. Task context — strip canonical LSP section from task spec.
-
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = [];
 		if (parts.taskType) taskLines.push(`**Type**: ${parts.taskType}`);

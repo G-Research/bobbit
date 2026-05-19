@@ -446,6 +446,18 @@ describe("Canonical LSP-before-text-search rule (base system prompt)", () => {
 		);
 	});
 
+	it("canonical section appears before generic read/grep/bash guidance", () => {
+		const content = assembleForRole("canonical-order", "coder", "You are a coder.");
+		const lsp = content.indexOf(CANONICAL_HEADER);
+		const readGuidance = content.indexOf("# How to read files and gather information");
+		assert.ok(lsp >= 0, "canonical section must exist");
+		assert.ok(readGuidance >= 0, "read/search guidance must exist");
+		assert.ok(
+			lsp < readGuidance,
+			"Canonical LSP section must appear before generic read/grep/bash guidance",
+		);
+	});
+
 	it("role override that does not mention LSP still inherits exactly one canonical section", () => {
 		// Simulate a project `.bobbit/config/roles/coder.yaml` replacing the
 		// default coder prompt entirely with text that omits LSP guidance.
