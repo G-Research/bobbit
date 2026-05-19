@@ -4,7 +4,29 @@
  * and tab switching between chat and review.
  */
 import { test, expect } from "../gateway-harness.js";
+import type { Page } from "@playwright/test";
 import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+
+const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review']";
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function reviewPanelTab(page: Page, title: string) {
+	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: new RegExp(`^Review:\\s*${escapeRegExp(title)}$`) });
+}
+
+function reviewPaneTab(page: Page, title: string) {
+	return page.locator(`review-pane button.review-tab[title="${title}"]`);
+}
+
+async function selectReviewPanelTab(page: Page, title: string) {
+	const tab = reviewPanelTab(page, title);
+	await expect(tab).toHaveCount(1, { timeout: 10_000 });
+	await expect(tab).toBeVisible({ timeout: 5_000 });
+	await tab.click();
+}
 
 test.describe("Review Pane", () => {
 
@@ -14,12 +36,8 @@ test.describe("Review Pane", () => {
 		await sendMessage(page, "REVIEW_OPEN");
 		await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
 
-		// Wait for review tab to appear in unified panel tab bar
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
-
-		// Click the Review tab to switch to it
-		await reviewTab.click();
+		// Wait for the per-document review tab to appear in the side panel tab bar.
+		await selectReviewPanelTab(page, "Test Document");
 
 		// Verify review pane element is present
 		await expect(page.locator("review-pane")).toBeVisible({ timeout: 5_000 });
@@ -39,18 +57,17 @@ test.describe("Review Pane", () => {
 		// Multi-tool returns "Done. Used 3 tools."
 		await waitForAgentResponse(page, { text: "Done. Used 3 tools." });
 
-		// Wait for review tab to appear
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
-		await reviewTab.click();
+		// Dynamic chat tabs promotes each review document to a top-level side panel tab.
+		await expect(page.locator(REVIEW_PANEL_TAB_SELECTOR)).toHaveCount(3, { timeout: 10_000 });
+		await selectReviewPanelTab(page, "Document A");
 
-		// Verify multiple document tabs appear inside the review pane
-		await expect(page.locator(".review-tab")).toHaveCount(3, { timeout: 5_000 });
+		// Verify multiple document tabs still appear inside the review pane.
+		await expect(page.locator("review-pane .review-tab")).toHaveCount(3, { timeout: 5_000 });
 
 		// Verify tab labels
-		await expect(page.locator(".review-tab", { hasText: "Document A" })).toBeVisible();
-		await expect(page.locator(".review-tab", { hasText: "Document B" })).toBeVisible();
-		await expect(page.locator(".review-tab", { hasText: "Document C" })).toBeVisible();
+		await expect(reviewPaneTab(page, "Document A")).toBeVisible();
+		await expect(reviewPaneTab(page, "Document B")).toBeVisible();
+		await expect(reviewPaneTab(page, "Document C")).toBeVisible();
 	});
 
 	test("closes review tab via review_close", async ({ page }) => {
@@ -60,15 +77,14 @@ test.describe("Review Pane", () => {
 		// First open a review document
 		await sendMessage(page, "REVIEW_OPEN");
 		await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
+		await expect(reviewPanelTab(page, "Test Document")).toHaveCount(1, { timeout: 10_000 });
 
 		// Now close the review document
 		await sendMessage(page, "REVIEW_CLOSE");
 		await waitForAgentResponse(page, { text: "Done. Used review_close tool." });
 
 		// Review tab should disappear from the unified panel tab bar
-		await expect(reviewTab).not.toBeVisible({ timeout: 10_000 });
+		await expect(reviewPanelTab(page, "Test Document")).toHaveCount(0, { timeout: 10_000 });
 	});
 
 	test("shows review pane in side panel on desktop", async ({ page }) => {
@@ -78,9 +94,8 @@ test.describe("Review Pane", () => {
 		await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
 
 		// On desktop, the review pane appears in the side panel (goal-preview-panel)
-		// The Review tab should appear in the side panel header
-		const reviewTab = page.locator(".goal-preview-panel .goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
+		// The per-document Review tab should appear in the side panel header
+		await expect(reviewPanelTab(page, "Test Document")).toHaveCount(1, { timeout: 10_000 });
 
 		// Review pane should be visible in the side panel
 		await expect(page.locator("review-pane")).toBeVisible({ timeout: 5_000 });
@@ -95,19 +110,17 @@ test.describe("Review Pane", () => {
 		await sendMessage(page, "REVIEW_MULTI");
 		await waitForAgentResponse(page, { text: "Done. Used 3 tools." });
 
-		// Switch to review panel
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
-		await reviewTab.click();
+		// Verify all review documents are exposed as unambiguous top-level tabs.
+		await expect(page.locator(REVIEW_PANEL_TAB_SELECTOR)).toHaveCount(3, { timeout: 10_000 });
 
-		// Click on "Document B" tab within the review pane
-		await page.locator(".review-tab", { hasText: "Document B" }).click();
+		// Switch to Document B through its top-level review tab.
+		await selectReviewPanelTab(page, "Document B");
 
 		// Verify Document B content is displayed
 		await expect(page.locator("review-document").getByText("Second document content").first()).toBeVisible({ timeout: 5_000 });
 
-		// Switch to "Document A"
-		await page.locator(".review-tab", { hasText: "Document A" }).click();
+		// Switch to Document A using the internal review-pane tab.
+		await reviewPaneTab(page, "Document A").click();
 
 		// Verify Document A content is displayed
 		await expect(page.locator("review-document").getByText("First document content").first()).toBeVisible({ timeout: 5_000 });
@@ -119,10 +132,8 @@ test.describe("Review Pane", () => {
 		await sendMessage(page, "REVIEW_OPEN");
 		await waitForAgentResponse(page, { text: "Done. Used review_open tool." });
 
-		// Switch to review tab
-		const reviewTab = page.locator(".goal-tab-pill", { hasText: "Review" });
-		await expect(reviewTab).toBeVisible({ timeout: 10_000 });
-		await reviewTab.click();
+		// Switch to the per-document review tab.
+		await selectReviewPanelTab(page, "Test Document");
 
 		// Submit Review button should be disabled when there are no annotations
 		const submitBtn = page.locator("button", { hasText: "Submit Review" });
