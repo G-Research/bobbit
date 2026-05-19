@@ -28,6 +28,27 @@ function pathToUri(p: string): string {
 	return pathToFileURL(p).href;
 }
 
+/**
+ * Thrown by `TypescriptLspClient.workspaceSymbol()` when tsserver reports
+ * `No Project` / `ThrowNoProject` for a `workspace/symbol` request. The
+ * supervisor catches this specifically to drive a project-readiness probe
+ * and single retry — see `src/server/lsp/supervisor.ts`.
+ */
+export class TypescriptNoProjectError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "TypescriptNoProjectError";
+	}
+}
+
+function isNoProjectError(err: unknown): boolean {
+	if (!err) return false;
+	const msg = (err as { message?: unknown })?.message;
+	const data = (err as { data?: unknown })?.data;
+	const hay = `${typeof msg === "string" ? msg : ""} ${typeof data === "string" ? data : data ? JSON.stringify(data) : ""}`;
+	return /No Project|ThrowNoProject/.test(hay);
+}
+
 function lspSeverity(n?: number): Diagnostic["severity"] {
 	switch (n) {
 		case 1: return "error";
@@ -314,7 +335,16 @@ class TypescriptLspClient implements LspClient {
 	}
 
 	async workspaceSymbol(query: string): Promise<SymbolInformation[]> {
-		const res: any[] = await this.proc.connection.sendRequest("workspace/symbol", { query }) ?? [];
+		let res: any[];
+		try {
+			res = await this.proc.connection.sendRequest("workspace/symbol", { query }) ?? [];
+		} catch (err) {
+			if (isNoProjectError(err)) {
+				const msg = (err as { message?: unknown })?.message;
+				throw new TypescriptNoProjectError(typeof msg === "string" ? msg : "No Project", { cause: err });
+			}
+			throw err;
+		}
 		return res.slice(0, 100).map(s => ({
 			name: s.name,
 			kind: s.kind,

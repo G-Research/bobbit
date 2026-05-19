@@ -20,6 +20,7 @@ import type { LspClient, LspClientFactory, SandboxLspBridge, SpawnOpts } from ".
 import { languageForFile, findProjectRoot, detectLanguages } from "./language-detect.js";
 import type { Language, Location } from "./types.js";
 import { LspCapacityError, LspUnavailableError } from "./error.js";
+import { TypescriptNoProjectError } from "./clients/typescript.js";
 
 export interface ServerKey { worktreePath: string; language: Language; }
 
@@ -59,7 +60,24 @@ interface Entry {
 	disabledUntil: number;
 	configWatcher?: fs.FSWatcher;
 	configDebounce?: NodeJS.Timeout;
+	/** TypeScript-only: set once `ensureTypescriptWorkspaceProjectReady`
+	 *  successfully probes a representative file so subsequent `No Project`
+	 *  retries are skipped. */
+	workspaceSymbolProjectReady?: boolean;
+	/** In-flight probe promise so concurrent `No Project` recoveries coalesce
+	 *  to one `documentSymbols` call. */
+	workspaceSymbolProjectReadyP?: Promise<void>;
+	/** Memoised representative source file (host absolute path) for the
+	 *  probe, or `null` if no candidate exists under the worktree. `undefined`
+	 *  means not yet searched. */
+	workspaceSymbolRepresentativeFile?: string | null;
 }
+
+/** Extensions considered for the TypeScript project probe. */
+const TS_PROBE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"]);
+const TS_PROBE_EXCLUDED_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage", ".git", ".bobbit"]);
+const TS_PROBE_BASENAME_PREFERENCE = ["index", "main", "server"];
+const TS_PROBE_MAX_ENTRIES = 200;
 
 export type LspCallStatus = "ok" | "lsp_unavailable" | "lsp_capacity" | "lsp_timeout" | "lsp_route_missing" | "error";
 
@@ -529,7 +547,15 @@ export class LspSupervisor {
 				case "document_symbols":
 					return await client.documentSymbols(absInput);
 				case "workspace_symbol": {
-					const syms = await client.workspaceSymbol(args.query ?? "");
+					const query = args.query ?? "";
+					let syms;
+					try {
+						syms = await client.workspaceSymbol(query);
+					} catch (err) {
+						if (lang !== "typescript" || !(err instanceof TypescriptNoProjectError)) throw err;
+						await this.ensureTypescriptWorkspaceProjectReady(entry, client);
+						syms = await client.workspaceSymbol(query);
+					}
 					return syms.map(s => ({ ...s, path: path.relative(cwd, s.path) || path.basename(s.path) }));
 				}
 				case "rename": {
@@ -548,6 +574,44 @@ export class LspSupervisor {
 			entry.lastActivityAt = Date.now();
 			this.maybeArmIdleTimer(entry);
 		}
+	}
+
+	/**
+	 * TypeScript-only project-readiness probe. Run once per cold entry after
+	 * the first `workspace/symbol` call hits `No Project`. Concurrent
+	 * recoveries coalesce on the cached promise so only one `documentSymbols`
+	 * request fires.
+	 *
+	 * When no representative source file exists the probe resolves without
+	 * throwing — the supervisor still issues the single `workspace/symbol`
+	 * retry so failure semantics match the design (no infinite loop, no grep
+	 * guidance baked in).
+	 */
+	private async ensureTypescriptWorkspaceProjectReady(entry: Entry, client: LspClient): Promise<void> {
+		if (entry.workspaceSymbolProjectReady) return;
+		if (entry.workspaceSymbolProjectReadyP) return entry.workspaceSymbolProjectReadyP;
+		const p = (async () => {
+			const file = this.resolveTypescriptRepresentativeFile(entry);
+			if (!file) return;
+			await client.ensureDocOpen(file);
+			await client.documentSymbols(file);
+			entry.workspaceSymbolProjectReady = true;
+		})();
+		entry.workspaceSymbolProjectReadyP = p;
+		try {
+			await p;
+		} finally {
+			entry.workspaceSymbolProjectReadyP = undefined;
+		}
+	}
+
+	private resolveTypescriptRepresentativeFile(entry: Entry): string | null {
+		if (entry.workspaceSymbolRepresentativeFile !== undefined) {
+			return entry.workspaceSymbolRepresentativeFile;
+		}
+		const chosen = findTypescriptRepresentativeFile(entry.key.worktreePath);
+		entry.workspaceSymbolRepresentativeFile = chosen;
+		return chosen;
 	}
 
 	private relativise(loc: Location, cwd: string): Location {
@@ -675,3 +739,101 @@ export class LspSupervisor {
 
 // Re-export utilities used by gateway HTTP route + adapters.
 export { pathToFileURL, fileURLToPath };
+
+/**
+ * Deterministic, bounded search for a representative TypeScript/JavaScript
+ * source file under `worktreePath`. Used by the supervisor to load a TS
+ * project after `workspace/symbol` returns `No Project`.
+ *
+ * Candidate roots, in order:
+ *   1. Directories at the worktree root containing `tsconfig.json` or
+ *      `jsconfig.json` (worktree root itself first when it has one).
+ *   2. The worktree root.
+ *
+ * For each root, scan `src/` first with depth ≤ 2, then root-level files
+ * with depth 0. Total directory entries examined are capped at
+ * `TS_PROBE_MAX_ENTRIES` to bound worst-case cost on huge trees. Within each
+ * directory candidates are sorted alphabetically; basenames `index`,
+ * `main`, `server` are preferred (in that order) before the first sorted
+ * match.
+ */
+export function findTypescriptRepresentativeFile(worktreePath: string): string | null {
+	const budget = { entries: 0 };
+	const roots = collectCandidateRoots(worktreePath, budget);
+	for (const root of roots) {
+		const srcDir = path.join(root, "src");
+		const found = scanDirForCandidate(srcDir, 2, budget);
+		if (found) return found;
+		const rootFile = scanDirForCandidate(root, 0, budget);
+		if (rootFile) return rootFile;
+	}
+	return null;
+}
+
+function collectCandidateRoots(worktreePath: string, budget: { entries: number }): string[] {
+	const roots: string[] = [];
+	const seen = new Set<string>();
+	const pushRoot = (p: string) => {
+		if (!seen.has(p)) { seen.add(p); roots.push(p); }
+	};
+	// Worktree root itself first if it has a tsconfig/jsconfig.
+	try {
+		if (fs.existsSync(path.join(worktreePath, "tsconfig.json")) ||
+			fs.existsSync(path.join(worktreePath, "jsconfig.json"))) {
+			pushRoot(worktreePath);
+		}
+	} catch { /* ignore */ }
+	// Top-level subdirectories of the worktree containing a tsconfig/jsconfig.
+	let entries: fs.Dirent[] = [];
+	try { entries = fs.readdirSync(worktreePath, { withFileTypes: true }); } catch { /* ignore */ }
+	entries.sort((a, b) => a.name.localeCompare(b.name));
+	for (const ent of entries) {
+		if (budget.entries >= TS_PROBE_MAX_ENTRIES) break;
+		budget.entries++;
+		if (!ent.isDirectory()) continue;
+		if (TS_PROBE_EXCLUDED_DIRS.has(ent.name)) continue;
+		const dir = path.join(worktreePath, ent.name);
+		try {
+			if (fs.existsSync(path.join(dir, "tsconfig.json")) ||
+				fs.existsSync(path.join(dir, "jsconfig.json"))) {
+				pushRoot(dir);
+			}
+		} catch { /* ignore */ }
+	}
+	pushRoot(worktreePath);
+	return roots;
+}
+
+function scanDirForCandidate(dir: string, maxDepth: number, budget: { entries: number }): string | null {
+	if (budget.entries >= TS_PROBE_MAX_ENTRIES) return null;
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+	catch { return null; }
+	entries.sort((a, b) => a.name.localeCompare(b.name));
+	const files: string[] = [];
+	const subdirs: string[] = [];
+	for (const ent of entries) {
+		if (budget.entries >= TS_PROBE_MAX_ENTRIES) break;
+		budget.entries++;
+		if (ent.isDirectory()) {
+			if (TS_PROBE_EXCLUDED_DIRS.has(ent.name)) continue;
+			if (maxDepth > 0) subdirs.push(path.join(dir, ent.name));
+			continue;
+		}
+		if (!ent.isFile()) continue;
+		const ext = path.extname(ent.name);
+		if (!TS_PROBE_EXTENSIONS.has(ext)) continue;
+		files.push(path.join(dir, ent.name));
+	}
+	// Prefer index/main/server in this directory before descending.
+	for (const preferred of TS_PROBE_BASENAME_PREFERENCE) {
+		const hit = files.find(f => path.basename(f, path.extname(f)) === preferred);
+		if (hit) return hit;
+	}
+	if (files.length > 0) return files[0];
+	for (const sub of subdirs) {
+		const hit = scanDirForCandidate(sub, maxDepth - 1, budget);
+		if (hit) return hit;
+	}
+	return null;
+}
