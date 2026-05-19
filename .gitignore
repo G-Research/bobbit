@@ -90,6 +90,10 @@ tests/fixtures/children-tool-renderers-bundle.js
 tests/fixtures/children-tool-renderers-bundle.css
 tests/fixtures/defer-offscreen-render-bundle.js
 tests/fixtures/defer-offscreen-render-bundle.css
+tests/fixtures/shortcut-hint-titles-render-bundle.js
+tests/fixtures/shortcut-hint-titles-render-bundle.css
+tests/fixtures/inbox-renderer-bundle.js
+tests/fixtures/inbox-renderer-bundle.css
 .qa-test-state/
 .idea/
 .claude/worktrees/

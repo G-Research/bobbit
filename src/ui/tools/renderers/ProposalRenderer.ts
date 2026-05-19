@@ -6,7 +6,7 @@ import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { FileText } from "lucide";
 import { renderHeader, getToolState } from "../renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import "../../../ui/components/ExpandableSection.js";
 import { parseRevFromResult } from "./proposal-rev-marker.js";
 export { parseRevFromResult } from "./proposal-rev-marker.js";
@@ -25,9 +25,28 @@ function truncate(s: string, max = 150): string {
 	return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
+function mergeParamFields(
+	primary: Record<string, any> | null,
+	fallback: Record<string, any> | null,
+): Record<string, any> | null {
+	if (!primary) return fallback;
+	if (!fallback) return primary;
+	const merged: Record<string, any> = { ...fallback, ...primary };
+	for (const [key, value] of Object.entries(fallback)) {
+		const current = primary[key];
+		if ((current === undefined || current === null || current === "") && value !== undefined && value !== null && value !== "") {
+			merged[key] = value;
+		}
+	}
+	return merged;
+}
+
 function parseParams(params: any): Record<string, any> | null {
 	if (!params) return null;
-	if (typeof params === "object" && params !== null && !Array.isArray(params)) return params;
+	if (typeof params === "object" && params !== null && !Array.isArray(params)) {
+		const nested = mergeParamFields(parseParams(params.arguments), parseParams(params.input));
+		return nested ?? params;
+	}
 	if (typeof params === "string") {
 		try { return JSON.parse(params); } catch { return null; }
 	}
@@ -48,10 +67,10 @@ export class ProposalRenderer implements ToolRenderer {
 		return new ProposalRenderer(name);
 	}
 
-	render(params: any | undefined, result: ToolResultMessage | undefined, isStreaming?: boolean): ToolRenderResult {
+	render(params: any | undefined, result: ToolResultMessage | undefined, isStreaming?: boolean, ctx?: ToolRenderContext): ToolRenderResult {
 		const state = getToolState(result, isStreaming);
 		const meta = PROPOSAL_LABELS[this._toolName] || PROPOSAL_LABELS.propose_goal;
-		const fields = parseParams(params);
+		const fields = mergeParamFields(parseParams(params), parseParams(ctx?.toolCallInput));
 
 		// Streaming with no complete fields yet
 		if (!fields && isStreaming) {

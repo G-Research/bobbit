@@ -202,7 +202,10 @@ test.describe("Continue-Archived API (lossless)", () => {
 		await archive(parentId).catch(() => {});
 	});
 
-	test("assistant session (assistantType) returns 422", async () => {
+	test("assistant session (assistantType) is now allowed — returns 201", async () => {
+		// Path B of the Reopen-Archived-Proposals design: assistant sessions can
+		// now be continued. The 422 block remains only for goal/delegate/team
+		// sessions (covered by sibling tests above).
 		const resp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: nonGitCwd(), goalAssistant: true }),
@@ -216,7 +219,11 @@ test.describe("Continue-Archived API (lossless)", () => {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
-		expect(cont.status).toBe(422);
+		expect(cont.status).toBe(201);
+		const data = await cont.json();
+		expect(data.id).toBeTruthy();
+		expect(data.id).not.toBe(sid);
+		expect(data.assistantType).toBe("goal");
 	});
 
 	test("role copied to new session", async () => {

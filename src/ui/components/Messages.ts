@@ -623,7 +623,13 @@ export class ToolMessage extends LitElement {
 			this.toolCall.arguments,
 			result,
 			!this.aborted && (this.isStreaming || this.pending),
-			{ toolUseId: this.toolCall.id, sessionId: sessionIdCtx, goalId: goalIdCtx, getAskResponseAnswers },
+			{
+				toolUseId: this.toolCall.id,
+				toolCallInput: (this.toolCall as any).input,
+				sessionId: sessionIdCtx,
+				goalId: goalIdCtx,
+				getAskResponseAnswers,
+			},
 		);
 
 		// Handle custom rendering (no card wrapper)

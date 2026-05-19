@@ -22,7 +22,7 @@
  * Pattern mirrors tests/e2e/ui/settings.spec.ts for navigation + reload.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, gitCwd, defaultProjectId } from "../e2e-setup.js";
+import { apiFetch, defaultProject } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Staff sandbox indicator", () => {
@@ -35,16 +35,15 @@ test.describe("Staff sandbox indicator", () => {
 	});
 
 	test("edit page shows 'Disabled' for a staff created with sandboxed: false", async ({ page }) => {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
+		const project = await defaultProject();
 
 		const resp = await apiFetch("/api/staff", {
 			method: "POST",
 			body: JSON.stringify({
 				name: `SandboxOff${Date.now()}`,
 				systemPrompt: "Indicator test.",
-				cwd: gitCwd(),
-				projectId: pid,
+				cwd: project.rootPath,
+				projectId: project.id,
 				sandboxed: false,
 			}),
 		});
@@ -75,16 +74,15 @@ test.describe("Staff sandbox indicator", () => {
 	});
 
 	test("edit page indicator survives a reload (persisted, not derived)", async ({ page }) => {
-		const pid = await defaultProjectId();
-		expect(pid).toBeTruthy();
+		const project = await defaultProject();
 
 		const resp = await apiFetch("/api/staff", {
 			method: "POST",
 			body: JSON.stringify({
 				name: `SandboxReload${Date.now()}`,
 				systemPrompt: "Reload test.",
-				cwd: gitCwd(),
-				projectId: pid,
+				cwd: project.rootPath,
+				projectId: project.id,
 				sandboxed: false,
 			}),
 		});

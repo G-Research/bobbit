@@ -83,6 +83,9 @@ const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
+import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
+import { InboxNudger } from "./agent/inbox-nudger.js";
+import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigStore } from "./agent/project-config-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
@@ -769,8 +772,54 @@ export function createGateway(config: GatewayConfig) {
 	sessionManager.configCascade = configCascade;
 
 	const staffManager = new StaffManager(projectContextManager);
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager);
+
+	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
+	// `inboxNudger` ticks every 15s to deliver digests to idle staff.
+	//   - `InboxManager` resolves the per-project store via `projectContextManager`.
+	//   - `InboxNudger` looks up pending entries via a cross-project store adapter
+	//     (its dep type is the single-project `InboxStore`, but staff records are
+	//     globally unique so we route `listPending` through the PCM).
+	//   - Wiring order: construct InboxManager → construct InboxNudger →
+	//     inboxManager.setNudger(inboxNudger) → staffManager.setInboxManager(
+	//     inboxManager) → sessionManager.setInboxNudger(inboxNudger) → start.
+	const inboxManager = new InboxManager(projectContextManager, staffManager, (event) => broadcastToAll(event));
+	const crossProjectInboxStore: InboxStore = {
+		listPending: (staffId: string): InboxEntry[] => {
+			for (const ctx of projectContextManager.all()) {
+				if (ctx.staffStore.get(staffId)) return ctx.inboxStore.listPending(staffId);
+			}
+			return [];
+		},
+		// Unused by nudger but required to satisfy the `InboxStore` shape.
+		put: () => { /* nudger does not write */ },
+		get: () => undefined,
+		list: () => [],
+		update: () => false,
+		remove: () => false,
+		removeAll: () => { /* handled by InboxManager.removeAll */ },
+	} as unknown as InboxStore;
+	const inboxNudger = new InboxNudger({
+		sessionManager,
+		staffManager,
+		inboxStore: crossProjectInboxStore,
+	});
+	inboxManager.setNudger(inboxNudger);
+	staffManager.setInboxManager(inboxManager);
+	sessionManager.setInboxNudger(inboxNudger);
+
+	// One-shot migration: heal sessions that lost their `staffId` association
+	// before the staffId-persistence fix landed. Idempotent — sessions that
+	// already carry `staffId` are skipped. Logs loudly per backfilled session
+	// so the underlying bug doesn't get masked next time.
+	try {
+		sessionManager.backfillStaffIds(staffManager);
+	} catch (err) {
+		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
+	}
+
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
 	triggerEngine.start();
+	inboxNudger.start();
 	// Placeholder task store for TeamManager construction. Real goal/task operations
 	// route through the per-project context (see TeamManager.getTasksForSession). The
 	// first registered project's store is used when available, otherwise a server-
@@ -895,7 +944,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1092,10 +1141,13 @@ export function createGateway(config: GatewayConfig) {
 		const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
 		if (!teamLeadSession || teamLeadSession.status === "terminated") return;
 		try {
+			// source: "verification" so TeamManager.subscribeTeamLeadEvents preserves
+			// idle-nudge backoff counters when the lead replies to this notification
+			// (rather than treating it as a fresh user-driven idle cycle).
 			if (teamLeadSession.status === "streaming") {
-				sessionManager.deliverLiveSteer(team.teamLeadSessionId, message);
+				sessionManager.deliverLiveSteer(team.teamLeadSessionId, message, { source: "verification" });
 			} else {
-				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true });
+				sessionManager.enqueuePrompt(team.teamLeadSessionId, message, { isSteered: true, source: "verification" });
 			}
 			console.log(`[verification] Notified team lead for goal ${goalId}: ${message}`);
 		} catch (err) {
@@ -1350,7 +1402,7 @@ export function createGateway(config: GatewayConfig) {
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[] }> = [];
 						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
 						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string }> = [];
+						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; repoWorktrees?: Record<string, string> }> = [];
 						// Skip hidden contexts (synthetic system project) — it has
 						// no goals/sessions/staff and must never drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
@@ -1373,7 +1425,12 @@ export function createGateway(config: GatewayConfig) {
 								});
 							}
 							for (const st of ctx.staffStore.getAll()) {
-								sweepStaff.push({ id: st.id, branch: (st as any).branch, worktreePath: (st as any).worktreePath });
+								sweepStaff.push({
+									id: st.id,
+									branch: st.branch,
+									worktreePath: st.worktreePath,
+									repoWorktrees: st.repoWorktrees,
+								});
 							}
 						}
 						console.log(`[boot] sweeper start (${sweepProjects.length} projects)`);
@@ -1646,6 +1703,7 @@ export function createGateway(config: GatewayConfig) {
 			server.close();
 			clearInterval(cleanupInterval);
 			triggerEngine.stop();
+			inboxNudger.stop();
 			wss.close();
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
@@ -1809,6 +1867,7 @@ async function handleApiRoute(
 	reviewAnnotationStore?: ReviewAnnotationStore,
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
+	inboxManager?: InboxManager,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -6714,8 +6773,8 @@ async function handleApiRoute(
 		const ps = sessionManager.getPersistedSession(archivedId);
 		if (!ps) { json({ error: "session not found" }, 404); return; }
 		if (!ps.archived) { json({ error: "source not archived" }, 409); return; }
-		if (ps.goalId || ps.delegateOf || ps.teamGoalId || ps.assistantType) {
-			json({ error: "goal, delegate, team, or assistant sessions cannot be continued" }, 422);
+		if (ps.goalId || ps.delegateOf || ps.teamGoalId) {
+			json({ error: "goal, delegate, or team sessions cannot be continued" }, 422);
 			return;
 		}
 		if (!ps.projectId || !projectRegistry.get(ps.projectId)) {
@@ -6727,7 +6786,7 @@ async function handleApiRoute(
 		// sessions whose persisted `agentSessionFile` was never populated.
 		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
 		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
 		const { randomUUID } = await import("node:crypto");
 
@@ -6798,6 +6857,16 @@ async function handleApiRoute(
 			console.warn(`[continue-archived] tool-content copy failed (non-fatal): ${err}`);
 		}
 
+		// Clone the proposal-draft directory (live file + history snapshots).
+		// Schema-agnostic recursive copy — see `proposal-files.ts` for layout.
+		// On WS auth the rehydrate broadcast iterates the new session's dir and
+		// feeds the panel automatically; no extra wiring needed here.
+		try {
+			copyProposalDirIfPresent(archivedId, newSessionId, bobbitStateDir());
+		} catch (err) {
+			console.warn(`[continue-archived] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
 		const role = ps.role ? roleManager.getRole(ps.role) : undefined;
 		const createOpts: any = {
 			sessionId: newSessionId,
@@ -6818,12 +6887,21 @@ async function handleApiRoute(
 			createOpts.roleName = role.name;
 			createOpts.role = role.name;
 			createOpts.accessory = role.accessory;
+		} else if (ps.role) {
+			// Persisted role name without a registered Role definition (e.g. the
+			// generic "assistant" role assigned to assistant sessions). Propagate
+			// it + the persisted accessory so the new session inherits its identity.
+			createOpts.role = ps.role;
+			createOpts.roleName = ps.role;
+			if (ps.accessory) createOpts.accessory = ps.accessory;
+		} else if (ps.accessory) {
+			createOpts.accessory = ps.accessory;
 		}
 
 		let newSession;
 		try {
 			newSession = await sessionManager.createSession(
-				projCwd, undefined, undefined, undefined, createOpts,
+				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
@@ -6849,6 +6927,7 @@ async function handleApiRoute(
 			cwd: newSession.cwd,
 			status: newSession.status,
 			title: continuedTitle,
+			assistantType: ps.assistantType,
 		}, 201);
 		return;
 	}
@@ -8839,12 +8918,29 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
-		const cwd = body.cwd || config.defaultCwd;
-		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: body.projectId, cwd });
+		const explicitCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
+			? body.cwd.trim()
+			: undefined;
+		const explicitProjectId = typeof body.projectId === "string" && body.projectId.trim().length > 0
+			? body.projectId.trim()
+			: undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, projectContextManager, { projectId: explicitProjectId, cwd: explicitCwd });
 		if (!resolved.ok) {
 			json({ error: resolved.error }, resolved.status);
 			return;
 		}
+		if (resolved.project.hidden || resolved.projectId === SYSTEM_PROJECT_ID) {
+			json({ error: "projectId required: staff agents must be created in a registered project" }, 400);
+			return;
+		}
+		if (explicitCwd && explicitProjectId) {
+			const cwdProject = projectRegistry.findByCwd(explicitCwd);
+			if (!cwdProject || cwdProject.id !== resolved.projectId) {
+				json({ error: "cwd must be inside the selected project" }, 400);
+				return;
+			}
+		}
+		const cwd = explicitCwd ?? resolved.project.rootPath;
 		const projectId = resolved.projectId;
 		try {
 			const staff = await staffManager.createStaff(
@@ -8853,7 +8949,13 @@ async function handleApiRoute(
 				body.systemPrompt,
 				cwd,
 				sessionManager,
-				{ triggers: body.triggers, roleId: body.roleId, projectId, sandboxed: body.sandboxed },
+				{
+					triggers: body.triggers,
+					roleId: body.roleId,
+					projectId,
+					sandboxed: body.sandboxed === true,
+					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
+				},
 			);
 			json(staff, 201);
 		} catch (err: any) {
@@ -8881,10 +8983,15 @@ async function handleApiRoute(
 				json({ error: "Missing projectId" }, 400);
 				return;
 			}
-			const targetProject = projectRegistry.get(body.projectId);
+			const targetProjectId = body.projectId.trim();
+			const targetProject = projectRegistry.get(targetProjectId);
 			if (!targetProject) { json({ error: "Project not found" }, 404); return; }
+			if (targetProject.hidden || targetProject.id === SYSTEM_PROJECT_ID) {
+				json({ error: "projectId must reference a registered project" }, 400);
+				return;
+			}
 			try {
-				const staff = staffManager.reassignProject(id, body.projectId);
+				const staff = await staffManager.reassignProject(id, targetProjectId, sessionManager);
 				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
 				json(staff);
 			} catch (err: any) {
@@ -8896,15 +9003,57 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+
+			let cwdUpdate: string | undefined;
+			if (Object.prototype.hasOwnProperty.call(body, "cwd")) {
+				const staff = staffManager.getStaff(id);
+				if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+				if (typeof body.cwd !== "string" || body.cwd.trim().length === 0) {
+					json({ error: "cwd must be a non-empty string" }, 400);
+					return;
+				}
+				const requestedCwd = body.cwd.trim();
+				const normalizeCwdForComparison = (value: string): string => {
+					let resolved = path.resolve(value.trim());
+					try { resolved = fs.realpathSync(resolved); } catch { /* compare textual path when legacy cwd no longer exists */ }
+					let normalized = resolved.replace(/\\/g, "/");
+					if (process.platform === "win32") normalized = normalized.toLowerCase();
+					return normalized.replace(/\/+$/, "");
+				};
+				const existingCwd = typeof staff.cwd === "string" ? staff.cwd : "";
+				const isUnchangedCwd = existingCwd.trim().length > 0
+					&& normalizeCwdForComparison(requestedCwd) === normalizeCwdForComparison(existingCwd);
+				if (!isUnchangedCwd) {
+					const staffProjectId = typeof staff.projectId === "string" && staff.projectId.trim().length > 0
+						? staff.projectId.trim()
+						: undefined;
+					const staffProject = staffProjectId ? projectRegistry.get(staffProjectId) : undefined;
+					if (!staffProject || staffProject.hidden || staffProject.id === SYSTEM_PROJECT_ID) {
+						json({ error: "Staff agent is not attached to a registered project" }, 400);
+						return;
+					}
+					const cwdProject = projectRegistry.findByCwd(requestedCwd);
+					if (!cwdProject || cwdProject.id !== staffProject.id) {
+						json({ error: "cwd must be inside the staff agent's project" }, 400);
+						return;
+					}
+					cwdUpdate = requestedCwd;
+				}
+			}
+
 			const ok = staffManager.updateStaff(id, {
 				name: body.name,
 				description: body.description,
 				systemPrompt: body.systemPrompt,
-				cwd: body.cwd,
+				cwd: cwdUpdate,
 				state: body.state,
 				triggers: body.triggers,
 				memory: body.memory,
 				roleId: body.roleId,
+				contextPolicy:
+					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
+						? body.contextPolicy
+						: undefined,
 			});
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
 			json(staffManager.getStaff(id));
@@ -8919,19 +9068,145 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/staff/:id/wake — manually trigger a wake cycle
-	const staffWakeMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/wake$/);
-	if (staffWakeMatch && req.method === "POST") {
-		const id = staffWakeMatch[1];
+	// ── Staff inbox endpoints ──────────────────────────────────────
+	// `POST /api/staff/:id/wake` was deleted as part of the staff-inbox migration
+	// (see docs/design/staff-inbox.md §7.2). UI/external integrations now hit
+	// `POST /api/staff/:id/inbox` with `source.type = "manual_ui" | "manual_api"`.
+
+	// GET /api/staff/:id/inbox?state=pending&limit=50
+	const staffInboxListMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox$/);
+	if (staffInboxListMatch && req.method === "GET") {
+		const id = staffInboxListMatch[1];
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const rawState = url.searchParams.get("state");
+		const allowedStates: ReadonlyArray<InboxEntry["state"]> = ["pending", "completed", "failed", "cancelled"];
+		const state = rawState && (allowedStates as readonly string[]).includes(rawState)
+			? (rawState as InboxEntry["state"])
+			: undefined;
+		const limitRaw = url.searchParams.get("limit");
+		const limit = limitRaw != null ? Math.max(0, parseInt(limitRaw, 10) || 0) : undefined;
+		const entries = inboxManager.listForStaff(id, state, limit);
+		json({ entries });
+		return;
+	}
+
+	// POST /api/staff/:id/inbox
+	if (staffInboxListMatch && req.method === "POST") {
+		const id = staffInboxListMatch[1];
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
 		const body = await readBody(req);
+		if (!body || typeof body.title !== "string" || !body.title.trim()) {
+			json({ error: "Missing title" }, 400);
+			return;
+		}
+		if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+			json({ error: "Missing prompt" }, 400);
+			return;
+		}
+		const sourceType = body.source?.type === "manual_ui" || body.source?.type === "trigger"
+			? body.source.type
+			: "manual_api";
+		const actorId = typeof body.source?.actorId === "string" ? body.source.actorId : undefined;
 		try {
-			const sessionId = await staffManager.wake(id, body?.prompt, sessionManager);
-			json({ sessionId }, 201);
+			const entry = inboxManager.enqueue(id, {
+				title: body.title,
+				prompt: body.prompt,
+				context: typeof body.context === "string" ? body.context : undefined,
+				source: { type: sourceType, actorId },
+			});
+			json({ entry }, 201);
 		} catch (err) {
 			jsonError(400, err);
 		}
+		return;
+	}
+
+	// POST /api/staff/:id/inbox/:entryId/complete
+	const staffInboxCompleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/complete$/);
+	if (staffInboxCompleteMatch && req.method === "POST") {
+		const [, id, entryId] = staffInboxCompleteMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const body = await readBody(req);
+		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+			json({ error: "Missing sessionId" }, 400);
+			return;
+		}
+		const session = sessionManager.getSession(body.sessionId);
+		if (!session || session.staffId !== id) {
+			json({ error: "Forbidden: session does not belong to this staff" }, 403);
+			return;
+		}
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.state !== "pending") {
+			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
+			return;
+		}
+		try {
+			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body.summary === "string" ? body.summary : undefined);
+			json({ entry });
+		} catch (err) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// POST /api/staff/:id/inbox/:entryId/dismiss
+	const staffInboxDismissMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)\/dismiss$/);
+	if (staffInboxDismissMatch && req.method === "POST") {
+		const [, id, entryId] = staffInboxDismissMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const body = await readBody(req);
+		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+			json({ error: "Missing sessionId" }, 400);
+			return;
+		}
+		const session = sessionManager.getSession(body.sessionId);
+		if (!session || session.staffId !== id) {
+			json({ error: "Forbidden: session does not belong to this staff" }, 403);
+			return;
+		}
+		if (body.outcome !== "failed" && body.outcome !== "cancelled") {
+			json({ error: "outcome must be 'failed' or 'cancelled'" }, 400);
+			return;
+		}
+		if (typeof body.reason !== "string" || !body.reason.trim()) {
+			json({ error: "Missing reason" }, 400);
+			return;
+		}
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.state !== "pending") {
+			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
+			return;
+		}
+		try {
+			const entry = inboxManager.transitionToTerminal(id, entryId, body.outcome, body.reason);
+			json({ entry });
+		} catch (err) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// DELETE /api/staff/:id/inbox/:entryId
+	const staffInboxDeleteMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox\/([^/]+)$/);
+	if (staffInboxDeleteMatch && req.method === "DELETE") {
+		const [, id, entryId] = staffInboxDeleteMatch;
+		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
+		const staff = staffManager.getStaff(id);
+		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const ok = inboxManager.remove(id, entryId);
+		if (!ok) { json({ error: "Inbox entry not found" }, 404); return; }
+		json({ ok: true });
 		return;
 	}
 

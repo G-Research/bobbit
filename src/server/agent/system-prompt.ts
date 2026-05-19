@@ -582,10 +582,15 @@ export interface PromptSection {
 /**
  * Assemble the full system prompt from its parts and write to a temp file.
  *
- * Order:
+ * Order (stable prefix first, volatile sections last, for provider prompt-cache reuse):
  *   1. Global system prompt (config/system-prompt.md)
  *   2. AGENTS.md from the session's working directory (with @refs resolved inline)
- *   3. Goal spec (if session belongs to a goal)
+ *   2.5. Working directory instructions
+ *   3. Tool documentation
+ *   4. Available Skills catalog
+ *   5. Goal spec + role (if session belongs to a goal)
+ *   6. Current Task
+ *   7. Workflow upstream-gate context
  *
  * Returns the path to the assembled prompt file, or undefined if all parts
  * are empty (in which case no --system-prompt should be passed to the agent).
@@ -640,9 +645,25 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		);
 	}
 
-	// 3. Goal spec (merge rolePrompt into goalSpec section for backward compat).
-	//    Strip the canonical LSP header from goalSpec too — the protected-core
-	//    injection in step 1 owns that section.
+	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching).
+	// Strip canonical LSP section to prevent duplicates from late tool-doc fragments
+	// that include LSP-over-grep guidance.
+	if (parts.toolDocs?.trim()) {
+		const toolDocs = stripCanonicalLspRule(parts.toolDocs).trim();
+		if (toolDocs) sections.push(toolDocs);
+	}
+
+	// 4. Available Skills (autonomous activation catalog — stable across turns)
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
+		if (skillsSection) sections.push(skillsSection);
+	}
+
+	// 5. Goal spec (merge rolePrompt into goalSpec section for backward compat).
+	// Volatile sections (goal/task/workflow context) follow the stable prefix above
+	// so provider prompt caches reuse the tool docs + skills catalog between turns.
+	// Strip the canonical LSP header from goalSpec too — the protected-core
+	// injection in step 1 owns that section.
 	{
 		let effectiveGoalSpec = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
 		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
@@ -657,21 +678,14 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		}
 	}
 
-	// 3.5. Goal nesting context (Phase 6) — three stanzas for team-lead sessions
+	// 5.5. Goal nesting context (Phase 6) — three stanzas for team-lead sessions
 	// describing root/child role + the subgoal/team_spawn/task_create decision rule.
 	if (parts.nestingContext) {
 		const nesting = buildNestingContextSection(parts.nestingContext);
 		if (nesting) sections.push(nesting);
 	}
 
-	// 4. Tool documentation — strip canonical LSP section to prevent duplicates
-	// from late tool-doc fragments that include LSP-over-grep guidance.
-	if (parts.toolDocs?.trim()) {
-		const toolDocs = stripCanonicalLspRule(parts.toolDocs).trim();
-		if (toolDocs) sections.push(toolDocs);
-	}
-
-	// 5. Task context — strip canonical LSP section from task spec.
+	// 6. Task context — strip canonical LSP section from task spec.
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = ["# Current Task"];
 		if (parts.taskType) taskLines.push(`\n**Type**: ${parts.taskType}`);
@@ -692,20 +706,14 @@ function _assembleSystemPrompt(sessionId: string, parts: PromptParts): string | 
 		sections.push(taskLines.join("\n"));
 	}
 
-	// 5.5. LSP symbol-lookup hint — superseded by the canonical
+	// 6.5. LSP symbol-lookup hint — superseded by the canonical
 	// `## Tool selection — LSP before text search` section in the base system
 	// prompt (`defaults/system-prompt.md`). The hint is no longer appended here
 	// to avoid duplicate competing LSP sections in the final prompt.
 	// `buildLspSymbolLookupHint` remains exported for backward compatibility.
 	void buildLspSymbolLookupHint;
 
-	// 5.6. Available Skills (autonomous activation catalog)
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) sections.push(skillsSection);
-	}
-
-	// 6. Workflow dependency context (accepted upstream gate content). Strip
+	// 7. Workflow dependency context (accepted upstream gate content). Strip
 	// canonical LSP section — upstream gate content (design docs, task specs,
 	// goal specs from other agents) often quotes the canonical header verbatim
 	// and would otherwise produce a duplicate section.
@@ -798,8 +806,25 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
 	}
 
-	// 3. Goal spec (separate from role) — strip canonical LSP section if present
-	//    so the inspector view shows the rule only once (in the base section).
+	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse).
+	// Strip canonical LSP section to keep the base section as the sole source.
+	if (parts.toolDocs?.trim()) {
+		const td = stripCanonicalLspRule(parts.toolDocs).trim();
+		if (td) {
+			sections.push({ label: "Tools", source: "Tool documentation", content: td, tokens: estimateTokens(td) });
+		}
+	}
+
+	// 4. Available Skills (stable prefix)
+	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
+		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
+		if (skillsSection) {
+			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
+		}
+	}
+
+	// 5. Goal spec (separate from role) — strip canonical LSP section if present
+	// so the inspector view shows the rule only once (in the base section).
 	{
 		const goalBody = parts.goalSpec ? stripCanonicalLspRule(parts.goalSpec).trim() : "";
 		if (goalBody) {
@@ -811,7 +836,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 4. Role prompt (with injected LSP rule for code-lookup roles)
+	// 6. Role prompt (with injected LSP rule for code-lookup roles)
 	{
 		const role = effectiveRolePrompt(parts.roleName, parts.rolePrompt);
 		if (role) {
@@ -819,7 +844,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 4.5. Goal nesting context (Phase 6) — see _assembleSystemPrompt for shape.
+	// 6.5. Goal nesting context (Phase 6) — see _assembleSystemPrompt for shape.
 	if (parts.nestingContext) {
 		const nesting = buildNestingContextSection(parts.nestingContext);
 		if (nesting) {
@@ -827,15 +852,8 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		}
 	}
 
-	// 7. Tool docs — strip canonical LSP section to keep base section as sole source.
-	if (parts.toolDocs?.trim()) {
-		const td = stripCanonicalLspRule(parts.toolDocs).trim();
-		if (td) {
-			sections.push({ label: "Tools", source: "Tool documentation", content: td, tokens: estimateTokens(td) });
-		}
-	}
+	// 7. Task context — strip canonical LSP section from task spec.
 
-	// 8. Task context — strip canonical LSP section from task spec.
 	if (parts.taskTitle || parts.taskType) {
 		const taskLines: string[] = [];
 		if (parts.taskType) taskLines.push(`**Type**: ${parts.taskType}`);
@@ -850,15 +868,7 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
 		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskContent, tokens: estimateTokens(taskContent) });
 	}
 
-	// 8.5. Available Skills
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) {
-			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
-		}
-	}
-
-	// 9. Workflow context — strip canonical LSP section to prevent duplicates
+	// 8. Workflow context — strip canonical LSP section to prevent duplicates
 	// from upstream gate content (design docs, prior task specs, etc.).
 	if (parts.workflowContext?.trim()) {
 		const wf = stripCanonicalLspRule(parts.workflowContext).trim();

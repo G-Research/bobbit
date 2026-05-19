@@ -204,7 +204,7 @@ Same scoping rule applies to anything you run via `bash` — pass `rg`/`grep`/`f
 
 **Default to `bash_bg` over `bash`** for any command that might take longer than 2 minutes or produce large output you may not need in full. This includes: builds, full test suites, Docker operations, package installs, CI pipelines, dev servers, file watchers, and anything with uncertain duration.
 
-`bash_bg` captures all output server-side. Use its exploration actions to pull only what you need into your context window:
+`bash_bg` captures all output server-side. bash_bg does not notify on completion. If you need to take follow up actions, use bash_bg wait. Use its exploration actions to pull only what you need into your context window:
 
 - **`grep`** first — search for `error|fail|warning` to find problems without reading thousands of lines
 - **`head`** — check startup output or early errors

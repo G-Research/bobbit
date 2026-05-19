@@ -28,7 +28,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, wakeStaffAgent, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, gatewayFetch, clearArchivedSessionsState } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, archivedDivider, bucketActiveArchived, passesSidebarFilters } from "./render-helpers.js";
@@ -594,12 +594,19 @@ async function handleStaffClick(agent: typeof state.staffList[0]): Promise<void>
 		}
 		// Session was deleted — fall through to wake (creates a new one)
 	}
-	// Fallback for legacy staff without a session
-	const result = await wakeStaffAgent(agent.id, "Manual wake from sidebar");
-	if (result?.sessionId) {
-		await reloadStaffList();
-		await refreshSessions();
-		await connectToSession(result.sessionId, false);
+	// Fallback for legacy staff without a session: enqueue an inbox entry; the
+	// InboxNudger will create/recover the session and wake the agent next tick.
+	await enqueueInboxManual(agent.id, {
+		title: "Manual wake",
+		prompt: "Manual wake from sidebar",
+		source: { type: "manual_ui" },
+	});
+	await reloadStaffList();
+	await refreshSessions();
+	// If a session was recovered, focus it.
+	const refreshed = state.staffList.find((s) => s.id === agent.id);
+	if (refreshed?.currentSessionId) {
+		await connectToSession(refreshed.currentSessionId, false);
 	}
 }
 

@@ -122,9 +122,13 @@ test.describe("Proposal revision snapshots", () => {
 			{ timeout: 10_000 },
 		).toEqual([1, 2, 3]);
 
-		// 4. Cleanup - terminate the session; per-session draft dir is wiped.
+		// 4. Cleanup - terminate (archive) the session.
+		// Per the reopen-archived-proposals design, the per-session draft dir
+		// now SURVIVES archive (so the user can resubmit / continue later) and
+		// is only removed on full purge (the 7-day mark). Smoke-check that the
+		// dir is still present right after archive.
 		await apiFetch(`/api/sessions/${sid}`, { method: "DELETE" }).catch(() => {});
 		const sessionDir = path.join(stateDir, "proposal-drafts", sid);
-		await expect.poll(() => fs.existsSync(sessionDir), { timeout: 15_000 }).toBe(false);
+		expect(fs.existsSync(sessionDir)).toBe(true);
 	});
 });

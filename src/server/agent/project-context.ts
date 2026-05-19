@@ -6,6 +6,7 @@ import { GateStore } from "./gate-store.js";
 import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
 import { StaffStore } from "./staff-store.js";
+import { InboxStore } from "./inbox-store.js";
 import { RoleStore } from "./role-store.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { ToolManager } from "./tool-manager.js";
@@ -41,6 +42,7 @@ export class ProjectContext {
   readonly taskStore: TaskStore;
   readonly teamStore: TeamStore;
   readonly staffStore: StaffStore;
+  readonly inboxStore: InboxStore;
   readonly colorStore: ColorStore;
   readonly searchIndex: SearchService;
   readonly costTracker: CostTracker;
@@ -68,6 +70,7 @@ export class ProjectContext {
     this.taskStore = new TaskStore(this.stateDir);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
+    this.inboxStore = new InboxStore(this.stateDir);
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
     this.costTracker = new CostTracker(this.stateDir);

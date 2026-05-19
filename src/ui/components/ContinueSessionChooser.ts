@@ -16,6 +16,12 @@ export class ContinueSessionChooser extends LitElement {
 	@property() sessionId = "";
 	/** Rough message count shown in the modal chrome. */
 	@property({ type: Number }) messageCount = 0;
+	/**
+	 * Proposal types found in the archived session's `proposal-drafts/<id>/`
+	 * directory. When non-empty the modal appends a one-liner explaining that
+	 * the draft will be carried over into the new session.
+	 */
+	@property({ type: Array }) proposalTypes: string[] = [];
 
 	private _boundKeyDown = this._onKeyDown.bind(this);
 
@@ -78,6 +84,11 @@ export class ContinueSessionChooser extends LitElement {
 								history will be cloned losslessly — the agent picks up where
 								you left off.
 							</p>
+							${this.proposalTypes.length > 0 ? html`
+								<p class="text-xs text-muted-foreground" data-proposal-carryover>
+									Your ${this.proposalTypes.join(" / ")} proposal draft will be carried over so you can keep editing.
+								</p>
+							` : null}
 						</div>
 
 						<div class="flex items-center justify-end gap-2 pt-1">

@@ -34,6 +34,7 @@ const EXTENSION_FILES = [
 	"browser",
 	"html",
 	"images",
+	"inbox",
 	"lsp",
 	"mcp",
 	"proposals",
@@ -61,6 +62,14 @@ before(async () => {
 	// Ensure tool extensions that read state on import have a directory to look at.
 	if (!process.env.BOBBIT_DIR) {
 		process.env.BOBBIT_DIR = mkdtempSync(path.join(tmpdir(), "bobbit-tool-budget-"));
+	}
+	// Ensure staff-gated tools (inbox) register so their descriptions are budget-checked.
+	// Mirrors how BOBBIT_GOAL_ID gates the tasks/team extensions in the caller env.
+	if (!process.env.BOBBIT_STAFF_ID) {
+		process.env.BOBBIT_STAFF_ID = "00000000-0000-0000-0000-000000000000";
+	}
+	if (!process.env.BOBBIT_SESSION_ID) {
+		process.env.BOBBIT_SESSION_ID = "00000000-0000-0000-0000-000000000000";
 	}
 
 	for (const group of EXTENSION_FILES) {

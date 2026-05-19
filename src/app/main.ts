@@ -31,6 +31,7 @@ import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideCle
 import { toggleRolePicker } from "./sidebar.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { toggleShowArchived, toggleShowBusy, toggleShowRead } from "../ui/components/sidebar-filters.js";
+import { PROPOSAL_TYPES } from "./proposal-registry.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
 let _goalDashboardModule: typeof import("./goal-dashboard.js") | null = null;
@@ -67,6 +68,10 @@ setRenderApp(doRenderApp);
 // pipeline. Used by tests/e2e/ui/children-tool-renderers.spec.ts.
 (window as any).__bobbitRenderTool = renderTool;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
+
+function hasActiveProposalPanel(): boolean {
+	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
+}
 
 // ============================================================================
 // GATEWAY STARTUP POLLING
@@ -608,8 +613,8 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
-			const hasPanel = canFullscreen || (!state.assistantType && state.activeProposals.goal != null);
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
+			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
@@ -668,7 +673,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.activeProposals.goal != null || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -692,7 +697,7 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen);
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {
@@ -700,10 +705,14 @@ async function initApp() {
 					state.previewPanelFullscreen = false;
 					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else {
+				} else if (state.isPreviewSession) {
 					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;
+				} else {
+					// Proposal/review/inbox-only panels have no fullscreen surface.
+					const collapsed = localStorage.getItem(key) === "true";
+					localStorage.setItem(key, collapsed ? "false" : "true");
 				}
 				renderApp();
 			}
@@ -773,6 +782,12 @@ async function initApp() {
 	if (typeof document !== "undefined") {
 		document.body.dataset.shortcutsReady = "1";
 	}
+
+	// Refresh ${shortcutHint(...)} evaluations that were stamped as "" by the
+	// early renderApp() at the top of initApp(): at that point no shortcut had
+	// been registered yet, so toolbar/sidebar titles like "New goal" were missing
+	// their "(Alt+G)" suffix until some incidental state change re-rendered.
+	renderApp();
 
 	// Sync preferences when the page becomes visible (covers cross-device
 	// changes when the user switches back to this tab/app).
