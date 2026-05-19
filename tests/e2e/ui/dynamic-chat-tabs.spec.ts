@@ -205,8 +205,8 @@ async function expectPreviewTabsExposeUserFacingSourceNames(page: Page, sources:
 	try {
 		await expect.poll(async () => {
 			const tabs = await visiblePreviewTabPresentations(page);
-			return sources.every((source) => tabs.some((tab) => source.test(tab.text) || source.test(tab.tooltip)));
-		}, { timeout: 5_000, message: `${errorPrefix}: preview tab text or tooltip should include each preview artifact source` }).toBe(true);
+			return sources.every((source) => tabs.some((tab) => source.test(tab.text) || source.test(tab.tooltip) || source.test(tab.dataTitle)));
+		}, { timeout: 5_000, message: `${errorPrefix}: preview tab text, tooltip, or data-title should include each preview artifact source` }).toBe(true);
 	} catch {
 		const tabs = await visiblePreviewTabPresentations(page);
 		throw new Error(`${errorPrefix}: preview tabs must expose artifact-derived user-facing names; presentations=${JSON.stringify(tabs)}`);

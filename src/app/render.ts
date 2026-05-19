@@ -2779,9 +2779,7 @@ function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const source = tab.source as Record<string, unknown>;
 	const sourceTitle = `Preview: ${basename(entry) || "inline.html"}`;
-	const title = tab.title && tab.title !== "Preview"
-		? unsnapshotPreviewTitle(tab.title)
-		: sourceTitle;
+	const title = previewSourceTitle(tab) || sourceTitle;
 	return {
 		...tab,
 		kind: "preview",
@@ -2848,6 +2846,19 @@ function unsnapshotPreviewTitle(title: string): string {
 
 function snapshotPreviewTitle(title: string): string {
 	return /\s\(snapshot\)$/.test(title) ? title : `${title} (snapshot)`;
+}
+
+function previewSourceTitle(tab: PanelWorkspaceTab): string {
+	if (tab.kind !== "preview") return tab.title || tab.label || "";
+	const source = tab.source as Record<string, unknown>;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const sourcePath = previewEntryFromTab(tab)
+		|| recordValue(tabState, "snapshotFile")
+		|| recordValue(source, "path")
+		|| recordValue(source, "snapshotPath")
+		|| recordValue(tabState, "snapshotPath");
+	if (sourcePath) return `Preview: ${basename(sourcePath) || "inline.html"}`;
+	return unsnapshotPreviewTitle(tab.title || tab.label || "Preview: inline.html");
 }
 
 function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab {
@@ -3470,20 +3481,18 @@ export function doRenderApp(): void {
 		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
 	);
 
-	const panelTabButtonTooltip = (tab: UnifiedPanelTab, label: string): string => (
-		tab.kind === "preview" ? (tab.title || label) : label
-	);
-
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
 		const label = panelTabButtonLabel(tab);
-		const tooltip = panelTabButtonTooltip(tab, label);
+		const sourceTitle = tab.kind === "preview" ? previewSourceTitle(tab) : "";
+		const tooltip = sourceTitle || label;
+		const dataTitle = sourceTitle || tab.title;
 		return html`
 		<button
 			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
 			title=${tooltip}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
-			data-panel-tab-title=${tab.title}
+			data-panel-tab-title=${dataTitle}
 			data-testid=${testId}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 		>${label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
