@@ -436,6 +436,23 @@ export async function fetchProjects(): Promise<Project[]> {
   }
 }
 
+export async function saveProjectOrder(projectIds: string[]): Promise<Project[] | null> {
+  try {
+    const res = await gatewayFetch("/api/projects/order", {
+      method: "PUT",
+      body: JSON.stringify({ projectIds }),
+    });
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+    const data = await res.json().catch(() => null);
+    return data?.projects || data || [];
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to save project order", message, { code, stack });
+    return null;
+  }
+}
+
 export async function detectProject(dirPath: string): Promise<{
   exists: boolean;
   hasBobbit: boolean;
