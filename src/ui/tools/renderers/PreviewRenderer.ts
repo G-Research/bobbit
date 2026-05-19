@@ -104,6 +104,60 @@ async function locateToolResultBlock(toolUseId: string | undefined, blockIndexIn
 	return null;
 }
 
+function hashString(value: string): string {
+	let h = 5381;
+	for (let i = 0; i < value.length; i++) h = ((h << 5) + h) ^ value.charCodeAt(i);
+	return (h >>> 0).toString(36);
+}
+
+function baseName(path: string | undefined): string {
+	if (!path) return "";
+	const clean = path.split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "";
+	return clean.split("/").filter(Boolean).pop() || clean || "";
+}
+
+function previewTabTitle(params: PreviewOpenParams | undefined, parsed: ParsedSnapshot, entry: string | undefined): string {
+	const sourcePath = params?.file
+		|| (parsed.kind === "file" ? parsed.path : undefined)
+		|| (parsed.kind === "preview" ? parsed.entry || parsed.path : undefined)
+		|| entry;
+	return `Preview: ${baseName(sourcePath) || "inline.html"}`;
+}
+
+function previewTabId(toolUseId: string | undefined, blockIndex: number, parsed: ParsedSnapshot, entry: string | undefined, params: PreviewOpenParams | undefined): string {
+	if (toolUseId) return `preview:tool:${encodeURIComponent(toolUseId)}:${blockIndex}`;
+	const stable = params?.file
+		|| entry
+		|| (parsed.kind === "preview" ? parsed.url : parsed.kind === "file" ? parsed.path : parsed.html.slice(0, 1024));
+	return `preview:snapshot:${hashString(stable)}`;
+}
+
+function previewTabSource(
+	params: PreviewOpenParams | undefined,
+	parsed: ParsedSnapshot,
+	entry: string | undefined,
+	toolUseId: string | undefined,
+	blockIndex: number,
+): Record<string, unknown> {
+	const source: Record<string, unknown> = {
+		type: "preview_open",
+		snapshotKind: parsed.kind,
+		toolUseId,
+		blockIndex,
+		entry,
+		params: { file: params?.file || "", inline: !params?.file },
+	};
+	if (parsed.kind === "preview") {
+		source.url = parsed.url;
+		source.path = parsed.path;
+	} else if (parsed.kind === "file") {
+		source.path = parsed.path;
+	} else {
+		source.inline = true;
+	}
+	return source;
+}
+
 export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any> {
 	render(
 		params: PreviewOpenParams | undefined,
@@ -222,7 +276,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				//    force the iframe to reload (its src includes `#mtime=<n>`
 				//    as a cache buster) and set the entry from the snapshot URL.
 				try {
-					const { state: appState, renderApp } = await import("../../../app/state.js");
+					const [{ state: appState, renderApp }, { selectHtmlPreviewTab }] = await Promise.all([
+						import("../../../app/state.js"),
+						import("../../../app/preview-panel.js"),
+					]);
 					let entry = entryFromPost;
 					if (!entry && parsed.kind === "preview") {
 						entry = parsed.entry;
@@ -232,8 +289,20 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 							if (m) entry = m[1];
 						}
 					}
+					const mtime = mtimeFromPost ?? Date.now();
 					if (entry) (appState as any).previewPanelEntry = entry;
-					(appState as any).previewPanelMtime = mtimeFromPost ?? Date.now();
+					(appState as any).previewPanelMtime = mtime;
+					(appState as any).isPreviewSession = true;
+					selectHtmlPreviewTab({
+						sessionId,
+						entry,
+						mtime,
+						id: previewTabId(ctx?.toolUseId, snap.index, parsed, entry, params),
+						title: previewTabTitle(params, parsed, entry),
+						url: parsed.kind === "preview" ? parsed.url : undefined,
+						source: previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index),
+						select: true,
+					});
 					renderApp();
 				} catch {
 					/* state import failure shouldn't block the success animation */

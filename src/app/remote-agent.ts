@@ -2,6 +2,7 @@ import { getModel } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp } from "./state.js";
+import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention } from "./notification-policy.js";
 import { refreshGateStatusForGoal } from "./api.js";
@@ -87,6 +88,15 @@ function mergeToolPayloads(...payloads: Array<Record<string, unknown> | null | u
 		}
 	}
 	return merged;
+}
+
+function isReviewWorkspaceSelectionActive(title?: string): boolean {
+	const s = state as any;
+	const activeId = typeof s.activePanelTabId === "string" ? s.activePanelTabId
+		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
+		: "";
+	if (activeId) return activeId.startsWith("review:") || (!!title && activeId === `review:${encodeURIComponent(title)}`);
+	return s.previewPanelTab === "review" || s.previewPanelActiveTab === "review";
 }
 
 function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: string) => unknown): any {
@@ -1856,6 +1866,7 @@ export class RemoteAgent {
 				state.reviewActiveTab = data.title;
 				state.previewPanelActiveTab = "review";
 				state.previewPanelTab = "review";
+				selectReviewWorkspaceTab(data.title, { sessionId: this._sessionId || "", select: true });
 				// Un-collapse panel on desktop
 				if (this._sessionId) {
 					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
@@ -1863,20 +1874,31 @@ export class RemoteAgent {
 				renderApp();
 			} else if (data.action === "review_close") {
 				const sid = this._sessionId || "";
+				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
 				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (data.title) {
-					state.reviewDocuments.delete(data.title);
-					clearAnnotations(sid, data.title);
-					if (state.reviewActiveTab === data.title) {
+				if (closingTitle) {
+					state.reviewDocuments.delete(closingTitle);
+					clearAnnotations(sid, closingTitle);
+					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
 					}
+					closeReviewWorkspaceTabs([closingTitle], { sessionId: sid, select: false });
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					clearAllAnnotations(sid);
+					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
+				if (shouldReselect) {
+					if (state.reviewPanelOpen && state.reviewActiveTab) {
+						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId: sid, select: true });
+					} else {
+						selectSensiblePanelWorkspaceTab({ sessionId: sid, select: true });
+					}
+				}
 				renderApp();
 			}
 		}
