@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
-import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
+import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
@@ -8,6 +8,7 @@ import "./components/search-status-dot.js";
 import {
 	state,
 	renderApp,
+	setProjects,
 	activeSessionId,
 	isDesktop,
 	setSidebarWidth,
@@ -28,7 +29,7 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
+import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchProjects, saveProjectOrder } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
 import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
@@ -57,6 +58,353 @@ export function toggleProjectExpanded(projectId: string): void {
 	if (_expandedProjects.has(key)) _expandedProjects.delete(key);
 	else _expandedProjects.add(key);
 	localStorage.setItem(EXPANDED_PROJECTS_KEY, JSON.stringify([..._expandedProjects]));
+}
+
+// ============================================================================
+// PROJECT REORDER STATE
+// ============================================================================
+
+type ProjectReorderState = {
+	activeId: string;
+	pointerId: number;
+	startProjectIds: string[];
+	visualProjectIds: string[];
+	dropIndex: number;
+	suppressNextClick: boolean;
+	startX: number;
+	startY: number;
+	dragging: boolean;
+	keyboard: boolean;
+};
+
+const PROJECT_REORDER_DRAG_THRESHOLD_PX = 4;
+let _projectReorderState: ProjectReorderState | null = null;
+let _projectReorderMessage = "";
+let _suppressProjectHeaderClick = false;
+let _suppressProjectHeaderClickTimer: number | null = null;
+
+function currentProjectIds(): string[] {
+	return state.projects.map((project) => project.id);
+}
+
+function completeProjectOrderIds(projectIds: string[]): string[] {
+	const currentIds = new Set(currentProjectIds());
+	const seen = new Set<string>();
+	const complete: string[] = [];
+	for (const id of projectIds) {
+		if (!currentIds.has(id) || seen.has(id)) continue;
+		seen.add(id);
+		complete.push(id);
+	}
+	for (const project of state.projects) {
+		if (seen.has(project.id)) continue;
+		seen.add(project.id);
+		complete.push(project.id);
+	}
+	return complete;
+}
+
+function orderProjectsByIds(projects: Project[], projectIds: string[]): Project[] {
+	const byId = new Map(projects.map((project) => [project.id, project]));
+	const seen = new Set<string>();
+	const ordered: Project[] = [];
+	for (const id of projectIds) {
+		const project = byId.get(id);
+		if (!project || seen.has(id)) continue;
+		seen.add(id);
+		ordered.push(project);
+	}
+	for (const project of projects) {
+		if (seen.has(project.id)) continue;
+		seen.add(project.id);
+		ordered.push(project);
+	}
+	return ordered;
+}
+
+function projectOrdersDiffer(a: string[], b: string[]): boolean {
+	if (a.length !== b.length) return true;
+	return a.some((id, index) => id !== b[index]);
+}
+
+function projectNameForId(projectId: string): string {
+	return state.projects.find((project) => project.id === projectId)?.name || "project";
+}
+
+function setProjectReorderMessage(message: string): void {
+	_projectReorderMessage = message;
+}
+
+export function renderProjectReorderLiveRegion() {
+	return html`<div class="project-reorder-live" data-testid="project-reorder-live-region" aria-live="polite" aria-atomic="true">${_projectReorderMessage}</div>`;
+}
+
+function suppressNextProjectHeaderClick(): void {
+	_suppressProjectHeaderClick = true;
+	if (_suppressProjectHeaderClickTimer !== null) window.clearTimeout(_suppressProjectHeaderClickTimer);
+	_suppressProjectHeaderClickTimer = window.setTimeout(() => {
+		_suppressProjectHeaderClick = false;
+		_suppressProjectHeaderClickTimer = null;
+	}, 200);
+}
+
+function consumeProjectHeaderReorderClick(): boolean {
+	if (!_suppressProjectHeaderClick && !_projectReorderState?.suppressNextClick) return false;
+	_suppressProjectHeaderClick = false;
+	if (_suppressProjectHeaderClickTimer !== null) {
+		window.clearTimeout(_suppressProjectHeaderClickTimer);
+		_suppressProjectHeaderClickTimer = null;
+	}
+	if (_projectReorderState) _projectReorderState.suppressNextClick = false;
+	return true;
+}
+
+function addProjectReorderDocumentListeners(): void {
+	document.addEventListener("pointermove", handleProjectReorderMove);
+	document.addEventListener("pointerup", handleProjectReorderPointerUp);
+	document.addEventListener("pointercancel", handleProjectReorderPointerCancel);
+}
+
+function removeProjectReorderDocumentListeners(): void {
+	document.removeEventListener("pointermove", handleProjectReorderMove);
+	document.removeEventListener("pointerup", handleProjectReorderPointerUp);
+	document.removeEventListener("pointercancel", handleProjectReorderPointerCancel);
+}
+
+function focusProjectReorderHandle(projectId: string): void {
+	requestAnimationFrame(() => {
+		const handle = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="project-reorder-handle"]'))
+			.find((el) => el.dataset.projectId === projectId);
+		handle?.focus();
+	});
+}
+
+export function isProjectReordering(): boolean {
+	return _projectReorderState?.dragging === true;
+}
+
+export function projectOrderForRender(): Project[] {
+	if (!isProjectReordering() || !_projectReorderState) return state.projects;
+	return orderProjectsByIds(state.projects, _projectReorderState.visualProjectIds);
+}
+
+function beginProjectReorder(): void {
+	const reorder = _projectReorderState;
+	if (!reorder || reorder.dragging) return;
+	reorder.dragging = true;
+	reorder.visualProjectIds = completeProjectOrderIds(reorder.visualProjectIds);
+	reorder.dropIndex = reorder.visualProjectIds.indexOf(reorder.activeId);
+	setProjectReorderMessage(`Picked up ${projectNameForId(reorder.activeId)}.`);
+	renderApp();
+}
+
+export function startProjectReorder(e: PointerEvent, projectId: string): void {
+	if (e.pointerType === "mouse" && e.button !== 0) return;
+	e.preventDefault();
+	e.stopPropagation();
+	if (_projectReorderState) return;
+	const projectIds = currentProjectIds();
+	if (!projectIds.includes(projectId)) return;
+	_projectReorderState = {
+		activeId: projectId,
+		pointerId: e.pointerId,
+		startProjectIds: projectIds,
+		visualProjectIds: projectIds,
+		dropIndex: projectIds.indexOf(projectId),
+		suppressNextClick: true,
+		startX: e.clientX,
+		startY: e.clientY,
+		dragging: false,
+		keyboard: false,
+	};
+	addProjectReorderDocumentListeners();
+	try {
+		(e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
+	} catch {
+		// Pointer capture can fail when the handle is removed during a re-render.
+	}
+}
+
+function updateProjectReorderFromPointer(clientY: number): void {
+	const reorder = _projectReorderState;
+	if (!reorder) return;
+	const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-project-reorder-id]"))
+		.filter((row) => row.dataset.projectReorderId && row.dataset.projectReorderId !== reorder.activeId && row.getClientRects().length > 0);
+	let dropIndex = rows.length;
+	for (let i = 0; i < rows.length; i++) {
+		const rect = rows[i].getBoundingClientRect();
+		if (clientY < rect.top + rect.height / 2) {
+			dropIndex = i;
+			break;
+		}
+	}
+	const withoutActive = completeProjectOrderIds(reorder.visualProjectIds).filter((id) => id !== reorder.activeId);
+	dropIndex = Math.max(0, Math.min(dropIndex, withoutActive.length));
+	const nextIds = [...withoutActive];
+	nextIds.splice(dropIndex, 0, reorder.activeId);
+	reorder.dropIndex = dropIndex;
+	if (!projectOrdersDiffer(nextIds, reorder.visualProjectIds)) return;
+	reorder.visualProjectIds = nextIds;
+	const beforeId = nextIds[dropIndex + 1];
+	setProjectReorderMessage(beforeId
+		? `Moved ${projectNameForId(reorder.activeId)} before ${projectNameForId(beforeId)}.`
+		: `Moved ${projectNameForId(reorder.activeId)} to the end.`);
+	renderApp();
+}
+
+export function handleProjectReorderMove(e: PointerEvent): void {
+	const reorder = _projectReorderState;
+	if (!reorder || reorder.keyboard || reorder.pointerId !== e.pointerId) return;
+	e.preventDefault();
+	if (!reorder.dragging) {
+		const dx = e.clientX - reorder.startX;
+		const dy = e.clientY - reorder.startY;
+		if (Math.hypot(dx, dy) < PROJECT_REORDER_DRAG_THRESHOLD_PX) return;
+		beginProjectReorder();
+	}
+	updateProjectReorderFromPointer(e.clientY);
+}
+
+function handleProjectReorderPointerUp(e: PointerEvent): void {
+	const reorder = _projectReorderState;
+	if (!reorder || reorder.keyboard || reorder.pointerId !== e.pointerId) return;
+	e.preventDefault();
+	e.stopPropagation();
+	const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+	const droppedInsideList = !!target?.closest("[data-project-reorder-list]");
+	void finishProjectReorder(!reorder.dragging || !droppedInsideList);
+}
+
+function handleProjectReorderPointerCancel(e: PointerEvent): void {
+	const reorder = _projectReorderState;
+	if (!reorder || reorder.keyboard || reorder.pointerId !== e.pointerId) return;
+	e.preventDefault();
+	e.stopPropagation();
+	void finishProjectReorder(true);
+}
+
+function moveKeyboardProject(projectId: string, delta: number): void {
+	const reorder = _projectReorderState;
+	if (!reorder || reorder.activeId !== projectId) return;
+	const ids = completeProjectOrderIds(reorder.visualProjectIds);
+	const from = ids.indexOf(projectId);
+	if (from < 0) return;
+	const to = Math.max(0, Math.min(ids.length - 1, from + delta));
+	if (to === from) return;
+	ids.splice(from, 1);
+	ids.splice(to, 0, projectId);
+	reorder.visualProjectIds = ids;
+	reorder.dropIndex = to;
+	setProjectReorderMessage(`Moved ${projectNameForId(projectId)} to position ${to + 1} of ${ids.length}.`);
+	renderApp();
+	focusProjectReorderHandle(projectId);
+}
+
+function beginKeyboardProjectReorder(projectId: string): void {
+	const projectIds = currentProjectIds();
+	if (!projectIds.includes(projectId)) return;
+	_projectReorderState = {
+		activeId: projectId,
+		pointerId: -1,
+		startProjectIds: projectIds,
+		visualProjectIds: projectIds,
+		dropIndex: projectIds.indexOf(projectId),
+		suppressNextClick: true,
+		startX: 0,
+		startY: 0,
+		dragging: true,
+		keyboard: true,
+	};
+	setProjectReorderMessage(`Picked up ${projectNameForId(projectId)}.`);
+	renderApp();
+	focusProjectReorderHandle(projectId);
+}
+
+export function handleProjectReorderKeyDown(e: KeyboardEvent, projectId: string): void {
+	if (![" ", "Enter", "ArrowUp", "ArrowDown", "Escape"].includes(e.key)) return;
+	const reorder = _projectReorderState;
+	if (!reorder) {
+		if (e.key !== " " && e.key !== "Enter") return;
+		e.preventDefault();
+		e.stopPropagation();
+		beginKeyboardProjectReorder(projectId);
+		return;
+	}
+	if (reorder.activeId !== projectId) return;
+	e.preventDefault();
+	e.stopPropagation();
+	if (e.key === "Escape") {
+		void finishProjectReorder(true);
+	} else if (e.key === "ArrowUp") {
+		moveKeyboardProject(projectId, -1);
+	} else if (e.key === "ArrowDown") {
+		moveKeyboardProject(projectId, 1);
+	} else if (e.key === " " || e.key === "Enter") {
+		void finishProjectReorder(false);
+	}
+}
+
+function handleProjectReorderDocumentKeyDown(e: KeyboardEvent): void {
+	if (e.key !== "Escape" || !_projectReorderState) return;
+	e.preventDefault();
+	e.stopPropagation();
+	void finishProjectReorder(true);
+}
+
+document.addEventListener("keydown", handleProjectReorderDocumentKeyDown, true);
+
+export async function finishProjectReorder(cancel = false): Promise<void> {
+	const reorder = _projectReorderState;
+	if (!reorder) return;
+	removeProjectReorderDocumentListeners();
+	const wasDragging = reorder.dragging;
+	const startIds = completeProjectOrderIds(reorder.startProjectIds);
+	const finalIds = completeProjectOrderIds(reorder.visualProjectIds);
+	const originalProjects = orderProjectsByIds(state.projects, startIds);
+	const optimisticProjects = orderProjectsByIds(state.projects, finalIds);
+	const changed = projectOrdersDiffer(startIds, finalIds);
+	if (reorder.suppressNextClick) suppressNextProjectHeaderClick();
+	_projectReorderState = null;
+
+	if (cancel || !wasDragging || !changed) {
+		setProjectReorderMessage(cancel && wasDragging ? "Project reorder cancelled." : "");
+		renderApp();
+		return;
+	}
+
+	setProjects(optimisticProjects);
+	setProjectReorderMessage(`Dropped ${projectNameForId(reorder.activeId)} at position ${finalIds.indexOf(reorder.activeId) + 1} of ${finalIds.length}.`);
+	renderApp();
+
+	const savedProjects = await saveProjectOrder(finalIds);
+	if (savedProjects) {
+		setProjects(savedProjects);
+	} else {
+		const restored = await fetchProjects();
+		setProjects(restored.length > 0 || originalProjects.length === 0 ? restored : originalProjects);
+	}
+	renderApp();
+}
+
+export function renderProjectReorderHandle(project: Project) {
+	const active = _projectReorderState?.activeId === project.id && _projectReorderState.dragging;
+	return html`
+		<button
+			type="button"
+			class="project-reorder-handle ${active ? "project-reorder-handle-active" : ""}"
+			data-testid="project-reorder-handle"
+			data-project-id=${project.id}
+			aria-label=${`Reorder ${project.name}`}
+			aria-pressed=${active ? "true" : "false"}
+			aria-grabbed=${active ? "true" : "false"}
+			title=${`Reorder ${project.name}`}
+			@pointerdown=${(e: PointerEvent) => startProjectReorder(e, project.id)}
+			@click=${(e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); consumeProjectHeaderReorderClick(); }}
+			@keydown=${(e: KeyboardEvent) => handleProjectReorderKeyDown(e, project.id)}
+		>
+			${icon(GripVertical, "xs")}
+		</button>
+	`;
 }
 
 // ============================================================================
@@ -856,22 +1204,40 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 	const isProvisional = !!project.provisional;
 	const navId = `project:${project.id}`;
 	const navActive = getActiveNavId() === navId;
+	const reordering = isProjectReordering();
+	const reorderActive = _projectReorderState?.activeId === project.id && _projectReorderState.dragging;
 	return html`
-		<div class="group flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md cursor-pointer ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+		<div class="group project-header flex items-center gap-1 pr-1 py-0.5 pl-0.5 rounded-md ${reordering ? "cursor-default" : "cursor-pointer"} ${reorderActive ? "project-reorder-active" : ""} ${navActive ? "bg-secondary text-foreground sidebar-session-active" : "hover:bg-secondary/30"} transition-colors"
+			data-testid="project-header"
+			data-project-id=${project.id}
+			data-project-reorder-id=${project.id}
+			data-project-reordering=${reordering ? "true" : "false"}
+			data-project-reorder-active=${reorderActive ? "true" : "false"}
 			data-nav-id=${navId}
 			data-nav-active=${navActive ? "true" : "false"}
-			@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
+			@click=${(e: Event) => {
+				if (consumeProjectHeaderReorderClick() || isProjectReordering()) {
+					e.preventDefault();
+					e.stopPropagation();
+					return;
+				}
+				toggleProjectExpanded(project.id);
+				renderApp();
+			}}>
 			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
+			${renderProjectReorderHandle(project)}
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
 			<button
+				type="button"
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors ${isDesktop() ? "opacity-0 group-hover:opacity-100" : ""}"
 				style="padding:0;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); setHashRoute("settings", `${project.id}/general`); }}
 				title="Project settings"
 			>${icon(Settings, "xs")}</button>
 			<button
+				type="button"
 				class="rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors relative shrink-0"
 				style="padding:0 2px;line-height:0;"
 				@click=${(e: Event) => { e.stopPropagation(); showGoalDialog(undefined, project.id); }}
@@ -980,7 +1346,8 @@ export function renderSidebar() {
 	const isSkillsActive = isRouteActive("skills");
 
 	return html`
-		<div class="shrink-0 h-full flex flex-col sidebar-edge sidebar-root relative" data-testid="sidebar-expanded" style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+		<div class="shrink-0 h-full flex flex-col sidebar-edge sidebar-root relative" data-testid="sidebar-expanded" data-project-reordering=${isProjectReordering() ? "true" : "false"} style="background: var(--sidebar); width: var(--sidebar-w, 240px);">
+			${renderProjectReorderLiveRegion()}
 			<div class="sidebar-resize-handle" @pointerdown=${onSidebarResizePointerDown} @dblclick=${onSidebarResizeDoubleClick} title="Drag to resize (double-click to reset)"></div>
 			<div class="flex flex-col border-b border-border/50 px-0.5 py-1 gap-0.5">
 				<div class="flex items-center">
@@ -1043,7 +1410,7 @@ export function renderSidebar() {
 				></search-box>
 				<search-status-dot></search-status-dot>
 			</div>
-			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5">
+			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5" data-project-reorder-list>
 				${renderOrphanedStaffBanner()}
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
@@ -1131,15 +1498,18 @@ export function renderSidebar() {
 							}
 
 							return html`
-							${state.projects.map((project, i) => {
+							${projectOrderForRender().map((project, i) => {
 								const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [], archivedGoals: [], standaloneArchivedSessions: [] };
 								const expanded = isProjectExpanded(project.id);
+								const effectiveExpanded = isProjectReordering() ? false : expanded;
 								return html`
-									${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-									${renderProjectHeader(project, expanded)}
-									${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-										${renderProjectContent(project, data.goals, data.sessions, data.staff, data.archivedGoals, data.standaloneArchivedSessions)}
-									</div>` : ""}
+									${i > 0 ? html`<div class="project-reorder-separator border-t border-border/30 my-1 mx-2"></div>` : ""}
+									<div class="project-reorder-section" data-project-id=${project.id}>
+										${renderProjectHeader(project, effectiveExpanded)}
+										${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+											${renderProjectContent(project, data.goals, data.sessions, data.staff, data.archivedGoals, data.standaloneArchivedSessions)}
+										</div>` : ""}
+									</div>
 								`;
 							})}
 

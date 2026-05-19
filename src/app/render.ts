@@ -44,7 +44,7 @@ function isSessionArchived(sessionId: string | null | undefined): boolean {
 }
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -311,7 +311,8 @@ function renderMobileLanding() {
 		passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
 
 	return html`
-		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root">
+		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
+			${renderProjectReorderLiveRegion()}
 			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {
@@ -406,8 +407,9 @@ function renderMobileLanding() {
 										const q = state.searchQuery.toLowerCase();
 										staffList = filterStaffByQuery(staffList, q);
 									}
+									const projectsForRender = projectOrderForRender();
 									const projectMap = new Map<string, { goals: typeof liveGoals; sessions: typeof ungroupedSessions; staff: typeof staffList }>();
-										for (const p of state.projects) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
+										for (const p of projectsForRender) projectMap.set(p.id, { goals: [], sessions: [], staff: [] });
 										for (const g of liveGoals) {
 											if (!g.projectId) { console.warn("[mobile] orphaned goal with no projectId — skipping", g.id); continue; }
 											const bucket = projectMap.get(g.projectId);
@@ -432,17 +434,23 @@ function renderMobileLanding() {
 										// Bucket archived goals + standalone archived sessions per project.
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
 										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
-										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, state.projects);
-										return html`${state.projects.map((project, i) => {
+										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, projectsForRender);
+										return html`<div data-project-reorder-list>${projectsForRender.map((project, i) => {
 											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 											const expanded = isProjectExpanded(project.id);
+											const effectiveExpanded = isProjectReordering() ? false : expanded;
 											const color = getProjectAccentColor(project);
 											return html`
 												${i > 0 ? html`<div class="border-t border-border/30 my-1 mx-2"></div>` : ""}
-												<div class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
-													@click=${() => { toggleProjectExpanded(project.id); renderApp(); }}>
-													<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
-													<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
+												<div data-project-reorder-id=${project.id} data-project-id=${project.id}>
+													<div
+														data-testid="project-header"
+														data-project-id=${project.id}
+														class="flex items-center gap-1.5 pl-0.5 pr-2 py-0.5 rounded-md cursor-pointer active:bg-secondary/50 transition-colors"
+														@click=${() => { if (isProjectReordering()) return; toggleProjectExpanded(project.id); renderApp(); }}>
+														<span class="text-muted-foreground shrink-0 select-none" style="width:14px;text-align:center;font-size: 1.1667em;">${effectiveExpanded ? "▾" : "▸"}</span>
+														${renderProjectReorderHandle(project)}
+														<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "sm")}</span>
 													<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 1.1667em;">${project.name}</span>
 													<div class="flex items-center gap-2 shrink-0">
 														<button
@@ -464,7 +472,7 @@ function renderMobileLanding() {
 														</button>
 													</div>
 												</div>
-												${expanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
+												${effectiveExpanded ? html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 													${data.goals.map((goal, gi) => html`
 														${gi > 0 ? html`<div class="border-t border-border/30 mx-2"></div>` : ""}
 														${renderGoalGroup(goal)}
@@ -511,6 +519,7 @@ function renderMobileLanding() {
 														return renderProjectArchivedSection(project, ab.archivedGoals, ab.standaloneArchivedSessions, "mobile");
 													})()}
 												</div>` : ""}
+												</div>
 											`;
 										})}
 										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
@@ -519,7 +528,7 @@ function renderMobileLanding() {
 												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
 												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
 											</div>
-										` : ""}`;
+										` : ""}</div>`;
 								})()}
 							`}
 			</div>

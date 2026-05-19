@@ -96,7 +96,7 @@ import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotatio
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
-import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID } from "./agent/project-registry.js";
+import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
 import { ProjectContextManager } from "./agent/project-context-manager.js";
@@ -2165,7 +2165,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/projects" && req.method === "GET") {
 		// Filter out hidden projects (e.g. the synthetic "system" project) so
 		// they never appear in the client's state.projects.
-		json(projectRegistry.list().filter(p => !p.hidden));
+		json(projectRegistry.list().filter(p => !p.hidden && p.id !== SYSTEM_PROJECT_ID));
 		return;
 	}
 
@@ -2343,6 +2343,30 @@ async function handleApiRoute(
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
+		}
+		return;
+	}
+
+	// PUT /api/projects/order
+	if (url.pathname === "/api/projects/order" && req.method === "PUT") {
+		const body = await readBody(req);
+		try {
+			const projects = projectRegistry.setVisibleOrder(body?.projectIds);
+			broadcastToAll({ type: "projects_changed", projects });
+			json({ projects });
+		} catch (err: any) {
+			if (err instanceof ProjectOrderError || err?.code === "invalid_project_order" || err?.code === "stale_project_order") {
+				const code = err?.code === "stale_project_order" ? "stale_project_order" : "invalid_project_order";
+				const payload: Record<string, unknown> = {
+					error: err?.message || "Invalid project order",
+					code,
+				};
+				if (Array.isArray(err?.details?.expectedProjectIds)) payload.expectedProjectIds = err.details.expectedProjectIds;
+				if (Array.isArray(err?.details?.receivedProjectIds)) payload.receivedProjectIds = err.details.receivedProjectIds;
+				json(payload, code === "stale_project_order" ? 409 : 400);
+			} else {
+				jsonError(400, err);
+			}
 		}
 		return;
 	}

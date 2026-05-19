@@ -564,6 +564,30 @@ export function setProjects(projects: Project[]): void {
 	}
 }
 
+function projectSignature(project: Project): string {
+	const record = project as unknown as Record<string, unknown>;
+	const sorted: Record<string, unknown> = {};
+	for (const key of Object.keys(record).sort()) {
+		sorted[key] = record[key];
+	}
+	return JSON.stringify(sorted);
+}
+
+export function projectsEqual(a: Project[], b: Project[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].id !== b[i].id) return false;
+		if (projectSignature(a[i]) !== projectSignature(b[i])) return false;
+	}
+	return true;
+}
+
+export function setProjectsIfChanged(projects: Project[]): boolean {
+	if (projectsEqual(state.projects, projects)) return false;
+	setProjects(projects);
+	return true;
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================

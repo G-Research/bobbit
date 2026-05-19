@@ -1,7 +1,7 @@
 import {
 	state,
 	renderApp,
-	setProjects,
+	setProjectsIfChanged,
 	expandedGoals,
 	saveExpandedGoals,
 	type GatewaySession,
@@ -107,6 +107,7 @@ export async function refreshSessions(): Promise<void> {
 
 	let sessionsChanged = false;
 	let goalsChanged = false;
+	let projectsChanged = false;
 
 	try {
 		// Build URLs with generation params for conditional fetch
@@ -121,14 +122,15 @@ export async function refreshSessions(): Promise<void> {
 			gatewayFetch(sessionsUrl),
 			gatewayFetch(goalsUrl),
 			// Fetch projects alongside sessions/goals so project grouping is
-			// available on the very first render — prevents sessions briefly
-			// appearing under the wrong project.
-			isInitial ? fetchProjects().catch((): null => null) : Promise.resolve(null),
+			// available on the very first render and landing/mobile pages without
+			// an active session still pick up cross-tab project reorder changes.
+			fetchProjectsSnapshot(),
 		]);
-		// Apply projects before processing sessions so the first renderApp()
-		// already has the correct project list for sidebar grouping.
-		if (projectsResult) {
-			setProjects(projectsResult);
+		// Apply projects before processing sessions so renderApp() already has
+		// the correct project list for sidebar grouping. The equality gate avoids
+		// repainting every 5s polling tick when order/content is unchanged.
+		if (projectsResult !== null) {
+			projectsChanged = setProjectsIfChanged(projectsResult);
 		}
 		// background polling: failures are silent (caller does not show a modal)
 		if (!sessionsRes.ok) throw new Error(`Failed to fetch sessions: ${sessionsRes.status}`);
@@ -236,7 +238,7 @@ export async function refreshSessions(): Promise<void> {
 		}
 	} finally {
 		state.sessionsLoading = false;
-		if (sessionsChanged || goalsChanged || isInitial) {
+		if (sessionsChanged || goalsChanged || projectsChanged || isInitial) {
 			renderApp();
 		}
 	}
@@ -425,14 +427,36 @@ export async function cleanupOrphanedIndexRows(projectId?: string): Promise<numb
 // PROJECT API
 // ============================================================================
 
-export async function fetchProjects(): Promise<Project[]> {
+async function fetchProjectsSnapshot(): Promise<Project[] | null> {
   try {
     const res = await gatewayFetch("/api/projects");
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     const data = await res.json();
-    return data.projects || data || [];
+    if (Array.isArray(data?.projects)) return data.projects;
+    return Array.isArray(data) ? data : [];
   } catch {
-    return [];
+    return null;
+  }
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  return (await fetchProjectsSnapshot()) ?? [];
+}
+
+export async function saveProjectOrder(projectIds: string[]): Promise<Project[] | null> {
+  try {
+    const res = await gatewayFetch("/api/projects/order", {
+      method: "PUT",
+      body: JSON.stringify({ projectIds }),
+    });
+    if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
+    const data = await res.json().catch(() => null);
+    return data?.projects || data || [];
+  } catch (err) {
+    const { showConnectionError } = await import("./dialogs.js");
+    const { message, code, stack } = errorDetails(err);
+    showConnectionError("Failed to save project order", message, { code, stack });
+    return null;
   }
 }
 
