@@ -564,6 +564,8 @@ export interface SessionManagerOptions {
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
+	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
+	private sessionsWithConnectedClients = new Set<SessionInfo>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
 	/** @internal Test-only session store (used when no PCM is available). */
@@ -760,6 +762,18 @@ export class SessionManager {
 		}
 	}
 
+	private _trackConnectedSession(session: SessionInfo): void {
+		if (this.sessions.get(session.id) === session && session.status !== "terminated" && session.clients.size > 0) {
+			this.sessionsWithConnectedClients.add(session);
+		} else {
+			this.sessionsWithConnectedClients.delete(session);
+		}
+	}
+
+	private _untrackConnectedSession(session: SessionInfo): void {
+		this.sessionsWithConnectedClients.delete(session);
+	}
+
 	/**
 	 * Re-broadcast the current `session_status` for every session that has
 	 * connected clients, WITHOUT bumping `statusVersion`. Heartbeat. Idempotent
@@ -772,10 +786,12 @@ export class SessionManager {
 		let sessionsWithClients = 0;
 		let frames = 0;
 		let recipients = 0;
-		for (const session of this.sessions.values()) {
+		for (const session of this.sessionsWithConnectedClients) {
 			sessionsScanned++;
-			if (session.clients.size === 0) continue;
-			if (session.status === "terminated") continue;
+			if (this.sessions.get(session.id) !== session || session.clients.size === 0 || session.status === "terminated") {
+				this.sessionsWithConnectedClients.delete(session);
+				continue;
+			}
 			sessionsWithClients++;
 			frames++;
 			recipients += session.clients.size;
@@ -2616,6 +2632,7 @@ export class SessionManager {
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
+		this._untrackConnectedSession(session);
 		this.sessions.delete(session.id);
 		(ps as any)._restartFrameOfReference = frameOfRef;
 		opts?.mutatePs?.(ps);
@@ -2631,6 +2648,7 @@ export class SessionManager {
 				if ((ws as any).readyState === 1) restored.clients.add(ws);
 			}
 			broadcastStatus(restored, opts?.finalStatus ?? "idle");
+			this._trackConnectedSession(restored);
 		}
 		return restored;
 	}
@@ -4119,6 +4137,7 @@ export class SessionManager {
 				client.close(1000, "Session terminated");
 			}
 			session.clients.clear();
+			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 			extStore.remove(id);
 			cleanupSessionPrompt(id);
@@ -4778,6 +4797,7 @@ export class SessionManager {
 			client.close(1000, "Session terminated");
 		}
 		session.clients.clear();
+		this._untrackConnectedSession(session);
 
 		// Resolve the store BEFORE removing from in-memory map, so
 		// resolveStoreForSession can look up the session's projectId.
@@ -5315,7 +5335,10 @@ export class SessionManager {
 						console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
 						// restoreSession replaces the map entry — add client to the new one
 						const revived = this.sessions.get(sessionId);
-						if (revived) revived.clients.add(ws);
+						if (revived && (ws as any).readyState === 1) {
+							revived.clients.add(ws);
+							this._trackConnectedSession(revived);
+						}
 					})
 					.catch((err) => {
 						console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
@@ -5325,6 +5348,7 @@ export class SessionManager {
 		}
 
 		session.clients.add(ws);
+		this._trackConnectedSession(session);
 
 		// Note: tool_execution_update events from the heartbeat will flow to
 		// this client naturally via the broadcast in the event listener.
@@ -5339,6 +5363,7 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (session) {
 			session.clients.delete(ws);
+			this._trackConnectedSession(session);
 		}
 	}
 
@@ -5572,6 +5597,7 @@ export class SessionManager {
 				client.close(1000, "Server shutting down");
 			}
 			session.clients.clear();
+			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 		}
 
