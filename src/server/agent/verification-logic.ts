@@ -232,6 +232,42 @@ export function isProviderBackoffError(output: string): boolean {
 	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
+/**
+ * Minimal session snapshot — just the fields needed to surface an active
+ * provider backoff. Defined locally (rather than importing SessionInfo) so
+ * this stays in the pure-logic module and is trivially testable.
+ */
+export interface BackoffSnapshot {
+	lastTurnErrorMessage?: string;
+	transientRetryAttempts?: number;
+	pendingAutoRetryTimer?: unknown;
+}
+
+/**
+ * If a session's last turn ended in a provider overload / rate-limit error,
+ * return a human-readable suffix describing the condition; otherwise return
+ * empty string. Used to enrich verification timeout messages so reviewers
+ * (and the team-lead notification that quotes them) can distinguish "model
+ * silently chugging through a long review" from "stuck behind a quota wall".
+ *
+ * Pure — no I/O — so the verification harness can pass a session-info
+ * snapshot directly and unit tests can pass plain objects.
+ */
+export function describeProviderBackoff(session: BackoffSnapshot | undefined): string {
+	if (!session) return "";
+	const errMsg = session.lastTurnErrorMessage || "";
+	if (!errMsg) return "";
+	if (!isProviderBackoffError(errMsg)) return "";
+	const kind = errMsg.includes("rate_limit_error") || /\b429\b/.test(errMsg)
+		? "rate-limit"
+		: (errMsg.includes("overloaded_error") || /\b529\b/.test(errMsg) ? "overload" : "backoff");
+	const attempts = session.transientRetryAttempts ?? 0;
+	const attemptPart = attempts > 0 ? ` after ${attempts} auto-retry attempt${attempts === 1 ? "" : "s"}` : "";
+	const pendingPart = session.pendingAutoRetryTimer ? " — auto-retry still pending" : "";
+	const snippet = errMsg.slice(0, 200).replace(/\s+/g, " ").trim();
+	return ` Last turn hit a provider ${kind} error${attemptPart}${pendingPart}. Check your provider quota / subscription rate limits. (Error: ${snippet})`;
+}
+
 /** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
 export function isTransientQaError(output: string): boolean {
 	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;

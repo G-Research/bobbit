@@ -322,6 +322,20 @@ describe("TaskManager State Machine", () => {
 				mgr.transitionTask(task.id, "complete");
 			}, /Invalid state transition/);
 		});
+
+		it("is a no-op when already in the target state", () => {
+			const task = mgr.createTask("g1", "Task", "impl");
+			mgr.transitionTask(task.id, "in-progress");
+			// Repeating the same transition must not throw (agents commonly
+			// re-issue the current state and a 400 wedges team-lead loops).
+			assert.equal(mgr.transitionTask(task.id, "in-progress"), true);
+			assert.equal(mgr.getTask(task.id)!.state, "in-progress");
+			// Terminal-to-self is also a no-op (no outgoing transition is
+			// "needed" — same state is the same state).
+			mgr.transitionTask(task.id, "complete");
+			assert.equal(mgr.transitionTask(task.id, "complete"), true);
+			assert.equal(mgr.getTask(task.id)!.state, "complete");
+		});
 	});
 
 	// --- completeTask ---

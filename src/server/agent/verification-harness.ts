@@ -50,6 +50,7 @@ import {
 	computeAllPassed,
 	canSkipAllSteps,
 	detectJsonValidationError,
+	describeProviderBackoff,
 	isPreImplementationGate,
 	shouldSuppressRestartInterrupt,
 } from "./verification-logic.js";
@@ -2308,11 +2309,21 @@ export class VerificationHarness {
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
+			// If the underlying agent was stuck behind a provider rate-limit /
+			// overload (corp-subscription quotas, Anthropic 429/529, etc.) the
+			// generic "timed out after 600s" message buries the actual cause.
+			// Pull the session's last-turn error state and surface it so the
+			// reviewer output (and the team-lead notification that quotes it)
+			// names the rate limit explicitly.
+			const backoffSuffix = describeProviderBackoff(this.sessionManager?.getSession(sessionId));
 			const errOutput = isTimeout
-				? `LLM review timed out after ${(timeoutMs / 1000)}s.`
-				: `LLM review failed: ${err.message}`;
+				? `LLM review timed out after ${(timeoutMs / 1000)}s.${backoffSuffix}`
+				: `LLM review failed: ${err.message}${backoffSuffix}`;
 			if (isProcessDeath) {
 				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${err.message}`);
+			}
+			if (backoffSuffix) {
+				console.warn(`[verification] Reviewer for "${step.name}" (session ${sessionId}) was stuck on provider backoff at timeout:${backoffSuffix}`);
 			}
 			return { passed: false, output: errOutput, sessionId };
 		} finally {
@@ -2631,11 +2642,20 @@ export class VerificationHarness {
 		} catch (err: any) {
 			const isTimeout = err.message?.includes("timed out") || err.message?.includes("Timeout");
 			const isProcessDeath = err.message?.includes("process exited") || err.message?.includes("process not running");
+			// See runLlmReviewViaSession for rationale: surface provider
+			// rate-limit / overload state so a "timed out" failure doesn't
+			// hide a quota wall behind a generic timeout message.
+			const backoffSuffix = qaSessionId
+				? describeProviderBackoff(this.sessionManager?.getSession(qaSessionId))
+				: "";
 			const errOutput = isTimeout
-				? `Agent QA timed out after ${(timeoutMs / 1000)}s.`
-				: `Agent QA failed: ${err.message}`;
+				? `Agent QA timed out after ${(timeoutMs / 1000)}s.${backoffSuffix}`
+				: `Agent QA failed: ${err.message}${backoffSuffix}`;
 			if (isProcessDeath) {
 				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${err.message}`);
+			}
+			if (backoffSuffix) {
+				console.warn(`[verification] QA agent for "${step.name}" (session ${qaSessionId}) was stuck on provider backoff at timeout:${backoffSuffix}`);
 			}
 			return { passed: false, output: errOutput, sessionId: qaSessionId };
 		} finally {

@@ -25,6 +25,7 @@ import {
 	// New classifier for provider overload / rate-limit / quota-throttle.
 	// Used by SessionManager to pick the unbounded backoff policy.
 	isProviderBackoffError,
+	describeProviderBackoff,
 } from "../src/server/agent/verification-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -299,6 +300,88 @@ describe("isProviderBackoffError", () => {
 		assert.equal(isProviderBackoffError("compiled 429 files"), false);
 		assert.equal(isProviderBackoffError("sample rate: 44100"), false);
 		assert.equal(isProviderBackoffError("TypeError: cannot read properties of null"), false);
+	});
+});
+
+// ===================================================================
+// describeProviderBackoff — used by verification harness to enrich
+// timeout / failure outputs when an agent was stuck behind a quota wall.
+// ===================================================================
+
+describe("describeProviderBackoff", () => {
+	it("returns empty string for undefined / empty session", () => {
+		assert.equal(describeProviderBackoff(undefined), "");
+		assert.equal(describeProviderBackoff({}), "");
+		assert.equal(describeProviderBackoff({ lastTurnErrorMessage: "" }), "");
+	});
+
+	it("returns empty string when the last-turn error is not a provider backoff", () => {
+		assert.equal(
+			describeProviderBackoff({
+				lastTurnErrorMessage: "Error: Expected ',' or '}' after property value in JSON at position 320",
+			}),
+			"",
+		);
+		assert.equal(
+			describeProviderBackoff({ lastTurnErrorMessage: "Error: read ECONNRESET" }),
+			"",
+		);
+	});
+
+	it("names 'rate-limit' for rate_limit_error markers", () => {
+		const out = describeProviderBackoff({
+			lastTurnErrorMessage: '{"type":"rate_limit_error","message":"You have exceeded your quota"}',
+			transientRetryAttempts: 3,
+		});
+		assert.match(out, /rate-limit/);
+		assert.match(out, /3 auto-retry attempts/);
+		assert.match(out, /Check your provider quota/);
+	});
+
+	it("names 'overload' for overloaded_error markers", () => {
+		const out = describeProviderBackoff({
+			lastTurnErrorMessage: '{"type":"overloaded_error","message":"Overloaded"}',
+		});
+		assert.match(out, /overload/);
+		assert.doesNotMatch(out, /auto-retry attempt/); // attempts=0 → no count
+	});
+
+	it("names 'rate-limit' for HTTP 429", () => {
+		const out = describeProviderBackoff({
+			lastTurnErrorMessage: "HTTP 429 Too Many Requests",
+			transientRetryAttempts: 1,
+		});
+		assert.match(out, /rate-limit/);
+		assert.match(out, /1 auto-retry attempt\b/);
+	});
+
+	it("names 'overload' for HTTP 529", () => {
+		const out = describeProviderBackoff({
+			lastTurnErrorMessage: "status 529",
+		});
+		assert.match(out, /overload/);
+	});
+
+	it("marks auto-retry as pending when a timer is queued", () => {
+		const out = describeProviderBackoff({
+			lastTurnErrorMessage: "rate_limit_error",
+			transientRetryAttempts: 2,
+			pendingAutoRetryTimer: {} as unknown,
+		});
+		assert.match(out, /auto-retry still pending/);
+	});
+
+	it("includes a truncated snippet of the original provider error", () => {
+		const longMsg = "rate_limit_error: " + "x".repeat(500);
+		const out = describeProviderBackoff({ lastTurnErrorMessage: longMsg });
+		assert.match(out, /\(Error: /);
+		// Snippet should be capped at 200 chars; full 500-char error must not leak.
+		assert.equal(out.includes("x".repeat(300)), false);
+	});
+
+	it("output starts with a leading space so it appends cleanly after a sentence", () => {
+		const out = describeProviderBackoff({ lastTurnErrorMessage: "rate_limit_error" });
+		assert.equal(out.startsWith(" "), true);
 	});
 });
 
