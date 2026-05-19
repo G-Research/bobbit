@@ -183,11 +183,16 @@ export class AgentInterface extends LitElement {
 	 */
 	private _openProposalPanel(type: string): void {
 		const s = appState as any;
+		const sessionId = this.session?.sessionId || s.selectedSessionId || "";
+		s.previewPanelActiveTab = type;
+		s.previewPanelTab = type;
 		if (this.assistantType) {
 			s.assistantTab = "preview";
-		} else {
-			s.previewPanelTab = type;
 		}
+		void import("../../app/preview-panel.js")
+			.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab: true }))
+			.then(() => renderApp())
+			.catch(() => { /* legacy fields above still select the proposal */ });
 		renderApp();
 		this.requestUpdate();
 	}

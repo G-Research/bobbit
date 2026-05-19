@@ -116,10 +116,51 @@ function getState(): any {
 	return (globalThis as any).bobbitState ?? {};
 }
 
+const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
+	goal: "Goal Proposal",
+	project: "Project Proposal",
+	role: "Role Proposal",
+	tool: "Tool Proposal",
+	staff: "Staff Proposal",
+};
+
+function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+	const s = getState();
+	const tab = {
+		id: `proposal:${type}`,
+		kind: "proposal",
+		title: PROPOSAL_TAB_LABELS[type],
+		source: { type: "proposal", proposalType: type, sessionId },
+	};
+	const tabs = Array.isArray(s.panelWorkspace?.tabs) ? s.panelWorkspace.tabs
+		: Array.isArray(s.panelTabs) ? s.panelTabs
+		: Object.prototype.hasOwnProperty.call(s, "panelTabs") ? (s.panelTabs = [])
+		: null;
+	if (tabs) {
+		const idx = tabs.findIndex((t: any) => t?.id === tab.id);
+		if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
+		else tabs.push(tab);
+	}
+	if ("activePanelTabId" in s) s.activePanelTabId = tab.id;
+	if (s.panelWorkspace && typeof s.panelWorkspace === "object") s.panelWorkspace.activeTabId = tab.id;
+	try {
+		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
+			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
+		}
+	} catch { /* ignore */ }
+}
+
+function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): void {
+	upsertProposalWorkspaceTab(type, sessionId);
+	void import("./preview-panel.js")
+		.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab }))
+		.catch(() => { /* optional browser-only integration */ });
+}
+
 /**
- * Reveal the UI surface for a proposal slot. Assistant sessions keep the
- * existing split-preview UX; normal sessions select the matching unified tab
- * and uncollapse the panel.
+ * Reveal the UI surface for a proposal slot. Assistant sessions keep legacy
+ * mobile `assistantTab` compatibility while also selecting the typed proposal
+ * tab for the dynamic workspace.
  */
 export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot, "sessionId">, opts: ProposalFirstEmitOpts): void {
 	const s = getState();
@@ -128,11 +169,11 @@ export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot,
 		if (s.assistantTab === "chat" && opts.isMobile) {
 			s.assistantTab = "preview";
 		}
-		return;
 	}
 
 	s.previewPanelActiveTab = type;
 	s.previewPanelTab = type;
+	selectProposalWorkspaceTab(type, slot.sessionId, !opts.isAssistant || opts.isMobile);
 	clearCollapseKey(slot.sessionId);
 }
 
