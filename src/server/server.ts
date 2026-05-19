@@ -29,6 +29,7 @@ import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -56,6 +57,20 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
+	const normalizedPath = pathname
+		.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}(?=\/|$)/gi, "/:id")
+		.replace(/\/\d+(?=\/|$)/g, "/:id")
+		.replace(/\/[A-Za-z0-9_-]{20,}(?=\/|$)/g, "/:id");
+	return `${method || "GET"} ${normalizedPath}`;
+}
+
+function wsEventType(event: unknown): string {
+	return event && typeof event === "object" && typeof (event as { type?: unknown }).type === "string"
+		? (event as { type: string }).type
+		: "unknown";
 }
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
@@ -557,6 +572,7 @@ export function createGateway(config: GatewayConfig) {
 	const stateDir = bobbitStateDir();
 	const configDir = bobbitConfigDir();
 	fs.mkdirSync(stateDir, { recursive: true });
+	if (cpuDiagnosticsEnabled()) getCpuDiagnostics();
 
 	// Initialize module-level caches for parameterized modules
 	initPromptDirs(stateDir);
@@ -873,7 +889,16 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
+			const _cpuDiagEnabled = cpuDiagnosticsEnabled();
+			const _cpuDiagStart = _cpuDiagEnabled ? performance.now() : 0;
+			const _cpuDiagLabel = _cpuDiagEnabled ? normalizeApiRouteLabel(req.method, url.pathname) : "";
+			try {
+				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
+			} finally {
+				if (_cpuDiagEnabled) {
+					getCpuDiagnostics().recordRest(_cpuDiagLabel, res.statusCode || 0, performance.now() - _cpuDiagStart);
+				}
+			}
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -949,34 +974,111 @@ export function createGateway(config: GatewayConfig) {
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal
 	function broadcastToGoal(goalId: string, event: any): void {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+					const sid = (ws as any).sessionId as string | undefined;
+					if (sid) {
+						const session = sessionManager.getSession(sid);
+						if (session?.teamGoalId === goalId || session?.goalId === goalId) {
+							ws.send(data);
+							continue;
+						}
+						// Session is associated with a different goal — skip it
+						if (session?.teamGoalId || session?.goalId) continue;
+					}
+					// Fallback: send to clients with no goal association
+					// (e.g. the user's browser session viewing the goal dashboard)
+					ws.send(data);
+				}
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
 		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let matchedGoal = 0;
+		let fallback = 0;
+		let skipped = 0;
 		for (const ws of wss.clients) {
+			scanned++;
 			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
 					if (session?.teamGoalId === goalId || session?.goalId === goalId) {
 						ws.send(data);
+						recipients++;
+						matchedGoal++;
 						continue;
 					}
 					// Session is associated with a different goal — skip it
-					if (session?.teamGoalId || session?.goalId) continue;
+					if (session?.teamGoalId || session?.goalId) { skipped++; continue; }
 				}
 				// Fallback: send to clients with no goal association
 				// (e.g. the user's browser session viewing the goal dashboard)
 				ws.send(data);
+				recipients++;
+				fallback++;
+			} else {
+				skipped++;
 			}
 		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToGoal", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			matchedGoal,
+			fallback,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 
 	/** Broadcast to ALL authenticated WebSocket clients (regardless of session/goal). */
 	function broadcastToAll(event: any): void {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+					ws.send(data);
+				}
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
 		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
 		for (const ws of wss.clients) {
+			scanned++;
 			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
 				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
 			}
 		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToAll", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
@@ -985,17 +1087,49 @@ export function createGateway(config: GatewayConfig) {
 	 * surface index status in project-agnostic chrome.
 	 */
 	function broadcastToProject(projectId: string, event: any): void {
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				const sid = (ws as any).sessionId as string | undefined;
+				if (sid) {
+					const session = sessionManager.getSession(sid);
+					if (!session) continue;
+					if (session.projectId && session.projectId !== projectId) continue;
+				}
+				ws.send(data);
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
 		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
 		for (const ws of wss.clients) {
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+			scanned++;
+			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
-				if (!session) continue;
-				if (session.projectId && session.projectId !== projectId) continue;
+				if (!session) { skipped++; continue; }
+				if (session.projectId && session.projectId !== projectId) { skipped++; continue; }
 			}
 			ws.send(data);
+			recipients++;
 		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToProject", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 
 	// Bridge search index progress bus → WS. Progress events are debounced
@@ -1005,9 +1139,14 @@ export function createGateway(config: GatewayConfig) {
 		const flushProgress = (projectId: string) => {
 			const entry = progressDebounce.get(projectId);
 			if (!entry) return;
+			const diagEnabled = cpuDiagnosticsEnabled();
+			const diagStart = diagEnabled ? performance.now() : 0;
 			progressDebounce.delete(projectId);
 			clearTimeout(entry.timer);
 			broadcastToProject(projectId, entry.latest);
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("search:progressFlush", performance.now() - diagStart, { flushes: 1 });
+			}
 		};
 		searchProgressBus.on("index:progress", (ev) => {
 			const event = { type: "index:progress" as const, ...ev };
@@ -1056,10 +1195,39 @@ export function createGateway(config: GatewayConfig) {
 	function broadcastToSession(sessionId: string, event: any): void {
 		const session = sessionManager.getSession(sessionId);
 		if (!session) return;
-		const data = JSON.stringify(event);
-		for (const ws of session.clients) {
-			if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of session.clients) {
+				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+			}
+			return;
 		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
+		for (const ws of session.clients) {
+			scanned++;
+			if ((ws as any).readyState === 1 /* OPEN */) {
+				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
+			}
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToSession", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
 	}
 
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade);
@@ -1461,6 +1629,7 @@ export function createGateway(config: GatewayConfig) {
 			triggerEngine.stop();
 			inboxNudger.stop();
 			wss.close();
+			try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
 			try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 			for (const pool of sessionManager.getAllWorktreePools().values()) {
 				await pool.drain();
@@ -5982,7 +6151,14 @@ async function handleApiRoute(
 
 		// Send a heartbeat newline every 60s to prevent client body-timeout
 		const heartbeat = setInterval(() => {
-			try { res.write("\n"); } catch { /* connection gone */ }
+			const diagEnabled = cpuDiagnosticsEnabled();
+			const diagStart = diagEnabled ? performance.now() : 0;
+			try {
+				res.write("\n");
+				if (diagEnabled) getCpuDiagnostics().recordTimer("rest:waitHeartbeat", performance.now() - diagStart, { writes: 1 });
+			} catch {
+				if (diagEnabled) getCpuDiagnostics().recordTimer("rest:waitHeartbeat", performance.now() - diagStart, { errors: 1 });
+			}
 		}, 60_000);
 
 		try {

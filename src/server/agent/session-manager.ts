@@ -31,6 +31,7 @@ import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
 import { CostTracker } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
@@ -367,9 +368,56 @@ const _warnedClients = new WeakSet<WebSocket>();
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
+	if (!cpuDiagnosticsEnabled()) {
+		const data = JSON.stringify(msg);
+		for (const client of clients) {
+			if (client.readyState !== 1) continue;
+			const buffered = (client as any).bufferedAmount ?? 0;
+			const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+				overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+				warnBytes: WS_BUFFER_WARN_BYTES,
+			});
+			if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
+				_pendingOverflowCheck.add(client);
+				console.warn(
+					`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
+				);
+				setTimeout(() => {
+					_pendingOverflowCheck.delete(client);
+					if (client.readyState !== 1) return;
+					const bufferedNow = (client as any).bufferedAmount ?? 0;
+					const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
+						overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+						warnBytes: WS_BUFFER_WARN_BYTES,
+					});
+					if (recheck.kind === "terminate") {
+						console.warn(
+							`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
+							`Last msg type=${(msg as any).type}.`,
+						);
+						try { client.terminate(); } catch { /* ignore */ }
+					}
+				}, 10);
+			}
+			if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
+				_warnedClients.add(client);
+				console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
+			}
+			client.send(data);
+		}
+		return;
+	}
+
+	const stringifyStart = performance.now();
 	const data = JSON.stringify(msg);
+	const stringifyMs = performance.now() - stringifyStart;
+	const sendStart = performance.now();
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
 	for (const client of clients) {
-		if (client.readyState !== 1) continue;
+		scanned++;
+		if (client.readyState !== 1) { skipped++; continue; }
 		const buffered = (client as any).bufferedAmount ?? 0;
 		const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
 			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
@@ -402,7 +450,17 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
 		}
 		client.send(data);
+		recipients++;
 	}
+	getCpuDiagnostics().recordWsBroadcast("session-manager:broadcast", (msg as { type?: string }).type || "unknown", {
+		frames: 1,
+		scanned,
+		recipients,
+		skipped,
+		bytes: Buffer.byteLength(data) * recipients,
+		stringifyMs,
+		sendMs: performance.now() - sendStart,
+	});
 }
 
 // `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
@@ -420,7 +478,19 @@ import { broadcastStatus } from "./session-status.js";
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> }, truncated: unknown): void {
 	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
 	const entry = session.eventBuffer.push(spliced);
-	broadcast(session.clients, { type: "event", data: spliced, seq: entry.seq, ts: entry.ts });
+	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	if (cpuDiagnosticsEnabled()) {
+		const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
+			? (spliced as { type: string }).type
+			: "unknown";
+		getCpuDiagnostics().recordWsBroadcast("session-manager:emitSessionEvent", eventType, {
+			frames: 1,
+			recipients: session.clients.size,
+			bytes: Buffer.byteLength(JSON.stringify(frame)) * session.clients.size,
+			bufferSize: session.eventBuffer.size,
+		});
+	}
+	broadcast(session.clients, frame);
 }
 
 /**
@@ -696,14 +766,39 @@ export class SessionManager {
 	 * on the client (they ignore frames whose version <= lastStatusVersion).
 	 */
 	private _emitStatusHeartbeat(): void {
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		let sessionsScanned = 0;
+		let sessionsWithClients = 0;
+		let frames = 0;
+		let recipients = 0;
 		for (const session of this.sessions.values()) {
+			sessionsScanned++;
 			if (session.clients.size === 0) continue;
 			if (session.status === "terminated") continue;
+			sessionsWithClients++;
+			frames++;
+			recipients += session.clients.size;
 			broadcast(session.clients, {
 				type: "session_status",
 				status: session.status,
 				statusVersion: session.statusVersion ?? 0,
 				...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
+			});
+		}
+		if (diagEnabled) {
+			const durationMs = performance.now() - diagStart;
+			getCpuDiagnostics().recordTimer("session-manager:statusHeartbeat", durationMs, {
+				sessionsScanned,
+				sessionsWithClients,
+				frames,
+				recipients,
+			});
+			getCpuDiagnostics().recordWsBroadcast("session-manager:statusHeartbeat", "session_status", {
+				frames,
+				scanned: sessionsScanned,
+				recipients,
+				sendMs: durationMs,
 			});
 		}
 	}
