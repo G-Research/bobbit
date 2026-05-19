@@ -135,8 +135,8 @@ function setProjectReorderMessage(message: string): void {
 	_projectReorderMessage = message;
 }
 
-function renderProjectReorderLiveRegion() {
-	return html`<div class="project-reorder-live" aria-live="polite" aria-atomic="true">${_projectReorderMessage}</div>`;
+export function renderProjectReorderLiveRegion() {
+	return html`<div class="project-reorder-live" data-testid="project-reorder-live-region" aria-live="polite" aria-atomic="true">${_projectReorderMessage}</div>`;
 }
 
 function suppressNextProjectHeaderClick(): void {

@@ -1,7 +1,7 @@
 import { getModel } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
-import { state, renderApp } from "./state.js";
+import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention } from "./notification-policy.js";
@@ -1537,6 +1537,12 @@ export class RemoteAgent {
 			case "preferences_changed":
 				this._applyPreferences(msg.preferences);
 				break;
+
+			case "projects_changed": {
+				const projects = Array.isArray((msg as any).projects) ? (msg as any).projects : null;
+				if (projects && setProjectsIfChanged(projects)) renderApp();
+				break;
+			}
 
 			case "preview_changed":
 				this.onPreviewChanged?.(msg.sessionId, msg.preview);

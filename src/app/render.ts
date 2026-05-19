@@ -44,7 +44,7 @@ function isSessionArchived(sessionId: string | null | undefined): boolean {
 }
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle } from "./sidebar.js";
+import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
@@ -311,6 +311,7 @@ function renderMobileLanding() {
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
+			${renderProjectReorderLiveRegion()}
 			<div class="w-full max-w-xl mx-auto px-2 py-4 pb-16 flex flex-col gap-1">
 				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
 					${(() => {

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createSession, deleteSession, registerProject, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "./ui-helpers.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 375, height: 667 };
@@ -44,6 +44,10 @@ function projectReorderRow(page: Page, projectId: string): Locator {
 
 function reorderMode(page: Page): Locator {
 	return page.locator('[data-project-reordering="true"]');
+}
+
+function projectReorderLiveRegion(page: Page): Locator {
+	return page.locator('[data-testid="project-reorder-live-region"][aria-live="polite"][aria-atomic="true"]');
 }
 
 function uniqueRootPath(label: string): string {
@@ -245,6 +249,29 @@ async function collapseDesktopSidebar(page: Page): Promise<void> {
 	await expect(page.locator('[data-testid="sidebar-collapsed"]')).toBeVisible({ timeout: 20_000 });
 }
 
+async function waitForRemoteAgentConnected(page: Page, sessionId: string): Promise<void> {
+	await page.waitForFunction(
+		(sid) => {
+			const appState = (window as any).__bobbitState ?? (window as any).bobbitState;
+			return appState?.selectedSessionId === sid
+				&& appState?.remoteAgent?.connected === true
+				&& appState?.connectionStatus === "connected";
+		},
+		sessionId,
+		{ timeout: 20_000 },
+	);
+}
+
+async function blockProjectListFetches(page: Page): Promise<void> {
+	await page.route("**/api/projects", async (route) => {
+		if (route.request().method() === "GET") {
+			await route.abort();
+			return;
+		}
+		await route.continue();
+	});
+}
+
 test.describe("Project drag reorder (browser E2E)", () => {
 	test.beforeEach(async () => {
 		createdProjects = [];
@@ -342,6 +369,38 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		}).toEqual(expectedTitles);
 	});
 
+	test("connected second page updates from projects_changed without reload", async ({ page }) => {
+		test.setTimeout(120_000);
+		const alpha = await createProjectFixture("live-sync-alpha");
+		const beta = await createProjectFixture("live-sync-beta");
+		const gamma = await createProjectFixture("live-sync-gamma");
+
+		await openDesktop(page);
+		await waitForProjects(page, [alpha, beta, gamma]);
+		await expectRenderedOrder(page, [alpha, beta, gamma]);
+
+		const peer = await page.context().newPage();
+		try {
+			await openDesktop(peer);
+			await waitForProjects(peer, [alpha, beta, gamma]);
+			await expectRenderedOrder(peer, [alpha, beta, gamma]);
+			await navigateToHash(peer, `#/session/${alpha.sessionId}`);
+			await waitForRemoteAgentConnected(peer, alpha.sessionId);
+			await expectRenderedOrder(peer, [alpha, beta, gamma]);
+
+			// Prove the live update comes from the WebSocket broadcast, not the
+			// fallback project polling path used when no session WebSocket exists.
+			await blockProjectListFetches(peer);
+
+			await startProjectDrag(page, gamma);
+			await dropProjectOn(page, alpha, "before");
+			await expectPersistedOrder([gamma, alpha, beta]);
+			await expectRenderedOrder(peer, [gamma, alpha, beta]);
+		} finally {
+			await peer.close().catch(() => {});
+		}
+	});
+
 	test("mobile handle is always visible; pointer drag reorders with temporary collapse/restore and reload persistence", async ({ page }) => {
 		test.setTimeout(120_000);
 		const alpha = await createProjectFixture("mobile-alpha");
@@ -349,6 +408,7 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		const gamma = await createProjectFixture("mobile-gamma");
 
 		await openMobile(page);
+		await expect(projectReorderLiveRegion(page), "mobile reorder UI should render a polite live region").toBeAttached({ timeout: 20_000 });
 		await waitForProjects(page, [alpha, beta, gamma]);
 		await expectRenderedOrder(page, [alpha, beta, gamma]);
 		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
