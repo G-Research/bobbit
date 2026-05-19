@@ -433,7 +433,7 @@ function renderMobileLanding() {
 										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
 										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
 										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, projectsForRender);
-										return html`${projectsForRender.map((project, i) => {
+										return html`<div data-project-reorder-list>${projectsForRender.map((project, i) => {
 											const data = projectMap.get(project.id) || { goals: [], sessions: [], staff: [] };
 											const expanded = isProjectExpanded(project.id);
 											const effectiveExpanded = isProjectReordering() ? false : expanded;
@@ -526,7 +526,7 @@ function renderMobileLanding() {
 												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
 												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
 											</div>
-										` : ""}`;
+										` : ""}</div>`;
 								})()}
 							`}
 			</div>
