@@ -73,6 +73,7 @@ import {
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
 	proposalPanelTabId,
+	proposalRevisionFromPanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
@@ -2443,6 +2444,57 @@ function proposalPanelForWorkspaceType(type: ProposalType) {
 	return proposalPanelForType(type);
 }
 
+function proposalFieldText(value: unknown): string {
+	if (value == null) return "";
+	if (typeof value === "string") return value;
+	try { return JSON.stringify(value, null, 2) ?? String(value); } catch { return String(value); }
+}
+
+const PROPOSAL_TITLE_FIELD: Record<ProposalType, string> = {
+	goal: "title",
+	project: "name",
+	role: "name",
+	tool: "tool",
+	staff: "name",
+};
+
+function historicalProposalPanel(tab: PanelWorkspaceTab) {
+	if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
+	const type = tab.source.proposalType;
+	const rev = proposalRevisionFromPanelTab(tab);
+	const fields = tab.state?.fields && typeof tab.state.fields === "object" && !Array.isArray(tab.state.fields)
+		? tab.state.fields as Record<string, unknown>
+		: undefined;
+	if (!fields) {
+		return html`
+			<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel=${`${type}-proposal`} data-historical-proposal="true">
+				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
+					Loading proposal revision${rev ? ` ${rev}` : ""}…
+				</div>
+			</div>
+		`;
+	}
+	const titleKey = PROPOSAL_TITLE_FIELD[type];
+	const title = proposalFieldText(fields[titleKey]) || `${type.charAt(0).toUpperCase()}${type.slice(1)} proposal`;
+	return html`
+		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full overflow-hidden" data-panel=${`${type}-proposal`} data-historical-proposal="true">
+			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0 border-b border-border">
+				<div class="text-sm font-medium truncate">${title}</div>
+				${rev ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${rev}</span>` : ""}
+				<span class="text-[11px] text-muted-foreground shrink-0">historical snapshot</span>
+			</div>
+			<div class="flex-1 min-h-0 overflow-auto p-5 flex flex-col gap-4">
+				${Object.entries(fields).map(([key, value]) => html`
+					<div data-field=${key}>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${key}</label>
+						<pre class="text-sm whitespace-pre-wrap break-words rounded-md border border-border bg-secondary/30 p-3 text-foreground/90">${proposalFieldText(value) || "—"}</pre>
+					</div>
+				`)}
+			</div>
+		</div>
+	`;
+}
+
 // ============================================================================
 // GOAL PROPOSAL PANEL (non-assistant inline panel)
 // ============================================================================
@@ -3534,7 +3586,10 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const proposalPanelContent = (type: ProposalType) => {
+	const proposalPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
+		const type = tab.source.proposalType;
+		if (isHistoricalProposalTab(tab)) return historicalProposalPanel(tab);
 		if (state.activeProposals[type] == null && type !== currentAssistantProposalType()) return "";
 		return proposalPanelForWorkspaceType(type);
 	};
@@ -3550,7 +3605,7 @@ export function doRenderApp(): void {
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
-			return proposalPanelContent(tab.source.proposalType);
+			return proposalPanelContent(tab);
 		}
 		return "";
 	};

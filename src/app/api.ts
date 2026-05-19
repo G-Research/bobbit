@@ -1710,6 +1710,24 @@ export async function loadDraftFromServer(sessionId: string, type: string): Prom
 	}
 }
 
+/** Read a proposal snapshot without mutating the live draft. Returns server JSON or null on error. */
+export async function readProposalSnapshot(
+	sessionId: string,
+	type: string,
+	rev: number,
+): Promise<{ ok: true; rev: number; fields: Record<string, unknown> } | { ok: false; code?: string; message?: string } | null> {
+	try {
+		const res = await gatewayFetch(
+			`/api/sessions/${encodeURIComponent(sessionId)}/proposal/${encodeURIComponent(type)}/snapshot?rev=${encodeURIComponent(String(rev))}`,
+		);
+		const body = await res.json().catch(() => null);
+		return body as any;
+	} catch (err) {
+		console.error("[proposal] readProposalSnapshot failed:", err);
+		return null;
+	}
+}
+
 /** Restore a proposal snapshot to the live draft. Returns server JSON or null on error. */
 export async function restoreProposalSnapshot(
 	sessionId: string,

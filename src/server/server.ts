@@ -119,8 +119,10 @@ import {
 	listProposalFiles,
 	parseProposalFile,
 	readProposalFile,
+	readSnapshot,
 	restoreSnapshot,
 	writeProposalFile,
+	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
 
@@ -6299,7 +6301,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -6326,6 +6328,32 @@ async function handleApiRoute(
 				const contentType = proposalType === "goal" ? "text/markdown; charset=utf-8" : "application/yaml; charset=utf-8";
 				res.writeHead(200, { "Content-Type": contentType });
 				res.end(content);
+			} catch (err) {
+				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// GET /api/sessions/:id/proposal/:type/snapshot?rev=N — read a historical snapshot without mutating the live draft.
+		if (suffix === "/snapshot" && req.method === "GET") {
+			const revParam = url.searchParams.get("rev") || "";
+			const rev = Number.parseInt(revParam, 10);
+			if (!Number.isInteger(rev) || rev < 1 || String(rev) !== revParam) {
+				json({ ok: false, code: "INVALID_BODY", message: "rev must be a positive integer" }, 400);
+				return;
+			}
+			try {
+				const content = await readSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				if (content === undefined) {
+					json({ ok: false, code: "SNAPSHOT_NOT_FOUND", message: `No snapshot rev ${rev} for ${proposalType} proposal` }, 404);
+					return;
+				}
+				const parsed = getProposalTypePlugin(proposalType).parse(content);
+				if (!parsed.ok) {
+					json(parsed, 400);
+					return;
+				}
+				json({ ok: true, rev, fields: parsed.value.fields });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}

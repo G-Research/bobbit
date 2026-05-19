@@ -1468,42 +1468,35 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
 			const numericRev = typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
+			const historicalFields = fields && typeof fields === "object" && !Array.isArray(fields)
+				? fields as Record<string, unknown>
+				: undefined;
 			if (numericRev) {
-				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev });
-			} else {
-				revealActiveProposalPanel(type, sessionId);
-			}
-
-			// Snapshot-restore branch — server is authoritative; the broadcast
-			// rebuilds the slot via remote.onProposal. We also fan out to the
-			// legacy per-type callback so per-form state (state.previewTitle
-			// etc.) is populated.
-			if (numericRev) {
+				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: historicalFields });
+				renderApp();
+				if (historicalFields) return;
 				try {
-					const { restoreProposalSnapshot } = await import("./api.js");
-					const res = await restoreProposalSnapshot(sessionId, type, numericRev);
-					if (res && (res as any).ok) {
-						const restoredFields = (res as any).fields as Record<string, unknown> | undefined;
-						if (restoredFields) {
-							const legacyMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
-								goal: remote.onGoalProposal,
-								role: remote.onRoleProposal,
-								tool: remote.onToolProposal,
-								staff: remote.onStaffProposal,
-								project: remote.onProjectProposal,
-							};
-							const legacyCb = legacyMap[type];
-							if (legacyCb) legacyCb(restoredFields, false);
-							selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: restoredFields });
-						}
+					const { readProposalSnapshot } = await import("./api.js");
+					const res = await readProposalSnapshot(sessionId, type, numericRev);
+					if (res && (res as any).ok && (res as any).fields) {
+						selectProposalWorkspaceTab(type, {
+							sessionId,
+							select: true,
+							setAssistantTab: true,
+							rev: numericRev,
+							fields: (res as any).fields as Record<string, unknown>,
+						});
+						renderApp();
 					} else {
-						console.warn(`[proposal] restore failed:`, res);
+						console.warn(`[proposal] snapshot read failed:`, res);
 					}
 				} catch (err) {
-					console.warn("[proposal] restore threw:", err);
+					console.warn("[proposal] snapshot read threw:", err);
 				}
 				return;
 			}
+
+			revealActiveProposalPanel(type, sessionId);
 
 			// Legacy fields path (archived sessions with no rev marker).
 			if (!fields) return;
