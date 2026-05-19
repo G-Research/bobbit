@@ -2768,11 +2768,12 @@ function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string
 	if (sessionId && !tabSessionId) return null;
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const source = tab.source as Record<string, unknown>;
+	const title = tab.title || `Preview: ${basename(entry) || "inline.html"}`;
 	return {
 		...tab,
 		kind: "preview",
-		title: tab.title || `Preview: ${basename(entry) || "inline.html"}`,
-		label: tab.label || "Preview",
+		title,
+		label: tab.label && tab.label !== "Preview" ? tab.label : title,
 		legacyTab: "preview",
 		source: {
 			...source,
@@ -3433,17 +3434,24 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => html`
+	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
+		tab.kind === "preview" ? (tab.title || tab.label || "Preview") : tab.label
+	);
+
+	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
+		const label = panelTabButtonLabel(tab);
+		return html`
 		<button
 			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
-			title=${tab.label}
+			title=${label}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${tab.title}
 			data-testid=${testId}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-		>${tab.label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+		>${label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
 	`;
+	};
 
 	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => panelTabButton(
 		tab,

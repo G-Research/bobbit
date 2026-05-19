@@ -176,11 +176,12 @@ export function selectHtmlPreviewTab(args: {
 }): void {
 	const sessionId = args.sessionId || activeSessionId() || "";
 	const entry = args.entry || state.previewPanelEntry || "index.html";
+	const title = args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`;
 	const tab: PanelWorkspaceTab = {
 		id: args.id || LIVE_PREVIEW_PANEL_TAB_ID,
 		kind: "preview",
-		title: args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`,
-		label: "Preview",
+		title,
+		label: title,
 		legacyTab: "preview",
 		source: {
 			type: "html-preview",

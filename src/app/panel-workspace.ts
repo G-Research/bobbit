@@ -187,11 +187,12 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 
 	if (input.isPreviewSession) {
 		const entry = input.previewEntry || "inline.html";
+		const title = `Preview: ${entry}`;
 		tabs.push({
 			id: LIVE_PREVIEW_PANEL_TAB_ID,
 			kind: "preview",
-			title: `Preview: ${entry}`,
-			label: "Preview",
+			title,
+			label: title,
 			legacyTab: "preview",
 			source: { type: "preview", entry, sessionId: input.sessionId },
 		});

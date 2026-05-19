@@ -1,5 +1,5 @@
 import { ChatPanel } from "../ui/index.js";
-import { selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -23,7 +23,7 @@ import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog }
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./render.js";
+import { setSelectedWorkflowId, showHeaderToast, showProposalToast, resetProposalAnnCount } from "./render.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
@@ -38,6 +38,15 @@ import {
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	activePanelTabIdForSession,
+	firstContentPanelTab,
+	isHistoricalProposalTab,
+	panelTabsForSession,
+	proposalPanelTabId,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
 
 /**
  * Extract the markdown body field from a proposal's fields object.
@@ -189,6 +198,63 @@ function revealActiveProposalPanel(type: ProposalType, sessionId: string): void 
 		state.assistantHasProposal = true;
 		if (!isDesktop()) state.assistantTab = "preview";
 	}
+}
+
+function liveProposalSlotForSession(type: ProposalType, sessionId: string): ProposalSlot | undefined {
+	const slot = state.activeProposals[type];
+	if (!slot) return undefined;
+	if (slot.sessionId && slot.sessionId !== sessionId) return undefined;
+	return slot;
+}
+
+function hasObjectFields(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+function isSelectableFallbackContentTab(tab: PanelWorkspaceTab, failedTabId: string, sessionId: string): boolean {
+	if (!tab || tab.id === failedTabId || tab.kind === "chat") return false;
+	const sourceSessionId = typeof (tab.source as any)?.sessionId === "string" ? (tab.source as any).sessionId : "";
+	if (sourceSessionId && sourceSessionId !== sessionId) return false;
+	if (tab.kind === "proposal" && tab.source.type === "proposal") {
+		if (isHistoricalProposalTab(tab)) return hasObjectFields(tab.state?.fields);
+		return !!liveProposalSlotForSession(tab.source.proposalType, sessionId) || isAssistantProposalType(tab.source.proposalType);
+	}
+	return true;
+}
+
+function selectChatPanelTab(sessionId: string): void {
+	selectPanelWorkspaceTab({
+		id: CHAT_PANEL_TAB_ID,
+		kind: "chat",
+		title: "Chat",
+		label: "Chat",
+		legacyTab: "chat",
+		source: { type: "chat", sessionId },
+	}, { sessionId, select: true, setAssistantTab: true, clearCollapse: false });
+}
+
+function selectProposalSnapshotFallback(type: ProposalType, sessionId: string, failedTabId: string): void {
+	const tabs = panelTabsForSession(state, sessionId);
+	if (liveProposalSlotForSession(type, sessionId)) {
+		selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true });
+		return;
+	}
+	const fallback = firstContentPanelTab(tabs.filter((tab) => isSelectableFallbackContentTab(tab, failedTabId, sessionId)));
+	if (fallback) {
+		selectPanelWorkspaceTab(fallback, { sessionId, select: true, setAssistantTab: true });
+		return;
+	}
+	selectChatPanelTab(sessionId);
+}
+
+function handleProposalSnapshotUnavailable(type: ProposalType, sessionId: string, rev: number, reason: unknown): void {
+	const failedTabId = proposalPanelTabId(type, rev);
+	const wasActive = activePanelTabIdForSession(state, sessionId) === failedTabId;
+	console.warn("[proposal] snapshot read failed:", { type, rev, reason });
+	removePanelWorkspaceTabs([failedTabId], { sessionId, select: false, clearCollapse: false });
+	if (wasActive) selectProposalSnapshotFallback(type, sessionId, failedTabId);
+	if (activeSessionId() === sessionId) showHeaderToast(`Proposal revision ${rev} is no longer available`);
+	renderApp();
 }
 
 /**
@@ -1511,7 +1577,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				try {
 					const { readProposalSnapshot } = await import("./api.js");
 					const res = await readProposalSnapshot(sessionId, type, numericRev);
-					if (res && (res as any).ok && (res as any).fields) {
+					if (res && (res as any).ok && hasObjectFields((res as any).fields)) {
 						const snapshotFields = (res as any).fields as Record<string, unknown>;
 						const latestSlot = state.activeProposals[type];
 						const latestRev = latestSlot?.sessionId === sessionId && typeof latestSlot.rev === "number" && Number.isFinite(latestSlot.rev) && latestSlot.rev > 0
@@ -1530,10 +1596,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 							renderApp();
 						}
 					} else {
-						console.warn(`[proposal] snapshot read failed:`, res);
+						handleProposalSnapshotUnavailable(type, sessionId, numericRev, res);
 					}
 				} catch (err) {
-					console.warn("[proposal] snapshot read threw:", err);
+					handleProposalSnapshotUnavailable(type, sessionId, numericRev, err);
 				}
 				return;
 			}
