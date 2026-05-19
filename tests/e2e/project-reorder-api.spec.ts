@@ -49,8 +49,18 @@ function projectNames(projects: ProjectSummary[]): string[] {
 	return projects.map(project => project.name);
 }
 
+function projectIds(projects: ProjectSummary[]): string[] {
+	return projects.map(project => project.id);
+}
+
+async function expectProjectOrderJson<T = any>(res: Response): Promise<T> {
+	const text = await res.text();
+	expect(text, "PUT /api/projects/order must not be routed to PUT /api/projects/:id").not.toContain("Project not found: order");
+	return JSON.parse(text) as T;
+}
+
 async function expectVisibleOrder(expectedIds: string[]): Promise<void> {
-	expect((await listVisibleProjects()).map(project => project.id)).toEqual(expectedIds);
+	expect(projectIds(await listVisibleProjects())).toEqual(expectedIds);
 }
 
 test.describe("PUT /api/projects/order", () => {
@@ -74,12 +84,15 @@ test.describe("PUT /api/projects/order", () => {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: order }),
 			});
+			const putBody = await expectProjectOrderJson<{ projects: ProjectSummary[] }>(putRes);
 			expect(putRes.status).toBe(200);
-			const putBody = await putRes.json();
+			expect(putBody).toMatchObject({ projects: expect.any(Array) });
+			expect(projectIds(putBody.projects)).toEqual(order);
 			expect(projectNames(putBody.projects)).toEqual(["C", "A", "B"]);
 			expect(putBody.projects.map((project: ProjectSummary) => project.position)).toEqual([0, 1, 2]);
 
-			const getProjects = await listVisibleProjects();
+			const getProjects = await listProjects();
+			expect(projectIds(getProjects)).toEqual(order);
 			expect(projectNames(getProjects)).toEqual(["C", "A", "B"]);
 			expect(getProjects.map(project => project.position)).toEqual([0, 1, 2]);
 
@@ -107,48 +120,58 @@ test.describe("PUT /api/projects/order", () => {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: "not-an-array" }),
 			});
+			const malformedBody = await expectProjectOrderJson(malformed);
 			expect(malformed.status).toBe(400);
-			expect(await malformed.json()).toMatchObject({ code: "invalid_project_order" });
+			expect(malformedBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
 			const nonString = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [a.id, b.id, 123] }),
 			});
+			const nonStringBody = await expectProjectOrderJson(nonString);
 			expect(nonString.status).toBe(400);
-			expect(await nonString.json()).toMatchObject({ code: "invalid_project_order" });
+			expect(nonStringBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
 			const duplicate = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [a.id, b.id, b.id] }),
 			});
+			const duplicateBody = await expectProjectOrderJson(duplicate);
 			expect(duplicate.status).toBe(400);
-			expect(await duplicate.json()).toMatchObject({ code: "invalid_project_order" });
+			expect(duplicateBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
 			const unknown = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [a.id, b.id, "missing-project"] }),
 			});
+			const unknownBody = await expectProjectOrderJson(unknown);
 			expect(unknown.status).toBe(400);
-			expect(await unknown.json()).toMatchObject({ code: "invalid_project_order" });
+			expect(unknownBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
-			const system = await apiFetch("/api/projects/order", {
+			const systemProjectRes = await apiFetch("/api/projects/system");
+			expect(systemProjectRes.status).toBe(200);
+			expect(await systemProjectRes.json()).toMatchObject({ id: "system", hidden: true });
+
+			const hiddenSystem = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [a.id, b.id, c.id, "system"] }),
 			});
-			expect(system.status).toBe(400);
-			expect(await system.json()).toMatchObject({ code: "invalid_project_order" });
+			const hiddenSystemBody = await expectProjectOrderJson(hiddenSystem);
+			expect(hiddenSystem.status).toBe(400);
+			expect(hiddenSystemBody).toMatchObject({ code: "invalid_project_order" });
 			await expectVisibleOrder(original);
 
 			const stale = await apiFetch("/api/projects/order", {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [a.id, b.id] }),
 			});
+			const staleBody = await expectProjectOrderJson(stale);
 			expect(stale.status).toBe(409);
-			expect(await stale.json()).toMatchObject({
+			expect(staleBody).toMatchObject({
 				code: "stale_project_order",
 				expectedProjectIds: original,
 				receivedProjectIds: [a.id, b.id],
@@ -167,6 +190,7 @@ test.describe("PUT /api/projects/order", () => {
 				method: "PUT",
 				body: JSON.stringify({ projectIds: [c.id, a.id, b.id] }),
 			});
+			await expectProjectOrderJson(reordered);
 			expect(reordered.status).toBe(200);
 
 			const del = await apiFetch(`/api/projects/${a.id}`, { method: "DELETE" });

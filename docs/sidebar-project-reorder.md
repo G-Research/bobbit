@@ -85,7 +85,7 @@ On save failure, the client shows the connection/error dialog and re-fetches pro
 ## Implementation map
 
 - Server registry: `src/server/agent/project-registry.ts` owns position migration, append/delete compaction, hidden/system exclusion, and `setVisibleOrder()` validation.
-- REST route: `src/server/server.ts` handles `PUT /api/projects/order` before project-id routes, returns structured validation errors, and emits `projects_changed` on success.
+- REST route: `src/server/server.ts` handles reserved `PUT /api/projects/order` before project-id routes, prevents reserved collection subroutes from matching generic project-ID handlers, returns structured validation errors, and emits `projects_changed` on success.
 - Client API/state: `src/app/api.ts` saves project order and refreshes projects during the session polling loop; `src/app/state.ts` gates project-array updates through equality checks.
 - Desktop sidebar: `src/app/sidebar.ts` owns shared reorder state, pointer/keyboard handling, live-region rendering, optimistic save/restore, and expanded-sidebar rendering.
 - Mobile landing: `src/app/render.ts` reuses the shared handle and reorder helpers while always showing the touch handle.
