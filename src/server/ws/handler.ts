@@ -120,14 +120,24 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 	if (imageModel) {
 		data.imageGenerationModel = imageModel;
 	}
-	if (Object.keys(data).length > 0) {
-		send(ws, { type: "state", data });
+	const withCost = sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
+	if (Object.keys(withCost).length > 0) {
+		send(ws, { type: "state", data: withCost });
 	}
 }
 
 function sendImageModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
-	if (imageModel) send(ws, { type: "state", data: { imageGenerationModel: imageModel } });
+	if (imageModel) sendStateWithCost(ws, sessionManager, sessionId, { imageGenerationModel: imageModel });
+}
+
+function sendStateWithCost(ws: WebSocket, sessionManager: SessionManager, sessionId: string, data: unknown): void {
+	send(ws, { type: "state", data: sessionManager.withSessionCostInState(sessionId, data) });
+}
+
+function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
+	const update = sessionManager.getSessionCostUpdate(sessionId);
+	if (update) send(ws, update);
 }
 
 /**
@@ -161,7 +171,7 @@ function buildArchivedStateData(
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
-	return data;
+	return sessionManager.withSessionCostInState(sessionId, data) as Record<string, unknown>;
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
@@ -268,6 +278,7 @@ export function handleWebSocketConnection(
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
 					send(ws, { type: "auth_ok" });
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
 					// Push persisted model + image model immediately. Without this, the
@@ -287,6 +298,7 @@ export function handleWebSocketConnection(
 			sessionManager.addClient(sessionId, ws);
 
 			send(ws, { type: "auth_ok" });
+			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
 			// client sets _isCompacting before a racing get_messages response.
@@ -305,7 +317,7 @@ export function handleWebSocketConnection(
 						// Splice canonical session status + version so the client's `case "state"`
 						// can prime `_lastStatusVersion` from the snapshot.
 						const spliced = { ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
-						send(ws, { type: "state", data: spliced });
+						sendStateWithCost(ws, sessionManager, sessionId, spliced);
 						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
 						const data = stateResponse.data as Record<string, unknown> | undefined;
@@ -380,6 +392,7 @@ export function handleWebSocketConnection(
 		if ((ws as any).isArchived) {
 			switch (msg.type) {
 				case "get_state": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const archived = sessionManager.getArchivedSession(sessionId);
 					if (archived) {
 						send(ws, { type: "state", data: buildArchivedStateData(archived, sessionManager, sessionId) });
@@ -387,6 +400,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_messages": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const messages = await sessionManager.getArchivedMessages(sessionId);
 					send(ws, { type: "messages", data: stampSnapshotOrder(messages) as unknown[] });
 					break;
@@ -417,9 +431,11 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					return;
 				case "get_state":
-					send(ws, { type: "state", data: { preparing: true } });
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					sendStateWithCost(ws, sessionManager, sessionId, { preparing: true });
 					return;
 				case "get_messages":
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "messages", data: stampSnapshotOrder([]) as unknown[] });
 					return;
 				case "prompt":
@@ -638,6 +654,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_state": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					try {
 						const stateResp = await session.rpcClient.getState();
 						if (stateResp.success) {
@@ -645,7 +662,7 @@ export function handleWebSocketConnection(
 							// the client's `case "state"` can prime `_lastStatusVersion` from
 							// the snapshot path (e.g. on reconnect via get_state).
 							const spliced = { ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
-							send(ws, { type: "state", data: spliced });
+							sendStateWithCost(ws, sessionManager, sessionId, spliced);
 							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data
 							const data = stateResp.data as Record<string, unknown> | undefined;
@@ -673,6 +690,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "get_messages": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const msgsResp = await session.rpcClient.getMessages();
 					if (msgsResp.success) {
 						const raw = msgsResp.data as any;
@@ -794,6 +812,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					break;
 				case "resume": {
+					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					// Client requesting resume-from-seq. If the requested seq is
 					// still in the EventBuffer window, replay buffered entries as
 					// individual {type:"event"} frames with their original seq/ts
