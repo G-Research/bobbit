@@ -2372,7 +2372,9 @@ async function handleApiRoute(
 	}
 
 	// GET /api/projects/:id
-	const projectGetMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+	// Collection-level project endpoints must never fall through to the generic
+	// project-id handlers (notably PUT /api/projects/order -> update("order")).
+	const projectGetMatch = url.pathname.match(/^\/api\/projects\/(?!(?:preflight|archive-bobbit|detect|scan|order)$)([^/]+)$/);
 	if (projectGetMatch && req.method === "GET") {
 		const project = projectRegistry.get(projectGetMatch[1]);
 		if (!project) { json({ error: "Project not found" }, 404); return; }
