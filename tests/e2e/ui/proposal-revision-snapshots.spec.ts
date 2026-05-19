@@ -50,7 +50,7 @@ const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
 const PROJECT_PROPOSAL_TAB_TITLE_RE = /^Project Proposal$/i;
 const PROJECT_PROPOSAL_HISTORICAL_TAB_TITLE_RE = /^Project Proposal rev 1$/i;
 
-async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; label: string; title: string; id: string; kind: string }>> {
+async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>> {
 	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
 		.map((button, index) => {
 			const el = button as HTMLElement;
@@ -64,9 +64,10 @@ async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; labe
 				title: (button.getAttribute("data-panel-tab-title") || "").replace(/\s+/g, " ").trim(),
 				id: button.getAttribute("data-panel-tab-id") || "",
 				kind: button.getAttribute("data-panel-tab-kind") || "",
+				active: button.classList.contains("goal-tab-pill--active"),
 			} : null;
 		})
-		.filter(Boolean) as Array<{ index: number; label: string; title: string; id: string; kind: string }>);
+		.filter(Boolean) as Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>);
 }
 
 async function clickPanelTabByIndex(page: Page, index: number, errorPrefix: string): Promise<void> {
@@ -103,7 +104,82 @@ async function clickProposalOpenButtonForRev(page: Page, rev: number, errorPrefi
 	await button.click();
 }
 
+async function seedProjectProposalRevision(page: Page, sessionId: string, fields: Record<string, unknown>): Promise<number> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+		method: "POST",
+		body: JSON.stringify({ args: fields }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `seed project proposal revision: ${text}`).toBe(200);
+	const body = JSON.parse(text) as { rev?: number };
+	expect(typeof body.rev, `seed response should include rev: ${text}`).toBe("number");
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.project?.rev ?? 0),
+		{ timeout: 10_000, message: `project proposal rev ${body.rev} should hydrate in the UI` },
+	).toBe(body.rev);
+	return body.rev!;
+}
+
+async function expectMissingRevisionFallback(page: Page, missingRev: number, errorPrefix: string): Promise<void> {
+	try {
+		await expect.poll(async () => {
+			const loadingVisible = await page.getByText(new RegExp(`Loading proposal revision\\s+${missingRev}`)).isVisible().catch(() => false);
+			const tabs = await visiblePanelTabs(page);
+			const activeTab = tabs.find((tab) => tab.active);
+			const missingRevisionActive = !!activeTab && activeTab.kind === "proposal" && new RegExp(`rev\\s+${missingRev}\\b`, "i").test(`${activeTab.title} ${activeTab.label}`);
+			const liveProposalVisible = await page.locator('[data-panel="project-proposal"]:not([data-historical-proposal="true"])').first().isVisible().catch(() => false);
+			const chatVisible = await page.locator("textarea").first().isVisible().catch(() => false);
+			return !loadingVisible && !missingRevisionActive && (liveProposalVisible || chatVisible);
+		}, { timeout: 10_000, message: `${errorPrefix}: missing snapshot should not leave a selected historical tab stuck loading` }).toBe(true);
+	} catch {
+		const tabs = await visiblePanelTabs(page);
+		const panelText = ((await page.locator('[data-panel="project-proposal"]').first().textContent({ timeout: 500 }).catch(() => "")) || "").replace(/\s+/g, " ").trim();
+		throw new Error(`${errorPrefix}: missing snapshot should remove the failed historical tab or select a live/chat fallback; tabs=${JSON.stringify(tabs)}; panel=${JSON.stringify(panelText)}`);
+	}
+}
+
 test.describe("Proposal revision snapshots", () => {
+	test("failed historical proposal snapshot read falls back instead of leaving a loading revision selected", async ({ page }) => {
+		test.setTimeout(60_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+		const sid = await activeSessionId(page);
+
+		const failedRev = await seedProjectProposalRevision(page, sid, {
+			name: "Failed Snapshot Historical Project",
+			root_path: "/tmp/failed-snapshot-history",
+			build_command: "echo historical",
+		});
+		await seedProjectProposalRevision(page, sid, {
+			name: "Failed Snapshot Live Project",
+			root_path: "/tmp/failed-snapshot-live",
+			build_command: "echo live",
+		});
+
+		await selectPanelTabByTitle(page, PROJECT_PROPOSAL_TAB_TITLE_RE, "PROPOSAL_REVISION_MISSING_SNAPSHOT_BUG: live project proposal should be selectable before opening a failed historical revision");
+		await expect(page.locator('[data-panel="project-proposal"]:not([data-historical-proposal="true"])').first()).toContainText("Failed Snapshot Live Project", { timeout: 10_000 });
+
+		await page.route(
+			(url) => url.pathname === `/api/sessions/${sid}/proposal/project/snapshot` && url.searchParams.get("rev") === String(failedRev),
+			(route) => route.fulfill({
+				status: 500,
+				contentType: "application/json",
+				body: JSON.stringify({ ok: false, code: "SNAPSHOT_READ_FAILED" }),
+			}),
+		);
+		const failedSnapshotResponse = page.waitForResponse(
+			(resp) => resp.url().includes(`/api/sessions/${sid}/proposal/project/snapshot?rev=${failedRev}`),
+			{ timeout: 10_000 },
+		);
+		await page.evaluate((rev) => {
+			document.dispatchEvent(new CustomEvent("proposal-open", { detail: { type: "project", rev } }));
+		}, failedRev);
+		const response = await failedSnapshotResponse;
+		expect(response.status(), "PROPOSAL_REVISION_MISSING_SNAPSHOT_BUG: failed rev should request a failed historical snapshot read").toBeGreaterThanOrEqual(400);
+
+		await expectMissingRevisionFallback(page, failedRev, "PROPOSAL_REVISION_MISSING_SNAPSHOT_BUG");
+	});
+
 	test("propose + edit + open-old card opens a historical tab while the latest draft stays live", async ({ page }) => {
 		const projectId = await getDefaultProjectId();
 		await apiFetch(`/api/projects/${projectId}/config`, {

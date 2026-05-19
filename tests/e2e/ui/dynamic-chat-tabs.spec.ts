@@ -182,6 +182,37 @@ async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; labe
 		.filter(Boolean) as Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>);
 }
 
+async function visiblePreviewTabPresentations(page: Page): Promise<Array<{ text: string; tooltip: string; dataTitle: string; id: string }>> {
+	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons
+		.map((button) => {
+			const el = button as HTMLElement;
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return null;
+			if (button.getAttribute("data-panel-tab-kind") !== "preview") return null;
+			const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
+			return {
+				text: normalize(button.textContent),
+				tooltip: normalize(button.getAttribute("title")),
+				dataTitle: normalize(button.getAttribute("data-panel-tab-title")),
+				id: normalize(button.getAttribute("data-panel-tab-id")),
+			};
+		})
+		.filter(Boolean) as Array<{ text: string; tooltip: string; dataTitle: string; id: string }>);
+}
+
+async function expectPreviewTabsExposeUserFacingSourceNames(page: Page, sources: RegExp[], errorPrefix: string): Promise<void> {
+	try {
+		await expect.poll(async () => {
+			const tabs = await visiblePreviewTabPresentations(page);
+			return sources.every((source) => tabs.some((tab) => source.test(tab.text) || source.test(tab.tooltip)));
+		}, { timeout: 5_000, message: `${errorPrefix}: preview tab text or tooltip should include each preview artifact source` }).toBe(true);
+	} catch {
+		const tabs = await visiblePreviewTabPresentations(page);
+		throw new Error(`${errorPrefix}: preview tabs must expose artifact-derived user-facing names; presentations=${JSON.stringify(tabs)}`);
+	}
+}
+
 async function waitForGoalAndPreviewTabs(page: Page): Promise<void> {
 	await waitForTopLevelTabCounts(
 		page,
@@ -630,6 +661,32 @@ test.describe("Dynamic chat tabs", () => {
 			"DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reopening the reserved title should recreate one selectable top-level tab",
 		);
 		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body reopened.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
+	});
+
+	test("multiple preview tabs expose source-derived visible labels or tooltips", async ({ page }) => {
+		test.setTimeout(90_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		await appendV3PreviewToolCard(page, sessionId, "tool-label-a", "label-a.html", "Preview Label A Content");
+		await appendV3PreviewToolCard(page, sessionId, "tool-label-b", "label-b.html", "Preview Label B Content");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: two preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
+		await buttons.nth(0).click();
+		await buttons.nth(1).click();
+
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
+			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: opening two preview artifacts should expose two preview tabs",
+		);
+		await expectPreviewTabsExposeUserFacingSourceNames(
+			page,
+			[/^Preview:\s*label-a\.html$/i, /^Preview:\s*label-b\.html$/i],
+			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG",
+		);
 	});
 
 	test("historical v3 preview tool-card reopen restores A and B as independent tabs", async ({ page }) => {
