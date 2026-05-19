@@ -103,12 +103,28 @@ function assembleWithBase(
 // ---------------------------------------------------------------------------
 
 describe("ensureCanonicalLspRule()", () => {
-	it("appends the canonical section when missing", () => {
+	it("inserts the canonical section before a heading-first custom prompt", () => {
 		const base = "# Custom project prompt\n\nUse the tools wisely.";
 		const out = ensureCanonicalLspRule(base);
 		assert.strictEqual(count(out, CANONICAL_HEADER), 1);
-		assert.ok(out.startsWith("# Custom project prompt"), "must preserve original content");
+		assert.ok(out.startsWith(CANONICAL_HEADER), "LSP rule should lead heading-first custom prompts");
+		assert.ok(out.includes("# Custom project prompt"), "must preserve original content");
 		assert.ok(out.includes("Use the tools wisely."), "must preserve original content");
+		assert.ok(
+			out.indexOf(CANONICAL_HEADER) < out.indexOf("# Custom project prompt"),
+			"LSP rule should appear before the first custom heading",
+		);
+	});
+
+	it("inserts the canonical section after an opening identity paragraph", () => {
+		const base = "You are a project assistant.\n\n# How to read files\n\nUse grep freely.";
+		const out = ensureCanonicalLspRule(base);
+		assert.strictEqual(count(out, CANONICAL_HEADER), 1);
+		assert.ok(out.startsWith("You are a project assistant."), "identity paragraph should stay first");
+		assert.ok(
+			out.indexOf(CANONICAL_HEADER) < out.indexOf("# How to read files"),
+			"LSP rule should appear before generic read/search guidance",
+		);
 	});
 
 	it("is a no-op when the canonical header already present (no duplicates)", () => {
@@ -126,7 +142,7 @@ describe("ensureCanonicalLspRule()", () => {
 		assert.strictEqual(out, base, "ensureCanonicalLspRule should be a no-op when header present");
 	});
 
-	it("appended rule references the full LSP tool family", () => {
+	it("inserted rule references the full LSP tool family", () => {
 		const out = ensureCanonicalLspRule("# Minimal\n");
 		for (const token of [
 			"lsp_workspace_symbol",
@@ -140,14 +156,14 @@ describe("ensureCanonicalLspRule()", () => {
 		}
 	});
 
-	it("appended rule lists text-search fallbacks", () => {
+	it("inserted rule lists text-search fallbacks", () => {
 		const out = ensureCanonicalLspRule("# Minimal\n");
 		for (const token of ["grep", "rg", "ripgrep", "git grep", "ag", "ack"]) {
 			assert.ok(out.includes(token), `canonical rule must mention text-search tool "${token}"`);
 		}
 	});
 
-	it("appended rule shows the literal lsp_definition symbolName example", () => {
+	it("inserted rule shows the literal lsp_definition symbolName example", () => {
 		const out = ensureCanonicalLspRule("# Minimal\n");
 		assert.ok(
 			out.includes(`lsp_definition({ symbolName: "X" })`),
@@ -155,7 +171,7 @@ describe("ensureCanonicalLspRule()", () => {
 		);
 	});
 
-	it("appended rule references the [lsp-hint] marker", () => {
+	it("inserted rule references the [lsp-hint] marker", () => {
 		const out = ensureCanonicalLspRule("# Minimal\n");
 		assert.ok(out.includes("[lsp-hint]"), "canonical rule must reference the [lsp-hint] marker");
 	});
@@ -213,6 +229,22 @@ describe("assembleSystemPrompt — custom base prompt without canonical header",
 		const content = assembleWithBase("custom-base-preserved", basePath);
 		assert.ok(content.includes("# Acme Project Assistant"));
 		assert.ok(content.includes("Follow project conventions."));
+	});
+
+	it("injects the canonical section before late custom read/grep/bash guidance", () => {
+		const basePath = writeCustomPrompt(
+			"custom-read-guidance",
+			"You are a project assistant.\n\n# How to read files and gather information\n\nUse grep and bash directly.\n",
+		);
+		const content = assembleWithBase("custom-base-read-guidance", basePath);
+		const lsp = content.indexOf(CANONICAL_HEADER);
+		const readGuidance = content.indexOf("# How to read files and gather information");
+		assert.ok(lsp >= 0, "canonical section must be present");
+		assert.ok(readGuidance >= 0, "custom read/search guidance must be preserved");
+		assert.ok(
+			lsp < readGuidance,
+			"Injected LSP section should appear before generic custom read/grep/bash guidance",
+		);
 	});
 });
 

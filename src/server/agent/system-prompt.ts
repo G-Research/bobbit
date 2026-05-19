@@ -271,19 +271,31 @@ export const LSP_CANONICAL_TOOL_SELECTION_RULE =
  * `## Tool selection — LSP before text search` section. If the base prompt
  * already contains the header (e.g. it came from `defaults/system-prompt.md`
  * or a project override that preserved the rule), it is returned unchanged.
- * Otherwise the canonical rule is appended after the base prompt with a blank
- * line separator.
+ * Otherwise the canonical rule is inserted near the top of the base prompt:
+ * after the opening identity paragraph when one exists, or before the first
+ * top-level heading for heading-first prompts.
  *
  * This is the protected-core injection that prevents a project
  * `.bobbit/config/system-prompt.md` override from accidentally suppressing
- * the LSP-over-grep guidance.
+ * the LSP-over-grep guidance while keeping the rule early enough for agents
+ * to reliably follow it.
  */
 export function ensureCanonicalLspRule(basePrompt: string): string {
 	if (basePrompt.includes(LSP_CANONICAL_TOOL_SELECTION_HEADER)) return basePrompt;
-	const trimmed = basePrompt.trimEnd();
-	return trimmed
-		? `${trimmed}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`
-		: `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
+	const trimmed = basePrompt.trim();
+	if (!trimmed) return `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
+
+	const firstHeading = trimmed.search(/^# /m);
+	if (firstHeading === 0) {
+		return `${LSP_CANONICAL_TOOL_SELECTION_RULE}\n\n${trimmed}\n`;
+	}
+	if (firstHeading > 0) {
+		const preamble = trimmed.slice(0, firstHeading).trimEnd();
+		const rest = trimmed.slice(firstHeading).trimStart();
+		return `${preamble}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n\n${rest}\n`;
+	}
+
+	return `${trimmed}\n\n${LSP_CANONICAL_TOOL_SELECTION_RULE}\n`;
 }
 
 /**

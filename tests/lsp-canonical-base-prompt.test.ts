@@ -139,6 +139,18 @@ describe("defaults/system-prompt.md — canonical LSP rule", () => {
 			"Canonical LSP section should reference the `[lsp-hint]` marker in search results",
 		);
 	});
+
+	it("places the canonical LSP section before generic read/grep/bash guidance", () => {
+		const raw = fs.readFileSync(defaultsSystemPrompt, "utf-8");
+		const lsp = raw.indexOf(CANONICAL_HEADER);
+		const readGuidance = raw.indexOf("# How to read files and gather information");
+		assert.ok(lsp >= 0, "canonical LSP section must exist");
+		assert.ok(readGuidance >= 0, "generic read/grep/bash guidance must exist");
+		assert.ok(
+			lsp < readGuidance,
+			"Canonical LSP section should appear before generic read/grep/bash guidance so agents see it first",
+		);
+	});
 });
 
 // ---------------------------------------------------------------------------

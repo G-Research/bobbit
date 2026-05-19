@@ -220,15 +220,16 @@ describe("LSP symbol-lookup — assembleSystemPrompt integration (canonical base
 		);
 	});
 
-	it("without baseSystemPromptPath the canonical section is absent (sanity check)", () => {
-		// Confirms the canonical section comes from the base prompt, not from
-		// any synthesised section in assembleSystemPrompt itself.
+	it("without baseSystemPromptPath the protected canonical section is still injected", () => {
+		// Minimal-config sessions still get the protected core LSP rule, even
+		// when no base prompt file is configured.
 		const content = assemble("hint-canonical-no-base", ["lsp_workspace_symbol", "read"], {
 			includeBasePrompt: false,
 		});
-		assert.ok(
-			!content.includes(CANONICAL_HEADER),
-			"Canonical section should originate exclusively from defaults/system-prompt.md",
+		assert.strictEqual(
+			(content.match(new RegExp(CANONICAL_HEADER, "g")) ?? []).length,
+			1,
+			"Minimal-config prompts should still contain exactly one protected canonical LSP section",
 		);
 	});
 });
