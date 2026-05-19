@@ -16,8 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, bobbitDir } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { apiFetch, bobbitDir, nonGitCwd } from "../e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
 	const resp = await apiFetch("/api/projects");
@@ -25,6 +25,23 @@ async function getDefaultProjectId(): Promise<string> {
 	const projects = Array.isArray(data) ? data : (data.projects || []);
 	expect(projects.length).toBeGreaterThan(0);
 	return projects[0].id;
+}
+
+async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd(), assistantType: "goal" }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `create goal assistant session: ${text}`).toBe(201);
+	const sessionId = JSON.parse(text).id as string;
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
+		{ timeout: 10_000, message: "goal assistant session should be selected" },
+	).toBe(sessionId);
+	return sessionId;
 }
 
 async function activeSessionId(page: Page): Promise<string> {
@@ -47,6 +64,7 @@ async function activeSessionId(page: Page): Promise<string> {
 }
 
 const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
+const GOAL_PROPOSAL_TAB_TITLE_RE = /^Goal Proposal$/i;
 const PROJECT_PROPOSAL_TAB_TITLE_RE = /^Project Proposal$/i;
 const PROJECT_PROPOSAL_HISTORICAL_TAB_TITLE_RE = /^Project Proposal rev 1$/i;
 
@@ -91,6 +109,13 @@ async function expectProjectProposalTabCount(page: Page, min: number, errorPrefi
 		async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "proposal" && /^Project Proposal/i.test(tab.title)).length,
 		{ timeout: 10_000, message: errorPrefix },
 	).toBeGreaterThanOrEqual(min);
+}
+
+async function expectExactGoalProposalTabCount(page: Page, expected: number, errorPrefix: string): Promise<void> {
+	await expect.poll(
+		async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "proposal" && /^Goal Proposal/i.test(tab.title)).length,
+		{ timeout: 10_000, message: errorPrefix },
+	).toBe(expected);
 }
 
 async function clickProposalOpenButtonForRev(page: Page, rev: number, errorPrefix: string): Promise<void> {
@@ -139,6 +164,79 @@ async function expectMissingRevisionFallback(page: Page, missingRev: number, err
 }
 
 test.describe("Proposal revision snapshots", () => {
+	test("current propose card keeps the server-stamped rev and opens the live tab", async ({ page }) => {
+		test.setTimeout(60_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "GOAL_PROPOSAL_PARITY");
+		await expect(page.locator('[data-testid="proposal-rev"]').first()).toHaveText("rev 1", { timeout: 20_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+			{ timeout: 10_000, message: "PROPOSAL_CURRENT_REV_BUG: live goal proposal rev should match the server snapshot rev" },
+		).toBe(1);
+
+		await clickProposalOpenButtonForRev(page, 1, "PROPOSAL_CURRENT_REV_BUG");
+		await expectExactGoalProposalTabCount(
+			page,
+			1,
+			"PROPOSAL_CURRENT_REV_BUG: opening the current rev should select the live Goal tab, not add a historical duplicate",
+		);
+		await selectPanelTabByTitle(page, GOAL_PROPOSAL_TAB_TITLE_RE, "PROPOSAL_CURRENT_REV_BUG: live goal proposal tab should remain selectable");
+		await expect(page.locator('[data-historical-proposal="true"]')).toHaveCount(0);
+		await expect(page.locator('input[placeholder="Goal title"]').first()).toHaveValue("Parity Goal A", { timeout: 5_000 });
+	});
+
+	test("streaming proposal previews do not synthesize snapshot revisions", async ({ page }) => {
+		test.setTimeout(60_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "STAY_BUSY:propose_goal:8");
+		await page.waitForFunction(
+			() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "").includes("Paragraph 4"),
+			null,
+			{ timeout: 15_000 },
+		);
+		await expect(page.locator('[data-testid="proposal-streaming-badge"]').first()).toBeVisible({ timeout: 5_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+			{ timeout: 5_000, message: "PROPOSAL_STREAMING_REV_BUG: streaming preview deltas must not increment immutable proposal revs" },
+		).toBe(0);
+		await expect(page.locator('[data-testid="proposal-panel-rev"]')).toHaveCount(0);
+	});
+
+	test("goal assistant draft restore preserves the latest server revision", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		const sessionId = await createGoalAssistantSessionViaApi(page);
+
+		await sendMessage(page, "GOAL_PROPOSAL_PARITY");
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+			{ timeout: 20_000, message: "PROPOSAL_GOAL_DRAFT_REV_BUG: first goal proposal should hydrate rev 1" },
+		).toBe(1);
+
+		await sendMessage(page, "GOAL_PROPOSAL_PARITY_EDIT");
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+			{ timeout: 20_000, message: "PROPOSAL_GOAL_DRAFT_REV_BUG: revised goal proposal should hydrate rev 2" },
+		).toBe(2);
+		await expect(page.locator('input[placeholder="Goal title"]').first()).toHaveValue("Parity Goal A — edited", { timeout: 5_000 });
+
+		await page.reload();
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
+			{ timeout: 10_000, message: "goal assistant session should stay selected after reload" },
+		).toBe(sessionId);
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+			{ timeout: 20_000, message: "PROPOSAL_GOAL_DRAFT_REV_BUG: draft restore must not downgrade the server-stamped goal rev" },
+		).toBe(2);
+		await expect(page.locator('[data-testid="proposal-panel-rev"]').first()).toHaveText("rev 2", { timeout: 10_000 });
+	});
+
 	test("failed historical proposal snapshot read falls back instead of leaving a loading revision selected", async ({ page }) => {
 		test.setTimeout(60_000);
 		await openApp(page);
