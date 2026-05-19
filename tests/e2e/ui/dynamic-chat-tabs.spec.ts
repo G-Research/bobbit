@@ -295,6 +295,45 @@ async function expectGoalProposalAccessible(page: Page, errorPrefix: string): Pr
 	await expectGoalProposalPanel(page, `${errorPrefix}: Goal proposal tab should render the proposal form`);
 }
 
+async function mobileGoalFormTopGap(page: Page): Promise<{ ready: boolean; gap: number; headerHeight: number; formTop: number; headerBottom: number }> {
+	return page.evaluate(() => {
+		const header = document.getElementById("app-header");
+		const forms = [...document.querySelectorAll(
+			'[data-panel="goal-proposal"] > .overflow-y-auto, .goal-preview-panel[data-panel-tab-id] > .overflow-y-auto',
+		)] as HTMLElement[];
+		const form = forms.find((el) => {
+			const rect = el.getBoundingClientRect();
+			return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < window.innerWidth;
+		}) ?? null;
+		if (!header || !form) return { ready: false, gap: 9999, headerHeight: 0, formTop: 0, headerBottom: 0 };
+		const headerRect = header.getBoundingClientRect();
+		const formRect = form.getBoundingClientRect();
+		return {
+			ready: true,
+			gap: Math.round(formRect.top - headerRect.bottom),
+			headerHeight: Math.round(headerRect.height),
+			formTop: Math.round(formRect.top),
+			headerBottom: Math.round(headerRect.bottom),
+		};
+	});
+}
+
+async function expectMobileGoalFormStartsBelowHeader(page: Page, errorPrefix: string): Promise<void> {
+	await expect.poll(async () => (await mobileGoalFormTopGap(page)).ready, {
+		timeout: 5_000,
+		message: `${errorPrefix}: mobile goal proposal form should be mounted`,
+	}).toBe(true);
+	await expect.poll(async () => (await mobileGoalFormTopGap(page)).gap, {
+		timeout: 5_000,
+		message: `${errorPrefix}: mobile goal proposal form should not be double-padded below the fixed header`,
+	}).toBeLessThan(48);
+	const diagnostics = await mobileGoalFormTopGap(page);
+	expect(
+		diagnostics.gap,
+		`${errorPrefix}: mobile goal proposal form should start below the fixed header; diagnostics=${JSON.stringify(diagnostics)}`,
+	).toBeGreaterThanOrEqual(-2);
+}
+
 async function expectPreviewContains(page: Page, expectedText: string, errorPrefix: string): Promise<void> {
 	const iframe = page.locator(".goal-preview-panel iframe").first();
 	await expect(iframe, `${errorPrefix}: selecting the HTML Preview tab should show the preview iframe`).toBeVisible({ timeout: 10_000 });
@@ -825,6 +864,27 @@ test.describe("Dynamic chat tabs", () => {
 		}
 	});
 
+	test("mobile goal assistant proposal is not double-padded below the fixed header", async ({ page }) => {
+		test.setTimeout(90_000);
+		await setupMobileEmulation(page);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openGoalAssistantProposal(page);
+		await page.setViewportSize({ width: 360, height: 740 });
+		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MOBILE_HEADER_GAP_BUG");
+
+		const assistantPanel = page.locator('[data-panel="goal-proposal"]').first();
+		await expect(
+			assistantPanel,
+			"DYNAMIC_CHAT_TABS_MOBILE_HEADER_GAP_BUG: assistant goal proposal renderer should be active",
+		).toBeVisible({ timeout: 5_000 });
+		await expect(
+			assistantPanel.getByRole("button", { name: /Create Goal/ }).first(),
+			"DYNAMIC_CHAT_TABS_MOBILE_HEADER_GAP_BUG: assistant goal proposal should expose Create Goal, not the normal-session Dismiss footer",
+		).toBeVisible({ timeout: 5_000 });
+		await expectMobileGoalFormStartsBelowHeader(page, "DYNAMIC_CHAT_TABS_MOBILE_HEADER_GAP_BUG");
+	});
+
 	test("mobile mixed proposal, review, and preview tabs are horizontally accessible", async ({ page }) => {
 		test.setTimeout(120_000);
 		await setupMobileEmulation(page);
@@ -850,6 +910,7 @@ test.describe("Dynamic chat tabs", () => {
 		await expectMobileHorizontalTabAccess(page, "DYNAMIC_CHAT_TABS_MOBILE_BUG");
 
 		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MOBILE_BUG");
+		await expectMobileGoalFormStartsBelowHeader(page, "DYNAMIC_CHAT_TABS_MOBILE_BUG");
 		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_MOBILE_BUG: mobile Preview tab should be selectable via horizontal tab access");
 		await expectPreviewContains(page, previewText, "DYNAMIC_CHAT_TABS_MOBILE_BUG");
 		for (const doc of REVIEW_DOCS) {

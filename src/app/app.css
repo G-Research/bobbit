@@ -93,13 +93,11 @@ details.wf-proposal-workflow .wf-proposal-gates {
 }
 
 /* Mobile: the fixed app-header overlays the top of #app-main. The chat
- * scroll area handles this with its own padding-top rule above. The
- * goal-preview-panel can have its own internal sticky header + tab strip
- * (e.g. project proposal: name/path header + Components/Workflows/Settings
- * tabs) sitting *above* its inner scroll, so padding the inner scroll alone
- * leaves the panel's chrome hidden under the app-header. Push the whole
- * panel down instead. */
-[data-mobile-header] .goal-preview-panel {
+ * scroll area handles this with its own padding-top rule above. For unified
+ * non-chat panes, offset only the mobile slider pane root. Proposal/review/
+ * preview renderers often contain nested .goal-preview-panel elements; padding
+ * every descendant stacks the header offset and creates a large blank gap. */
+[data-mobile-header] .goal-preview-panel[data-panel-tab-id] {
 	padding-top: var(--mobile-header-height, 60px) !important;
 }
 
