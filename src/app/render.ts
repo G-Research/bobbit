@@ -59,6 +59,20 @@ import "../ui/inbox/InboxPanel.js";
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	LIVE_PREVIEW_PANEL_TAB_ID,
+	assistantProposalType,
+	buildPanelWorkspaceTabs,
+	findPanelTab,
+	firstContentPanelTab,
+	panelContentTabs,
+	panelTabIdFromLegacy,
+	proposalPanelTabId,
+	reviewPanelTabId,
+	type LegacyPanelTab,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -731,16 +745,16 @@ function clearProposalReviewState(sessionId: string | null | undefined, type: Pr
 }
 
 function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
-	const mobileTabs = unifiedPanelTabs();
-	if (!mobileTabs.includes(state.previewPanelTab as UnifiedPanelTab)) {
-		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
-	} else if ((state.previewPanelTab as UnifiedPanelTab) === type) {
-		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
+	const tabs = unifiedPanelTabs();
+	const removedId = proposalPanelTabId(type);
+	const fallback = findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID)
+		?? firstContentPanelTab(tabs)
+		?? findPanelTab(tabs, CHAT_PANEL_TAB_ID);
+	if (fallback && (state.activePanelTabId === removedId || !findPanelTab(tabs, state.activePanelTabId))) {
+		setUnifiedActiveTab(fallback);
 	}
-
-	const contentTabs = unifiedPanelContentTabs();
-	if ((state.previewPanelActiveTab as UnifiedContentTab) === type || !contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
-		setUnifiedDesktopTab(contentTabs[0] ?? "preview");
+	if (state.previewPanelTab === type && fallback) {
+		setUnifiedActiveTab(fallback);
 	}
 }
 
@@ -2416,21 +2430,9 @@ function proposalPanelForType(type: ProposalType) {
 	}
 }
 
-function getAssistantPreviewPanel(type: string) {
-	const requested = state.previewPanelTab as ProposalType;
-	if (PROPOSAL_TYPES.includes(requested) && state.activeProposals[requested] != null && !(requested === "goal" && type === "goal")) {
-		return proposalPanelForType(requested);
-	}
-	switch (type) {
-		case "goal": return goalPreviewPanel();
-		case "role": return rolePreviewPanel();
-		case "tool": return toolPreviewPanel();
-		case "staff": return staffPreviewPanel();
-		case "project":
-		case "project-scaffolding":
-			return projectProposalPanel();
-		default: return "";
-	}
+function proposalPanelForWorkspaceType(type: ProposalType) {
+	if (type === "goal" && currentAssistantProposalType() === "goal") return goalPreviewPanel();
+	return proposalPanelForType(type);
 }
 
 // ============================================================================
@@ -2637,65 +2639,138 @@ function goalProposalPanel() {
 // the inline `srcdoc=` iframe are gone. The gateway now injects them
 // server-side on text/html responses through the `/preview/<sid>/` mount.
 
-type UnifiedPanelTab = "chat" | "preview" | "review" | "inbox" | ProposalType;
-type UnifiedContentTab = Exclude<UnifiedPanelTab, "chat">;
-
-const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
-	goal: "Goal",
-	project: "Project",
-	role: "Role",
-	tool: "Tool",
-	staff: "Staff",
-};
+type UnifiedPanelTab = PanelWorkspaceTab;
+type UnifiedContentTab = PanelWorkspaceTab;
 
 function activeProposalTypes(): ProposalType[] {
-	return PROPOSAL_TYPES.filter((type) => state.activeProposals[type] != null);
+	const sid = activeSessionId();
+	return PROPOSAL_TYPES.filter((type) => {
+		const slot = state.activeProposals[type];
+		return slot != null && (!sid || slot.sessionId === sid);
+	});
 }
 
-function hasActiveProposalPanel(): boolean {
-	return activeProposalTypes().length > 0;
+function currentAssistantProposalType(): ProposalType | null {
+	return assistantProposalType(state.assistantType);
 }
 
-/** Whether the unified panel is active for the current non-assistant session. */
-function hasUnifiedPanel(): boolean {
-	return !state.assistantType && (
-		state.isPreviewSession ||
-		state.reviewPanelOpen ||
-		state.inboxPanelOpen ||
-		hasActiveProposalPanel()
-	);
+function workspaceSessionId(): string {
+	return activeSessionId() || "__no-session__";
+}
+
+function previewWorkspaceKey(): string {
+	if (!state.isPreviewSession || !state.previewPanelEntry) return "";
+	return `${state.previewPanelEntry}|${state.previewPanelMtime || 0}`;
+}
+
+function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
+	const sid = workspaceSessionId();
+	state.activePanelTabId = tab.id;
+	state.panelWorkspaceActiveBySession[sid] = tab.id;
+	(state as any).previewPanelTab = tab.legacyTab;
+	state.assistantTab = tab.kind === "chat" ? "chat" : "preview";
+	if (tab.kind !== "chat") {
+		(state as any).previewPanelActiveTab = tab.legacyTab;
+	}
+	if (tab.kind === "review" && tab.source.type === "review") {
+		state.reviewActiveTab = tab.source.title;
+	}
+}
+
+function legacyRequestedTab(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab | undefined {
+	const mobileId = panelTabIdFromLegacy(state.previewPanelTab as LegacyPanelTab, state.reviewActiveTab);
+	if (state.previewPanelTab !== "chat") {
+		const mobileTab = findPanelTab(tabs, mobileId);
+		if (mobileTab) return mobileTab;
+	}
+
+	if (state.assistantType && state.assistantTab === "preview") {
+		const desktopId = panelTabIdFromLegacy(state.previewPanelActiveTab as LegacyPanelTab, state.reviewActiveTab);
+		const desktopTab = findPanelTab(tabs, desktopId);
+		if (desktopTab && desktopTab.kind !== "chat") return desktopTab;
+		const assistantType = currentAssistantProposalType();
+		const assistantTab = assistantType ? findPanelTab(tabs, proposalPanelTabId(assistantType)) : undefined;
+		return assistantTab ?? firstContentPanelTab(tabs);
+	}
+
+	if (isDesktop()) {
+		const desktopId = panelTabIdFromLegacy(state.previewPanelActiveTab as LegacyPanelTab, state.reviewActiveTab);
+		const desktopTab = findPanelTab(tabs, desktopId);
+		if (desktopTab && desktopTab.kind !== "chat") return desktopTab;
+	}
+
+	return undefined;
+}
+
+function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
+	const sid = workspaceSessionId();
+	const previewKey = previewWorkspaceKey();
+	if (previewKey && state.panelWorkspacePreviewKeyBySession[sid] !== previewKey) {
+		state.panelWorkspacePreviewKeyBySession[sid] = previewKey;
+		const previewTab = findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID);
+		if (previewTab) {
+			setUnifiedActiveTab(previewTab);
+			return;
+		}
+	}
+
+	const storedId = state.panelWorkspaceActiveBySession[sid] || state.activePanelTabId;
+	const storedTab = findPanelTab(tabs, storedId);
+	const requestedTab = legacyRequestedTab(tabs);
+	if (requestedTab && (!storedTab || storedTab.kind === "chat" || state.previewPanelTab !== "chat" || state.assistantTab === "preview")) {
+		setUnifiedActiveTab(requestedTab);
+		return;
+	}
+	if (storedTab) {
+		setUnifiedActiveTab(storedTab);
+		return;
+	}
+	const fallback = isDesktop() ? (firstContentPanelTab(tabs) ?? tabs[0]) : tabs[0];
+	if (fallback) setUnifiedActiveTab(fallback);
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
 function unifiedPanelTabs(): UnifiedPanelTab[] {
-	const tabs: UnifiedPanelTab[] = ["chat"];
-	if (state.isPreviewSession) tabs.push("preview");
-	if (state.reviewPanelOpen) tabs.push("review");
-	if (state.inboxPanelOpen) tabs.push("inbox");
-	tabs.push(...activeProposalTypes());
+	const tabs = buildPanelWorkspaceTabs({
+		isPreviewSession: state.isPreviewSession,
+		previewEntry: state.previewPanelEntry,
+		activeProposalTypes: activeProposalTypes(),
+		assistantProposalType: currentAssistantProposalType(),
+		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewPanelOpen: state.reviewPanelOpen,
+		inboxPanelOpen: state.inboxPanelOpen,
+		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
+	});
+	state.panelTabs = tabs;
+	ensureUnifiedActiveTab(tabs);
 	return tabs;
 }
 
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
-	return unifiedPanelTabs().filter((tab): tab is UnifiedContentTab => tab !== "chat");
+	return panelContentTabs(unifiedPanelTabs());
 }
 
 function setUnifiedMobileTab(tab: UnifiedPanelTab): void {
-	(state as any).previewPanelTab = tab;
+	setUnifiedActiveTab(tab);
 }
 
 function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
-	(state as any).previewPanelActiveTab = tab;
+	setUnifiedActiveTab(tab);
 }
 
-/** Index of the current previewPanelTab within unifiedPanelTabs(). Clamps to valid range. */
+/** Whether the unified panel is active for the current session. */
+function hasUnifiedPanel(): boolean {
+	return unifiedPanelContentTabs().length > 0;
+}
+
+/** Index of activePanelTabId within unifiedPanelTabs(). Clamps to a valid tab. */
 function unifiedTabIndex(): number {
 	const tabs = unifiedPanelTabs();
-	const current = state.previewPanelTab as UnifiedPanelTab;
-	const idx = tabs.indexOf(current);
+	const idx = tabs.findIndex((tab) => tab.id === state.activePanelTabId);
 	if (idx >= 0) return idx;
-	setUnifiedMobileTab(tabs[tabs.length - 1]);
-	return tabs.length - 1;
+	const fallback = tabs[0];
+	if (fallback) setUnifiedActiveTab(fallback);
+	return 0;
 }
 
 /** Compute slider translateX% for the given tab index and pane count. */
@@ -2705,7 +2780,7 @@ function unifiedSlideX(index: number, count: number): number {
 }
 
 /** Listen for postMessage from the preview iframe and drive the slider track.
- *  Also handles touch swipes on the chat / preview / goal panes. */
+ *  Also handles touch swipes on the chat / content panes. */
 function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
@@ -2717,7 +2792,7 @@ function setupPreviewSwipe(): void {
 		if (!hasUnifiedPanel()) return;
 		const tabs = unifiedPanelTabs();
 		const curIdx = unifiedTabIndex();
-		if (state.previewPanelTab !== "preview") return;
+		if (state.activePanelTabId !== LIVE_PREVIEW_PANEL_TAB_ID) return;
 		const track = getTrack();
 		if (!track) return;
 
@@ -2745,12 +2820,12 @@ function setupPreviewSwipe(): void {
 		}
 	});
 
-	// === touch swipe on non-iframe panes (chat, goal) ===
+	// === touch swipe on non-iframe panes (chat, proposals, reviews, inbox) ===
 	let startX = 0, startY = 0, captured = false, decided = false;
 	const el = document.getElementById("app")!;
 
 	el.addEventListener("touchstart", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.assistantType) return;
+		if (!hasUnifiedPanel()) return;
 		startX = e.touches[0].clientX;
 		startY = e.touches[0].clientY;
 		captured = false;
@@ -2758,7 +2833,7 @@ function setupPreviewSwipe(): void {
 	}, { passive: true });
 
 	el.addEventListener("touchmove", (e: TouchEvent) => {
-		if (!hasUnifiedPanel() || state.assistantType) return;
+		if (!hasUnifiedPanel()) return;
 		if (decided && !captured) return;
 		const dx = e.touches[0].clientX - startX;
 		const dy = e.touches[0].clientY - startY;
@@ -3089,54 +3164,37 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const assistantTabBar = () => {
-		if (!state.assistantType) return "";
-		if (!getAssistantPreviewPanel(state.assistantType)) return "";
-		return html`
-			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
-				<button
-					class="goal-tab-pill ${state.assistantTab === "chat" ? "goal-tab-pill--active" : ""}"
-					title="Chat"
-					@click=${() => { state.assistantTab = "chat"; renderApp(); }}
-				>Chat</button>
-				<button
-					class="goal-tab-pill ${state.assistantTab === "preview" ? "goal-tab-pill--active" : ""}"
-					title="Preview"
-					@click=${() => { state.assistantTab = "preview"; renderApp(); }}
-				>
-					Preview${state.assistantHasProposal ? html` <span class="goal-tab-dot"></span>` : ""}
-				</button>
-			</div>
-		`;
+	const panelTabHasDot = (tab: UnifiedPanelTab): boolean => {
+		if (tab.kind === "inbox") return state.inboxEntries.some((e) => e.state === "pending");
+		if (tab.kind !== "proposal" || tab.source.type !== "proposal") return false;
+		const type = tab.source.proposalType;
+		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
-	const unifiedTabLabel = (tab: UnifiedPanelTab): string => {
-		if (tab === "chat") return "Chat";
-		if (tab === "preview") return "Preview";
-		if (tab === "review") return "Review";
-		if (tab === "inbox") return "Inbox";
-		return PROPOSAL_TAB_LABELS[tab];
-	};
+	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => html`
+		<button
+			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
+			title=${tab.label}
+			data-panel-tab-id=${tab.id}
+			data-panel-tab-kind=${tab.kind}
+			data-panel-tab-title=${tab.title}
+			data-testid=${testId}
+			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
+		>${tab.label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+	`;
 
-	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => {
-		const label = unifiedTabLabel(tab);
-		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
-		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
-		return html`
-			<button
-				class="goal-tab-pill ${(state.previewPanelTab as UnifiedPanelTab) === tab ? "goal-tab-pill--active" : ""}"
-				title=${label}
-				data-testid=${tab === "inbox" ? "inbox-tab-pill" : ""}
-				@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
-		`;
-	};
+	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => panelTabButton(
+		tab,
+		tab.kind === "inbox" ? "inbox-tab-pill" : "",
+	);
 
 	const unifiedTabBar = () => {
 		if (!hasUnifiedPanel()) return "";
 		return html`
-			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
-				${unifiedPanelTabs().map((tab) => unifiedMobileTabButton(tab))}
+			<div class="goal-tab-bar shrink-0 border-b border-border bg-background overflow-x-auto" style="scrollbar-width:thin;">
+				<div class="flex items-center gap-1 px-3 py-2 min-w-max">
+					${unifiedPanelTabs().map((tab) => unifiedMobileTabButton(tab))}
+				</div>
 			</div>
 		`;
 	};
@@ -3188,7 +3246,13 @@ export function doRenderApp(): void {
 				.documents=${state.reviewDocuments}
 				.activeTab=${state.reviewActiveTab}
 				.sessionId=${activeSessionId() || ""}
-				@review-tab-change=${(e: CustomEvent) => { state.reviewActiveTab = e.detail.title; renderApp(); }}
+				@review-tab-change=${(e: CustomEvent) => {
+					const title = e.detail.title as string;
+					state.reviewActiveTab = title;
+					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					if (tab) setUnifiedActiveTab(tab);
+					renderApp();
+				}}
 				@review-submit=${async (e: CustomEvent) => {
 					const agent = state.remoteAgent;
 					if (agent) {
@@ -3267,57 +3331,52 @@ export function doRenderApp(): void {
 	};
 
 	const proposalPanelContent = (type: ProposalType) => {
-		if (state.activeProposals[type] == null) return "";
-		return proposalPanelForType(type);
+		if (state.activeProposals[type] == null && type !== currentAssistantProposalType()) return "";
+		return proposalPanelForWorkspaceType(type);
 	};
 
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
-		if (tab === "preview" && state.isPreviewSession) return htmlPreviewContent();
-		if (tab === "review" && state.reviewPanelOpen) return reviewPaneContent();
-		if (tab === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
-		return proposalPanelContent(tab as ProposalType);
+		if (tab.kind === "preview" && state.isPreviewSession) return htmlPreviewContent();
+		if (tab.kind === "review" && state.reviewPanelOpen) {
+			if (tab.source.type === "review" && state.reviewActiveTab !== tab.source.title) {
+				state.reviewActiveTab = tab.source.title;
+			}
+			return reviewPaneContent();
+		}
+		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
+		if (tab.kind === "proposal" && tab.source.type === "proposal") {
+			return proposalPanelContent(tab.source.proposalType);
+		}
+		return "";
 	};
 
-	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => {
-		const label = unifiedTabLabel(tab);
-		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
-		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
-		return html`
-			<button
-				class="goal-tab-pill ${(state.previewPanelActiveTab as UnifiedContentTab) === tab ? "goal-tab-pill--active" : ""}"
-				title=${label}
-				data-testid=${tab === "inbox" ? "inbox-tab-unified" : ""}
-				@click=${() => { setUnifiedDesktopTab(tab); setUnifiedMobileTab(tab); renderApp(); }}
-			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
-		`;
-	};
+	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => panelTabButton(
+		tab,
+		tab.kind === "inbox" ? "inbox-tab-unified" : "",
+	);
 
 	const unifiedPreviewPanel = () => {
 		const contentTabs = unifiedPanelContentTabs();
 		if (contentTabs.length === 0) return "";
 
-		// Archived/resubmit flows historically set previewPanelTab. Honour that
-		// request on desktop too, then clamp if the requested tab is unavailable.
-		const requestedMobileTab = state.previewPanelTab as UnifiedPanelTab;
-		if (requestedMobileTab !== "chat" && contentTabs.includes(requestedMobileTab as UnifiedContentTab)) {
-			setUnifiedDesktopTab(requestedMobileTab as UnifiedContentTab);
+		let activeTab = contentTabs.find((tab) => tab.id === state.activePanelTabId) ?? contentTabs[0];
+		if (state.activePanelTabId !== activeTab.id) {
+			setUnifiedDesktopTab(activeTab);
+			activeTab = contentTabs.find((tab) => tab.id === state.activePanelTabId) ?? activeTab;
 		}
-		if (!contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
-			setUnifiedDesktopTab(contentTabs[0]);
-		}
-
-		const activeTab = state.previewPanelActiveTab as UnifiedContentTab;
-		const showPreviewTab = contentTabs.includes("preview");
+		const showPreviewTab = contentTabs.some((tab) => tab.id === LIVE_PREVIEW_PANEL_TAB_ID);
 
 		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
+			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
 				<!-- Tab header -->
-				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-					<div class="flex items-center gap-1">
-						${contentTabs.map((tab) => unifiedDesktopTabButton(tab))}
+				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0 min-w-0">
+					<div class="flex-1 min-w-0 overflow-x-auto" style="scrollbar-width:thin;">
+						<div class="flex items-center gap-1 min-w-max">
+							${contentTabs.map((tab) => unifiedDesktopTabButton(tab))}
+						</div>
 					</div>
-					<div class="flex items-center gap-0.5">
-						${activeTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
+					<div class="flex items-center gap-0.5 shrink-0 pl-2">
+						${activeTab.id === LIVE_PREVIEW_PANEL_TAB_ID && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
 							${icon(Maximize2, "sm")}
@@ -3340,9 +3399,9 @@ export function doRenderApp(): void {
 	`;
 	/** Render individual pane content for mobile slider. */
 	const mobilePaneContent = (tab: UnifiedPanelTab) => {
-		if (tab === "chat") return state.chatPanel;
-		const content = unifiedPanelContent(tab as UnifiedContentTab);
-		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${content}</div>`;
+		if (tab.kind === "chat") return state.chatPanel;
+		const content = unifiedPanelContent(tab);
+		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
 
 	const mainArea = () => {
@@ -3384,35 +3443,6 @@ export function doRenderApp(): void {
 			lazyPageCall("search", () => import("./search-page.js"), "resetSearchPage", false);
 		}
 
-		if (connected && state.assistantType) {
-			const previewPanel = getAssistantPreviewPanel(state.assistantType);
-			if (!previewPanel) {
-				// No preview panel — use full-width chat
-				return html`
-					${reconnectBanner()}
-					<div class="flex-1 flex flex-col min-h-0">${state.chatPanel}</div>
-				`;
-			}
-			if (desktop) {
-				return html`
-					${reconnectBanner()}
-					<div class="flex-1 flex min-h-0 overflow-hidden">
-						<div class="goal-chat-panel flex-1 min-w-0 flex flex-col">${state.chatPanel}</div>
-						${previewPanel}
-					</div>
-				`;
-			}
-			const aSlideX = state.assistantTab === "chat" ? 0 : -50;
-			return html`
-				${reconnectBanner()}
-				<div class="assistant-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="assistant-slider__track" style="display:flex;width:200%;height:100%;transform:translateX(${aSlideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${state.chatPanel}</div>
-						<div style="width:50%;height:100%;min-width:0;display:flex;flex-direction:column;">${previewPanel}</div>
-					</div>
-				</div>
-			`;
-		}
 		if (connected && hasUnifiedPanel()) {
 			if (desktop && state.previewPanelFullscreen && state.isPreviewSession) {
 				return html`
@@ -3537,7 +3567,6 @@ export function doRenderApp(): void {
 						${headerLeft()}
 						${headerRight()}
 					</div>
-					${state.assistantType ? assistantTabBar() : ""}
 					${hasUnifiedPanel() ? unifiedTabBar() : ""}
 				</div>
 				<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
