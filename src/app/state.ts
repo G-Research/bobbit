@@ -1,6 +1,7 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
+import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
@@ -314,14 +315,21 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project" | "inbox",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,
 	previewPanelFullscreen: false,
 
-	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "inbox",
+	// Dynamic per-session side-panel workspace. Legacy assistantTab / previewPanelTab
+	// values are mirrored into activePanelTabId in render.ts for compatibility.
+	panelTabs: [] as PanelWorkspaceTab[],
+	activePanelTabId: "chat",
+	panelWorkspaceActiveBySession: {} as Record<string, string>,
+	panelWorkspacePreviewKeyBySession: {} as Record<string, string>,
+
+	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
 	// Review pane state (agent-initiated markdown review documents)
 	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
