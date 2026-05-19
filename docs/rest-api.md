@@ -243,7 +243,7 @@ For the user-facing model (lifecycle, immutable sandbox mode, legacy records) se
 |---|---|---|
 | `GET` | `/api/projects` | List visible registered projects in persisted project order. Hidden projects, including the synthetic `system` project, are excluded. |
 | `POST` | `/api/projects` | Register a project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`. When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
-| `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `{ projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
+| `PUT` | `/api/projects/order` | Persist the full visible project ID order for sidebar project drag reorder. Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). See [add-project-preflight.md](add-project-preflight.md). |
 | `GET` | `/api/projects/:id` | Get a single project. |
@@ -254,6 +254,8 @@ For the user-facing model (lifecycle, immutable sandbox mode, legacy records) se
 
 `GET /api/projects` returns only visible, non-system projects in the server-persisted order. Use the returned array order as the source of truth for sidebar grouping; visible project records may include a `position` field, but clients should not need to sort by it.
 
+`PUT /api/projects/order` is a reserved collection-level endpoint. It must be handled by the dedicated order route, never by the generic `PUT /api/projects/:id` update path. The server keeps the dedicated route before project-id handlers and excludes reserved collection subroutes from the generic matcher so `order` cannot be interpreted as a project ID.
+
 `PUT /api/projects/order` saves a new global order for visible projects:
 
 ```http
@@ -263,7 +265,7 @@ Content-Type: application/json
 { "projectIds": ["project-c", "project-a", "project-b"] }
 ```
 
-`projectIds` must be the complete current list of visible, non-system project IDs in the requested order. On success, the server stores contiguous positions, returns the visible projects in saved order, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
+`projectIds` must be the complete current list of visible, non-system project IDs in the requested order. On success, the server stores contiguous positions, returns `200` with the visible projects in saved order under `{ projects }`, and broadcasts `projects_changed` with the same ordered `projects` array so connected clients can sync without a reload.
 
 Project objects include the normal project fields; this example is truncated to the fields relevant to ordering:
 
