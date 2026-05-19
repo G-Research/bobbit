@@ -60,6 +60,44 @@ function resolveProposalToolsExtPath(ctx: PipelineContext): string {
 /** Delegate spawn timeout (30 seconds). */
 export const DELEGATE_SPAWN_TIMEOUT_MS = 30_000;
 
+export interface SandboxWiringOptions {
+	projectId?: string;
+	goalId?: string;
+	sandboxBranch?: string;
+	sandboxBaseBranch?: string;
+	/** Repo/worktree-relative cwd offset to preserve after remapping into /workspace* paths. */
+	sandboxCwdOffset?: string;
+}
+
+/** Normalize a host-derived cwd offset so it can be safely appended to a container path. */
+export function normalizeSandboxCwdOffset(relativeOffset?: string | null): string | undefined {
+	const raw = (relativeOffset ?? "").trim();
+	if (!raw || raw === ".") return undefined;
+	if (/^[a-zA-Z]:/.test(raw) || path.posix.isAbsolute(raw) || path.win32.isAbsolute(raw)) return undefined;
+	const parts = raw.replace(/\\/g, "/").split("/");
+	const safeParts: string[] = [];
+	for (const part of parts) {
+		if (!part || part === ".") continue;
+		if (part === "..") return undefined;
+		safeParts.push(part);
+	}
+	return safeParts.length > 0 ? safeParts.join("/") : undefined;
+}
+
+/** Apply a safe repo/worktree-relative offset to a container base cwd. */
+export function applySandboxCwdOffset(containerBaseCwd: string, relativeOffset?: string | null): string {
+	const safeOffset = normalizeSandboxCwdOffset(relativeOffset);
+	if (!safeOffset) return containerBaseCwd;
+	const base = containerBaseCwd.replace(/\/+$/, "") || "/";
+	return base === "/" ? `/${safeOffset}` : `${base}/${safeOffset}`;
+}
+
+/** Compute a safe relative cwd offset, returning undefined when cwd is outside root. */
+export function relativeSandboxCwdOffset(rootPath?: string, cwd?: string): string | undefined {
+	if (!rootPath || !cwd) return undefined;
+	return normalizeSandboxCwdOffset(path.relative(rootPath, cwd));
+}
+
 // ── Interfaces ─────────────────────────────────────────────────────────────
 
 export type SessionSetupMode = "normal" | "worktree" | "delegate";
@@ -113,6 +151,7 @@ export interface SessionSetupPlan {
 	// Sandbox worktree: branch to create inside the container
 	sandboxBranch?: string;
 	sandboxBaseBranch?: string;
+	sandboxCwdOffset?: string;
 
 	// Delegate-specific
 	instructions?: string;
@@ -151,7 +190,7 @@ export interface PipelineContext {
 	sessions: Map<string, SessionInfo>;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
-	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }) => Promise<boolean>;
+	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
@@ -594,7 +633,13 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		}
 		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
+				projectId: plan.projectId,
+				goalId: plan.goalId,
+				sandboxBranch: plan.sandboxBranch,
+				sandboxBaseBranch: plan.sandboxBaseBranch,
+				sandboxCwdOffset: plan.sandboxCwdOffset,
+			}),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");
@@ -746,6 +791,8 @@ export async function executeWorktreeAsync(
 	// subdirectory of the repo, offset the working directory within the worktree.
 	const originalCwd = plan.cwd;
 	const relativeOffset = plan.repoPath ? path.relative(plan.repoPath, originalCwd) : "";
+	const sandboxCwdOffset = normalizeSandboxCwdOffset(relativeOffset);
+	if (sandboxCwdOffset) plan.sandboxCwdOffset = sandboxCwdOffset;
 	const offsetCwd = relativeOffset && relativeOffset !== "."
 		? path.join(worktreeCwd, relativeOffset)
 		: worktreeCwd;
@@ -787,7 +834,13 @@ export async function executeWorktreeAsync(
 		}
 		const preSandboxCwd = plan.bridgeOptions.cwd;
 		await withRetry(
-			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, { projectId: plan.projectId, goalId: plan.goalId, sandboxBranch: plan.sandboxBranch, sandboxBaseBranch: plan.sandboxBaseBranch }),
+			() => ctx.applySandboxWiring(plan.bridgeOptions, plan.id, {
+				projectId: plan.projectId,
+				goalId: plan.goalId,
+				sandboxBranch: plan.sandboxBranch,
+				sandboxBaseBranch: plan.sandboxBaseBranch,
+				sandboxCwdOffset: plan.sandboxCwdOffset,
+			}),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id },
 		).then(applied => {
 			if (!applied) throw new Error("Sandbox is not configured as docker");

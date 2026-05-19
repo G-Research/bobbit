@@ -45,7 +45,7 @@ Justification (vs single append-only `<type>.history.jsonl`):
 - Reuses the existing tmp-file + `fs.rename` atomic write helpers in `proposal-files.ts` verbatim. Append-only JSONL needs new fsync/append discipline and partial-line recovery code we don't have.
 - Trivially survives partial writes — a half-written `<rev>.<ext>.tmp` is invisible to the rev scan and cleaned up on next mkdir.
 - Identical extension to the live draft — same plugin parser/serializer applies, no encoding shim.
-- Cleanup is free: `terminateSession` already `rm -rf`s the per-session draft dir; the `<type>.history/` subdir goes with it.
+- Cleanup is free: the per-session draft dir is reaped by `purgeOneSession` at the 7-day mark (deferred from archive by the [archived-proposal-reopen feature](../archived-proposal-reopen.md), so Path A / Path B can still read the snapshots after archive); the `<type>.history/` subdir goes with it.
 - Restart-safe rev recovery is one `readdir` + `parseInt` reduce — no metadata file to keep in sync.
 
 The cost — one inode per rev — is negligible (proposals are typically <10 KB each, history bounded by session lifetime, dir blown away on session terminate).
@@ -332,7 +332,7 @@ Place adjacent to the existing title heading. No clickable affordance — purely
 
 ## Restart survival
 
-- Snapshots live alongside drafts under the per-session dir → already covered by `terminateSession`'s rmdir.
+- Snapshots live alongside drafts under the per-session dir → reaped together with the live draft on the 7-day purge. (Archive itself does **not** delete the directory — the archived-proposal-reopen flow needs the snapshots on disk so a cloned assistant session can resume from the latest rev. See [docs/archived-proposal-reopen.md](../archived-proposal-reopen.md).)
 - WS-attach rehydrate (`src/server/ws/handler.ts` ~L328) reads the latest live draft and now also calls `latestRev(...)` to stamp `rev` on the rebroadcast `proposal_update {source: "rehydrate"}`. If the history dir is missing (legacy session predating this change), `rev = 0` — client treats as "no snapshots available" but panel still renders.
 
 ## Edge cases

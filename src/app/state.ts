@@ -1,5 +1,6 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
+import type { InboxEntry } from "../server/agent/inbox-store.js";
 import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
@@ -313,19 +314,27 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project" | "inbox",
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,
 	previewPanelFullscreen: false,
 
 	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project",
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "inbox",
 
 	// Review pane state (agent-initiated markdown review documents)
 	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,
+
+	// Inbox panel (per-session split panel for staff session views)
+	/** Pending + recent terminal inbox entries for the active staff session. Reset on session switch. */
+	inboxEntries: [] as InboxEntry[],
+	/** Whether the inbox panel is mounted for the active session (true iff active session has staffId). */
+	inboxPanelOpen: false,
+	/** Whether the manual "Add to inbox" composer dialog is showing. */
+	inboxAddDialogOpen: false,
 
 	/** Currently viewed goal dashboard (null = not on dashboard) */
 	goalDashboardId: null as string | null,
@@ -342,6 +351,7 @@ export const state = {
 	staffPreviewPrompt: "",
 	staffPreviewTriggers: "[]",
 	staffPreviewCwd: "",
+	staffPreviewWorktree: true,
 	staffPreviewNameEdited: false,
 	staffPreviewDescriptionEdited: false,
 	staffPreviewPromptEdited: false,

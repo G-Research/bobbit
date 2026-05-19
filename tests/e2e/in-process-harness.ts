@@ -20,7 +20,7 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -59,6 +59,69 @@ export interface GatewayInfo {
 	bgProcessManager: any;  // Exposed for bg-wait abort tests
 }
 
+function readHarnessToken(info: GatewayInfo): string {
+	try { return readFileSync(join(info.bobbitDir, "state", "token"), "utf-8").trim(); } catch {}
+	const token = process.env.BOBBIT_TOKEN?.trim();
+	if (token && token.length >= 64) return token;
+	throw new Error(`missing token for ${info.bobbitDir}`);
+}
+
+async function seedHarnessDefaultWorkflows(info: GatewayInfo, headers: Record<string, string>, projectId: string): Promise<void> {
+	const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+	let current: Record<string, any> = {};
+	try {
+		const cfgResp = await fetch(`${info.baseURL}/api/projects/${projectId}/config`, { headers });
+		if (cfgResp.ok) current = await cfgResp.json();
+	} catch { /* fall back to additive seed */ }
+	const existingWorkflows = current.workflows && typeof current.workflows === "object" && !Array.isArray(current.workflows)
+		? current.workflows as Record<string, unknown>
+		: {};
+	const workflows = { ...testWorkflows(), ...existingWorkflows };
+	const existingComponents = Array.isArray(current.components) ? current.components : [];
+	const componentNames = new Set(existingComponents.map((c: any) => c?.name).filter((name: unknown): name is string => typeof name === "string"));
+	const components = componentNames.has(TEST_DEFAULT_COMPONENT.name)
+		? existingComponents
+		: [...existingComponents, TEST_DEFAULT_COMPONENT];
+	const seedResp = await fetch(`${info.baseURL}/api/projects/${projectId}/config`, {
+		method: "PUT",
+		headers,
+		body: JSON.stringify({ components, workflows }),
+	});
+	if (!seedResp.ok) {
+		const seedText = await seedResp.text().catch(() => "<failed to read body>");
+		throw new Error(`[in-process-harness] default project workflow restore failed: ${seedResp.status} ${seedResp.statusText} body=${seedText}`);
+	}
+}
+
+async function restoreHarnessDefaultProject(info: GatewayInfo): Promise<void> {
+	const token = readHarnessToken(info);
+	const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+	const listResp = await fetch(`${info.baseURL}/api/projects`, { headers });
+	if (!listResp.ok) {
+		throw new Error(`[in-process-harness] default project restore list failed: ${listResp.status} ${listResp.statusText}`);
+	}
+	const body = await listResp.json();
+	const projects: Array<{ id?: string; name?: string; hidden?: boolean }> = Array.isArray(body) ? body : (body.projects ?? []);
+	const existingDefault = projects.find(p => !p.hidden && p.name === "default" && p.id);
+	if (existingDefault?.id) {
+		await seedHarnessDefaultWorkflows(info, headers, existingDefault.id);
+		return;
+	}
+
+	const registerResp = await fetch(`${info.baseURL}/api/projects`, {
+		method: "POST",
+		headers,
+		body: JSON.stringify({ name: "default", rootPath: info.bobbitDir, upsert: true, acceptCanonical: true }),
+	});
+	const registerText = await registerResp.text().catch(() => "<failed to read body>");
+	if (!registerResp.ok) {
+		throw new Error(`[in-process-harness] default project restore failed: ${registerResp.status} ${registerResp.statusText} body=${registerText}`);
+	}
+	const project = JSON.parse(registerText) as { id?: string };
+	if (!project.id) throw new Error(`[in-process-harness] default project restore returned no id: ${registerText}`);
+	await seedHarnessDefaultWorkflows(info, headers, project.id);
+}
+
 /**
  * Extended test fixture that provides a per-worker in-process gateway.
  *
@@ -66,7 +129,7 @@ export interface GatewayInfo {
  *   import { test, expect } from "./in-process-harness.js";
  *   // e2e-setup helpers automatically target this worker's gateway
  */
-export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktreePool: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false (pool pre-fill skipped for CPU).
 	// Opt in with `test.use({ enableWorktreePool: true })` in specs that
 	// actually exercise the pool endpoints.
@@ -177,39 +240,42 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		});
 
 		const port = await gw.start();
+		const gatewayUrl = `http://127.0.0.1:${port}`;
+
+		// Set env so e2e-setup.ts helpers and in-process mock agents target this worker's server.
+		process.env.E2E_PORT = String(port);
+		process.env.BOBBIT_GATEWAY_URL = gatewayUrl;
+		process.env.BOBBIT_TOKEN = token;
 
 		// Register the server CWD as a project via REST so existing tests that
 		// rely on a pre-existing "default" project at projects[0] keep working.
 		// The server no longer auto-registers one — see server.ts startup block.
 		// Workflows already seeded above via direct project.yaml write.
-		try {
-			await fetch(`http://127.0.0.1:${port}/api/projects`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"Authorization": `Bearer ${token}`,
-				},
-				// acceptCanonical=true is needed on macOS, where TMPDIR
-				// (/var/folders/...) is a symlink to /private/var/folders/...
-				// Without it, the server rejects the register with a
-				// SymlinkProjectRootError 400 and the harness silently runs
-				// with zero registered projects — every POST /api/sessions
-				// or /api/goals then 400s with "projectId required".
-				body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
-			});
-		} catch { /* best-effort */ }
+		const defaultProjectRegister = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${token}`,
+			},
+			// acceptCanonical=true is needed on macOS, where TMPDIR
+			// (/var/folders/...) is a symlink to /private/var/folders/...
+			// Without it, the server rejects the register with a
+			// SymlinkProjectRootError 400 and the harness must fail loudly;
+			// otherwise every POST /api/sessions or /api/goals then 400s with
+			// "projectId required".
+			body: JSON.stringify({ name: "default", rootPath: bobbitDir, upsert: true, acceptCanonical: true }),
+		});
+		if (!defaultProjectRegister.ok) {
+			const body = await defaultProjectRegister.text().catch(() => "<failed to read body>");
+			throw new Error(
+				`[in-process-harness] default project registration failed: ` +
+				`${defaultProjectRegister.status} ${defaultProjectRegister.statusText} body=${body || "<empty>"}`,
+			);
+		}
 
 		// Write gateway-url so agent subprocesses (including the mock agent) can
 		// read it for callbacks to internal endpoints.
-		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`, "utf-8");
-
-		// Set env so e2e-setup.ts helpers target this worker's server
-		process.env.E2E_PORT = String(port);
-
-		// cli.ts normally writes .bobbit/state/gateway-url so agent subprocesses
-		// can discover the gateway. When running in-process we must do that
-		// ourselves — tests that exercise tool-grant-request rely on it.
-		writeFileSync(join(bobbitDir, "state", "gateway-url"), `http://127.0.0.1:${port}`);
+		writeFileSync(join(bobbitDir, "state", "gateway-url"), gatewayUrl, "utf-8");
 
 		const info: GatewayInfo = {
 			port,
@@ -232,6 +298,15 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 			},
 		});
 	}, { scope: "worker", auto: true, timeout: 30_000 }],
+
+	restoreDefaultProject: [async ({ gateway }, use) => {
+		await use();
+		try {
+			await restoreHarnessDefaultProject(gateway);
+		} catch (err) {
+			console.warn(`[in-process-harness] default project restore skipped: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}, { auto: true }],
 });
 
 export { expect } from "@playwright/test";

@@ -29,6 +29,19 @@ import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendin
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { backToSessions, createAndConnectSession, terminateSession, saveGoalDraft, deleteGoalDraft, saveRoleDraft, deleteRoleDraft, saveProjectDraft, deleteProjectDraft, markProposalDismissed } from "./session-manager.js";
 import { deleteProposalFile } from "./proposal-helpers.js";
+
+/**
+ * Returns true when the given session id refers to a session that is already
+ * archived (present in `state.archivedSessions`). Proposal-panel submit
+ * handlers use this to skip the `DELETE /api/sessions/:id` teardown call —
+ * when the user resubmits a proposal from an *archived* session view the
+ * session is already gone server-side and the DELETE would 404 + surface as
+ * an error toast.
+ */
+function isSessionArchived(sessionId: string | null | undefined): boolean {
+	if (!sessionId) return false;
+	return state.archivedSessions.some((s) => s.id === sessionId);
+}
 import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection } from "./sidebar.js";
@@ -40,9 +53,12 @@ import "../ui/components/SearchResults.js";
 import "../ui/components/review/ReviewPane.js";
 import "../ui/components/review/ReviewDocument.js";
 import "../ui/components/review/AnnotationPopover.js";
+// Register inbox panel web components
+import "../ui/inbox/InboxPanel.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
 import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
+import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -702,6 +718,44 @@ export function resetProposalAnnCount(type: "goal" | "role" | "staff"): void {
 	else if (type === "staff") _staffAnnCount = 0;
 }
 
+function recomputeAssistantHasProposal(): void {
+	state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
+}
+
+function clearProposalReviewState(sessionId: string | null | undefined, type: ProposalType): void {
+	if (!sessionId) return;
+	if (type === "goal" || type === "role" || type === "staff") {
+		clearProposalAnnotations(sessionId, type);
+		resetProposalAnnCount(type);
+	}
+}
+
+function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
+	const mobileTabs = unifiedPanelTabs();
+	if (!mobileTabs.includes(state.previewPanelTab as UnifiedPanelTab)) {
+		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
+	} else if ((state.previewPanelTab as UnifiedPanelTab) === type) {
+		setUnifiedMobileTab(mobileTabs.includes("preview") ? "preview" : "chat");
+	}
+
+	const contentTabs = unifiedPanelContentTabs();
+	if ((state.previewPanelActiveTab as UnifiedContentTab) === type || !contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
+		setUnifiedDesktopTab(contentTabs[0] ?? "preview");
+	}
+}
+
+function dismissTypedProposal(type: ProposalType): void {
+	const slot = state.activeProposals[type];
+	const sessionId = slot?.sessionId ?? activeSessionId();
+	clearProposalReviewState(sessionId, type);
+	if (sessionId && slot?.fields) markProposalDismissed(sessionId, type, slot.fields);
+	delete state.activeProposals[type];
+	recomputeAssistantHasProposal();
+	clampUnifiedTabsAfterProposalRemoved(type);
+	if (sessionId) void deleteProposalFile(sessionId, type);
+	renderApp();
+}
+
 /** Render the "comments cleared" toast above a proposal panel, if active. */
 function proposalToast() {
 	if (!_proposalToastText) return "";
@@ -1157,7 +1211,7 @@ function goalPreviewPanel() {
 			});
 		}
 
-		if (sessionId) {
+		if (sessionId && !isSessionArchived(sessionId)) {
 			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 			clearSessionModel(sessionId);
 		}
@@ -1273,21 +1327,8 @@ function rolePreviewPanel() {
 		const trimmedName = state.rolePreviewName.trim();
 		const trimmedLabel = state.rolePreviewLabel.trim();
 		if (!trimmedName || !trimmedLabel) return;
-		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		if (sessionId) clearProposalAnnotations(sessionId, "role");
-		resetProposalAnnCount("role");
-		delete state.activeProposals.role;
-		// Clean up persisted draft
-		if (sessionId) {
-			deleteRoleDraft(sessionId);
-		}
-		localStorage.removeItem("gateway.sessionId");
+		const proposalSessionId = state.activeProposals.role?.sessionId ?? activeSessionId();
+		const isRoleAssistant = state.assistantType === "role";
 
 		// Parse tools: comma-separated string -> array
 		const toolsList = state.rolePreviewTools
@@ -1299,20 +1340,36 @@ function rolePreviewPanel() {
 		const toolPolicies: Record<string, string> = {};
 		for (const t of toolsList) toolPolicies[t] = "allow";
 
-		await createRole({
+		const created = await createRole({
 			name: trimmedName,
 			label: trimmedLabel,
 			promptTemplate: state.rolePreviewPrompt,
 			toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
 			accessory: state.rolePreviewAccessory,
 		});
+		if (!created) return;
 
-		// Slice E: drop the on-disk proposal file once accepted.
-		if (sessionId) void deleteProposalFile(sessionId, "role");
+		clearProposalReviewState(proposalSessionId, "role");
+		delete state.activeProposals.role;
+		recomputeAssistantHasProposal();
+		clampUnifiedTabsAfterProposalRemoved("role");
+		if (proposalSessionId) {
+			deleteRoleDraft(proposalSessionId);
+			void deleteProposalFile(proposalSessionId, "role");
+		}
 
-		if (sessionId) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
+		if (isRoleAssistant) {
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.assistantType = null;
+			localStorage.removeItem("gateway.sessionId");
+			if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
+				await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
+				clearSessionModel(proposalSessionId);
+			}
 		}
 
 		// Navigate to the roles page
@@ -1481,6 +1538,7 @@ function rolePreviewPanel() {
 					},
 					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_roleAnnCount})</span>`,
 				}) : ""}
+				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("role"), children: "Dismiss" }) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateRole,
@@ -1505,7 +1563,11 @@ function toolPreviewPanel() {
 		reconcileFollowTail(toolOuterScrollRef.value);
 	});
 	const handleDone = () => {
-		backToSessions();
+		if (state.assistantType === "tool") {
+			backToSessions();
+			return;
+		}
+		dismissTypedProposal("tool");
 	};
 
 	const handleViewTool = async () => {
@@ -1590,7 +1652,7 @@ function toolPreviewPanel() {
 			<!-- Footer -->
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
 				${streaming ? streamingBadge() : ""}
-				${Button({ variant: "ghost", onClick: handleDone, children: "Close" })}
+				${Button({ variant: "ghost", onClick: handleDone, children: state.assistantType === "tool" ? "Close" : "Dismiss" })}
 				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleViewTool,
@@ -1802,10 +1864,47 @@ function describeCron(cron: string): string {
 	return cron ? `Custom: ${cron}` : "";
 }
 
+function staffPreviewSessionId(): string | undefined {
+	return state.activeProposals.staff?.sessionId || activeSessionId();
+}
+
+function staffPreviewProjectId(sessionId = staffPreviewSessionId()): string | undefined {
+	if (!sessionId) return undefined;
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	if (session?.projectId) return session.projectId;
+	const activeId = activeSessionId();
+	if (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId) {
+		return state.chatPanel?.agentInterface?.projectId || undefined;
+	}
+	return undefined;
+}
+
+function activeProjectForStaffPreview() {
+	const projectId = staffPreviewProjectId();
+	return projectId
+		? state.projects.find(p => p.id === projectId)
+		: undefined;
+}
+
+function effectiveStaffPreviewCwd(project = activeProjectForStaffPreview()): string | undefined {
+	const explicitCwd = state.staffPreviewCwd.trim();
+	if (explicitCwd) return explicitCwd;
+	return project?.rootPath || undefined;
+}
+
+function seedStaffPreviewCwdFromProject(project = activeProjectForStaffPreview()): void {
+	if (state.staffPreviewCwdEdited || state.staffPreviewCwd.trim()) return;
+	if (project?.rootPath) state.staffPreviewCwd = project.rootPath;
+}
+
 function staffPreviewPanel() {
 	ensureMarkdownBlock();
 	ensureSandboxStatusLoaded();
+	const staffProject = activeProjectForStaffPreview();
+	seedStaffPreviewCwdFromProject(staffProject);
 	const streaming = isProposalStreaming("staff_proposal");
+	const effectiveCwd = effectiveStaffPreviewCwd(staffProject);
 	queueMicrotask(() => {
 		reconcileFollowTail(staffPromptPreviewRef.value);
 		reconcileFollowTail(staffPromptTextareaRef.value);
@@ -1813,19 +1912,8 @@ function staffPreviewPanel() {
 	const handleCreateStaff = async () => {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
-		const sessionId = activeSessionId();
-		if (state.remoteAgent) {
-			state.remoteAgent.disconnect();
-			state.remoteAgent = null;
-			state.connectionStatus = "disconnected";
-		}
-		state.assistantType = null;
-		if (sessionId) clearProposalAnnotations(sessionId, "staff");
-		resetProposalAnnCount("staff");
-		delete state.activeProposals.staff;
-		localStorage.removeItem("gateway.sessionId");
-		setHashRoute("landing");
-		state.appView = "authenticated";
+		const proposalSessionId = staffPreviewSessionId();
+		const isStaffAssistant = state.assistantType === "staff";
 
 		let triggers: any[] = [];
 		try {
@@ -1833,22 +1921,47 @@ function staffPreviewPanel() {
 		} catch { /* keep empty */ }
 
 		const sandboxed = _staffSandboxed;
-		_staffSandboxed = false;
+		const submitProjectId = staffPreviewProjectId();
+		const submitProject = submitProjectId
+			? state.projects.find(p => p.id === submitProjectId)
+			: undefined;
+		const cwd = effectiveStaffPreviewCwd(submitProject);
 		const result = await createStaffAgent({
 			name: trimmedName,
 			description: state.staffPreviewDescription,
 			systemPrompt: state.staffPreviewPrompt,
-			cwd: state.staffPreviewCwd,
+			cwd,
+			worktree: state.staffPreviewWorktree,
 			triggers,
-			projectId: state.activeProjectId || undefined,
+			projectId: submitProjectId,
 			sandboxed,
 		});
-		// Slice E: drop the on-disk proposal file once accepted.
-		if (sessionId) void deleteProposalFile(sessionId, "staff");
-		if (sessionId) {
-			await gatewayFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-			clearSessionModel(sessionId);
+		if (!result) return;
+
+		_staffSandboxed = false;
+		state.staffPreviewWorktree = true;
+		clearProposalReviewState(proposalSessionId, "staff");
+		delete state.activeProposals.staff;
+		recomputeAssistantHasProposal();
+		clampUnifiedTabsAfterProposalRemoved("staff");
+		if (proposalSessionId) void deleteProposalFile(proposalSessionId, "staff");
+
+		if (isStaffAssistant) {
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.assistantType = null;
+			localStorage.removeItem("gateway.sessionId");
+			setHashRoute("landing");
+			state.appView = "authenticated";
+			if (proposalSessionId && !isSessionArchived(proposalSessionId)) {
+				await gatewayFetch(`/api/sessions/${proposalSessionId}`, { method: "DELETE" });
+				clearSessionModel(proposalSessionId);
+			}
 		}
+
 		reloadStaffList();
 		await refreshSessions();
 		if (result?.currentSessionId) {
@@ -1887,17 +2000,47 @@ function staffPreviewPanel() {
 						}}
 					></textarea>
 				</div>
-				<div>
+				<div data-testid="staff-proposal-cwd-field">
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-					${Input({
-						type: "text",
-						value: state.staffPreviewCwd,
-						placeholder: (state as any).defaultCwd || "(server default)",
-						onInput: (e: Event) => {
+					<input
+						type="text"
+						data-testid="staff-proposal-cwd-input"
+						class="flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm md:text-sm text-foreground shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30"
+						.value=${state.staffPreviewCwd}
+						placeholder=${staffProject?.rootPath || "Project working directory"}
+						@input=${(e: Event) => {
 							state.staffPreviewCwd = (e.target as HTMLInputElement).value;
 							state.staffPreviewCwdEdited = true;
-						},
-					})}
+						}}
+					/>
+					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-cwd-hint">
+						${staffProject
+							? html`Selected project: <span class="font-medium text-foreground/80">${staffProject.name}</span> · <code class="text-[10px]">${staffProject.rootPath}</code>`
+							: effectiveCwd
+								? html`Using <code class="text-[10px]">${effectiveCwd}</code>`
+								: "No project cwd is available; the server will validate the request."}
+					</p>
+				</div>
+				<div data-testid="staff-proposal-worktree-control">
+					<label class="flex items-center gap-2 cursor-pointer">
+						<input
+							type="checkbox"
+							data-testid="staff-proposal-worktree-checkbox"
+							.checked=${state.staffPreviewWorktree}
+							@change=${(e: Event) => {
+								state.staffPreviewWorktree = (e.target as HTMLInputElement).checked;
+								renderApp();
+							}}
+						/>
+						<span class="text-xs text-muted-foreground font-medium">Create worktree when supported</span>
+						<span title="Uses an isolated project worktree for git-backed projects. Turn off to run directly in the project directory."
+							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
+					</label>
+					<p class="mt-1 text-[11px] text-muted-foreground" data-testid="staff-proposal-worktree-mode">
+						${state.staffPreviewWorktree
+							? "Auto: Bobbit will use a project worktree when supported."
+							: "Opt-out: this staff agent will run in the project directory."}
+					</p>
 				</div>
 				<div>
 					<label class="flex items-center gap-1.5 cursor-pointer ${!(state.sandboxStatus?.available && state.sandboxStatus?.imageExists) ? "opacity-40 pointer-events-none" : ""}">
@@ -1986,6 +2129,7 @@ function staffPreviewPanel() {
 					},
 					children: html`<span data-testid="proposal-send-feedback">Send feedback (${_staffAnnCount})</span>`,
 				}) : ""}
+				${!state.assistantType ? Button({ variant: "ghost", onClick: () => dismissTypedProposal("staff"), children: "Dismiss" }) : ""}
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
@@ -2148,9 +2292,7 @@ function projectProposalPanel() {
 
 	const handleDismiss = () => {
 		if (proposal?.sessionId) deleteProjectDraft(proposal.sessionId);
-		delete state.activeProposals.project;
-		state.assistantHasProposal = false;
-		renderApp();
+		dismissTypedProposal("project");
 	};
 
 	const onFieldInput = (key: string, value: string) => {
@@ -2263,7 +2405,22 @@ function projectProposalPanel() {
 	`;
 }
 
+function proposalPanelForType(type: ProposalType) {
+	switch (type) {
+		case "goal": return goalProposalPanel();
+		case "project": return projectProposalPanel();
+		case "role": return rolePreviewPanel();
+		case "tool": return toolPreviewPanel();
+		case "staff": return staffPreviewPanel();
+		default: return "";
+	}
+}
+
 function getAssistantPreviewPanel(type: string) {
+	const requested = state.previewPanelTab as ProposalType;
+	if (PROPOSAL_TYPES.includes(requested) && state.activeProposals[requested] != null && !(requested === "goal" && type === "goal")) {
+		return proposalPanelForType(requested);
+	}
 	switch (type) {
 		case "goal": return goalPreviewPanel();
 		case "role": return rolePreviewPanel();
@@ -2419,7 +2576,11 @@ function goalProposalPanel() {
 		_proposalAutoStartTeam = true;
 		// Persist dismiss so it survives reconnect
 		const sid = activeSessionId();
-		if (sid && dismissed) markProposalDismissed(sid, dismissed);
+		if (sid && dismissed) {
+			markProposalDismissed(sid, dismissed);
+			void deleteProposalFile(sid, "goal");
+		}
+		recomputeAssistantHasProposal();
 		// If preview tab still available, switch to it; otherwise back to chat
 		if (state.isPreviewSession) {
 			state.previewPanelActiveTab = "preview";
@@ -2476,32 +2637,64 @@ function goalProposalPanel() {
 // the inline `srcdoc=` iframe are gone. The gateway now injects them
 // server-side on text/html responses through the `/preview/<sid>/` mount.
 
+type UnifiedPanelTab = "chat" | "preview" | "review" | "inbox" | ProposalType;
+type UnifiedContentTab = Exclude<UnifiedPanelTab, "chat">;
+
+const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
+	goal: "Goal",
+	project: "Project",
+	role: "Role",
+	tool: "Tool",
+	staff: "Staff",
+};
+
+function activeProposalTypes(): ProposalType[] {
+	return PROPOSAL_TYPES.filter((type) => state.activeProposals[type] != null);
+}
+
+function hasActiveProposalPanel(): boolean {
+	return activeProposalTypes().length > 0;
+}
+
 /** Whether the unified panel is active for the current non-assistant session. */
 function hasUnifiedPanel(): boolean {
 	return !state.assistantType && (
 		state.isPreviewSession ||
-		state.activeProposals.goal != null ||
-		state.activeProposals.project != null ||
-		state.reviewPanelOpen
+		state.reviewPanelOpen ||
+		state.inboxPanelOpen ||
+		hasActiveProposalPanel()
 	);
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
-function unifiedPanelTabs(): Array<"chat" | "preview" | "goal" | "review" | "project"> {
-	const tabs: Array<"chat" | "preview" | "goal" | "review" | "project"> = ["chat"];
+function unifiedPanelTabs(): UnifiedPanelTab[] {
+	const tabs: UnifiedPanelTab[] = ["chat"];
 	if (state.isPreviewSession) tabs.push("preview");
 	if (state.reviewPanelOpen) tabs.push("review");
-	if (state.activeProposals.goal != null) tabs.push("goal");
-	if (state.activeProposals.project != null) tabs.push("project");
+	if (state.inboxPanelOpen) tabs.push("inbox");
+	tabs.push(...activeProposalTypes());
 	return tabs;
+}
+
+function unifiedPanelContentTabs(): UnifiedContentTab[] {
+	return unifiedPanelTabs().filter((tab): tab is UnifiedContentTab => tab !== "chat");
+}
+
+function setUnifiedMobileTab(tab: UnifiedPanelTab): void {
+	(state as any).previewPanelTab = tab;
+}
+
+function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
+	(state as any).previewPanelActiveTab = tab;
 }
 
 /** Index of the current previewPanelTab within unifiedPanelTabs(). Clamps to valid range. */
 function unifiedTabIndex(): number {
 	const tabs = unifiedPanelTabs();
-	const idx = tabs.indexOf(state.previewPanelTab);
+	const current = state.previewPanelTab as UnifiedPanelTab;
+	const idx = tabs.indexOf(current);
 	if (idx >= 0) return idx;
-	state.previewPanelTab = tabs[tabs.length - 1];
+	setUnifiedMobileTab(tabs[tabs.length - 1]);
 	return tabs.length - 1;
 }
 
@@ -2546,7 +2739,7 @@ function setupPreviewSwipe(): void {
 			let newIdx = curIdx;
 			if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
 			else if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
-			state.previewPanelTab = tabs[newIdx];
+			setUnifiedMobileTab(tabs[newIdx]);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 			renderApp();
 		}
@@ -2610,7 +2803,7 @@ function setupPreviewSwipe(): void {
 			let newIdx = curIdx;
 			if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
 			else if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
-			state.previewPanelTab = tabs[newIdx];
+			setUnifiedMobileTab(tabs[newIdx]);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 		}
 		captured = false;
@@ -2917,43 +3110,33 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const unifiedTabLabel = (tab: UnifiedPanelTab): string => {
+		if (tab === "chat") return "Chat";
+		if (tab === "preview") return "Preview";
+		if (tab === "review") return "Review";
+		if (tab === "inbox") return "Inbox";
+		return PROPOSAL_TAB_LABELS[tab];
+	};
+
+	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => {
+		const label = unifiedTabLabel(tab);
+		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
+		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
+		return html`
+			<button
+				class="goal-tab-pill ${(state.previewPanelTab as UnifiedPanelTab) === tab ? "goal-tab-pill--active" : ""}"
+				title=${label}
+				data-testid=${tab === "inbox" ? "inbox-tab-pill" : ""}
+				@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
+			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+		`;
+	};
+
 	const unifiedTabBar = () => {
 		if (!hasUnifiedPanel()) return "";
 		return html`
 			<div class="goal-tab-bar shrink-0 flex items-center gap-1 px-3 py-2 border-b border-border bg-background">
-				<button
-					class="goal-tab-pill ${state.previewPanelTab === "chat" ? "goal-tab-pill--active" : ""}"
-					title="Chat"
-					@click=${() => { state.previewPanelTab = "chat"; renderApp(); }}
-				>Chat</button>
-				${state.isPreviewSession ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "preview" ? "goal-tab-pill--active" : ""}"
-						title="Preview"
-						@click=${() => { state.previewPanelTab = "preview"; renderApp(); }}
-					>Preview</button>
-				` : ""}
-				${state.reviewPanelOpen ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "review" ? "goal-tab-pill--active" : ""}"
-						title="Review"
-						@click=${() => { state.previewPanelTab = "review"; renderApp(); }}
-					>Review</button>
-				` : ""}
-				${state.activeProposals.goal != null ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "goal" ? "goal-tab-pill--active" : ""}"
-						title="Goal"
-						@click=${() => { state.previewPanelTab = "goal"; renderApp(); }}
-					>Goal <span class="goal-tab-dot"></span></button>
-				` : ""}
-				${state.activeProposals.project != null ? html`
-					<button
-						class="goal-tab-pill ${state.previewPanelTab === "project" ? "goal-tab-pill--active" : ""}"
-						title="Project"
-						@click=${() => { state.previewPanelTab = "project"; renderApp(); }}
-					>Project <span class="goal-tab-dot"></span></button>
-				` : ""}
+				${unifiedPanelTabs().map((tab) => unifiedMobileTabButton(tab))}
 			</div>
 		`;
 	};
@@ -3064,61 +3247,77 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const inboxPaneContent = () => {
+		const sid = activeSessionId() || "";
+		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+		const staffId = sess?.staffId || "";
+		return html`
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="inbox-panel-root">
+				<inbox-panel
+					.entries=${state.inboxEntries}
+					.staffId=${staffId}
+					.sessionId=${sid}
+					.addDialogOpen=${state.inboxAddDialogOpen}
+					@inbox-open-add=${() => { state.inboxAddDialogOpen = true; renderApp(); }}
+					@inbox-add-close=${() => { state.inboxAddDialogOpen = false; renderApp(); }}
+					@inbox-add-submitted=${() => { state.inboxAddDialogOpen = false; renderApp(); }}
+				></inbox-panel>
+			</div>
+		`;
+	};
+
+	const proposalPanelContent = (type: ProposalType) => {
+		if (state.activeProposals[type] == null) return "";
+		return proposalPanelForType(type);
+	};
+
+	const unifiedPanelContent = (tab: UnifiedContentTab) => {
+		if (tab === "preview" && state.isPreviewSession) return htmlPreviewContent();
+		if (tab === "review" && state.reviewPanelOpen) return reviewPaneContent();
+		if (tab === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
+		return proposalPanelContent(tab as ProposalType);
+	};
+
+	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => {
+		const label = unifiedTabLabel(tab);
+		const isProposalTab = PROPOSAL_TYPES.includes(tab as ProposalType);
+		const inboxDot = tab === "inbox" && state.inboxEntries.some((e) => e.state === "pending");
+		return html`
+			<button
+				class="goal-tab-pill ${(state.previewPanelActiveTab as UnifiedContentTab) === tab ? "goal-tab-pill--active" : ""}"
+				title=${label}
+				data-testid=${tab === "inbox" ? "inbox-tab-unified" : ""}
+				@click=${() => { setUnifiedDesktopTab(tab); setUnifiedMobileTab(tab); renderApp(); }}
+			>${label}${isProposalTab || inboxDot ? html` <span class="goal-tab-dot"></span>` : ""}</button>
+		`;
+	};
+
 	const unifiedPreviewPanel = () => {
-		// Auto-correct tab if the active tab's content is no longer available
-		if (state.previewPanelActiveTab === "review" && !state.reviewPanelOpen) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview" : (state.activeProposals.goal != null ? "goal" : (state.activeProposals.project != null ? "project" : "preview"));
-		} else if (state.previewPanelActiveTab === "preview" && !state.isPreviewSession && state.activeProposals.goal != null) {
-			state.previewPanelActiveTab = "goal";
-		} else if (state.previewPanelActiveTab === "goal" && state.activeProposals.goal == null && state.isPreviewSession) {
-			state.previewPanelActiveTab = "preview";
-		} else if (state.previewPanelActiveTab === "project" && state.activeProposals.project == null) {
-			state.previewPanelActiveTab = state.isPreviewSession ? "preview"
-				: (state.activeProposals.goal != null ? "goal"
-				: (state.reviewPanelOpen ? "review" : "preview"));
+		const contentTabs = unifiedPanelContentTabs();
+		if (contentTabs.length === 0) return "";
+
+		// Archived/resubmit flows historically set previewPanelTab. Honour that
+		// request on desktop too, then clamp if the requested tab is unavailable.
+		const requestedMobileTab = state.previewPanelTab as UnifiedPanelTab;
+		if (requestedMobileTab !== "chat" && contentTabs.includes(requestedMobileTab as UnifiedContentTab)) {
+			setUnifiedDesktopTab(requestedMobileTab as UnifiedContentTab);
+		}
+		if (!contentTabs.includes(state.previewPanelActiveTab as UnifiedContentTab)) {
+			setUnifiedDesktopTab(contentTabs[0]);
 		}
 
-		const showPreviewTab = state.isPreviewSession;
-		const showGoalTab = state.activeProposals.goal != null;
-		const showReviewTab = state.reviewPanelOpen;
-		const showProjectTab = state.activeProposals.project != null;
+		const activeTab = state.previewPanelActiveTab as UnifiedContentTab;
+		const showPreviewTab = contentTabs.includes("preview");
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0">
 				<!-- Tab header -->
 				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
 					<div class="flex items-center gap-1">
-						${showPreviewTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "preview" ? "goal-tab-pill--active" : ""}"
-								title="Preview"
-								@click=${() => { state.previewPanelActiveTab = "preview"; renderApp(); }}
-							>Preview</button>
-						` : ""}
-						${showReviewTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "review" ? "goal-tab-pill--active" : ""}"
-								title="Review"
-								@click=${() => { state.previewPanelActiveTab = "review"; renderApp(); }}
-							>Review</button>
-						` : ""}
-						${showGoalTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "goal" ? "goal-tab-pill--active" : ""}"
-								title="Goal"
-								@click=${() => { state.previewPanelActiveTab = "goal"; renderApp(); }}
-							>Goal <span class="goal-tab-dot"></span></button>
-						` : ""}
-						${showProjectTab ? html`
-							<button
-								class="goal-tab-pill ${state.previewPanelActiveTab === "project" ? "goal-tab-pill--active" : ""}"
-								title="Project"
-								@click=${() => { state.previewPanelActiveTab = "project"; renderApp(); }}
-							>Project <span class="goal-tab-dot"></span></button>
-						` : ""}
+						${contentTabs.map((tab) => unifiedDesktopTabButton(tab))}
 					</div>
 					<div class="flex items-center gap-0.5">
-						${showPreviewTab && state.previewPanelActiveTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
+						${activeTab === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
 							${icon(Maximize2, "sm")}
@@ -3129,15 +3328,7 @@ export function doRenderApp(): void {
 					</div>
 				</div>
 				<!-- Tab content -->
-				${state.previewPanelActiveTab === "review" && showReviewTab
-					? reviewPaneContent()
-					: state.previewPanelActiveTab === "preview" && showPreviewTab
-						? htmlPreviewContent()
-						: state.previewPanelActiveTab === "goal" && showGoalTab
-							? goalProposalPanel()
-							: state.previewPanelActiveTab === "project" && showProjectTab
-								? projectProposalPanel()
-								: ""}
+				${unifiedPanelContent(activeTab)}
 			</div>
 		`;
 	};
@@ -3148,21 +3339,10 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: "chat" | "preview" | "goal" | "review" | "project") => {
+	const mobilePaneContent = (tab: UnifiedPanelTab) => {
 		if (tab === "chat") return state.chatPanel;
-		if (tab === "preview" && state.isPreviewSession) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${htmlPreviewContent()}</div>`;
-		}
-		if (tab === "review" && state.reviewPanelOpen) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${reviewPaneContent()}</div>`;
-		}
-		if (tab === "goal" && state.activeProposals.goal != null) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${goalProposalPanel()}</div>`;
-		}
-		if (tab === "project" && state.activeProposals.project != null) {
-			return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${projectProposalPanel()}</div>`;
-		}
-		return html``;
+		const content = unifiedPanelContent(tab as UnifiedContentTab);
+		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0">${content}</div>`;
 	};
 
 	const mainArea = () => {

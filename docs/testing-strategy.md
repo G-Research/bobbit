@@ -118,6 +118,18 @@ See `tests/e2e/sandbox-recovery-docker.spec.ts` for the same pattern in API-leve
 
 **Limitations.** The `gateway` fixture is worker-scoped, so a crash/restart in test N affects every later test on that worker. Tests should assert only on entities they own (sessions/projects/goals they created in this test) and avoid global state assumptions. Playwright groups tests with matching `enableMcp` / `enableWorktreePool` options onto the same worker, so each spec file in practice gets its own gateway lifecycle.
 
+#### Worker-scoped project state and helper self-healing
+
+Every E2E worker starts with its own temp `BOBBIT_DIR`, token, port, project registry, and gateway state. The harnesses seed `projects.json` as empty and then register one visible project named `default` through the REST API. That project is test scaffolding only: production still has no implicit user default project, and `POST /api/sessions` / `POST /api/goals` still require an explicit `projectId` or a `cwd` matching a registered project (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)). Tests must not depend on the developer's real `.bobbit/` state or on a global fallback project.
+
+The shared helpers in `tests/e2e/e2e-setup.ts` keep this worker default healthy for high-level test setup:
+
+- `defaultProjectId()` reads the live project list for the current worker before returning an id. If the cached id disappeared, the visible project list is empty, or the `default` project was deleted, it re-registers the worker default with `upsert: true` and `acceptCanonical: true`.
+- `createSession()` and `createGoal()` inject that ensured id when the caller does not pass `projectId`. This makes helper setup resilient after specs that intentionally delete every visible project to exercise the zero-project UI state.
+- Non-201 helper failures include the response body plus request, port/base, `bobbitDir`, cached default id, and live project list. A `POST /api/sessions` 400 should therefore identify the actual server rejection instead of reporting `body=<empty>`.
+
+Keep the self-healing targeted. Do not add broad sleeps or weaken server validation when a later helper follows a project-deletion spec; the helper should restore only the worker default prerequisite it owns. API validation specs should issue their own direct `apiFetch()` calls and continue asserting intentional 4xx responses. Use `rawApiFetch()` only when the test must bypass harness request shaping, such as missing-`projectId` coverage or symlink-root rejection.
+
 **Framework extensions** added to `tests/e2e/ui/spec-framework.ts` to support these stories:
 
 - `ProjectHandle` — entity handle for asserting against projects.

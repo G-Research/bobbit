@@ -1,0 +1,87 @@
+name: inbox_complete
+description: "Mark an inbox entry as completed with an optional result summary."
+summary: "Complete an inbox entry"
+params: [entry_id, summary?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Inbox
+docs: |-
+  Required: `entry_id`. Optional: `summary` (staff-written result, stored on the entry). Transitions the entry from `pending` to `completed`. Rejects entries already in a terminal state.
+detail_docs: >-
+  ## Purpose
+
+
+  Mark an inbox entry as `completed`. Use this after you have done the work the
+  entry describes. The `summary` field is the staff agent's record of what was
+  done; it surfaces in the inbox history panel and in `inbox_list(state="completed")`
+  responses.
+
+
+  Transitions are agent-driven: the server never auto-completes entries.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `entry_id` | string | **Yes** | The entry id (UUID) returned by `inbox_list`. |
+
+  | `summary` | string | No | Short result summary describing what was done.
+  Strongly recommended — this is the audit trail. |
+
+
+  ## When to Use
+
+
+  - **After finishing an inbox-item's work** — record the outcome before moving
+  on to the next pending entry.
+
+  - **Even for no-op completions** — if you decide the work was already done
+  (idempotency check via memory or history), still complete the entry with a
+  summary explaining that.
+
+
+  ## When NOT to Use
+
+
+  - **For failures or cancellations** — use `inbox_dismiss` instead, which
+  records an `error` reason rather than a `result`.
+
+  - **For entries already in a terminal state** — the server returns 409
+  Conflict if the entry is not `pending`.
+
+
+  ## Examples
+
+
+  ```
+
+  # Complete after doing the work
+
+  inbox_complete(entry_id="ec1...", summary="Posted daily digest to #standup
+  with summary of 7 PRs merged in last 24h.")
+
+
+  # Complete a duplicate trigger
+
+  inbox_complete(entry_id="ec2...", summary="No-op: identical work already
+  recorded in completed entry ec1.... Idempotency check via memory.")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **One-way transition** — `pending` → `completed` cannot be undone. If you
+  later realise the work was wrong, dismiss is not the right tool either; the
+  user prunes via UI.
+
+  - **`summary` is the audit trail** — always include it. Empty completions
+  make history useless.
+
+  - **Staff-only** — this tool is only registered for staff sessions.

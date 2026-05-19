@@ -122,6 +122,18 @@ Loading an archived session shows `claude-opus-4-6` (the client-side placeholder
 
 See [docs/internals.md — Archived-session state push on auth](internals.md#archived-session-state-push-on-auth).
 
+## Archived proposal draft missing after continue / resubmit
+
+User opens an archived assistant session, expects to see a "Resubmit `<type>` proposal" button on the footer or a draft carried over by `POST /api/sessions/:id/continue`, and gets nothing.
+
+- **Resubmit button missing**: the footer shows only "Continue in New Session". Check `GET /api/sessions/:id/proposals` directly — if `proposals` is empty, no draft exists on disk. Most likely cause: the draft was deleted at archive time by an older `session-manager.ts::terminateSession` that has not been updated. The current code defers proposal-drafts cleanup to `purgeOneSession` (7-day purge); the `terminateSession` path must skip the directory. If the endpoint is missing from the server entirely, the client falls back to the no-draft footer silently — verify the `^/api/sessions/([^/]+)/proposals$` route is registered.
+- **Continue returned 422 for an assistant session**: the `assistantType` guard was re-introduced. The current handler only blocks `goalId` / `delegateOf` / `teamGoalId`; assistant sessions are accepted and the response echoes `assistantType`.
+- **Continued session has no draft**: server logs surface `[continue-archived] proposal-dir copy failed (non-fatal): …` when `copyProposalDirIfPresent` (in `src/server/agent/continue-archived.ts`) throws. The copy is intentionally non-fatal so the underlying `.jsonl` continue still succeeds; check disk permissions on `<stateDir>/proposal-drafts/`. Also confirm `cleanupFailedContinue` did not run prematurely — it nukes both the cloned `.jsonl` and the cloned proposal-drafts directory.
+- **Toast "DELETE /api/sessions/<id> returned 404" on resubmit**: the `isSessionArchived` guard in `src/app/render.ts` is missing or bypassed. The submit handlers in the goal / project / role / tool / staff proposal panels must short-circuit the post-accept session teardown when the parent is already in `state.archivedSessions`.
+- E2E coverage: `tests/e2e/ui/archived-proposal-resubmit.spec.ts` (Path A + Path B + reload persistence + no-draft fallback), `tests/e2e/continue-archived-assistant.spec.ts` (server-side clone happy paths + cross-realm rejection regression).
+
+See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full design and where each piece lives.
+
 ## Session persistence
 
 - Check `<project-root>/.bobbit/state/sessions.json` (per-project, not centralized)
@@ -132,6 +144,19 @@ See [docs/internals.md — Archived-session state push on auth](internals.md#arc
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
 - **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
+
+## Staff inbox tools missing after restart / `[INBOX]` completion silently fails
+
+- **Symptoms**: a staff agent woken by `[INBOX]` reports `Tool inbox_complete not found` / `Tool inbox_list not found`; `GET /api/sessions/:id` returns a body with no `staffId` field; the REST fallback `POST /api/staff/:staffId/inbox/:entryId/complete` returns `403 Forbidden: session does not belong to this staff`. Inbox entries stay pending forever and re-fire on every trigger.
+- **Root cause**: the three inbox tools in `defaults/tools/inbox/extension.ts` are gated by `BOBBIT_STAFF_ID` in the agent process env. That env var is set from `PersistedSession.staffId` on every (re)spawn (`session-manager.ts::restoreSession` → `bridgeOptions.env.BOBBIT_STAFF_ID = ps.staffId`). Pre-fix, `StaffManager` mutated `session.staffId = id` only in memory, so the field never reached disk and was undefined after any respawn / compaction / server restart.
+- **Quick diagnostic**: `jq '.sessions[] | select(.title == "<staff name>") | {id, staffId, cwd}' .bobbit/state/sessions.json` — if `staffId` is null/missing on a session whose `title` matches a staff `name`, you've hit the bug.
+- **Resolution path**: should auto-heal on next server restart via `src/server/agent/staff-backfill.ts`. A loud warn log will appear: `[staff-backfill] backfilling staffId="..." for session=...`. If it doesn't fire, check that the session's `title` exactly matches a staff `name` AND its `worktreePath` (or `cwd`) matches the staff's `worktreePath`. The backfill is conservative and refuses title-only matches.
+- **Spawn-path wires** (must all be present for new sessions to persist correctly):
+  - `session-manager.ts::createSession` opts → both plan builders carry `staffId: opts?.staffId,`.
+  - `staff-manager.ts` passes `staffId: id` (and `staffId` on the scheduled-wake path) to both `createSession` call sites.
+  - `session-setup.ts::persistOnce` writes `staffId: plan.staffId` into `PersistedSession`.
+  - `session-manager.ts::restoreSession` reads `ps.staffId` and sets `bridgeOptions.env.BOBBIT_STAFF_ID`.
+- **Pinning test**: `tests/staff-session-staffid-persistence.test.ts` covers spawn-path forwarding, `SessionStore` round-trip, backfill idempotency, and source-level guards for the read/write field.
 
 ## `system-prompt.md` not customised
 
@@ -278,6 +303,15 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 
 - `renderApp()` debounced via `requestAnimationFrame` — multiple calls collapse
 - For synchronous DOM updates, use `renderAppSync()`
+
+## Toolbar / sidebar buttons missing shortcut hints in `title`
+
+- **Symptom**: hovering a toolbar or sidebar button on a freshly-booted app shows a bare label (e.g. `New goal`, `Terminate session`, `Collapse preview`) instead of the labelled-with-shortcut form (`New goal (Alt+G)`, etc.). A second render — any WS event, sessions poll, hash change, or user input — fixes it. Under heavy parallel e2e load this race accounted for the largest single category of toolbar-locator flakes.
+- **Root cause**: `initApp()` in `src/app/main.ts` calls `renderApp()` early to mount the UI shell. At that point no shortcut has been registered yet, so every `${shortcutHint(id)}` interpolation in templates evaluates to `""` and Lit stamps the bare title. Shortcut registration (`registerShortcut(...)` calls plus `await loadSavedBindings(); startListening();`) runs further down `initApp()`, but pre-fix no `renderApp()` followed it — the stale titles stayed in the DOM until something else triggered a re-render.
+- **Fix**: a single `renderApp()` call in `initApp()` immediately after `loadSavedBindings()` / `startListening()` and the `document.body.dataset.shortcutsReady = "1"` marker. Lit diffs and only restamps the changed `title` attributes, so the extra pass is cheap. Search the file for the `Refresh ${shortcutHint(...)} evaluations` comment if you need to find the exact line.
+- **Do not remove it.** The call looks redundant next to the early `renderApp()` at the top of `initApp()` — it is not. The early render happens **before** shortcut registration; this one happens **after**, and is the only render guaranteed to see the registered bindings.
+- **Pinning test**: `tests/shortcut-hint-titles-render.spec.ts` (with fixture `tests/fixtures/shortcut-hint-titles-render-entry.ts`). It simulates the boot order — first render with no shortcuts, then registration, then second render — and asserts the second render stamps the title with the `(Alt+G)` suffix. Deleting the post-registration `renderApp()` call must fail this test.
+- **Related flake cleanup**: this race was "flake category A" in the PR 600 investigation — ~10 e2e tests (`api-error-modal`, `goal-accept-failure-keeps-assistant`, `goal-creation`, `goal-form-tooltips`, `proposal-inline-comments`, `proposal-tools`, `stories-goal-routing`) that waited on `button[title='New goal (Alt+G)']`. Other flake categories (createSession 201→400 server race, tail-chat scroll drift, cold-start timeouts) are independent.
 
 ## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
@@ -516,10 +550,10 @@ See [docs/internals.md — Skill chip rendering & autonomous activation](interna
 - State is per-project: goals, sessions, tasks, teams, gates, search, costs all live in `<project-root>/.bobbit/state/`
 - `ProjectContextManager` manages all `ProjectContext` instances and routes store access
 - Project registry at `<server-cwd>/.bobbit/state/projects.json` — check file exists and is valid JSON
-- **No default user project.** The server never auto-registers a *user* project. A fresh install has an empty `projects.json` (visible projects only) and the UI forces Add Project before any goal/session work in user projects. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` matching a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
-- **Synthetic `system` project carve-out.** At startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`, `hidden: true`) via `registerSystemProject()`. It does **not** appear in `GET /api/projects` and is invisible to `state.projects`, but it is a valid `projectId` for `POST /api/sessions`. Two kinds of caller land here: (a) the Tools page → New Tool with scope = System, which passes `projectId: "system"` explicitly; and (b) `POST /api/sessions` with `assistantType ∈ {role, tool, staff}` and no `projectId` — the server's `isServerScopeAssistant` branch anchors these at `SYSTEM_PROJECT_ID` without consulting `resolveProjectForRequest`. See [internals.md — Synthetic system project](internals.md#synthetic-system-project) and [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs).
+- **No default user project.** The server never auto-registers a *user* project. A fresh install has an empty `projects.json` (visible projects only) and the UI forces Add Project before any goal/session work in user projects. `POST /api/goals`, `POST /api/sessions`, and `POST /api/staff` require an explicit `projectId` or a `cwd` inside a registered project's `rootPath` and return **400** `"projectId required: ..."` otherwise (see [rest-api.md — Project resolution contract](rest-api.md#project-resolution-contract)).
+- **Synthetic `system` project carve-out.** At startup the server registers a hidden synthetic project (id `system`, anchored at `<bobbitStateDir>/system-project/`, `hidden: true`) via `registerSystemProject()`. It does **not** appear in `GET /api/projects` and is invisible to `state.projects`, but it is a valid `projectId` for `POST /api/sessions`. Two kinds of caller land here: (a) the Tools page → New Tool with scope = System, which passes `projectId: "system"` explicitly; and (b) `POST /api/sessions` with `assistantType ∈ {role, tool}` and no `projectId` — the server's `isServerScopeAssistant` branch anchors these at `SYSTEM_PROJECT_ID` without consulting `resolveProjectForRequest`. Staff assistants are excluded and must resolve a real project. See [internals.md — Synthetic system project](internals.md#synthetic-system-project) and [rest-api.md — `POST /api/sessions` assistantType carve-outs](rest-api.md#post-apisessions--assistanttype-carve-outs).
 - **Diagnosing a user-visible 400 "projectId required":**
-  1. Was the request a `POST /api/sessions` with `assistantType ∈ {role, tool, staff}`? It should never 400 on missing project — the server anchors at `system`. A 400 here means the server-scope carve-out regressed; check the `isServerScopeAssistant` branch in `handleApiRoute()`.
+  1. Was the request a `POST /api/sessions` with `assistantType ∈ {role, tool}`? It should never 400 on missing project — the server anchors at `system`. A 400 here means the server-scope carve-out regressed; check the `isServerScopeAssistant` branch in `handleApiRoute()`. If `assistantType` is `staff`, the 400 is expected unless the request includes a real `projectId` or project-contained `cwd`.
   2. Was the request from a system-scope tool assistant relying on `cwd` only? It must carry `projectId: "system"` in the POST body — `cwd`-only resolution will 400 because `findByCwd` skips hidden projects.
   3. Was the request from the splash-screen "New Session" / "Quick Session" button? Those are gated on `state.projects.length` (0 → New Project CTA, 1 → bound session, ≥2 → splash picker via `state.splashProjectPickerOpen`); a 400 here means the gating regressed.
   4. Confirm the system project is registered — `state.projects` will not show it (by design), but its presence is observable via the server log line on startup or by inspecting `<bobbitStateDir>/projects.json` directly. There is no `?includeHidden=1` query flag.
@@ -831,6 +865,14 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.
 
+## Auto-nudge cadence never escapes base delay
+
+Symptom: an unattended team-lead session receives idle nudges roughly every 5 or 10 minutes overnight, regardless of the documented 12h exponential-backoff cap.
+
+Cause: pre-fix `TeamManager.subscribeTeamLeadEvents` treated every `agent_start` on the lead's RPC client as "the lead did something productive" and reset the backoff counter. But `agent_start` also fires when the lead is replying to its own auto-nudge — so the counter reset on every cycle and the exponential ceiling was dead code.
+
+Fix: prompts now carry a `PromptSource` (declared in `src/server/agent/session-manager.ts`, persisted as `SessionInfo.lastPromptSource`). Only `"user"` / `"system"` sources reset `idleNudgeCount` / `noWorkersNudgeCount` on the next `agent_start`; `"auto-nudge"` / `"task-notification"` / `"verification"` preserve them so `scheduleWorkersNudge` / `scheduleNoWorkersNudge` keep stepping up. See [docs/design/notification-policy.md — Team-lead idle-nudge backoff](design/notification-policy.md#9-team-lead-idle-nudge-backoff) for the full mechanism. Pinning test: `tests/team-manager-idle-nudge-backoff.test.ts`.
+
 ## `bash_bg wait` not interrupted by steer
 
 A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process itself is **not** killed; only the wait call resolves with `{ aborted: true }`. Diagnose:
@@ -1036,3 +1078,18 @@ Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call si
   `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
   CLI codepath is writing the file directly without routing through
   `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.
+
+## Trigger fired but staff didn't wake
+
+- **Symptom**: a cron / git trigger fires (visible in `lastFired` / `lastSeenSha` advancing) but the staff session never produces a new turn. Pre-inbox, the trigger silently dropped while the session was `streaming`/`starting`; that path is gone (`POST /api/staff/:id/wake` deleted, `TriggerEngine.wakingInProgress` field removed). Triggers now always enqueue.
+- **First check**: `cat <projectStateDir>/inbox/<staffId>.json` — if a pending entry is there, the trigger ran fine; the question is why the nudger hasn't delivered it.
+- **WS sanity**: an `inbox.entry.added` frame should hit every connected client within ~50 ms of the enqueue. Missing means `InboxManager.broadcastToAll` isn't wired, or the trigger engine errored before calling `enqueue` (check server logs for `[trigger-engine] Failed to enqueue inbox entry`).
+- **Nudger gating**: `InboxNudger.tickOne` skips when (a) `staff.state !== "active"`, (b) `staff.currentSessionId` is unset, (c) `session.status !== "idle"`, (d) `nudgePending` is already set for that staff, or (e) the pending list is empty. The tick is 15 s, so worst-case latency on the idle→nudge edge is ~15 s + compact time (when `contextPolicy === "compact"`).
+- **Stuck `nudgePending`**: cleared in `InboxNudger.onAgentStart(sessionId)` via the session-manager hook. If the agent never enters `streaming` (e.g. provider error before the first token), the flag stays set and silences re-nudges until the next successful turn or server restart. Catch in `applyPolicyThenNudge` clears it on thrown exceptions but not on `enqueuePrompt` silently parking the prompt.
+- See [docs/staff-inbox.md](staff-inbox.md) for the full lifecycle.
+
+## Staff context-policy save bounces back
+
+- **Symptom**: changing the Context Policy radio on the staff edit page and clicking Save shows the new value briefly, then the form re-renders with the old value.
+- **Fix shipped in the staff-inbox release**: `PUT /api/staff/:id` now forwards `contextPolicy` (`"preserve"` \| `"compact"`) through to `StaffStore.update`. Pre-fix builds dropped it on the allow-list.
+- **If seen again**: check `server.ts` `PUT /api/staff/:id` handler still threads `body.contextPolicy` into the update payload; `staff-store.ts` `update()` normalises any other value to `"compact"`. The radio binding is in `src/app/staff-page.ts` (`editContextPolicy` field).

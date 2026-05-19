@@ -810,6 +810,40 @@ gives `edit_proposal` calls a proper card with a compact diff and an
 
 Full design: [docs/design/proposal-revision-snapshots.md](./proposal-revision-snapshots.md).
 
+## 11.6 Archive survival (follow-up)
+
+A later change relaxed the per-session draft directory's lifetime so that
+archived sessions retain their proposal drafts on disk. The motivation is the
+*orphaned-draft* failure mode: an archived assistant session
+(`assistantType` ∈ `goal | role | tool | staff | project`) used to lose its
+draft on terminate, even though `propose_*` had already captured a clean,
+parseable payload that the user might still want to submit. Two callers now
+depend on the draft surviving archive:
+
+- **Path A — in-place resubmit.** The archived chat footer offers a
+  "Resubmit `<type>` proposal" button that opens the existing proposal
+  panel, hydrated from disk via `GET /api/sessions/:id/proposals`, and
+  submits through the live REST path (`createGoal`, `createProject`, …)
+  with no new session and no agent involvement. The submit handlers in
+  `src/app/render.ts` short-circuit the post-accept
+  `DELETE /api/sessions/:id` teardown call via a new `isSessionArchived`
+  guard so resubmitting from an already-archived parent does not 404-toast.
+- **Path B — continue assistant.** The `POST /api/sessions/:id/continue`
+  handler now accepts assistant sessions (the coding-agent guards on
+  `goalId` / `delegateOf` / `teamGoalId` stay) and clones the entire
+  draft directory — live `<type>.{md,yaml}` plus the
+  `<type>.history/<rev>.<ext>` snapshot tree — verbatim into the new
+  session's slot via `copyProposalDirIfPresent`. The standard WS
+  `auth_ok` rehydrate broadcast picks it up on attach.
+
+The single semantic shift is: `session-manager.ts::terminateSession` no
+longer removes `<stateDir>/proposal-drafts/<sessionId>/`. Deletion is
+deferred to `purgeOneSession` at the 7-day mark, alongside the existing
+`.jsonl` purge. The atomic-rollback contract (§4) and the path-safety
+rules are unchanged.
+
+Full spec: [docs/archived-proposal-reopen.md](../archived-proposal-reopen.md).
+
 ## 12. Out of scope
 
 - Diff/undo history of edits.
@@ -837,5 +871,8 @@ Full design: [docs/design/proposal-revision-snapshots.md](./proposal-revision-sn
   directory cleanup must happen after any in-flight `editProposalFile`
   promise resolves. We use the same fire-and-forget pattern as
   `eagerDeleteRemoteSessionBranch`; an `unlink` on a missing dir is harmless.
+  (Post §11.6: cleanup is deferred from archive to the 7-day purge, so the
+  race window now only opens on the explicit `purgeOneSession` tick rather
+  than at terminate time.)
 
 — end —

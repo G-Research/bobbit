@@ -9,14 +9,11 @@
  *     → parseProposalFile(...)
  *     → { fields: { title, cwd, workflow, options, spec } }
  *
- * The companion E2E (`tests/e2e/ui/proposal-spec-survives-navigate.spec.ts`)
- * is `test.fixme`-quarantined for a CLIENT-side rehydrate bug — see
- * `docs/design/proposal-spec-rehydrate.md`. This unit suite proves the
- * server layer is NOT to blame: the spec field survives every shape the
- * goal-proposal frontmatter / body can take, and an empty spec is loudly
- * rejected at parse time rather than silently rehydrated as "".
- *
- * Design doc: docs/design/proposal-spec-rehydrate.md.
+ * Companion E2E: `tests/e2e/ui/proposal-spec-survives-navigate.spec.ts`
+ * exercises the CLIENT-side rehydrate path end-to-end. This unit suite
+ * proves the server layer is NOT to blame: the spec field survives every
+ * shape the goal-proposal frontmatter / body can take, and an empty spec
+ * is loudly rejected at parse time rather than silently rehydrated as "".
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

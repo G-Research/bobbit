@@ -1,5 +1,6 @@
 import { ChatPanel } from "../ui/index.js";
 import { startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
@@ -36,7 +37,7 @@ import {
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
-import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
 
 /**
  * Extract the markdown body field from a proposal's fields object.
@@ -50,6 +51,38 @@ function extractProposalBody(
 	if (!fields) return "";
 	if (type === "goal") return String((fields as any).spec ?? "");
 	return String((fields as any).prompt ?? "");
+}
+
+function projectRootForSession(sessionId: string): string {
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	let projectId = session?.projectId;
+	const activeId = activeSessionId();
+	if (!projectId && (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId)) {
+		projectId = state.chatPanel?.agentInterface?.projectId;
+	}
+	if (!projectId) return "";
+	return state.projects.find(p => p.id === projectId)?.rootPath || "";
+}
+
+function proposalCwdOrProjectRoot(proposalCwd: unknown, sessionId: string): string {
+	const cwd = typeof proposalCwd === "string" ? proposalCwd : "";
+	return cwd.trim() ? cwd : projectRootForSession(sessionId);
+}
+
+function resetStaffProposalPreview(sessionId: string): void {
+	state.staffPreviewName = "";
+	state.staffPreviewDescription = "";
+	state.staffPreviewPrompt = "";
+	state.staffPreviewTriggers = "[]";
+	state.staffPreviewCwd = projectRootForSession(sessionId);
+	state.staffPreviewWorktree = true;
+	state.staffPreviewNameEdited = false;
+	state.staffPreviewDescriptionEdited = false;
+	state.staffPreviewPromptEdited = false;
+	state.staffPreviewTriggersEdited = false;
+	state.staffPreviewCwdEdited = false;
+	state.assistantHasProposal = false;
 }
 
 // ============================================================================
@@ -142,6 +175,22 @@ function resolveProjectMode(sessionId: string): "provisional" | "registered" {
 	return project?.provisional ? "provisional" : "registered";
 }
 
+function isAssistantProposalType(type: ProposalType): boolean {
+	return state.assistantType === type || (type === "project" && state.assistantType === "project-scaffolding");
+}
+
+function revealActiveProposalPanel(type: ProposalType, sessionId: string): void {
+	const isMatchingAssistant = isAssistantProposalType(type);
+	revealProposalPanel(type, { sessionId }, {
+		isAssistant: isMatchingAssistant,
+		isMobile: !isDesktop(),
+	});
+	if (state.assistantType && !isMatchingAssistant) {
+		state.assistantHasProposal = true;
+		if (!isDesktop()) state.assistantTab = "preview";
+	}
+}
+
 /**
  * Slice E gap-closure: dismissal helpers are now thin shims forwarding to the
  * typed (per-ProposalType) implementations in `./proposal-helpers.ts`.
@@ -224,6 +273,13 @@ function createDraftManager<T>(config: {
 				const draft = await loadDraftFromServer(sessionId, config.type);
 				if (!draft) return false;
 				config.restore(sessionId, draft as T);
+				// Pin the contract: after a successful restore, schedule a render
+				// so the fast-path connectToSession (which fire-and-forgets this
+				// promise) repaints the proposal panel with the rehydrated state.
+				// The slow path already renders implicitly in connectToSession's
+				// terminal finally{}; this keeps both paths symmetric. Pinned by
+				// tests/proposal-rehydrate-client.test.ts.
+				renderApp();
 				return true;
 			} catch (err) {
 				console.error(`[${config.type}-draft] Failed to restore draft:`, err);
@@ -737,15 +793,17 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	state.selectedSessionId = sessionId;
 
-	// Project proposal is scoped to the session that emitted it. Clear it the
-	// moment the user navigates away so it never bleeds into other sessions.
-	// connectToSession() rehydrates from the persisted draft if the user comes
-	// back to the originating session.
-	if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
-		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
-		delete state.activeProposals.project;
-		state.assistantHasProposal = false;
+	// Proposals are scoped to the session that emitted them. Clear stale slots
+	// the moment the user navigates away so they never bleed into other sessions.
+	// connectToSession() rehydrates from persisted proposal files when returning.
+	for (const type of PROPOSAL_TYPES) {
+		const slot = state.activeProposals[type];
+		if (slot && slot.sessionId !== sessionId) {
+			if (type === "project") delete state.projectProposalAcceptedBySessionId[slot.sessionId];
+			delete state.activeProposals[type];
+		}
 	}
+	state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type]?.sessionId === sessionId);
 
 	// Fade out the current chat panel instantly
 	if (state.chatPanel) {
@@ -831,18 +889,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// annotations re-anchoring as orphans because their referenced text
 		// disappeared). Mirrors the slow-path guard at the bottom of
 		// connectToSession (~line 1675).
-		for (const t of ["goal", "role", "staff"] as const) {
+		for (const t of PROPOSAL_TYPES) {
 			const slot = state.activeProposals[t];
 			if (slot && slot.sessionId !== sessionId) {
 				delete state.activeProposals[t];
 			}
 		}
 		// Recompute hasProposal from what's left.
-		state.assistantHasProposal =
-			(state.activeProposals.goal != null && state.activeProposals.goal.sessionId === sessionId)
-			|| (state.activeProposals.role != null && state.activeProposals.role.sessionId === sessionId)
-			|| (state.activeProposals.staff != null && state.activeProposals.staff.sessionId === sessionId)
-			|| (state.activeProposals.project != null && state.activeProposals.project.sessionId === sessionId);
+		state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
@@ -860,8 +914,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
 
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
@@ -1299,7 +1356,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
 			if (!state.staffPreviewPromptEdited) state.staffPreviewPrompt = proposal.prompt;
 			if (!state.staffPreviewTriggersEdited) state.staffPreviewTriggers = proposal.triggers || "[]";
-			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposal.cwd || "";
+			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposalCwdOrProjectRoot(proposal.cwd, sessionId);
 			state.assistantHasProposal = true;
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
@@ -1340,7 +1397,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				}
 				delete state.activeProposals[type];
 				// Recompute assistantHasProposal across remaining slots.
-				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
+				state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t] != null);
 				renderApp();
 				return;
 			}
@@ -1388,10 +1445,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				delete state.projectProposalAcceptedBySessionId[sessionId];
 			}
 			if (isFirstEmit) {
+				const isMatchingAssistant = isAssistantProposalType(type);
 				plugin.onFirstEmit(slot, {
-					isAssistant: state.assistantType === type,
+					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
 				});
+				if (state.assistantType && !isMatchingAssistant && !isDesktop()) {
+					state.assistantTab = "preview";
+				}
 			}
 			renderApp();
 		};
@@ -1406,6 +1467,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
+			revealActiveProposalPanel(type, sessionId);
 
 			// Snapshot-restore branch — server is authoritative; the broadcast
 			// rebuilds the slot via remote.onProposal. We also fan out to the
@@ -1485,8 +1547,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
 
 		// ── Bind the agent to the early ChatPanel (created before connect
 		// to show the "Connecting…" shell instantly).
@@ -1716,27 +1781,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Mirror the project-slot pattern below: keep the slot when it's
 			// scoped to this session, drop it only when it's left over from a
 			// different session.
-			if (state.assistantType !== "goal") {
-				const slot = state.activeProposals.goal;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.goal;
+			for (const type of PROPOSAL_TYPES) {
+				const slot = state.activeProposals[type];
+				if (slot && slot.sessionId !== sessionId) {
+					if (type === "project") delete state.projectProposalAcceptedBySessionId[slot.sessionId];
+					delete state.activeProposals[type];
+				}
 			}
-			if (state.assistantType !== "role") {
-				const slot = state.activeProposals.role;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.role;
-			}
-			if (state.assistantType !== "staff") {
-				const slot = state.activeProposals.staff;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.staff;
-			}
-			// Project proposal is scoped to the originating session and transient
-			// for non-assistant sessions — mirrors the goal-proposal model. The
-			// project-assistant branch below handles persistence for that session
-			// type only (its session is dedicated to building the proposal).
-			if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
-				delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
-				delete state.activeProposals.project;
-				state.assistantHasProposal = false;
-			}
+			state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type]?.sessionId === sessionId);
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
@@ -1784,17 +1836,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.toolPreviewRendererHtml = "";
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
-				state.staffPreviewName = "";
-				state.staffPreviewDescription = "";
-				state.staffPreviewPrompt = "";
-				state.staffPreviewTriggers = "[]";
-				state.staffPreviewCwd = "";
-				state.staffPreviewNameEdited = false;
-				state.staffPreviewDescriptionEdited = false;
-				state.staffPreviewPromptEdited = false;
-				state.staffPreviewTriggersEdited = false;
-				state.staffPreviewCwdEdited = false;
-				state.assistantHasProposal = false;
+				resetStaffProposalPreview(sessionId);
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
@@ -2001,9 +2043,9 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 		}
 	}
 
-	// Clear project proposal if it belonged to this session
-	if (state.activeProposals.project?.sessionId === sessionId) {
-		delete state.activeProposals.project;
+	// Clear proposal slots if they belonged to this session.
+	for (const type of PROPOSAL_TYPES) {
+		if (state.activeProposals[type]?.sessionId === sessionId) delete state.activeProposals[type];
 	}
 	delete state.projectProposalAcceptedBySessionId[sessionId];
 
@@ -2226,6 +2268,7 @@ export function backToSessions(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
 	state.appView = "authenticated";
@@ -2250,6 +2293,7 @@ export function disconnectGateway(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
 	teardownMobileScrollTracking();
