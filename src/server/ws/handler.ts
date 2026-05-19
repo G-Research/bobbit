@@ -284,8 +284,9 @@ export function handleWebSocketConnection(
 
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
+				(ws as any).isViewer = true;
 				send(ws, { type: "auth_ok" });
-				// Do NOT set (ws as any).sessionId — broadcastToGoal fallback will include this client
+				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Read-only: ignore all subsequent messages
 				return;
 			}
@@ -313,7 +314,10 @@ export function handleWebSocketConnection(
 				return;
 			}
 
-			// Register client in session
+			// Register client in session. Server-level broadcast helpers use this
+			// tag to avoid falling back regular session sockets into unrelated goal
+			// dashboard events.
+			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
 			send(ws, { type: "auth_ok" });
