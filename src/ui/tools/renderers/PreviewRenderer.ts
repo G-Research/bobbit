@@ -158,6 +158,22 @@ function previewTabSource(
 	return source;
 }
 
+function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined): Record<string, unknown> {
+	const state: Record<string, unknown> = {
+		snapshotKind: parsed.kind,
+		entry,
+		mtime,
+		url,
+	};
+	if (parsed.kind === "inline") state.snapshotHtml = parsed.html;
+	else if (parsed.kind === "file") state.snapshotFile = parsed.path;
+	else {
+		state.snapshotUrl = parsed.url;
+		state.snapshotPath = parsed.path;
+	}
+	return state;
+}
+
 export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any> {
 	render(
 		params: PreviewOpenParams | undefined,
@@ -301,6 +317,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						title: previewTabTitle(params, parsed, entry),
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index),
+						state: previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined),
 						select: true,
 					});
 					renderApp();

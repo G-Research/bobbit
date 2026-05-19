@@ -12,11 +12,25 @@ export interface PanelWorkspaceTab {
 	label: string;
 	legacyTab: LegacyPanelTab;
 	source:
-		| { type: "chat" }
-		| { type: "preview"; entry: string }
-		| { type: "proposal"; proposalType: ProposalType }
-		| { type: "review"; title: string }
-		| { type: "inbox" };
+		| { type: "chat"; sessionId?: string }
+		| {
+			type: "preview" | "html-preview" | "preview_open";
+			entry?: string;
+			sessionId?: string;
+			live?: boolean;
+			origin?: string;
+			url?: string;
+			path?: string;
+			snapshotKind?: string;
+			toolUseId?: string;
+			blockIndex?: number;
+			params?: Record<string, unknown>;
+			[key: string]: unknown;
+		}
+		| { type: "proposal"; proposalType: ProposalType; sessionId?: string }
+		| { type: "review"; title?: string; reviewTitle?: string; sessionId?: string }
+		| { type: "inbox"; sessionId?: string };
+	state?: Record<string, unknown>;
 }
 
 export const CHAT_PANEL_TAB_ID = "chat";

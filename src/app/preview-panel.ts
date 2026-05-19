@@ -1,19 +1,10 @@
 import { state, renderApp, activeSessionId } from "./state.js";
+import { LIVE_PREVIEW_PANEL_TAB_ID, type LegacyPanelTab, type PanelWorkspaceTab } from "./panel-workspace.js";
 
 // WP-E: SSE subscription to per-session preview mount events.
 // The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
 // event whenever the agent rewrites the entry file or any sibling asset.
 // We bump `previewPanelMtime` to force the iframe to reload via `#mtime=<n>`.
-
-type PanelWorkspaceTabKind = "chat" | "preview" | "proposal" | "review" | "inbox";
-
-type PanelWorkspaceTab = {
-	id: string;
-	kind: PanelWorkspaceTabKind;
-	title: string;
-	source?: Record<string, unknown>;
-	state?: Record<string, unknown>;
-};
 
 type PanelWorkspaceOptions = {
 	sessionId?: string;
@@ -88,7 +79,8 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 		return;
 	}
 	if (tab.kind === "proposal") {
-		const proposalType = typeof tab.source?.proposalType === "string" ? tab.source.proposalType : "goal";
+		const source = tab.source as Record<string, unknown>;
+		const proposalType = typeof source.proposalType === "string" ? source.proposalType : "goal";
 		s.assistantHasProposal = true;
 		s.previewPanelActiveTab = proposalType;
 		s.previewPanelTab = proposalType;
@@ -96,7 +88,10 @@ function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWork
 		return;
 	}
 	if (tab.kind === "review") {
-		const title = typeof tab.source?.reviewTitle === "string" ? tab.source.reviewTitle : tab.title.replace(/^Review:\s*/, "");
+		const source = tab.source as Record<string, unknown>;
+		const title = typeof source.reviewTitle === "string" ? source.reviewTitle
+			: typeof source.title === "string" ? source.title
+			: tab.title.replace(/^Review:\s*/, "");
 		s.reviewPanelOpen = true;
 		s.reviewActiveTab = title;
 		s.previewPanelActiveTab = "review";
@@ -139,7 +134,13 @@ async function notifyOptionalPanelWorkspaceModule(action: "select" | "close", de
 export function selectPanelWorkspaceTab(tab: PanelWorkspaceTab, options: PanelWorkspaceOptions = {}): void {
 	const s = state as any;
 	upsertPanelTabState(s, tab);
-	if (options.select !== false) setActivePanelTabState(s, tab.id);
+	if (options.select !== false) {
+		setActivePanelTabState(s, tab.id);
+		const sid = options.sessionId || activeSessionId();
+		if (sid && s.panelWorkspaceActiveBySession && typeof s.panelWorkspaceActiveBySession === "object") {
+			s.panelWorkspaceActiveBySession[sid] = tab.id;
+		}
+	}
 	applyLegacySelection(s, tab, options);
 	if (options.clearCollapse !== false) clearCollapseKey(options.sessionId || activeSessionId() || undefined);
 	const detail = { tab, activeTabId: options.select === false ? activePanelTabId(s) : tab.id, options };
@@ -168,15 +169,18 @@ export function selectHtmlPreviewTab(args: {
 	title?: string;
 	url?: string;
 	source?: Record<string, unknown>;
+	state?: Record<string, unknown>;
 	select?: boolean;
 	setAssistantTab?: boolean;
 }): void {
 	const sessionId = args.sessionId || activeSessionId() || "";
 	const entry = args.entry || state.previewPanelEntry || "index.html";
 	const tab: PanelWorkspaceTab = {
-		id: args.id || `preview:live:${sessionId || "active"}`,
+		id: args.id || LIVE_PREVIEW_PANEL_TAB_ID,
 		kind: "preview",
 		title: args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`,
+		label: "Preview",
+		legacyTab: "preview",
 		source: {
 			type: "html-preview",
 			sessionId,
@@ -184,6 +188,7 @@ export function selectHtmlPreviewTab(args: {
 			...args.source,
 		},
 		state: {
+			...args.state,
 			entry,
 			mtime: args.mtime,
 			url: args.url,
@@ -194,6 +199,7 @@ export function selectHtmlPreviewTab(args: {
 		select: args.select,
 		setAssistantTab: args.setAssistantTab,
 	});
+	if (args.select !== false) (state as any).previewPanelMountedTabId = tab.id;
 }
 
 export function selectProposalWorkspaceTab(type: string, options: PanelWorkspaceOptions = {}): void {
@@ -202,7 +208,9 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		id: `proposal:${type}`,
 		kind: "proposal",
 		title: PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`,
-		source: { type: "proposal", proposalType: type, sessionId },
+		label: PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type,
+		legacyTab: type as LegacyPanelTab,
+		source: { type: "proposal", proposalType: type as any, sessionId },
 	}, { ...options, sessionId });
 }
 
@@ -212,6 +220,8 @@ export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceO
 		id: reviewTabId(title),
 		kind: "review",
 		title: `Review: ${title}`,
+		label: `Review: ${title}`,
+		legacyTab: "review",
 		source: { type: "review", reviewTitle: title, sessionId },
 	}, { ...options, sessionId });
 }
@@ -244,7 +254,7 @@ export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions =
 			sessionId,
 			entry: s.previewPanelEntry || "index.html",
 			mtime: s.previewPanelMtime,
-			id: `preview:live:${sessionId || "active"}`,
+			id: LIVE_PREVIEW_PANEL_TAB_ID,
 			select: options.select,
 			setAssistantTab: options.setAssistantTab,
 		});
@@ -257,10 +267,10 @@ export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions =
 		}
 	}
 	if (s.inboxPanelOpen || (Array.isArray(s.inboxEntries) && s.inboxEntries.length > 0)) {
-		selectPanelWorkspaceTab({ id: "inbox", kind: "inbox", title: "Inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
+		selectPanelWorkspaceTab({ id: "inbox", kind: "inbox", title: "Inbox", label: "Inbox", legacyTab: "inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
 		return;
 	}
-	selectPanelWorkspaceTab({ id: "chat", kind: "chat", title: "Chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
+	selectPanelWorkspaceTab({ id: "chat", kind: "chat", title: "Chat", label: "Chat", legacyTab: "chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
 }
 
 /** Start an SSE subscription to preview-events for the given session. */
@@ -295,7 +305,7 @@ export function startPreviewSubscription(sessionId: string): void {
 					sessionId,
 					entry,
 					mtime,
-					id: `preview:live:${sessionId}`,
+					id: LIVE_PREVIEW_PANEL_TAB_ID,
 					source: { live: true, origin: "preview-bootstrap" },
 					select: state.previewPanelTab === "preview" || state.previewPanelActiveTab === "preview",
 				});
@@ -328,7 +338,7 @@ export function startPreviewSubscription(sessionId: string): void {
 						sessionId,
 						entry,
 						mtime,
-						id: `preview:live:${sessionId}`,
+						id: LIVE_PREVIEW_PANEL_TAB_ID,
 						source: { live: true, origin: "preview-events" },
 						select: activeSessionId() === sessionId,
 					});
