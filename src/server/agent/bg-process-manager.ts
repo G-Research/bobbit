@@ -60,6 +60,7 @@ export interface BgProcess {
 	status: "running" | "exited";
 	exitCode: number | null;
 	startTime: number;
+	endTime: number | null;
 	cwd: string;
 	/** If set, process was spawned inside this Docker container */
 	containerId?: string;
@@ -81,6 +82,7 @@ export interface BgProcessInfo {
 	status: "running" | "exited";
 	exitCode: number | null;
 	startTime: number;
+	endTime: number | null;
 }
 
 const MAX_LOG_LINES = 5000;
@@ -144,6 +146,7 @@ export class BgProcessManager {
 			status: "running",
 			exitCode: null,
 			startTime: Date.now(),
+			endTime: null,
 			cwd,
 			containerId,
 			exited,
@@ -210,6 +213,7 @@ export class BgProcessManager {
 		child.on("exit", (code) => {
 			bg.status = "exited";
 			bg.exitCode = code;
+			bg.endTime = Date.now();
 			// Resolve BEFORE broadcast/destroy so any awaiter on `bg.exited`
 			// observes status === 'exited' the moment they're scheduled.
 			resolveExited();
@@ -221,6 +225,7 @@ export class BgProcessManager {
 				type: "bg_process_exited",
 				processId: id,
 				exitCode: code,
+				endTime: bg.endTime,
 			} as any);
 		});
 
@@ -439,6 +444,7 @@ export class BgProcessManager {
 			status: bg.status,
 			exitCode: bg.exitCode,
 			startTime: bg.startTime,
+			endTime: bg.endTime,
 		};
 	}
 }

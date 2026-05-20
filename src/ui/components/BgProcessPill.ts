@@ -13,6 +13,8 @@ export interface BgProcessInfo {
 	status: "running" | "exited";
 	exitCode: number | null;
 	startTime: number;
+	/** Null while running; optional for legacy hydrated processes. */
+	endTime?: number | null;
 }
 
 /**
@@ -184,6 +186,20 @@ export class BgProcessPill extends LitElement {
 					: html`<span class="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground shrink-0"></span>`;
 	}
 
+	private _hasValidEndTime(p: BgProcessInfo): p is BgProcessInfo & { endTime: number } {
+		return typeof p.endTime === "number" && Number.isFinite(p.endTime) && p.endTime >= p.startTime;
+	}
+
+	private _runtimeTemplate(p: BgProcessInfo, isRunning: boolean) {
+		if (isRunning) {
+			return html`<live-timer .startTime=${p.startTime} .running=${true}></live-timer>`;
+		}
+		if (this._hasValidEndTime(p)) {
+			return html`<live-timer .startTime=${p.startTime} .endTime=${p.endTime} .running=${false}></live-timer>`;
+		}
+		return html`<span title="Runtime unavailable for legacy process">—</span>`;
+	}
+
 	private _dropdownTemplate() {
 		const p = this.process;
 		const isRunning = p.status === "running";
@@ -221,8 +237,8 @@ export class BgProcessPill extends LitElement {
 						${!isRunning && p.exitCode !== null
 							? html`<span class="font-mono text-sm font-semibold ${p.exitCode === 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}">exit ${p.exitCode}</span>`
 							: nothing}
-						<span class="font-mono text-[11px] text-muted-foreground" title="Elapsed since process started">
-							<live-timer .startTime=${p.startTime} .running=${isRunning}></live-timer>
+						<span class="font-mono text-[11px] text-muted-foreground" title=${isRunning || this._hasValidEndTime(p) ? "Elapsed since process started" : "Runtime unavailable for legacy process"}>
+							${this._runtimeTemplate(p, isRunning)}
 						</span>
 						${isRunning
 							? html`<button
