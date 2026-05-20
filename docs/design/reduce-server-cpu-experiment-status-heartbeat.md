@@ -22,14 +22,62 @@ Ad hoc targeted benchmark, separate from the full harness, using the real `Sessi
 
 Environment: Windows_NT 10.0.26200 x64, Node `v24.13.1`, 24 CPU cores.
 
-Command shape used before and after the change:
+Reproduction recipe used before and after the change:
 
 ```bash
-BOBBIT_DIR=<tmp> BOBBIT_CPU_DIAG=1 BOBBIT_CPU_DIAG_JSONL=<tmp>/diag.jsonl BOBBIT_CPU_DIAG_FLUSH_MS=1000 \
-  npx tsx .bobbit/tmp-heartbeat-bench.ts
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/heartbeat-bench.mjs" <<'EOF'
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { performance } from "node:perf_hooks";
+
+const repo = process.cwd();
+const sessions = Number(process.env.HEARTBEAT_SESSIONS ?? 50_000);
+const ticks = Number(process.env.HEARTBEAT_TICKS ?? 50);
+const waitMs = Number(process.env.HEARTBEAT_WAIT_MS ?? 15_500);
+const { SessionManager } = await import(pathToFileURL(path.join(repo, "src/server/agent/session-manager.ts")).href);
+const { getCpuDiagnostics } = await import(pathToFileURL(path.join(repo, "src/server/agent/cpu-diagnostics.ts")).href);
+
+const manager = new SessionManager();
+const now = Date.now();
+let sent = 0;
+const client = { readyState: 1, send() { sent++; } };
+for (let i = 0; i < sessions; i++) {
+  const id = `s${i}`;
+  manager.sessions.set(id, {
+    id,
+    title: id,
+    cwd: repo,
+    status: "idle",
+    statusVersion: 1,
+    createdAt: now,
+    lastActivity: now,
+    clients: new Set(),
+  });
+}
+manager.addClient("s0", client);
+await new Promise((resolve) => setTimeout(resolve, waitMs));
+const cpuStart = process.cpuUsage();
+const wallStart = performance.now();
+for (let i = 0; i < ticks; i++) manager._emitStatusHeartbeat();
+const cpu = process.cpuUsage(cpuStart);
+const wallMs = performance.now() - wallStart;
+getCpuDiagnostics().flush("heartbeat-bench");
+getCpuDiagnostics().shutdown();
+clearInterval(manager._statusHeartbeatTimer);
+await manager._testSearchIndex?.close?.();
+console.log(JSON.stringify({ sessions, ticks: ticks + 1, sent, wallMs, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000 }, null, 2));
+EOF
+BOBBIT_DIR="$TMP/.bobbit" \
+BOBBIT_CPU_DIAG=1 \
+BOBBIT_CPU_DIAG_JSONL="$TMP/diag.jsonl" \
+BOBBIT_CPU_DIAG_FLUSH_MS=1000 \
+npx tsx "$TMP/heartbeat-bench.mjs"
+cat "$TMP/diag.jsonl"
 ```
 
-The temporary script created 50,000 sessions, attached one client with `addClient`, waited one heartbeat interval, ran 50 manual heartbeat ticks, flushed diagnostics, then deleted the temp file/artifacts.
+The inline script creates 50,000 sessions, attaches one WebSocket-shaped client with `addClient`, waits one heartbeat interval, runs 50 manual heartbeat ticks, flushes diagnostics, and cleans up its temporary directory on exit.
 
 ## Results
 

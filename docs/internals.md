@@ -2558,7 +2558,7 @@ The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manag
 
 ## Viewer WebSocket
 
-The `/ws/viewer` endpoint provides a read-only, sessionless WebSocket connection for the goal dashboard to receive live gate verification events.
+The `/ws/viewer` endpoint provides a sessionless WebSocket connection for the goal dashboard to receive live gate and team events while no agent session is active.
 
 ### Why a separate endpoint?
 
@@ -2566,22 +2566,23 @@ The main `/ws/:sessionId` endpoint binds a WebSocket to a specific agent session
 
 ### Protocol
 
-1. Client opens `ws(s)://<host>/ws/viewer`
-2. Client sends `{ type: "auth", token: "<gateway-token>" }` - same auth as session connections
-3. Server validates the token and responds with `{ type: "auth_ok" }`. The connection is marked as authenticated but is **not** associated with any session
-4. Server broadcasts via `broadcastToGoal()`, which has a fallback path that sends to all authenticated clients with no session ID - this is how events reach the viewer
-5. All client-to-server messages after auth are ignored (read-only)
+1. Client opens `ws(s)://<host>/ws/viewer`.
+2. Client sends `{ type: "auth", token: "<gateway-token>", goalId?: "<goal-id>" }` - same auth as session connections, with an optional initial goal subscription.
+3. Server validates the token, marks the socket as a viewer, seeds its `viewerGoalIds` set from `goalId` when present, and responds with `{ type: "auth_ok" }`. The socket is authenticated but **not** associated with any session.
+4. After auth, the viewer socket accepts `{ type: "subscribe_goal", goalId }`, `{ type: "unsubscribe_goal", goalId }`, `{ type: "clear_goal_subscriptions" }`, and `{ type: "ping" }`. Messages outside that set have no effect.
+5. `broadcastToGoal()` delivers goal/team/gate events to matching goal session sockets plus viewer sockets subscribed to that `goalId`. There is no fallback that sends all goal events to unaffiliated viewers.
+6. Search/index events (`index:*`) use project-level broadcast, not goal-level broadcast, so they still reach viewer sockets regardless of the viewer's goal subscriptions.
 
 ### Client lifecycle
 
-- **Connect on mount**: `loadDashboardData()` in `goal-dashboard.ts` opens the viewer WS after setting the current goal ID
-- **Dispatch events**: Incoming messages are dispatched as `gate-verification-event` CustomEvents on `document`, matching the same pattern `RemoteAgent` uses - so `VerificationOutputModal` and `handleLiveVerificationEvent` work without modification
-- **Disconnect on unmount**: `clearDashboardState()` closes the connection and clears the reconnect timer
-- **Auto-reconnect**: On unexpected close, reconnects after a 3s delay (only if the dashboard is still mounted). Brief gaps are acceptable because the dashboard also polls gate status periodically
+- **Connect on mount**: `loadDashboardData()` in `goal-dashboard.ts` closes any previous viewer socket, opens a new one after setting the current goal ID, includes that goal in the auth frame, and sends `subscribe_goal` again after `auth_ok`.
+- **Dispatch events**: Incoming messages with a mismatched `goalId` are ignored. Remaining verification messages are routed through the shared verification event bus before document-level listeners handle them.
+- **Disconnect on unmount**: `clearDashboardState()` closes the connection and clears the reconnect timer.
+- **Auto-reconnect**: On unexpected close, reconnects after a 3s delay (only if the dashboard is still mounted). Brief gaps are acceptable because the dashboard also polls gate status periodically.
 
 ### Server handling
 
-The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionId`. The WS handler in `handler.ts` recognizes the `__viewer__` sentinel session ID: after successful auth, it sends `auth_ok` and returns immediately without calling `sessionManager.addClient()` or syncing session state. No changes to `broadcastToGoal()` were needed - the existing fallback path already sends to authenticated clients with no session association.
+The upgrade handler in `server.ts` matches `/ws/viewer` alongside `/ws/:sessionId`. The WS handler in `handler.ts` recognizes the `__viewer__` sentinel session ID: after successful auth, it sends `auth_ok` and returns without calling `sessionManager.addClient()` or syncing session state. Goal event delivery is explicit: `broadcastToGoal()` checks `viewerGoalIds` for viewer sockets and skips unsubscribed viewers, while `broadcastToProject()` continues to send search/index status to authenticated viewer sockets.
 
 ## Goals, workflows, tasks & gates
 
