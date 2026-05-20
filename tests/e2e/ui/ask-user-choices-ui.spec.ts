@@ -16,17 +16,21 @@ import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 test.describe("ask_user_choices widget (full-stack UI)", () => {
-	test("happy path — pick answers, submit, widget flips to read-only", async ({ page, rec }) => {
+	test("happy path — pick answers, submit, composite-id widget flips to read-only", async ({ page, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await rec.capture("Empty session ready");
 
-		// Trigger the mock agent's ask_user_choices branch.
-		await sendMessage(page, "please use ask_user_choices");
+		// Trigger the mock agent's ask_user_choices branch with a composite tool_use_id.
+		await sendMessage(page, "please use ask_user_choices_composite");
 
 		// Widget appears.
 		const widget = page.locator("ask-user-choices-widget").first();
 		await expect(widget).toBeVisible({ timeout: 20_000 });
+		await expect.poll(
+			() => widget.evaluate((el) => (el as any).toolUseId as string),
+			{ timeout: 10_000 },
+		).toContain("|");
 		await rec.capture("Widget rendered");
 
 		// Two tabs.
@@ -62,6 +66,7 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		// Click Submit — widget should go read-only (no Submit button).
 		await submit.click();
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.locator("user-message").filter({ hasText: "ask_user_choices_response" })).toHaveCount(0);
 		await rec.capture("Submitted — widget read-only");
 
 		// Radio inputs are disabled in read-only mode.
