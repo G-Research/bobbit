@@ -20,7 +20,7 @@ function isGoalBroadcast(msg: WsMsg, goalId: string): boolean {
 	);
 }
 
-function connectViewerWs(): Promise<WsConnection> {
+function connectViewerWs(goalId?: string): Promise<WsConnection> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/viewer`);
 		const messages: WsMsg[] = [];
@@ -38,7 +38,7 @@ function connectViewerWs(): Promise<WsConnection> {
 				}
 			}
 		});
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken() })));
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: readE2EToken(), ...(goalId ? { goalId } : {}) })));
 		ws.on("error", reject);
 
 		const authTimer = setTimeout(() => reject(new Error("viewer WS auth timeout")), 10_000);
@@ -46,7 +46,7 @@ function connectViewerWs(): Promise<WsConnection> {
 			if (!messages.some((m) => m.type === "auth_ok")) return;
 			clearTimeout(authTimer);
 			clearInterval(authPoll);
-			resolve({
+			const conn: WsConnection = {
 				ws,
 				messages,
 				waitFor(pred, timeoutMs = 15_000) {
@@ -68,22 +68,28 @@ function connectViewerWs(): Promise<WsConnection> {
 				messageCount: () => messages.length,
 				send: (msg) => ws.send(JSON.stringify(msg)),
 				close: () => ws.close(),
-			});
+			};
+			resolve(conn);
 		}, 25);
 	});
 }
 
 test.describe("Goal WebSocket fanout", () => {
-	test("viewer and matching goal session receive goal events while unrelated regular session does not", async () => {
+	test("subscribed viewer and matching goal session receive goal events while unrelated viewers and sessions do not", async () => {
 		const goal = await createGoal({ title: `Goal fanout WS ${Date.now()}`, workflowId: "test-fast" });
+		const otherGoal = await createGoal({ title: `Other fanout WS ${Date.now()}`, workflowId: "test-fast" });
 		const goalSessionId = await createSession({ goalId: goal.id });
 		const unrelatedSessionId = await createSession();
-		const viewerConn = await connectViewerWs();
+		const viewerConn = await connectViewerWs(goal.id);
+		const unscopedViewerConn = await connectViewerWs();
+		const otherGoalViewerConn = await connectViewerWs(otherGoal.id);
 		const goalConn = await connectWs(goalSessionId);
 		const unrelatedConn = await connectWs(unrelatedSessionId);
 
 		try {
 			const viewerCursor = viewerConn.messageCount();
+			const unscopedViewerCursor = unscopedViewerConn.messageCount();
+			const otherGoalViewerCursor = otherGoalViewerConn.messageCount();
 			const goalCursor = goalConn.messageCount();
 			const unrelatedCursor = unrelatedConn.messageCount();
 
@@ -103,14 +109,21 @@ test.describe("Goal WebSocket fanout", () => {
 			]);
 
 			const unrelatedGoalMessages = unrelatedConn.messages.slice(unrelatedCursor).filter((m) => isGoalBroadcast(m, goal.id));
+			const unscopedViewerGoalMessages = unscopedViewerConn.messages.slice(unscopedViewerCursor).filter((m) => isGoalBroadcast(m, goal.id));
+			const otherGoalViewerGoalMessages = otherGoalViewerConn.messages.slice(otherGoalViewerCursor).filter((m) => isGoalBroadcast(m, goal.id));
 			expect(unrelatedGoalMessages).toEqual([]);
+			expect(unscopedViewerGoalMessages).toEqual([]);
+			expect(otherGoalViewerGoalMessages).toEqual([]);
 		} finally {
 			viewerConn.close();
+			unscopedViewerConn.close();
+			otherGoalViewerConn.close();
 			goalConn.close();
 			unrelatedConn.close();
 			await deleteSession(goalSessionId);
 			await deleteSession(unrelatedSessionId);
 			await deleteGoal(goal.id);
+			await deleteGoal(otherGoal.id);
 		}
 	});
 });

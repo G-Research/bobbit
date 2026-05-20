@@ -209,6 +209,35 @@ function send(ws: WebSocket, msg: ServerMessage): void {
 	}
 }
 
+function getViewerGoalIds(ws: WebSocket): Set<string> {
+	const existing = (ws as any).viewerGoalIds;
+	if (existing instanceof Set) return existing;
+	const next = new Set<string>();
+	(ws as any).viewerGoalIds = next;
+	return next;
+}
+
+function handleViewerMessage(ws: WebSocket, msg: ClientMessage): void {
+	const viewerMsg = msg as unknown as { type?: string; goalId?: unknown };
+	if (viewerMsg.type === "subscribe_goal") {
+		if (typeof viewerMsg.goalId === "string" && viewerMsg.goalId.trim()) {
+			getViewerGoalIds(ws).add(viewerMsg.goalId);
+		}
+		return;
+	}
+	if (viewerMsg.type === "unsubscribe_goal") {
+		if (typeof viewerMsg.goalId === "string") getViewerGoalIds(ws).delete(viewerMsg.goalId);
+		return;
+	}
+	if (viewerMsg.type === "clear_goal_subscriptions") {
+		getViewerGoalIds(ws).clear();
+		return;
+	}
+	if (viewerMsg.type === "ping") {
+		send(ws, { type: "pong" });
+	}
+}
+
 function getClientIp(req: IncomingMessage): string {
 	return req.socket.remoteAddress || "unknown";
 }
@@ -285,9 +314,14 @@ export function handleWebSocketConnection(
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
 				(ws as any).isViewer = true;
+				(ws as any).viewerGoalIds = new Set<string>();
+				const initialGoalId = (msg as unknown as { goalId?: unknown }).goalId;
+				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
+					getViewerGoalIds(ws).add(initialGoalId);
+				}
 				send(ws, { type: "auth_ok" });
 				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
-				// Read-only: ignore all subsequent messages
+				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
 			}
 
@@ -413,6 +447,12 @@ export function handleWebSocketConnection(
 			if (pendingPerm) {
 				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
+			return;
+		}
+
+		// Viewer-only connections receive project broadcasts plus explicitly subscribed goal broadcasts.
+		if ((ws as any).isViewer) {
+			handleViewerMessage(ws, msg);
 			return;
 		}
 

@@ -72,6 +72,37 @@ function wsEventType(event: unknown): string {
 		? (event as { type: string }).type
 		: "unknown";
 }
+
+function responseChunkByteLength(chunk: unknown, encoding?: unknown): number {
+	if (chunk == null || typeof chunk === "function") return 0;
+	if (typeof chunk === "string") {
+		return Buffer.byteLength(chunk, typeof encoding === "string" ? encoding as BufferEncoding : undefined);
+	}
+	if (Buffer.isBuffer(chunk)) return chunk.length;
+	if (chunk instanceof Uint8Array) return chunk.byteLength;
+	return Buffer.byteLength(String(chunk));
+}
+
+function attachResponseByteCounter(res: http.ServerResponse): () => number {
+	let bytes = 0;
+	const originalWrite = res.write;
+	const originalEnd = res.end;
+	res.write = function patchedWrite(this: http.ServerResponse, chunk: any, encodingOrCb?: any, cb?: any): boolean {
+		bytes += responseChunkByteLength(chunk, encodingOrCb);
+		return originalWrite.call(this, chunk, encodingOrCb, cb);
+	} as typeof res.write;
+	res.end = function patchedEnd(this: http.ServerResponse, chunk?: any, encodingOrCb?: any, cb?: any): http.ServerResponse {
+		bytes += responseChunkByteLength(chunk, encodingOrCb);
+		return originalEnd.call(this, chunk, encodingOrCb, cb);
+	} as typeof res.end;
+	return () => bytes;
+}
+
+function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
+	if (!ws?.isViewer) return false;
+	const goalIds = ws.viewerGoalIds;
+	return goalIds instanceof Set && goalIds.has(goalId);
+}
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -814,6 +845,15 @@ export function createGateway(config: GatewayConfig) {
 
 		// API routes
 		if (url.pathname.startsWith("/api/")) {
+			const _cpuDiagEnabled = cpuDiagnosticsEnabled();
+			const _cpuDiagStart = _cpuDiagEnabled ? performance.now() : 0;
+			const _cpuDiagLabel = _cpuDiagEnabled ? normalizeApiRouteLabel(req.method, url.pathname) : "";
+			const _cpuDiagBytes = _cpuDiagEnabled ? attachResponseByteCounter(res) : undefined;
+			if (_cpuDiagEnabled) {
+				res.once("finish", () => {
+					getCpuDiagnostics().recordRest(_cpuDiagLabel, res.statusCode || 0, performance.now() - _cpuDiagStart, _cpuDiagBytes?.() ?? 0);
+				});
+			}
 
 			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
@@ -889,16 +929,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			const _cpuDiagEnabled = cpuDiagnosticsEnabled();
-			const _cpuDiagStart = _cpuDiagEnabled ? performance.now() : 0;
-			const _cpuDiagLabel = _cpuDiagEnabled ? normalizeApiRouteLabel(req.method, url.pathname) : "";
-			try {
-				await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
-			} finally {
-				if (_cpuDiagEnabled) {
-					getCpuDiagnostics().recordRest(_cpuDiagLabel, res.statusCode || 0, performance.now() - _cpuDiagStart);
-				}
-			}
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -987,7 +1018,7 @@ export function createGateway(config: GatewayConfig) {
 					if (session?.teamGoalId === goalId || session?.goalId === goalId) ws.send(data);
 					continue;
 				}
-				if ((ws as any).isViewer) ws.send(data);
+				if (viewerSubscribedToGoal(ws as any, goalId)) ws.send(data);
 			}
 			return;
 		}
@@ -1006,6 +1037,7 @@ export function createGateway(config: GatewayConfig) {
 		let skippedOtherGoal = 0;
 		let skippedUnknownSession = 0;
 		let skippedUnscoped = 0;
+		let skippedViewerUnsubscribed = 0;
 		for (const ws of wss.clients) {
 			scanned++;
 			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
@@ -1025,9 +1057,14 @@ export function createGateway(config: GatewayConfig) {
 				continue;
 			}
 			if ((ws as any).isViewer) {
-				ws.send(data);
-				recipients++;
-				viewer++;
+				if (viewerSubscribedToGoal(ws as any, goalId)) {
+					ws.send(data);
+					recipients++;
+					viewer++;
+				} else {
+					skipped++;
+					skippedViewerUnsubscribed++;
+				}
 				continue;
 			}
 			skipped++;
@@ -1045,6 +1082,7 @@ export function createGateway(config: GatewayConfig) {
 			skippedOtherGoal,
 			skippedUnknownSession,
 			skippedUnscoped,
+			skippedViewerUnsubscribed,
 			bytes: Buffer.byteLength(data) * recipients,
 			stringifyMs,
 			sendMs: performance.now() - sendStart,
