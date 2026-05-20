@@ -76,8 +76,8 @@ Each registered project is a self-contained unit on disk. State (goals, sessions
     team-state.json # Team state
     gates.json     # Gate state and signals
     staff.json     # Staff agents
-    search.flex/   # Lexical search index for THIS project (FlexSearch JSON)
-    costs/         # Cost tracking
+    search.flex/       # Lexical search index for THIS project (FlexSearch JSON)
+    session-costs.json # Cost tracking (see session-cost.md)
 
 <server-cwd>/.bobbit/
   state/
@@ -2640,7 +2640,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
 | `search.flex/` | `SearchService` | FlexSearch index (JSON files under `index/` plus `meta.json`). See [Semantic search](#semantic-search). |
-| `costs/` | `CostTracker` | Token/cost data |
+| `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 
 ### `<server-cwd>/.bobbit/state/` - global, gitignored

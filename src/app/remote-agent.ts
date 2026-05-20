@@ -1250,6 +1250,12 @@ export class RemoteAgent {
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
+				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
+					this._state.serverCost = msg.data.serverCost ?? null;
+					if (this._state.serverCost) {
+						this.emit({ type: "cost_update" as any, cost: this._state.serverCost });
+					}
+				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
 

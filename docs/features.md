@@ -61,8 +61,11 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 Per-session token usage and cost tracking, aggregated to goal and task level.
 
 - Tracks input tokens, output tokens, cache read/write tokens, and total cost.
-- Updated via `cost_update` WebSocket events broadcast to connected clients.
+- Persists cumulative session totals through `CostTracker`; this is the authoritative display source when present.
+- Hydrates clients via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
 - Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
+
+See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
 
 ## Prompt Queue
 

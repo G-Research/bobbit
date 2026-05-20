@@ -32,7 +32,7 @@ import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
-import { CostTracker } from "./cost-tracker.js";
+import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -1146,7 +1146,84 @@ export class SessionManager {
 		throw new Error("No cost tracker available");
 	}
 
+	/** Return persisted cumulative cost for a session, without creating a zero-cost record. */
+	getSessionCost(sessionId: string): SessionCost | undefined {
+		const live = this.sessions.get(sessionId);
+		if (live) {
+			try {
+				const cost = this.resolveCostTracker(live).getSessionCost(sessionId);
+				if (cost) return cost;
+			} catch {
+				// Fall through to persisted/store scans below.
+			}
+		}
 
+		const persisted = this.getPersistedSession(sessionId);
+		if (persisted?.projectId || !this.projectContextManager) {
+			try {
+				const cost = this.getCostTracker(persisted?.projectId).getSessionCost(sessionId);
+				if (cost) return cost;
+			} catch {
+				// Fall through to cross-project scan.
+			}
+		}
+
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				const cost = ctx.costTracker.getSessionCost(sessionId);
+				if (cost) return cost;
+			}
+		}
+		return undefined;
+	}
+
+	/** Merge authoritative persisted cost into a state snapshot when cost exists. */
+	withSessionCostInState(sessionId: string, data: unknown): unknown {
+		const cost = this.getSessionCost(sessionId);
+		if (!cost) return data;
+		if (data && typeof data === "object" && !Array.isArray(data)) {
+			return { ...(data as Record<string, unknown>), serverCost: cost };
+		}
+		return { serverCost: cost };
+	}
+
+	/** Build the cumulative cost_update payload used for attach/reconnect hydration. */
+	getSessionCostUpdate(sessionId: string): Extract<ServerMessage, { type: "cost_update" }> | null {
+		const cost = this.getSessionCost(sessionId);
+		if (!cost) return null;
+		const live = this.sessions.get(sessionId);
+		const persisted = live ? undefined : this.getPersistedSession(sessionId);
+		return {
+			type: "cost_update",
+			sessionId,
+			goalId: live?.goalId ?? persisted?.goalId,
+			taskId: this.resolveTaskIdForSession(sessionId),
+			cost,
+		};
+	}
+
+	/** Broadcast cumulative persisted cost to connected clients, if this session has cost data. */
+	broadcastSessionCost(session: SessionInfo): void {
+		const update = this.getSessionCostUpdate(session.id);
+		if (update) broadcast(session.clients, update);
+	}
+
+	private resolveTaskIdForSession(sessionId: string): string | undefined {
+		const live = this.sessions.get(sessionId);
+		if (live?.taskId) return live.taskId;
+		const persisted = this.getPersistedSession(sessionId);
+		if (persisted?.taskId) return persisted.taskId;
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				const tm = new TaskManager(ctx.taskStore);
+				const tasks = tm.getTasksForSession(sessionId);
+				if (tasks.length > 0) return tasks[0].id;
+			}
+			return undefined;
+		}
+		const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
+		return tasks.length > 0 ? tasks[0].id : undefined;
+	}
 
 	getMcpManager(): McpManager | null {
 		return this.mcpManager;
@@ -3523,6 +3600,10 @@ export class SessionManager {
 	/** After compaction, refresh messages and state for all connected clients. */
 	async refreshAfterCompaction(session: SessionInfo): Promise<void> {
 		try {
+			// Send the authoritative cumulative cost before the compacted messages
+			// snapshot so clients never fall back to the reduced visible transcript.
+			this.broadcastSessionCost(session);
+
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
 				const raw: any = msgs.data;
@@ -3549,7 +3630,7 @@ export class SessionManager {
 			}
 			const st = await session.rpcClient.getState();
 			if (st.success) {
-				broadcast(session.clients, { type: "state", data: st.data });
+				broadcast(session.clients, { type: "state", data: this.withSessionCostInState(session.id, st.data) });
 			}
 		} catch (err) {
 			console.error(`[session-manager] Failed to refresh after compaction for ${session.id}:`, err);
