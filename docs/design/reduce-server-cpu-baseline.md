@@ -111,3 +111,24 @@ npm run check
 - `worktree-pool` has the second-highest median CPU at 3.06% and elevated REST p95 on run 3, while gateway WS bytes remained 0 in diagnostics.
 - `goal-team` has modest median CPU but the highest p95 event-loop delay at 70.124 ms and high REST p95 from setup/spawn/signal paths.
 - `idle` is effectively 0% median CPU after startup; its WS frames are project index broadcasts with no recipients/bytes.
+
+## E2E-like workload follow-up
+
+The initial shared baseline predates the mixed `e2e-like` workload. Future experiment baselines should include it with the same normalization rules and gateway JSONL attribution used above:
+
+```bash
+npm run build:server
+node scripts/bench-server-cpu.mjs --workload e2e-like --tabs 5 --agents 3 --duration 10 --runs 3 --out artifacts/cpu/e2e-like.jsonl
+```
+
+Smoke run on this implementation branch after `npm run build:server`:
+
+```bash
+node scripts/bench-server-cpu.mjs --workload e2e-like --duration 5 --runs 1 --flush-ms 250 --out artifacts/cpu/e2e-like-smoke.jsonl
+```
+
+| Workload | Runs | Successful | Median CPU % | p95 event-loop delay ms | REST p95 ms | WS frames/sec | WS bytes/sec | WS recipients/sec | Functional result |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `e2e-like` smoke | 1 | 1 | 14.81 | 66.257 | 169.439 | 46.2 | 94383.4 | 98.4 | `prompts=2`, `agentEnds=2`, `gateSignals=2`, `previewMounts=2`, `previewChangedEvents=2`, `polls=88` |
+
+Notes: the smoke summary reported commit `eb9ecfff3542fd6bec58ee00d2cc9cb235f6fcee` with `gitDirty: true` because it ran before committing this task. Raw `artifacts/cpu/` JSONL files were removed and are not committed.

@@ -12,6 +12,7 @@ node scripts/bench-server-cpu.mjs --workload multi-tabs --tabs 5 --duration 60 -
 node scripts/bench-server-cpu.mjs --workload goal-team --agents 3 --duration 60 --runs 3 --out artifacts/cpu/goal-team.jsonl
 node scripts/bench-server-cpu.mjs --workload goal-fanout --tabs 5 --agents 3 --duration 60 --runs 3 --out artifacts/cpu/goal-fanout.jsonl
 node scripts/bench-server-cpu.mjs --workload worktree-pool --goals 3 --duration 60 --runs 3 --out artifacts/cpu/worktree-pool.jsonl
+node scripts/bench-server-cpu.mjs --workload e2e-like --tabs 5 --agents 3 --duration 60 --runs 3 --out artifacts/cpu/e2e-like.jsonl
 ```
 
 CI smoke check:
@@ -32,3 +33,5 @@ For `--out artifacts/cpu/idle.jsonl`, the harness writes:
 Summaries include commit SHA, dirty flag, Node/OS/core metadata, workload options, median CPU%, p95 event-loop delay, REST p95, WS frames/sec, WS recipient-sends/sec, and WS bytes/sec when the CPU diagnostics module emits those fields.
 
 `goal-fanout` creates a workflow goal, one `/ws/viewer` dashboard socket, one matching goal-session socket, and `--tabs` unrelated regular session sockets. It starts/spawns a small team, repeatedly signals `design-doc`, polls goal/team/gate endpoints, and reports viewer, goal-session, and unrelated-session goal-event counts.
+
+`e2e-like` is the mixed regression-context workload required by the CPU design. It launches the same isolated gateway, then drives browser-equivalent traffic without measuring driver/browser CPU as gateway CPU: one streaming session with `--tabs` session WebSockets, one `/ws/viewer` socket, a preview SSE stream plus repeated preview mounts/lookups, one workflow goal with a goal-session socket, `--agents` mock team workers, repeated gate signals, and dashboard-style sessions/goals/projects/team/tasks/gates/verification/cost polling. Normalize it against the same shared baseline as other workloads using gateway JSONL metrics only: median CPU%, p95 event-loop delay, REST p95, WS frames/sec, WS recipient-sends/sec, and WS bytes/sec. Treat child-agent/git/Docker activity as subsystem pressure, not gateway CPU.

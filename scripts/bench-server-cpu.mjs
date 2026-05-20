@@ -10,14 +10,14 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const CLI_PATH = path.join(REPO_ROOT, "dist", "server", "cli.js");
 const MOCK_AGENT_PATH = path.join(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
-const WORKLOADS = new Set(["idle", "stream", "multi-tabs", "goal-team", "goal-fanout", "worktree-pool"]);
+const WORKLOADS = new Set(["idle", "stream", "multi-tabs", "goal-team", "goal-fanout", "worktree-pool", "e2e-like"]);
 const DEFAULT_DURATION_SEC = 60;
 const DEFAULT_RUNS = 3;
 const SMOKE_DURATION_SEC = 5;
 const DEFAULT_FLUSH_MS = 1000;
 
 function usage() {
-	return `Usage: node scripts/bench-server-cpu.mjs --workload <idle|stream|multi-tabs|goal-team|goal-fanout|worktree-pool> [options]
+	return `Usage: node scripts/bench-server-cpu.mjs --workload <idle|stream|multi-tabs|goal-team|goal-fanout|worktree-pool|e2e-like> [options]
 
 Options:
   --workload <name>       Workload to run (default: idle, or idle in --smoke)
@@ -38,6 +38,7 @@ Examples:
   npm run build:server
   node scripts/bench-server-cpu.mjs --workload idle --duration 60 --runs 3 --out artifacts/cpu/idle.jsonl
   node scripts/bench-server-cpu.mjs --workload goal-fanout --tabs 5 --agents 3 --duration 60 --runs 3 --out artifacts/cpu/goal-fanout.jsonl
+  node scripts/bench-server-cpu.mjs --workload e2e-like --tabs 5 --agents 3 --duration 60 --runs 3 --out artifacts/cpu/e2e-like.jsonl
   node scripts/bench-server-cpu.mjs --smoke --out artifacts/cpu/smoke.jsonl
 `;
 }
@@ -644,6 +645,85 @@ function closeAll(conns) {
 	for (const conn of conns) conn?.close?.();
 }
 
+function recordSseBlock(block, counts) {
+	const trimmed = block.trim();
+	if (!trimmed || trimmed.startsWith(":")) return;
+	let event = "message";
+	for (const line of block.split(/\r?\n/u)) {
+		if (line.startsWith("event:")) event = line.slice("event:".length).trim() || "message";
+	}
+	counts.events++;
+	if (event === "hello") counts.hello++;
+	if (event === "preview-changed") counts.previewChanged++;
+}
+
+async function openPreviewSse(ctx, sessionId) {
+	const controller = new AbortController();
+	const counts = { events: 0, hello: 0, previewChanged: 0, bytes: 0 };
+	let readySettled = false;
+	let resolveReady;
+	let rejectReady;
+	const ready = new Promise((resolve, reject) => {
+		resolveReady = resolve;
+		rejectReady = reject;
+	});
+	const settleReady = (fn, value) => {
+		if (readySettled) return;
+		readySettled = true;
+		fn(value);
+	};
+
+	const pump = (async () => {
+		try {
+			const res = await apiFetch(ctx, `/api/sessions/${sessionId}/preview-events`, {
+				signal: controller.signal,
+				headers: { Accept: "text/event-stream" },
+			});
+			if (!res.ok) throw new Error(`GET preview-events failed: ${res.status}`);
+			settleReady(resolveReady, true);
+			if (!res.body) return;
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				counts.bytes += value?.byteLength ?? 0;
+				buffer += decoder.decode(value, { stream: true });
+				let boundary = buffer.indexOf("\n\n");
+				while (boundary !== -1) {
+					const block = buffer.slice(0, boundary);
+					buffer = buffer.slice(boundary + 2);
+					recordSseBlock(block, counts);
+					boundary = buffer.indexOf("\n\n");
+				}
+			}
+		} catch (err) {
+			if (controller.signal.aborted) {
+				settleReady(resolveReady, true);
+			} else {
+				settleReady(rejectReady, err);
+			}
+		}
+	})();
+
+	return {
+		ready,
+		get events() { return counts.events; },
+		get hello() { return counts.hello; },
+		get previewChanged() { return counts.previewChanged; },
+		get bytes() { return counts.bytes; },
+		async close() {
+			controller.abort();
+			await Promise.race([pump.catch(() => null), sleep(1000)]);
+		},
+	};
+}
+
+async function closePreviewStreams(streams) {
+	await Promise.all(streams.map((stream) => stream?.close?.().catch(() => null)));
+}
+
 async function driveIdle(ctx, deadline) {
 	let healthChecks = 0;
 	while (Date.now() < deadline) {
@@ -854,6 +934,142 @@ async function driveGoalFanout(ctx, deadline) {
 	}
 }
 
+async function driveE2eLike(ctx, deadline) {
+	const conns = [];
+	const previewStreams = [];
+	let prompts = 0;
+	let agentEnds = 0;
+	let polls = 0;
+	let spawned = 0;
+	let gateSignals = 0;
+	let gateSignalErrors = 0;
+	let previewMounts = 0;
+	let previewLookups = 0;
+	const roles = ["coder", "reviewer", "test-engineer", "docs-writer", "qa-tester"];
+
+	try {
+		const sessionId = await createSession(ctx, { title: "CPU e2e-like primary" });
+		for (let i = 0; i < ctx.opts.tabs; i++) conns.push(await connectWs(ctx, `/ws/${sessionId}`));
+		conns.push(await connectWs(ctx, "/ws/viewer"));
+
+		const previewStream = await openPreviewSse(ctx, sessionId);
+		previewStreams.push(previewStream);
+		await previewStream.ready;
+
+		const mountPreview = async () => {
+			const res = await safeApi(ctx, `/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
+				method: "POST",
+				body: JSON.stringify({
+					entry: "index.html",
+					html: `<!doctype html><html><head><meta charset="utf-8"><title>CPU Benchmark</title></head><body><h1>CPU benchmark preview</h1><p>mount ${previewMounts + 1}</p></body></html>`,
+				}),
+			});
+			if (res.ok) previewMounts++;
+			return res;
+		};
+		await mountPreview();
+		if ((await safeApi(ctx, `/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`)).ok) previewLookups++;
+
+		const goal = await createGoal(ctx, { title: `CPU E2E-like Goal ${Date.now()}` });
+		const goalSessionId = await createSession(ctx, { goalId: goal.id, title: "CPU e2e-like goal observer" });
+		conns.push(await connectWs(ctx, `/ws/${goalSessionId}`));
+		await apiJson(ctx, `/api/goals/${goal.id}/team/start`, { method: "POST" });
+		for (let i = 0; i < ctx.opts.agents; i++) {
+			const role = roles[i % roles.length];
+			try {
+				await apiJson(ctx, `/api/goals/${goal.id}/team/spawn`, {
+					method: "POST",
+					body: JSON.stringify({ role, task: `STAY_BUSY:500 CPU e2e-like worker ${i + 1}` }),
+				});
+				spawned++;
+			} catch (err) {
+				if (spawned === 0) throw err;
+			}
+		}
+
+		const signalDesignGate = async () => {
+			const res = await safeApi(ctx, `/api/goals/${goal.id}/gates/design-doc/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: `# Benchmark design\n\nE2E-like mixed workload signal ${gateSignals + gateSignalErrors + 1}.` }),
+			});
+			if (res.ok) gateSignals++;
+			else gateSignalErrors++;
+		};
+		await signalDesignGate();
+
+		const sendPrompt = () => {
+			const conn = conns[0];
+			const cursor = conn.messageCount();
+			conn.send({ type: "prompt", text: `STAY_BUSY:propose_goal:10 CPU_E2E_${prompts}` });
+			prompts++;
+			conn.waitForFrom(cursor, (m) => m.type === "event" && m.data?.type === "agent_end", 15_000)
+				.then(() => { agentEnds++; })
+				.catch(() => null);
+		};
+		sendPrompt();
+
+		let nextPromptAt = Date.now() + 2500;
+		let nextPreviewAt = Date.now() + 2000;
+		let nextSignalAt = Date.now() + 3500;
+		while (Date.now() < deadline) {
+			const now = Date.now();
+			if (now >= nextPromptAt) {
+				sendPrompt();
+				nextPromptAt = now + 2500;
+			}
+			if (now >= nextPreviewAt) {
+				await mountPreview();
+				nextPreviewAt = now + 3000;
+			}
+			if (now >= nextSignalAt) {
+				await signalDesignGate();
+				nextSignalAt = now + 4000;
+			}
+			const previewLookup = safeApi(ctx, `/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`);
+			const results = await Promise.all([
+				safeApi(ctx, "/api/sessions"),
+				safeApi(ctx, "/api/goals"),
+				safeApi(ctx, "/api/projects"),
+				safeApi(ctx, `/api/goals/${goal.id}`),
+				safeApi(ctx, `/api/goals/${goal.id}/team`),
+				safeApi(ctx, `/api/goals/${goal.id}/team/agents`),
+				safeApi(ctx, `/api/goals/${goal.id}/tasks`),
+				safeApi(ctx, `/api/goals/${goal.id}/gates`),
+				safeApi(ctx, `/api/goals/${goal.id}/verifications/active`),
+				safeApi(ctx, `/api/goals/${goal.id}/cost`),
+				previewLookup,
+			]);
+			polls += results.length;
+			if (results[results.length - 1]?.ok) previewLookups++;
+			await sleep(Math.min(500, Math.max(50, deadline - Date.now())));
+		}
+		await safeApi(ctx, `/api/goals/${goal.id}/team/teardown`, { method: "POST" });
+
+		return {
+			ok: prompts > 0 && spawned > 0 && gateSignals > 0 && previewMounts > 0,
+			sessionId,
+			goalId: goal.id,
+			tabs: ctx.opts.tabs,
+			spawnedAgents: spawned,
+			prompts,
+			agentEnds,
+			gateSignals,
+			gateSignalErrors,
+			polls,
+			previewMounts,
+			previewLookups,
+			previewEvents: previewStreams.reduce((n, stream) => n + stream.events, 0),
+			previewChangedEvents: previewStreams.reduce((n, stream) => n + stream.previewChanged, 0),
+			previewBytes: previewStreams.reduce((n, stream) => n + stream.bytes, 0),
+			wsFrames: conns.reduce((n, c) => n + c.frames, 0),
+			wsBytes: conns.reduce((n, c) => n + c.bytes, 0),
+		};
+	} finally {
+		await closePreviewStreams(previewStreams);
+		closeAll(conns);
+	}
+}
+
 async function driveWorktreePool(ctx, deadline) {
 	const createdGoals = [];
 	let polls = 0;
@@ -891,6 +1107,7 @@ async function driveWorkload(ctx) {
 		case "goal-team": return driveGoalTeam(ctx, deadline);
 		case "goal-fanout": return driveGoalFanout(ctx, deadline);
 		case "worktree-pool": return driveWorktreePool(ctx, deadline);
+		case "e2e-like": return driveE2eLike(ctx, deadline);
 		default: throw new Error(`Unsupported workload: ${ctx.opts.workload}`);
 	}
 }

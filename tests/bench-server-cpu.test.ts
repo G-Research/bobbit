@@ -31,6 +31,16 @@ describe("bench-server-cpu CLI parsing", () => {
 		assert.equal(opts.smoke, true);
 	});
 
+	it("accepts the e2e-like mixed workload", () => {
+		const opts = parseArgs(["--workload", "e2e-like", "--duration", "6", "--runs", "1"]);
+
+		assert.equal(opts.workload, "e2e-like");
+		assert.equal(opts.durationSec, 6);
+		assert.equal(opts.runs, 1);
+		assert.equal(opts.out.replace(/\\/g, "/"), "artifacts/cpu/e2e-like.jsonl");
+		assert.equal(opts.summaryOut.replace(/\\/g, "/"), "artifacts/cpu/e2e-like.summary.json");
+	});
+
 	it("rejects unknown workloads", () => {
 		assert.throws(
 			() => parseArgs(["--workload", "unknown"]),
