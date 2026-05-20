@@ -297,5 +297,45 @@ describe("BgProcessManager.waitForExit \u2014 state machine", () => {
 	});
 });
 
+describe("BgProcessManager endTime snapshots", () => {
+	it("created/running process info exposes endTime null", () => {
+		const { mgr } = makeManager();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "sleep 30", os.tmpdir());
+
+		try {
+			assert.equal((info as { endTime?: unknown }).endTime, null, "running BgProcessInfo must include endTime: null");
+		} finally {
+			mgr.cleanup(SESSION);
+		}
+	});
+
+	it("list() and waitForExit() expose numeric endTime after child exit", async () => {
+		const { mgr, last } = makeManager();
+		const SESSION = freshSession();
+		const info = mgr.create(SESSION, "noop", os.tmpdir());
+
+		try {
+			const waitPromise = mgr.waitForExit(SESSION, info.id, 10_000);
+			queueMicrotask(() => last().emit("exit", 0));
+
+			const result = await waitPromise;
+			assert.ok(result);
+			const listed = mgr.list(SESSION).find((p) => p.id === info.id);
+			assert.ok(listed);
+
+			const listEndTime = (listed as { endTime?: unknown }).endTime;
+			const waitEndTime = (result!.info as { endTime?: unknown }).endTime;
+
+			assert.equal(typeof listEndTime, "number", "exited list() snapshot must include numeric endTime");
+			assert.equal(typeof waitEndTime, "number", "waitForExit() snapshot must include numeric endTime");
+			assert.ok((listEndTime as number) >= info.startTime, "list() endTime must be at or after startTime");
+			assert.equal(waitEndTime, listEndTime, "waitForExit() and list() should report the same final endTime");
+		} finally {
+			mgr.cleanup(SESSION);
+		}
+	});
+});
+
 // Make sure no global mock timer state leaks between describe blocks.
 mock.timers.reset();
