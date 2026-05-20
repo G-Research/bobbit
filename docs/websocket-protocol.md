@@ -68,9 +68,9 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `tasks_list` | `tasks` | Full task list for a goal |
 | `session_archived` | `sessionId`, `archivedAt` | Session was archived |
 | `preferences_changed` | `preferences` | Server preferences were updated |
-| `bg_process_created` | `process` | Background process started |
+| `bg_process_created` | `process` (`BgProcessInfo`) | Background process started; `process.endTime` is `null` |
 | `bg_process_output` | `processId`, `stream`, `text` | Output from a background process |
-| `bg_process_exited` | `processId`, `exitCode` | Background process terminated |
+| `bg_process_exited` | `processId`, `exitCode`, `endTime` | Background process terminated; `endTime` is the fixed exit timestamp |
 | `gate_signal_received` | `goalId`, `gateId`, `signalId` | Gate signal received |
 | `gate_verification_started` | `goalId`, `gateId`, `signalId` | Gate verification began |
 | `gate_verification_step_started` | `goalId`, `gateId`, `stepIndex`, `stepName` | A verification step began |
@@ -90,6 +90,12 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Background process events
+
+`BgProcessInfo` snapshots carry `{ id, name, command, pid, status, exitCode, startTime, endTime }`, where timestamps are epoch milliseconds. Running processes have `endTime: null`; exited processes set `endTime` once at child exit.
+
+`bg_process_created` sends the full running snapshot. `bg_process_exited` sends `{ processId, exitCode, endTime }` so clients can update an existing pill without waiting for REST hydration. Missing legacy `endTime` values mean the final runtime is unknown; clients should keep the display non-growing rather than deriving elapsed time from `Date.now()`.
 
 ### Session cost hydration
 

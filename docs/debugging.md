@@ -364,6 +364,7 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 
 - **Dropdown renders via portal**: `BgProcessPill` appends its log dropdown to `document.body` instead of rendering it inline. This is necessary because the "More" overflow popover uses `backdrop-filter: blur()`, which creates a new CSS containing block — `position: fixed` children behave like `position: absolute` and `mask-image` clips them. If the dropdown appears mispositioned or clipped inside a popover, check that the portal is working (the `#bg-process-dropdown` element should be a direct child of `document.body`, not nested inside the pill or popover).
 - **Dismiss for popover pills skips animation**: Pills inside the "More" popover lack the animation wrapper that visible pills have. `_handlePillDismiss` in `AgentInterface` detects hidden (popover) pills and calls `onBgProcessDismiss()` directly instead of waiting for a `pill-fade-out` animation. If dismiss stops working for popover pills, check that the hidden-set detection still matches the overflow logic in `_renderPillStrip()`.
+- **Exited duration keeps growing**: exited process snapshots must include numeric `BgProcessInfo.endTime`; the UI renders `endTime - startTime`, while legacy missing/null `endTime` renders `—` rather than `Date.now() - startTime`. See [docs/internals.md — Background process runtime snapshots](internals.md#background-process-runtime-snapshots).
 
 ## Gates
 

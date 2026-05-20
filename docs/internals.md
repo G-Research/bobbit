@@ -2331,6 +2331,28 @@ For the parallel pattern on the agent stream (different event family, same shape
 
 ---
 
+## Background process runtime snapshots
+
+Background process pills render live state from `BgProcessManager` snapshots, not from browser-local assumptions. This matters because an exited process may remain visible for hours, survive reconnects, or be rehydrated through REST; using `Date.now() - startTime` after exit makes old processes look like they ran until the current page render.
+
+**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps.
+
+- While `status === "running"`, `endTime` is `null` and the UI may render a live elapsed timer from `startTime`.
+- On child `exit`, the server updates `status`, `exitCode`, and `endTime` once before resolving waiters or broadcasting the exit event.
+- Exited processes with a numeric `endTime` render fixed runtime as `endTime - startTime`; the value must not grow after re-render, reconnect, REST hydration, or page reload.
+- Legacy exited snapshots with missing/null/invalid `endTime` render runtime as unavailable (`—`) instead of falling back to time-since-start.
+
+### Surfaces
+
+- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited.
+- `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
+- `bg_process_exited` carries `processId`, `exitCode`, and `endTime` so the client can freeze an existing pill immediately.
+
+The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock.
+
+---
+
 ## Steer-interruptible bash_bg wait
 
 `bash_bg` action `wait` blocks the agent for up to 300 s (default) while the server long-polls `BgProcessManager.waitForExit()`. Without special handling, a steer (user or `team_steer`) arriving during that window would be accepted by the WebSocket handler but could not take effect until the wait resolved - the agent is stuck mid tool-call and the steer feels ignored.
