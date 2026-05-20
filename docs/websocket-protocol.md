@@ -1,12 +1,29 @@
 # WebSocket Protocol
 
-Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type": "auth", "token": "<token>" }`. After `auth_ok`, the client can send commands and receives streaming events.
+Bobbit exposes two WebSocket entrypoints. Both require the first frame to be `auth` and close unauthenticated sockets.
+
+## Endpoints
+
+### Session sockets: `/ws/<session-id>`
+
+Connect to `wss://<host>:<port>/ws/<session-id>`. First message must be `{ "type": "auth", "token": "<token>" }`. After `auth_ok`, the client can send session commands and receives streaming session events.
+
+### Viewer sockets: `/ws/viewer`
+
+The goal dashboard uses `wss://<host>:<port>/ws/viewer` when no agent session is active. First message is `{ "type": "auth", "token": "<token>", "goalId": "<optional-goal-id>" }`; the optional `goalId` seeds the viewer's goal-subscription set before `auth_ok`.
+
+After `auth_ok`, a viewer socket is authenticated but not associated with a session and is not added to `SessionManager` clients. It accepts only viewer subscription messages and `ping`; messages outside that set have no effect.
+
+Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only when they are subscribed to the matching `goalId`. Session sockets for agents that belong to that goal still receive those same events. Search/index broadcasts (`index:*`) are project broadcasts rather than goal broadcasts, so they still reach authenticated viewer sockets regardless of goal subscription.
 
 ## Client → Server
 
 | Type | Fields | Description |
 |---|---|---|
-| `auth` | `token` | Authenticate the connection |
+| `auth` | `token`, `goalId?` | Authenticate the connection. `goalId` is only used by `/ws/viewer` to subscribe immediately after auth. |
+| `subscribe_goal` | `goalId` | `/ws/viewer` only: add a goal subscription for goal-scoped broadcasts. |
+| `unsubscribe_goal` | `goalId` | `/ws/viewer` only: remove one goal subscription. |
+| `clear_goal_subscriptions` | — | `/ws/viewer` only: remove all goal subscriptions. |
 | `prompt` | `text`, `images?`, `attachments?` | Send a user prompt |
 | `steer` | `text` | Interrupt the agent mid-turn with guidance |
 | `follow_up` | `text` | Send a follow-up message |

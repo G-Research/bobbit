@@ -12,7 +12,9 @@
  */
 
 import { execFile as execFileCb, type ExecFileOptions } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -34,22 +36,41 @@ export async function execFileSafe(
 	let lastError: unknown;
 
 	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		let success = 0;
+		let errorCode = "none";
+		let retryDelayMs = 0;
 		try {
 			const result = await execFileAsync(file, args, options);
+			success = 1;
 			return { stdout: result.stdout as string, stderr: result.stderr as string };
 		} catch (err: any) {
 			lastError = err;
+			errorCode = typeof err?.code === "string" ? err.code : "error";
 
 			// Only retry on transient spawn errors, not on command failures
 			if (TRANSIENT_SPAWN_CODES.has(err?.code) && attempt < MAX_RETRIES) {
+				retryDelayMs = RETRY_DELAY_MS * (attempt + 1);
 				console.warn(
-					`[exec-file-safe] ${err.code} spawning "${file}" — retry ${attempt + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS}ms`,
+					`[exec-file-safe] ${err.code} spawning "${file}" — retry ${attempt + 1}/${MAX_RETRIES} in ${retryDelayMs}ms`,
 				);
-				await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (attempt + 1)));
-				continue;
+			} else {
+				throw err;
 			}
-
-			throw err;
+		} finally {
+			if (diagEnabled) {
+				getCpuDiagnostics().recordChildProcess(`execFileSafe:${file}`, performance.now() - diagStart, {
+					attempt,
+					success,
+					errorCode,
+					timeoutMs: typeof options?.timeout === "number" ? options.timeout : 0,
+				});
+			}
+		}
+		if (retryDelayMs > 0) {
+			await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+			continue;
 		}
 	}
 

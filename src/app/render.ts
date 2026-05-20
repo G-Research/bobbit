@@ -2778,7 +2778,8 @@ function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string
 	if (sessionId && !tabSessionId) return null;
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const source = tab.source as Record<string, unknown>;
-	const title = tab.title || `Preview: ${basename(entry) || "inline.html"}`;
+	const sourceTitle = `Preview: ${basename(entry) || "inline.html"}`;
+	const title = previewSourceTitle(tab) || sourceTitle;
 	return {
 		...tab,
 		kind: "preview",
@@ -2839,8 +2840,25 @@ function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: strin
 	};
 }
 
+function unsnapshotPreviewTitle(title: string): string {
+	return title.replace(/\s\(snapshot\)$/, "");
+}
+
 function snapshotPreviewTitle(title: string): string {
 	return /\s\(snapshot\)$/.test(title) ? title : `${title} (snapshot)`;
+}
+
+function previewSourceTitle(tab: PanelWorkspaceTab): string {
+	if (tab.kind !== "preview") return tab.title || tab.label || "";
+	const source = tab.source as Record<string, unknown>;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const sourcePath = previewEntryFromTab(tab)
+		|| recordValue(tabState, "snapshotFile")
+		|| recordValue(source, "path")
+		|| recordValue(source, "snapshotPath")
+		|| recordValue(tabState, "snapshotPath");
+	if (sourcePath) return `Preview: ${basename(sourcePath) || "inline.html"}`;
+	return unsnapshotPreviewTitle(tab.title || tab.label || "Preview: inline.html");
 }
 
 function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab {
@@ -2850,8 +2868,7 @@ function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, derivedTabs: Panel
 	const liveTitle = liveTab.title || liveTab.label;
 	const tabTitle = tab.title || tab.label;
 	if (!liveTitle || tabTitle !== liveTitle) return tab;
-	const title = snapshotPreviewTitle(tabTitle);
-	return { ...tab, title, label: title };
+	return { ...tab, label: snapshotPreviewTitle(tab.label || tabTitle) };
 }
 
 function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
@@ -3461,18 +3478,21 @@ export function doRenderApp(): void {
 	};
 
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		tab.kind === "preview" ? (tab.title || tab.label || "Preview") : tab.label
+		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
 	);
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
 		const label = panelTabButtonLabel(tab);
+		const sourceTitle = tab.kind === "preview" ? previewSourceTitle(tab) : "";
+		const tooltip = sourceTitle || label;
+		const dataTitle = sourceTitle || tab.title;
 		return html`
 		<button
 			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
-			title=${label}
+			title=${tooltip}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
-			data-panel-tab-title=${tab.title}
+			data-panel-tab-title=${dataTitle}
 			data-testid=${testId}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 		>${label}${panelTabHasDot(tab) ? html` <span class="goal-tab-dot"></span>` : ""}</button>

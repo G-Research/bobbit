@@ -173,16 +173,30 @@ function connectDashboardWs(): void {
 	const ws = new WebSocket(wsUrl);
 	dashboardWs = ws;
 
+	const subscribeToCurrentGoal = () => {
+		if (ws.readyState === WebSocket.OPEN && currentGoalId) {
+			ws.send(JSON.stringify({ type: "subscribe_goal", goalId: currentGoalId }));
+		}
+	};
+
 	ws.addEventListener("open", () => {
 		const token = localStorage.getItem("gateway.token");
 		if (token) {
-			ws.send(JSON.stringify({ type: "auth", token }));
+			ws.send(JSON.stringify({ type: "auth", token, ...(currentGoalId ? { goalId: currentGoalId } : {}) }));
 		}
 	});
 
 	ws.addEventListener("message", (event) => {
 		try {
 			const msg = JSON.parse(event.data as string);
+			if (msg?.type === "auth_ok") {
+				subscribeToCurrentGoal();
+				return;
+			}
+			if (typeof msg?.goalId === "string" && msg.goalId !== currentGoalId) return;
+			if (msg?.type === "gate_signal_received" || msg?.type === "gate_status_changed") {
+				refreshGatesFromWsEvent(msg.goalId);
+			}
 			dispatchVerificationEvent(msg);
 		} catch {
 			// ignore unparseable messages
@@ -526,6 +540,28 @@ function stopAgentPolling(): void {
 	agents = [];
 }
 
+function applyGateState(goalId: string, newGates: GateState[]): void {
+	gates = newGates;
+	// Sync to sidebar gate status cache
+	const goal = state.goals.find(g => g.id === goalId);
+	if (goal?.workflow?.gates.length) {
+		const passed = newGates.filter((g: any) => g.status === "passed").length;
+		const total = goal.workflow.gates.length;
+		const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
+		const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
+		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
+	}
+}
+
+function refreshGatesFromWsEvent(goalId: string): void {
+	if (!currentGoalId || currentGoalId !== goalId) return;
+	fetchGoalGates(goalId).then(newGates => {
+		if (!currentGoalId || currentGoalId !== goalId) return;
+		applyGateState(goalId, newGates);
+		renderApp();
+	}).catch(() => { /* ignore */ });
+}
+
 function startGatePolling(goalId: string): void {
 	stopGatePolling();
 	gatePollTimer = setInterval(async () => {
@@ -533,16 +569,7 @@ function startGatePolling(goalId: string): void {
 		try {
 			const newGates = await fetchGoalGates(goalId);
 			if (JSON.stringify(newGates) !== JSON.stringify(gates)) {
-				gates = newGates;
-				// Sync to sidebar gate status cache
-				const goal = state.goals.find(g => g.id === goalId);
-				if (goal?.workflow?.gates.length) {
-					const passed = newGates.filter((g: any) => g.status === "passed").length;
-					const total = goal.workflow.gates.length;
-					const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
-					const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
-					state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
-				}
+				applyGateState(goalId, newGates);
 				renderApp();
 			}
 			// Also refresh active verifications alongside gate polling
@@ -643,10 +670,15 @@ function handleLiveVerificationEvent(e: Event) {
 			const entry = liveVerifications.get(key);
 			if (entry) {
 				entry.overallStatus = detail.status;
-				// Re-fetch gates to update signal history
-				if (currentGoalId) {
-					fetchGoalGates(currentGoalId).then(g => { gates = g; renderApp(); });
-				}
+			}
+			// Re-fetch gates to update signal history. Some auto-pass gates complete
+			// without a preceding started event, so this must not depend on live state.
+			if (currentGoalId) {
+				fetchGoalGates(currentGoalId).then(g => {
+					if (!currentGoalId) return;
+					applyGateState(currentGoalId, g);
+					renderApp();
+				});
 			}
 			stopLiveVerifTimerIfDone();
 			renderApp();

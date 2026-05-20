@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
@@ -175,17 +176,75 @@ function buildArchivedStateData(
 }
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
+	if (!cpuDiagnosticsEnabled()) {
+		const data = JSON.stringify(msg);
+		for (const client of clients) {
+			if (client.readyState === 1) {
+				client.send(data);
+			}
+		}
+		return;
+	}
+
+	const stringifyStart = performance.now();
 	const data = JSON.stringify(msg);
+	const stringifyMs = performance.now() - stringifyStart;
+	const sendStart = performance.now();
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
 	for (const client of clients) {
+		scanned++;
 		if (client.readyState === 1) {
 			client.send(data);
+			recipients++;
+		} else {
+			skipped++;
 		}
 	}
+	getCpuDiagnostics().recordWsBroadcast("ws-handler:broadcast", (msg as { type?: string }).type || "unknown", {
+		frames: 1,
+		scanned,
+		recipients,
+		skipped,
+		bytes: Buffer.byteLength(data) * recipients,
+		stringifyMs,
+		sendMs: performance.now() - sendStart,
+	});
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
 	if (ws.readyState === 1) {
 		ws.send(JSON.stringify(msg));
+	}
+}
+
+function getViewerGoalIds(ws: WebSocket): Set<string> {
+	const existing = (ws as any).viewerGoalIds;
+	if (existing instanceof Set) return existing;
+	const next = new Set<string>();
+	(ws as any).viewerGoalIds = next;
+	return next;
+}
+
+function handleViewerMessage(ws: WebSocket, msg: ClientMessage): void {
+	const viewerMsg = msg as unknown as { type?: string; goalId?: unknown };
+	if (viewerMsg.type === "subscribe_goal") {
+		if (typeof viewerMsg.goalId === "string" && viewerMsg.goalId.trim()) {
+			getViewerGoalIds(ws).add(viewerMsg.goalId);
+		}
+		return;
+	}
+	if (viewerMsg.type === "unsubscribe_goal") {
+		if (typeof viewerMsg.goalId === "string") getViewerGoalIds(ws).delete(viewerMsg.goalId);
+		return;
+	}
+	if (viewerMsg.type === "clear_goal_subscriptions") {
+		getViewerGoalIds(ws).clear();
+		return;
+	}
+	if (viewerMsg.type === "ping") {
+		send(ws, { type: "pong" });
 	}
 }
 
@@ -264,9 +323,15 @@ export function handleWebSocketConnection(
 
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
+				(ws as any).isViewer = true;
+				(ws as any).viewerGoalIds = new Set<string>();
+				const initialGoalId = (msg as unknown as { goalId?: unknown }).goalId;
+				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
+					getViewerGoalIds(ws).add(initialGoalId);
+				}
 				send(ws, { type: "auth_ok" });
-				// Do NOT set (ws as any).sessionId — broadcastToGoal fallback will include this client
-				// Read-only: ignore all subsequent messages
+				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
+				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
 			}
 
@@ -294,7 +359,10 @@ export function handleWebSocketConnection(
 				return;
 			}
 
-			// Register client in session
+			// Register client in session. Server-level broadcast helpers use this
+			// tag to avoid falling back regular session sockets into unrelated goal
+			// dashboard events.
+			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
 
 			send(ws, { type: "auth_ok" });
@@ -312,7 +380,12 @@ export function handleWebSocketConnection(
 			// sessions with no history (avoids sending getState ahead of the
 			// user's first prompt on the agent's sequential RPC pipeline).
 			if (session.status !== "preparing" && session.eventBuffer.size > 0) {
+				const diagEnabled = cpuDiagnosticsEnabled();
+				const diagStart = diagEnabled ? performance.now() : 0;
 				session.rpcClient.getState().then((stateResponse) => {
+					if (diagEnabled) {
+						getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { success: stateResponse.success ? 1 : 0 });
+					}
 					if (stateResponse.success) {
 						// Splice canonical session status + version so the client's `case "state"`
 						// can prime `_lastStatusVersion` from the snapshot.
@@ -328,6 +401,7 @@ export function handleWebSocketConnection(
 						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 				}).catch(() => {
+					if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { errors: 1 });
 					sendFallbackModelState(ws, sessionManager, sessionId);
 				});
 			} else {
@@ -385,6 +459,12 @@ export function handleWebSocketConnection(
 			if (pendingPerm) {
 				send(ws, { type: "tool_permission_needed", ...pendingPerm });
 			}
+			return;
+		}
+
+		// Viewer-only connections receive project broadcasts plus explicitly subscribed goal broadcasts.
+		if ((ws as any).isViewer) {
+			handleViewerMessage(ws, msg);
 			return;
 		}
 
@@ -655,8 +735,13 @@ export function handleWebSocketConnection(
 				}
 				case "get_state": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
 					try {
 						const stateResp = await session.rpcClient.getState();
+						if (diagEnabled) {
+							getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { success: stateResp.success ? 1 : 0 });
+						}
 						if (stateResp.success) {
 							// Splice canonical session status + version into the snapshot so
 							// the client's `case "state"` can prime `_lastStatusVersion` from
@@ -673,6 +758,7 @@ export function handleWebSocketConnection(
 							sendFallbackModelState(ws, sessionManager, sessionId);
 						}
 					} catch {
+						if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { errors: 1 });
 						sendFallbackModelState(ws, sessionManager, sessionId);
 					}
 					break;
@@ -691,7 +777,12 @@ export function handleWebSocketConnection(
 				}
 				case "get_messages": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
 					const msgsResp = await session.rpcClient.getMessages();
+					if (diagEnabled) {
+						getCpuDiagnostics().recordTimer("ws-handler:getMessages", performance.now() - diagStart, { success: msgsResp.success ? 1 : 0 });
+					}
 					if (msgsResp.success) {
 						const raw = msgsResp.data as any;
 						// msgsResp.data may be an array or { messages: [...] }
@@ -818,13 +909,31 @@ export function handleWebSocketConnection(
 					// individual {type:"event"} frames with their original seq/ts
 					// so the client can dedupe. Otherwise signal a gap — the client
 					// will fall back to a full get_messages snapshot.
+					const diagEnabled = cpuDiagnosticsEnabled();
+					const diagStart = diagEnabled ? performance.now() : 0;
+					let replayed = 0;
+					let bytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
 					if (!session.eventBuffer.canResumeFrom(fromSeq)) {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
+						if (diagEnabled) {
+							getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "resume_gap", { frames: 1, recipients: 1, bytes: 0, replayed: 0, gaps: 1, sendMs: performance.now() - diagStart });
+						}
 						break;
 					}
 					for (const entry of session.eventBuffer.since(fromSeq)) {
-						send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
+						if (diagEnabled) {
+							const frame = { type: "event" as const, data: entry.event, seq: entry.seq, ts: entry.ts };
+							const data = JSON.stringify(frame);
+							if (ws.readyState === 1) ws.send(data);
+							bytes += Buffer.byteLength(data);
+						} else {
+							send(ws, { type: "event", data: entry.event, seq: entry.seq, ts: entry.ts });
+						}
+						replayed++;
+					}
+					if (diagEnabled) {
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}
