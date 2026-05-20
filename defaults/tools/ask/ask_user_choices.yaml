@@ -79,9 +79,18 @@ detail_docs: |
 
   When you see a user message starting with `[ask_user_choices_response
   tool_use_id=...]`, parse the JSON on the following line(s) to get the
-  answers. Match `tool_use_id` to the tool call you previously made. If the
-  user sends an unrelated message instead, they chose not to answer — proceed
-  without the answers (or re-ask by calling the tool again).
+  answers. Match `tool_use_id` to the tool call you previously made. It is
+  opaque and may include the safe composite delimiter `|`, for example
+  `call_abc|fc_def`; do not split, trim, or normalize it. Whitespace and
+  newlines in IDs are invalid.
+
+  This envelope is an internal transcript control message. Bobbit persists it
+  and uses it to wake the agent, but hides it from normal chat rendering and
+  shows the answered ask card instead. The parser/format single source of truth
+  is `src/shared/ask-envelope.ts`.
+
+  If the user sends an unrelated message instead, they chose not to answer —
+  proceed without the answers (or re-ask by calling the tool again).
 
   **Never emit the `[ask_user_choices_response ...]` marker yourself** — it is
   reserved for the user/UI layer.

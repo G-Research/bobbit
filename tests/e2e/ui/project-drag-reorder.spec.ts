@@ -186,6 +186,13 @@ async function expectPersistedOrder(expected: ProjectFixture[]): Promise<void> {
 	}).toEqual(expectedIds);
 }
 
+async function expectNoProjectOrderFailureDialog(page: Page): Promise<void> {
+	await expect(
+		page.getByText("Failed to save project order", { exact: true }),
+		"successful project drag reorder must not show the save-failure dialog",
+	).toHaveCount(0);
+}
+
 async function expectSessionContentsVisible(page: Page, projects: ProjectFixture[]): Promise<void> {
 	for (const project of projects) {
 		await expect(page.getByText(project.sessionTitle, { exact: true }), `session content for ${project.name}`).toBeVisible({ timeout: 10_000 });
@@ -346,6 +353,7 @@ test.describe("Project drag reorder (browser E2E)", () => {
 
 		await expectRenderedOrder(page, [gamma, alpha, beta]);
 		await expectPersistedOrder([gamma, alpha, beta]);
+		await expectNoProjectOrderFailureDialog(page);
 		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
 
 		await startProjectDrag(page, alpha);
@@ -423,6 +431,7 @@ test.describe("Project drag reorder (browser E2E)", () => {
 
 		await expectRenderedOrder(page, [gamma, alpha, beta]);
 		await expectPersistedOrder([gamma, alpha, beta]);
+		await expectNoProjectOrderFailureDialog(page);
 		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
 
 		await page.reload();

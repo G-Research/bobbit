@@ -394,7 +394,7 @@ on the resulting `messages.map(m => ({ id: m.id, _order: m._order, role: m.role 
 | 6 | Optimistic → echo (id) | `optimistic-prompt(id=opt1)`, `live(seq=1,id=opt1,role=user)` | `[opt1@1]` (replaced, no dup) |
 | 7 | Optimistic → echo (text) | `optimistic-prompt(id=opt1,text="hi")`, `live(seq=1,id=srv1,role=user,text="hi")` | `[srv1@1]` |
 | 8 | Proposal burst | `live(seq=1,id=a1,toolUse=propose_goal)`, `live(seq=2,id=a2,toolUse=propose_role)`, `live(seq=3,id=tr1,role=toolResult)` | `[a1@1, a2@2, tr1@3]` — both widgets present, no overwrite (kills Mode A) |
-| 9 | ask_user_choices envelope routing | `live(seq=1,id=a1,toolUse=ask_user_choices,toolUseId=auc1)`, `live(seq=2,id=u1,role=user,text="[ask_user_choices_response auc1] …")` | both rows present in order; envelope-scan helper finds row 2 by `auc1` |
+| 9 | ask_user_choices envelope routing | `live(seq=1,id=a1,toolUse=ask_user_choices,toolUseId=auc1)`, `live(seq=2,id=u1,role=user,text="[ask_user_choices_response tool_use_id=auc1]\n…")` | both rows present in order; envelope-scan helper finds row 2 by `auc1` |
 | 10 | Reconnect with gap | `live(seq=1,id=u1)`, `live(seq=2,id=a1)`, `snapshot([u1,a1,u2,a2])` (live tail follows) , then `live(seq=5,id=a3)` | snapshot block at `[-1e9..-1e9+3]`, `a3@5` after; no dups |
 | 11 | Permission insert + resolve | `live(seq=1,id=u1)`, `permission-needed(seq=2,id=p1)`, `permission-resolved(p1)` | `[u1@1]` — no slice-truncation of u1 |
 | 12 | Compaction placeholder + server marker | `compaction-placeholder` → row `compacting_placeholder@hi+0.5`; then `snapshot([{id:cs1,role:assistant,text:"Context compacted from 12k tokens."}])` | single compaction row from server, synthetic dropped |
@@ -407,7 +407,7 @@ Pass criterion: byte-equal output array of `(id, _order)` pairs.
 |---|---|
 | **ST-DEDUP-02 — Proposal burst** | Mock agent emits two consecutive `propose_*` assistant turns + a toolResult. Both `<proposal-…>` widgets must render in order. Click the first → it submits; click the second → it submits. Neither is unmounted/remounted (assertion: stable `data-msg-key` between the two screenshots). |
 | **ST-DEDUP-03 — Mid-burst reconnect** | While the proposal burst is mid-stream, kill the WS. Server resumes via `seq` replay. After reconnect, the widget appears **exactly once** in the transcript (assertion: `page.locator('proposal-goal').count() === 1`). |
-| **ST-DEDUP-04 — `ask_user_choices` envelope routing** | Two `ask_user_choices` cards on screen. Click answer on card B; `[ask_user_choices_response <toolUseId-B>]` user message arrives. Card B shows answer; card A unchanged (assertion: `findAskResponseAnswers` matches card B's `toolUseId`). |
+| **ST-DEDUP-04 — `ask_user_choices` envelope routing** | Two `ask_user_choices` cards on screen. Click answer on card B; `[ask_user_choices_response tool_use_id=<toolUseId-B>]` user message arrives. Card B shows answer; card A unchanged (assertion: `findAskResponseAnswers` matches card B's `toolUseId`). |
 
 ### 10.3 Regression guard
 

@@ -5,9 +5,9 @@ window, Bobbit can fold older turns into a shorter summary — *compaction*.
 The transcript keeps moving forward, the user keeps their conversation
 history in the UI, and the agent stops bleeding tokens on every turn.
 
-This page documents the **client-facing** surface: the two triggers, the
+This page documents the **client-facing** surface: the three triggers, the
 rich summary card that appears in the transcript, how it round-trips across
-navigation and reload, and the two test entrypoints. Server-side mechanics
+navigation and reload, and the test entrypoints. Server-side mechanics
 (how the agent subprocess actually compacts, refresh-after-compaction RPC)
 live in [internals.md](internals.md).
 
@@ -148,6 +148,22 @@ refresh has not landed yet, `tokensAfter` stays `null` and the card shows
 fill on the usage bar a moment later. A follow-up amend-action could
 back-fill the field, but v1 accepts the null and keeps the reducer simple.
 
+## Cost display after compaction
+
+Compaction changes the visible transcript, not the cumulative session spend.
+After a compacted snapshot lands, the remaining assistant messages may carry
+only the post-compaction visible usage. Bobbit therefore treats persisted
+`CostTracker` data as the authoritative cost display source when present.
+
+`SessionManager.refreshAfterCompaction()` broadcasts the cumulative
+`cost_update` before the compacted `messages` snapshot, then sends a `state`
+frame with `serverCost` merged in. This ordering primes the client before the
+reduced transcript replaces the old one, so the footer and context popover do
+not fall back to a lower visible-message sum.
+
+Full source-of-truth, hydration, and regression-test details live in
+[session-cost.md](session-cost.md).
+
 ## Round-tripping across navigation and reload
 
 Compaction events are persisted server-side in a per-session sidecar
@@ -247,6 +263,7 @@ npm run test:manual
 | Helper unit tests | `tests/compaction-types.test.ts` — `parseOverflowTokenCount`, in-progress builder, stable id |
 | Reducer unit tests | `tests/message-reducer.test.ts` — cases 12, 12b, 12c, 12d, 12e |
 | Browser E2E (renderer lifecycle, file:// harness) | `tests/e2e/ui/compaction-widget.spec.ts`, `tests/fixtures/compaction-widget.html` |
+| Compact-cost regression | `tests/e2e/compact-cost-ws.spec.ts`, `tests/e2e/ui/compact-cost.spec.ts`, `tests/context-cost-stats.spec.ts` |
 | Real-LLM e2e | `tests/compaction.spec.ts`, `tests/playwright-e2e.config.ts` |
 | Manual-integration pressure test | `tests/manual-integration/compaction-pressure.spec.ts` |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |

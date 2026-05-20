@@ -723,7 +723,7 @@ test.describe("Dynamic chat tabs", () => {
 		);
 		await expectPreviewTabsExposeUserFacingSourceNames(
 			page,
-			[/^Preview:\s*label-a\.html$/i, /^Preview:\s*label-b\.html$/i],
+			[/^Preview:\s*label-a\.html(?:\s+\(snapshot\))?$/i, /^Preview:\s*label-b\.html(?:\s+\(snapshot\))?$/i],
 			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG",
 		);
 	});

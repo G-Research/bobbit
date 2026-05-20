@@ -62,7 +62,7 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Token usage and cost update |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
@@ -90,6 +90,14 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Session cost hydration
+
+`cost_update.cost` has the same shape as `state.serverCost`: cumulative input/output/cache token totals plus `totalCost`. The payload is read from persisted `CostTracker` data and is not a delta; clients should replace their cached cost snapshot, not add it locally.
+
+When persisted cost exists, the server hydrates it on active attach/reconnect, `get_state`, `get_messages`, resume/replay fallback, archived attach/state/messages, and `refreshAfterCompaction()`. `refreshAfterCompaction()` sends `cost_update` before the compacted `messages` snapshot so the UI keeps showing cumulative spend instead of recalculating from the reduced visible transcript.
+
+See [session-cost.md](session-cost.md) for the source-of-truth and no-double-counting rules.
 
 ### Streaming resume
 

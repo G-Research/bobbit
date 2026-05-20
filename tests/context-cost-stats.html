@@ -22,13 +22,15 @@
   }
   .context-area { cursor: pointer; }
   .cost-area { cursor: pointer; position: relative; }
-  .cost-popover {
+  .cost-popover,
+  .context-popover {
     position: absolute; bottom: 100%; right: 0; margin-bottom: 6px; z-index: 50;
     background: var(--popover); color: var(--popover-foreground);
     border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 14px; min-width: 260px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-size: 12px;
   }
+  .stats-bar { position: relative; }
 </style>
 </head>
 <body>
@@ -60,10 +62,12 @@ function formatTokenCount(count) {
 // ---- State ----
 let _contextTokens = 0;
 let _contextWindow = 0;
-let _costValue = 0;
+let _visibleCostValue = 0;
+let _serverCost = null;
 let _stale = false;
 let _modelId = 'claude-sonnet-4-20250514';
 let _costPopoverOpen = false;
+let _contextPopoverOpen = false;
 
 // ---- Rendering ----
 function renderContextBar() {
@@ -97,13 +101,23 @@ function renderContextBar() {
     </span>`;
 }
 
+function authoritativeCostValue() {
+  return _serverCost && Number.isFinite(_serverCost.totalCost) ? _serverCost.totalCost : undefined;
+}
+
+function sessionCostText() {
+  const costValue = authoritativeCostValue();
+  return costValue && costValue > 0 ? formatCost(costValue) : '\u2014';
+}
+
 function renderCost() {
   const el = document.getElementById('cost-area');
-  if (!_costValue) {
+  const costValue = authoritativeCostValue();
+  if (!costValue || costValue <= 0) {
     el.innerHTML = '';
     return;
   }
-  const costText = formatCost(_costValue);
+  const costText = formatCost(costValue);
   el.innerHTML = `<span id="cost-text">${costText}</span>`;
   if (_costPopoverOpen) {
     el.innerHTML += `<div id="cost-popover" class="cost-popover">
@@ -121,17 +135,39 @@ function renderModel() {
   el.innerHTML = _modelId ? `<button id="model-button">${_modelId}</button>` : '';
 }
 
+function renderContextPopover() {
+  document.getElementById('context-popover')?.remove();
+  if (!_contextPopoverOpen) return;
+  document.getElementById('stats-bar').insertAdjacentHTML('beforeend', `<div id="context-popover" class="context-popover">
+    <div style="font-weight:600;margin-bottom:6px;">Session</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
+      <span style="color:var(--muted-foreground)">Total cost</span>
+      <span id="context-total-cost" style="font-weight:500;font-variant-numeric:tabular-nums">${sessionCostText()}</span>
+    </div>
+    <div style="opacity:0.6">Visible message cost: ${formatCost(_visibleCostValue)}</div>
+  </div>`);
+}
+
 function renderAll() {
   renderModel();
   renderContextBar();
   renderCost();
+  renderContextPopover();
 }
 
 // ---- Click handlers ----
+document.getElementById('context-area').addEventListener('click', (e) => {
+  e.stopPropagation();
+  _contextPopoverOpen = !_contextPopoverOpen;
+  _costPopoverOpen = false;
+  renderAll();
+});
+
 document.getElementById('cost-area').addEventListener('click', (e) => {
   e.stopPropagation();
   _costPopoverOpen = !_costPopoverOpen;
-  renderCost();
+  _contextPopoverOpen = false;
+  renderAll();
 });
 
 // ---- Public test API ----
@@ -143,7 +179,22 @@ window.setUsage = function(input, output, contextWindow) {
 };
 
 window.setCost = function(total) {
-  _costValue = total;
+  window.setServerCost(total);
+};
+
+window.setVisibleCost = function(total) {
+  _visibleCostValue = total;
+  renderAll();
+};
+
+window.setServerCost = function(total) {
+  _serverCost = total === null || total === undefined ? null : {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalCost: total,
+  };
   renderAll();
 };
 
@@ -182,6 +233,11 @@ window.getCostText = function() {
 
 window.isPopoverOpen = function() {
   return !!document.getElementById('cost-popover');
+};
+
+window.getContextTotalCostText = function() {
+  const el = document.getElementById('context-total-cost');
+  return el ? el.textContent : '';
 };
 
 window.getPctText = function() {

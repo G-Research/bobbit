@@ -24,15 +24,21 @@ export interface AskResponseAnswer {
 	other_text: string | null;
 }
 
+/** Canonical safe character set for envelope tool_use_id values.
+ *  Allows simple IDs plus the composite delimiter (`|`) used by live tool calls. */
+export const ASK_TOOL_USE_ID_PATTERN = "[A-Za-z0-9_|-]+";
+
 /** Regex that matches a well-formed envelope message text.
  *  Group 1 = tool_use_id; group 2 = JSON body (everything after the first newline). */
-export const ASK_ENVELOPE_REGEX =
-	/^\[ask_user_choices_response tool_use_id=([A-Za-z0-9_-]+)\]\n([\s\S]+)$/;
+export const ASK_ENVELOPE_REGEX = new RegExp(
+	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
+);
 
 /** Cheap prefix test — true for any text starting with the marker line (used by
  *  the transcript render-layer filter where we don't need to parse the body). */
-export const ASK_ENVELOPE_PREFIX_REGEX =
-	/^\[ask_user_choices_response tool_use_id=[A-Za-z0-9_-]+\]\n/;
+export const ASK_ENVELOPE_PREFIX_REGEX = new RegExp(
+	`^\\[ask_user_choices_response tool_use_id=${ASK_TOOL_USE_ID_PATTERN}\\]\\n`,
+);
 
 /** Build an envelope message body from a tool_use_id and answers. */
 export function buildAskResponseEnvelope(

@@ -372,7 +372,7 @@ const goalDraft = createDraftManager({
 	type: 'goal',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeGoalProposal: (state.activeProposals.goal?.fields as any) ?? undefined,
+		activeGoalProposal: state.activeProposals.goal ?? undefined,
 		previewTitle: state.previewTitle,
 		previewSpec: state.previewSpec,
 		previewCwd: state.previewCwd,
@@ -386,7 +386,16 @@ const goalDraft = createDraftManager({
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
 		if (draft.activeGoalProposal) {
-			const fields = draft.activeGoalProposal as Record<string, unknown>;
+			const stored = draft.activeGoalProposal as any;
+			const hasStoredSlot = stored.fields && typeof stored.fields === "object" && !Array.isArray(stored.fields);
+			const storedFields = (hasStoredSlot ? stored.fields : stored) as Record<string, unknown>;
+			const storedRev = hasStoredSlot
+				? (typeof stored.rev === "number" && Number.isFinite(stored.rev) && stored.rev > 0 ? Math.trunc(stored.rev) : 0)
+				: 1;
+			const existing = state.activeProposals.goal?.sessionId === _sessionId ? state.activeProposals.goal : undefined;
+			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
+			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
+			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
 			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
 				// User previously dismissed this proposal — keep the draft on disk
 				// (so future edit_proposal events can rehydrate it) but don't
@@ -398,8 +407,8 @@ const goalDraft = createDraftManager({
 				state.activeProposals.goal = {
 					sessionId: _sessionId,
 					fields,
-					streaming: false,
-					rev: 1,
+					streaming: existing?.streaming ?? false,
+					rev,
 				};
 			}
 		} else {
@@ -443,7 +452,7 @@ const roleDraft = createDraftManager({
 	type: 'role',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeRoleProposal: (state.activeProposals.role?.fields as any) ?? undefined,
+		activeRoleProposal: state.activeProposals.role ?? undefined,
 		previewName: state.rolePreviewName,
 		previewLabel: state.rolePreviewLabel,
 		previewPrompt: state.rolePreviewPrompt,
@@ -460,7 +469,16 @@ const roleDraft = createDraftManager({
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
 		if (draft.activeRoleProposal) {
-			const fields = draft.activeRoleProposal as Record<string, unknown>;
+			const stored = draft.activeRoleProposal as any;
+			const hasStoredSlot = stored.fields && typeof stored.fields === "object" && !Array.isArray(stored.fields);
+			const storedFields = (hasStoredSlot ? stored.fields : stored) as Record<string, unknown>;
+			const storedRev = hasStoredSlot
+				? (typeof stored.rev === "number" && Number.isFinite(stored.rev) && stored.rev > 0 ? Math.trunc(stored.rev) : 0)
+				: 1;
+			const existing = state.activeProposals.role?.sessionId === _sessionId ? state.activeProposals.role : undefined;
+			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
+			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
+			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
 			if (isProposalDismissedTyped(_sessionId, "role", fields)) {
 				delete state.activeProposals.role;
 				dismissed = true;
@@ -468,8 +486,8 @@ const roleDraft = createDraftManager({
 				state.activeProposals.role = {
 					sessionId: _sessionId,
 					fields,
-					streaming: false,
-					rev: 1,
+					streaming: existing?.streaming ?? false,
+					rev,
 				};
 			}
 		} else {
@@ -1492,10 +1510,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				return;
 			}
 			// Server-stamped rev (from proposal_update events) is the source of truth.
-			// Fall back to client-incremented for streaming-partial / legacy paths.
+			// Streaming/final tool-use scans are only an in-memory preview path; they
+			// must never synthesize revision numbers or a streamed proposal can race
+			// ahead of the immutable snapshot counter and make the current tool card
+			// look stale. Legacy no-rev paths keep the existing rev (or 0 = unknown).
 			const nextRev = (typeof serverRev === "number" && serverRev > 0)
-				? serverRev
-				: (prev?.rev ?? 0) + 1;
+				? Math.trunc(serverRev)
+				: (prev?.rev ?? 0);
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
