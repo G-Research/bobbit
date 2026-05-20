@@ -1290,9 +1290,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const pill = ai.querySelector(`bg-process-pill[data-id="${msg.processId}"]`) as any;
 				if (pill?.appendOutput) pill.appendOutput(msg.text, msg.ts);
 			} else if (msg.type === "bg_process_exited" && msg.processId) {
-				// Update status in the process list
+				// Update status in the process list. Older servers may omit endTime;
+				// preserve a non-growing null fallback instead of implying Date.now().
 				ai.bgProcesses = ai.bgProcesses.map((p) =>
-					p.id === msg.processId ? { ...p, status: "exited" as const, exitCode: msg.exitCode ?? null } : p
+					p.id === msg.processId
+						? { ...p, status: "exited" as const, exitCode: msg.exitCode ?? null, endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null }
+						: p
 				);
 			}
 		};

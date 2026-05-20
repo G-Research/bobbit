@@ -41,12 +41,39 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/git-status` | Git status for session's working directory (branch, ahead/behind, dirty files) |
 | `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`) |
+| `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
+| `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
+| `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. See [session-cost.md](session-cost.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover |
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
 
+### Background processes
+
+Background process snapshots use epoch-millisecond timestamps so clients can render runtime without depending on page load time:
+
+```ts
+type BgProcessInfo = {
+  id: string;
+  name: string;
+  command: string;
+  pid: number;
+  status: "running" | "exited";
+  exitCode: number | null;
+  startTime: number;
+  endTime: number | null;
+};
+```
+
+`endTime` is `null` while `status === "running"`. On child exit the server sets `endTime` once, and list / wait snapshots preserve that final value so reloads and reconnects keep showing the fixed `endTime - startTime` runtime.
+
+- `POST /api/sessions/:id/bg-processes` returns `201 BgProcessInfo` for the created process.
+- `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for UI hydration.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info: BgProcessInfo, timedOut: boolean, aborted: boolean }`; `info.endTime` is numeric after exit and remains `null` for running timeout/abort snapshots.
+
+Older exited snapshots may omit `endTime` or set it to `null`. Clients must render those runtimes as unknown/non-growing instead of substituting `Date.now()` for an exit timestamp.
 
 ### Proposal drafts
 

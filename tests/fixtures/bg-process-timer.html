@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>BgProcessPill timer fixture</title>
+<style>
+	body {
+		font-family: system-ui, sans-serif;
+		font-size: 14px;
+		padding: 20px;
+	}
+	#pill-container {
+		display: flex;
+		gap: 12px;
+		align-items: center;
+	}
+	.font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+	.fixed { position: fixed; }
+	.flex { display: flex; }
+	.inline-flex { display: inline-flex; }
+	.items-center { align-items: center; }
+	.justify-between { justify-content: space-between; }
+	.gap-1 { gap: 0.25rem; }
+	.gap-1\.5 { gap: 0.375rem; }
+	.gap-2 { gap: 0.5rem; }
+	.p-2 { padding: 0.5rem; }
+	.px-1 { padding-left: 0.25rem; padding-right: 0.25rem; }
+	.px-1\.5 { padding-left: 0.375rem; padding-right: 0.375rem; }
+	.px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+	.py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+	.py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+	.mb-1\.5 { margin-bottom: 0.375rem; }
+	.rounded { border-radius: 0.25rem; }
+	.rounded-full { border-radius: 9999px; }
+	.rounded-lg { border-radius: 0.5rem; }
+	.rounded-l-full { border-radius: 9999px 0 0 9999px; }
+	.rounded-r-full { border-radius: 0 9999px 9999px 0; }
+	.border { border: 1px solid #d1d5db; }
+	.border-l { border-left: 1px solid #d1d5db; }
+	.text-xs { font-size: 12px; }
+	.text-sm { font-size: 14px; }
+	.text-\[10px\] { font-size: 10px; }
+	.text-\[11px\] { font-size: 11px; }
+	.leading-tight { line-height: 1.25; }
+	.leading-snug { line-height: 1.375; }
+	.font-medium { font-weight: 500; }
+	.font-semibold { font-weight: 600; }
+	.font-normal { font-weight: 400; }
+	.min-w-0 { min-width: 0; }
+	.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.break-all { word-break: break-all; }
+	.whitespace-pre-wrap { white-space: pre-wrap; }
+	.overflow-y-auto { overflow-y: auto; }
+	.shrink-0 { flex-shrink: 0; }
+	.cursor-pointer { cursor: pointer; }
+	.select-none { user-select: none; }
+	.w-1\.5 { width: 6px; }
+	.h-1\.5 { height: 6px; }
+	.h-\[180px\] { height: 180px; }
+	.bg-card { background: #fff; }
+	.bg-background { background: #f9fafb; }
+	.bg-muted { background: #f3f4f6; }
+	.bg-blue-600 { background: #2563eb; }
+	.bg-green-600 { background: #16a34a; }
+	.text-muted-foreground { color: #6b7280; }
+	.text-foreground { color: #111827; }
+	.text-green-700 { color: #15803d; }
+	.text-red-700, .text-red-600 { color: #b91c1c; }
+</style>
+</head>
+<body>
+<div id="pill-container"></div>
+</body>
+</html>
