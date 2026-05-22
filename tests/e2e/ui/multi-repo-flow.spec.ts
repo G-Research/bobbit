@@ -85,7 +85,7 @@ async function navigateToSettings(page: import("@playwright/test").Page, project
 }
 
 test.describe("multi-repo flow (UI)", () => {
-	test("Settings → Components lists 3 components incl. data-only and workflows panel resolves (component, command)", async ({ page }, testInfo) => {
+	test("Settings → Components lists, edits, persists, and deletes components", async ({ page }, testInfo) => {
 		test.setTimeout(60_000);
 		const project = await registerMultiRepoProject();
 		testInfo.attach("project-root", { body: project.rootPath, contentType: "text/plain" }).catch(() => {});
@@ -94,64 +94,20 @@ test.describe("multi-repo flow (UI)", () => {
 			await openApp(page);
 			await navigateToSettings(page, project.id, "components");
 
-			// 3 components rendered
 			const cards = page.locator('[data-testid="component-card"]');
 			await expect(cards).toHaveCount(3, { timeout: 10_000 });
 			await expect(page.locator('[data-component-name="api"]')).toBeVisible();
 			await expect(page.locator('[data-component-name="web"]')).toBeVisible();
 			await expect(page.locator('[data-component-name="shared"]')).toBeVisible();
+			await expect(page.locator('[data-component-name="shared"] [data-testid="data-only-hint"]')).toBeVisible();
 
-			// Data-only "shared" shows "no commands" hint.
-			//
-			// NOTE: production has no `data-only-toggle` checkbox — the data-only
-			// state is conveyed entirely by the `data-only-hint` italic text
-			// (see settings-page.ts::renderProjectComponentsTab). Original test
-			// asserted toBeChecked() against a control that never shipped. We
-			// keep only the visible-hint assertion.
-			const sharedCard = page.locator('[data-component-name="shared"]');
-			await expect(sharedCard.locator('[data-testid="data-only-hint"]')).toBeVisible();
-
-			// NOTE: the original test also opened a `workflows-disclosure`
-			// element and asserted resolved (component, command) pairs via
-			// `workflow-step` / `step-resolution` / `step-shell` testids. None
-			// of those testids exist in the current Components tab — the
-			// workflows surface in Settings is rendered by the embedded
-			// workflow page (see settings-page.ts L2901), which uses different
-			// testids and lives under a separate tab. The (component, command)
-			// resolution itself is covered by API-level tests against
-			// `/api/projects/:id/structured`. Drop the UI assertions until the
-			// resolved-step disclosure ships in production.
-
-			// Persistence across reload.
-			await page.reload();
-			await expect(page.locator('[data-testid="component-card"]')).toHaveCount(3, { timeout: 10_000 });
-		} finally {
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
-
-	test("Settings → Components: edit a command, save, reload — change persists", async ({ page }) => {
-		test.setTimeout(60_000);
-		const project = await registerMultiRepoProject();
-
-		try {
-			await openApp(page);
-			await navigateToSettings(page, project.id, "components");
-
-			await expect(page.locator('[data-component-name="api"]')).toBeVisible({ timeout: 10_000 });
-
-			// Edit api/build value
+			// Edit api/build value, save, then reload to verify persistence.
 			const apiCard = page.locator('[data-component-name="api"]');
 			const buildRow = apiCard.locator('[data-testid="command-row"]').first();
-			const valueInput = buildRow.locator('[data-testid="command-value"]');
-			await valueInput.fill("echo edited");
-
-			// Save and wait for round-trip
+			await buildRow.locator('[data-testid="command-value"]').fill("echo edited");
 			await page.locator('[data-testid="save-components"]').click();
 			await expect(page.locator('[data-testid="save-status"]')).toHaveText("Saved.", { timeout: 10_000 });
 
-			// Reload and verify the edited value comes back
 			await page.reload();
 			await expect(page.locator('[data-component-name="api"]')).toBeVisible({ timeout: 10_000 });
 			const reloadedValue = await page
@@ -160,37 +116,14 @@ test.describe("multi-repo flow (UI)", () => {
 				.locator('[data-testid="command-value"]')
 				.inputValue();
 			expect(reloadedValue).toBe("echo edited");
-		} finally {
-			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
-			project.cleanup();
-		}
-	});
 
-	// Structured worktree_root endpoint coverage lives in tests/e2e/multi-repo-flow-api.spec.ts.
-
-	// Re-scan-from-Settings flow was replaced with "Open Project Assistant";
-	// repo scanning now happens in the assistant's interactive flow rather than
-	// via a settings-page button. The underlying POST /api/projects/:id/rescan-repos
-	// endpoint is still covered by API-level tests.
-
-	test("Settings → Components: delete a component", async ({ page }) => {
-		test.setTimeout(60_000);
-		const project = await registerMultiRepoProject();
-		try {
-			await openApp(page);
-			await navigateToSettings(page, project.id, "components");
-
-			await expect(page.locator('[data-testid="component-card"]')).toHaveCount(3, { timeout: 10_000 });
-
-			// Auto-accept the confirm() dialog.
+			// Delete the data-only component, save, and verify the structured API data.
 			page.once("dialog", d => d.accept());
 			await page.locator('[data-component-name="shared"] [data-testid="delete-component"]').click();
-
 			await expect(page.locator('[data-testid="component-card"]')).toHaveCount(2);
 			await page.locator('[data-testid="save-components"]').click();
 			await expect(page.locator('[data-testid="save-status"]')).toHaveText("Saved.", { timeout: 10_000 });
 
-			// Confirm via API.
 			const res = await apiFetch(`/api/projects/${project.id}/structured`);
 			const data = await res.json();
 			expect(data.components.map((c: any) => c.name)).toEqual(["api", "web"]);
@@ -199,5 +132,4 @@ test.describe("multi-repo flow (UI)", () => {
 			project.cleanup();
 		}
 	});
-
 });
