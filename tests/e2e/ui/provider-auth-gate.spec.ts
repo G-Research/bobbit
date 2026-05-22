@@ -133,6 +133,28 @@ test.describe("Direct-cloud auth gate", () => {
 		await expect.poll(() => sessions.posts().length, { timeout: 1_000 }).toBe(0);
 	});
 
+	test("fails closed when cloud provider status cannot be loaded", async ({ page }) => {
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		let statusRequests = 0;
+		await page.route(/\/api\/cloud-providers\/status(?:\?.*)?$/, async (route) => {
+			statusRequests++;
+			await route.fulfill({
+				status: 503,
+				contentType: "application/json",
+				body: JSON.stringify({ error: "status unavailable" }),
+			});
+		});
+		const sessions = await stubSessionCreation(page);
+
+		await openApp(page);
+		statusRequests = 0;
+		await clickNewSession(page);
+
+		await expect.poll(() => statusRequests, { timeout: 5_000 }).toBeGreaterThan(0);
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0);
+		await expect.poll(() => sessions.posts().length, { timeout: 1_000 }).toBe(0);
+	});
+
 	test("saves a Google API key, enables the provider, and resumes session creation", async ({ page }) => {
 		let googleAuthenticated = false;
 		const providerKeyPosts: Array<Record<string, unknown>> = [];
@@ -175,6 +197,115 @@ test.describe("Direct-cloud auth gate", () => {
 		await expect.poll(() => sessions.posts().length, { timeout: 10_000 }).toBe(1);
 		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0, { timeout: 5_000 });
 		expect(providerKeyPosts).toEqual([{ key: "test-gemini-key", enable: true }]);
+	});
+
+	test("manual OAuth code fallback completes a supported provider and resumes session creation", async ({ page }) => {
+		await page.addInitScript(() => {
+			window.open = () => null;
+		});
+		let anthropicAuthenticated = false;
+		const oauthCompleteBodies: Array<Record<string, unknown>> = [];
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		await stubCloudProviderStatus(page, () => cloudAuthStatus("direct-cloud", anthropicAuthenticated ? ["anthropic"] : []));
+		const sessions = await stubSessionCreation(page);
+		await page.route(/\/api\/oauth\/start(?:\?.*)?$/, async (route, request) => {
+			expect(request.postDataJSON()).toMatchObject({ provider: "anthropic" });
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					flowId: "flow-anthropic-manual",
+					url: "https://auth.example/anthropic",
+					provider: "anthropic",
+					callbackServer: false,
+					instructions: "Paste the manual code from the provider.",
+				}),
+			});
+		});
+		await page.route(/\/api\/oauth\/complete(?:\?.*)?$/, async (route, request) => {
+			const body = request.postDataJSON() as Record<string, unknown>;
+			oauthCompleteBodies.push(body);
+			anthropicAuthenticated = true;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ success: true, provider: "anthropic" }),
+			});
+		});
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toBeVisible({ timeout: 10_000 });
+		await page.locator('[data-testid="cloud-auth-gate-provider-anthropic"]').click();
+		await page.getByRole("button", { name: "Connect selected" }).click();
+		await expect(page.getByText("A browser tab opened for Anthropic")).toBeVisible({ timeout: 5_000 });
+		await page.getByPlaceholder("Paste redirect URL or code").fill("manual-auth-code");
+		await page.getByRole("button", { name: "Submit code" }).click();
+
+		await expect.poll(() => sessions.posts().length, { timeout: 10_000 }).toBe(1);
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0, { timeout: 5_000 });
+		expect(oauthCompleteBodies).toEqual([{ flowId: "flow-anthropic-manual", code: "manual-auth-code" }]);
+	});
+
+	test("does not continue when status refresh fails after OAuth", async ({ page }) => {
+		await page.addInitScript(() => {
+			window.open = () => null;
+		});
+		let oauthCompleted = false;
+		let refreshFailures = 0;
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		await page.route(/\/api\/cloud-providers\/status(?:\?.*)?$/, async (route) => {
+			if (oauthCompleted) {
+				refreshFailures++;
+				await route.fulfill({
+					status: 503,
+					contentType: "application/json",
+					body: JSON.stringify({ error: "status unavailable" }),
+				});
+				return;
+			}
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify(cloudAuthStatus("direct-cloud")),
+			});
+		});
+		const sessions = await stubSessionCreation(page);
+		await page.route(/\/api\/oauth\/start(?:\?.*)?$/, async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					flowId: "flow-anthropic-refresh-fails",
+					url: "https://auth.example/anthropic",
+					provider: "anthropic",
+					callbackServer: false,
+				}),
+			});
+		});
+		await page.route(/\/api\/oauth\/complete(?:\?.*)?$/, async (route) => {
+			oauthCompleted = true;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ success: true, provider: "anthropic" }),
+			});
+		});
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toBeVisible({ timeout: 10_000 });
+		await page.locator('[data-testid="cloud-auth-gate-provider-anthropic"]').click();
+		await page.getByRole("button", { name: "Connect selected" }).click();
+		await page.getByPlaceholder("Paste redirect URL or code").fill("manual-auth-code");
+		await page.getByRole("button", { name: "Submit code" }).click();
+
+		await expect(page.locator('[data-testid="cloud-auth-gate-provider-anthropic"]')).toContainText("could not verify provider status", { timeout: 10_000 });
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toBeVisible();
+		await expect.poll(() => refreshFailures, { timeout: 1_000 }).toBeGreaterThan(0);
+		await expect.poll(() => sessions.posts().length, { timeout: 1_000 }).toBe(0);
 	});
 
 	test("AI Gateway cloud status bypasses the auth gate", async ({ page }) => {

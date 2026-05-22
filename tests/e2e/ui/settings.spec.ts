@@ -60,9 +60,25 @@ async function cleanupCloudProviderState(): Promise<void> {
 		"providerCredentialInvalid.anthropic": null,
 		"providerCredentialInvalid.openai": null,
 		"providerCredentialInvalid.google": null,
+		"default.sessionModel": null,
+		"default.imageModel": null,
 		"aigw.url": null,
 		"aigw.models": null,
 	});
+}
+
+async function getPreferences(): Promise<Record<string, unknown>> {
+	const resp = await apiFetch("/api/preferences");
+	await expectResponseOk(resp);
+	return await resp.json();
+}
+
+async function saveProviderKey(provider: CloudProviderId, key = `test-${provider}-key`): Promise<void> {
+	const resp = await apiFetch(`/api/provider-keys/${provider}`, {
+		method: "POST",
+		body: JSON.stringify({ key, enable: true }),
+	});
+	await expectResponseOk(resp);
 }
 
 async function providerKeyList(): Promise<string[]> {
@@ -179,6 +195,128 @@ test.describe("Settings (full-stack UI)", () => {
 				await expectProviderPreference(provider.id, false);
 			}
 			await expectNoSavedProviderKeys();
+		} finally {
+			await cleanupCloudProviderState();
+		}
+	});
+
+	test("account tab exposes remove for Bobbit-owned credentials and explains host-managed env vars", async ({ page }) => {
+		await cleanupCloudProviderState();
+		try {
+			await page.route(/\/api\/cloud-providers\/status(?:\?.*)?$/, async (route) => {
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						mode: "direct-cloud",
+						aigwConfigured: false,
+						authGateRequired: false,
+						providers: [
+							{
+								id: "anthropic",
+								label: "Anthropic",
+								enabled: true,
+								configured: true,
+								authenticated: true,
+								expired: false,
+								needsReauth: false,
+								status: "authenticated",
+								credentialTypes: ["oauth"],
+								oauthSupported: true,
+								apiKeySupported: true,
+							},
+							{
+								id: "openai",
+								label: "OpenAI",
+								enabled: true,
+								configured: true,
+								authenticated: true,
+								expired: false,
+								needsReauth: false,
+								status: "authenticated",
+								credentialTypes: ["api_key"],
+								oauthSupported: true,
+								apiKeySupported: true,
+							},
+							{
+								id: "google",
+								label: "Google Gemini",
+								enabled: true,
+								configured: true,
+								authenticated: true,
+								expired: false,
+								needsReauth: false,
+								status: "authenticated",
+								credentialTypes: ["env"],
+								oauthSupported: false,
+								apiKeySupported: true,
+							},
+						],
+					}),
+				});
+			});
+
+			await openAccountSettings(page);
+			await expect(page.locator("[data-testid='provider-remove-credential-anthropic']")).toBeVisible();
+			await expect(page.locator("[data-testid='provider-remove-credential-openai']")).toBeVisible();
+			await expect(page.locator("[data-testid='provider-remove-credential-google']")).toHaveCount(0);
+			await expect(page.locator("[data-testid='provider-card-google']")).toContainText("environment variable (host-managed; Bobbit cannot remove it)");
+
+			await page.locator("[data-testid='provider-remove-credential-anthropic']").click();
+			const dialog = page.getByRole("dialog");
+			await expect(dialog).toContainText("saved OAuth or API-key credential");
+			await expect(dialog).toContainText("Environment variables and host-managed tokens cannot be removed by Bobbit.");
+			await dialog.getByRole("button", { name: "Cancel" }).click();
+		} finally {
+			await cleanupCloudProviderState();
+		}
+	});
+
+	test("disabling providers keeps credentials and resets only matching default models", async ({ page }) => {
+		await cleanupCloudProviderState();
+		try {
+			await saveProviderKey("openai", "test-openai-reset-key");
+			await putPreferences({
+				"default.sessionModel": "openai/gpt-4o",
+				"default.imageModel": "aigw/custom-image",
+			});
+
+			await openAccountSettings(page);
+			const openaiToggle = page.locator("[data-testid='provider-enabled-openai']");
+			await expect(openaiToggle).toBeChecked({ timeout: 10_000 });
+			const openaiDisable = page.waitForResponse(resp =>
+				resp.url().includes("/api/cloud-providers/openai")
+				&& resp.request().method() === "PUT"
+				&& resp.status() === 200,
+			);
+			await openaiToggle.click();
+			await openaiDisable;
+			await expect.poll(async () => (await getPreferences())["default.sessionModel"] ?? null, { timeout: 10_000 }).toBeNull();
+			let prefs = await getPreferences();
+			expect(prefs["default.imageModel"]).toBe("aigw/custom-image");
+			expect(await providerKeyList()).toContain("openai");
+
+			await saveProviderKey("google", "test-google-reset-key");
+			await putPreferences({
+				"default.sessionModel": "ollama/local-model",
+				"default.imageModel": "google/gemini-2.5-flash-image",
+			});
+			await page.reload();
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 15_000 });
+			await navigateToHash(page, "#/settings/system/account");
+			const googleToggle = page.locator("[data-testid='provider-enabled-google']");
+			await expect(googleToggle).toBeChecked({ timeout: 10_000 });
+			const googleDisable = page.waitForResponse(resp =>
+				resp.url().includes("/api/cloud-providers/google")
+				&& resp.request().method() === "PUT"
+				&& resp.status() === 200,
+			);
+			await googleToggle.click();
+			await googleDisable;
+			await expect.poll(async () => (await getPreferences())["default.imageModel"] ?? null, { timeout: 10_000 }).toBeNull();
+			prefs = await getPreferences();
+			expect(prefs["default.sessionModel"]).toBe("ollama/local-model");
+			expect(await providerKeyList()).toEqual(expect.arrayContaining(["openai", "google"]));
 		} finally {
 			await cleanupCloudProviderState();
 		}

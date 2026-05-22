@@ -743,23 +743,30 @@ export function openDirectCloudAuthGate(status: CloudAuthStatus, opts: EnsureDir
 		let attempted = false;
 		let statusText = requiredProvider ? `Connect ${CLOUD_PROVIDER_LABELS[requiredProvider]} to continue.` : "Select one or more providers to connect.";
 		const cleanup = (result: boolean) => { render(html``, container); container.remove(); resolve(result); };
-		const hasRequiredAuth = async () => {
+		const hasRequiredAuth = async (): Promise<{ ok: boolean; statusLoaded: boolean }> => {
 			const refreshed = await fetchCloudAuthStatus();
-			return !refreshed || refreshed.mode === "aigw" || refreshed.providers.some((p) => p.enabled && p.authenticated && (!requiredProvider || p.id === requiredProvider));
+			if (!refreshed) return { ok: false, statusLoaded: false };
+			return {
+				ok: refreshed.mode === "aigw" || refreshed.providers.some((p) => p.enabled && p.authenticated && (!requiredProvider || p.id === requiredProvider)),
+				statusLoaded: true,
+			};
 		};
 		const connectOne = async (p: CloudProviderStatus) => {
 			rowError[p.id] = "";
 			renderDialog();
 			const ok = method[p.id] === "api_key" ? await openCloudProviderApiKeyDialog(p.id) : await openOAuthDialog(oauthProviderForVendor(p.id));
-			if (ok && await hasRequiredAuth()) {
+			const verified = ok ? await hasRequiredAuth() : { ok: false, statusLoaded: true };
+			if (verified.ok) {
 				connected.add(p.id);
 				failed.delete(p.id);
 				return;
 			}
 			failed.add(p.id);
-			rowError[p.id] = p.id === "google" && p.apiKeySupported
-				? "Google sign-in is not available in this build. Add a Gemini API key instead."
-				: p.apiKeySupported ? "Sign-in did not complete. Try again or use an API key instead." : "Sign-in did not complete.";
+			rowError[p.id] = !verified.statusLoaded
+				? "Connected, but Bobbit could not verify provider status. Check your connection and try again."
+				: p.id === "google" && p.apiKeySupported
+					? "Google sign-in is not available in this build. Add a Gemini API key instead."
+					: p.apiKeySupported ? "Sign-in did not complete. Try again or use an API key instead." : "Sign-in did not complete.";
 		};
 		const connectSelected = async () => {
 			if (connected.size > 0 && attempted && failed.size > 0) return cleanup(true);
@@ -820,8 +827,9 @@ export function openDirectCloudAuthGate(status: CloudAuthStatus, opts: EnsureDir
 export async function ensureDirectCloudAuthReady(opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
 	if (explicitProviderIsNonTarget(opts.modelProvider)) return true;
 	const requestedProvider = cloudVendorForModelProvider(opts.modelProvider);
+	if (!requestedProvider && await hasExplicitNonTargetDefault(opts.reason)) return true;
 	const status = await fetchCloudAuthStatus();
-	if (!status) return true;
+	if (!status) return false;
 	if (status.mode === "aigw" || status.aigwConfigured) return true;
 	if (requestedProvider) {
 		const providerStatus = status.providers.find((p) => p.id === requestedProvider);
@@ -829,7 +837,6 @@ export async function ensureDirectCloudAuthReady(opts: EnsureDirectCloudAuthRead
 		return openDirectCloudAuthGate(status, opts);
 	}
 	if (!status.authGateRequired) return true;
-	if (await hasExplicitNonTargetDefault(opts.reason)) return true;
 	return openDirectCloudAuthGate(status, opts);
 }
 

@@ -2631,6 +2631,60 @@ function getAccountProviderStatus(providerId: CloudProviderId): CloudProviderSta
 	return accountStatus?.providers.find(status => status.id === providerId) ?? defaultProviderStatus(provider);
 }
 
+function accountCloudVendorForModelProvider(provider: string | undefined): CloudProviderId | null {
+	const normalized = provider?.trim().toLowerCase();
+	if (!normalized) return null;
+	if (normalized === "anthropic") return "anthropic";
+	if (normalized === "openai" || normalized === "openai-codex") return "openai";
+	if (normalized === "google" || normalized === "google-gemini" || normalized === "google-gemini-cli" || normalized === "gemini") return "google";
+	return null;
+}
+
+function accountModelProviderFromPref(pref: unknown): string | undefined {
+	if (typeof pref !== "string") return undefined;
+	const slash = pref.indexOf("/");
+	return slash > 0 ? pref.slice(0, slash) : undefined;
+}
+
+function accountModelPrefBelongsToProvider(pref: unknown, providerId: CloudProviderId): boolean {
+	return accountCloudVendorForModelProvider(accountModelProviderFromPref(pref)) === providerId;
+}
+
+async function resetDefaultModelsForDisabledProvider(providerId: CloudProviderId): Promise<{ reset: string[]; error?: string }> {
+	try {
+		const prefsRes = await gatewayFetch("/api/preferences");
+		if (!prefsRes.ok) throw new Error(await accountResponseError(prefsRes, "Could not load default model preferences"));
+		const prefs = await prefsRes.json().catch(() => ({}));
+		const updates: Record<string, null> = {};
+		const reset: string[] = [];
+		if (accountModelPrefBelongsToProvider(prefs?.["default.sessionModel"], providerId)) {
+			updates["default.sessionModel"] = null;
+			prefSessionModel = "";
+			reset.push("session model");
+		}
+		if (accountModelPrefBelongsToProvider(prefs?.["default.imageModel"], providerId)) {
+			updates["default.imageModel"] = null;
+			prefImageModel = "";
+			reset.push("image model");
+		}
+		if (reset.length === 0) return { reset };
+		const saveRes = await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(updates),
+		});
+		if (!saveRes.ok) throw new Error(await accountResponseError(saveRes, "Could not reset default model preferences"));
+		return { reset };
+	} catch (err) {
+		return { reset: [], error: err instanceof Error ? err.message : "Could not reset default model preferences" };
+	}
+}
+
+function formatResetDefaultsMessage(reset: string[]): string {
+	if (reset.length === 0) return "";
+	return ` ${reset.length === 1 ? `Default ${reset[0]} was` : "Default session and image models were"} reset to Auto (best available).`;
+}
+
 async function refreshAccountStatus(force = false): Promise<void> {
 	if (accountLoading && !force) return;
 	accountLoading = true;
@@ -2668,9 +2722,16 @@ async function handleProviderEnabled(providerId: CloudProviderId, enabled: boole
 			body: JSON.stringify({ enabled }),
 		});
 		if (!res.ok) throw new Error(await accountResponseError(res, `Could not ${enabled ? "enable" : "disable"} ${provider.title}`));
+		const resetResult: { reset: string[]; error?: string } = enabled ? { reset: [] } : await resetDefaultModelsForDisabledProvider(providerId);
 		showAccountNotice(enabled
 			? `${provider.title} enabled. Connect a credential to use its models.`
-			: `${provider.title} disabled. Saved credentials were kept.`);
+			: `${provider.title} disabled. Saved credentials were kept.${formatResetDefaultsMessage(resetResult.reset)}`);
+		if (resetResult.error) {
+			accountProviderMessages = {
+				...accountProviderMessages,
+				[providerId]: `Provider was disabled, but ${resetResult.error}`,
+			};
+		}
 		await refreshAccountStatus(true);
 	} catch (err) {
 		accountProviderMessages = {
@@ -2790,15 +2851,17 @@ async function removeAccountCredential(): Promise<void> {
 function accountCredentialLine(status: CloudProviderStatus): string {
 	if (!status.configured && status.enabled) return "No credential saved.";
 	if (!status.configured) return "";
-	if (!status.enabled && status.status !== "aigw_bypass") return "Saved credential kept.";
 	const labels = status.credentialTypes.map(type => {
 		switch (type) {
 			case "oauth": return "OAuth";
 			case "api_key": return "API key saved";
-			case "env": return "environment variable";
-			case "host_token": return "host token";
+			case "env": return "environment variable (host-managed; Bobbit cannot remove it)";
+			case "host_token": return "host token (host-managed; Bobbit cannot remove it)";
 		}
 	});
+	if (!status.enabled && status.status !== "aigw_bypass") {
+		return labels.length ? `Saved credential kept: ${labels.join(", ")}.` : "Saved credential kept.";
+	}
 	return labels.length ? `Credential: ${labels.join(", ")}` : "Credential saved.";
 }
 
@@ -2859,7 +2922,7 @@ function accountMessageClass(message: string): string {
 }
 
 function canRemoveAccountCredential(status: CloudProviderStatus): boolean {
-	return status.credentialTypes.includes("api_key");
+	return status.credentialTypes.includes("api_key") || status.credentialTypes.includes("oauth");
 }
 
 function renderAccountProviderCard(provider: AccountProviderDef) {
@@ -3019,7 +3082,7 @@ function renderAccountRemoveDialog() {
 				<div class="p-6">
 					<h2 id="account-remove-credential-title" class="text-base font-semibold text-foreground">Remove ${provider.title} credential?</h2>
 					<p class="mt-2 text-sm text-muted-foreground">
-						This deletes Bobbit's saved credential for ${provider.title}. Provider enablement is unchanged. Environment variables are not affected.
+						This deletes Bobbit's saved OAuth or API-key credential for ${provider.title}. Provider enablement is unchanged. Environment variables and host-managed tokens cannot be removed by Bobbit.
 					</p>
 				</div>
 				<div class="flex justify-end gap-2 border-t border-border px-6 pb-4 pt-3">
