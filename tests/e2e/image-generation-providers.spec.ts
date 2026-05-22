@@ -65,30 +65,54 @@ function shimFetch(routes: Array<{ match: (url: string) => boolean; respond: (ur
 	return { restore: () => { globalThis.fetch = original; } };
 }
 
-async function setPref(key: string, value: any): Promise<void> {
-	const resp = await api("/api/preferences", {
+type ImageCloudProvider = "openai" | "google";
+
+async function assertPublicStateDoesNotLeakSecret(secret: string): Promise<void> {
+	for (const path of ["/api/preferences", "/api/cloud-providers/status"]) {
+		const resp = await api(path);
+		expect(resp.ok).toBe(true);
+		const body = await resp.json();
+		expect(JSON.stringify(body)).not.toContain(secret);
+	}
+}
+
+async function saveProviderKey(provider: ImageCloudProvider, key: string): Promise<void> {
+	const resp = await api(`/api/provider-keys/${provider}`, {
+		method: "POST",
+		body: JSON.stringify({ key, enable: true }),
+	});
+	expect(resp.ok).toBe(true);
+	const body = await resp.json();
+	expect(body.ok).toBe(true);
+	expect(body.provider).toBe(provider);
+	expect(body.enabled).toBe(true);
+	expect(JSON.stringify(body)).not.toContain(key);
+	await assertPublicStateDoesNotLeakSecret(key);
+}
+
+async function setCloudProviderEnabled(provider: ImageCloudProvider, enabled: boolean): Promise<void> {
+	const resp = await api(`/api/cloud-providers/${provider}`, {
 		method: "PUT",
-		body: JSON.stringify({ [key]: value }),
+		body: JSON.stringify({ enabled }),
 	});
 	expect(resp.ok).toBe(true);
 }
 
-async function clearPref(key: string): Promise<void> {
-	await api("/api/preferences", {
-		method: "PUT",
-		body: JSON.stringify({ [key]: null }),
-	}).catch(() => {});
+async function cleanupProvider(provider: ImageCloudProvider): Promise<void> {
+	const keyResp = await api(`/api/provider-keys/${provider}`, { method: "DELETE" });
+	expect(keyResp.ok).toBe(true);
+	await setCloudProviderEnabled(provider, false);
 }
 
 test.describe("image-generation provider branches", () => {
 	test.afterEach(async () => {
-		// Restore prefs that tests poked at.
-		await clearPref("providerKey.openai");
-		await clearPref("providerKey.google");
+		// Restore API keys and provider opt-in state that tests poked at.
+		await cleanupProvider("openai");
+		await cleanupProvider("google");
 	});
 
 	test("generateOpenAIImage: DALL-E path (dall-e-3) returns base64 image", async () => {
-		await setPref("providerKey.openai", "test-openai-key");
+		await saveProviderKey("openai", "test-openai-key");
 		const shim = shimFetch([
 			{
 				match: (u) => u.includes("api.openai.com") && u.includes("/images/generations"),
@@ -114,7 +138,7 @@ test.describe("image-generation provider branches", () => {
 	});
 
 	test("generateOpenAIImage: GPT Image 2 path returns base64 image", async () => {
-		await setPref("providerKey.openai", "test-openai-key");
+		await saveProviderKey("openai", "test-openai-key");
 		const shim = shimFetch([
 			{
 				match: (u) => u.includes("api.openai.com") && u.includes("/images/generations"),
@@ -139,7 +163,7 @@ test.describe("image-generation provider branches", () => {
 	});
 
 	test("generateGeminiImage: inlineData decoded", async () => {
-		await setPref("providerKey.google", "test-google-key");
+		await saveProviderKey("google", "test-google-key");
 		const shim = shimFetch([
 			{
 				match: (u) => u.includes("generativelanguage.googleapis.com") && u.includes(":generateContent"),
@@ -167,7 +191,7 @@ test.describe("image-generation provider branches", () => {
 	});
 
 	test("generateImagenImage: predictions decoded", async () => {
-		await setPref("providerKey.google", "test-google-key");
+		await saveProviderKey("google", "test-google-key");
 		const shim = shimFetch([
 			{
 				match: (u) => u.includes("generativelanguage.googleapis.com") && u.includes(":predict"),
@@ -191,7 +215,7 @@ test.describe("image-generation provider branches", () => {
 	});
 
 	test("error stringification: malformed data.error never produces [object Object]", async () => {
-		await setPref("providerKey.openai", "test-openai-key");
+		await saveProviderKey("openai", "test-openai-key");
 		// Provider returns a structured error WITHOUT a `.message` field — old
 		// behaviour would `String(data.error)` → "[object Object]".
 		const shim = shimFetch([
@@ -222,7 +246,7 @@ test.describe("image-generation provider branches", () => {
 	});
 
 	test("status code prefix: thrown message begins with HTTP status", async () => {
-		await setPref("providerKey.openai", "test-openai-key");
+		await saveProviderKey("openai", "test-openai-key");
 		const shim = shimFetch([
 			{
 				match: (u) => u.includes("api.openai.com") && u.includes("/images/generations"),
