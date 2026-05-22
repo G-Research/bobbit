@@ -11,7 +11,13 @@ Build an interactive HTML interface in the live preview panel for: **$ARGUMENTS*
 
 ## How it works
 
-Use `preview_open(html="...")` to render HTML in a split-pane alongside the chat. The panel auto-updates on each call. The user can expand it fullscreen via the maximize icon (Escape to exit).
+Use `preview_open(html="...")` to render ephemeral reports, mockups, charts, and interactive UI in a split-pane alongside the chat. The panel auto-updates on each call. The user can expand it fullscreen via the maximize icon (Escape to exit).
+
+The preview workspace dedupes identical artifacts by content hash. Reopening or regenerating the same bytes may select/update the existing live preview tab instead of creating a second historical tab; different content remains separately restorable.
+
+Use `preview_open(file="/absolute/path/to/file.html")` only for an existing or reusable file-backed preview. Declare sibling CSS, images, and other assets explicitly with `assets` or `manifest`; undeclared siblings will 404. Do not write and preview the same artifact through both the inline file-render surface and the live preview panel.
+
+For the full contract, follow `defaults/docs/html-rendering.md`.
 
 ## Setup — always start with this skeleton
 
@@ -127,9 +133,11 @@ Handled automatically — the preview bridge syncs the app's theme. Your UI adap
 
 ## Rules
 
-1. **Always use `preview_open`** — never write a standalone HTML file. The preview panel is the delivery mechanism.
-2. **Always include `<link rel="stylesheet" href="/src/ui/app.css">`** — this gives you the design system.
-3. **Use CSS variables for all colors** — never hardcode hex/rgb values. This ensures dark/light mode works.
-4. **Make it interactive** — add event handlers, state management, filtering, sorting. The user should be able to explore and interact, not just look.
-5. **Iterate** — call `preview_open` repeatedly as you build. Start with structure, add styling, then interactivity. The panel updates in-place.
-6. **Describe changes in chat** — don't dump HTML in chat. Just say what you changed; the user sees it in the panel.
+1. **Use `preview_open(html=...)` by default** — the live preview panel is the delivery mechanism for this skill.
+2. **Write standalone `.html` only when the user asks for a committed file deliverable** — then do not also call `preview_open` for the same artifact.
+3. **Use `preview_open(file=...)` only for existing/reusable file-backed previews** — pass an absolute entry path and declare sibling assets with `assets` or `manifest`.
+4. **Always include `<link rel="stylesheet" href="/src/ui/app.css">`** — this gives you the design system.
+5. **Use CSS variables for all colors** — never hardcode hex/rgb values. This ensures dark/light mode works.
+6. **Make it interactive** — add event handlers, state management, filtering, sorting. The user should be able to explore and interact, not just look.
+7. **Iterate** — call `preview_open` repeatedly as you build. Start with structure, add styling, then interactivity. The panel updates in-place and identical content may dedupe by content hash.
+8. **Describe changes in chat** — don't dump HTML in chat. Just say what you changed; the user sees it in the panel.

@@ -16,6 +16,7 @@ export interface PreviewChangedEvent {
 	mtime: number;
 	url?: string;
 	path?: string;
+	contentHash?: string;
 }
 
 const emitters = new Map<string, EventEmitter>();

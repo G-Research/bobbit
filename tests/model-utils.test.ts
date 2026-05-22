@@ -68,17 +68,17 @@ describe("inferMeta()", () => {
 		assert.equal(meta.contextWindow, 400_000);
 	});
 
-	it("GPT-5.4 → reasoning=true so xhigh does not clamp to off", () => {
+	it("GPT-5.4 → 272K context and reasoning=true so xhigh does not clamp to off", () => {
 		const meta = inferMeta("gpt-5.4");
-		assert.equal(meta.contextWindow, 1_050_000);
+		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));
 	});
 
-	it("GPT-5.5 → 1M context, 128K max, reasoning=true", () => {
+	it("GPT-5.5 → 272K context, 128K max, reasoning=true", () => {
 		const meta = inferMeta("gpt-5.5");
-		assert.equal(meta.contextWindow, 1_000_000);
+		assert.equal(meta.contextWindow, 272_000);
 		assert.equal(meta.maxTokens, 128_000);
 		assert.equal(meta.reasoning, true);
 		assert.ok(meta.input!.includes("image"));

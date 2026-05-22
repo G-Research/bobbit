@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { getModels } from "@earendil-works/pi-ai";
+
 import { globalAgentDir } from "../bobbit-dir.js";
 import type { ApiModel } from "./model-registry.js";
 
@@ -9,16 +11,17 @@ type OpenAIAddition = Omit<ApiModel, "authenticated">;
 /**
  * ── OpenAI / OpenAI-Codex model additions ─────────────────────────
  *
- * These entries are merged into the user's `models.json` so that pi-ai's
- * model registry surfaces speculative future-flagship OpenAI models (GPT-5.5
- * variants) under both the `openai` and `openai-codex` providers.
+ * These entries are merged into the user's `models.json` only when pi-ai does
+ * not already ship the same provider/model pair. Once pi-ai adds a model,
+ * `writeOpenAIModelAdditions` removes Bobbit-owned duplicate custom entries so
+ * stale speculative metadata cannot shadow the built-in registry.
  *
- * Cost values below are best-guess placeholders. `writeOpenAIModelAdditions`
- * is conservative: when an entry already exists in `models.json`, it only
- * overwrites a specific field if that field still equals the value Bobbit
- * previously emitted as the default (tracked in `PREV_DEFAULTS`). This
- * preserves user-edited fields across upgrades — if you tweaked the cost
- * locally, future Bobbit versions won't clobber it.
+ * Cost values below are best-guess placeholders. The merge is conservative:
+ * when an entry already exists in `models.json`, it only overwrites a specific
+ * field if that field still equals the value Bobbit previously emitted as the
+ * default (tracked in `PREV_DEFAULTS`). This preserves user-edited fields
+ * across upgrades — if you tweaked the cost locally, future Bobbit versions
+ * won't clobber it.
  *
  * Adding a new revision: when you change a field's default below, append the
  * *previous* default to `PREV_DEFAULTS` (keyed by `${provider}::${id}::${field}`)
@@ -142,6 +145,14 @@ function valuesEqual(a: unknown, b: unknown): boolean {
 	return false;
 }
 
+function getBuiltInModel(provider: string, id: string): Record<string, unknown> | undefined {
+	try {
+		return (getModels(provider as any) as unknown as Array<Record<string, unknown>>).find((m) => m.id === id);
+	} catch {
+		return undefined;
+	}
+}
+
 function isBobbitOwned(provider: string, id: string, field: string, currentValue: unknown, currentDefault: unknown): boolean {
 	if (valuesEqual(currentValue, currentDefault)) return true;
 	const key = `${provider}::${id}::${field}`;
@@ -167,6 +178,72 @@ const ADDITION_FIELD_SAMPLE: Record<keyof Omit<OpenAIAddition, "id" | "provider"
 };
 const ADDITION_FIELDS: Array<keyof OpenAIAddition> = Object.keys(ADDITION_FIELD_SAMPLE) as Array<keyof OpenAIAddition>;
 
+function hasUserEditedField(provider: string, model: OpenAIAddition, existing: Record<string, unknown>): boolean {
+	const knownKeys = new Set<string>(["id", ...ADDITION_FIELDS.map(String)]);
+	if (Object.keys(existing).some((key) => !knownKeys.has(key))) return true;
+	return ADDITION_FIELDS.some((field) => {
+		const current = existing[field];
+		if (current === undefined) return false;
+		const defaultValue = (model as Record<string, unknown>)[field];
+		return !isBobbitOwned(provider, model.id, field, current, defaultValue);
+	});
+}
+
+function syncOrRemoveBuiltInDuplicate(
+	provider: string,
+	model: OpenAIAddition,
+	builtIn: Record<string, unknown>,
+	models: Array<Record<string, unknown>>,
+	existing: Record<string, unknown>,
+): boolean {
+	const index = models.indexOf(existing);
+	if (index === -1) return false;
+
+	// Pure Bobbit additions should disappear once pi-ai ships the model. Leaving
+	// them in `models.json` shadows the built-in entry because pi-coding-agent's
+	// custom-model merge is provider+id-last-wins.
+	if (!hasUserEditedField(provider, model, existing)) {
+		models.splice(index, 1);
+		return true;
+	}
+
+	// If the user edited one field (for example pricing), keep the custom entry
+	// but migrate any still-Bobbit-owned fields to the now-authoritative built-in
+	// values so stale context windows do not survive indefinitely.
+	let changed = false;
+	for (const field of ADDITION_FIELDS) {
+		const builtInValue = builtIn[field];
+		if (builtInValue === undefined) continue;
+		const current = existing[field];
+		const defaultValue = (model as Record<string, unknown>)[field];
+		if (current === undefined || isBobbitOwned(provider, model.id, field, current, defaultValue)) {
+			if (!valuesEqual(current, builtInValue)) {
+				existing[field] = builtInValue;
+				changed = true;
+			}
+		}
+	}
+	return changed;
+}
+
+function pruneEmptyProviderBlocks(data: Record<string, any>): boolean {
+	let changed = false;
+	for (const [provider, config] of Object.entries(data.providers ?? {})) {
+		if (
+			config &&
+			typeof config === "object" &&
+			!Array.isArray(config) &&
+			Object.keys(config).length === 1 &&
+			Array.isArray((config as any).models) &&
+			(config as any).models.length === 0
+		) {
+			delete data.providers[provider];
+			changed = true;
+		}
+	}
+	return changed;
+}
+
 export function writeOpenAIModelAdditions(): void {
 	const data = readModelsJson();
 	if (!data.providers) data.providers = {};
@@ -174,11 +251,19 @@ export function writeOpenAIModelAdditions(): void {
 	let changed = false;
 	for (const model of OPENAI_MODEL_ADDITIONS) {
 		const provider = model.provider;
+		const builtIn = getBuiltInModel(provider, model.id);
+		if (builtIn && !data.providers[provider]) continue;
+
 		if (!data.providers[provider]) data.providers[provider] = {};
 		if (!Array.isArray(data.providers[provider].models)) data.providers[provider].models = [];
 
 		const models = data.providers[provider].models as Array<Record<string, unknown>>;
 		const existing = models.find((m) => m.id === model.id) as Record<string, unknown> | undefined;
+
+		if (builtIn) {
+			if (existing && syncOrRemoveBuiltInDuplicate(provider, model, builtIn, models, existing)) changed = true;
+			continue;
+		}
 
 		if (!existing) {
 			// Entry missing entirely — write the full default payload.
@@ -217,5 +302,6 @@ export function writeOpenAIModelAdditions(): void {
 		}
 	}
 
+	if (pruneEmptyProviderBlocks(data)) changed = true;
 	if (changed) writeModelsJson(data);
 }

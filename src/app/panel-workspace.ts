@@ -46,6 +46,31 @@ export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boo
 	return source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
 }
 
+export function normalizePreviewContentHash(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const hash = value.trim().toLowerCase();
+	return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
+}
+
+export function previewContentHashFromTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab || tab.kind !== "preview") return "";
+	const source = tab.source as Record<string, unknown> | undefined;
+	const tabState = tab.state as Record<string, unknown> | undefined;
+	return normalizePreviewContentHash(tabState?.contentHash) || normalizePreviewContentHash(source?.contentHash);
+}
+
+export function previewTabsHaveSameContent(a: PanelWorkspaceTab | undefined | null, b: PanelWorkspaceTab | undefined | null): boolean {
+	const ah = previewContentHashFromTab(a);
+	return !!ah && ah === previewContentHashFromTab(b);
+}
+
+export function previewTabAllowsLiveDedupe(tab: PanelWorkspaceTab | undefined | null): boolean {
+	if (!tab || tab.kind !== "preview") return true;
+	const source = tab.source as Record<string, unknown> | undefined;
+	const tabState = tab.state as Record<string, unknown> | undefined;
+	return source?.dedupeWithLive !== false && tabState?.dedupeWithLive !== false;
+}
+
 function normalizePanelTabId(id: string): string {
 	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID ? LIVE_PREVIEW_PANEL_TAB_ID : id;
 }
@@ -179,6 +204,7 @@ export interface BuildPanelWorkspaceTabsInput {
 	sessionId?: string;
 	isPreviewSession: boolean;
 	previewEntry: string;
+	previewContentHash?: string;
 	activeProposalTypes: ProposalType[];
 	assistantProposalType: ProposalType | null;
 	reviewTitles: string[];
@@ -200,13 +226,17 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 	if (input.isPreviewSession) {
 		const entry = input.previewEntry || "inline.html";
 		const title = `Preview: ${entry}`;
+		const contentHash = normalizePreviewContentHash(input.previewContentHash);
 		tabs.push({
 			id: LIVE_PREVIEW_PANEL_TAB_ID,
 			kind: "preview",
 			title,
 			label: title,
 			legacyTab: "preview",
-			source: { type: "preview", entry, sessionId: input.sessionId },
+			source: contentHash
+				? { type: "preview", entry, sessionId: input.sessionId, contentHash }
+				: { type: "preview", entry, sessionId: input.sessionId },
+			state: contentHash ? { contentHash } : undefined,
 		});
 	}
 
