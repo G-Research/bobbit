@@ -11,7 +11,7 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, createSession, deleteSession, createGoal, deleteGoal, apiFetch } from "../e2e-setup.js";
+import { waitForHealth, createGoal, deleteGoal } from "../e2e-setup.js";
 import {
 	SpecContext,
 } from "./spec-framework.js";
@@ -52,7 +52,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// N-01: Sidebar session selection and highlight
 	// ---------------------------------------------------------------
 
-	test("N-01: Sidebar session selection updates URL and highlight @smoke", async () => {
+	test("N-01/N-07: Sidebar selection persists and title survives reload @smoke", async () => {
 		s.begin(STORY_N01);
 
 		await s.createTestSession("A");
@@ -78,58 +78,31 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await s.session("B").is_highlighted();
 		await s.url_contains(`/session/${s.session("B").sessionId}`);
 
-		// act — reload page
+		// assert — N-07 page title is set before reload
+		s.begin(STORY_N07);
+		s.assert();
+		await s.page_title_contains("Bobbit");
+
+		// act — reload page for N-01
+		s.begin(STORY_N01);
 		s.act();
 		await s.reload();
 
 		// assert — session B still selected after reload
 		s.assert();
 		await s.url_contains(`/session/${s.session("B").sessionId}`);
-	});
 
-	// ---------------------------------------------------------------
-	// N-02: Goal dashboard navigation and back
-	// ---------------------------------------------------------------
-
-	test("N-02: Goal dashboard navigation and back", async () => {
-		s.begin(STORY_N02);
-
-		await s.createTestSession("A");
-		const goal = await createGoal({ title: "Nav test goal" });
-		goalIds.push(goal.id);
-		await s.open();
-
-		// setup — navigate to session first
-		await s.navigate_to("session", "A");
-		await s.editor.is_visible();
-
-		// act — navigate to goal dashboard
-		s.act();
-		await navigateToHash(s.page, `#/goal/${goal.id}`);
-
-		// assert — goal dashboard visible, URL correct. Use toBeVisible with
-		// generous timeout instead of a fixed sleep; under parallel load the
-		// dashboard container can take longer than 500ms to mount.
+		// assert — N-07 title survives the same reload
+		s.begin(STORY_N07);
 		s.assert();
-		await s.url_contains(`/goal/${goal.id}`);
-		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 15_000 });
-
-		// act — press back to return to session
-		s.act();
-		await s.navigate_back();
-
-		// assert — back at session, textarea visible
-		s.assert();
-		await s.url_contains(`/session/${s.session("A").sessionId}`);
-		await s.editor.is_visible();
+		await s.page_title_contains("Bobbit");
 	});
 
 	// ---------------------------------------------------------------
 	// N-03: Deep links to all view types
 	// ---------------------------------------------------------------
 
-	test("N-03: Deep links to all view types @smoke", async () => {
+	test("N-03/N-10: Deep links and settings sub-navigation @smoke", async () => {
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
@@ -159,6 +132,40 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await expect(s.page.getByText("Models").first())
 			.toBeVisible({ timeout: 10_000 });
+
+		// N-10: settings sub-navigation shares the same settings route setup.
+		s.begin(STORY_N10);
+		s.act();
+		await navigateToHash(s.page, "#/settings/system/general");
+		s.assert();
+		await s.page.waitForFunction(() =>
+			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
+		await expect(s.page.getByText("Settings").first())
+			.toBeVisible({ timeout: 10_000 });
+
+		s.act();
+		const modelTab = s.page.getByText("Models").first();
+		if (await modelTab.isVisible({ timeout: 3_000 }).catch(() => false)) {
+			await modelTab.click();
+			await s.page.waitForFunction(() => window.location.hash.includes("/settings"), null, { timeout: 5_000 });
+
+			s.assert();
+			const hash = await s.page.evaluate(() => window.location.hash);
+			expect(hash).toContain("/settings");
+		} else {
+			s.assert();
+			await s.url_contains("/settings");
+		}
+
+		s.act();
+		await navigateToHash(s.page, "#/settings");
+		s.assert();
+		await s.page.waitForFunction(() =>
+			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
+		await expect(s.page.locator("button").filter({ hasText: "Settings" }).first())
+			.toBeVisible({ timeout: 5_000 });
+
+		s.begin(STORY_N03);
 
 		// Deep link: roles
 		s.act();
@@ -321,29 +328,6 @@ test.describe("CT-13: URL routing and navigation", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// N-07: Page title reflects project
-	// ---------------------------------------------------------------
-
-	test("N-07: Page title contains Bobbit", async () => {
-		s.begin(STORY_N07);
-
-		await s.createTestSession("A");
-		await s.open();
-
-		s.act();
-		// No action needed — just check the title
-
-		s.assert();
-		await s.page_title_contains("Bobbit");
-
-		// After reload, still has Bobbit in title
-		s.act();
-		await s.reload();
-		s.assert();
-		await s.page_title_contains("Bobbit");
-	});
-
-	// ---------------------------------------------------------------
 	// N-08: Keyboard shortcuts for navigation
 	// ---------------------------------------------------------------
 
@@ -453,16 +437,37 @@ test.describe("CT-13: URL routing and navigation", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// N-09: Cross-feature navigation journey
+	// N-02 / N-09: Goal back navigation and cross-feature journey
 	// ---------------------------------------------------------------
 
-	test("N-09: Cross-feature navigation journey", async () => {
-		s.begin(STORY_N09);
-
+	test("N-02/N-09: Goal dashboard back navigation and cross-feature journey", async () => {
 		await s.createTestSession("A");
 		const goal = await createGoal({ title: "Journey goal" });
 		goalIds.push(goal.id);
 		await s.open();
+
+		// N-02: session → goal dashboard → browser back to session.
+		s.begin(STORY_N02);
+		await s.navigate_to("session", "A");
+		await s.editor.is_visible();
+
+		s.act();
+		await navigateToHash(s.page, `#/goal/${goal.id}`);
+		s.assert();
+		await s.url_contains(`/goal/${goal.id}`);
+		await expect(s.page.locator(".dashboard-container").first())
+			.toBeVisible({ timeout: 15_000 });
+
+		s.act();
+		await s.navigate_back();
+		s.assert();
+		await s.url_contains(`/session/${s.session("A").sessionId}`);
+		await s.editor.is_visible();
+
+		// N-09: reuse the same session/goal for the broader cross-feature path.
+		s.begin(STORY_N09);
+		await navigateToHash(s.page, "#/");
+		await s.page.waitForFunction(() => window.location.hash === "" || window.location.hash === "#/", null, { timeout: 5_000 });
 
 		// act — landing → session
 		s.act();
@@ -499,52 +504,6 @@ test.describe("CT-13: URL routing and navigation", () => {
 		// No blank screens at any step — app still responsive
 		await expect(s.page.locator("button").filter({ hasText: "Settings" }).first())
 			.toBeVisible({ timeout: 10_000 });
-	});
-
-	// ---------------------------------------------------------------
-	// N-10: Settings sub-navigation
-	// ---------------------------------------------------------------
-
-	test("N-10: Settings sub-navigation", async () => {
-		s.begin(STORY_N10);
-
-		await s.createTestSession("A");
-		await s.open();
-
-		// act — navigate to settings/system/general
-		s.act();
-		await navigateToHash(s.page, "#/settings/system/general");
-		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
-		await expect(s.page.getByText("Settings").first())
-			.toBeVisible({ timeout: 10_000 });
-
-		// act — click a different settings tab (Models)
-		s.act();
-		const modelTab = s.page.getByText("Models").first();
-		if (await modelTab.isVisible({ timeout: 3_000 }).catch(() => false)) {
-			await modelTab.click();
-			await s.page.waitForFunction(() => window.location.hash.includes("/settings"), null, { timeout: 5_000 });
-
-			s.assert();
-			const hash = await s.page.evaluate(() => window.location.hash);
-			expect(hash).toContain("/settings");
-		} else {
-			// If Models tab not found, just verify we're on settings
-			s.assert();
-			await s.url_contains("/settings");
-		}
-
-		// act — navigate to bare /settings (no sub-path)
-		s.act();
-		await navigateToHash(s.page, "#/settings");
-		s.assert();
-		await s.page.waitForFunction(() =>
-			window.location.hash.startsWith("#/settings"), { timeout: 5_000 });
-		// Should default to a valid view (not blank) — settings button always visible
-		await expect(s.page.locator("button").filter({ hasText: "Settings" }).first())
-			.toBeVisible({ timeout: 5_000 });
 	});
 });
 
