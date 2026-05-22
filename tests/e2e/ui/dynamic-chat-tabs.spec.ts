@@ -272,12 +272,6 @@ async function clickTopLevelTabByIndex(page: Page, index: number, errorPrefix: s
 	await tab.click();
 }
 
-async function matchingTabIndexes(page: Page, label: RegExp): Promise<number[]> {
-	return (await visiblePanelTabs(page))
-		.filter((tab) => label.test(tab.label))
-		.map((tab) => tab.index);
-}
-
 async function ensureChatInput(page: Page, errorPrefix: string): Promise<void> {
 	const textarea = page.locator("textarea").first();
 	if (await textarea.isVisible().catch(() => false)) return;
@@ -343,55 +337,6 @@ async function expectPreviewContains(page: Page, expectedText: string, errorPref
 	).toContainText(expectedText, { timeout: 10_000 });
 }
 
-async function rawPreviewBodyText(page: Page): Promise<string> {
-	return (await page.frameLocator(".goal-preview-panel iframe").locator("body").textContent({ timeout: 500 }).catch(() => "") || "").trim();
-}
-
-async function collectPreviewTabTexts(page: Page, expectedCount: number, errorPrefix: string): Promise<string[]> {
-	const previewTabIndexes = await matchingTabIndexes(page, PREVIEW_TAB_RE);
-	if (previewTabIndexes.length < expectedCount) {
-		const labels = await visiblePanelTabLabels(page);
-		throw new Error(`${errorPrefix}: expected at least ${expectedCount} preview tabs, found ${previewTabIndexes.length}; visible tabs were: ${labels.join(", ") || "<none>"}`);
-	}
-
-	const texts: string[] = [];
-	for (let i = 0; i < expectedCount; i++) {
-		const beforeText = await rawPreviewBodyText(page);
-		await clickTopLevelTabByIndex(page, previewTabIndexes[i], errorPrefix);
-		if (beforeText && i > 0) {
-			await expect.poll(() => rawPreviewBodyText(page), {
-				timeout: 5_000,
-				message: `${errorPrefix}: selecting preview tab ${i + 1} should switch away from the previous preview content`,
-			}).not.toBe(beforeText);
-		}
-		await expect.poll(() => rawPreviewBodyText(page), {
-			timeout: 10_000,
-			message: `${errorPrefix}: preview tab ${i + 1} should render non-empty iframe content`,
-		}).not.toBe("");
-		texts.push(await rawPreviewBodyText(page));
-	}
-	return texts;
-}
-
-async function openPreviewSnapshotToolCard(page: Page, size: number, ordinal: number, errorPrefix: string): Promise<string> {
-	const expectedText = "x".repeat(size);
-	await ensureChatInput(page, errorPrefix);
-	const beforeCount = await page.locator(PREVIEW_OPEN_BUTTON_SELECTOR).count();
-	await sendMessage(page, `PREVIEW_OPEN_SNAPSHOT SIZE=${size}`);
-	await expect(
-		page.locator(PREVIEW_OPEN_BUTTON_SELECTOR),
-		`${errorPrefix}: preview_open tool card ${ordinal} should render its own Open button`,
-	).toHaveCount(beforeCount + 1, { timeout: 15_000 });
-
-	const button = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR).nth(beforeCount);
-	await button.scrollIntoViewIfNeeded();
-	await expect(button, `${errorPrefix}: preview_open tool card ${ordinal} Open button should be enabled`).toBeEnabled({ timeout: 5_000 });
-	await button.click();
-	await expect(button, `${errorPrefix}: clicking preview_open tool card ${ordinal} should acknowledge that it opened`).toHaveText(/Opened/, { timeout: 5_000 });
-	await expectPreviewContains(page, expectedText, `${errorPrefix}: opening preview_open tool card ${ordinal} should select that snapshot immediately`);
-	return expectedText;
-}
-
 async function appendSyntheticToolCard(
 	page: Page,
 	args: { toolId: string; toolName: string; input: Record<string, unknown>; resultContent: string[] },
@@ -436,7 +381,7 @@ async function mountV3PreviewEntry(page: Page, sessionId: string, entry: string,
 
 async function appendV3PreviewToolCard(page: Page, sessionId: string, toolId: string, entry: string, bodyText: string): Promise<string> {
 	const mounted = await mountV3PreviewEntry(page, sessionId, entry, bodyText);
-	const snapshot = `__preview_snapshot_v3__\n${JSON.stringify({ kind: "preview", url: mounted.url, path: mounted.path })}\n`;
+	const snapshot = `__preview_snapshot_v3__\n${JSON.stringify({ kind: "preview", url: mounted.url, path: mounted.path, entry: mounted.entry })}\n`;
 	await appendSyntheticToolCard(page, {
 		toolId,
 		toolName: "preview_open",
@@ -582,9 +527,17 @@ test.describe("Dynamic chat tabs", () => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1280, height: 800 });
 
-		await openGoalAssistantProposal(page);
-		const firstPreviewText = await openPreviewSnapshotToolCard(page, 11, 1, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
-		const secondPreviewText = await openPreviewSnapshotToolCard(page, 29, 2, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		const sessionId = await openGoalAssistantProposal(page);
+		await ensureChatInput(page, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		const firstPreviewText = await appendV3PreviewToolCard(page, sessionId, "tool-multipreview-a", "multipreview-a.html", "Multipreview Preview A Content");
+		const secondPreviewText = await appendV3PreviewToolCard(page, sessionId, "tool-multipreview-b", "multipreview-b.html", "Multipreview Preview B Content");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: two v3 preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
+		await buttons.nth(0).click();
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: opening the first preview_open tool card should select that snapshot immediately");
+		await buttons.nth(1).click();
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: opening the second preview_open tool card should select that snapshot immediately");
 
 		await waitForTopLevelTabCounts(
 			page,
@@ -595,19 +548,13 @@ test.describe("Dynamic chat tabs", () => {
 			"DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: expected two distinct top-level preview tabs plus the Goal proposal tab after opening two preview_open tool cards",
 		);
 
-		const previewTabTexts = await collectPreviewTabTexts(page, 2, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
-		expect(
-			previewTabTexts.some((text) => text.includes(firstPreviewText)),
-			`DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: no selectable preview tab rendered the first preview_open snapshot; tab texts were ${JSON.stringify(previewTabTexts)}`,
-		).toBe(true);
-		expect(
-			previewTabTexts.some((text) => text.includes(secondPreviewText)),
-			`DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: no selectable preview tab rendered the second preview_open snapshot; tab texts were ${JSON.stringify(previewTabTexts)}`,
-		).toBe(true);
+		await selectTopLevelTabByTitle(page, /Preview:\s*multipreview-a\.html/i, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: first preview tab should render the first preview_open snapshot");
+		await selectTopLevelTabByTitle(page, /Preview:\s*multipreview-b\.html/i, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: second preview tab should render the second preview_open snapshot");
 
 		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
 
-		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
 		await buttons.nth(0).scrollIntoViewIfNeeded();
 		await buttons.nth(0).click();
 		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopening the first preview_open tool card should restore the first snapshot");
@@ -625,8 +572,14 @@ test.describe("Dynamic chat tabs", () => {
 
 		await openApp(page);
 		const sessionA = await createRegularSessionViaApi(page);
-		const firstPreviewText = await openPreviewSnapshotToolCard(page, 13, 1, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
-		const secondPreviewText = await openPreviewSnapshotToolCard(page, 31, 2, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		const firstPreviewText = await appendV3PreviewToolCard(page, sessionA, "tool-session-a-preview-a", "session-a-preview-a.html", "Session A Preview A Content");
+		const secondPreviewText = await appendV3PreviewToolCard(page, sessionA, "tool-session-a-preview-b", "session-a-preview-b.html", "Session A Preview B Content");
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await expect(buttons, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session A v3 preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
+		await buttons.nth(0).click();
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: opening session A preview A should show A content");
+		await buttons.nth(1).click();
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: opening session A preview B should show B content");
 		await waitForTopLevelTabCounts(
 			page,
 			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
@@ -653,11 +606,17 @@ test.describe("Dynamic chat tabs", () => {
 			async () => (await visiblePanelTabLabels(page)).filter((label) => reviewTabRe("Test Document").test(label)).length,
 			{ timeout: 5_000, message: "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B review tab must not bleed back into session A" },
 		).toBe(0);
-		const restoredTexts = await collectPreviewTabTexts(page, 2, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
-		expect(restoredTexts.some((text) => text.includes(firstPreviewText))).toBe(true);
-		expect(restoredTexts.some((text) => text.includes(secondPreviewText))).toBe(true);
+		await selectTopLevelTabByTitle(page, /Preview:\s*session-a-preview-a\.html/i, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: restored session A preview A should render its own content");
+		await selectTopLevelTabByTitle(page, /Preview:\s*session-a-preview-b\.html/i, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG");
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: restored session A preview B should render its own content");
 
 		await navigateToSession(page, sessionB);
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "Session B review", match: reviewTabRe("Test Document"), min: 1 }],
+			"DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switching back to session B should restore its own review tab",
+		);
 		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switching back to session B should restore its own review tab");
 	});
 
