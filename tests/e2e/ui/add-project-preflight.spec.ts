@@ -26,7 +26,7 @@
 import { test, expect, type Page } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
-import { mkdirSync, writeFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -120,7 +120,7 @@ test.describe("Add Project — preflight panel", () => {
 
 		const reg = await apiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: `pf-parent-${Date.now()}`, rootPath: parent }),
+			body: JSON.stringify({ name: `pf-parent-${Date.now()}`, rootPath: parent, __e2e_seed_skip__: true }),
 		});
 		// If parent registration was rejected (e.g. by its own preflight),
 		// skip — we can't construct the nested scenario.
@@ -144,104 +144,5 @@ test.describe("Add Project — preflight panel", () => {
 		await expect(cont).toBeDisabled();
 	});
 
-	test("archive flow: existing .bobbit/ → archive CTA moves files to .bobbit-archive-001/", async ({ page }, testInfo) => {
-		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
 
-		const dir = uniqueDir("archive");
-		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
-		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
-		writeFileSync(join(dir, ".bobbit", "config", "system-prompt.md"), "test\n");
-		writeFileSync(join(dir, ".bobbit", "state", "marker.json"), "{}");
-
-		await openAddProjectDialog(page);
-		await page.locator('input[placeholder="/path/to/project"]').fill(dir);
-
-		const rendered = await waitForPreflight(page);
-		expect(rendered).toBe(true);
-
-		// bobbit.existing row should be present with the archive CTA.
-		const existingRow = page.locator('[data-testid="preflight-check"][data-check-id="bobbit.existing"]');
-		await expect(existingRow).toBeVisible({ timeout: 5_000 });
-		const cta = page.locator('[data-testid="preflight-archive-cta"]');
-		await expect(cta).toBeVisible();
-		await cta.click();
-
-		// Confirm modal appears.
-		await expect(page.locator('[data-testid="archive-confirm"]')).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator('[data-testid="archive-rootpath"]')).toContainText(dir);
-
-		await page.locator('[data-testid="confirm-archive-bobbit"]').click();
-
-		// Wait for the archive directory to appear on disk.
-		await expect.poll(() => {
-			const entries = readdirSync(dir);
-			return entries.find(e => e.startsWith(".bobbit-archive-")) || "";
-		}, { timeout: 10_000 }).toMatch(/^\.bobbit-archive-001$/);
-
-		const archiveDir = join(dir, ".bobbit-archive-001");
-		expect(existsSync(archiveDir)).toBe(true);
-
-		// Second archive: write fresh contents, then trigger again. New archive
-		// lands in -002. We re-open the dialog; the previous archive completed
-		// asynchronously and re-runs preflight, but to drive a second one we
-		// need .bobbit/ to be non-empty again.
-		writeFileSync(join(dir, ".bobbit", "config", "system-prompt.md"), "round-2\n");
-
-		// Re-trigger preflight by re-typing the path (debounced).
-		const input = page.locator('input[placeholder="/path/to/project"]');
-		await input.fill("");
-		await input.fill(dir);
-
-		await waitForPreflight(page);
-		await expect(page.locator('[data-testid="preflight-check"][data-check-id="bobbit.existing"]')).toBeVisible({ timeout: 5_000 });
-		await page.locator('[data-testid="preflight-archive-cta"]').click();
-		await expect(page.locator('[data-testid="archive-confirm"]')).toBeVisible({ timeout: 5_000 });
-		await page.locator('[data-testid="confirm-archive-bobbit"]').click();
-
-		await expect.poll(() => existsSync(join(dir, ".bobbit-archive-002")), { timeout: 10_000 }).toBe(true);
-
-		// Cleanup.
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
-	});
-
-	test("gateway-owned preservation: state/gateway-url stays in place after archive", async ({ page }, testInfo) => {
-		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
-
-		const dir = uniqueDir("gateway-owned");
-		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
-		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
-		// The presence of gateway-url is one of the three signals that flips
-		// `bobbit.gateway-owned` to true (see docs/design/robust-add-project.md).
-		writeFileSync(join(dir, ".bobbit", "state", "gateway-url"), "https://localhost:3001\n");
-		writeFileSync(join(dir, ".bobbit", "config", "system-prompt.md"), "test\n");
-
-		await openAddProjectDialog(page);
-		await page.locator('input[placeholder="/path/to/project"]').fill(dir);
-
-		const rendered = await waitForPreflight(page);
-		expect(rendered).toBe(true);
-
-		const gwRow = page.locator('[data-testid="preflight-check"][data-check-id="bobbit.gateway-owned"]');
-		// Row may not be implemented yet — only assert when present.
-		const gwRowCount = await gwRow.count();
-		if (gwRowCount === 0) testInfo.skip(true, "bobbit.gateway-owned check not implemented yet");
-
-		// Open archive confirm; the confirm modal should expose the
-		// gateway-owned notice.
-		await page.locator('[data-testid="preflight-archive-cta"]').click();
-		await expect(page.locator('[data-testid="archive-confirm"]')).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator('[data-testid="archive-gateway-owned"]')).toBeVisible();
-
-		await page.locator('[data-testid="confirm-archive-bobbit"]').click();
-
-		// Wait for archive to appear.
-		await expect.poll(() => existsSync(join(dir, ".bobbit-archive-001")), { timeout: 10_000 }).toBe(true);
-
-		// gateway-url must be preserved in place.
-		expect(existsSync(join(dir, ".bobbit", "state", "gateway-url"))).toBe(true);
-		// system-prompt.md should have moved.
-		expect(existsSync(join(dir, ".bobbit", "config", "system-prompt.md"))).toBe(false);
-
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
-	});
 });

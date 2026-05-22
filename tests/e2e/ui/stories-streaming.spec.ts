@@ -31,134 +31,113 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// CT-01-a: Send message and observe streaming lifecycle
+	// CT-01-a / CT-01-d: Streaming lifecycle and queued rapid sends
 	// ---------------------------------------------------------------
 
-	test("CT-01-a: Send message and observe streaming lifecycle @smoke", async ({ rec }) => {
-		s.begin(defineStory({
+	test("CT-01-a/d: Streaming lifecycle and queued rapid sends @smoke", async ({ rec }) => {
+		const lifecycleStory = defineStory({
 			id: "CT-01-a",
 			title: "Send message and observe streaming lifecycle",
 			contracts: [CT_01, CT_06],
 			covers: [],
-		}));
+		});
+		const queuedStory = defineStory({
+			id: "CT-01-d",
+			title: "Rapid sends while streaming queue messages",
+			contracts: [CT_01],
+			covers: ["rapid-sends-while-streaming"],
+		});
 
 		// setup
+		s.begin(lifecycleStory);
 		await s.createTestSession("A");
 		await s.open();
 		await s.navigate_to("session", "A");
 
-		// act
+		// act — start the stream for CT-01-a
 		s.act();
 		await rec.capture("Empty session ready");
 		await s.send_message("STAY_BUSY:3000 hello world");
 
-		// assert
+		// assert — CT-01-a streaming controls are visible
 		s.assert();
 		await s.wait_for_streaming();
 		await rec.capture("Streaming — Stop button visible");
 		await s.editor.can("stop_streaming");
+
+		// act — CT-01-d queues follow-up sends against the same live stream
+		s.begin(queuedStory);
+		s.act();
+		await s.send_message("queued1");
+		await s.send_message("queued2");
+
+		// assert — CT-01-d queue affordance is visible while the stream runs
+		s.assert();
+		await expect(s.page.locator(".queue-pill").first())
+			.toBeVisible({ timeout: 5_000 });
+
+		// assert — CT-01-a returns to idle and remains usable
+		s.begin(lifecycleStory);
+		s.assert();
 		await s.wait_for_idle();
 		await rec.capture("Idle — turn complete");
 		await s.editor.can("send_message");
 		await s.editor.is_focused();
 		await s.message_list.contains_text("hello world");
+
+		// assert — CT-01-d queued messages are processed
+		s.begin(queuedStory);
+		s.assert();
+		await s.message_list.contains_text("queued1");
+		await s.message_list.contains_text("queued2");
 	});
 
 	// ---------------------------------------------------------------
-	// CT-01-b: Abort mid-stream preserves partial response
+	// CT-01-b / CT-01-c: Abort mid-stream and re-send
 	// ---------------------------------------------------------------
 
-	test("CT-01-b: Abort mid-stream preserves partial response @smoke @quarantine", async () => {
-		s.begin(defineStory({
+	test("CT-01-b/c: Abort mid-stream preserves editor and allows re-send @smoke @quarantine", async () => {
+		const abortStory = defineStory({
 			id: "CT-01-b",
 			title: "Abort mid-stream preserves partial response",
 			contracts: [CT_01, CT_06],
 			covers: ["abort-mid-stream"],
-		}));
+		});
+		const resendStory = defineStory({
+			id: "CT-01-c",
+			title: "Re-send after abort",
+			contracts: [CT_01],
+			covers: ["re-send-after-abort"],
+		});
 
 		// setup
+		s.begin(abortStory);
 		await s.createTestSession("A");
 		await s.open();
 		await s.navigate_to("session", "A");
 
-		// act
+		// act — abort a live stream
 		s.act();
-		await s.send_message("STAY_BUSY:1500 long task");
+		await s.send_message("STAY_BUSY:1500 first");
 		await s.wait_for_streaming();
 		await s.stop_streaming();
 		await s.wait_for_idle();
 
-		// assert
+		// assert — CT-01-b leaves the editor usable
 		s.assert();
 		await s.editor.can("send_message");
 		// After abort, click textarea to confirm it's usable (focus may stay on
 		// the now-removed stop button rather than auto-transferring)
 		await s.page.locator("message-editor textarea").first().click();
 		await s.editor.is_focused();
-	});
 
-	// ---------------------------------------------------------------
-	// CT-01-c: Re-send after abort
-	// ---------------------------------------------------------------
-
-	test("CT-01-c: Re-send after abort", async () => {
-		s.begin(defineStory({
-			id: "CT-01-c",
-			title: "Re-send after abort",
-			contracts: [CT_01],
-			covers: ["re-send-after-abort"],
-		}));
-
-		// setup
-		await s.createTestSession("A");
-		await s.open();
-		await s.navigate_to("session", "A");
-
-		// act
+		// act/assert — CT-01-c can re-send after the abort
+		s.begin(resendStory);
 		s.act();
-		await s.send_message("STAY_BUSY:1500 first");
-		await s.wait_for_streaming();
-		await s.stop_streaming();
-		await s.wait_for_idle();
 		await s.send_message("hello");
-
-		// assert
 		s.assert();
 		await s.wait_for_idle();
 		await s.message_list.contains_text("hello");
-	});
-
-	// ---------------------------------------------------------------
-	// CT-01-d: Rapid sends while streaming queue messages
-	// ---------------------------------------------------------------
-
-	test("CT-01-d: Rapid sends while streaming queue messages", async () => {
-		s.begin(defineStory({
-			id: "CT-01-d",
-			title: "Rapid sends while streaming queue messages",
-			contracts: [CT_01],
-			covers: ["rapid-sends-while-streaming"],
-		}));
-
-		// setup
-		await s.createTestSession("A");
-		await s.open();
-		await s.navigate_to("session", "A");
-
-		// act
-		s.act();
-		await s.send_message("STAY_BUSY:3000 working");
-		await s.wait_for_streaming();
-		await s.send_message("queued1");
-		await s.send_message("queued2");
-
-		// assert
-		s.assert();
-		await expect(s.page.locator(".queue-pill").first())
-			.toBeVisible({ timeout: 5_000 });
-		await s.wait_for_idle();
-		await s.message_list.contains_text("queued1");
-		await s.message_list.contains_text("queued2");
 	});
 
 	// ---------------------------------------------------------------
@@ -181,7 +160,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// act
 		s.act();
 		await s.navigate_to("session", "A");
-		await s.send_message("STAY_BUSY:1500 working");
+		await s.send_message("STAY_BUSY:3000 working");
 		await s.wait_for_streaming();
 		await s.navigate_to("session", "B");
 		await s.navigate_to("session", "A");
@@ -316,110 +295,74 @@ test.describe("CT-01: Streaming lifecycle", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// ST-DEDUP-02: Proposal burst keeps both widgets in order (unified
-	// message-ordering reducer).
+	// ST-DEDUP-02 / ST-DEDUP-03: Proposal burst ordering and replay dedup.
 	// ---------------------------------------------------------------
 	//
-	// Pre-fix: legacy `_deferredAssistantMessage` slot held the first
-	// `propose_*` assistant message until the next message_update; a second
-	// `propose_*` assistant turn arriving before that flush silently
-	// overwrote the first. Post-fix: the unified reducer keys every
-	// transcript row by (_order, _insertionTick) — both widgets land in
-	// chronological order and stay rendered.
-	test("ST-DEDUP-02: Proposal burst keeps both widgets in order", async ({ rec }) => {
-		s.begin(defineStory({
+	// Pre-fix: legacy `_deferredAssistantMessage` could overwrite the first
+	// `propose_*` assistant turn in a burst, and replayed buffered events could
+	// append a second copy of either widget. The unified reducer keys transcript
+	// rows by (_order, _insertionTick) and live-event seq, so the same burst can
+	// prove both source order and replay stability.
+	test("ST-DEDUP-02/03: Proposal burst order survives replay", async ({ rec }) => {
+		const burstOrderStory = defineStory({
 			id: "ST-DEDUP-02",
 			title: "Proposal burst keeps both widgets in order",
 			contracts: [CT_01],
 			covers: ["unified-message-ordering-reducer", "proposal-burst"],
-		}));
+		});
+		const replayStory = defineStory({
+			id: "ST-DEDUP-03",
+			title: "Mid-burst reconnect preserves widgets exactly once",
+			contracts: [CT_01, CT_05],
+			covers: ["unified-message-ordering-reducer", "replay-dedup"],
+		});
+
+		const countWidgets = async () => await s.page.evaluate(() => {
+			const body = document.body.textContent || "";
+			const order: string[] = [];
+			let goal = 0, role = 0;
+			for (const el of document.querySelectorAll("assistant-message")) {
+				const t = el.textContent || "";
+				if (t.includes("Goal Proposal")) { order.push("goal"); goal++; }
+				if (t.includes("Role Proposal")) { order.push("role"); role++; }
+			}
+			return {
+				goal,
+				role,
+				order,
+				assistant: document.querySelectorAll("assistant-message").length,
+				done: body.split("BURST_DONE_E2E").length - 1,
+			};
+		});
 
 		// setup
-		await s.createTestSession("A");
+		s.begin(burstOrderStory);
+		const sessionId = await s.createTestSession("A");
 		await s.open();
 		await s.navigate_to("session", "A");
 
-		// act
+		// act — one burst supplies both ordering and replay-dedup coverage
 		s.act();
 		await rec.capture("Empty session before burst");
 		await s.send_message("please run a proposal_burst for E2E");
 		await s.wait_for_idle();
 		await rec.capture("Burst complete — idle");
 
-		// Wait for the closing assistant message that signals the burst is done.
-		await expect.poll(
-			async () => await s.page.evaluate(() =>
-				Array.from(document.querySelectorAll("assistant-message")).filter(
-					(el) => (el.textContent || "").includes("BURST_DONE_E2E")
-				).length
-			),
-			{ timeout: 15_000, message: "burst close marker did not render" },
-		).toBeGreaterThan(0);
+		await expect.poll(async () => (await countWidgets()).done, {
+			timeout: 15_000,
+			message: "burst close marker did not render",
+		}).toBeGreaterThan(0);
 
-		// assert — both proposal widgets render exactly once, in source order.
+		// assert — ST-DEDUP-02: both proposal widgets render once, in source order.
 		s.assert();
-		const counts = await s.page.evaluate(() => {
-			const names: string[] = [];
-			let goalProposals = 0, roleProposals = 0;
-			for (const el of document.querySelectorAll("assistant-message")) {
-				const text = el.textContent || "";
-				if (text.includes("Goal Proposal")) { names.push("goal"); goalProposals++; }
-				if (text.includes("Role Proposal")) { names.push("role"); roleProposals++; }
-			}
-			return { goalProposals, roleProposals, order: names };
-		});
-		expect(counts.goalProposals).toBe(1);
-		expect(counts.roleProposals).toBe(1);
-		expect(counts.order).toEqual(["goal", "role"]);
-		await rec.capture("Both widgets rendered in order");
-	});
-
-	// ---------------------------------------------------------------
-	// ST-DEDUP-03: Mid-burst replay does not duplicate the proposal widgets.
-	// ---------------------------------------------------------------
-	//
-	// Combines ST-DEDUP-01 (replay infrastructure) with the proposal burst:
-	// after a full burst lands, replaying every buffered event must NOT
-	// produce a second copy of either widget. The reducer's id-keyed render
-	// keys + seq-stamped live-event dedup ensure stability.
-	test("ST-DEDUP-03: Mid-burst reconnect / replay preserves widgets exactly once", async ({ rec }) => {
-		s.begin(defineStory({
-			id: "ST-DEDUP-03",
-			title: "Mid-burst reconnect preserves widgets exactly once",
-			contracts: [CT_01, CT_05],
-			covers: ["unified-message-ordering-reducer", "replay-dedup"],
-		}));
-
-		// setup
-		const sessionId = await s.createTestSession("A");
-		await s.open();
-		await s.navigate_to("session", "A");
-
-		await s.send_message("please run a proposal_burst for E2E");
-		await s.wait_for_idle();
-		await rec.capture("Burst complete");
-
-		const countWidgets = async () => await s.page.evaluate(() => {
-			const body = document.body.textContent || "";
-			let goal = 0, role = 0;
-			for (const el of document.querySelectorAll("assistant-message")) {
-				const t = el.textContent || "";
-				if (t.includes("Goal Proposal")) goal++;
-				if (t.includes("Role Proposal")) role++;
-			}
-			return {
-				goal, role,
-				assistant: document.querySelectorAll("assistant-message").length,
-				done: body.split("BURST_DONE_E2E").length - 1,
-			};
-		});
-
-		await expect.poll(async () => (await countWidgets()).done, { timeout: 15_000 }).toBeGreaterThan(0);
 		const before = await countWidgets();
 		expect(before.goal).toBe(1);
 		expect(before.role).toBe(1);
+		expect(before.order).toEqual(["goal", "role"]);
+		await rec.capture("Both widgets rendered in order");
 
-		// act — replay every buffered event.
+		// act — ST-DEDUP-03: replay every buffered event.
+		s.begin(replayStory);
 		s.act();
 		const replayResp = await apiFetch(`/api/internal/test/replay-buffered-events/${sessionId}`, { method: "POST" });
 		expect(replayResp.status).toBe(200);
@@ -443,7 +386,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 			return w.__burstStability.ticks >= 5;
 		}, null, { timeout: 5_000, polling: 100 });
 
-		// assert
+		// assert — replay must not duplicate widgets or assistant rows.
 		s.assert();
 		const after = await countWidgets();
 		expect(after.goal).toBe(1);
@@ -603,70 +546,50 @@ test.describe("CT-06: Focus follows intent", () => {
 	});
 
 	// ---------------------------------------------------------------
-	// CT-06-a: Focus follows rapid session switch
+	// CT-06-a / CT-06-b: Focus follows navigation intent
 	// ---------------------------------------------------------------
 
-	test("CT-06-a: Focus follows rapid session switch", async () => {
-		s.begin(defineStory({
+	test("CT-06-a/b: Focus follows session switch and settings detour", async () => {
+		const switchStory = defineStory({
 			id: "CT-06-a",
 			title: "Focus follows rapid session switch",
 			contracts: [CT_06],
 			covers: ["rapid-session-switch"],
-		}));
-
-		// setup
-		await s.createTestSession("A");
-		await s.createTestSession("B");
-		await s.open();
-
-		// act
-		s.act();
-		await s.navigate_to("session", "A");
-
-		// assert
-		s.assert();
-		await s.editor.is_focused();
-
-		// act — switch to B
-		s.act();
-		await s.navigate_to("session", "B");
-
-		// assert
-		s.assert();
-		await s.editor.is_focused();
-
-		// act — switch back to A
-		s.act();
-		await s.navigate_to("session", "A");
-
-		// assert
-		s.assert();
-		await s.editor.is_focused();
-	});
-
-	// ---------------------------------------------------------------
-	// CT-06-b: Focus returns after dialog close
-	// ---------------------------------------------------------------
-
-	test("CT-06-b: Focus returns after dialog close", async () => {
-		s.begin(defineStory({
+		});
+		const dialogStory = defineStory({
 			id: "CT-06-b",
 			title: "Focus returns after dialog close",
 			contracts: [CT_06],
 			covers: ["dialog-close"],
-		}));
+		});
 
 		// setup
+		s.begin(switchStory);
 		await s.createTestSession("A");
+		await s.createTestSession("B");
 		await s.open();
-		await s.navigate_to("session", "A");
 
-		// act
+		// act/assert — CT-06-a rapid session switching keeps focus in the editor
+		s.act();
+		await s.navigate_to("session", "A");
+		s.assert();
+		await s.editor.is_focused();
+
+		s.act();
+		await s.navigate_to("session", "B");
+		s.assert();
+		await s.editor.is_focused();
+
+		s.act();
+		await s.navigate_to("session", "A");
+		s.assert();
+		await s.editor.is_focused();
+
+		// act/assert — CT-06-b focus returns after leaving and re-entering chat
+		s.begin(dialogStory);
 		s.act();
 		await s.navigate_to("settings");
 		await s.navigate_to("session", "A");
-
-		// assert
 		s.assert();
 		await s.editor.is_focused();
 	});

@@ -1,230 +1,128 @@
 /**
  * Search E2E tests — SR-01, SR-02, SR-05, SR-07.
  *
- * Tests sidebar filter mode (client-side title matching), full search
- * page navigation, Ctrl+K keyboard shortcut, and archived auto-open/close.
+ * Keeps served-app coverage for sidebar search wiring, keyboard shortcuts,
+ * full-search navigation, and archived auto-open/close. Full search result
+ * grouping/filter rendering lives in the lightweight search-page fixture.
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession, createGoal, deleteGoal, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 test.describe("Search (UI)", () => {
-	/**
-	 * SR-01: Sidebar filter mode — typing in the sidebar search input
-	 * instantly filters visible items by title (client-side).
-	 */
-	test("SR-01: sidebar filter hides non-matching sessions @smoke", async ({ page }) => {
-		// Create two sessions with distinct titles via API
+	test("SR-01: sidebar filter matches session and goal titles @smoke", async ({ page }) => {
 		const id1 = await createSession();
 		const id2 = await createSession();
-		await waitForSessionStatus(id1, "idle");
-		await waitForSessionStatus(id2, "idle");
-
-		// Rename sessions so they have known, distinguishable titles
-		await apiFetch(`/api/sessions/${id1}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "AlphaSearchTarget" }),
-		});
-		await apiFetch(`/api/sessions/${id2}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "BetaOtherItem" }),
-		});
-
-		await openApp(page);
-
-		// Both sessions should be visible
-		await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 10_000 });
-		await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 10_000 });
-
-		// Type a query that matches only the first session
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.fill("AlphaSearch");
-
-		// Wait for debounce (200ms) + render — matching item visible, other hidden
-		await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BetaOtherItem")).not.toBeVisible({ timeout: 5_000 });
-
-		// Type a query that matches only the second session
-		await searchInput.fill("BetaOther");
-		await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("AlphaSearchTarget")).not.toBeVisible({ timeout: 5_000 });
-
-		// Clear the search — both should reappear
-		await searchInput.fill("");
-		await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 5_000 });
-
-		// Cleanup
-		await deleteSession(id1);
-		await deleteSession(id2);
-	});
-
-	/**
-	 * SR-01 continued: sidebar filter also works for goal titles.
-	 */
-	test("SR-01: sidebar filter matches goal titles", async ({ page }) => {
 		const goal = await createGoal({ title: "UniqueGoalXYZ123" });
+		try {
+			await waitForSessionStatus(id1, "idle");
+			await waitForSessionStatus(id2, "idle");
+			await apiFetch(`/api/sessions/${id1}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "AlphaSearchTarget" }),
+			});
+			await apiFetch(`/api/sessions/${id2}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "BetaOtherItem" }),
+			});
 
-		await openApp(page);
+			await openApp(page);
+			await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 10_000 });
 
-		// Goal should be visible in sidebar (goal titles render as uppercase via CSS)
-		await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 10_000 });
+			const searchInput = page.locator("input[data-search]");
+			await searchInput.fill("AlphaSearch");
+			await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("BetaOtherItem")).not.toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).not.toBeVisible({ timeout: 5_000 });
 
-		// Search for the goal
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.fill("UniqueGoalXYZ");
-		await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 5_000 });
+			await searchInput.fill("BetaOther");
+			await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("AlphaSearchTarget")).not.toBeVisible({ timeout: 5_000 });
 
-		// Search for something else — goal should disappear
-		await searchInput.fill("NoMatchZZZ999");
-		await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).not.toBeVisible({ timeout: 5_000 });
+			await searchInput.fill("UniqueGoalXYZ");
+			await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("AlphaSearchTarget")).not.toBeVisible({ timeout: 5_000 });
 
-		// Clear — goal reappears
-		await searchInput.fill("");
-		await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 5_000 });
-
-		await deleteGoal(goal.id);
+			await searchInput.fill("");
+			await expect(page.getByText("AlphaSearchTarget")).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("BetaOtherItem")).toBeVisible({ timeout: 5_000 });
+			await expect(page.getByText("UniqueGoalXYZ123", { exact: false })).toBeVisible({ timeout: 5_000 });
+		} finally {
+			await deleteSession(id1).catch(() => {});
+			await deleteSession(id2).catch(() => {});
+			await deleteGoal(goal.id).catch(() => {});
+		}
 	});
 
-	/**
-	 * SR-02: Full search navigation — clicking "Full Search" link navigates
-	 * to #/search?q=<query> with the query pre-filled.
-	 */
-	test("SR-02: Full Search link navigates to search page", async ({ page }) => {
+	test("SR-02: Full Search link navigates, with no sidebar Content toggle", async ({ page }) => {
 		await openApp(page);
 
-		// Type a query in sidebar search
 		const searchInput = page.locator("input[data-search]");
 		await searchInput.fill("testquery");
 
-		// Wait for the Full Search link to appear (it shows when query is non-empty)
 		const fullSearchLink = page.getByText("Full Search");
 		await expect(fullSearchLink).toBeVisible({ timeout: 5_000 });
+		const searchBox = page.locator("search-box");
+		await expect(searchBox.getByText("Content")).not.toBeVisible({ timeout: 2_000 });
 
-		// Click the Full Search link
 		await fullSearchLink.click();
-
-		// Verify URL contains #/search with the query
 		await expect(async () => {
 			const hash = await page.evaluate(() => window.location.hash);
 			expect(hash).toContain("#/search");
 			expect(hash).toContain("testquery");
 		}).toPass({ timeout: 5_000 });
-
-		// Verify the search page rendered — look for the back arrow or search input
-		// The search page has its own input and result area
 		await expect(page.locator("input").last()).toBeVisible({ timeout: 5_000 });
 	});
 
-	/**
-	 * SR-05: Keyboard shortcut — Ctrl+K focuses the sidebar search input,
-	 * Escape clears and blurs it.
-	 */
 	test("SR-05: Ctrl+K focuses search, Escape clears", async ({ page }) => {
 		await openApp(page);
 
 		const searchInput = page.locator("input[data-search]");
-
-		// Verify search input exists
 		await expect(searchInput).toBeVisible({ timeout: 10_000 });
-
-		// Wait for the app's keydown listener to attach before dispatching.
-		// Under parallel E2E load the first Chromium keystroke can be dropped
-		// when focus hasn't settled, so we dispatch a synthetic KeyboardEvent
-		// on `window` (where the shortcut registry listens) instead of using
-		// page.keyboard.press. Mirrors the Ctrl+[ pattern below.
 		await expect.poll(
 			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
 			{ timeout: 15_000 },
 		).toBe(true);
 
-		// Press Ctrl+K to focus the search input. Dispatch via window.dispatchEvent
-		// because keyboard.press can be dropped under heavy parallel load.
-		// Set both ctrlKey and metaKey for platform-aware ctrlOrMeta matching.
 		await page.evaluate(() => {
 			window.dispatchEvent(new KeyboardEvent("keydown", {
 				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
 			}));
 		});
-
-		// Verify the input is focused
 		await expect(searchInput).toBeFocused({ timeout: 5_000 });
 
-		// Type something
 		await searchInput.fill("hello");
 		await expect(searchInput).toHaveValue("hello");
-
-		// Press Escape to clear and blur
 		await page.keyboard.press("Escape");
-
-		// Verify input is cleared
 		await expect(searchInput).toHaveValue("", { timeout: 3_000 });
-
-		// Verify input is blurred (not focused)
 		await expect(searchInput).not.toBeFocused({ timeout: 3_000 });
 	});
 
-	/**
-	 * SR-07: Archived auto-open/close — when searching, the archived section
-	 * auto-opens to include archived items in the filter. When search is cleared,
-	 * it auto-closes if it was opened by search (not manually).
-	 *
-	 * This test creates and terminates a session (which archives it), then
-	 * searches for its title to trigger archived auto-open.
-	 */
 	test("SR-07: archived section auto-opens on search match", async ({ page }) => {
-		// Create a session with a unique title, then terminate it to archive
 		const id = await createSession();
-		await waitForSessionStatus(id, "idle");
-		await apiFetch(`/api/sessions/${id}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "ArchivedSearchTest999" }),
-		});
-		// Terminate (archives the session)
-		await deleteSession(id);
+		try {
+			await waitForSessionStatus(id, "idle");
+			await apiFetch(`/api/sessions/${id}`, {
+				method: "PATCH",
+				body: JSON.stringify({ title: "ArchivedSearchTest999" }),
+			});
+			await deleteSession(id);
 
-		await openApp(page);
+			await openApp(page);
+			await expect(page.locator("[data-testid='sidebar-filters-button']:visible").first())
+				.toBeVisible({ timeout: 10_000 });
+			await expect(page.getByText("ArchivedSearchTest999")).not.toBeVisible({ timeout: 3_000 });
 
-		// Sidebar is loaded — the Filters button is the stable sentinel here.
-		// (The legacy "See Archived" button — which used to satisfy a generic
-		// `text=/Archived/` match — no longer exists.)
-		await expect(page.locator("[data-testid='sidebar-filters-button']:visible").first())
-			.toBeVisible({ timeout: 10_000 });
+			const searchInput = page.locator("input[data-search]");
+			await searchInput.fill("ArchivedSearchTest999");
+			await expect(page.getByText("ArchivedSearchTest999")).toBeVisible({ timeout: 15_000 });
 
-		// The archived session should NOT be visible yet (section collapsed by default)
-		await expect(page.getByText("ArchivedSearchTest999")).not.toBeVisible({ timeout: 3_000 });
-
-		// Search for the archived session's title
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.fill("ArchivedSearchTest999");
-
-		// The archived section should auto-open and show the item
-		await expect(page.getByText("ArchivedSearchTest999")).toBeVisible({ timeout: 15_000 });
-
-		// Clear the search — archived section should auto-close
-		await searchInput.fill("");
-
-		// The archived session should disappear (section auto-closed by search)
-		await expect(page.getByText("ArchivedSearchTest999")).not.toBeVisible({ timeout: 5_000 });
-	});
-
-	/**
-	 * Verify no Content toggle exists in sidebar search.
-	 * The old "Content" toggle should have been removed.
-	 */
-	test("no Content toggle in sidebar search", async ({ page }) => {
-		await openApp(page);
-
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.fill("test");
-
-		// Wait for controls to render
-		await expect(page.getByText("Full Search")).toBeVisible({ timeout: 5_000 });
-
-		// The "Content" toggle should NOT exist in the search controls area
-		// (search-box is the parent of the search input)
-		const searchBox = page.locator("search-box");
-		const contentToggle = searchBox.getByText("Content");
-		await expect(contentToggle).not.toBeVisible({ timeout: 2_000 });
+			await searchInput.fill("");
+			await expect(page.getByText("ArchivedSearchTest999")).not.toBeVisible({ timeout: 5_000 });
+		} finally {
+			await deleteSession(id).catch(() => {});
+		}
 	});
 });

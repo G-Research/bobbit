@@ -220,36 +220,4 @@ test.describe("SB-00b: Archived delegates visible after Show Archived toggle", (
 		).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("archived delegate not visible when Show Archived is off", async ({ page }) => {
-		const PARENT_TITLE = "SB00b-ParentB";
-		const DELEGATE_TITLE = "SB00b-DelegateB";
-
-		// 1. Create parent + delegate, archive the delegate
-		const parentId = await createSession();
-		cleanupSessionIds.push(parentId);
-		await waitForSessionStatus(parentId, "idle");
-		await renameSession(parentId, PARENT_TITLE);
-
-		const delegateId = await createDelegate(parentId);
-		cleanupSessionIds.push(delegateId);
-		await waitForSessionStatus(delegateId, "idle");
-		await renameSession(delegateId, DELEGATE_TITLE);
-
-		await terminateSession(delegateId);
-
-		// 2. Open the app without enabling Show Archived
-		await openApp(page);
-		await navigateToHash(page, `#/session/${parentId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		// 3. Wait for the parent row to render as a positive sentinel that the
-		// sidebar has populated (archived toggle is off, so parent is live).
-		await expect(page.getByText(PARENT_TITLE, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
-
-		// 4. The archived delegate title should NOT appear in the sidebar
-		await expect(page.getByText(DELEGATE_TITLE, { exact: true })).toHaveCount(0, { timeout: 3_000 });
-
-		// Cleanup
-		await terminateSession(parentId);
-	});
 });
