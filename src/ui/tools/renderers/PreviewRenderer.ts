@@ -15,6 +15,8 @@ const PREVIEW_SNAPSHOT_MARKER_V3 = "__preview_snapshot_v3__\n";
 interface PreviewOpenParams {
 	html?: string;
 	file?: string;
+	assets?: string[];
+	manifest?: string;
 }
 
 interface SnapshotBlock {
@@ -28,7 +30,7 @@ interface SnapshotBlock {
 type ParsedSnapshot =
 	| { kind: "inline"; html: string }
 	| { kind: "file"; path: string }
-	| { kind: "preview"; url: string; path: string; entry?: string };
+	| { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string };
 
 function parseSnapshotText(text: string): ParsedSnapshot | null {
 	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)) {
@@ -36,11 +38,13 @@ function parseSnapshotText(text: string): ParsedSnapshot | null {
 		try {
 			const parsed = JSON.parse(body);
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
+				const contentHash = normalizeContentHash(parsed.contentHash);
 				return {
 					kind: "preview",
 					url: parsed.url,
 					path: typeof parsed.path === "string" ? parsed.path : "",
 					entry: typeof parsed.entry === "string" ? parsed.entry : undefined,
+					...(contentHash ? { contentHash } : {}),
 				};
 			}
 		} catch {
@@ -104,6 +108,12 @@ async function locateToolResultBlock(toolUseId: string | undefined, blockIndexIn
 	return null;
 }
 
+function normalizeContentHash(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const hash = value.trim().toLowerCase();
+	return /^[a-f0-9]{64}$/.test(hash) ? hash : undefined;
+}
+
 function hashString(value: string): string {
 	let h = 5381;
 	for (let i = 0; i < value.length; i++) h = ((h << 5) + h) ^ value.charCodeAt(i);
@@ -126,7 +136,8 @@ function previewTabTitle(params: PreviewOpenParams | undefined, parsed: ParsedSn
 
 function previewTabId(toolUseId: string | undefined, blockIndex: number, parsed: ParsedSnapshot, entry: string | undefined, params: PreviewOpenParams | undefined): string {
 	if (toolUseId) return `preview:tool:${encodeURIComponent(toolUseId)}:${blockIndex}`;
-	const stable = params?.file
+	const stable = (parsed.kind === "preview" ? parsed.contentHash : undefined)
+		|| params?.file
 		|| entry
 		|| (parsed.kind === "preview" ? parsed.url : parsed.kind === "file" ? parsed.path : parsed.html.slice(0, 1024));
 	return `preview:snapshot:${hashString(stable)}`;
@@ -142,7 +153,12 @@ function restorableSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | 
 
 function mountBodyForSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | undefined): Record<string, unknown> | null {
 	const restorable = restorableSnapshot(parsed, params);
-	if (restorable.kind === "file") return { file: restorable.path };
+	if (restorable.kind === "file") {
+		const body: Record<string, unknown> = { file: restorable.path };
+		if (Array.isArray(params?.assets) && params.assets.length > 0) body.assets = params.assets;
+		if (typeof params?.manifest === "string" && params.manifest) body.manifest = params.manifest;
+		return body;
+	}
 	if (restorable.kind === "inline") return { html: restorable.html };
 	return null;
 }
@@ -155,6 +171,7 @@ function previewTabSource(
 	blockIndex: number,
 ): Record<string, unknown> {
 	const restorable = restorableSnapshot(parsed, params);
+	const contentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
 	const source: Record<string, unknown> = {
 		type: "preview_open",
 		snapshotKind: restorable.kind,
@@ -164,6 +181,7 @@ function previewTabSource(
 		entry,
 		params: { file: params?.file || "", inline: !params?.file },
 	};
+	if (contentHash) source.contentHash = contentHash;
 	if (parsed.kind === "preview") {
 		source.url = parsed.url;
 		source.snapshotUrl = parsed.url;
@@ -181,6 +199,7 @@ function previewTabSource(
 
 function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined, params: PreviewOpenParams | undefined): Record<string, unknown> {
 	const restorable = restorableSnapshot(parsed, params);
+	const contentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
 	const state: Record<string, unknown> = {
 		snapshotKind: restorable.kind,
 		markerKind: parsed.kind,
@@ -188,6 +207,7 @@ function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtim
 		mtime,
 		url,
 	};
+	if (contentHash) state.contentHash = contentHash;
 	if (restorable.kind === "inline") state.snapshotHtml = restorable.html;
 	else if (restorable.kind === "file") state.snapshotFile = restorable.path;
 	if (parsed.kind === "preview") {
@@ -265,6 +285,13 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				const parsed = parseSnapshotText(snapshotText);
 				if (!parsed) throw new Error("Snapshot block could not be parsed");
 
+				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
+				let liveContentHashBeforeOpen: string | undefined;
+				try {
+					const { state: appState } = await import("../../../app/state.js");
+					liveContentHashBeforeOpen = normalizeContentHash((appState as any).previewPanelContentHash);
+				} catch { /* optional state probe */ }
+
 				// 3. Enable preview mode (idempotent)
 				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
 					method: "PATCH",
@@ -286,6 +313,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				// across the renderer's lifetime.
 				let entryFromPost: string | undefined;
 				let mtimeFromPost: number | undefined;
+				let contentHashFromPost: string | undefined;
 				const postBody = mountBodyForSnapshot(parsed, params);
 				if (postBody) {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
@@ -304,6 +332,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						const data = await postResp.json();
 						if (typeof data?.entry === "string" && data.entry) entryFromPost = data.entry;
 						if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
+						contentHashFromPost = normalizeContentHash(data?.contentHash);
 					} catch { /* ignore — body parse is best-effort */ }
 				}
 
@@ -327,13 +356,17 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						}
 					}
 					const mtime = mtimeFromPost ?? Date.now();
+					const mountedContentHash = contentHashFromPost || snapshotContentHash;
 					if (entry) (appState as any).previewPanelEntry = entry;
 					(appState as any).previewPanelMtime = mtime;
+					(appState as any).previewPanelContentHash = mountedContentHash || "";
 					(appState as any).isPreviewSession = true;
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,
 						mtime,
+						contentHash: snapshotContentHash,
+						dedupeWithLive: snapshotContentHash ? liveContentHashBeforeOpen === snapshotContentHash : false,
 						id: previewTabId(ctx?.toolUseId, snap.index, parsed, entry, params),
 						title: previewTabTitle(params, parsed, entry),
 						url: parsed.kind === "preview" ? parsed.url : undefined,

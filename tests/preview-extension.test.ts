@@ -29,6 +29,7 @@ let fetchResponder: ((url: string, init: any) => { status: number; body: any }) 
 const fetchCalls: Array<{ url: string; init: any }> = [];
 
 const SID = "11111111-1111-1111-1111-111111111111";
+const HASH = "a".repeat(64);
 
 before(() => {
 	process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:1/";
@@ -51,6 +52,7 @@ before(() => {
 					relPath: `${SID}/inline.html`,
 					entry: "inline.html",
 					mtime: 1714512345678,
+					contentHash: HASH,
 				}),
 				{ status: 200 },
 			);
@@ -90,6 +92,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 		const parsed = parseSnapshot(res.content[1].text);
 		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") assert.strictEqual(parsed.contentHash, HASH);
 
 		// Body bytes must NEVER appear in the snapshot.
 		assert.ok(!res.content[1].text.includes("<h1>Hello</h1>"));
@@ -125,6 +128,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 						relPath: `${SID}/report.html`,
 						entry: "report.html",
 						mtime: 1714512345678,
+						contentHash: HASH,
 					},
 				};
 			}
@@ -227,7 +231,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 		// This is what the extension feeds the builder in production.
 		const url = `/preview/${SID}/report.html`;
 		const relPath = `${SID}/report.html`;
-		const block = buildPreviewSnapshotV3Block(url, relPath);
+		const block = buildPreviewSnapshotV3Block(url, relPath, HASH);
 		assert.ok(
 			block.length <= 250,
 			`v3 block must be ≤ 250 bytes, got ${block.length} (${block})`,
@@ -237,6 +241,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
 			assert.strictEqual(parsed.path, relPath);
+			assert.strictEqual(parsed.contentHash, HASH);
 		}
 	});
 

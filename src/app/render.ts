@@ -69,10 +69,13 @@ import {
 	firstContentPanelTab,
 	isHistoricalProposalTab,
 	isLivePreviewTab,
+	normalizePreviewContentHash,
 	panelContentTabs,
 	panelTabIdFromLegacy,
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
+	previewTabAllowsLiveDedupe,
+	previewTabsHaveSameContent,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
 	reviewPanelTabId,
@@ -2730,7 +2733,8 @@ function workspaceSessionId(): string {
 
 function previewWorkspaceKey(): string {
 	if (!state.isPreviewSession || !state.previewPanelEntry) return "";
-	return `${state.previewPanelEntry}|${state.previewPanelMtime || 0}`;
+	const contentHash = normalizePreviewContentHash((state as any).previewPanelContentHash);
+	return `${state.previewPanelEntry}|${contentHash || state.previewPanelMtime || 0}`;
 }
 
 let mountedPreviewTabId = "";
@@ -2878,6 +2882,8 @@ function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceT
 	for (const rawTab of panelTabsForSession(state, sessionId)) {
 		const normalizedTab = normalizeHistoricalPreviewTab(rawTab, sessionId) ?? normalizeHistoricalProposalTab(rawTab, sessionId);
 		if (!normalizedTab || seen.has(normalizedTab.id)) continue;
+		if (previewTabAllowsLiveDedupe(normalizedTab) && derivedTabs.some((derived) => previewTabsHaveSameContent(normalizedTab, derived))) continue;
+		if (storedExtraTabs.some((stored) => previewTabsHaveSameContent(normalizedTab, stored))) continue;
 		const tab = disambiguateStoredPreviewTab(normalizedTab, derivedTabs);
 		seen.add(tab.id);
 		storedExtraTabs.push(tab);
@@ -2916,6 +2922,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	const snapshotKind = recordValue(tabState, "snapshotKind") || recordValue(source, "snapshotKind");
 	const snapshotHtml = recordValue(tabState, "snapshotHtml");
 	const snapshotFile = recordValue(tabState, "snapshotFile") || recordValue(source, "path");
+	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
 	const stateMtime = tabState.mtime;
 	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry) return;
 
@@ -2933,6 +2940,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (!body) {
 		state.previewPanelEntry = entry;
 		state.previewPanelMtime = typeof stateMtime === "number" ? stateMtime : Date.now();
+		(state as any).previewPanelContentHash = contentHash;
 		markPreviewTabMounted(tab);
 		return;
 	}
@@ -2949,6 +2957,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 			if (activePanelTabIdForSession(state, sessionId) !== tab.id) return;
 			state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : entry;
 			state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
+			(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || contentHash;
 			markPreviewTabMounted(tab);
 			renderApp();
 		} catch (err) {
@@ -3006,7 +3015,8 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	const sid = workspaceSessionId();
 	const storedId = activePanelTabIdForSession(state, sid);
 	const storedTab = findPanelTab(tabs, storedId);
-	const storedHistoricalPreview = storedTab?.kind === "preview" && !isLivePreviewTab(storedTab);
+	const liveTab = findPanelTab(tabs, LIVE_PREVIEW_PANEL_TAB_ID);
+	const storedHistoricalPreview = storedTab?.kind === "preview" && !isLivePreviewTab(storedTab) && (!previewTabsHaveSameContent(storedTab, liveTab) || !previewTabAllowsLiveDedupe(storedTab));
 	const storedHistoricalArtifact = storedHistoricalPreview || isHistoricalProposalTab(storedTab);
 	const previewKey = previewWorkspaceKey();
 	if (previewKey && state.panelWorkspacePreviewKeyBySession[sid] !== previewKey) {
@@ -3038,6 +3048,7 @@ function unifiedPanelTabs(): UnifiedPanelTab[] {
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
 		previewEntry: state.previewPanelEntry,
+		previewContentHash: (state as any).previewPanelContentHash,
 		activeProposalTypes: activeProposalTypes(),
 		assistantProposalType: currentAssistantProposalType(),
 		reviewTitles: [...state.reviewDocuments.keys()],

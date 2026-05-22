@@ -7,6 +7,8 @@ import {
 	buildPanelWorkspaceTabs,
 	findPanelTab,
 	isLivePreviewTab,
+	previewContentHashFromTab,
+	previewTabsHaveSameContent,
 	type PanelWorkspaceTab,
 } from "../src/app/panel-workspace.ts";
 
@@ -54,5 +56,16 @@ describe("panel workspace preview tab compatibility", () => {
 		assert.equal(isLivePreviewTab(previewTab("preview:legacy-live", { live: true })), true);
 		assert.equal(isLivePreviewTab(previewTab("preview:bootstrap", { origin: "preview-events" })), true);
 		assert.equal(isLivePreviewTab(previewTab("preview:tool:abc:1", { type: "preview_open", toolUseId: "abc" })), false);
+	});
+
+	it("matches preview tabs by content hash, not title", () => {
+		const hash = "a".repeat(64);
+		const live = previewTab(LIVE_PREVIEW_PANEL_TAB_ID, { contentHash: hash.toUpperCase() });
+		const historical = previewTab("preview:tool:abc:1", { type: "preview_open", toolUseId: "abc", contentHash: hash });
+		const sameTitleDifferentContent = previewTab("preview:tool:def:1", { type: "preview_open", toolUseId: "def" });
+
+		assert.equal(previewContentHashFromTab(live), hash);
+		assert.equal(previewTabsHaveSameContent(live, historical), true);
+		assert.equal(previewTabsHaveSameContent(live, sameTitleDifferentContent), false);
 	});
 });

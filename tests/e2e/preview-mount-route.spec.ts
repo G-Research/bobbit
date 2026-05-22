@@ -2,7 +2,7 @@
  * API E2E for WP-H: the v3 mount endpoint + content origin route.
  *
  * Validates:
- *   - POST /api/preview/mount?sessionId=<sid>  with {html} → 200 + {url, path, entry, mtime}
+ *   - POST /api/preview/mount?sessionId=<sid>  with {html} → 200 + {url, path, entry, mtime, contentHash}
  *   - GET  /preview/<sid>/inline.html with valid cookie → 200 text/html + bridge inject
  *   - GET  /preview/<sid>/inline.html without cookie (forced auth) → 401
  *   - GET  /preview/<sid>/../../etc/passwd → 403 (or 400)
@@ -51,7 +51,7 @@ async function mintCookie(): Promise<string> {
 }
 
 test.describe("POST /api/preview/mount (v3)", () => {
-	test("html body → 200 with {url, path, entry, mtime}", async () => {
+	test("html body → 200 with {url, path, entry, mtime, contentHash}", async () => {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			body: JSON.stringify({ html: "<h1>x</h1>" }),
@@ -65,6 +65,7 @@ test.describe("POST /api/preview/mount (v3)", () => {
 		expect(body.path.length).toBeGreaterThan(0);
 		expect(typeof body.mtime).toBe("number");
 		expect(body.mtime).toBeGreaterThan(0);
+		expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
 	});
 
 	test("missing both html and file → 400", async () => {

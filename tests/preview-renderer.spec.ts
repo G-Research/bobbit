@@ -20,7 +20,9 @@ async function gotoAndWait(page: any) {
 
 const MARKER = "__preview_snapshot_v1__\n";
 const MARKER_V2 = "__preview_snapshot_v2__\n";
+const MARKER_V3 = "__preview_snapshot_v3__\n";
 const SESSION_ID = "11111111-1111-1111-1111-111111111111";
+const HASH = "b".repeat(64);
 const TOOL_USE_ID = "tool-1";
 
 function makeResultWithSnapshot(html: string) {
@@ -32,6 +34,20 @@ function makeResultWithSnapshot(html: string) {
 		content: [
 			{ type: "text", text: "Preview panel is open and will auto-update." },
 			{ type: "text", text: MARKER + html },
+		],
+		timestamp: Date.now(),
+	};
+}
+
+function makePreviewResultWithSnapshot(entry = "inline.html", contentHash = HASH) {
+	return {
+		role: "toolResult",
+		toolCallId: TOOL_USE_ID,
+		toolName: "preview_open",
+		isError: false,
+		content: [
+			{ type: "text", text: "Preview panel is open and will auto-update." },
+			{ type: "text", text: MARKER_V3 + JSON.stringify({ kind: "preview", url: `/preview/${SESSION_ID}/${entry}`, path: `${SESSION_ID}/${entry}`, contentHash }) + "\n" },
 		],
 		timestamp: Date.now(),
 	};
@@ -240,6 +256,25 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(postBody.file).toBe(filePath);
 		expect(postBody.html).toBeUndefined();
 		expect(postBody.kind).toBeUndefined();
+	});
+
+	test("v3 marker: identical content reuses the live preview tab", async ({ page }) => {
+		await gotoAndWait(page);
+		await page.evaluate(async ([hash, sessionId, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, hash);
+			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>same</p>" }, result, false);
+			(window as any).__resetFetchCalls();
+		}, [HASH, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH)] as any);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+		expect(previewState.previewPanelContentHash).toBe(HASH);
 	});
 
 	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {

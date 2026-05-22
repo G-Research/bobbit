@@ -6,7 +6,7 @@ import "../../src/ui/components/Messages.js";
 
 function renderPreview(
 	container: HTMLElement,
-	params: { html?: string; file?: string } | undefined,
+	params: { html?: string; file?: string; assets?: string[]; manifest?: string } | undefined,
 	result: any = undefined,
 	isStreaming = false,
 	ctx: any = { sessionId: "11111111-1111-1111-1111-111111111111", toolUseId: "tool-1" },
@@ -67,17 +67,47 @@ void renderTool;
 	const { state } = await import("../../src/app/state.js");
 	(state as any).remoteAgent = { state: { messages } };
 };
+(window as any).__setPreviewWorkspace = async (sessionId: string, hash: string) => {
+	const { state } = await import("../../src/app/state.js");
+	(state as any).previewPanelEntry = "inline.html";
+	(state as any).previewPanelMtime = 123;
+	(state as any).previewPanelContentHash = hash;
+	(state as any).isPreviewSession = true;
+	(state as any).panelTabsBySession = {
+		[sessionId]: [{
+			id: "preview:live",
+			kind: "preview",
+			title: "Preview: inline.html",
+			label: "Preview: inline.html",
+			legacyTab: "preview",
+			source: { type: "preview", entry: "inline.html", sessionId, live: true, contentHash: hash },
+			state: { entry: "inline.html", contentHash: hash },
+		}],
+	};
+	(state as any).panelTabs = (state as any).panelTabsBySession[sessionId];
+	(state as any).panelWorkspaceActiveBySession = { [sessionId]: "preview:live" };
+	(state as any).activePanelTabId = "preview:live";
+};
 (window as any).__getPreviewState = async () => {
 	const { state } = await import("../../src/app/state.js");
 	return {
 		previewPanelEntry: (state as any).previewPanelEntry,
 		previewPanelMtime: (state as any).previewPanelMtime,
+		previewPanelContentHash: (state as any).previewPanelContentHash,
+		panelTabsBySession: (state as any).panelTabsBySession,
+		activePanelTabId: (state as any).activePanelTabId,
+		panelWorkspaceActiveBySession: (state as any).panelWorkspaceActiveBySession,
 	};
 };
 (window as any).__resetPreviewState = async () => {
 	const { state } = await import("../../src/app/state.js");
 	(state as any).previewPanelEntry = "";
 	(state as any).previewPanelMtime = 0;
+	(state as any).previewPanelContentHash = "";
+	(state as any).panelTabsBySession = {};
+	(state as any).panelTabs = [];
+	(state as any).activePanelTabId = "chat";
+	(state as any).panelWorkspaceActiveBySession = {};
 };
 (window as any).__getFetchCalls = () => (window as any).__fetchCalls || [];
 (window as any).__resetFetchCalls = () => {

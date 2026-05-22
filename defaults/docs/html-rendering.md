@@ -52,7 +52,7 @@ behaviour is identical — same iframe, same theme bridge, same SSE-driven
 refresh.
 
 Use `file=` when the HTML lives on disk already. Use `html=` for one-shot
-generated content. The tool result is a constant ~150-byte snapshot
+generated content. The tool result is a constant ≤250-byte snapshot
 regardless of HTML size, so iterating on a 5000-line report does not blow
 up your context window.
 

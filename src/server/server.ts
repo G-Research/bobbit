@@ -7824,7 +7824,7 @@ async function handleApiRoute(
 
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
-	// {url, path, entry, mtime}. See docs/design/embedded-html-preview-rewrite.md §6.
+	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
 	if (url.pathname === "/api/preview/mount" && req.method === "POST") {
 		const sessionId = url.searchParams.get("sessionId") || "";
 		if (!VALID_SESSION_ID.test(sessionId)) {
@@ -7944,6 +7944,7 @@ async function handleApiRoute(
 				mtime: result.mtime,
 				url: result.url,
 				path: result.path,
+				contentHash: result.contentHash,
 			});
 			json(result);
 			return;
@@ -7990,6 +7991,7 @@ async function handleApiRoute(
 				relPath: path.posix.join(sessionId, entry),
 				entry,
 				mtime: Math.floor(stat.mtimeMs),
+				contentHash: previewMount.contentHashForMount(sessionId),
 			});
 			return;
 		} catch (err: any) {
@@ -8054,6 +8056,7 @@ async function handleApiRoute(
 						mtime: Math.floor(stat.mtimeMs),
 						url: `/preview/${sid}/${entry}`,
 						path: entryPath,
+						contentHash: previewMount.contentHashForMount(sid),
 					})}\n\n`);
 				}
 			}

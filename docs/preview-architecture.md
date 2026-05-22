@@ -479,7 +479,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 
 ## Acceptance properties
 
-- Tool result is constant ~150 bytes regardless of HTML size — no HTML in the
+- Tool result is constant ≤250 bytes regardless of HTML size — no HTML in the
   conversation transcript.
 - Iframe link clicks navigate inside the preview origin; assets resolve via
   `<base href="/preview/<sid>/">`.
