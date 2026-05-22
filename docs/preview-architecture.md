@@ -58,10 +58,14 @@ Preview tab identity has two layers:
   `inline.html`. These tabs represent chat artifacts: opening them may remount
   the recorded snapshot into the one live server mount, or select the recorded
   v3 mount directly when no remount body is available.
-- Both live and historical preview tabs may carry `contentHash`. When a
-  historical tab's hash matches the current live hash, the workspace collapses
-  that artifact to `preview:live` instead of showing a duplicate tab. When hashes
-  differ, the tabs remain separate so each preview artifact can be restored.
+- The live tab and v3 historical preview tabs may carry `contentHash`. When a
+  v3 historical tab's hash matches the current live hash, the workspace
+  collapses that artifact to `preview:live` instead of showing a duplicate tab.
+  A v3 card whose marker omitted `contentHash` can still receive the hash from
+  the remount response and collapse after the refreshed mount proves identity.
+  When hashes differ, the tabs remain separate so each preview artifact can be
+  restored. Legacy v1/v2 tabs may record the remount hash for metadata, but they
+  stay historical and do not collapse into `preview:live`.
 - Desktop renders the content tabs in a horizontally scrollable strip. Mobile
   exposes the same tab set through the header tab bar and slider track; there is
   no desktop-only preview capability.
@@ -69,11 +73,14 @@ Preview tab identity has two layers:
 Opening a v3 historical card whose `contentHash` already matches the live mount
 selects the live tab and skips the remount POST. This avoids stale relative-file
 remounts and the false "File no longer available" state for content that is
-already mounted. Reopen failures stay local to the tab/card: missing file
-snapshots disable with "File no longer available", parse or fetch errors leave
-the button retryable and log `[PreviewRenderer] reopen failed`, and background
-tab-remount failures log `[panel-workspace] preview tab restore failed` without
-changing preview serving semantics.
+already mounted. If the v3 marker omitted `contentHash`, the renderer must
+remount from the original `html` / `file` params; the POST response then supplies
+the first usable hash and same-content tabs can collapse to `preview:live`.
+Reopen failures stay local to the tab/card: missing file snapshots disable with
+"File no longer available", parse or fetch errors leave the button retryable and
+log `[PreviewRenderer] reopen failed`, and background tab-remount failures log
+`[panel-workspace] preview tab restore failed` without changing preview serving
+semantics.
 
 ## Per-session mount
 
@@ -360,8 +367,11 @@ optional `contentHash`, and the original tool params to drive the **Open**
 button on tool cards. Opening a card selects a source-derived preview tab
 immediately. If the original call still carries `html` or `file`, the renderer
 can remount that snapshot into the live mount unless the v3 `contentHash` already
-matches the live mount. If no remount body is available, a v3 card selects the
-tab by recorded entry/mtime and points the iframe at the existing mount path.
+matches the live mount. When the marker omitted `contentHash` to preserve the
+250-byte cap, a successful remount `POST` returns the hash; the renderer attaches
+that hash to the v3 tab and can collapse it into `preview:live`. If no remount
+body is available, a v3 card selects the tab by recorded entry/mtime and points
+the iframe at the existing mount path.
 
 **`path` is host-invariant.** The field carries the project-root-relative
 `<sessionId>/<entry>` identifier (forward slashes on every OS), not the
@@ -382,16 +392,18 @@ sessions:
 
 | Marker | Payload | Renderer behaviour |
 |---|---|---|
-| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}` |
-| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}` |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path,contentHash?}` | Create/select a historical preview tab; collapse to live and skip remount when `contentHash` already matches; otherwise remount from original `html`/`file` params when available or select by recorded entry/mtime |
+| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}`; the tab does not collapse into `preview:live` solely because the remount response includes `contentHash` |
+| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}`; the tab does not collapse into `preview:live` solely because the remount response includes `contentHash` |
+| `__preview_snapshot_v3__` | `{kind:"preview",url,path,contentHash?}` | Create/select a historical preview tab; collapse to live and skip remount when `contentHash` already matches; otherwise remount from original `html`/`file` params when available, using the POST response hash to collapse same-content remounts, or select by recorded entry/mtime |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`
 in both `snapshot.ts` and `PreviewRenderer.ts`. Reopen flows for v1/v2 in
 `PreviewRenderer.ts::onClick` route through the unified mount endpoint, so
 WP-G's deletion of `/api/preview/render` and `/api/preview/asset` doesn't
-break old archived sessions.
+break old archived sessions. Those legacy flows preserve historical-tab
+semantics even though the unified mount endpoint now returns `contentHash`.
+Only v3 markers opt into live-tab collapse by content identity.
 
 ## Theme-token snapshot for standalone tabs
 
@@ -522,9 +534,13 @@ back the preview tree sees the same bytes the gateway just wrote.
 - Opening a historical v3 card whose `contentHash` matches the live mount skips
   the remount POST, selects `preview:live`, and does not surface "File no longer
   available" for already-mounted content.
-- Live and historical preview tabs with the same `contentHash` collapse to one
-  visible preview tab for that content.
+- Opening a historical v3 card whose marker omitted `contentHash` remounts from
+  the original params; the POST response hash can still collapse same-content
+  history into `preview:live`.
+- Live and v3 historical preview tabs with the same `contentHash` collapse to
+  one visible preview tab for that content.
 - Historical preview artifacts with different `contentHash` values remain
   separate and independently restorable through the one live server mount.
-- Archived sessions with v1 / v2 markers continue to render an Open button
-  that re-stamps the mount via `POST /api/preview/mount`.
+- Archived sessions with v1 / v2 markers continue to render an Open button that
+  re-stamps the mount via `POST /api/preview/mount` but remains historical even
+  when that response includes `contentHash`.
