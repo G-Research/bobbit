@@ -1,11 +1,16 @@
 /**
  * Per-project Staff sub-section — browser E2E.
  *
+ * Story coverage pinned here:
+ *   SB-31: staff rows render under a dedicated per-project Staff sub-section,
+ *   remain searchable/collapsible/reload-safe, and stay separate from Sessions.
+ *
  * Browser coverage is consolidated into the real user-facing flows here. The
  * pure PATCH /api/staff/:id project reassignment data path is covered by the
  * API E2E suite in tests/e2e/staff-patch-reassign.spec.ts.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
+import { type Page } from "@playwright/test";
+import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
@@ -83,7 +88,7 @@ test.describe("Per-project Staff sub-section", () => {
 		}
 	});
 
-	test("Staff sub-section header, placement, search, collapse persistence, and archive lifecycle", async ({ page }) => {
+	test("SB-31: Staff sub-section header, placement, search, collapse persistence, and archive lifecycle", async ({ page }) => {
 		const project = await defaultProject();
 		const tag = Date.now();
 		const matchName = `MatchableBot${tag}`;
@@ -105,10 +110,10 @@ test.describe("Per-project Staff sub-section", () => {
 		await expect(page.getByText(matchName, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.getByText(otherName, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
 
-		const placement = await staffPlacement(page, matchName);
-		expect(placement.found).toBe(true);
-		expect(placement.underStaff).toBe(true);
-		expect(placement.underSessions).toBe(false);
+		await expect.poll(
+			() => staffPlacement(page, matchName),
+			{ timeout: 10_000 },
+		).toEqual({ found: true, underStaff: true, underSessions: false });
 
 		await page.reload();
 		await expect(page.getByText(matchName, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
@@ -147,7 +152,7 @@ test.describe("Per-project Staff sub-section", () => {
 		await expect(page.getByText(matchName, { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("collapsed sidebar surfaces staff under a dedicated STAFF bucket (not in SES)", async ({ page }) => {
+	test("SB-31: collapsed sidebar surfaces staff under a dedicated STAFF bucket (not in SES)", async ({ page }) => {
 		const project = await defaultProject();
 		const name = `CollapsedBot${Date.now()}`;
 		const staff = await createStaffAgent(project, name);
