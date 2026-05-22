@@ -178,14 +178,18 @@ function readModelsJson(): Record<string, any> {
 
 function writeModelsJson(data: Record<string, any>): void {
 	const p = getModelsJsonPath();
+	let tmp = "";
 	try {
 		const dir = path.dirname(p);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		const tmp = p + ".tmp";
+		tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
 		fs.renameSync(tmp, p);
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
+		if (tmp) {
+			try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+		}
 		console.error("[aigw-manager] Failed to write models.json:", err);
 	}
 }

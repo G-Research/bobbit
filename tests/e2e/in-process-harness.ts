@@ -7,7 +7,7 @@
  *
  * Each Playwright worker gets its own isolated gateway with:
  *   - A unique OS-assigned port (port 0)
- *   - A unique BOBBIT_DIR (ephemeral, cleaned up after)
+ *   - A unique BOBBIT_DIR and BOBBIT_AGENT_DIR (ephemeral, cleaned up after)
  *   - The mock agent (no API key needed)
  *
  * The fixture sets process.env.E2E_PORT before any test files import
@@ -21,19 +21,15 @@
  */
 import { test as base } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 
-// Per-worker V8 compile cache. See gateway-harness.ts for rationale.
-{
-	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
-	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
-	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
-	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
-}
+// Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
+// workers cold-import dist/server once per process, so a per-worker cache gives
+// no useful same-run speedup; on Windows/Node 24 it intermittently returned
+// stale module metadata as false "does not provide an export" startup errors.
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
@@ -147,6 +143,8 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		const agentDir = join(bobbitDir, "agent");
+		mkdirSync(agentDir, { recursive: true });
 		// Canonicalize bobbitDir so downstream consumers (process.env.BOBBIT_DIR,
 		// the project rootPath derived from it, the preview-mount baseDir) all
 		// see the real path. On macOS /var/folders → /private/var/folders, and
@@ -166,6 +164,10 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
+		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
+		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
+		process.env.BOBBIT_AGENT_DIR = agentDir;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";

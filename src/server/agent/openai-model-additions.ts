@@ -123,9 +123,14 @@ function writeModelsJson(data: Record<string, any>): void {
 	const p = getModelsJsonPath();
 	const dir = path.dirname(p);
 	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-	const tmp = `${p}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-	fs.renameSync(tmp, p);
+	const tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+	try {
+		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+		fs.renameSync(tmp, p);
+	} catch (err) {
+		try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+		throw err;
+	}
 	if (process.env.BOBBIT_DEBUG) {
 		console.log(`[openai-model-additions] Wrote models.json to ${p}`);
 	}

@@ -44,7 +44,7 @@ export default function globalTeardown() {
 		} catch {}
 	}
 
-	// Per-run V8 compile cache created by e2e-global-setup.ts.
+	// Legacy cleanup for V8 compile-cache dirs from older harness versions.
 	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT;
 	if (cacheRoot && cacheRoot.includes("bobbit-e2e-v8cache")) {
 		try { rmSync(cacheRoot, { recursive: true, force: true }); } catch {}
