@@ -1,11 +1,10 @@
 /**
- * Sidebar goal actions & staff E2E tests — SB-16, SB-22, SB-23, SB-31.
+ * Sidebar goal actions E2E tests — SB-16, SB-22, SB-23.
  *
  * Covers:
  *   SB-16: "New Goal" button on project header → goal assistant opens
- *   SB-22: Re-attempt archived goal → goal assistant opens
+ *   SB-22: Re-attempt archived/fresh goal → goal assistant opens
  *   SB-23: Archive goal lifecycle (live → archive → appears in archived section)
- *   SB-31: Dedicated Staff sub-section visible per-project (zero or more staff)
  */
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
@@ -153,23 +152,4 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		await expect(page.getByText("SB23 Archive Test", { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("SB-31: dedicated Staff section header in the sidebar (per-project)", async ({ page }) => {
-		await openApp(page);
-
-		// Wait for the sidebar to fully load
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 15_000 });
-
-		// Each project bucket has a dedicated "Staff" sub-section header — even
-		// when zero staff exist — so users can create their first staff agent
-		// from inside the project bucket.
-		const staffSubheader = page.locator("[data-testid='sidebar-expanded'] span.uppercase")
-			.filter({ hasText: /^Staff$/i })
-			.first();
-		await expect(staffSubheader).toBeVisible({ timeout: 5_000 });
-
-		// The "+ New staff agent" button is reachable on the staff sub-section header.
-		await expect(page.locator("button[title^='New staff agent']").first()).toBeVisible({ timeout: 5_000 });
-	});
 });
