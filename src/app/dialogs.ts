@@ -485,12 +485,21 @@ function oauthProviderForVendor(provider: CloudProviderId): string {
 	return provider === "openai" ? "openai-codex" : provider;
 }
 
+function cloudVendorForModelProvider(provider?: string): CloudProviderId | undefined {
+	if (!provider) return undefined;
+	const p = provider.trim().toLowerCase();
+	if (p === "anthropic") return "anthropic";
+	if (p === "openai" || p === "openai-codex") return "openai";
+	if (p === "google" || p === "google-gemini" || p === "google-gemini-cli" || p === "gemini") return "google";
+	return undefined;
+}
+
 function explicitProviderIsNonTarget(provider?: string): boolean {
 	if (!provider) return false;
 	const p = provider.trim().toLowerCase();
 	if (!p) return false;
 	if (p === "aigw") return true;
-	return !TARGET_MODEL_PROVIDERS.has(p);
+	return cloudVendorForModelProvider(p) === undefined && !TARGET_MODEL_PROVIDERS.has(p);
 }
 
 function providerFromPref(pref: unknown): string | undefined {
@@ -717,12 +726,14 @@ function openCloudProviderApiKeyDialog(provider: CloudProviderId): Promise<boole
 	});
 }
 
-export function openDirectCloudAuthGate(status: CloudAuthStatus, _opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
+export function openDirectCloudAuthGate(status: CloudAuthStatus, opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
 		document.body.appendChild(container);
-		const providers = status.providers.filter((p) => p.id === "anthropic" || p.id === "openai" || p.id === "google");
+		const requiredProvider = cloudVendorForModelProvider(opts.modelProvider);
+		const providers = status.providers.filter((p) => (p.id === "anthropic" || p.id === "openai" || p.id === "google") && (!requiredProvider || p.id === requiredProvider));
 		const selected = new Set<CloudProviderId>();
+		if (requiredProvider && providers.some((p) => p.id === requiredProvider)) selected.add(requiredProvider);
 		const connected = new Set<CloudProviderId>();
 		const failed = new Set<CloudProviderId>();
 		const method: Record<CloudProviderId, "oauth" | "api_key"> = { anthropic: "oauth", openai: "oauth", google: "oauth" };
@@ -730,17 +741,17 @@ export function openDirectCloudAuthGate(status: CloudAuthStatus, _opts: EnsureDi
 		for (const p of providers) if ((!p.oauthSupported || p.status === "oauth_unavailable") && p.apiKeySupported) method[p.id] = "api_key";
 		let processing = false;
 		let attempted = false;
-		let statusText = "Select one or more providers to connect.";
+		let statusText = requiredProvider ? `Connect ${CLOUD_PROVIDER_LABELS[requiredProvider]} to continue.` : "Select one or more providers to connect.";
 		const cleanup = (result: boolean) => { render(html``, container); container.remove(); resolve(result); };
-		const hasAnyAuth = async () => {
+		const hasRequiredAuth = async () => {
 			const refreshed = await fetchCloudAuthStatus();
-			return !refreshed || refreshed.mode === "aigw" || refreshed.providers.some((p) => p.enabled && p.authenticated);
+			return !refreshed || refreshed.mode === "aigw" || refreshed.providers.some((p) => p.enabled && p.authenticated && (!requiredProvider || p.id === requiredProvider));
 		};
 		const connectOne = async (p: CloudProviderStatus) => {
 			rowError[p.id] = "";
 			renderDialog();
 			const ok = method[p.id] === "api_key" ? await openCloudProviderApiKeyDialog(p.id) : await openOAuthDialog(oauthProviderForVendor(p.id));
-			if (ok && await hasAnyAuth()) {
+			if (ok && await hasRequiredAuth()) {
 				connected.add(p.id);
 				failed.delete(p.id);
 				return;
@@ -808,10 +819,17 @@ export function openDirectCloudAuthGate(status: CloudAuthStatus, _opts: EnsureDi
 
 export async function ensureDirectCloudAuthReady(opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
 	if (explicitProviderIsNonTarget(opts.modelProvider)) return true;
+	const requestedProvider = cloudVendorForModelProvider(opts.modelProvider);
 	const status = await fetchCloudAuthStatus();
 	if (!status) return true;
-	if (status.mode === "aigw" || status.aigwConfigured || !status.authGateRequired) return true;
-	if (!opts.modelProvider && await hasExplicitNonTargetDefault(opts.reason)) return true;
+	if (status.mode === "aigw" || status.aigwConfigured) return true;
+	if (requestedProvider) {
+		const providerStatus = status.providers.find((p) => p.id === requestedProvider);
+		if (providerStatus?.enabled && providerStatus.authenticated) return true;
+		return openDirectCloudAuthGate(status, opts);
+	}
+	if (!status.authGateRequired) return true;
+	if (await hasExplicitNonTargetDefault(opts.reason)) return true;
 	return openDirectCloudAuthGate(status, opts);
 }
 
