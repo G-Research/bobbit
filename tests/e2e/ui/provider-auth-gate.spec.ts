@@ -1,0 +1,192 @@
+import type { Page } from "@playwright/test";
+import { test, expect } from "../gateway-harness.js";
+import { openApp } from "./ui-helpers.js";
+
+type CloudProviderId = "anthropic" | "openai" | "google";
+type CloudStatusMode = "direct-cloud" | "aigw";
+
+const PROVIDERS: CloudProviderId[] = ["anthropic", "openai", "google"];
+const LABELS: Record<CloudProviderId, string> = {
+	anthropic: "Anthropic",
+	openai: "OpenAI",
+	google: "Google Gemini",
+};
+
+function providerStatus(
+	id: CloudProviderId,
+	overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+	return {
+		id,
+		label: LABELS[id],
+		enabled: false,
+		configured: false,
+		authenticated: false,
+		expired: false,
+		needsReauth: false,
+		status: "disabled",
+		credentialTypes: [],
+		oauthSupported: id !== "google",
+		apiKeySupported: id !== "anthropic",
+		...overrides,
+	};
+}
+
+function cloudAuthStatus(mode: CloudStatusMode, authenticatedProviders: CloudProviderId[] = []): Record<string, unknown> {
+	const authenticated = new Set(authenticatedProviders);
+	if (mode === "aigw") {
+		return {
+			mode: "aigw",
+			aigwConfigured: true,
+			authGateRequired: false,
+			providers: PROVIDERS.map((id) => providerStatus(id, {
+				enabled: false,
+				status: "aigw_bypass",
+				message: "AI Gateway is handling model access.",
+			})),
+		};
+	}
+	return {
+		mode: "direct-cloud",
+		aigwConfigured: false,
+		authGateRequired: authenticated.size === 0,
+		providers: PROVIDERS.map((id) => {
+			const isAuthenticated = authenticated.has(id);
+			return providerStatus(id, isAuthenticated ? {
+				enabled: true,
+				configured: true,
+				authenticated: true,
+				status: "authenticated",
+				credentialTypes: ["api_key"],
+			} : {});
+		}),
+	};
+}
+
+async function stubPreferencesWithoutExplicitCloudBypass(page: Page): Promise<void> {
+	await page.route(/\/api\/preferences(?:\?.*)?$/, async (route, request) => {
+		if (request.method() === "GET") {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({}),
+			});
+			return;
+		}
+		await route.fallback();
+	});
+}
+
+async function stubCloudProviderStatus(
+	page: Page,
+	statusFactory: () => Record<string, unknown>,
+): Promise<{ requests: () => number }> {
+	let requestCount = 0;
+	await page.route(/\/api\/cloud-providers\/status(?:\?.*)?$/, async (route) => {
+		requestCount++;
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify(statusFactory()),
+		});
+	});
+	return { requests: () => requestCount };
+}
+
+async function stubSessionCreation(page: Page): Promise<{ posts: () => Array<Record<string, unknown>> }> {
+	const postBodies: Array<Record<string, unknown>> = [];
+	await page.route(/\/api\/sessions(?:\?.*)?$/, async (route, request) => {
+		if (request.method() !== "POST") {
+			await route.fallback();
+			return;
+		}
+		const body = request.postDataJSON() as Record<string, unknown> | null;
+		postBodies.push(body ?? {});
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({ id: `stub-session-${postBodies.length}` }),
+		});
+	});
+	return { posts: () => postBodies };
+}
+
+async function clickNewSession(page: Page): Promise<void> {
+	await page.locator("button[title^='New session']").first().click();
+}
+
+test.describe("Direct-cloud auth gate", () => {
+	test("opens before direct-cloud session start and cancel prevents session creation", async ({ page }) => {
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		await stubCloudProviderStatus(page, () => cloudAuthStatus("direct-cloud"));
+		const sessions = await stubSessionCreation(page);
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		const gate = page.locator('[data-testid="cloud-auth-gate"]');
+		await expect(gate).toBeVisible({ timeout: 10_000 });
+		expect(sessions.posts()).toHaveLength(0);
+
+		await page.locator('[data-testid="cloud-auth-gate-cancel"]').click();
+		await expect(gate).toHaveCount(0, { timeout: 5_000 });
+		await expect.poll(() => sessions.posts().length, { timeout: 1_000 }).toBe(0);
+	});
+
+	test("saves a Google API key, enables the provider, and resumes session creation", async ({ page }) => {
+		let googleAuthenticated = false;
+		const providerKeyPosts: Array<Record<string, unknown>> = [];
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		await stubCloudProviderStatus(page, () => cloudAuthStatus("direct-cloud", googleAuthenticated ? ["google"] : []));
+		const sessions = await stubSessionCreation(page);
+		await page.route(/\/api\/provider-keys\/google(?:\?.*)?$/, async (route, request) => {
+			if (request.method() !== "POST") {
+				await route.fallback();
+				return;
+			}
+			providerKeyPosts.push(request.postDataJSON() as Record<string, unknown>);
+			googleAuthenticated = true;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ ok: true, provider: "google", enabled: true }),
+			});
+		});
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toBeVisible({ timeout: 10_000 });
+		expect(sessions.posts()).toHaveLength(0);
+
+		await page.locator('[data-testid="cloud-auth-gate-provider-google"]').click();
+		await expect(page.getByRole("button", { name: "Connect selected" })).toBeEnabled();
+		await page.getByRole("button", { name: "Connect selected" }).click();
+
+		const keyInput = page.getByPlaceholder("Paste Gemini API key");
+		await expect(keyInput).toBeVisible({ timeout: 5_000 });
+		await keyInput.fill("test-gemini-key");
+		const saveResponse = page.waitForResponse((response) =>
+			response.url().includes("/api/provider-keys/google") && response.request().method() === "POST",
+		);
+		await page.getByRole("button", { name: "Save key" }).click();
+		await saveResponse;
+
+		await expect.poll(() => sessions.posts().length, { timeout: 10_000 }).toBe(1);
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0, { timeout: 5_000 });
+		expect(providerKeyPosts).toEqual([{ key: "test-gemini-key", enable: true }]);
+	});
+
+	test("AI Gateway cloud status bypasses the auth gate", async ({ page }) => {
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		const status = await stubCloudProviderStatus(page, () => cloudAuthStatus("aigw"));
+		const sessions = await stubSessionCreation(page);
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		await expect.poll(() => sessions.posts().length, { timeout: 10_000 }).toBe(1);
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0);
+		expect(status.requests()).toBeGreaterThan(0);
+	});
+});
