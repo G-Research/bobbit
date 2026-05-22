@@ -258,18 +258,20 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(postBody.kind).toBeUndefined();
 	});
 
-	test("v3 marker: identical content reuses the live preview tab", async ({ page }) => {
+	test("v3 marker: identical content reuses the live preview tab without remounting relative files", async ({ page }) => {
 		await gotoAndWait(page);
 		await page.evaluate(async ([hash, sessionId, result]) => {
 			await (window as any).__resetPreviewState();
 			await (window as any).__setPreviewWorkspace(sessionId, hash);
-			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>same</p>" }, result, false);
+			(window as any).__renderPreview(document.getElementById("container")!, { file: "relative/report.html" }, result, false);
 			(window as any).__resetFetchCalls();
 		}, [HASH, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH)] as any);
 
 		await page.locator("[data-preview-open-btn]").click();
 		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
 
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
 		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);

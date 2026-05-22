@@ -326,6 +326,11 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				if (!parsed) throw new Error("Snapshot block could not be parsed");
 
 				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
+				let liveContentHashBeforeOpen: string | undefined;
+				try {
+					const { state: appState } = await import("../../../app/state.js");
+					liveContentHashBeforeOpen = normalizeContentHash((appState as any).previewPanelContentHash);
+				} catch { /* optional state probe */ }
 
 				// 3. Enable preview mode (idempotent)
 				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
@@ -349,7 +354,8 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				let entryFromPost: string | undefined;
 				let mtimeFromPost: number | undefined;
 				let contentHashFromPost: string | undefined;
-				const postBody = mountBodyForSnapshot(parsed, params);
+				const liveAlreadyHasSnapshot = !!snapshotContentHash && liveContentHashBeforeOpen === snapshotContentHash;
+				const postBody = liveAlreadyHasSnapshot ? null : mountBodyForSnapshot(parsed, params);
 				if (postBody) {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 						method: "POST",
