@@ -90,10 +90,5 @@ test.describe("Unseen-activity dot (server-backed read state)", () => {
 		await expect(unseenDot).toHaveCount(0);
 	});
 
-	test("mark-read endpoint returns 404 for unknown session", async () => {
-		const resp = await apiFetch("/api/sessions/does-not-exist/mark-read", {
-			method: "POST",
-		});
-		expect(resp.status).toBe(404);
-	});
+	// Unknown-session endpoint coverage lives in tests/e2e/unseen-activity-api.spec.ts.
 });

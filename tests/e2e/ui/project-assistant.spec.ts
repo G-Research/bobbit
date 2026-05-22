@@ -1,31 +1,14 @@
 /**
  * Project assistant UX E2E tests — consolidated.
- * 4 essential tests covering critical paths:
- * 1. Happy path: create provisional → accept proposal → project promoted with config
- * 2. Dismiss/cleanup: dismiss proposal + provisional cleanup on delete
- * 3. Provisional project persistence across page refresh
- * 4. API basics: session types + provisional flag
+ *
+ * API basics coverage lives in tests/e2e/project-assistant-api.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, nonGitCwd, waitForSessionStatus, deleteSession } from "../e2e-setup.js";
+import { apiFetch, deleteSession } from "../e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-/** Create a project assistant session via API and return session ID + provisional project info. */
-async function createProjectAssistantSession(
-	assistantType: "project" | "project-scaffolding",
-	cwd?: string,
-): Promise<{ sessionId: string; provisionalProjectId?: string }> {
-	const resp = await apiFetch("/api/sessions", {
-		method: "POST",
-		body: JSON.stringify({ assistantType, cwd: cwd || nonGitCwd() }),
-	});
-	expect(resp.status).toBe(201);
-	const data = await resp.json();
-	return { sessionId: data.id, provisionalProjectId: data.provisionalProjectId };
-}
 
 /** Create a unique temp dir for each test.
  *  Returns the canonical (realpath) form so the project-assistant flow
@@ -288,36 +271,5 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	test("API basics — session types and provisional flag", async () => {
-		// Detection mode
-		const { sessionId: detectionId, provisionalProjectId: pp1 } = await createProjectAssistantSession("project");
-		const detResp = await apiFetch(`/api/sessions/${detectionId}`);
-		const detData = await detResp.json();
-		expect(detData.assistantType).toBe("project");
-
-		// Scaffolding mode
-		const { sessionId: scaffoldId, provisionalProjectId: pp2 } = await createProjectAssistantSession("project-scaffolding");
-		const scfResp = await apiFetch(`/api/sessions/${scaffoldId}`);
-		const scfData = await scfResp.json();
-		expect(scfData.assistantType).toBe("project-scaffolding");
-
-		// Verify provisional flag via projects API
-		if (pp1) {
-			const projects = await getProjects();
-			const provisional = projects.find((p: any) => p.id === pp1);
-			expect(provisional).toBeTruthy();
-			expect(provisional.provisional).toBe(true);
-		}
-
-		// Session terminate removes from active list
-		await deleteSession(detectionId);
-		const resp = await apiFetch("/api/sessions");
-		const data = await resp.json();
-		const sessions = data.sessions || [];
-		expect(sessions.find((s: { id: string }) => s.id === detectionId)).toBeFalsy();
-
-		await deleteSession(scaffoldId);
-		if (pp1) await cleanupProject(pp1);
-		if (pp2) await cleanupProject(pp2);
-	});
+	// API basics — session types and provisional flag — moved to tests/e2e/project-assistant-api.spec.ts.
 });
