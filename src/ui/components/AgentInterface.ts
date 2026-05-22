@@ -98,8 +98,8 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onAskAgentPr?: () => void;
 	// Optional custom API key prompt handler - if not provided, uses default dialog
 	@property({ attribute: false }) onApiKeyRequired?: (provider: string) => Promise<boolean>;
-	// Optional callback called before sending a message
-	@property({ attribute: false }) onBeforeSend?: () => void | Promise<void>;
+	// Optional callback called before sending a message; return false to cancel.
+	@property({ attribute: false }) onBeforeSend?: () => void | boolean | Promise<void | boolean>;
 	// Optional callback called before executing a tool call - return false to prevent execution
 	@property({ attribute: false }) onBeforeToolCall?: (toolName: string, args: any) => boolean | Promise<boolean>;
 	// Optional callback called when cost display is clicked
@@ -210,9 +210,11 @@ export class AgentInterface extends LitElement {
 
 		chooser.addEventListener("cancel", () => cleanup());
 		chooser.addEventListener("continue", async () => {
-			cleanup();
 			const archivedId = this.session?.sessionId;
 			if (!archivedId) return;
+			const { ensureDirectCloudAuthReady } = await import("../../app/dialogs.js");
+			if (!(await ensureDirectCloudAuthReady({ reason: "create-session", continuationLabel: "Continue session", modelProvider: this.session?.state?.model?.provider }))) return;
+			cleanup();
 			try {
 				const resp = await gatewayFetch(`/api/sessions/${archivedId}/continue`, {
 					method: "POST",
@@ -1192,9 +1194,11 @@ export class AgentInterface extends LitElement {
 
 		const isStreaming = session.state.isStreaming;
 
-		// Check if API key exists for the provider (only needed in direct mode, skip for queued messages)
+		// Check direct-cloud readiness before sending. Local/custom/aigw providers are skipped by the helper.
 		if (!isStreaming) {
 			const provider = session.state.model.provider;
+			const { ensureDirectCloudAuthReady } = await import("../../app/dialogs.js");
+			if (!(await ensureDirectCloudAuthReady({ reason: "send-message", continuationLabel: "Send message", modelProvider: provider }))) return;
 			const apiKey = await getAppStorage().providerKeys.get(provider);
 
 			// If no API key, prompt for it
@@ -1215,7 +1219,8 @@ export class AgentInterface extends LitElement {
 
 		// Call onBeforeSend hook before sending
 		if (this.onBeforeSend) {
-			await this.onBeforeSend();
+			const beforeResult = await this.onBeforeSend();
+			if (beforeResult === false) return;
 		}
 
 		// Only clear editor after we know we can send
