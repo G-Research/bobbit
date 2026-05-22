@@ -1,18 +1,34 @@
 /**
  * E2E tests for sidebar search and keyboard shortcuts.
- *
- * Covers user stories:
- *   SB-24: Filter sidebar by typing
- *   SB-25: Search auto-opens archived section
- *   SB-26: Launch full search from sidebar
- *   SB-34: Sidebar keyboard shortcuts
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect, type Page } from "../gateway-harness.js";
 import { createSession, deleteSession, createGoal, deleteGoal, apiFetch, nonGitCwd, waitForHealth } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
+async function waitForShortcutsReady(page: Page): Promise<void> {
+	await expect.poll(
+		() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+		{ timeout: 15_000 },
+	).toBe(true);
+}
+
+async function dispatchCtrlK(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		window.dispatchEvent(new KeyboardEvent("keydown", {
+			key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+		}));
+	});
+}
+
+async function dispatchCtrlBracket(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		window.dispatchEvent(new KeyboardEvent("keydown", {
+			key: "[", code: "BracketLeft", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
+		}));
+	});
+}
+
 test.describe("Sidebar search & keyboard shortcuts", () => {
-	// Track created resources for cleanup
 	let sessionAlpha: string;
 	let sessionBravo: string;
 	let goalCharlie: { id: string };
@@ -20,9 +36,7 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
 
-		// Create sessions and a goal with distinct names
 		sessionAlpha = await createSession({ cwd: nonGitCwd() });
-		// Rename sessions via API to have distinct, searchable names
 		await apiFetch(`/api/sessions/${sessionAlpha}`, {
 			method: "PATCH",
 			body: JSON.stringify({ title: "AlphaUniqueSearch" }),
@@ -43,58 +57,33 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await deleteGoal(goalCharlie.id).catch(() => {});
 	});
 
-	test("SB-24: filter sidebar by typing partial name @smoke", async ({ page }) => {
-		await openApp(page);
-
-		// Wait for sidebar to render our sessions
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 10_000 });
-		await expect(page.getByText("BravoUniqueSearch")).toBeVisible({ timeout: 5_000 });
-
-		// Type partial name matching only Alpha
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
-		await searchInput.fill("AlphaUnique");
-
-		// Debounce (200ms) is absorbed by the auto-retrying assertions below.
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BravoUniqueSearch")).not.toBeVisible({ timeout: 3_000 });
-
-		// Clear the input — all should reappear
-		await searchInput.fill("");
-
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BravoUniqueSearch")).toBeVisible({ timeout: 5_000 });
-	});
-
-	test("SB-24: query persists after clicking a filtered session", async ({ page }) => {
+	test("SB-24: filter, preserve query on navigation, Escape clears and blurs @smoke", async ({ page }) => {
 		await openApp(page);
 
 		const sidebar = page.locator(".sidebar-edge");
-		// Match multiple elements (the span + its wrapper div both contain the text).
-		// Use .first() consistently so later click + assertions don't hit strict mode.
 		const alphaRow = sidebar.getByText("AlphaUniqueSearch").first();
+		const bravoRow = sidebar.getByText("BravoUniqueSearch").first();
 		await expect(alphaRow).toBeVisible({ timeout: 10_000 });
+		await expect(bravoRow).toBeVisible({ timeout: 5_000 });
 
 		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
 		await searchInput.fill("AlphaUnique");
-		// Wait for the debounced state update + sidebar re-render to settle
-		// (SearchBox debounces 200ms before propagating to state.searchQuery).
 		await expect(searchInput).toHaveValue("AlphaUnique");
-		await expect(alphaRow).toBeVisible();
-		await expect(sidebar.getByText("BravoUniqueSearch").first()).not.toBeVisible();
+		await expect(alphaRow).toBeVisible({ timeout: 5_000 });
+		await expect(bravoRow).not.toBeVisible({ timeout: 3_000 });
 
-		// Click the filtered session row
 		await alphaRow.click();
-
-		// Query should persist in the input. Use longer timeout + auto-retry
-		// because the click triggers navigation + renderApp cycles that can
-		// transiently reset the input before settling.
 		await expect(searchInput).toHaveValue("AlphaUnique", { timeout: 5_000 });
+
+		await searchInput.click();
+		await searchInput.press("Escape");
+		await expect(searchInput).toHaveValue("");
+		expect(await searchInput.evaluate((el) => document.activeElement === el)).toBe(false);
+		await expect(alphaRow).toBeVisible({ timeout: 5_000 });
+		await expect(bravoRow).toBeVisible({ timeout: 5_000 });
 	});
 
 	test("SB-24: goal visible when child session matches", async ({ page }) => {
-		// Create a session under the goal with a searchable name
 		const goalSession = await createSession({ cwd: nonGitCwd(), goalId: goalCharlie.id });
 		await apiFetch(`/api/sessions/${goalSession}`, {
 			method: "PATCH",
@@ -103,75 +92,31 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 
 		try {
 			await openApp(page);
-
-			// Wait for goal to be visible
 			await expect(page.getByText("CharlieUniqueGoal")).toBeVisible({ timeout: 10_000 });
 
 			const searchInput = page.locator("input[data-search]");
-			await searchInput.click();
 			await searchInput.fill("DeltaGoalChild");
-
-			// The goal should remain visible because its child matches
 			await expect(page.getByText("CharlieUniqueGoal")).toBeVisible({ timeout: 5_000 });
-
-			// Non-matching items should be hidden
 			await expect(page.getByText("AlphaUniqueSearch")).not.toBeVisible({ timeout: 3_000 });
 		} finally {
 			await deleteSession(goalSession).catch(() => {});
 		}
 	});
 
-	test("SB-24: escape clears and blurs search", async ({ page }) => {
-		await openApp(page);
-
-		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
-		await searchInput.fill("AlphaUnique");
-		await expect(searchInput).toHaveValue("AlphaUnique");
-
-		// Press Escape
-		await searchInput.press("Escape");
-
-		// Input should be cleared and blurred
-		await expect(searchInput).toHaveValue("");
-		const isFocused = await searchInput.evaluate((el) => document.activeElement === el);
-		expect(isFocused).toBe(false);
-
-		// All items should reappear
-		await expect(page.getByText("AlphaUniqueSearch")).toBeVisible({ timeout: 5_000 });
-		await expect(page.getByText("BravoUniqueSearch")).toBeVisible({ timeout: 5_000 });
-	});
-
 	test("SB-25: search auto-opens archived section", async ({ page }) => {
-		// Create and archive a session with a unique name
 		const archivedId = await createSession({ cwd: nonGitCwd() });
 		await apiFetch(`/api/sessions/${archivedId}`, {
 			method: "PATCH",
 			body: JSON.stringify({ title: "EchoArchived" }),
 		});
-		// Archive by deleting (which archives in Bobbit)
 		await deleteSession(archivedId);
 
 		await openApp(page);
-
-		// Ensure archived section is initially collapsed (not showing)
-		// The "Archived" header should exist but content may not be expanded
 		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
 		await searchInput.fill("EchoArchived");
 
-		// The archived section should auto-open — look for the archived toggle showing expanded state
-		// The "▾" chevron next to "Archived" indicates it's open. Auto-retry covers
-		// the 200ms debounce + archived-fetch time.
-		const archivedHeader = page.getByText("Archived").first();
-		await expect(archivedHeader).toBeVisible({ timeout: 8_000 });
-
-		// Clear search — archived section should revert (auto-close)
+		await expect(page.getByText("Archived").first()).toBeVisible({ timeout: 8_000 });
 		await searchInput.fill("");
-
-		// After clearing a search-opened archived section, it should close
-		// Verify the archived section is no longer showing expanded content
-		// The content inside the archived section should be hidden
 		await expect(page.getByText("EchoArchived")).not.toBeVisible({ timeout: 5_000 });
 	});
 
@@ -179,15 +124,12 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		await openApp(page);
 
 		const searchInput = page.locator("input[data-search]");
-		await searchInput.click();
 		await searchInput.fill("TestQuery");
 
-		// Click "Full Search" link (auto-retry covers the 200ms debounce)
 		const fullSearchLink = page.getByText("Full Search");
 		await expect(fullSearchLink).toBeVisible({ timeout: 5_000 });
 		await fullSearchLink.click();
 
-		// Should navigate to #/search?q=TestQuery
 		await expect(async () => {
 			const hash = await page.evaluate(() => window.location.hash);
 			expect(hash).toContain("#/search");
@@ -195,118 +137,40 @@ test.describe("Sidebar search & keyboard shortcuts", () => {
 		}).toPass({ timeout: 5_000 });
 	});
 
-	test("SB-34: Ctrl+K focuses search input", async ({ page }) => {
-		await openApp(page);
-
-		// Ensure search is not focused initially
-		const searchInput = page.locator("input[data-search]");
-		const initiallyFocused = await searchInput.evaluate((el) => document.activeElement === el);
-		expect(initiallyFocused).toBe(false);
-
-		// Wait for the app's keydown listener to attach before dispatching.
-		await expect.poll(
-			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
-			{ timeout: 15_000 },
-		).toBe(true);
-
-		// Dispatch via window.dispatchEvent — keyboard.press can be dropped
-		// under heavy parallel load before focus settles. Set both ctrlKey
-		// and metaKey to match the registry's platform-aware ctrlOrMeta check.
-		await page.evaluate(() => {
-			window.dispatchEvent(new KeyboardEvent("keydown", {
-				key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
-			}));
-		});
-
-		// Search input should be focused — poll to absorb the rAF/render delay
-		// the shortcut handler relies on.
-		await expect.poll(
-			() => searchInput.evaluate((el) => document.activeElement === el),
-			{ timeout: 5_000 },
-		).toBe(true);
-	});
-
-	test("SB-34: Ctrl+[ toggles sidebar collapse", async ({ page }) => {
-		await openApp(page);
-
-		// Sidebar is the flex-col element with sidebar-edge class
-		const sidebar = page.locator(".sidebar-edge");
-		await expect(sidebar).toBeVisible({ timeout: 5_000 });
-
-		// Verify the search input is visible (proves sidebar is expanded)
-		const searchInput = page.locator("input[data-search]");
-		await expect(searchInput).toBeVisible({ timeout: 3_000 });
-
-		// Wait for the app's keydown listener to attach before dispatching.
-		await expect.poll(
-			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
-			{ timeout: 15_000 },
-		).toBe(true);
-
-		// Dispatch Ctrl+[ via window.dispatchEvent rather than Playwright's
-		// keyboard.press — under heavy parallel load the first Chromium
-		// keystroke can be dropped when focus hasn't settled. The app's
-		// shortcut registry listens on `window`, so dispatching there
-		// reaches it reliably.
-		// Set BOTH ctrlKey and metaKey so the dispatched event matches
-		// the registry's platform-aware ctrlOrMeta check on macOS (metaKey)
-		// and Linux/Windows (ctrlKey) without per-platform branching.
-		const pressCtrlBracket = () => page.evaluate(() => {
-			window.dispatchEvent(new KeyboardEvent("keydown", {
-				key: "[", code: "BracketLeft", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
-			}));
-		});
-
-		await pressCtrlBracket();
-
-		// Sidebar should be collapsed — poll for state change rather than
-		// rely on a single not-visible assertion that races against re-render.
-		await expect.poll(
-			() => page.evaluate(() => !!document.querySelector("[data-testid='sidebar-collapsed']")),
-			{ timeout: 5_000 },
-		).toBe(true);
-
-		await pressCtrlBracket();
-
-		// Sidebar should be expanded again — search input visible
-		await expect(searchInput).toBeVisible({ timeout: 5_000 });
-	});
-
-	test("SB-34: Ctrl+K works even when textarea has focus", async ({ page }) => {
-		// Create a session so we have a textarea
+	test("SB-34: keyboard shortcuts focus search from app/textarea and toggle sidebar collapse", async ({ page }) => {
 		const tempSession = await createSession({ cwd: nonGitCwd() });
 		try {
 			await openApp(page);
-			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, tempSession);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
-
-			// Focus the textarea
-			await page.locator("textarea").first().click();
-			const textareaFocused = await page.evaluate(() => document.activeElement?.tagName.toLowerCase());
-			expect(textareaFocused).toBe("textarea");
-
-			// Wait for the app's keydown listener to attach before dispatching.
-			await expect.poll(
-				() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
-				{ timeout: 15_000 },
-			).toBe(true);
-
-			// Press Ctrl+K — should still focus search.
-			// Note: Ctrl+K uses ctrlOrMeta modifier so it fires even in input contexts.
-			// Dispatch via window.dispatchEvent — keyboard.press can be dropped
-			// under heavy parallel load. Set both ctrlKey and metaKey for
-			// platform-aware ctrlOrMeta matching.
-			await page.evaluate(() => {
-				window.dispatchEvent(new KeyboardEvent("keydown", {
-					key: "k", code: "KeyK", ctrlKey: true, metaKey: true, bubbles: true, cancelable: true,
-				}));
-			});
-
 			const searchInput = page.locator("input[data-search]");
+			expect(await searchInput.evaluate((el) => document.activeElement === el)).toBe(false);
+			await waitForShortcutsReady(page);
+
+			await dispatchCtrlK(page);
 			await expect.poll(
 				() => searchInput.evaluate((el) => document.activeElement === el),
 				{ timeout: 5_000 },
 			).toBe(true);
+
+			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, tempSession);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+			await page.locator("textarea").first().click();
+			expect(await page.evaluate(() => document.activeElement?.tagName.toLowerCase())).toBe("textarea");
+
+			await dispatchCtrlK(page);
+			await expect.poll(
+				() => searchInput.evaluate((el) => document.activeElement === el),
+				{ timeout: 5_000 },
+			).toBe(true);
+
+			await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 5_000 });
+			await dispatchCtrlBracket(page);
+			await expect.poll(
+				() => page.evaluate(() => !!document.querySelector("[data-testid='sidebar-collapsed']")),
+				{ timeout: 5_000 },
+			).toBe(true);
+
+			await dispatchCtrlBracket(page);
+			await expect(searchInput).toBeVisible({ timeout: 5_000 });
 		} finally {
 			await deleteSession(tempSession).catch(() => {});
 		}
