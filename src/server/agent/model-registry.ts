@@ -17,6 +17,14 @@ import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
+import {
+	CLOUD_PROVIDERS,
+	cloudModelPrefIsUsable,
+	cloudVendorForModelProvider,
+	hasValidCloudProviderCredential,
+	isProviderEnabled,
+	parseModelPref,
+} from "./cloud-provider-auth.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -90,11 +98,24 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
 function getPrefsVersion(prefs: PreferencesStore): number {
 	const all = prefs.getAll();
 	let hash = 0;
+	let authMtime = 0;
+	try {
+		const st = fs.statSync(globalAuthPath());
+		authMtime = st.mtimeMs;
+	} catch { /* auth.json absent */ }
 	const str = JSON.stringify([
 		all["aigw.url"],
 		all["aigw.exclusive"],
 		all["customProviders"],
+		...CLOUD_PROVIDERS.flatMap((provider) => [
+			all[`providerEnabled.${provider}`],
+			all[`providerCredentialInvalid.${provider}`],
+		]),
 		...Object.keys(all).filter(k => k.startsWith("providerKey.")).sort(),
+		Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_OAUTH_TOKEN),
+		Boolean(process.env.OPENAI_API_KEY),
+		Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+		authMtime,
 	]);
 	for (let i = 0; i < str.length; i++) {
 		hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
@@ -123,8 +144,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		try {
 			const providers = getProviders();
 			for (const providerId of providers) {
+				const vendor = cloudVendorForModelProvider(providerId as string);
+				if (vendor && !isProviderEnabled(prefs, vendor)) continue;
 				const models = getModels(providerId as any);
-				const isAuth = detectProviderAuth(providerId as string, prefs);
+				const isAuth = vendor
+					? hasValidCloudProviderCredential(prefs, vendor)
+					: detectProviderAuth(providerId as string, prefs);
 				const bobbitAdditions = getOpenAIModelAdditions(providerId as string);
 				const mergedModels = [
 					...models,
@@ -455,6 +480,42 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 		req.on("error", reject);
 		req.end();
 	});
+}
+
+// ── Selection Helpers ──────────────────────────────────────────────
+
+export async function getSelectableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
+	const models = await getAvailableModels(prefs);
+	return models.filter((model) => {
+		const vendor = cloudVendorForModelProvider(model.provider);
+		return vendor ? model.authenticated : true;
+	});
+}
+
+export function modelPrefLooksUsable(prefs: PreferencesStore | undefined | null, pref: string | undefined | null): boolean {
+	const parsed = parseModelPref(pref);
+	if (!parsed) return false;
+	if (!prefs) return true;
+	return cloudModelPrefIsUsable(prefs, pref);
+}
+
+export async function modelPrefIsUsable(prefs: PreferencesStore, pref: string | undefined | null): Promise<boolean> {
+	const parsed = parseModelPref(pref);
+	if (!parsed) return false;
+	if (!cloudModelPrefIsUsable(prefs, pref)) return false;
+	const models = await getAvailableModels(prefs);
+	return models.some((model) => model.provider === parsed.provider && model.id === parsed.modelId && model.authenticated);
+}
+
+export async function pickDefaultSessionModel(prefs: PreferencesStore): Promise<string | undefined> {
+	const saved = prefs.get("default.sessionModel") as string | undefined;
+	if (saved && await modelPrefIsUsable(prefs, saved)) return saved;
+
+	const selectable = (await getSelectableModels(prefs))
+		.filter((model) => model.authenticated)
+		.sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id));
+	const best = selectable[0];
+	return best ? `${best.provider}/${best.id}` : undefined;
 }
 
 // ── Model Recency Ranking ──────────────────────────────────────────

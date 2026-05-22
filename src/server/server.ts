@@ -141,7 +141,19 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
+import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, pickDefaultImageModelPref } from "./agent/image-generation.js";
+import {
+	cloudModelPrefIsUsable,
+	cloudVendorForModelPref,
+	cloudVendorForOAuthProvider,
+	cloudVendorForProviderKey,
+	getCloudAuthStatus,
+	isCloudProviderId,
+	isProviderEnabled,
+	migrateExistingCloudProviderPreferences,
+	setProviderEnabled,
+	shouldBypassCloudAuthUx,
+} from "./agent/cloud-provider-auth.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
@@ -696,6 +708,7 @@ export function createGateway(config: GatewayConfig) {
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
+	migrateExistingCloudProviderPreferences(preferencesStore);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
 	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
@@ -3606,6 +3619,9 @@ async function handleApiRoute(
 			autoSandboxBranch = `session/s-${shortId}`;
 		}
 
+		const initialModelPref = sessionManager.resolveInitialModel(createOpts?.role, resolvedProjectId);
+		if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
+
 		try {
 			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
 
@@ -4206,6 +4222,31 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
+	async function sendCloudAuthRequired(): Promise<void> {
+		const status = await getCloudAuthStatus(preferencesStore);
+		json({
+			code: "cloud_auth_required",
+			error: "Choose at least one cloud provider to connect before starting cloud-backed work.",
+			status,
+		}, 409);
+	}
+
+	async function rejectIfCloudAuthRequiredForModel(pref: string | undefined | null, unresolvedMayUseCloud = true): Promise<boolean> {
+		if (shouldBypassCloudAuthUx(preferencesStore)) return false;
+		const vendor = cloudVendorForModelPref(pref);
+		if (vendor) {
+			if (cloudModelPrefIsUsable(preferencesStore, pref)) return false;
+			await sendCloudAuthRequired();
+			return true;
+		}
+		if (pref) return false;
+		if (!unresolvedMayUseCloud) return false;
+		const status = await getCloudAuthStatus(preferencesStore);
+		if (!status.authGateRequired) return false;
+		await sendCloudAuthRequired();
+		return true;
+	}
+
 	// GET /api/preferences — return all preferences (filter sensitive keys)
 	if (url.pathname === "/api/preferences" && req.method === "GET") {
 		json(getSafePreferences());
@@ -4223,8 +4264,35 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
+		invalidateModelCache();
 		json({ ok: true });
 		broadcastPreferencesChanged();
+		return;
+	}
+
+	// GET /api/cloud-providers/status — redacted cloud-provider enablement/auth status
+	if (url.pathname === "/api/cloud-providers/status" && req.method === "GET") {
+		json(await getCloudAuthStatus(preferencesStore));
+		return;
+	}
+
+	// PUT /api/cloud-providers/:provider — enable/disable a cloud vendor without mutating credentials
+	const cloudProviderMatch = url.pathname.match(/^\/api\/cloud-providers\/([^/]+)$/);
+	if (cloudProviderMatch && req.method === "PUT") {
+		const provider = decodeURIComponent(cloudProviderMatch[1]);
+		if (!isCloudProviderId(provider)) {
+			json({ error: "Unsupported cloud provider" }, 400);
+			return;
+		}
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || typeof body.enabled !== "boolean") {
+			json({ error: "Missing boolean 'enabled' field" }, 400);
+			return;
+		}
+		setProviderEnabled(preferencesStore, provider, body.enabled);
+		invalidateModelCache();
+		broadcastPreferencesChanged();
+		json({ ok: true, provider, enabled: body.enabled });
 		return;
 	}
 
@@ -4403,11 +4471,11 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
-		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
+		const defaultPref = pickDefaultImageModelPref(preferencesStore);
 		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
 		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
 		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
-		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
+		const selectedModel = selectedModelRaw ? (canonicalImageModelPref(selectedModelRaw) || selectedModelRaw) : undefined;
 		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
 		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
 		const model = requestedModel
@@ -4435,6 +4503,11 @@ async function handleApiRoute(
 				images: result.images,
 			});
 		} catch (err: any) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (!shouldBypassCloudAuthUx(preferencesStore) && message.includes("No authenticated image generation provider configured")) {
+				await sendCloudAuthRequired();
+				return;
+			}
 			jsonError(500, err);
 		}
 		return;
@@ -4538,7 +4611,14 @@ async function handleApiRoute(
 			return;
 		}
 		preferencesStore.set(`providerKey.${provider}`, body.key);
-		json({ ok: true });
+		const vendor = cloudVendorForProviderKey(provider);
+		if (vendor && body.enable !== false) {
+			setProviderEnabled(preferencesStore, vendor, true);
+			preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+		}
+		invalidateModelCache();
+		broadcastPreferencesChanged();
+		json({ ok: true, ...(vendor ? { provider: vendor, enabled: isProviderEnabled(preferencesStore, vendor) } : {}) });
 		return;
 	}
 
@@ -4550,6 +4630,10 @@ async function handleApiRoute(
 			return;
 		}
 		preferencesStore.remove(`providerKey.${provider}`);
+		const vendor = cloudVendorForProviderKey(provider);
+		if (vendor) preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+		invalidateModelCache();
+		broadcastPreferencesChanged();
 		json({ ok: true });
 		return;
 	}
@@ -5671,6 +5755,8 @@ async function handleApiRoute(
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
 		try {
+			const initialModelPref = sessionManager.resolveInitialModel(undefined, getGoalAcrossProjects(goalId)?.projectId);
+			if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
@@ -5700,6 +5786,8 @@ async function handleApiRoute(
 			return;
 		}
 		try {
+			const initialModelPref = sessionManager.resolveInitialModel(typeof body.role === "string" ? body.role : undefined, spawnGoal?.projectId);
+			if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
 			const spawnOpts: { workflowGateId?: string; inputGateIds?: string[] } = {};
 			if (typeof body.workflowGateId === "string") spawnOpts.workflowGateId = body.workflowGateId;
 			if (Array.isArray(body.inputGateIds)) spawnOpts.inputGateIds = body.inputGateIds as string[];
@@ -6252,6 +6340,10 @@ async function handleApiRoute(
 			json({ error: "source project no longer registered" }, 410);
 			return;
 		}
+		const persistedModelPref = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		const continuedModelPref = persistedModelPref || sessionManager.resolveInitialModel(ps.role, ps.projectId);
+		if (await rejectIfCloudAuthRequiredForModel(continuedModelPref, true)) return;
+		const canUsePersistedModel = !!persistedModelPref && cloudModelPrefIsUsable(preferencesStore, persistedModelPref);
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
 		// sessions whose persisted `agentSessionFile` was never populated.
@@ -6345,13 +6437,13 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
-			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
-			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+			// We'll set the model explicitly below when it remains usable.
+			skipAutoModel: canUsePersistedModel,
 		};
 		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
-		if (ps.modelProvider && ps.modelId) {
-			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		if (canUsePersistedModel && persistedModelPref) {
+			createOpts.initialModel = persistedModelPref;
 		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
@@ -6386,7 +6478,7 @@ async function handleApiRoute(
 		// "Continued: …" once the user sends their first prompt in the new session.
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
-		if (ps.modelProvider && ps.modelId) {
+		if (canUsePersistedModel && ps.modelProvider && ps.modelId) {
 			// Model is pinned at spawn via createOpts.initialModel above; just
 			// persist the choice so a later restore picks it up. No redundant
 			// post-spawn setModel — that's the whole point of spawn-time pinning.
@@ -6859,7 +6951,8 @@ async function handleApiRoute(
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			jsonError(500, err);
+			const message = err instanceof Error ? err.message : String(err);
+			jsonError(message.includes("Google sign-in is not available") ? 501 : 500, err);
 		}
 		return;
 	}
@@ -6873,6 +6966,15 @@ async function handleApiRoute(
 		}
 		try {
 			const result = await oauthComplete(body.flowId, body.code);
+			if (result.success) {
+				const vendor = cloudVendorForOAuthProvider(result.provider);
+				if (vendor) {
+					setProviderEnabled(preferencesStore, vendor, true);
+					preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+					invalidateModelCache();
+					broadcastPreferencesChanged();
+				}
+			}
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
