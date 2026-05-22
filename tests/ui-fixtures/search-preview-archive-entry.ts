@@ -37,6 +37,29 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const method = (init?.method || "GET").toUpperCase();
 	fetchLog.push({ url, method, body: parseBody(init) });
 
+	if (url === "/api/preferences") return response({});
+	if (url === "/api/cloud-providers/status") {
+		return response({
+			mode: "direct-cloud",
+			aigwConfigured: false,
+			authGateRequired: false,
+			providers: [
+				{
+					id: "anthropic",
+					label: "Anthropic",
+					enabled: true,
+					configured: true,
+					authenticated: true,
+					expired: false,
+					needsReauth: false,
+					status: "authenticated",
+					credentialTypes: ["oauth"],
+					oauthSupported: true,
+					apiKeySupported: false,
+				},
+			],
+		});
+	}
 	if (/^\/api\/sessions\/[^/]+\/proposals$/.test(url)) {
 		return response({ proposals: proposalTypes.map((proposalType) => ({ proposalType })) });
 	}

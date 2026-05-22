@@ -7,7 +7,22 @@ import { setProjects, setRenderApp, state, type Project } from "../../src/app/st
 import type { RoleData, ToolInfo, Workflow } from "../../src/app/api.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
-type OAuthStatus = Partial<Record<"anthropic" | "openai-codex", { authenticated: boolean; expires?: number }>>;
+type OAuthStatus = Partial<Record<"anthropic" | "openai-codex" | "google", { authenticated: boolean; expires?: number }>>;
+type CloudProviderStatus = {
+	id: "anthropic" | "openai" | "google";
+	label: string;
+	enabled: boolean;
+	configured: boolean;
+	authenticated: boolean;
+	expired: boolean;
+	needsReauth: boolean;
+	status: "disabled" | "enabled_without_credential" | "authenticated" | "expired" | "invalid" | "oauth_unavailable" | "aigw_bypass";
+	credentialTypes: Array<"oauth" | "api_key" | "env" | "host_token">;
+	oauthSupported: boolean;
+	apiKeySupported: boolean;
+	expires?: number;
+	message?: string;
+};
 type StructuredProject = { components: any[]; workflows?: Record<string, unknown>; worktree_root?: string };
 
 const STORE_PREFIX = "bobbit-settings-admin-fixture";
@@ -88,10 +103,57 @@ let projects: Project[] = DEFAULT_PROJECTS;
 let tools: ToolInfo[] = defaultTools();
 let workflows: Workflow[] = defaultWorkflows();
 let structuredProjects: Record<string, StructuredProject> = readJson(STRUCTURED_KEY, defaultStructuredProjects());
+function defaultCloudProviders(): CloudProviderStatus[] {
+	return [
+		{
+			id: "anthropic",
+			label: "Anthropic",
+			enabled: true,
+			configured: true,
+			authenticated: true,
+			expired: false,
+			needsReauth: false,
+			status: "authenticated",
+			credentialTypes: ["oauth"],
+			oauthSupported: true,
+			apiKeySupported: false,
+		},
+		{
+			id: "openai",
+			label: "OpenAI",
+			enabled: true,
+			configured: false,
+			authenticated: false,
+			expired: false,
+			needsReauth: false,
+			status: "enabled_without_credential",
+			credentialTypes: [],
+			oauthSupported: true,
+			apiKeySupported: true,
+		},
+		{
+			id: "google",
+			label: "Google Gemini",
+			enabled: false,
+			configured: false,
+			authenticated: false,
+			expired: false,
+			needsReauth: false,
+			status: "disabled",
+			credentialTypes: [],
+			oauthSupported: false,
+			apiKeySupported: true,
+			message: "Google sign-in is not available in this build. Add a Gemini API key instead.",
+		},
+	];
+}
+
 let oauthStatus: OAuthStatus = {
 	anthropic: { authenticated: true },
 	"openai-codex": { authenticated: false },
+	google: { authenticated: false },
 };
+let cloudProviders: CloudProviderStatus[] = defaultCloudProviders();
 let fetchLog: FetchLogEntry[] = [];
 
 function readJson<T>(key: string, fallback: T): T {
@@ -215,6 +277,32 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 
 	if (pathname === "/api/aigw/status") return response({ configured: false, url: "", models: [] });
+	if (pathname === "/api/cloud-providers/status") {
+		return response({
+			mode: "direct-cloud",
+			aigwConfigured: false,
+			authGateRequired: !cloudProviders.some((p) => p.enabled && p.authenticated),
+			providers: cloudProviders,
+		});
+	}
+	const cloudProviderMatch = pathname.match(/^\/api\/cloud-providers\/([^/]+)$/);
+	if (cloudProviderMatch && method === "PUT") {
+		const providerId = decodeURIComponent(cloudProviderMatch[1]) as CloudProviderStatus["id"];
+		cloudProviders = cloudProviders.map((provider) => {
+			if (provider.id !== providerId) return provider;
+			const enabled = body?.enabled === true;
+			return {
+				...provider,
+				enabled,
+				status: enabled
+					? (provider.authenticated ? "authenticated" : "enabled_without_credential")
+					: "disabled",
+			};
+		});
+		prefs[`providerEnabled.${providerId}`] = body?.enabled === true;
+		persistStores();
+		return response({ ok: true });
+	}
 	if (pathname === "/api/models") return response(DEFAULT_MODELS);
 	if (pathname === "/api/image-models") return response(DEFAULT_IMAGE_MODELS);
 	if (pathname === "/api/models/test") return response({ ok: true, latencyMs: 1 });
@@ -303,6 +391,7 @@ updatePlayFinishDataset();
 	workflows?: Workflow[];
 	structuredProjects?: Record<string, StructuredProject>;
 	oauthStatus?: OAuthStatus;
+	cloudProviders?: CloudProviderStatus[];
 } = {}) => {
 	localStorage.removeItem(PREFS_KEY);
 	localStorage.removeItem(ROLES_KEY);
@@ -316,8 +405,10 @@ updatePlayFinishDataset();
 	oauthStatus = {
 		anthropic: { authenticated: true },
 		"openai-codex": { authenticated: false },
+		google: { authenticated: false },
 		...(opts.oauthStatus || {}),
 	};
+	cloudProviders = opts.cloudProviders || defaultCloudProviders();
 	fetchLog = [];
 	setConfigScope("system");
 	persistStores();
