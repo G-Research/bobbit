@@ -286,6 +286,79 @@ test.describe("provider opt-in API and model filtering", () => {
 		}
 	});
 
+	test("definitive image provider auth failure marks credentials invalid and redacts status", async () => {
+		const secret = "sk-invalid-openai-secret-provider-opt-in";
+		await saveProviderKey("openai", secret);
+		await putPreferences({ "default.imageModel": "openai/gpt-image-2" });
+
+		await withImageProviderFetchMock(async (href, init) => {
+			if (href !== "https://api.openai.com/v1/images/generations") return undefined;
+			const requestBody = JSON.parse(String(init?.body || "{}"));
+			expect(requestBody.model).toBe("gpt-image-2");
+			return new Response(JSON.stringify({
+				error: { message: `Incorrect API key provided: ${secret}` },
+			}), { status: 401, headers: { "Content-Type": "application/json" } });
+		}, async () => {
+			const res = await apiFetch("/api/image-generation/generate", {
+				method: "POST",
+				body: JSON.stringify({ prompt: "draw a test square", model: "openai/gpt-image-2" }),
+			});
+			expect(res.status).toBe(500);
+			expect(await res.text()).not.toContain(secret);
+		});
+
+		const prefs = await getPreferences();
+		expect(prefs["providerCredentialInvalid.openai"]).toBe(true);
+		const openai = providerStatus(await getCloudStatus(), "openai");
+		expect(openai.enabled).toBe(true);
+		expect(openai.configured).toBe(true);
+		expect(openai.authenticated).toBe(false);
+		expect(openai.needsReauth).toBe(true);
+		expect(openai.status).toBe("invalid");
+		expect(openai.credentialTypes).toContain("api_key");
+
+		const imageModels = await (await apiFetch("/api/image-models")).json();
+		expect(imageModels.some((model: any) => model.provider === "openai")).toBe(false);
+		await expectPublicResponsesDoNotLeak([secret]);
+	});
+
+	test("transient image provider failures do not mark credentials invalid", async () => {
+		const cases: Array<{ name: string; run: () => Promise<void> }> = [
+			{
+				name: "rate-limit",
+				run: () => withImageProviderFetchMock(async (href) => {
+					if (href !== "https://api.openai.com/v1/images/generations") return undefined;
+					return new Response(JSON.stringify({ error: { message: "rate limit exceeded" } }), { status: 429, headers: { "Content-Type": "application/json" } });
+				}, () => requestImageGenerationExpectingFailure()),
+			},
+			{
+				name: "server-error",
+				run: () => withImageProviderFetchMock(async (href) => {
+					if (href !== "https://api.openai.com/v1/images/generations") return undefined;
+					return new Response(JSON.stringify({ error: { message: "provider temporarily unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
+				}, () => requestImageGenerationExpectingFailure()),
+			},
+			{
+				name: "network-error",
+				run: () => withImageProviderFetchMock(async (href) => {
+					if (href !== "https://api.openai.com/v1/images/generations") return undefined;
+					throw new TypeError("simulated provider network failure");
+				}, () => requestImageGenerationExpectingFailure()),
+			},
+		];
+
+		for (const entry of cases) {
+			await saveProviderKey("openai", `sk-transient-${entry.name}-provider-opt-in`);
+			await putPreferences({ "default.imageModel": "openai/gpt-image-2" });
+			await entry.run();
+			expect((await getPreferences())["providerCredentialInvalid.openai"]).not.toBe(true);
+			const openai = providerStatus(await getCloudStatus(), "openai");
+			expect(openai.authenticated).toBe(true);
+			expect(openai.needsReauth).toBe(false);
+			expect(openai.status).toBe("authenticated");
+		}
+	});
+
 	test("disabled target cloud providers are omitted from /api/models even when credentials exist", async () => {
 		await saveProviderKey("anthropic", "anthropic-disabled-model-key", { enable: false });
 		await saveProviderKey("openai", "openai-disabled-model-key", { enable: false });
@@ -392,6 +465,38 @@ async function expectPublicResponsesDoNotLeak(secrets: string[]): Promise<void> 
 		for (const secret of secrets) {
 			expect(text).not.toContain(secret);
 		}
+	}
+}
+
+async function requestImageGenerationExpectingFailure(): Promise<void> {
+	const res = await apiFetch("/api/image-generation/generate", {
+		method: "POST",
+		body: JSON.stringify({ prompt: "draw a transient failure test", model: "openai/gpt-image-2" }),
+	});
+	expect(res.status).toBe(500);
+}
+
+async function withImageProviderFetchMock<T>(
+	handler: (url: string, init?: any) => Response | undefined | Promise<Response | undefined>,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const previousFetch = globalThis.fetch;
+	globalThis.fetch = (async (url: any, init?: any) => {
+		const href = typeof url === "string"
+			? url
+			: url instanceof URL
+				? url.toString()
+				: typeof url?.url === "string"
+					? url.url
+					: String(url);
+		const response = await handler(href, init);
+		if (response) return response;
+		return previousFetch(url, init);
+	}) as typeof fetch;
+	try {
+		return await fn();
+	} finally {
+		globalThis.fetch = previousFetch;
 	}
 }
 

@@ -4,7 +4,13 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { CustomProviderConfig } from "./model-registry.js";
 import { resolveHostTokenValue } from "./host-tokens.js";
-import { hasValidCloudProviderCredential, isProviderEnabled } from "./cloud-provider-auth.js";
+import {
+	cloudVendorForModelProvider,
+	getCloudProviderCredentialStatus,
+	isProviderEnabled,
+	markCloudProviderCredentialInvalid,
+	type CloudProviderId,
+} from "./cloud-provider-auth.js";
 
 export type ImageProviderType = "openai-images" | "gemini-images" | "google-imagen";
 
@@ -41,6 +47,13 @@ export interface ImageGenerationRequest {
 	aspectRatio?: string;
 	imageSize?: string;
 	n?: number;
+}
+
+export class ImageProviderAuthFailureError extends Error {
+	constructor(message: string, readonly provider: CloudProviderId) {
+		super(message);
+		this.name = "ImageProviderAuthFailureError";
+	}
 }
 
 const OPENAI_IMAGE_MODELS: Omit<ApiImageModel, "authenticated">[] = [
@@ -170,11 +183,15 @@ export function defaultImageModelPref(): string {
 export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[] {
 	const openaiEnabled = isProviderEnabled(prefs, "openai");
 	const googleEnabled = isProviderEnabled(prefs, "google");
-	const openaiAuth = openaiEnabled && hasValidCloudProviderCredential(prefs, "openai");
-	const googleAuth = googleEnabled && hasValidCloudProviderCredential(prefs, "google");
+	const openaiCredentials = openaiEnabled ? getCloudProviderCredentialStatus(prefs, "openai") : undefined;
+	const googleCredentials = googleEnabled ? getCloudProviderCredentialStatus(prefs, "google") : undefined;
+	const openaiVisible = openaiEnabled && !openaiCredentials?.invalid && !openaiCredentials?.expired;
+	const googleVisible = googleEnabled && !googleCredentials?.invalid && !googleCredentials?.expired;
+	const openaiAuth = openaiVisible && openaiCredentials?.authenticated === true;
+	const googleAuth = googleVisible && googleCredentials?.authenticated === true;
 	const builtins: ApiImageModel[] = [
-		...(openaiEnabled ? OPENAI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: openaiAuth })) : []),
-		...(googleEnabled ? GEMINI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: googleAuth })) : []),
+		...(openaiVisible ? OPENAI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: openaiAuth })) : []),
+		...(googleVisible ? GEMINI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: googleAuth })) : []),
 	];
 
 	const custom = ((prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [])
@@ -299,7 +316,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 	if (!apiKey) {
 		const codexToken = getOpenAICodexOAuthCredential();
 		if (codexToken) {
-			return generateOpenAICodexImage(codexToken, model, request);
+			return generateOpenAICodexImage(prefs, codexToken, model, request);
 		}
 		throw new Error("Missing OpenAI API key for image generation");
 	}
@@ -329,7 +346,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(`${resp.status} OpenAI image request failed: ${formatProviderErrorBody(data)}`);
+		throw providerRequestFailureError(prefs, model, resp.status, "OpenAI image request failed", formatProviderErrorBody(data));
 	}
 	const rows = Array.isArray(data?.data) ? data.data : [];
 	const images: GeneratedImage[] = [];
@@ -344,7 +361,7 @@ async function generateOpenAIImage(prefs: PreferencesStore, model: ApiImageModel
 	return images;
 }
 
-async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
+async function generateOpenAICodexImage(prefs: PreferencesStore, token: string, imageModel: ApiImageModel, request: ImageGenerationRequest): Promise<GeneratedImage[]> {
 	const requestedN = Math.max(Math.floor(request.n || 1), 1);
 	if (requestedN > 1) {
 		throw new Error("openai-codex image driver supports n=1 only");
@@ -388,7 +405,7 @@ async function generateOpenAICodexImage(token: string, imageModel: ApiImageModel
 	});
 	const text = await resp.text();
 	if (!resp.ok) {
-		throw new Error(`${resp.status} OpenAI Codex image request failed: ${parseCodexError(text) || "<no error body>"}`);
+		throw providerRequestFailureError(prefs, imageModel, resp.status, "OpenAI Codex image request failed", parseCodexError(text) || "<no error body>");
 	}
 	const images = parseCodexImageEvents(text, format);
 	if (images.length === 0) {
@@ -433,7 +450,7 @@ async function generateGeminiImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(`${resp.status} Gemini image request failed: ${formatProviderErrorBody(data)}`);
+		throw providerRequestFailureError(prefs, model, resp.status, "Gemini image request failed", formatProviderErrorBody(data));
 	}
 	const parts = data?.candidates?.[0]?.content?.parts || data?.parts || [];
 	const images = parts
@@ -469,7 +486,7 @@ async function generateImagenImage(prefs: PreferencesStore, model: ApiImageModel
 	});
 	const data: any = await resp.json().catch(() => ({}));
 	if (!resp.ok) {
-		throw new Error(`${resp.status} Imagen request failed: ${formatProviderErrorBody(data)}`);
+		throw providerRequestFailureError(prefs, model, resp.status, "Imagen request failed", formatProviderErrorBody(data));
 	}
 	const rows = Array.isArray(data?.predictions) ? data.predictions : [];
 	const images = rows
@@ -777,6 +794,46 @@ async function imageFromUrl(url: string, model: ApiImageModel | undefined, revis
 		try { reader.releaseLock(); } catch { /* ignore */ }
 	}
 	return { data: Buffer.concat(chunks).toString("base64"), mimeType, revisedPrompt };
+}
+
+function providerRequestFailureError(
+	prefs: PreferencesStore,
+	model: ApiImageModel,
+	status: number,
+	label: string,
+	detail: string,
+): Error {
+	const safeDetail = redactProviderErrorText(detail);
+	const message = `${status} ${label}: ${safeDetail}`;
+	const provider = markInvalidCredentialForAuthFailure(prefs, model, status, safeDetail);
+	return provider ? new ImageProviderAuthFailureError(message, provider) : new Error(message);
+}
+
+function markInvalidCredentialForAuthFailure(
+	prefs: PreferencesStore,
+	model: ApiImageModel,
+	status: number,
+	detail: string,
+): CloudProviderId | undefined {
+	if (model.customProviderId) return undefined;
+	const provider = cloudVendorForModelProvider(model.provider);
+	if (!provider || !isDefinitiveProviderAuthFailure(status, detail)) return undefined;
+	markCloudProviderCredentialInvalid(prefs, provider);
+	return provider;
+}
+
+function isDefinitiveProviderAuthFailure(status: number, detail: string): boolean {
+	if (status === 401) return true;
+	if (status !== 400 && status !== 403) return false;
+	return /api\s*key|apikey|authenticat|authori[sz]ation|unauthori[sz]ed|forbidden|permission denied|credential|token|key not valid|invalid key/i.test(detail);
+}
+
+function redactProviderErrorText(value: string): string {
+	if (!value) return value;
+	return value
+		.replace(/sk-[A-Za-z0-9_-]+/g, "<redacted-api-key>")
+		.replace(/AIza[A-Za-z0-9_-]+/g, "<redacted-api-key>")
+		.replace(/[A-Za-z0-9_-]{32,}/g, "<redacted-token>");
 }
 
 /**

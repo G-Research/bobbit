@@ -141,7 +141,7 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, pickDefaultSessionModel } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, pickDefaultImageModelPref } from "./agent/image-generation.js";
+import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, ImageProviderAuthFailureError, pickDefaultImageModelPref } from "./agent/image-generation.js";
 import {
 	cloudModelPrefIsUsable,
 	cloudVendorForModelPref,
@@ -4519,6 +4519,10 @@ async function handleApiRoute(
 			if (!shouldBypassCloudAuthUx(preferencesStore) && message.includes("No authenticated image generation provider configured")) {
 				await sendCloudAuthRequired();
 				return;
+			}
+			if (err instanceof ImageProviderAuthFailureError) {
+				invalidateModelCache();
+				broadcastPreferencesChanged();
 			}
 			jsonError(500, err);
 		}

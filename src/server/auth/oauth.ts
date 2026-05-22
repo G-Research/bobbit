@@ -108,6 +108,61 @@ export function normalizeProvider(provider?: string | null): OAuthProviderId {
 	throw new Error(`Unsupported OAuth provider: ${provider}`);
 }
 
+function safeDecodeURIComponent(value: string): string {
+	try {
+		return decodeURIComponent(value.replace(/\+/g, "%20"));
+	} catch {
+		return value;
+	}
+}
+
+function firstNonEmptyParam(params: URLSearchParams, ...names: string[]): string | undefined {
+	for (const name of names) {
+		const value = params.get(name);
+		if (value && value.trim()) return value.trim();
+	}
+	return undefined;
+}
+
+function parseHashFragment(fragment: string): { code?: string; state?: string } {
+	const trimmed = fragment.replace(/^#/, "").replace(/^\?/, "").trim();
+	if (!trimmed) return {};
+	if (trimmed.includes("=") || trimmed.includes("&")) {
+		const params = new URLSearchParams(trimmed);
+		const code = firstNonEmptyParam(params, "code", "authorization_code");
+		const state = firstNonEmptyParam(params, "state");
+		return { ...(code ? { code } : {}), ...(state ? { state } : {}) };
+	}
+	return { state: safeDecodeURIComponent(trimmed) };
+}
+
+function parseOAuthCompletionInput(input: string): { code: string; state?: string } | undefined {
+	const trimmed = input.trim();
+	if (!trimmed) return undefined;
+
+	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+		try {
+			const parsed = new URL(trimmed);
+			const queryCode = firstNonEmptyParam(parsed.searchParams, "code", "authorization_code");
+			const queryState = firstNonEmptyParam(parsed.searchParams, "state");
+			const hash = parseHashFragment(parsed.hash);
+			const code = queryCode || hash.code;
+			const state = queryState || hash.state;
+			if (!code) return undefined;
+			return { code, ...(state ? { state } : {}) };
+		} catch {
+			// Fall through to raw-code parsing below. Never echo the pasted URL.
+		}
+	}
+
+	// Preserve the historical manual fallback: raw "code" or "code#state".
+	const parts = trimmed.split("#");
+	const code = parts[0]?.trim();
+	if (!code) return undefined;
+	const state = parts[1]?.trim();
+	return { code, ...(state ? { state } : {}) };
+}
+
 function cleanupExpiredFlows(): void {
 	const now = Date.now();
 	// Snapshot entries before mutating the map to avoid mutation-during-iteration UB.
@@ -300,12 +355,13 @@ export async function oauthComplete(
 		return { success: false, error: "code required", provider: flow.provider };
 	}
 
+	const parsedAuth = parseOAuthCompletionInput(authCode);
+	if (!parsedAuth) {
+		return { success: false, error: "code required", provider: flow.provider };
+	}
 	pendingFlows.delete(flowId);
 
-	// The auth code from the callback page is in format "code#state"
-	const parts = authCode.split("#");
-	const code = parts[0];
-	const state = parts[1];
+	const { code, state } = parsedAuth;
 
 	try {
 		const tokenResponse = await fetch(TOKEN_URL, {

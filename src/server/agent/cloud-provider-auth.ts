@@ -133,6 +133,14 @@ export function setProviderEnabled(prefs: PreferencesStore, provider: CloudProvi
 	prefs.set(providerEnabledPreferenceKey(provider), enabled === true);
 }
 
+export function markCloudProviderCredentialInvalid(prefs: PreferencesStore, provider: CloudProviderId): void {
+	prefs.set(`providerCredentialInvalid.${provider}`, true);
+}
+
+export function clearCloudProviderCredentialInvalid(prefs: PreferencesStore, provider: CloudProviderId): void {
+	prefs.remove(`providerCredentialInvalid.${provider}`);
+}
+
 export function shouldBypassCloudAuthUx(prefs: PreferencesStore): boolean {
 	return Boolean(getAigwUrl(prefs));
 }
