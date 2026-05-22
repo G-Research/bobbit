@@ -139,7 +139,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, pickDefaultSessionModel } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, pickDefaultImageModelPref } from "./agent/image-generation.js";
 import {
@@ -4231,6 +4231,15 @@ async function handleApiRoute(
 		}, 409);
 	}
 
+	function enableProviderAfterOAuth(providerId: string | undefined | null): void {
+		const vendor = cloudVendorForOAuthProvider(providerId);
+		if (!vendor) return;
+		setProviderEnabled(preferencesStore, vendor, true);
+		preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+		invalidateModelCache();
+		broadcastPreferencesChanged();
+	}
+
 	async function rejectIfCloudAuthRequiredForModel(pref: string | undefined | null, unresolvedMayUseCloud = true): Promise<boolean> {
 		if (shouldBypassCloudAuthUx(preferencesStore)) return false;
 		const vendor = cloudVendorForModelPref(pref);
@@ -4241,6 +4250,8 @@ async function handleApiRoute(
 		}
 		if (pref) return false;
 		if (!unresolvedMayUseCloud) return false;
+		const selectableDefault = await pickDefaultSessionModel(preferencesStore);
+		if (selectableDefault) return rejectIfCloudAuthRequiredForModel(selectableDefault, false);
 		const status = await getCloudAuthStatus(preferencesStore);
 		if (!status.authGateRequired) return false;
 		await sendCloudAuthRequired();
@@ -6341,9 +6352,10 @@ async function handleApiRoute(
 			return;
 		}
 		const persistedModelPref = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
-		const continuedModelPref = persistedModelPref || sessionManager.resolveInitialModel(ps.role, ps.projectId);
-		if (await rejectIfCloudAuthRequiredForModel(continuedModelPref, true)) return;
 		const canUsePersistedModel = !!persistedModelPref && cloudModelPrefIsUsable(preferencesStore, persistedModelPref);
+		const fallbackModelPref = canUsePersistedModel ? undefined : (sessionManager.resolveInitialModel(ps.role, ps.projectId) || await pickDefaultSessionModel(preferencesStore));
+		const continuedModelPref = canUsePersistedModel ? persistedModelPref : fallbackModelPref;
+		if (await rejectIfCloudAuthRequiredForModel(continuedModelPref, true)) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
 		// sessions whose persisted `agentSessionFile` was never populated.
@@ -6437,13 +6449,13 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
-			// We'll set the model explicitly below when it remains usable.
-			skipAutoModel: canUsePersistedModel,
+			// We'll set the chosen model explicitly below when one is usable.
+			skipAutoModel: !!continuedModelPref,
 		};
-		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
+		// Pin the chosen model at spawn time so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
-		if (canUsePersistedModel && persistedModelPref) {
-			createOpts.initialModel = persistedModelPref;
+		if (continuedModelPref) {
+			createOpts.initialModel = continuedModelPref;
 		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
@@ -6937,10 +6949,11 @@ async function handleApiRoute(
 		const provider = url.searchParams.get("provider") || undefined;
 		const status = oauthFlowStatus(flowId, provider);
 		if (status.error === "flow not found") {
-			json(status, 404);
+			json({ complete: status.complete, error: status.error }, 404);
 			return;
 		}
-		json(status);
+		if (status.complete) enableProviderAfterOAuth(status.provider ?? provider);
+		json(status.error ? { complete: status.complete, error: status.error } : { complete: status.complete });
 		return;
 	}
 
@@ -6966,15 +6979,7 @@ async function handleApiRoute(
 		}
 		try {
 			const result = await oauthComplete(body.flowId, body.code);
-			if (result.success) {
-				const vendor = cloudVendorForOAuthProvider(result.provider);
-				if (vendor) {
-					setProviderEnabled(preferencesStore, vendor, true);
-					preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
-					invalidateModelCache();
-					broadcastPreferencesChanged();
-				}
-			}
+			if (result.success) enableProviderAfterOAuth(result.provider);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);

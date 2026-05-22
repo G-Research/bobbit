@@ -400,7 +400,7 @@ export function oauthStatus(providerInput?: string): {
 export function oauthFlowStatus(
 	flowId: string,
 	providerInput?: string,
-): { complete: boolean; error?: string } {
+): { complete: boolean; error?: string; provider?: OAuthProviderId } {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) return { complete: false, error: "flow not found" };
 	// Defence-in-depth: if a provider was supplied and disagrees with the stored
@@ -418,7 +418,7 @@ export function oauthFlowStatus(
 	if (flow.provider === "anthropic") return { complete: false };
 	if (flow.completed) {
 		pendingFlows.delete(flowId);
-		return { complete: true };
+		return { complete: true, provider: flow.provider };
 	}
 	if (flow.error) {
 		pendingFlows.delete(flowId);
