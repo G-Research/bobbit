@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { getModels } from "@earendil-works/pi-ai";
 
 let tmp: string;
 let previousAgentDir: string | undefined;
@@ -46,26 +47,43 @@ function readModels(): any {
 	return JSON.parse(readFileSync(f, "utf-8"));
 }
 
-function findEntry(data: any, provider: string, id: string): any {
+function findOptionalEntry(data: any, provider: string, id: string): any | undefined {
 	const list = data?.providers?.[provider]?.models;
-	assert.ok(Array.isArray(list), `expected models array for provider ${provider}`);
-	const e = list.find((m: any) => m.id === id);
+	if (!Array.isArray(list)) return undefined;
+	return list.find((m: any) => m.id === id);
+}
+
+function findEntry(data: any, provider: string, id: string): any {
+	const e = findOptionalEntry(data, provider, id);
 	assert.ok(e, `expected entry ${provider}/${id} in models.json`);
 	return e;
 }
 
+function hasBuiltIn(provider: string, id: string): boolean {
+	return getModels(provider as any).some((m: any) => m.id === id);
+}
+
+function customAdditionSample(): (typeof OPENAI_MODEL_ADDITIONS)[number] {
+	const sample = OPENAI_MODEL_ADDITIONS.find((m) => !hasBuiltIn(m.provider, m.id));
+	assert.ok(sample, "test requires at least one Bobbit-only OpenAI model addition");
+	return sample;
+}
+
 describe("writeOpenAIModelAdditions merge policy", () => {
-	it("empty file → all defaults written", () => {
+	it("empty file → only additions missing from pi-ai built-ins are written", () => {
 		writeOpenAIModelAdditions();
 		const data = readModels();
-		assert.ok(data, "models.json should exist after the call");
-		// Every entry from OPENAI_MODEL_ADDITIONS must be present.
-		for (const m of OPENAI_MODEL_ADDITIONS) {
+		const expected = OPENAI_MODEL_ADDITIONS.filter((m) => !hasBuiltIn(m.provider, m.id));
+		if (expected.length > 0) assert.ok(data, "models.json should exist after the call");
+		for (const m of expected) {
 			const e = findEntry(data, m.provider, m.id);
 			assert.equal(e.name, m.name);
 			assert.equal(e.api, m.api);
 			assert.equal(e.baseUrl, m.baseUrl);
 			assert.deepEqual(e.cost, m.cost);
+		}
+		for (const m of OPENAI_MODEL_ADDITIONS.filter((m) => hasBuiltIn(m.provider, m.id))) {
+			assert.equal(findOptionalEntry(data, m.provider, m.id), undefined, `${m.provider}/${m.id} should use pi-ai's built-in metadata`);
 		}
 	});
 
@@ -74,7 +92,7 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		writeOpenAIModelAdditions();
 		// 2) user edits a field — change `name` away from the default.
 		const data1 = readModels();
-		const sample = OPENAI_MODEL_ADDITIONS[0];
+		const sample = customAdditionSample();
 		const entry = findEntry(data1, sample.provider, sample.id);
 		entry.name = "User Custom Name";
 		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(data1, null, 2));
@@ -95,7 +113,7 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		// handles. We then mutate the `cost` field to something else and
 		// verify mutation survives, while `name` is left undisturbed (because
 		// it already matched the default).
-		const sample = OPENAI_MODEL_ADDITIONS[0];
+		const sample = customAdditionSample();
 		const seeded = {
 			providers: {
 				[sample.provider]: {
@@ -125,9 +143,72 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		assert.equal(e.name, sample.name);
 	});
 
+	it("Bobbit-owned duplicate is removed once pi-ai ships the same model", () => {
+		const sample = OPENAI_MODEL_ADDITIONS.find((m) => m.provider === "openai-codex" && m.id === "gpt-5.5");
+		assert.ok(sample && hasBuiltIn(sample.provider, sample.id), "expected openai-codex/gpt-5.5 to be a pi-ai built-in");
+		const seeded = {
+			providers: {
+				[sample.provider]: {
+					models: [
+						{
+							id: sample.id,
+							name: sample.name,
+							api: sample.api,
+							baseUrl: sample.baseUrl,
+							cost: sample.cost,
+							contextWindow: sample.contextWindow,
+							maxTokens: sample.maxTokens,
+							reasoning: sample.reasoning,
+							thinkingLevelMap: sample.thinkingLevelMap,
+							input: sample.input,
+						},
+					],
+				},
+			},
+		};
+		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
+		writeOpenAIModelAdditions();
+		const data = readModels();
+		assert.equal(findOptionalEntry(data, sample.provider, sample.id), undefined);
+	});
+
+	it("user-edited duplicate keeps edits but migrates Bobbit-owned fields to built-in metadata", () => {
+		const sample = OPENAI_MODEL_ADDITIONS.find((m) => m.provider === "openai-codex" && m.id === "gpt-5.5");
+		assert.ok(sample, "expected legacy openai-codex/gpt-5.5 addition");
+		const builtIn = getModels(sample.provider as any).find((m: any) => m.id === sample.id) as any;
+		assert.ok(builtIn, "expected pi-ai built-in metadata");
+		const seeded = {
+			providers: {
+				[sample.provider]: {
+					models: [
+						{
+							id: sample.id,
+							name: "User Custom Name",
+							api: sample.api,
+							baseUrl: sample.baseUrl,
+							cost: sample.cost,
+							contextWindow: sample.contextWindow,
+							maxTokens: sample.maxTokens,
+							reasoning: sample.reasoning,
+							thinkingLevelMap: sample.thinkingLevelMap,
+							input: sample.input,
+						},
+					],
+				},
+			},
+		};
+		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
+		writeOpenAIModelAdditions();
+		const data = readModels();
+		const e = findEntry(data, sample.provider, sample.id);
+		assert.equal(e.name, "User Custom Name");
+		assert.equal(e.contextWindow, builtIn.contextWindow);
+		assert.deepEqual(e.thinkingLevelMap, builtIn.thinkingLevelMap);
+	});
+
 	it("missing fields are filled in from defaults", () => {
 		// Seed a sparse entry that lacks `cost` and `baseUrl`.
-		const sample = OPENAI_MODEL_ADDITIONS[0];
+		const sample = customAdditionSample();
 		const seeded = {
 			providers: {
 				[sample.provider]: {
