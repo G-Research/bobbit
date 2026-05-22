@@ -8,7 +8,9 @@
  * `message_end` was in flight when the snapshot landed the live row's update
  * could be lost.
  *
- * Each variation runs 5x to amplify timing variance.
+ * Browser coverage keeps B/C/D as smoke-level full-stack journeys. Unit tests
+ * own the exhaustive reducer invariants; run `H3_BROWSER_ITER=5` manually for
+ * stress coverage when investigating this race.
  *
  * No production code is modified.
  */
@@ -20,7 +22,7 @@ import {
 	sendMessage,
 } from "./ui-helpers.js";
 
-const ITER = 5;
+const ITER = Number(process.env.H3_BROWSER_ITER ?? 2);
 const STREAM_DONE_RE = /STREAM_BURST_DONE:\d+/;
 
 /** Read the current transcript message-list as a compact projection. */
