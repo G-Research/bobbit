@@ -4,6 +4,7 @@ import { globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { CustomProviderConfig } from "./model-registry.js";
 import { resolveHostTokenValue } from "./host-tokens.js";
+import { hasValidCloudProviderCredential, isProviderEnabled } from "./cloud-provider-auth.js";
 
 export type ImageProviderType = "openai-images" | "gemini-images" | "google-imagen";
 
@@ -167,11 +168,13 @@ export function defaultImageModelPref(): string {
 }
 
 export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[] {
-	const openaiAuth = hasOpenAIKey(prefs);
-	const googleAuth = hasGoogleKey(prefs);
+	const openaiEnabled = isProviderEnabled(prefs, "openai");
+	const googleEnabled = isProviderEnabled(prefs, "google");
+	const openaiAuth = openaiEnabled && hasValidCloudProviderCredential(prefs, "openai");
+	const googleAuth = googleEnabled && hasValidCloudProviderCredential(prefs, "google");
 	const builtins: ApiImageModel[] = [
-		...OPENAI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: openaiAuth })),
-		...GEMINI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: googleAuth })),
+		...(openaiEnabled ? OPENAI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: openaiAuth })) : []),
+		...(googleEnabled ? GEMINI_IMAGE_MODELS.map((m) => ({ ...m, authenticated: googleAuth })) : []),
 	];
 
 	const custom = ((prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [])
@@ -184,7 +187,7 @@ export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[
 				provider: config.name || config.id,
 				api: config.type as ImageProviderType,
 				baseUrl: config.baseUrl,
-				authenticated: Boolean(config.apiKey) || (config.type === "openai-images" ? openaiAuth : googleAuth),
+				authenticated: Boolean(config.apiKey) || (config.type === "openai-images" ? hasOpenAIKey(prefs) : hasGoogleKey(prefs)),
 				customProviderId: config.id,
 			}));
 		});
@@ -193,12 +196,26 @@ export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[
 }
 
 export function getImageModelByPref(prefs: PreferencesStore, pref?: string | null): ApiImageModel | undefined {
-	// Prefer canonicalised user input; fall back to the canonical default (already
-	// in canonical form, so no double-canonicalisation needed).
-	const canonical = canonicalImageModelPref(pref) || defaultImageModelPref();
+	const canonical = canonicalImageModelPref(pref);
 	const parsed = parseImageModelPref(canonical);
 	if (!parsed) return undefined;
 	return getAvailableImageModels(prefs).find((m) => m.provider === parsed.provider && m.id === parsed.id);
+}
+
+export function pickDefaultImageModelPref(prefs: PreferencesStore): string | undefined {
+	const saved = canonicalImageModelPref(prefs.get("default.imageModel") as string | undefined);
+	const savedModel = getImageModelByPref(prefs, saved);
+	if (savedModel?.authenticated) return `${savedModel.provider}/${savedModel.id}`;
+
+	const models = getAvailableImageModels(prefs).filter((model) => model.authenticated);
+	const priority = (model: ApiImageModel): number => {
+		if (model.provider === "openai") return 0;
+		if (model.provider === "google") return 1;
+		return 2;
+	};
+	models.sort((a, b) => priority(a) - priority(b));
+	const best = models[0];
+	return best ? `${best.provider}/${best.id}` : undefined;
 }
 
 /**
@@ -258,8 +275,10 @@ export async function generateImage(prefs: PreferencesStore, request: ImageGener
 	if (!request.prompt || typeof request.prompt !== "string") {
 		throw new Error("prompt is required");
 	}
-	const model = getImageModelByPref(prefs, request.model) || getImageModelByPref(prefs, defaultImageModelPref());
-	if (!model) throw new Error("No image generation model is configured");
+	const model = request.model
+		? getImageModelByPref(prefs, request.model)
+		: getImageModelByPref(prefs, pickDefaultImageModelPref(prefs));
+	if (!model || !model.authenticated) throw new Error("No authenticated image generation provider configured");
 	if (model.api === "openai-images") {
 		const images = await generateOpenAIImage(prefs, model, request);
 		return { model, images };

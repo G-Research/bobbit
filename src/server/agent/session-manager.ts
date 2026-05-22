@@ -50,8 +50,8 @@ import { McpManager } from "../mcp/mcp-manager.js";
 import { isTransientReviewError, isProviderBackoffError } from "./verification-logic.js";
 import { truncateLargeToolContent, truncateLargeToolContentInMessages } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, inferMeta } from "./aigw-manager.js";
-import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { modelRecencyRank } from "./model-registry.js";
+import { getAvailableImageModels, parseImageModelPref, pickDefaultImageModelPref } from "./image-generation.js";
+import { modelPrefLooksUsable, modelRecencyRank, pickDefaultSessionModel } from "./model-registry.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { buildAvailableRolesList } from "./team-manager.js";
 // createWorktree is used in session-setup.ts pipeline
@@ -3209,10 +3209,11 @@ export class SessionManager {
 
 		// Pin model + thinking level at spawn so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
-		// Prefer the persisted model if known (avoids surprising changes after
+		// Prefer the persisted model if known and still usable (avoids surprising changes after
 		// restart); fall back to role/preference resolution.
-		if (ps.modelProvider && ps.modelId) {
-			bridgeOptions.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		const persistedModelPref = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
+		if (persistedModelPref && modelPrefLooksUsable(this.preferencesStore, persistedModelPref)) {
+			bridgeOptions.initialModel = persistedModelPref;
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -3366,6 +3367,9 @@ export class SessionManager {
 		const sandboxCwdOffset = opts?.sandboxed
 			? await this.resolveSandboxCwdOffset(cwd, projectId, goalId, opts?.sandboxCwdOffset)
 			: undefined;
+		const usableInitialModel = opts?.initialModel && modelPrefLooksUsable(this.preferencesStore, opts.initialModel)
+			? opts.initialModel
+			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -3464,9 +3468,9 @@ export class SessionManager {
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
 				sandboxCwdOffset,
-				skipAutoModel: opts?.skipAutoModel,
+				skipAutoModel: opts?.skipAutoModel && !!usableInitialModel,
 				skipAutoThinking: opts?.skipAutoThinking,
-				initialModel: opts?.initialModel,
+				initialModel: usableInitialModel,
 				initialThinkingLevel: opts?.initialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				bridgeOptions: { cwd },
@@ -3523,9 +3527,9 @@ export class SessionManager {
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
 			sandboxCwdOffset,
-			skipAutoModel: opts?.skipAutoModel,
+			skipAutoModel: opts?.skipAutoModel && !!usableInitialModel,
 			skipAutoThinking: opts?.skipAutoThinking,
-			initialModel: opts?.initialModel,
+			initialModel: usableInitialModel,
 			initialThinkingLevel: opts?.initialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			bridgeOptions: { cwd },
@@ -3785,7 +3789,8 @@ export class SessionManager {
 		if (!session.role || !this.configCascade) return undefined;
 		try {
 			const resolved = this.configCascade.resolveRoles(session.projectId);
-			return resolved.find(r => r.item.name === session.role)?.item.model;
+			const model = resolved.find(r => r.item.name === session.role)?.item.model;
+			return model && modelPrefLooksUsable(this.preferencesStore, model) ? model : undefined;
 		} catch {
 			return undefined;
 		}
@@ -3817,12 +3822,12 @@ export class SessionManager {
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
 				const m = resolved.find(r => r.item.name === role)?.item.model;
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				if (m && /^[^/]+\/.+$/.test(m) && modelPrefLooksUsable(this.preferencesStore, m)) return m;
 			} catch { /* fall through */ }
 		}
 		// default.sessionModel preference
 		const pref = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && modelPrefLooksUsable(this.preferencesStore, pref)) return pref;
 		return undefined;
 	}
 
@@ -3874,11 +3879,11 @@ export class SessionManager {
 			try {
 				const resolved = this.configCascade.resolveRoles(projectId);
 				const m = resolved.find(r => r.item.name === role)?.item.model;
-				if (m && /^[^/]+\/.+$/.test(m)) return m;
+				if (m && /^[^/]+\/.+$/.test(m) && modelPrefLooksUsable(this.preferencesStore, m)) return m;
 			} catch { /* fall through */ }
 		}
 		const pref = this.preferencesStore?.get("default.reviewModel") as string | undefined;
-		if (pref && /^[^/]+\/.+$/.test(pref)) return pref;
+		if (pref && /^[^/]+\/.+$/.test(pref) && modelPrefLooksUsable(this.preferencesStore, pref)) return pref;
 		return undefined;
 	}
 
@@ -3921,7 +3926,9 @@ export class SessionManager {
 
 		// Check explicit preference first (works for both aigw and public providers)
 		const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-		if (sessionModelPref) {
+		if (sessionModelPref && !modelPrefLooksUsable(this.preferencesStore, sessionModelPref)) {
+			console.warn(`[session-manager] Preferred model "${sessionModelPref}" is disabled or unauthenticated, ignoring`);
+		} else if (sessionModelPref) {
 			const slash = sessionModelPref.indexOf("/");
 			if (slash > 0 && slash < sessionModelPref.length - 1) {
 				const provider = sessionModelPref.slice(0, slash);
@@ -3951,6 +3958,32 @@ export class SessionManager {
 			} else {
 				console.warn(`[session-manager] Malformed default.sessionModel preference: "${sessionModelPref}", ignoring`);
 			}
+		}
+
+		try {
+			const modelToUse = await pickDefaultSessionModel(this.preferencesStore);
+			if (modelToUse) {
+				const preSpawnPinned = spawnPinned && session.spawnPinnedModel === modelToUse;
+				await applyModelString(session.rpcClient, modelToUse, {
+					sessionManager: this,
+					sessionId: session.id,
+					contextLabel: "best available model",
+					skipSetModel: preSpawnPinned,
+				});
+				this._writeModelNameFile(session.id, modelToUse);
+				const slash = modelToUse.indexOf("/");
+				const provider = modelToUse.slice(0, slash);
+				const modelId = modelToUse.slice(slash + 1);
+				this.resolveStoreForSession(session.id).update(session.id, { modelProvider: provider, modelId });
+				broadcast(session.clients, {
+					type: "state",
+					data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
+				});
+				console.log(`[session-manager] Auto-selected model "${modelToUse}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
+				return;
+			}
+		} catch (err) {
+			console.warn(`[session-manager] Best-available model selection failed for ${session.id}:`, err);
 		}
 
 		// Fall back to aigw best-ranked model when gateway is configured
@@ -4509,8 +4542,9 @@ export class SessionManager {
 
 		// Pin model/thinking-level at spawn for the respawn (after role assignment).
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		if (respawnPersisted?.modelProvider && respawnPersisted?.modelId) {
-			bridgeOptions.initialModel = `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`;
+		const respawnModelPref = respawnPersisted?.modelProvider && respawnPersisted?.modelId ? `${respawnPersisted.modelProvider}/${respawnPersisted.modelId}` : undefined;
+		if (respawnModelPref && modelPrefLooksUsable(this.preferencesStore, respawnModelPref)) {
+			bridgeOptions.initialModel = respawnModelPref;
 		} else {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
@@ -4605,10 +4639,11 @@ export class SessionManager {
 	}
 
 	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
-		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
+		const rawNamingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
+		const namingModel = rawNamingModel && modelPrefLooksUsable(this.preferencesStore, rawNamingModel) ? rawNamingModel : undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
 		const namingThinking = this.preferencesStore?.get("default.namingThinkingLevel") as string | undefined;
-		return { namingModel: namingModel || undefined, aigwUrl, thinkingLevel: namingThinking || undefined };
+		return { namingModel, aigwUrl, thinkingLevel: namingThinking || undefined };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {
@@ -4757,19 +4792,14 @@ export class SessionManager {
 		return available.some((m) => m.provider === provider && m.id === modelId);
 	}
 
-	/** Resolve the image generation model for a session, falling back to the system default. */
+	/** Resolve the image generation model for a session, falling back to the best authenticated system default. */
 	getImageModelForSession(sessionId: string): { provider: string; id: string } | undefined {
 		const persisted = this.resolveStoreForId(sessionId)?.get(sessionId);
-		if (persisted?.imageModelProvider && persisted?.imageModelId) {
+		if (persisted?.imageModelProvider && persisted?.imageModelId && this.isKnownImageModel(persisted.imageModelProvider, persisted.imageModelId)) {
 			return { provider: persisted.imageModelProvider, id: persisted.imageModelId };
 		}
-		// Coalesce to the system default first, then parse exactly once.
-		// `defaultImageModelPref()` always returns the parseable
-		// "openai/gpt-image-2", so the result is always defined — the previous
-		// `|| parseImageModelPref(defaultImageModelPref())` fallback chain was
-		// dead code (the first parse always succeeded once we coalesce upstream).
-		const pref = (this.preferencesStore?.get("default.imageModel") as string | undefined) || defaultImageModelPref();
-		return parseImageModelPref(pref);
+		if (!this.preferencesStore) return undefined;
+		return parseImageModelPref(pickDefaultImageModelPref(this.preferencesStore));
 	}
 
 	/** Latest user turn text for request-scoped policy checks such as model override gating. */
@@ -5569,8 +5599,9 @@ export class SessionManager {
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			if (forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId) {
-				bridgeOptions.initialModel = `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`;
+			const forceRespawnModelPref = forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId ? `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}` : undefined;
+			if (forceRespawnModelPref && modelPrefLooksUsable(this.preferencesStore, forceRespawnModelPref)) {
+				bridgeOptions.initialModel = forceRespawnModelPref;
 			} else {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;
