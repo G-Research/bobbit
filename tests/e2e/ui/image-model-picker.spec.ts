@@ -24,13 +24,39 @@ async function setPref(key: string, value: any): Promise<void> {
 	expect(resp.ok).toBe(true);
 }
 
+type ImageProvider = "openai" | "google";
+const IMAGE_PROVIDERS: ImageProvider[] = ["openai", "google"];
+
+async function saveImageProviderKey(provider: ImageProvider, key = `test-${provider}-image-key`): Promise<void> {
+	const resp = await apiFetch(`/api/provider-keys/${provider}`, {
+		method: "POST",
+		body: JSON.stringify({ key, enable: true }),
+	});
+	expect(resp.ok).toBe(true);
+}
+
+async function cleanupImageProviders(): Promise<void> {
+	for (const provider of IMAGE_PROVIDERS) {
+		await apiFetch(`/api/provider-keys/${provider}`, { method: "DELETE" }).catch(() => {});
+		await apiFetch(`/api/cloud-providers/${provider}`, {
+			method: "PUT",
+			body: JSON.stringify({ enabled: false }),
+		}).catch(() => {});
+	}
+}
+
 test.describe("Image model picker (Settings → Models)", () => {
+	test.beforeEach(async () => {
+		for (const provider of IMAGE_PROVIDERS) await saveImageProviderKey(provider);
+	});
+
 	test.afterEach(async () => {
-		// Reset the system default image model between tests.
+		// Reset the system default image model and image provider opt-ins between tests.
 		await apiFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ "default.imageModel": null }),
 		}).catch(() => {});
+		await cleanupImageProviders();
 	});
 
 	test("navigation: image model row is visible in Settings → Models", async ({ page }) => {
