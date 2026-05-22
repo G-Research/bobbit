@@ -1,33 +1,25 @@
 /**
  * Goal form tooltip E2E tests — verify ⓘ tooltip icons on optional step toggles.
  *
- * Tests that the `description` field from workflow YAML is rendered as a tooltip
- * next to optional step toggles (e.g. "Enable QA Testing") in the goal creation form.
+ * Field-level workflow metadata is covered in tests/e2e/goal-workflow-api.spec.ts;
+ * this browser spec keeps the real assistant/form render path only once.
  */
 import { test, expect } from "../gateway-harness.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
 import { apiFetch } from "../e2e-setup.js";
 
-// Goal-assistant cold-start (mock agent registry warm-up + workflow YAML scan +
-// session-prompts dir creation) can comfortably eat 25–40s on first call under
-// parallel browser load. The default 30s per-test timeout was overflowing
-// because the helper compounds two 20s waits (visible + value) on top of a 30s
-// textarea wait. Bump the budget for this whole spec well past the worst-case
-// sum of the inner waits so a single slow turn doesn't tip the test over.
 test.describe.configure({ timeout: 90_000 });
 
 /**
  * Configure qa_start_command on the default project so the goal form's
- * "Enable QA Testing" tooltip shows the real workflow description
- * ("...ephemeral server...") rather than the
- * "Configure qa_start_command in project settings..." fallback.
+ * "Enable QA Testing" tooltip shows the real workflow description rather than
+ * the "Configure qa_start_command in project settings..." fallback.
  */
 test.beforeAll(async () => {
 	const projectsResp = await apiFetch("/api/projects");
 	const projects = await projectsResp.json();
 	if (projects.length === 0) return;
 	const projectId = projects[0].id;
-	// QA settings live on a component's `config` map now (not top-level).
 	const structuredResp = await apiFetch(`/api/projects/${projectId}/structured`).catch(() => null);
 	if (!structuredResp || !structuredResp.ok) return;
 	const data = await structuredResp.json();
@@ -40,119 +32,45 @@ test.beforeAll(async () => {
 	});
 });
 
-/** Helper: open goal assistant, send GOAL_PROPOSAL, switch to feature workflow. */
-async function openGoalFormWithFeatureWorkflow(page: import("@playwright/test").Page) {
+async function openGoalForm(page: import("@playwright/test").Page) {
 	await openApp(page);
 
-	// Open the goal assistant. NOTE: this only works if the worker has exactly
-	// ONE registered project — with multiple, `startNewGoalFlow` opens a
-	// picker popover instead. The per-project-config-dirs spec used to leak a
-	// second project, breaking this; that's now cleaned up in its afterAll.
 	const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
 	await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
+	await expect(newGoalBtn).toBeEnabled({ timeout: 10_000 });
 	await newGoalBtn.click();
 
 	const textarea = page.locator("textarea").first();
-	await expect(textarea).toBeVisible({ timeout: 30_000 });
-
-	// Send GOAL_PROPOSAL — mock agent responds with a proposal (workflow=general)
+	await expect(textarea).toBeVisible({ timeout: 45_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
-	// Wait for the proposal panel to render. `toHaveValue` already auto-waits
-	// for the element to be attached and stable, so a single 25s budget is
-	// enough — the previous two 20s waits compounded to 40s and would tip the
-	// test over its 30s default budget under load.
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 25_000 });
-
-	// Switch workflow to "feature" which has optional QA step with description
-	const workflowSelect = page.locator(".goal-preview-panel select").first();
-	await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
-	await workflowSelect.selectOption("feature");
-
-	// Wait for the workflow switch to settle: the select must show 'feature'
-	// AND the toggle must be attached with the real tooltip icon (which
-	// appears only for optional steps that carry a description — present
-	// only in the 'feature' workflow).
-	await expect(workflowSelect).toHaveValue("feature", { timeout: 5_000 });
-	await expect(page.getByText("Enable QA Testing").first()).toBeVisible({ timeout: 5_000 });
-	await expect(
-		page.locator(".goal-preview-panel span.cursor-help").first(),
-	).toBeVisible({ timeout: 5_000 });
 }
 
 test.describe("Step description tooltips @quarantine", () => {
-	test("optional step shows ⓘ tooltip when description is set @quarantine", async ({ page }) => {
-		await openGoalFormWithFeatureWorkflow(page);
+	test("optional step tooltip renders workflow description and styling @quarantine", async ({ page }) => {
+		await openGoalForm(page);
 
-		// Find the ⓘ icon next to the QA Testing optional step (not the auto-start toggle tooltip)
-		const qaLabel = page.getByText("Enable QA Testing").first();
-		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
+		// Switch explicitly so the assertion is independent of the mock proposal's
+		// default workflow/options payload.
+		const workflowSelect = page.locator(".goal-preview-panel select").first();
+		await expect(workflowSelect).toBeVisible({ timeout: 5_000 });
+		await workflowSelect.selectOption("feature");
+		await expect(workflowSelect).toHaveValue("feature", { timeout: 5_000 });
+
+		const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
+		await expect(qaLabel).toBeVisible({ timeout: 5_000 });
+		const tooltipIcon = qaLabel.locator("span.cursor-help").first();
 		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
-
-		// Verify the icon text is ⓘ
 		await expect(tooltipIcon).toHaveText("ⓘ");
 
-		// The tooltip's `title` attribute swaps between the real description
-		// (from feature.yaml) and a fallback "Configure qa_start_command…"
-		// message while the UI asynchronously loads the project's QA config.
-		// Poll until the real description arrives — auto-retrying
-		// toHaveAttribute handles this cleanly.
-		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i, { timeout: 10_000 });
-	});
-
-	test("tooltip title matches the full workflow YAML description", async ({ page }) => {
-		await openGoalFormWithFeatureWorkflow(page);
-
-		const qaLabel = page.getByText("Enable QA Testing").first();
-		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
-		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
-
-		// The tooltip's `title` swaps between the real description and a
-		// fallback "Configure qa_start_command…" while the UI loads the
-		// project's QA config. Wait for the real description (auto-retrying).
-		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/, { timeout: 10_000 });
-		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/);
-		await expect(tooltipIcon).toHaveAttribute("title", /browser/);
-		await expect(tooltipIcon).toHaveAttribute("title", /end-to-end/);
-	});
-
-	test("tooltip icon has correct CSS classes", async ({ page }) => {
-		await openGoalFormWithFeatureWorkflow(page);
-
-		const qaLabel = page.getByText("Enable QA Testing").first();
-		const tooltipIcon = qaLabel.locator("..").locator("span.cursor-help");
-		await expect(tooltipIcon).toBeVisible({ timeout: 5_000 });
-
-		// Verify it follows the sandbox tooltip pattern: text-[9px], text-muted-foreground, cursor-help
+		// Full YAML text is pinned in the API spec; this browser assertion proves
+		// the real form wires that description into the title attribute.
+		await expect(tooltipIcon).toHaveAttribute("title", /QA agent/i, { timeout: 10_000 });
+		await expect(tooltipIcon).toHaveAttribute("title", /ephemeral server/i);
 		await expect(tooltipIcon).toHaveClass(/text-\[9px\]/);
 		await expect(tooltipIcon).toHaveClass(/text-muted-foreground/);
 		await expect(tooltipIcon).toHaveClass(/cursor-help/);
-	});
-
-	test("general workflow has no tooltip icons (no optional steps)", async ({ page }) => {
-		await openApp(page);
-
-		// Open goal assistant
-		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-		await expect(newGoalBtn).toBeVisible({ timeout: 10_000 });
-		await newGoalBtn.click();
-
-		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 45_000 });
-
-		// Send GOAL_PROPOSAL — mock agent uses "general" workflow by default
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
-
-		// Single auto-waiting `toHaveValue` instead of two compounded waits —
-		// see comment in `openGoalFormWithFeatureWorkflow` above.
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 25_000 });
-
-		// General workflow has no optional steps — no ⓘ icons should be present
-		const tooltipIcons = page.locator(".goal-preview-panel span.cursor-help");
-		// There might be a sandbox tooltip, but no step-description tooltips.
-		// The "Optional Steps" label itself should not appear for general workflow.
-		await expect(page.getByText("Optional Steps")).not.toBeVisible();
 	});
 });
