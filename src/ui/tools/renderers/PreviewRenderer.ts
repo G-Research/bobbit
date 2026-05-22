@@ -413,6 +413,8 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index),
 						state: previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined, params),
+						// Only collapse v3 history into live when live already had that content before this click.
+						dedupeWithLive: !snapshotContentHash || liveAlreadyHasSnapshot,
 						select: true,
 					});
 					renderApp();
