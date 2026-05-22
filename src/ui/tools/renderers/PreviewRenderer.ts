@@ -481,9 +481,11 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: tabSource,
 						state: tabState,
-						// Collapse v3 history into live only when live already matched before this click,
-						// or when this click remounted restorable content and the server hash proves it now matches.
-						dedupeWithLive: !snapshotContentHash || liveHasSnapshotAfterOpen,
+						// Collapse only v3 history into live, and only when content identity proves
+						// the historical artifact and current live mount are identical. Legacy
+						// v1/v2 snapshots predate content hashes and must remain distinct even
+						// when a remount response returns a hash for the newly written live mount.
+						dedupeWithLive: parsed.kind === "preview" && liveHasSnapshotAfterOpen,
 						select: true,
 					});
 					if (liveAlreadyHasSnapshot || remountMatchedSnapshot) {

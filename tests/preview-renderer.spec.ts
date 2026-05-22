@@ -168,11 +168,17 @@ test.describe("PreviewOpenRenderer", () => {
 		await gotoAndWait(page);
 		const html = "<p>hello-world</p>";
 		await page.evaluate(
-			([params, result]) => {
+			([params, result, hash]) => {
 				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+						return { status: 200, body: { entry: "inline.html", mtime: 234, contentHash: hash } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
 				(window as any).__resetFetchCalls();
 			},
-			[{ html }, makeResultWithSnapshot(html)],
+			[{ html }, makeResultWithSnapshot(html), HASH],
 		);
 
 		await page.locator("[data-preview-open-btn]").click();
@@ -191,6 +197,14 @@ test.describe("PreviewOpenRenderer", () => {
 		const postBody = JSON.parse(calls[1].body);
 		expect(postBody.html).toBe(html);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:tool:tool-1:1"]);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(tabs[0].source.dedupeWithLive).toBe(false);
+		expect(tabs[0].state.dedupeWithLive).toBe(false);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
 	});
 
 	test("click with truncated snapshot: GET tool-content then PATCH then POST", async ({ page }) => {
@@ -237,11 +251,17 @@ test.describe("PreviewOpenRenderer", () => {
 		await gotoAndWait(page);
 		const filePath = "/abs/path/to/report.html";
 		await page.evaluate(
-			([params, result]) => {
+			([params, result, hash]) => {
 				(window as any).__renderPreview(document.getElementById("container")!, params, result, false);
+				(window as any).__setFetchResponse((url: string, init: any) => {
+					if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+						return { status: 200, body: { entry: "report.html", mtime: 345, contentHash: hash } };
+					}
+					return { status: 200, body: { ok: true } };
+				});
 				(window as any).__resetFetchCalls();
 			},
-			[{ file: filePath }, makeFileResultWithSnapshot(filePath)],
+			[{ file: filePath }, makeFileResultWithSnapshot(filePath), HASH],
 		);
 
 		await page.locator("[data-preview-open-btn]").click();
@@ -256,6 +276,14 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(postBody.file).toBe(filePath);
 		expect(postBody.html).toBeUndefined();
 		expect(postBody.kind).toBeUndefined();
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:tool:tool-1:1"]);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(tabs[0].source.dedupeWithLive).toBe(false);
+		expect(tabs[0].state.dedupeWithLive).toBe(false);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
 	});
 
 	test("v3 marker: identical content reuses the live preview tab without remounting relative files", async ({ page }) => {
