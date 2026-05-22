@@ -12,26 +12,28 @@ skills all defer to this document.
                 │ Does the user want to LOOK at a visual artefact? │
                 └──────────────────────────────────────────────────┘
                                     │
-              ┌─────────────────────┴──────────────────────┐
-              │                                            │
-              ▼                                            ▼
-   Iterating / one-off                       Persisting a deliverable
-   (report, mockup,                          (committed asset, doc site,
-    comparison, chart)                        long-lived report)
-              │                                            │
-              ▼                                            ▼
-   preview_open(html=...)                       write file.html
-   • single surface (panel)                     • single surface (inline render)
-   • no chat-history clutter                    • lives in repo / commit
-   • atomic refresh on each call                • user can open via file system
-   • DO NOT also write file                     • DO NOT also call preview_open
+      ┌─────────────────────────────┼──────────────────────────────┐
+      │                             │                              │
+      ▼                             ▼                              ▼
+Ephemeral / one-off        Reusable file-backed           Persisted deliverable
+(report, mockup,           live preview                   (committed asset,
+ comparison, chart,        (existing report,              doc site, long-lived
+ iteration)                local demo with assets)         report)
+      │                             │                              │
+      ▼                             ▼                              ▼
+preview_open(html=...)     preview_open(file="/abs/...")  write file.html
+• single live panel        • single live panel             • single inline render
+• no chat-history clutter  • absolute entry path           • lives in repo / commit
+• atomic refresh           • declare assets/manifest       • user opens file directly
+• no file write needed     • no inline file render         • DO NOT call preview_open
 ```
 
-**One artefact, one surface.** Never both. The two surfaces have independent
-state machines and will drift out of sync.
+**One artefact, one surface.** Never both. The inline file-render surface and
+the live preview panel have independent state machines and will drift out of
+sync.
 
-When unsure, default to `preview_open(html=...)`. ~90% of asks fall into the
-"iterating / one-off" bucket.
+When unsure, default to `preview_open(html=...)`. Most asks are ephemeral
+reports, mockups, charts, or iteration loops.
 
 ## Why one surface, not both
 
@@ -39,10 +41,23 @@ When unsure, default to `preview_open(html=...)`. ~90% of asks fall into the
   a new render with the file's tool-result snapshot, and the "Open" button on
   past tool cards becomes ambiguous because the underlying file may have moved
   on.
-- The preview panel is a single live slot driven by SSE hot reload and the
-  `preview_open` tool. It always reflects the latest call.
+- The preview panel is a live workspace driven by SSE hot reload and the
+  `preview_open` tool. It reflects the latest mounted preview and can reopen
+  historical preview snapshots from chat.
 - If both surfaces are live, "refresh the preview" becomes ambiguous: which
   one? The user shouldn't have to know.
+
+## Content identity and tab dedupe
+
+Each preview mount has a `contentHash`, a SHA-256 identity for the mounted
+preview tree. The workspace uses that hash to collapse duplicate preview tabs:
+identical live and historical artifacts select the same live preview tab, while
+different artifacts remain separately restorable.
+
+This means repeated `preview_open` calls with the same bytes may update or
+select the existing live preview instead of creating another historical tab.
+That is intentional; change the content when you need a distinct restorable
+preview.
 
 ## `html=` vs `file=` — the same surface
 
@@ -51,30 +66,36 @@ per-session preview mount served at `/preview/<sid>/`. User-visible
 behaviour is identical — same iframe, same theme bridge, same SSE-driven
 refresh.
 
-Use `file=` when the HTML lives on disk already. Use `html=` for one-shot
-generated content. The tool result is a constant ≤250-byte snapshot
-regardless of HTML size, so iterating on a 5000-line report does not blow
-up your context window.
+Use `html=` for one-shot generated content: reports, mockups, charts,
+comparison views, and fast iteration. The tool result is a constant ≤250-byte
+snapshot regardless of HTML size, so iterating on a 5000-line report does not
+blow up your context window.
 
-**Sibling assets are explicit, not automatic.** Bare `preview_open(file="report.html")`
-copies *only* the entry file into the mount — sibling CSS, images, and
-videos referenced from the HTML will 404 unless you declare them. Two
-opt-in mechanisms:
+Use `file=` only when the HTML intentionally lives on disk already or must be a
+reusable file-backed live preview. Relative paths are resolved from the agent's
+current working directory, but reusable previews should pass an absolute entry
+path so the snapshot is unambiguous across later turns.
+
+**Sibling assets are explicit, not automatic.** Bare
+`preview_open(file="/abs/path/report.html")` copies *only* the entry file into
+the mount — sibling CSS, images, and videos referenced from the HTML will 404
+unless you declare them. Two opt-in mechanisms:
 
 ```
 # Inline asset list (paths relative to the entry file's directory; supports
 # single-segment * and ? globs — `**` / `[...]` / `{a,b}` are rejected):
-preview_open(file="report.html", assets=["styles.css", "img/*.png"])
+preview_open(file="/abs/path/report.html", assets=["styles.css", "img/*.png"])
 
-# Or a sibling JSON manifest with the same `assets` array shape:
-preview_open(file="report.html", manifest="preview-manifest.json")
+# Or a sibling JSON manifest with the same `assets` array shape, also relative
+# to the entry file's directory:
+preview_open(file="/abs/path/report.html", manifest="preview-manifest.json")
 ```
 
-Why: bare `file=` used to BFS-walk the parent directory and silently expose
-any sibling drafts, secrets, or other agents' WIP. The explicit opt-in
-makes asset inclusion intentional. See
-[docs/preview-architecture.md](../../docs/preview-architecture.md) for the
-full contract.
+Why: bare `file=` used to BFS-walk the parent directory and silently expose any
+sibling drafts, secrets, or other agents' WIP. The explicit opt-in makes asset
+inclusion intentional. See
+[docs/preview-architecture.md](../../docs/preview-architecture.md) for the full
+contract.
 
 Full architecture: [docs/preview-architecture.md](../../docs/preview-architecture.md).
 
@@ -273,7 +294,9 @@ write `class="bg-card"` than `style="background: var(--card)"`.
 
 ## Anti-patterns — do not do these
 
-- ❌ Write `report.html` *and* call `preview_open(file="report.html")`.
+- ❌ Write `report.html` *and* call `preview_open(file="report.html")` for the same artifact.
+- ❌ Rely on undeclared sibling assets; declare them with `assets` or `manifest`.
+- ❌ Use a relative `preview_open(file=...)` path for a reusable file-backed preview.
 - ❌ Define `:root { --background: ... }` to "lock the palette".
 - ❌ Use `@media (prefers-color-scheme: dark)` — read the OS, not Bobbit.
 - ❌ Hardcode `#ffffff`, `rgba(0,0,0,0.5)`, `oklch(0.21 0.008 145)`.
