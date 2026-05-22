@@ -345,12 +345,87 @@ export function startCanvasEyeAnimation(
 	}
 
 	// Draw initial frame synchronously to avoid a blank-canvas flash on mount
-	const initSrc = cache.get("center-false") ?? cache.values().next().value;
+	const initKey = cache.has("center-false") ? "center-false" : cache.keys().next().value;
+	const initSrc = initKey ? cache.get(initKey) : undefined;
 	if (initSrc) ctx.drawImage(initSrc, 0, 0);
-	lastKey = "center-false";
+	lastKey = initKey ?? "";
 
 	rafId = requestAnimationFrame(tick);
 	return () => cancelAnimationFrame(rafId);
+}
+
+interface CanvasEyeAnimationController {
+	key: string;
+	cleanup: () => void;
+	releaseTimer: number | null;
+}
+
+const canvasEyeAnimations = new WeakMap<HTMLCanvasElement, CanvasEyeAnimationController>();
+
+function eyeSequenceKey(sequence: EyeFrame[]): string {
+	return sequence.map(frame => `${frame.pct}:${frame.gaze}:${frame.blink ? 1 : 0}`).join("|");
+}
+
+function canvasEyeAnimationKey(
+	sequence: EyeFrame[],
+	cycleDurationMs: number,
+	palette: BobbitPalette,
+): string {
+	const dpr = window.devicePixelRatio || 1;
+	return [
+		cycleDurationMs,
+		dpr,
+		palette.main,
+		palette.light,
+		palette.dark,
+		palette.eye,
+		eyeSequenceKey(sequence),
+	].join(";");
+}
+
+function ensureCanvasEyeAnimation(
+	canvas: HTMLCanvasElement,
+	sequence: EyeFrame[],
+	cycleDurationMs: number,
+	palette: BobbitPalette = CANONICAL_PALETTE,
+): void {
+	const key = canvasEyeAnimationKey(sequence, cycleDurationMs, palette);
+	const existing = canvasEyeAnimations.get(canvas);
+	if (existing && existing.releaseTimer !== null) {
+		window.clearTimeout(existing.releaseTimer);
+		existing.releaseTimer = null;
+	}
+	if (existing?.key === key) return;
+	existing?.cleanup();
+	canvasEyeAnimations.set(canvas, {
+		key,
+		cleanup: startCanvasEyeAnimation(canvas, sequence, cycleDurationMs, palette),
+		releaseTimer: null,
+	});
+}
+
+function stopCanvasEyeAnimation(canvas: HTMLCanvasElement): void {
+	const existing = canvasEyeAnimations.get(canvas);
+	if (!existing) return;
+	if (existing.releaseTimer !== null) {
+		window.clearTimeout(existing.releaseTimer);
+		existing.releaseTimer = null;
+	}
+	existing.cleanup();
+	canvasEyeAnimations.delete(canvas);
+}
+
+function scheduleCanvasEyeAnimationStop(canvas: HTMLCanvasElement): void {
+	const existing = canvasEyeAnimations.get(canvas);
+	if (!existing || existing.releaseTimer !== null) return;
+	const releaseTimer = window.setTimeout(() => {
+		const current = canvasEyeAnimations.get(canvas);
+		if (current === existing && current.releaseTimer === releaseTimer) {
+			current.cleanup();
+			canvasEyeAnimations.delete(canvas);
+		}
+	}, 0);
+	existing.releaseTimer = releaseTimer;
 }
 
 // ============================================================================
@@ -367,8 +442,11 @@ export function startCanvasEyeAnimation(
 export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): TemplateResult {
 	if (archived) {
 		// Static frame: center gaze, no blink, no animation loop
+		let attachedCanvas: HTMLCanvasElement | null = null;
 		const onRef = (el: Element | undefined) => {
 			if (el && el instanceof HTMLCanvasElement) {
+				attachedCanvas = el;
+				stopCanvasEyeAnimation(el);
 				const cache = buildEyePixelCache(CANONICAL_PALETTE, [{ pct: 0, gaze: "center", blink: false }]);
 				const pixels = cache.get("center-false");
 				if (pixels) {
@@ -380,6 +458,9 @@ export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): Templ
 					const ctx = el.getContext("2d")!;
 					drawPixelsBresenham(ctx, pixels, devW, devH);
 				}
+			} else if (attachedCanvas) {
+				stopCanvasEyeAnimation(attachedCanvas);
+				attachedCanvas = null;
 			}
 		};
 		return html`<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>`;
@@ -388,14 +469,14 @@ export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): Templ
 	// shut. This pairs with the breathing-squish CSS animation to make idle
 	// bobbits read as "asleep" rather than "awake but bored".
 	const sequence = isIdle ? SLEEP_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
-	let cleanup: (() => void) | null = null;
+	let attachedCanvas: HTMLCanvasElement | null = null;
 	const onRef = (el: Element | undefined) => {
 		if (el && el instanceof HTMLCanvasElement) {
-			cleanup?.();
-			cleanup = startCanvasEyeAnimation(el, sequence, 10000);
-		} else {
-			cleanup?.();
-			cleanup = null;
+			attachedCanvas = el;
+			ensureCanvasEyeAnimation(el, sequence, 10000);
+		} else if (attachedCanvas) {
+			scheduleCanvasEyeAnimationStop(attachedCanvas);
+			attachedCanvas = null;
 		}
 	};
 	return html`<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>`;
@@ -423,14 +504,14 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 
 	const sequence = isIdle ? IDLE_EYE_SEQUENCE : BUSY_EYE_SEQUENCE;
 	const cycleDuration = 10000;
-	let cleanup: (() => void) | null = null;
+	let attachedCanvas: HTMLCanvasElement | null = null;
 	const onRef = (el: Element | undefined) => {
 		if (el && el instanceof HTMLCanvasElement) {
-			cleanup?.();
-			cleanup = startCanvasEyeAnimation(el, sequence, cycleDuration);
-		} else {
-			cleanup?.();
-			cleanup = null;
+			attachedCanvas = el;
+			ensureCanvasEyeAnimation(el, sequence, cycleDuration);
+		} else if (attachedCanvas) {
+			scheduleCanvasEyeAnimationStop(attachedCanvas);
+			attachedCanvas = null;
 		}
 	};
 
@@ -474,14 +555,14 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 	const idlePhaseSec = -(phaseIndex * 1.3 % 10);
 
 	// Eye animation for idle blob
-	let cleanup: (() => void) | null = null;
+	let attachedCanvas: HTMLCanvasElement | null = null;
 	const onRef = (el: Element | undefined) => {
 		if (el && el instanceof HTMLCanvasElement) {
-			cleanup?.();
-			cleanup = startCanvasEyeAnimation(el, IDLE_EYE_SEQUENCE, 10000);
-		} else {
-			cleanup?.();
-			cleanup = null;
+			attachedCanvas = el;
+			ensureCanvasEyeAnimation(el, IDLE_EYE_SEQUENCE, 10000);
+		} else if (attachedCanvas) {
+			scheduleCanvasEyeAnimationStop(attachedCanvas);
+			attachedCanvas = null;
 		}
 	};
 
