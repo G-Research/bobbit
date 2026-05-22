@@ -623,11 +623,11 @@ export function readHandoff(task: PersistedTask, repo: string):
 
 ### 6.3 PR-per-repo
 
-Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
+Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}:refs/heads/{{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
 
 ```yaml
 - { name: "Push api", type: command, component: "api",
-    run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+    run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 - { name: "Push web", type: command, component: "web", run: "…" }
 ```
 

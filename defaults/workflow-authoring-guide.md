@@ -214,7 +214,7 @@ There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
 - { name: "Custom api thing", type: command, component: "api", run: "./scripts/special.sh" }
 
 # Shape C: pure free-form, working dir = per-branch container root
-- { name: "Push branch", type: command, run: "git push origin {{branch}}" }
+- { name: "Push branch", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 Validator rules:
@@ -397,7 +397,7 @@ workflows:
         name: Ready to Merge
         depends_on: [documentation]
         verify:
-          - { name: "Branch pushed to remote",   type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Branch pushed to remote",   type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
           - { name: "Master merged into branch", type: command, run: "git fetch origin {{master}} && git merge-base --is-ancestor origin/{{master}} {{branch}}" }
           - { name: "PR raised",                 type: command, run: "gh pr list --head {{branch}} --base {{master}} --state open --json url -q \".[0].url\" | grep -q ." }
 ```
@@ -449,8 +449,8 @@ workflows:
         name: Ready to Merge
         depends_on: [implementation]
         verify:
-          - { name: "Push api", type: command, component: "api", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
-          - { name: "Push web", type: command, component: "web", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Push api", type: command, component: "api", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Push web", type: command, component: "web", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 The `shared` data-only component generates no workflow steps. It's only present so the worktree pool checks it out alongside `api` and `web` on every goal/session branch — the e2e harness in `api` (or a separate `e2e` component) can then `cd ../shared/...` and consume its fixtures at the right revision.

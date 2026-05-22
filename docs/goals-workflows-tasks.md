@@ -142,7 +142,7 @@ workflows:
         depends_on: [implementation]
         verify:
           # Pure free-form (cwd = per-branch container root):
-          - { name: "Branch pushed", type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Branch pushed", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 **Why structural references.** Editing `components[name].commands[name]` updates every workflow step that references it — no regeneration required for command edits. Validation at load time catches typos and stale references (component renamed, command removed) before the agent runs anything. Cleaner audit trail in gate output: shows the `(component, command)` pair, not just a literal shell string.

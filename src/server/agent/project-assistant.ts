@@ -133,7 +133,7 @@ review.
 Use the canonical \`readyToMergeGate()\` shape (see \`seed-default-workflows.ts\`) — its
 three verify steps are:
 
-1. \`git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q .\`
+1. \`git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q .\`
 2. \`git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}\`
 3. \`gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q \".[0].url\" | grep -q .\`
 
@@ -261,7 +261,7 @@ Free-form shell is allowed for ad-hoc operations:
 \`\`\`yaml
 - name: "Push branch"
   type: command
-  run: "git push origin {{branch}}"
+  run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ."
 \`\`\`
 
 See \`defaults/workflow-authoring-guide.md\` for the full step grammar (llm-review, agent-qa, expect:failure, depends_on, phase, etc.).
