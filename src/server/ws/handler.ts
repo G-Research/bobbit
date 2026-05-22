@@ -103,6 +103,23 @@ function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[
 	return changed ? out : messages;
 }
 
+function enrichStateModelMetadata(data: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	const model = data?.model;
+	if (!data || !model || typeof model !== "object" || Array.isArray(model)) return data;
+	const modelData = model as Record<string, unknown>;
+	if (typeof modelData.id !== "string") return data;
+	const meta = inferMeta(modelData.id);
+	return {
+		...data,
+		model: {
+			...modelData,
+			contextWindow: typeof modelData.contextWindow === "number" ? modelData.contextWindow : meta.contextWindow,
+			maxTokens: typeof modelData.maxTokens === "number" ? modelData.maxTokens : meta.maxTokens,
+			reasoning: typeof modelData.reasoning === "boolean" ? modelData.reasoning : meta.reasoning,
+		},
+	};
+}
+
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
@@ -389,11 +406,11 @@ export function handleWebSocketConnection(
 					if (stateResponse.success) {
 						// Splice canonical session status + version so the client's `case "state"`
 						// can prime `_lastStatusVersion` from the snapshot.
-						const spliced = { ...(stateResponse.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+						const data = enrichStateModelMetadata(stateResponse.data as Record<string, unknown> | undefined);
+						const spliced = { ...(data ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
 						sendStateWithCost(ws, sessionManager, sessionId, spliced);
 						sendImageModelState(ws, sessionManager, sessionId);
 						// If agent state lacks model info, supplement with persisted data
-						const data = stateResponse.data as Record<string, unknown> | undefined;
 						if (!data?.model) {
 							sendFallbackModelState(ws, sessionManager, sessionId);
 						}
@@ -746,11 +763,11 @@ export function handleWebSocketConnection(
 							// Splice canonical session status + version into the snapshot so
 							// the client's `case "state"` can prime `_lastStatusVersion` from
 							// the snapshot path (e.g. on reconnect via get_state).
-							const spliced = { ...(stateResp.data as Record<string, unknown> | undefined ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
+							const data = enrichStateModelMetadata(stateResp.data as Record<string, unknown> | undefined);
+							const spliced = { ...(data ?? {}), status: session.status, statusVersion: session.statusVersion ?? 0 };
 							sendStateWithCost(ws, sessionManager, sessionId, spliced);
 							sendImageModelState(ws, sessionManager, sessionId);
 							// If agent state lacks model info, supplement with persisted data
-							const data = stateResp.data as Record<string, unknown> | undefined;
 							if (!data?.model) {
 								sendFallbackModelState(ws, sessionManager, sessionId);
 							}
