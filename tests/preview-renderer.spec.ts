@@ -347,6 +347,8 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(live.state.contentHash).toBe(HASH);
 		expect(archived.state.contentHash).toBe(oldHash);
 		expect(archived.state.snapshotHtml).toBe(oldHtml);
+		expect(archived.source.dedupeWithLive).toBe(false);
+		expect(archived.state.dedupeWithLive).toBe(false);
 		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
 	});
 
@@ -406,6 +408,130 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(archived.state.contentHash).toBe(firstHash);
 		expect(archived.source.sessionId).toBe(SESSION_ID);
 		expect(archived.state.sessionId).toBe(SESSION_ID);
+		expect(archived.source.dedupeWithLive).toBe(false);
+		expect(archived.state.dedupeWithLive).toBe(false);
+	});
+
+	test("v3 marker: matching live preview caches restorable params for a later different snapshot", async ({ page }) => {
+		await gotoAndWait(page);
+		const firstHash = "a".repeat(64);
+		const secondHash = "b".repeat(64);
+		await page.evaluate(async ([sessionId, firstHash, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, firstHash);
+			(window as any).__renderPreview(
+				document.getElementById("container")!,
+				{ html: "<p>first</p>" },
+				result,
+				false,
+				{ sessionId, toolUseId: "tool-a" },
+			);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 500, body: { error: "unexpected remount" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [SESSION_ID, firstHash, makePreviewResultWithSnapshot("inline.html", firstHash)] as any);
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+		let calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+
+		await page.evaluate(async ([sessionId, secondHash, result]) => {
+			(window as any).__clearLivePreviewRestorable(sessionId);
+			(window as any).__renderPreview(
+				document.getElementById("container")!,
+				{ html: "<p>second</p>" },
+				result,
+				false,
+				{ sessionId, toolUseId: "tool-b" },
+			);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					(window as any).__setLivePreviewHash(sessionId, secondHash);
+					return { status: 200, body: { entry: "inline.html", mtime: 222, contentHash: secondHash } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [SESSION_ID, secondHash, makePreviewResultWithSnapshot("inline.html", secondHash)] as any);
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:live", "preview:tool:tool-a:1"].sort());
+		expect(tabs.find((tab: any) => tab.id === "preview:live").state.contentHash).toBe(secondHash);
+		const archived = tabs.find((tab: any) => tab.id === "preview:tool:tool-a:1");
+		expect(archived.state.contentHash).toBe(firstHash);
+		expect(archived.state.snapshotHtml).toBe("<p>first</p>");
+		expect(archived.source.dedupeWithLive).toBe(false);
+		expect(archived.state.dedupeWithLive).toBe(false);
+	});
+
+	test("v3 marker: archives cached preview when delayed live state already matches the next snapshot", async ({ page }) => {
+		await gotoAndWait(page);
+		const initialHash = "1".repeat(64);
+		const firstHash = "a".repeat(64);
+		const secondHash = "b".repeat(64);
+		await page.evaluate(async ([sessionId, initialHash, firstHash, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, initialHash);
+			(window as any).__renderPreview(
+				document.getElementById("container")!,
+				{ html: "<p>first</p>" },
+				result,
+				false,
+				{ sessionId, toolUseId: "tool-a" },
+			);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 200, body: { entry: "inline.html", mtime: 111, contentHash: firstHash } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [SESSION_ID, initialHash, firstHash, makePreviewResultWithSnapshot("inline.html", firstHash)] as any);
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		await page.evaluate(async ([sessionId, secondHash, result]) => {
+			// Simulate a delayed bootstrap/SSE frame that has already re-derived live
+			// as the next preview before the renderer gets to archive the cached one.
+			(window as any).__setLivePreviewHash(sessionId, secondHash);
+			(window as any).__clearLivePreviewRestorable(sessionId);
+			(window as any).__renderPreview(
+				document.getElementById("container")!,
+				{ html: "<p>second</p>" },
+				result,
+				false,
+				{ sessionId, toolUseId: "tool-b" },
+			);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 500, body: { error: "unexpected remount" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
+			(window as any).__resetFetchCalls();
+		}, [SESSION_ID, secondHash, makePreviewResultWithSnapshot("inline.html", secondHash)] as any);
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
+		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:live", "preview:tool:tool-a:1"].sort());
+		expect(tabs.find((tab: any) => tab.id === "preview:live").state.contentHash).toBe(secondHash);
+		const archived = tabs.find((tab: any) => tab.id === "preview:tool:tool-a:1");
+		expect(archived.state.contentHash).toBe(firstHash);
+		expect(archived.source.dedupeWithLive).toBe(false);
+		expect(archived.state.dedupeWithLive).toBe(false);
 	});
 
 	test("v3 marker: different snapshot with no restorable params remains a historical tab", async ({ page }) => {
