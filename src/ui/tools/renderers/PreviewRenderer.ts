@@ -201,6 +201,47 @@ function tabContentHash(tab: any): string | undefined {
 	return normalizeContentHash(tab?.state?.contentHash) || normalizeContentHash(tab?.source?.contentHash);
 }
 
+const restorableLivePreviewCache = new Map<string, { contentHash: string; tab: any }>();
+
+function previewTabCanRestore(tab: any): boolean {
+	const state = tab?.state && typeof tab.state === "object" ? tab.state : {};
+	const source = tab?.source && typeof tab.source === "object" ? tab.source : {};
+	const snapshotKind = typeof state.snapshotKind === "string" ? state.snapshotKind : source.snapshotKind;
+	return (snapshotKind === "inline" && typeof state.snapshotHtml === "string")
+		|| (snapshotKind === "file" && (typeof state.snapshotFile === "string" || typeof source.path === "string"));
+}
+
+function rememberRestorableLivePreview(sessionId: string, contentHash: string | undefined, tab: any): void {
+	const hash = normalizeContentHash(contentHash);
+	if (!sessionId || !hash || !previewTabCanRestore(tab)) return;
+	restorableLivePreviewCache.set(sessionId, {
+		contentHash: hash,
+		tab: {
+			...tab,
+			source: { ...(tab.source || {}), sessionId, contentHash: hash },
+			state: { ...(tab.state || {}), sessionId, contentHash: hash },
+		},
+	});
+}
+
+function archiveCachedLivePreview(appState: any, sessionId: string, liveContentHash: string | undefined, nextContentHash: string | undefined): void {
+	const liveHash = normalizeContentHash(liveContentHash);
+	const nextHash = normalizeContentHash(nextContentHash);
+	if (!liveHash || !nextHash || liveHash === nextHash) return;
+	const cached = restorableLivePreviewCache.get(sessionId);
+	if (!cached || cached.contentHash !== liveHash) return;
+	const tabs = appState?.panelTabsBySession?.[sessionId];
+	if (!Array.isArray(tabs)) return;
+	if (tabs.some((tab: any) => tab?.kind === "preview" && tabContentHash(tab) === liveHash && tab.id !== "preview:live" && tab.id !== "preview")) return;
+	const title = typeof cached.tab.title === "string" && cached.tab.title ? cached.tab.title : "Preview: inline.html";
+	tabs.push({
+		...cached.tab,
+		label: /\s\(snapshot\)$/.test(cached.tab.label || "") ? cached.tab.label : `${cached.tab.label || title} (snapshot)`,
+		source: { ...(cached.tab.source || {}), sessionId, contentHash: liveHash },
+		state: { ...(cached.tab.state || {}), sessionId, contentHash: liveHash },
+	});
+}
+
 function archiveCurrentLivePreview(appState: any, sessionId: string, nextContentHash: string | undefined): void {
 	const nextHash = normalizeContentHash(nextContentHash);
 	if (!nextHash) return;
@@ -327,8 +368,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
 				let liveContentHashBeforeOpen: string | undefined;
+				let appStateBeforeOpen: any;
 				try {
 					const { state: appState } = await import("../../../app/state.js");
+					appStateBeforeOpen = appState;
 					liveContentHashBeforeOpen = normalizeContentHash((appState as any).previewPanelContentHash);
 				} catch { /* optional state probe */ }
 
@@ -356,6 +399,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				let contentHashFromPost: string | undefined;
 				const liveAlreadyHasSnapshot = !!snapshotContentHash && liveContentHashBeforeOpen === snapshotContentHash;
 				const postBody = liveAlreadyHasSnapshot ? null : mountBodyForSnapshot(parsed, params);
+				if (postBody && snapshotContentHash && !liveAlreadyHasSnapshot && appStateBeforeOpen) {
+					archiveCurrentLivePreview(appStateBeforeOpen, sessionId, snapshotContentHash);
+					archiveCachedLivePreview(appStateBeforeOpen, sessionId, liveContentHashBeforeOpen, snapshotContentHash);
+				}
 				if (postBody) {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 						method: "POST",
@@ -398,25 +445,50 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					}
 					const mtime = mtimeFromPost ?? Date.now();
 					const mountedContentHash = contentHashFromPost || snapshotContentHash;
+					const remountMatchedSnapshot = !!postBody
+						&& !!snapshotContentHash
+						&& !!contentHashFromPost
+						&& contentHashFromPost === snapshotContentHash;
+					const liveHasSnapshotAfterOpen = liveAlreadyHasSnapshot || remountMatchedSnapshot;
 					archiveCurrentLivePreview(appState, sessionId, mountedContentHash);
 					if (entry) (appState as any).previewPanelEntry = entry;
 					(appState as any).previewPanelMtime = mtime;
 					(appState as any).previewPanelContentHash = mountedContentHash || "";
 					(appState as any).isPreviewSession = true;
+					const tabId = previewTabId(ctx?.toolUseId, snap.index, parsed, entry, params);
+					const tabTitle = previewTabTitle(params, parsed, entry);
+					const tabSource = previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index);
+					const tabState = previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined, params);
+					if (mountedContentHash) {
+						tabSource.contentHash = mountedContentHash;
+						tabState.contentHash = mountedContentHash;
+					}
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,
 						mtime,
 						contentHash: mountedContentHash,
-						id: previewTabId(ctx?.toolUseId, snap.index, parsed, entry, params),
-						title: previewTabTitle(params, parsed, entry),
+						id: tabId,
+						title: tabTitle,
 						url: parsed.kind === "preview" ? parsed.url : undefined,
-						source: previewTabSource(params, parsed, entry, ctx?.toolUseId, snap.index),
-						state: previewTabState(parsed, entry, mtime, parsed.kind === "preview" ? parsed.url : undefined, params),
-						// Only collapse v3 history into live when live already had that content before this click.
-						dedupeWithLive: !snapshotContentHash || liveAlreadyHasSnapshot,
+						source: tabSource,
+						state: tabState,
+						// Collapse v3 history into live only when live already matched before this click,
+						// or when this click remounted restorable content and the server hash proves it now matches.
+						dedupeWithLive: !snapshotContentHash || liveHasSnapshotAfterOpen,
 						select: true,
 					});
+					if (remountMatchedSnapshot) {
+						rememberRestorableLivePreview(sessionId, mountedContentHash, {
+							id: tabId,
+							kind: "preview",
+							title: tabTitle,
+							label: tabTitle,
+							legacyTab: "preview",
+							source: tabSource,
+							state: tabState,
+						});
+					}
 					renderApp();
 				} catch {
 					/* state import failure shouldn't block the success animation */

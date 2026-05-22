@@ -1,5 +1,6 @@
 // Test entry — bundles PreviewOpenRenderer for a file:// fixture.
 import { html, render } from "lit";
+import { state as appState } from "../../src/app/state.js";
 import { PreviewOpenRenderer } from "../../src/ui/tools/renderers/PreviewRenderer.js";
 import { renderTool } from "../../src/ui/tools/index.js";
 import "../../src/ui/components/Messages.js";
@@ -87,6 +88,37 @@ void renderTool;
 	(state as any).panelTabs = (state as any).panelTabsBySession[sessionId];
 	(state as any).panelWorkspaceActiveBySession = { [sessionId]: "preview:live" };
 	(state as any).activePanelTabId = "preview:live";
+};
+(window as any).__setLivePreviewHash = (sessionId: string, hash: string) => {
+	(appState as any).previewPanelContentHash = hash;
+	const tabs = (appState as any).panelTabsBySession?.[sessionId];
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	if (live) {
+		live.source = { ...(live.source || {}), contentHash: hash };
+		live.state = { ...(live.state || {}), contentHash: hash };
+	}
+};
+(window as any).__markLivePreviewRestorable = (sessionId: string, html: string) => {
+	const tabs = (appState as any).panelTabsBySession?.[sessionId];
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	if (live) {
+		live.source = { ...(live.source || {}), snapshotKind: "inline" };
+		live.state = { ...(live.state || {}), snapshotKind: "inline", snapshotHtml: html };
+	}
+};
+(window as any).__clearLivePreviewRestorable = (sessionId: string) => {
+	const tabs = (appState as any).panelTabsBySession?.[sessionId];
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	if (live) {
+		const { snapshotKind: _sourceKind, ...source } = live.source || {};
+		const { snapshotKind: _stateKind, snapshotHtml: _html, snapshotFile: _file, ...state } = live.state || {};
+		void _sourceKind;
+		void _stateKind;
+		void _html;
+		void _file;
+		live.source = source;
+		live.state = state;
+	}
 };
 (window as any).__getPreviewState = async () => {
 	const { state } = await import("../../src/app/state.js");
