@@ -227,18 +227,24 @@ function rememberRestorableLivePreview(sessionId: string, contentHash: string | 
 function archiveCachedLivePreview(appState: any, sessionId: string, liveContentHash: string | undefined, nextContentHash: string | undefined): void {
 	const liveHash = normalizeContentHash(liveContentHash);
 	const nextHash = normalizeContentHash(nextContentHash);
-	if (!liveHash || !nextHash || liveHash === nextHash) return;
+	if (!nextHash) return;
 	const cached = restorableLivePreviewCache.get(sessionId);
-	if (!cached || cached.contentHash !== liveHash) return;
+	const cachedHash = normalizeContentHash(cached?.contentHash);
+	if (!cached || !cachedHash || cachedHash === nextHash) return;
+	// A delayed bootstrap/SSE frame can re-derive live as `nextHash` before a
+	// tool-card click archives the previously opened restorable preview. Keep the
+	// cache only when it represents either the current live content or the content
+	// immediately displaced by an already-live next snapshot.
+	if (liveHash && liveHash !== cachedHash && liveHash !== nextHash) return;
 	const tabs = appState?.panelTabsBySession?.[sessionId];
 	if (!Array.isArray(tabs)) return;
-	if (tabs.some((tab: any) => tab?.kind === "preview" && tabContentHash(tab) === liveHash && tab.id !== "preview:live" && tab.id !== "preview")) return;
+	if (tabs.some((tab: any) => tab?.kind === "preview" && tabContentHash(tab) === cachedHash && tab.id !== "preview:live" && tab.id !== "preview")) return;
 	const title = typeof cached.tab.title === "string" && cached.tab.title ? cached.tab.title : "Preview: inline.html";
 	tabs.push({
 		...cached.tab,
 		label: /\s\(snapshot\)$/.test(cached.tab.label || "") ? cached.tab.label : `${cached.tab.label || title} (snapshot)`,
-		source: { ...(cached.tab.source || {}), sessionId, contentHash: liveHash },
-		state: { ...(cached.tab.state || {}), sessionId, contentHash: liveHash },
+		source: { ...(cached.tab.source || {}), sessionId, contentHash: cachedHash, dedupeWithLive: false },
+		state: { ...(cached.tab.state || {}), sessionId, contentHash: cachedHash, dedupeWithLive: false },
 	});
 }
 
@@ -270,10 +276,12 @@ function archiveCurrentLivePreview(appState: any, sessionId: string, nextContent
 			...archivedSource,
 			type: typeof archivedSource.type === "string" ? archivedSource.type : "preview_open",
 			contentHash: liveHash,
+			dedupeWithLive: false,
 		},
 		state: {
 			...state,
 			contentHash: liveHash,
+			dedupeWithLive: false,
 		},
 	});
 }
@@ -399,8 +407,8 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				let contentHashFromPost: string | undefined;
 				const liveAlreadyHasSnapshot = !!snapshotContentHash && liveContentHashBeforeOpen === snapshotContentHash;
 				const postBody = liveAlreadyHasSnapshot ? null : mountBodyForSnapshot(parsed, params);
-				if (postBody && snapshotContentHash && !liveAlreadyHasSnapshot && appStateBeforeOpen) {
-					archiveCurrentLivePreview(appStateBeforeOpen, sessionId, snapshotContentHash);
+				if (snapshotContentHash && appStateBeforeOpen) {
+					if (postBody && !liveAlreadyHasSnapshot) archiveCurrentLivePreview(appStateBeforeOpen, sessionId, snapshotContentHash);
 					archiveCachedLivePreview(appStateBeforeOpen, sessionId, liveContentHashBeforeOpen, snapshotContentHash);
 				}
 				if (postBody) {
@@ -478,7 +486,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						dedupeWithLive: !snapshotContentHash || liveHasSnapshotAfterOpen,
 						select: true,
 					});
-					if (remountMatchedSnapshot) {
+					if (liveAlreadyHasSnapshot || remountMatchedSnapshot) {
 						rememberRestorableLivePreview(sessionId, mountedContentHash, {
 							id: tabId,
 							kind: "preview",

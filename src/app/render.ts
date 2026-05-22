@@ -74,6 +74,7 @@ import {
 	panelTabIdFromLegacy,
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
+	previewContentHashFromTab,
 	previewTabAllowsLiveDedupe,
 	previewTabsHaveSameContent,
 	proposalPanelTabId,
@@ -2877,9 +2878,23 @@ function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, derivedTabs: Panel
 
 function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
 	const sessionId = workspaceSessionId();
+	const storedTabs = panelTabsForSession(state, sessionId);
+	const derivedLiveIndex = derivedTabs.findIndex((tab) => tab.id === LIVE_PREVIEW_PANEL_TAB_ID);
+	if (derivedLiveIndex >= 0) {
+		const derivedLive = derivedTabs[derivedLiveIndex];
+		const storedLive = storedTabs.find((tab) => isLivePreviewTab(tab) && previewTabsHaveSameContent(tab, derivedLive));
+		if (storedLive) {
+			derivedTabs = [...derivedTabs];
+			derivedTabs[derivedLiveIndex] = {
+				...derivedLive,
+				source: { ...(storedLive.source as Record<string, unknown>), ...(derivedLive.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
+				state: { ...(storedLive.state || {}), ...(derivedLive.state || {}) },
+			};
+		}
+	}
 	const seen = new Set(derivedTabs.map((tab) => tab.id));
 	const storedExtraTabs: PanelWorkspaceTab[] = [];
-	for (const rawTab of panelTabsForSession(state, sessionId)) {
+	for (const rawTab of storedTabs) {
 		const normalizedTab = normalizeHistoricalPreviewTab(rawTab, sessionId) ?? normalizeHistoricalProposalTab(rawTab, sessionId);
 		if (!normalizedTab || seen.has(normalizedTab.id)) continue;
 		if (previewTabAllowsLiveDedupe(normalizedTab) && derivedTabs.some((derived) => previewTabsHaveSameContent(normalizedTab, derived))) continue;
@@ -2908,9 +2923,53 @@ function markPreviewTabMounted(tab: PanelWorkspaceTab): void {
 	(state as any).previewPanelMountedTabId = tab.id;
 }
 
+function archiveLivePreviewBeforeHistoricalRestore(sessionId: string, nextContentHash: string): void {
+	if (!nextContentHash) return;
+	const tabs = panelTabsForSession(state, sessionId);
+	const live = tabs.find((candidate) => isLivePreviewTab(candidate));
+	const liveHash = previewContentHashFromTab(live);
+	if (!live || !liveHash || liveHash === nextContentHash) return;
+	if (tabs.some((candidate) => candidate.kind === "preview" && !isLivePreviewTab(candidate) && previewContentHashFromTab(candidate) === liveHash)) return;
+	const liveState = (live.state || {}) as Record<string, unknown>;
+	const liveSource = live.source as Record<string, unknown>;
+	const snapshotKind = recordValue(liveState, "snapshotKind") || recordValue(liveSource, "snapshotKind");
+	const snapshotHtml = recordValue(liveState, "snapshotHtml");
+	const snapshotFile = recordValue(liveState, "snapshotFile") || recordValue(liveSource, "path");
+	const canRestore = (snapshotKind === "inline" && !!snapshotHtml) || (snapshotKind === "file" && !!snapshotFile);
+	if (!canRestore) return;
+	const { live: _live, origin: _origin, ...source } = liveSource;
+	void _live;
+	void _origin;
+	const title = previewSourceTitle(live) || live.title || live.label || "Preview: inline.html";
+	tabs.push({
+		...live,
+		id: `preview:snapshot:${liveHash}`,
+		title,
+		label: snapshotPreviewTitle(live.label || title),
+		legacyTab: "preview",
+		source: {
+			...source,
+			type: (typeof source.type === "string" ? source.type : "preview_open") as "preview" | "html-preview" | "preview_open",
+			sessionId,
+			contentHash: liveHash,
+			dedupeWithLive: false,
+		},
+		state: {
+			...liveState,
+			sessionId,
+			contentHash: liveHash,
+			dedupeWithLive: false,
+		},
+	});
+}
+
 function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (tab.kind !== "preview") return;
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) {
+		const liveEntry = previewEntryFromTab(tab);
+		const liveHash = previewContentHashFromTab(tab);
+		if (liveEntry) state.previewPanelEntry = liveEntry;
+		if (liveHash) (state as any).previewPanelContentHash = liveHash;
 		markPreviewTabMounted(tab);
 		return;
 	}
@@ -2925,6 +2984,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
 	const stateMtime = tabState.mtime;
 	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry) return;
+	archiveLivePreviewBeforeHistoricalRestore(sessionId, contentHash);
 
 	state.isPreviewSession = true;
 	if (previewRestoreInFlight.has(tab.id)) return;
@@ -2945,6 +3005,13 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		return;
 	}
 
+	state.previewPanelEntry = "";
+	state.previewPanelMtime = 0;
+	(state as any).previewPanelContentHash = contentHash;
+	try {
+		document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+			.forEach((iframe) => { iframe.src = "about:blank"; });
+	} catch { /* best-effort stale-content guard while the remount POST is in flight */ }
 	previewRestoreInFlight.add(tab.id);
 	void (async () => {
 		try {

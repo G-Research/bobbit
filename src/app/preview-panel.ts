@@ -233,7 +233,10 @@ export function selectHtmlPreviewTab(args: {
 		&& normalizePreviewContentHash(s.previewPanelContentHash) === contentHash;
 	if (currentLiveMatches) {
 		const duplicateIds = existingTabs
-			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview" && candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID && previewContentHashFromTab(candidate) === contentHash)
+			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
+				&& candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID
+				&& previewContentHashFromTab(candidate) === contentHash
+				&& previewTabAllowsLiveDedupe(candidate))
 			.map((candidate: PanelWorkspaceTab) => candidate.id);
 		const activeId = activePanelTabIdForSession(s, sessionId);
 		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
