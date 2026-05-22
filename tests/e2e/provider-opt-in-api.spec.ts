@@ -1,7 +1,7 @@
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, nonGitCwd } from "./e2e-setup.js";
+import { apiFetch, connectWs, createSession, nonGitCwd } from "./e2e-setup.js";
 import http from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -150,6 +150,104 @@ test.describe("provider opt-in API and model filtering", () => {
 		expect(google.status).toBe("enabled_without_credential");
 
 		await expectPublicResponsesDoNotLeak([disabledKeySecret, enabledKeySecret]);
+	});
+
+	test("provider credential deletion removes auth.json aliases without disabling providers", async () => {
+		await setCloudProviderEnabled("anthropic", true);
+		await setCloudProviderEnabled("openai", true);
+		await setCloudProviderEnabled("google", true);
+		await saveProviderKey("openai", "sk-openai-primary-delete-test");
+		await saveProviderKey("openai-codex", "sk-openai-codex-delete-test");
+		await saveProviderKey("google-gemini-cli", "google-gemini-cli-delete-test");
+
+		const secrets = [
+			"anthropic-oauth-delete-test",
+			"openai-oauth-delete-test",
+			"openai-codex-oauth-delete-test",
+			"google-oauth-delete-test",
+			"google-gemini-cli-auth-key-delete-test",
+		];
+		writeAuthJson({
+			anthropic: { type: "oauth", access: secrets[0], refresh: "anthropic-refresh-delete-test", expires: Date.now() + 60_000 },
+			openai: { type: "oauth", access: secrets[1], refresh: "openai-refresh-delete-test", expires: Date.now() + 60_000 },
+			"openai-codex": { type: "oauth", access: secrets[2], refresh: "openai-codex-refresh-delete-test", expires: Date.now() + 60_000 },
+			google: { type: "oauth", access: secrets[3], refresh: "google-refresh-delete-test", expires: Date.now() + 60_000 },
+			"google-gemini-cli": { key: secrets[4] },
+		});
+
+		expect(providerStatus(await getCloudStatus(), "openai").configured).toBe(true);
+		expect(providerStatus(await getCloudStatus(), "google").configured).toBe(true);
+		expect(providerStatus(await getCloudStatus(), "anthropic").configured).toBe(true);
+
+		let del = await apiFetch("/api/provider-keys/openai", { method: "DELETE" });
+		expect(del.status).toBe(200);
+		let auth = readAuthJson();
+		expect(auth.openai).toBeUndefined();
+		expect(auth["openai-codex"]).toBeUndefined();
+		expect(auth.google).toBeDefined();
+		expect(auth["google-gemini-cli"]).toBeDefined();
+		expect(providerStatus(await getCloudStatus(), "openai")).toMatchObject({
+			enabled: true,
+			configured: false,
+			authenticated: false,
+			status: "enabled_without_credential",
+		});
+
+		del = await apiFetch("/api/provider-keys/google-gemini-cli", { method: "DELETE" });
+		expect(del.status).toBe(200);
+		auth = readAuthJson();
+		expect(auth.google).toBeUndefined();
+		expect(auth["google-gemini-cli"]).toBeUndefined();
+		expect(auth.anthropic).toBeDefined();
+		expect(providerStatus(await getCloudStatus(), "google")).toMatchObject({
+			enabled: true,
+			configured: false,
+			authenticated: false,
+			status: "enabled_without_credential",
+		});
+
+		del = await apiFetch("/api/provider-keys/anthropic", { method: "DELETE" });
+		expect(del.status).toBe(200);
+		auth = readAuthJson();
+		expect(auth.anthropic).toBeUndefined();
+		const prefs = await getPreferences();
+		expect(prefs["providerEnabled.anthropic"]).toBe(true);
+		expect(prefs["providerEnabled.openai"]).toBe(true);
+		expect(prefs["providerEnabled.google"]).toBe(true);
+
+		await expectPublicResponsesDoNotLeak(secrets);
+	});
+
+	test("WebSocket rejects disabled cloud providers before set_model, prompt, and steer", async () => {
+		await saveProviderKey("google", "google-ws-auth-test-key");
+		await putPreferences({ "default.sessionModel": "google/gemini-ws-auth-test" });
+		const sessionId = await createSession();
+		try {
+			const ws = await connectWs(sessionId);
+			try {
+				await ws.waitFor((m: any) => m.type === "state" && m.data?.model?.provider === "google", 5_000);
+				await setCloudProviderEnabled("google", false);
+
+				let cursor = ws.messageCount();
+				ws.send({ type: "set_model", provider: "google", modelId: "gemini-rejected-by-opt-in" });
+				let err = await ws.waitForFrom(cursor, (m: any) => m.type === "error" && m.code === "cloud_auth_required", 5_000);
+				expect(err.message).toContain("Choose at least one cloud provider");
+
+				cursor = ws.messageCount();
+				ws.send({ type: "prompt", text: "this prompt must not be queued" });
+				err = await ws.waitForFrom(cursor, (m: any) => m.type === "error" && m.code === "cloud_auth_required", 5_000);
+				expect(err.message).toContain("Choose at least one cloud provider");
+
+				cursor = ws.messageCount();
+				ws.send({ type: "steer", text: "this steer must not be delivered" });
+				err = await ws.waitForFrom(cursor, (m: any) => m.type === "error" && m.code === "cloud_auth_required", 5_000);
+				expect(err.message).toContain("Choose at least one cloud provider");
+			} finally {
+				ws.close();
+			}
+		} finally {
+			await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+		}
 	});
 
 	test("AI Gateway mode bypasses cloud provider auth requirements and reauth prompts", async () => {
@@ -301,6 +399,11 @@ function writeAuthJson(data: Record<string, unknown>): void {
 	if (!agentDir) throw new Error("agentDir not initialised");
 	mkdirSync(agentDir, { recursive: true });
 	writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify(data, null, 2), "utf-8");
+}
+
+function readAuthJson(): Record<string, unknown> {
+	if (!agentDir) throw new Error("agentDir not initialised");
+	return JSON.parse(readFileSync(path.join(agentDir, "auth.json"), "utf-8"));
 }
 
 async function startMockAigwServer(): Promise<{ url: string; close: () => Promise<void> }> {

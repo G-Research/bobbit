@@ -24,6 +24,14 @@ import {
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { PreferencesStore } from "../agent/preferences-store.js";
+import {
+	cloudModelPrefIsUsable,
+	cloudVendorForModelProvider,
+	getCloudAuthStatus,
+	parseModelPref,
+	shouldBypassCloudAuthUx,
+} from "../agent/cloud-provider-auth.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -236,6 +244,63 @@ function send(ws: WebSocket, msg: ServerMessage): void {
 	}
 }
 
+const CLOUD_AUTH_REQUIRED_MESSAGE = "Choose at least one cloud provider to connect before starting cloud-backed work.";
+type LiveSession = NonNullable<ReturnType<SessionManager["getSession"]>>;
+
+function sendCloudAuthRequiredWs(ws: WebSocket): void {
+	send(ws, { type: "error", message: CLOUD_AUTH_REQUIRED_MESSAGE, code: "cloud_auth_required" });
+}
+
+function sessionModelPref(sessionManager: SessionManager, sessionId: string, session: LiveSession): string | undefined {
+	const persisted = sessionManager.getPersistedSession(sessionId);
+	if (persisted?.modelProvider && persisted.modelId) return `${persisted.modelProvider}/${persisted.modelId}`;
+	return sessionManager.resolveInitialModel(session.role, session.projectId);
+}
+
+function cloudModelPrefRequiresAuth(prefs: PreferencesStore, pref: string | undefined): boolean {
+	const parsed = parseModelPref(pref);
+	if (!parsed) return false;
+	const vendor = cloudVendorForModelProvider(parsed.provider);
+	return !!vendor && !cloudModelPrefIsUsable(prefs, pref);
+}
+
+async function ensureWsCloudAuthReadyForSession(
+	ws: WebSocket,
+	prefs: PreferencesStore | undefined,
+	sessionManager: SessionManager,
+	sessionId: string,
+	session: LiveSession,
+): Promise<boolean> {
+	if (!prefs || shouldBypassCloudAuthUx(prefs)) return true;
+	const pref = sessionModelPref(sessionManager, sessionId, session);
+	if (cloudModelPrefRequiresAuth(prefs, pref)) {
+		sendCloudAuthRequiredWs(ws);
+		return false;
+	}
+	if (pref) return true;
+	const status = await getCloudAuthStatus(prefs);
+	if (status.authGateRequired) {
+		sendCloudAuthRequiredWs(ws);
+		return false;
+	}
+	return true;
+}
+
+function ensureWsCloudAuthReadyForModel(
+	ws: WebSocket,
+	prefs: PreferencesStore | undefined,
+	provider: string | undefined,
+	modelId: string | undefined,
+): boolean {
+	if (!prefs || shouldBypassCloudAuthUx(prefs)) return true;
+	const vendor = cloudVendorForModelProvider(provider);
+	if (!vendor) return true;
+	const pref = provider && modelId ? `${provider}/${modelId}` : undefined;
+	if (pref && cloudModelPrefIsUsable(prefs, pref)) return true;
+	sendCloudAuthRequiredWs(ws);
+	return false;
+}
+
 function getViewerGoalIds(ws: WebSocket): Set<string> {
 	const existing = (ws as any).viewerGoalIds;
 	if (existing instanceof Set) return existing;
@@ -280,6 +345,7 @@ export function handleWebSocketConnection(
 	skipAuth = false,
 	sandboxTokenStore?: SandboxTokenStore,
 	projectContextManager?: ProjectContextManager,
+	preferencesStore?: PreferencesStore,
 ): void {
 	const ip = getClientIp(req);
 	let authenticated = false;
@@ -548,6 +614,7 @@ export function handleWebSocketConnection(
 			switch (msg.type) {
 				case "prompt": {
 					console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
+					if (!(await ensureWsCloudAuthReadyForSession(ws, preferencesStore, sessionManager, sessionId, session))) break;
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -604,6 +671,7 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "steer":
+					if (!(await ensureWsCloudAuthReadyForSession(ws, preferencesStore, sessionManager, sessionId, session))) break;
 					// Live steer: if agent is streaming, send directly via RPC
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
@@ -633,6 +701,7 @@ export function handleWebSocketConnection(
 					});
 					break;
 				case "set_model":
+					if (!ensureWsCloudAuthReadyForModel(ws, preferencesStore, msg.provider, msg.modelId)) break;
 					try {
 						await session.rpcClient.setModel(msg.provider, msg.modelId);
 						sessionManager.updateModelNameFile(session.id, msg.modelId);

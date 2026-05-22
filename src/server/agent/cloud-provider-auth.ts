@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { dirname } from "node:path";
 
 import { globalAuthPath } from "../bobbit-dir.js";
 import { getAigwUrl } from "./aigw-manager.js";
@@ -227,6 +228,41 @@ export function hasValidCloudProviderCredential(prefs: PreferencesStore, provide
 	return getCloudProviderCredentialStatus(prefs, provider).authenticated;
 }
 
+export function cloudProviderCredentialAliases(provider: CloudProviderId): { providerKeys: string[]; authJson: string[] } {
+	return {
+		providerKeys: [...PROVIDER_KEY_ALIASES[provider]],
+		authJson: Array.from(new Set([...PROVIDER_KEY_ALIASES[provider], ...OAUTH_ALIASES[provider]])),
+	};
+}
+
+export function removeBobbitOwnedCloudProviderCredentials(
+	prefs: PreferencesStore,
+	provider: CloudProviderId,
+): { removedProviderKeys: string[]; removedAuthJsonEntries: string[] } {
+	const aliases = cloudProviderCredentialAliases(provider);
+	const removedProviderKeys: string[] = [];
+	for (const alias of aliases.providerKeys) {
+		const prefKey = `providerKey.${alias}`;
+		if (prefs.get(prefKey) !== undefined) removedProviderKeys.push(alias);
+		prefs.remove(prefKey);
+	}
+	prefs.remove(`providerCredentialInvalid.${provider}`);
+
+	const authData = readAuthData();
+	const removedAuthJsonEntries: string[] = [];
+	if (authData) {
+		for (const alias of aliases.authJson) {
+			if (Object.prototype.hasOwnProperty.call(authData, alias)) {
+				delete authData[alias];
+				removedAuthJsonEntries.push(alias);
+			}
+		}
+		if (removedAuthJsonEntries.length > 0) writeAuthData(authData);
+	}
+
+	return { removedProviderKeys, removedAuthJsonEntries };
+}
+
 export async function hasAnyEnabledAuthenticatedCloudProvider(prefs: PreferencesStore): Promise<boolean> {
 	if (shouldBypassCloudAuthUx(prefs)) return true;
 	return CLOUD_PROVIDERS.some((provider) => isProviderEnabled(prefs, provider) && hasValidCloudProviderCredential(prefs, provider));
@@ -336,6 +372,18 @@ function readAuthData(): Record<string, any> | undefined {
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, any> : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+function writeAuthData(authData: Record<string, any>): void {
+	const authPath = globalAuthPath();
+	const dir = dirname(authPath);
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	fs.writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+	try {
+		fs.chmodSync(authPath, 0o600);
+	} catch {
+		// chmod may fail on Windows, that's OK.
 	}
 }
 

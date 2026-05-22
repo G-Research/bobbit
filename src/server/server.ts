@@ -149,6 +149,7 @@ import {
 	cloudVendorForProviderKey,
 	getCloudAuthStatus,
 	isCloudProviderId,
+	removeBobbitOwnedCloudProviderCredentials,
 	isProviderEnabled,
 	migrateExistingCloudProviderPreferences,
 	setProviderEnabled,
@@ -1333,7 +1334,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, preferencesStore);
 		});
 	});
 
@@ -4640,12 +4641,15 @@ async function handleApiRoute(
 			json({ error: "Missing provider name" }, 400);
 			return;
 		}
-		preferencesStore.remove(`providerKey.${provider}`);
 		const vendor = cloudVendorForProviderKey(provider);
-		if (vendor) preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+		if (vendor) {
+			removeBobbitOwnedCloudProviderCredentials(preferencesStore, vendor);
+		} else {
+			preferencesStore.remove(`providerKey.${provider}`);
+		}
 		invalidateModelCache();
 		broadcastPreferencesChanged();
-		json({ ok: true });
+		json({ ok: true, ...(vendor ? { provider: vendor } : {}) });
 		return;
 	}
 
