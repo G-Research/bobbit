@@ -20,18 +20,14 @@
  */
 import { test as base, expect } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
-import module from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Per-worker V8 compile cache (mirrors in-process-harness.ts).
-{
-	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT || join(tmpdir(), "bobbit-e2e-v8cache");
-	const workerCacheDir = join(cacheRoot, `w-${process.pid}`);
-	try { mkdirSync(workerCacheDir, { recursive: true }); } catch { /* best-effort */ }
-	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
-}
+// Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
+// workers cold-import dist/server once per process, so a per-worker cache gives
+// no useful same-run speedup; on Windows/Node 24 it intermittently returned
+// stale module metadata as false "does not provide an export" startup errors.
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
@@ -64,7 +60,12 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 	}
 
+	const agentDir = join(bobbitDir, "agent");
+	mkdirSync(agentDir, { recursive: true });
+
 	process.env.BOBBIT_DIR = bobbitDir;
+	process.env.BOBBIT_AGENT_DIR = agentDir;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SKIP_MCP = "1";
 	process.env.BOBBIT_SKIP_NPM_CI = "1";
 	process.env.BOBBIT_TEST_NO_PUSH = "1";
