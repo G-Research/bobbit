@@ -63,19 +63,6 @@ function makeSymlinkPair(label: string): { canonical: string; link: string } | n
 }
 
 test.describe("Add Project — symlink confirm flow", () => {
-	test.beforeEach(async () => {
-		// Remove all pre-registered projects so the app opens with the
-		// "Add Project" splash screen. The gateway harness now successfully
-		// registers a default project (with acceptCanonical), so without this
-		// cleanup the app navigates directly to the project assistant and the
-		// Add Project flow is never triggered.
-		const res = await apiFetch("/api/projects");
-		const data = await res.json();
-		const projects = data.projects || data || [];
-		for (const p of projects) {
-			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
-		}
-	});
 
 	test.afterEach(async () => {
 		// Clean up any projects this spec created.
@@ -83,6 +70,7 @@ test.describe("Add Project — symlink confirm flow", () => {
 		const data = await res.json();
 		const projects = data.projects || data || [];
 		for (const p of projects) {
+			if (p.name === "default") continue;
 			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
