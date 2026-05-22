@@ -930,7 +930,7 @@ Check the WS `proposal_update` frame fired by the `edit_proposal` handler and th
 
 ## Image generation failure
 
-`POST /api/image-generation/generate` returns `400` for malformed input and `500 { error }` for provider-side failures. It must never return `502` or `503` — those indicate a regression in the route handler.
+`POST /api/image-generation/generate` returns `400` for malformed input, `409 { code: "cloud_auth_required", status }` when direct-cloud mode has no authenticated image provider, and `500 { error }` for provider-side failures. It must never return `502` or `503` — those indicate a regression in the route handler.
 
 ## Goal `prUrl` removed
 

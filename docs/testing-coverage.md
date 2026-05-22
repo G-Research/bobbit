@@ -40,6 +40,16 @@ User stories defined in `userstories/sessions.md`, `userstories/resilience.md`, 
 - All stories registered in `tests/e2e/ui/story-registry.ts`; `tools/spec-check.ts` reports per-contract variation coverage (CT-05 at 75%, CT-16 at 100%).
 - **Framework extensions** in `tests/e2e/ui/spec-framework.ts`: `ProjectHandle` entity handle; `SpecContext.createTestSession(name, opts)` accepting `opts.cwd` (worktree-backed) and `opts.goalId` (goal-scoped); `SpecContext.create_session_via_ui()` and `rename_session()` for sidebar-driven flows; `event.disconnect()` to force a WebSocket close; `event.server_crash()` / `event.server_restart()` which bounce the in-process gateway via the worker-scoped `gateway` fixture (re-binds the same port, reuses `bobbitDir`).
 
+## Provider opt-in auth
+
+Covers the behavior documented in [provider-opt-in-auth.md](provider-opt-in-auth.md): per-vendor enablement, direct-cloud auth gate, AI Gateway bypass, credential preservation/removal, Google OAuth fallback, model filtering, and no unauthenticated cloud auto-select.
+
+- **API E2E** — `tests/e2e/provider-opt-in-api.spec.ts`: status redaction, enablement persistence, provider-key removal without disabling, disabled providers hidden from `/api/models`, direct-cloud session creation `409 cloud_auth_required`, AI Gateway `aigw_bypass`, host/env-managed credentials, invalid credential recovery, and image-provider auth-failure marking.
+- **Browser E2E** — `tests/e2e/ui/settings.spec.ts`: Settings → System → Account provider rows for Anthropic/OpenAI/Google, persistence across reload, cleanup/undo, credential removal copy, default-model reset on disable, and AI Gateway suppression of connect/API-key actions.
+- **Browser E2E** — `tests/e2e/ui/provider-auth-gate.spec.ts`: auth gate cancel safety, Google API-key fallback, Anthropic/OpenAI manual OAuth fallback, status-refresh fail-closed, and AI Gateway bypass.
+- **OAuth/API E2E** — `tests/e2e/oauth-flow-status.spec.ts` and `tests/e2e/ui/authenticate-gateway-oauth-regression.spec.ts`: provider-isolated OAuth flows, callback completion enabling provider preferences, Google OAuth 501/API-key guidance, and gateway authentication not starting Anthropic OAuth.
+- **Unit tests** — `tests/image-generation-registry.test.ts` and `tests/get-image-model-for-session.test.ts`: provider-aware image registry, aliases, authenticated-only defaults, and persisted image-model fallback when a provider is disabled or unauthenticated.
+
 ## Tail-chat / scroll pin
 
 User-facing contract: "if I am at the bottom when content arrives, I stay at the bottom" across streaming bursts, tool-result expansion, session navigate, image/iframe reflows, and user-scroll-up release.

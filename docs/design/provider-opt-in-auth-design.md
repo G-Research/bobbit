@@ -1,5 +1,7 @@
 # Provider Opt-In Auth — Technical Design
 
+Implementation reference: final user/API behavior is documented in [../provider-opt-in-auth.md](../provider-opt-in-auth.md). This file preserves the design context that led to the implementation.
+
 ## Goal
 
 Make Anthropic, OpenAI, and Google Gemini direct-cloud access an explicit user choice. Bobbit must not require Anthropic, must not surface cloud-provider auth UX when AI Gateway is configured, and must never auto-select an unauthenticated cloud model.

@@ -1,6 +1,6 @@
 # Provider Opt-In Auth UX
 
-Design specification for direct-cloud provider opt-in, credential status, and auth gating.
+Design specification for direct-cloud provider opt-in, credential status, and auth gating. Final user/API behavior is documented in [../provider-opt-in-auth.md](../provider-opt-in-auth.md).
 
 ## Principles
 
