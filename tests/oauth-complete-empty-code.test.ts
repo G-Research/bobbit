@@ -2,8 +2,8 @@
  * Unit test for `oauthComplete` in `src/server/auth/oauth.ts`.
  *
  * Contract:
- *   - Empty `authCode`              → { success: false, error: "code required" }.
- *   - Whitespace-only `authCode`    → { success: false, error: "code required" }.
+ *   - Empty `authCode`              → { success: false, error: "code required", provider: "anthropic" }.
+ *   - Whitespace-only `authCode`    → { success: false, error: "code required", provider: "anthropic" }.
  *   - Unknown `flowId`              → { success: false, error: "Unknown or expired flow ID" }.
  */
 import { describe, it } from "node:test";
@@ -37,13 +37,13 @@ describe("oauthComplete — input validation", () => {
 		assert.ok(start.flowId, "flow id should be returned");
 
 		const res1 = await oauthComplete(start.flowId, "");
-		assert.deepEqual(res1, { success: false, error: "code required" });
+		assert.deepEqual(res1, { success: false, error: "code required", provider: "anthropic" });
 	});
 
 	it("whitespace-only authCode for a real flow → 'code required'", async () => {
 		const { oauthStart } = await import("../src/server/auth/oauth.js");
 		const start = await oauthStart("anthropic");
 		const res = await oauthComplete(start.flowId, "   \t\n  ");
-		assert.deepEqual(res, { success: false, error: "code required" });
+		assert.deepEqual(res, { success: false, error: "code required", provider: "anthropic" });
 	});
 });

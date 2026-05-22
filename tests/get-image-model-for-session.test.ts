@@ -33,7 +33,9 @@ const { PreferencesStore } = await import("../src/server/agent/preferences-store
 const { SessionStore } = await import("../src/server/agent/session-store.js");
 const {
 	defaultImageModelPref,
+	getAvailableImageModels,
 	parseImageModelPref,
+	pickDefaultImageModelPref,
 } = await import("../src/server/agent/image-generation.js");
 
 type ImageModel = { provider: string; id: string };
@@ -44,20 +46,16 @@ type ImageModel = { provider: string; id: string };
  * keeps the test in lockstep with the production implementation: any edit
  * to the function body is picked up next test run.
  *
- * The real method body (post-B12):
- *
- *     const persisted = this.resolveStoreForId(sessionId)?.get(sessionId);
- *     if (persisted?.imageModelProvider && persisted?.imageModelId) {
- *         return { provider: persisted.imageModelProvider, id: persisted.imageModelId };
- *     }
- *     const pref = (this.preferencesStore?.get("default.imageModel") as string | undefined) || defaultImageModelPref();
- *     return parseImageModelPref(pref);
+ * The real method now validates persisted overrides against the provider-aware
+ * image registry, then falls back to `pickDefaultImageModelPref()` so disabled
+ * or unauthenticated direct-cloud providers are not selected silently.
  */
 function loadProductionFn(): (
 	store: { get: (id: string) => any },
 	prefs: { get: (k: string) => unknown },
 	parseImageModelPref: (s: string | undefined) => ImageModel | undefined,
-	defaultImageModelPref: () => string,
+	pickDefaultImageModelPref: (prefs: PreferencesStore) => string | undefined,
+	isKnownImageModel: (provider: string, modelId: string) => boolean,
 	sessionId: string,
 ) => ImageModel | undefined {
 	const src = fs.readFileSync(SOURCE, "utf-8");
@@ -74,6 +72,7 @@ function loadProductionFn(): (
 	// Rewrite `this.<x>` references to closure variables on our adapter.
 	body = body
 		.replace(/this\.resolveStoreForId\(sessionId\)/g, "store")
+		.replace(/this\.isKnownImageModel\(/g, "isKnownImageModel(")
 		.replace(/this\.preferencesStore\?/g, "prefs")
 		.replace(/this\.preferencesStore/g, "prefs")
 		// Drop TS type assertions — `as string | undefined` etc.
@@ -83,7 +82,8 @@ function loadProductionFn(): (
 		"store",
 		"prefs",
 		"parseImageModelPref",
-		"defaultImageModelPref",
+		"pickDefaultImageModelPref",
+		"isKnownImageModel",
 		"sessionId",
 		body,
 	) as any;
@@ -107,14 +107,23 @@ function makeFixture() {
 }
 
 const fn = loadProductionFn();
-function call(store: any, prefs: any, id: string): ImageModel | undefined {
-	return fn(store, prefs, parseImageModelPref, defaultImageModelPref, id);
+function enableImageProvider(prefs: PreferencesStore, provider: "openai" | "google"): void {
+	prefs.set(`providerEnabled.${provider}`, true);
+	prefs.set(`providerKey.${provider}`, "test-key");
+}
+
+function call(store: any, prefs: PreferencesStore, id: string): ImageModel | undefined {
+	const isKnownImageModel = (provider: string, modelId: string) => (
+		getAvailableImageModels(prefs).some((m) => m.provider === provider && m.id === modelId)
+	);
+	return fn(store, prefs, parseImageModelPref, pickDefaultImageModelPref, isKnownImageModel, id);
 }
 
 describe("SessionManager.getImageModelForSession (production logic)", () => {
 	it("returns per-session override when both imageModelProvider and imageModelId are set", () => {
 		const { store, prefs, id, cleanup } = makeFixture();
 		try {
+			enableImageProvider(prefs, "openai");
 			store.update(id, { imageModelProvider: "openai", imageModelId: "gpt-image-2" });
 			const got = call(store, prefs, id);
 			assert.deepEqual(got, { provider: "openai", id: "gpt-image-2" });
@@ -126,6 +135,7 @@ describe("SessionManager.getImageModelForSession (production logic)", () => {
 	it("falls back to `default.imageModel` preference when override absent", () => {
 		const { store, prefs, id, cleanup } = makeFixture();
 		try {
+			enableImageProvider(prefs, "google");
 			prefs.set("default.imageModel", "google/gemini-2.5-flash-image");
 			const got = call(store, prefs, id);
 			assert.deepEqual(got, { provider: "google", id: "gemini-2.5-flash-image" });
@@ -137,6 +147,7 @@ describe("SessionManager.getImageModelForSession (production logic)", () => {
 	it("falls back to `defaultImageModelPref()` when no override and no preference", () => {
 		const { store, prefs, id, cleanup } = makeFixture();
 		try {
+			enableImageProvider(prefs, "openai");
 			const got = call(store, prefs, id);
 			assert.deepEqual(got, parseImageModelPref(defaultImageModelPref()));
 			assert.deepEqual(got, { provider: "openai", id: "gpt-image-2" });
@@ -148,6 +159,8 @@ describe("SessionManager.getImageModelForSession (production logic)", () => {
 	it("override beats preference", () => {
 		const { store, prefs, id, cleanup } = makeFixture();
 		try {
+			enableImageProvider(prefs, "openai");
+			enableImageProvider(prefs, "google");
 			prefs.set("default.imageModel", "google/gemini-2.5-flash-image");
 			store.update(id, { imageModelProvider: "openai", imageModelId: "gpt-image-2" });
 			const got = call(store, prefs, id);
@@ -160,6 +173,7 @@ describe("SessionManager.getImageModelForSession (production logic)", () => {
 	it("partial persisted override (only one of provider/id set) is ignored — falls back to default", () => {
 		const { store, prefs, id, cleanup } = makeFixture();
 		try {
+			enableImageProvider(prefs, "openai");
 			store.update(id, { imageModelProvider: "openai" });
 			const got = call(store, prefs, id);
 			assert.deepEqual(got, parseImageModelPref(defaultImageModelPref()));
