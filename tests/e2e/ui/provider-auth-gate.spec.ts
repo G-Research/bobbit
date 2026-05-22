@@ -248,6 +248,71 @@ test.describe("Direct-cloud auth gate", () => {
 		expect(oauthCompleteBodies).toEqual([{ flowId: "flow-anthropic-manual", code: "manual-auth-code" }]);
 	});
 
+	test("OpenAI OAuth manual code fallback completes via openai-codex and resumes session creation", async ({ page }) => {
+		await page.addInitScript(() => {
+			window.open = () => null;
+		});
+		let openaiAuthenticated = false;
+		const servedAuthenticatedStatuses: boolean[] = [];
+		const oauthStartBodies: Array<Record<string, unknown>> = [];
+		const oauthCompleteBodies: Array<Record<string, unknown>> = [];
+		await stubPreferencesWithoutExplicitCloudBypass(page);
+		await stubCloudProviderStatus(page, () => {
+			servedAuthenticatedStatuses.push(openaiAuthenticated);
+			return cloudAuthStatus("direct-cloud", openaiAuthenticated ? ["openai"] : []);
+		});
+		const sessions = await stubSessionCreation(page);
+		await page.route(/\/api\/oauth\/start(?:\?.*)?$/, async (route, request) => {
+			const body = request.postDataJSON() as Record<string, unknown>;
+			oauthStartBodies.push(body);
+			expect(body).toMatchObject({ provider: "openai-codex" });
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					flowId: "flow-openai-manual",
+					url: "https://auth.example/openai",
+					provider: "openai-codex",
+					callbackServer: false,
+					instructions: "Paste the manual OpenAI code from the provider.",
+				}),
+			});
+		});
+		await page.route(/\/api\/oauth\/complete(?:\?.*)?$/, async (route, request) => {
+			const body = request.postDataJSON() as Record<string, unknown>;
+			oauthCompleteBodies.push(body);
+			openaiAuthenticated = true;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ success: true, provider: "openai-codex" }),
+			});
+		});
+
+		await openApp(page);
+		await clickNewSession(page);
+
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toBeVisible({ timeout: 10_000 });
+		expect(sessions.posts()).toHaveLength(0);
+		await page.locator('[data-testid="cloud-auth-gate-provider-openai"]').click();
+		await expect(page.getByRole("button", { name: "Connect selected" })).toBeEnabled();
+		await page.getByRole("button", { name: "Connect selected" }).click();
+		await expect(page.getByText("A browser tab opened for OpenAI")).toBeVisible({ timeout: 5_000 });
+		await expect(page.getByText("Paste the manual OpenAI code from the provider.")).toBeVisible();
+		await page.getByPlaceholder("Paste redirect URL or code").fill("manual-openai-code");
+		const completeResponse = page.waitForResponse((response) =>
+			response.url().includes("/api/oauth/complete") && response.request().method() === "POST",
+		);
+		await page.getByRole("button", { name: "Submit code" }).click();
+		await completeResponse;
+
+		await expect.poll(() => sessions.posts().length, { timeout: 10_000 }).toBe(1);
+		await expect(page.locator('[data-testid="cloud-auth-gate"]')).toHaveCount(0, { timeout: 5_000 });
+		expect(oauthStartBodies).toEqual([{ provider: "openai-codex" }]);
+		expect(oauthCompleteBodies).toEqual([{ flowId: "flow-openai-manual", code: "manual-openai-code" }]);
+		expect(servedAuthenticatedStatuses).toContain(true);
+	});
+
 	test("does not continue when status refresh fails after OAuth", async ({ page }) => {
 		await page.addInitScript(() => {
 			window.open = () => null;
