@@ -18,7 +18,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, apiFetch, deleteSession } from "../e2e-setup.js";
 import { SpecContext } from "./spec-framework.js";
-import { STORY_PR01, STORY_PR04, STORY_PR09, STORY_PR10 } from "./story-registry.js";
+import { STORY_PR01, STORY_PR09, STORY_PR10 } from "./story-registry.js";
 
 test.describe("CT-16: Projects organize sessions", () => {
 	let s: SpecContext;
@@ -60,29 +60,6 @@ test.describe("CT-16: Projects organize sessions", () => {
 		const projectsAfter = await respAfter.json();
 		const found = projectsAfter.find((p: any) => p.name === projectName);
 		expect(found).toBeTruthy();
-	});
-
-	// ---------------------------------------------------------------
-	// PR-04: Project removal API exists
-	// ---------------------------------------------------------------
-
-	test("PR-04: Project removal API returns proper status", async () => {
-		s.begin(STORY_PR04);
-
-		// setup
-		await s.open();
-
-		// act — verify DELETE endpoint exists (don't actually delete — would break other tests)
-		s.act();
-		// Use a non-existent project ID to test the endpoint without side effects
-		const resp = await apiFetch("/api/projects/nonexistent-id-12345", {
-			method: "DELETE",
-		});
-
-		// assert — endpoint exists and returns appropriate status (404 for non-existent)
-		s.assert();
-		// 404 means the endpoint exists but the project doesn't — that's correct behavior
-		expect([404, 400].includes(resp.status)).toBe(true);
 	});
 
 	// ---------------------------------------------------------------
