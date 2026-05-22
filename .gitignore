@@ -83,6 +83,8 @@ tests/fixtures/follow-tail-bundle.js
 tests/fixtures/follow-tail-bundle.css
 tests/fixtures/streaming-message-container-bundle.js
 tests/fixtures/streaming-message-container-bundle.css
+tests/fixtures/streaming-bobbit-canvas-ref-bundle.js
+tests/fixtures/streaming-bobbit-canvas-ref-bundle.css
 tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
 tests/fixtures/defer-offscreen-render-bundle.js

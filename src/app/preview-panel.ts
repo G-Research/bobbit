@@ -4,7 +4,11 @@ import {
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
+	isLivePreviewTab,
+	normalizePreviewContentHash,
 	panelTabsForSession,
+	previewContentHashFromTab,
+	previewTabAllowsLiveDedupe,
 	proposalPanelTabId,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
@@ -169,39 +173,122 @@ export function selectHtmlPreviewTab(args: {
 	id?: string;
 	title?: string;
 	url?: string;
+	contentHash?: string;
 	source?: Record<string, unknown>;
 	state?: Record<string, unknown>;
+	dedupeWithLive?: boolean;
 	select?: boolean;
 	setAssistantTab?: boolean;
 }): void {
 	const sessionId = args.sessionId || activeSessionId() || "";
 	const entry = args.entry || state.previewPanelEntry || "index.html";
 	const title = args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`;
+	const id = args.id || LIVE_PREVIEW_PANEL_TAB_ID;
+	const contentHash = normalizePreviewContentHash(args.contentHash)
+		|| (id === LIVE_PREVIEW_PANEL_TAB_ID ? normalizePreviewContentHash((state as any).previewPanelContentHash) : "");
+	const source: Record<string, unknown> = {
+		type: "html-preview",
+		sessionId,
+		entry,
+		...args.source,
+	};
+	const tabState: Record<string, unknown> = {
+		...args.state,
+		entry,
+		mtime: args.mtime,
+		url: args.url,
+	};
+	if (contentHash) {
+		source.contentHash = contentHash;
+		tabState.contentHash = contentHash;
+	}
+	if (args.dedupeWithLive === false) {
+		source.dedupeWithLive = false;
+		tabState.dedupeWithLive = false;
+	}
 	const tab: PanelWorkspaceTab = {
-		id: args.id || LIVE_PREVIEW_PANEL_TAB_ID,
+		id,
 		kind: "preview",
 		title,
 		label: title,
 		legacyTab: "preview",
-		source: {
-			type: "html-preview",
-			sessionId,
-			entry,
-			...args.source,
-		},
-		state: {
-			...args.state,
-			entry,
-			mtime: args.mtime,
-			url: args.url,
-		},
+		source: source as PanelWorkspaceTab["source"],
+		state: tabState,
 	};
+	const s = state as any;
+	const existingTabs = panelTabsForSession(s, sessionId);
+	const liveTabForSameContent = (): PanelWorkspaceTab => ({
+		...tab,
+		id: LIVE_PREVIEW_PANEL_TAB_ID,
+		source: {
+			...source,
+			live: true,
+			origin: typeof source.origin === "string" ? source.origin : "preview-open-dedupe",
+		} as PanelWorkspaceTab["source"],
+		state: tabState,
+	});
+	const currentLiveMatches = !!contentHash
+		&& !isLivePreviewTab(tab)
+		&& args.dedupeWithLive !== false
+		&& normalizePreviewContentHash(s.previewPanelContentHash) === contentHash;
+	if (currentLiveMatches) {
+		const duplicateIds = existingTabs
+			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
+				&& candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID
+				&& previewContentHashFromTab(candidate) === contentHash
+				&& previewTabAllowsLiveDedupe(candidate))
+			.map((candidate: PanelWorkspaceTab) => candidate.id);
+		const activeId = activePanelTabIdForSession(s, sessionId);
+		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+		const liveTab = liveTabForSameContent();
+		const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
+		selectPanelWorkspaceTab(liveTab, {
+			sessionId,
+			select: shouldSelect,
+			setAssistantTab: args.setAssistantTab,
+		});
+		if (shouldSelect) s.previewPanelMountedTabId = liveTab.id;
+		return;
+	}
+	const duplicateTabs = contentHash
+		? existingTabs.filter((candidate: PanelWorkspaceTab) => {
+			if (candidate.kind !== "preview" || candidate.id === tab.id || previewContentHashFromTab(candidate) !== contentHash) return false;
+			if (isLivePreviewTab(tab)) return previewTabAllowsLiveDedupe(candidate);
+			return args.dedupeWithLive !== false || !isLivePreviewTab(candidate);
+		})
+		: [];
+	if (duplicateTabs.length > 0) {
+		if (isLivePreviewTab(tab)) {
+			const duplicateIds = duplicateTabs.map(candidate => candidate.id);
+			const activeId = activePanelTabIdForSession(s, sessionId);
+			if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+			const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
+			selectPanelWorkspaceTab(tab, {
+				sessionId,
+				select: shouldSelect,
+				setAssistantTab: args.setAssistantTab,
+			});
+			if (shouldSelect) s.previewPanelMountedTabId = tab.id;
+			return;
+		}
+		const canonical = duplicateTabs.find(isLivePreviewTab) ?? duplicateTabs[0];
+		const selectedTab = isLivePreviewTab(canonical) ? liveTabForSameContent() : canonical;
+		const duplicateIds = duplicateTabs.filter(candidate => candidate.id !== selectedTab.id).map(candidate => candidate.id);
+		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+		selectPanelWorkspaceTab(selectedTab, {
+			sessionId,
+			select: args.select,
+			setAssistantTab: args.setAssistantTab,
+		});
+		if (args.select !== false) s.previewPanelMountedTabId = selectedTab.id;
+		return;
+	}
 	selectPanelWorkspaceTab(tab, {
 		sessionId,
 		select: args.select,
 		setAssistantTab: args.setAssistantTab,
 	});
-	if (args.select !== false) (state as any).previewPanelMountedTabId = tab.id;
+	if (args.select !== false) s.previewPanelMountedTabId = tab.id;
 }
 
 export function selectProposalWorkspaceTab(type: string, options: PanelWorkspaceOptions = {}): void {
@@ -266,6 +353,7 @@ export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions =
 			sessionId,
 			entry: s.previewPanelEntry || "index.html",
 			mtime: s.previewPanelMtime,
+			contentHash: s.previewPanelContentHash,
 			id: LIVE_PREVIEW_PANEL_TAB_ID,
 			select: options.select,
 			setAssistantTab: options.setAssistantTab,
@@ -304,6 +392,7 @@ export function startPreviewSubscription(sessionId: string): void {
 			const data = await r.json();
 			let entry = "";
 			let mtime: number | undefined;
+			let contentHash = "";
 			if (typeof data?.entry === "string" && data.entry) {
 				entry = data.entry;
 				state.previewPanelEntry = data.entry;
@@ -312,11 +401,14 @@ export function startPreviewSubscription(sessionId: string): void {
 				mtime = data.mtime;
 				state.previewPanelMtime = data.mtime;
 			}
+			contentHash = normalizePreviewContentHash(data?.contentHash);
+			(state as any).previewPanelContentHash = contentHash;
 			if (entry) {
 				selectHtmlPreviewTab({
 					sessionId,
 					entry,
 					mtime,
+					contentHash,
 					id: LIVE_PREVIEW_PANEL_TAB_ID,
 					source: { live: true, origin: "preview-bootstrap" },
 					select: state.previewPanelTab === "preview" || state.previewPanelActiveTab === "preview",
@@ -345,11 +437,14 @@ export function startPreviewSubscription(sessionId: string): void {
 				} else {
 					state.previewPanelMtime = mtime;
 				}
+				const contentHash = normalizePreviewContentHash(data?.contentHash);
+				(state as any).previewPanelContentHash = contentHash;
 				if (entry) {
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,
 						mtime,
+						contentHash,
 						id: LIVE_PREVIEW_PANEL_TAB_ID,
 						source: { live: true, origin: "preview-events" },
 						select: activeSessionId() === sessionId,

@@ -72,20 +72,15 @@ test.describe("Workflows page (project-scoped)", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	test("entering /workflows in System scope auto-switches to a project @smoke", async ({ page }) => {
+	test("workflows route auto-switches to project scope and lists active-project entries @smoke", async ({ page }) => {
 		// Fresh app load → in-memory config scope is "system" by default.
-		// The standalone /workflows route now redirects synchronously in main.ts
-		// to #/settings/<projectId>/workflows — the auto-switch is what proves
-		// System was rejected as a workflow scope (the redirect picks
-		// state.activeProjectId || projects[0], never "system").
+		// The standalone /workflows route redirects to a real project's
+		// settings/workflows tab, never to #/settings/system/workflows.
 		await openApp(page);
 		await navigateToHash(page, "#/workflows");
-
-		// Wait for the embedded Workflows tab to render.
 		await expect(page.locator("[data-testid='workflows-tab']").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Hash must land on a real project id, never the literal "system".
 		const hash1 = await page.evaluate(() => window.location.hash);
 		expect(hash1).toMatch(/^#\/settings\/[^/]+\/workflows/);
 		expect(hash1).not.toMatch(/^#\/settings\/system\//);
@@ -101,34 +96,22 @@ test.describe("Workflows page (project-scoped)", () => {
 		const hash2 = await page.evaluate(() => window.location.hash);
 		expect(hash2).toMatch(/^#\/settings\/[^/]+\/workflows/);
 		expect(hash2).not.toMatch(/^#\/settings\/system\//);
-	});
 
-	test("workflow list shows the active project's entries (no system-level leak)", async ({ page }) => {
-		await openApp(page);
-		// Navigate directly to the test project's settings/workflows surface
-		// rather than relying on the #/workflows redirect picking the right
-		// project. The redirect uses state.activeProjectId || projects[0] and
-		// can land on the harness default project (which doesn't have our
-		// seeded "Scope-only Workflow" entry).
+		// Navigate directly to the seeded project's workflows surface so the list
+		// assertion is deterministic even when the redirect picked the harness
+		// default project above.
 		await navigateToHash(page, `#/settings/${projectId}/workflows`);
-		await expect(page.locator("[data-testid='workflows-tab']").first())
-			.toBeVisible({ timeout: 10_000 });
-
-		// The project's seeded workflow is visible inside the workflows tab.
 		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab).toBeVisible({ timeout: 10_000 });
 		await expect(tab.getByText("Scope-only Workflow").first())
 			.toBeVisible({ timeout: 10_000 });
 
-		// Sanity check: no "system" origin badge inside the workflows tab
-		// (workflows have no server/builtin layer anymore — origin must be
-		// "project"). Scope to the workflows tab so we don't pick up Settings
-		// page badges from other tabs.
+		// Workflows have no system/server layer; origin badges in the tab must be
+		// project-only when present.
 		const badges = await tab.locator(".config-origin-badge").allTextContents();
 		for (const txt of badges) {
 			const t = (txt || "").trim().toLowerCase();
-			if (t.length > 0) {
-				expect(["project"]).toContain(t);
-			}
+			if (t.length > 0) expect(["project"]).toContain(t);
 		}
 	});
 });

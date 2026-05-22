@@ -1,93 +1,95 @@
-# E2E Test Plan: Concrete Path to <120s and Low CPU
+# E2E Speed Stability Report
 
-## What we've confirmed
+This is a point-in-time record of the E2E speed-stability work completed on 2026-05-22. The numbers below are verified at `801ba2159b3964a7699000915939e0f27fab70ad`; re-measure after large test moves.
 
-### Win 1: Shell cost (committed)
-Git Bash `--login` shell spawn on Windows is **3.7 seconds**. Plain bash is 150ms. For verification commands that only use shell builtins (like `echo ok` in `test-fast` workflow), we now skip `--login`.
+## Goal and strategy
 
-**Impact**: ~25× faster for command-verification tests that use builtins. Real-world workflows (`npm run test`) still use `--login` because they reference tools that need PATH.
+`npm run test:e2e` covers API, real-push API, and browser projects. The bottleneck was not raw Playwright parallelism; it was the amount of browser-tier work. Each browser worker owns a spawned gateway and Chromium process, so increasing workers raised Windows filesystem/CPU contention and created flakes.
 
-### Win 2: Tier 2 fixture (committed)
-`tests/contract/fixtures/gateway.ts` provides a per-test in-process gateway at ~35ms setup + ~60ms shutdown. Pure API tests run at ~200-400ms. Useful going forward.
+The safe strategy was therefore:
 
-### Constraint: process-level singletons
-Server code has module-level state (`_projectRoot`, prompt dirs, etc.) that prevents multiple gateways in the same Node process. **Per-test isolation requires one process per test**, which is too expensive (~1s import cost per process × 620 tests).
+1. Make the exact npm command portable.
+2. Move non-browser coverage out of the spawned-gateway browser project.
+3. Consolidate browser stories without deleting product-owner intent.
+4. Fix high-confidence flakes exposed by the lower-work suite.
+5. Keep worker counts conservative rather than hiding runtime with more parallelism.
 
-**Implication**: Per-file gateway (current Playwright model) is the practical ceiling for isolation.
+## Baseline versus final
 
-## Where the CPU goes
+| Metric | Baseline | Final at `801ba215` |
+|---|---:|---:|
+| Exact `npm run test:e2e` | blocked by non-portable stderr redirection | passed |
+| Wall time including build | 474–566s via equivalent shell command | 298s |
+| Playwright result | 1164 expected / 8 skipped / 11 flaky / 0 unexpected | 962 passed / 7 skipped / 3 flaky / 0 failed |
+| Listed tests / files | 1183 / 275 | 972 / 257 |
+| `api` tests | 668 | 690 |
+| `api-realpush` tests | 1 | 1 |
+| `browser` tests | 514 | 281 |
 
-Running `npm run test:e2e` today:
-- **6 Playwright workers** (3 API in-process + 3 Browser spawned)
-- Each browser worker runs: Playwright worker + spawned gateway + Chromium
-- ~30 extra processes at steady state (~15 from browser, ~15 from mock agents)
-- **CPU saturates** because each process has real work: page rendering, WS event handling, stdin/stdout parsing
+The final exact command passed under the 300s target by only 2s, so the result meets the goal but has little headroom.
 
-At the machine limit, CPU contention creates the timing-flaky tests (verification takes >15s because the gateway doing the verification can't get CPU).
+## Final worker configuration
 
-## The three levers
+Final verified worker counts:
 
-### Lever A: Reduce subprocess cost (high-impact, low-risk)
+- Top-level Playwright workers: `4`
+- `api`: `4`
+- `api-realpush`: `1`
+- `browser`: `3`
 
-1. **Plain shell for simple commands** — DONE. Cut verification command cost 25×.
-2. **Mock agent as worker thread** — partially explored, would save ~20-50ms × 600 sessions = 12-30s. Low priority vs other levers.
-3. **Skip mock agent for tests that don't need it** — Many tests create a session just to open a WS. If we had a way to open WS without spawning an agent, we'd save 100% of that cost.
+A `--workers=5` experiment was slower and flakier, including runs around 20 minutes with many flaky/failed attempts and filesystem-contention signatures. Do not raise workers to chase runtime; reduce browser work or fix contention instead.
 
-### Lever B: Reduce worker count (high-impact, requires refactoring)
+## Implemented reductions
 
-Current 6 workers saturate CPU. If we use **fewer, heavier workers** that serve more tests each, we reduce process-spawn overhead and CPU contention.
+- Removed non-portable `2>/dev/null` suppression from `test:e2e` and `test:e2e:standard`, so the exact npm acceptance command works on Windows/Git Bash.
+- Moved pure `file://` renderer specs out of full E2E and into the lightweight UI fixture/unit tier.
+- Split API-only assertions out of browser specs into in-process API specs, including optional steps, multi-repo data paths, project assistant API basics, unseen-activity endpoint checks, goal/workflow routing, project/search/sidebar stories, and session/story data paths.
+- Consolidated high-volume browser story files so one browser journey covers multiple related assertions where the UI path is the product behavior.
+- Moved mocked or DOM-only UI suites to fixture tests when they did not need a real gateway, Chromium navigation, websocket replay, or spawned-agent behavior.
+- Kept real browser coverage for user-visible flows such as proposal opening, review annotation hydration, staff/sidebar behavior, streaming/resync, project assistant, and session navigation.
 
-- Playwright workers = 2 instead of 6
-- Each worker handles more tests serially
-- Wall time depends on whether savings from less contention outweigh lost parallelism
+## Flake fixes completed
 
-### Lever C: Reduce test count (low-risk, coverage-tradeoff)
+High-confidence fixes landed during the effort:
 
-Per the Tier 1/2/3 split in the earlier plan:
-- Tier 1 (unit tests via file:// fixtures): **~800 tests, 22s** — already done
-- Tier 2 (in-process gateway, Node test runner): **~400 tests target, ~60s** — infrastructure built
-- Tier 3 (Playwright browser): **~30 tests, ~60s** — user stories only
+- Project assistant saved-state stabilization.
+- Cancel-verification workflow setup stabilization.
+- Abort-status ordering stabilization.
+- Sidebar keyboard navigation stabilization.
+- Dynamic preview tab fixture stabilization.
+- Coverage-restoration fixes for review annotations, staff sidebar, and proposal parity after reductions.
 
-Migrating 400 tests from Playwright to Node test runner is where the real win is.
+Final first-attempt flakes still passed on retry:
 
-## Concrete next step
+| Project | Spec | First-attempt signature |
+|---|---|---|
+| `api` | `tests/e2e/abort-status-e2e.spec.ts` | missing `ROLE_ASSISTANT_PROMPT` export from `role-assistant.js` |
+| `api` | `tests/e2e/abort-status-e2e.spec.ts` | missing `ProjectContext` export from `project-context.js` |
+| `browser` | `tests/e2e/ui/project-assistant.spec.ts` | `Project Assistant` sidebar row still visible after the happy-path promotion flow |
 
-Pick one: **Lever B** (reduce workers) or **Lever C** (migrate to Tier 2).
+These are the remaining stability floor; they should not be masked by more retries or higher worker counts.
 
-### Lever B: Reduce workers
-**Effort**: 1 hour (config change + verify).
-**Risk**: Wall time might go UP if we lose too much parallelism.
-**Test**: Change `playwright-e2e.config.ts` to `workers: 2` for each project. Run full suite. Measure.
+## Coverage and story audit evidence
 
-### Lever C: Migrate to Tier 2
-**Effort**: 1-2 weeks of mechanical rewriting.
-**Risk**: Low — we have the fixture and a working POC.
-**Test**: Migrate 50 tests at a time, measuring wall time after each batch.
+Coverage and product-story audits were used as blockers for deletions and consolidations.
 
-**My recommendation**: Do Lever B first (1 hour, might be a big win on its own). If it's not enough, start Lever C.
+Evidence recorded during final verification:
 
-## What Lever B might look like
+- Unit coverage aggregate had no line or function drop:
+  - Lines: `63.44% (33637/53021) -> 63.44% (33637/53021)`
+  - Functions: `60.34% (1193/1977) -> 60.34% (1193/1977)`
+  - Branches: `75.36% (4916/6523) -> 75.38% (4917/6523)`
+- RP coverage blockers were restored: review annotation browser hydration again pins `RP-05`, `RP-16`, and `RP-18`, while pure REST persistence remains covered in the API tier.
+- SB coverage blockers were restored: the staff sub-section browser spec again pins the dedicated staff/sidebar behavior, with staff reassignment data paths covered in the API tier.
+- Proposal parity blockers were restored: per-type post-reload dismissal and restart-survival behavior is covered in fixture tests, with a normal-session browser smoke retained for opening proposal types.
+- Objective story matrix result after restores: `88/91` covered; the remaining ambiguities are pre-existing annotation-only cases, not regressions from this work: `CT-02-b`, `CT-15`, and `SB-15`.
 
-Instead of 6 workers all spawning heavy browser contexts, run 2 workers that handle all tests:
-- 2 Playwright workers × 1 gateway each × 1 Chromium each = 2 gateways + 2 Chromiums
-- vs today's 3 gateways + 3 Chromiums + 3 API gateways in-process = 9 running gateways
+## Follow-up plan
 
-But with 2 workers serving 620 tests instead of 6, per-worker load doubles. If today each worker finishes in ~4min, with 2 workers it's ~12min.
+Priority order:
 
-That doesn't work.
-
-**Actual fix**: reduce the WORK, not just the concurrency. The browser suite has 190 tests. If ~80 of them don't actually need a browser (they test API state via UI selectors), move them to the API project. That gives:
-
-- API: 433 + 80 = 513 tests, 3 workers
-- Browser: 110 tests, 3 workers
-
-Each browser worker handles 110/3 = ~37 tests. At ~3s each = 111s per worker. Under 120s target.
-
-## The decision tree
-
-1. Keep Lever A win (committed)
-2. Try reducing workers to 2+4 (1 hour). If <120s, DONE.
-3. If not, migrate the ~80 API-only tests out of the browser project (1-2 days). If <120s, DONE.
-4. If not, proceed with full Tier 2 migration (1-2 weeks).
-
-Start with step 2?
+1. **Create runtime headroom.** The final 298s result is too close to the 300s target. Aim for at least 20–30s of margin before treating the suite as comfortably stable.
+2. **Fix remaining first-attempt flakes.** Investigate the abort-status transient missing-export failures and the project-assistant sidebar cleanup/promotion race with targeted repeats before changing retries or timeouts.
+3. **Continue reducing browser-tier work.** Prefer fixture or API coverage for tests that do not require a spawned gateway, real websocket replay, or Chromium navigation. Keep browser tests for actual user journeys.
+4. **Re-test lower worker counts after more reductions.** The verified config is top-level `4`; `--workers=5` is worse. Lower counts should be reconsidered only after the suite has enough runtime margin.
+5. **Track filesystem contention signatures.** Repeated search-index `ENOENT`, role-store save, git config lock, or temp-file rename errors under heavier parallelism should be treated as real contention bugs, not noise.

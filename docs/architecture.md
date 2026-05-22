@@ -28,18 +28,33 @@ by regular sessions and assistant sessions, so proposal, review, HTML preview,
 inbox, and chat panes are selected by the same tab dispatcher instead of by
 assistant-specific branches.
 
-Tabs are derived from their artifact source: live previews use names such as
-`Preview: inline.html`, historical preview tool cards get distinct preview
-tabs, proposal tabs distinguish the live editable draft from read-only
-historical revisions, and review documents appear as top-level `Review: <title>`
-tabs. Review tab IDs encode the title, so titles with spaces, slashes, `?`, `#`,
-or other reserved URL characters round-trip without being normalized. Desktop
+Tabs are derived from their artifact source. Live preview tabs are the current
+per-session server mount views: `preview:live` is titled from the active entry
+(such as `Preview: inline.html`) and updates from the preview bootstrap probe and
+`preview-changed` SSE events. Historical preview tabs originate from
+`preview_open` tool cards and represent chat artifacts that can be selected or
+remounted later.
+
+Preview tabs also carry content identity when available. v3 historical previews
+use `contentHash` to collapse same-content artifacts into `preview:live`, so
+users do not see duplicate tabs for the same mounted bytes. If a v3 marker omits
+the hash to stay within its size cap, the remount response can supply it and the
+artifact can still collapse after the refresh. Different-content preview
+artifacts keep separate tabs and remain independently restorable through the one
+live server mount. Legacy v1/v2 snapshots remain historical even when their
+remount response includes a hash; they predate the v3 content-identity contract.
+Proposal tabs distinguish the live editable draft from read-only historical
+revisions, and review documents appear as top-level `Review: <title>` tabs.
+Review tab IDs encode the title, so titles with spaces, slashes, `?`, `#`, or
+other reserved URL characters round-trip without being normalized. Desktop
 renders a scrollable tab strip next to the chat; mobile renders the same tab set
 in the header and slider track.
 
 The main client modules are `src/app/panel-workspace.ts` for tab identity,
 `src/app/preview-panel.ts` for selection helpers and preview SSE wiring, and
-`src/app/render.ts` for the shared dispatcher and responsive layout.
+`src/app/render.ts` for the shared dispatcher and responsive layout. See
+[Embedded HTML preview — architecture](preview-architecture.md) for the preview
+mount and `contentHash` contract.
 
 ## Build structure
 

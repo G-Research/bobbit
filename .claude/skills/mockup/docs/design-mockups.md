@@ -1,29 +1,34 @@
 # Design Mockups
 
-When mocking up UI changes, animations, or visual design options, write a self-contained `.html` file that the user can see rendered inline. The mockup should be a **high-fidelity preview**, not a rough sketch. The user should be able to look at the mockup and know exactly how the final product will look and feel.
+When mocking up UI changes, animations, or visual design options, render a high-fidelity live preview in the side panel. The mockup should not be a rough sketch; the user should be able to look at it and understand how the final product will look and feel.
 
-## Inline rendering
+## Live preview panel — default surface
 
-Files written via `write` with certain extensions render inline in the chat:
-
-- **`.html` / `.htm`**: Rendered in a sandboxed iframe with live preview. Use for interactive reports, data visualizations, UI mockups, or any rich output. The HTML can include inline CSS and JavaScript — it runs in an isolated sandbox. Collapsible source code shown underneath.
-- **`.svg`**: Rendered as a visual image preview. Make SVGs self-contained (inline styles, no external references). Set an explicit `viewBox` and use relative units. For dark/light theme compatibility, avoid hardcoding white or black backgrounds — use `currentColor` or explicit fills. Collapsible source code shown underneath.
-
-When a user asks to show, visualize, mock up, or demo something visual, prefer writing an HTML or SVG file so they see the result inline rather than just code.
-
-**Note**: Both `write` and `edit` render inline previews for `.html`/`.htm` files. For `edit`, the preview is fetched asynchronously after the edit completes — it reads the updated file from the server and renders it in an iframe, just like `write` does. Use `edit` for surgical changes to HTML files without needing to rewrite the entire file.
-
-## Live preview panel — the preferred approach
-
-**Always prefer live previews over static mockups.** Use the `preview_open` tool to show HTML in a split-pane alongside the chat. The panel auto-updates on each call, giving the user real-time visual feedback.
+Use `preview_open(html=...)` for mockups by default. It shows HTML in a split-pane alongside the chat and auto-updates on each call, giving the user real-time visual feedback without cluttering chat history.
 
 ```
 preview_open(html="<link rel='stylesheet' href='/src/ui/app.css'><!-- your HTML here -->")
 ```
 
 - **Reference real app CSS** — the preview iframe is same-origin with the Vite dev server, so `<link rel="stylesheet" href="/src/ui/app.css">` gives pixel-accurate mockups.
+- **Use Bobbit theme tokens** — use `var(--background)`, `var(--foreground)`, `var(--card)`, `var(--border)`, `var(--primary)`, `--chart-*`, and semantic status tokens instead of hardcoded colours unless you are matching source CSS exactly.
+- **Expect content-hash dedupe** — repeated identical preview bytes may select/update the existing live preview tab instead of creating another historical tab. Change the content when you need a distinct restorable mockup.
 - **Add interactive controls** (dropdowns, sliders, toggles) so the user can explore variants without asking you to regenerate.
-- **Do NOT render preview HTML inline in the chat.** The user sees it in the side panel. Just describe what changed.
+- **Do not render preview HTML inline in the chat.** The user sees it in the side panel. Just describe what changed.
+
+## File-backed previews
+
+Use `preview_open(file=...)` only for existing or reusable HTML artifacts. Pass an absolute entry path so the preview remains unambiguous across later turns:
+
+```
+preview_open(file="/absolute/path/to/mockup.html", assets=["styles.css", "img/*.png"])
+```
+
+Declare sibling CSS, images, fonts, videos, and other files explicitly with `assets` or `manifest`; undeclared siblings will 404. Relative asset specs are resolved from the entry file's directory.
+
+## One artifact, one surface
+
+Do not write a `.html` mockup into chat and also preview the same artifact with `preview_open`. Inline file rendering and the live preview panel are separate surfaces with separate state. If the user explicitly asks for a committed HTML deliverable, write the file and do not also open it in the live preview panel.
 
 ## Process — do the homework first
 

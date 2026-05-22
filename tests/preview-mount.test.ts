@@ -44,6 +44,10 @@ after(() => {
 	try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
+function assertHash(value: string): void {
+	assert.match(value, /^[a-f0-9]{64}$/);
+}
+
 function listMount(sid: string): string[] {
 	const base = mountDir(sid);
 	const out: string[] = [];
@@ -78,6 +82,7 @@ describe("writeInline", () => {
 		assert.equal(r.url, `/preview/${SID}/${DEFAULT_INLINE_ENTRY}`);
 		assert.equal(r.path, path.join(root, SID, DEFAULT_INLINE_ENTRY));
 		assert.equal(statSync(r.path).size, Buffer.byteLength("<h1>hello</h1>"));
+		assertHash(r.contentHash);
 	});
 	it("accepts a custom single-segment entry", () => {
 		const r = writeInline(SID, "<p>p</p>", "report.html");
@@ -95,6 +100,13 @@ describe("writeInline", () => {
 		writeInline(SID, "first", "rep.html");
 		const r = writeInline(SID, "second-much-longer", "rep.html");
 		assert.equal(statSync(r.path).size, "second-much-longer".length);
+	});
+	it("updates contentHash when inline content changes", () => {
+		const r1 = writeInline(SID, "same-entry-v1", "hash.html");
+		const r2 = writeInline(SID, "same-entry-v2", "hash.html");
+		assertHash(r1.contentHash);
+		assertHash(r2.contentHash);
+		assert.notEqual(r1.contentHash, r2.contentHash);
 	});
 });
 
@@ -132,6 +144,22 @@ describe("mountFile — explicit asset opt-in", () => {
 			const r = mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
 			assert.deepEqual(r.assets, ["styles.css"]);
 			assert.deepEqual(listMount(SID_B), ["report.html", "styles.css"]);
+			assertHash(r.contentHash);
+		} finally {
+			rmSync(src, { recursive: true, force: true });
+			removeMount(SID_B);
+		}
+	});
+
+	it("contentHash includes mounted assets", () => {
+		const src = makeSrc();
+		try {
+			const r1 = mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
+			writeFileSync(path.join(src, "styles.css"), "body{color:red}");
+			const r2 = mountFile(SID_B, path.join(src, "report.html"), ["styles.css"]);
+			assertHash(r1.contentHash);
+			assertHash(r2.contentHash);
+			assert.notEqual(r1.contentHash, r2.contentHash);
 		} finally {
 			rmSync(src, { recursive: true, force: true });
 			removeMount(SID_B);

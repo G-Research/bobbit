@@ -52,8 +52,7 @@ async function activeSessionId(page: Page): Promise<string> {
 	// createSessionViaUI()'s textarea-visible signal, so gatewaySessions is
 	// briefly empty even though the hash route already points at the new
 	// session. selectedSessionId is set synchronously by the route handler
-	// and is the source of truth used by every other parity spec. See
-	// proposal-types-uX-parity.spec.ts:135 for the canonical pattern.
+	// and is the source of truth used by the proposal/review fixture matrix.
 	const sid = await page.waitForFunction(
 		() => (window as any).bobbitState?.selectedSessionId ?? null,
 		null,

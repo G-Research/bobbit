@@ -71,6 +71,11 @@ const CASES: ProposalCase[] = [
 
 const STAFF_ACCEPT_NAME = "parity-staff";
 
+// Browser E2E keeps one generic non-goal/project proposal flow as a real
+// gateway + mock-agent smoke. The full per-type rendering/dismissal matrix is
+// covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
+const BROWSER_CASES = CASES.filter((c) => c.type === "role");
+
 async function waitForProposalSlot(page: Page, type: ProposalType): Promise<void> {
 	await page.waitForFunction(
 		(t) => {
@@ -259,7 +264,7 @@ async function deleteStaffByName(name: string): Promise<void> {
 test.describe("Proposal tabs open all proposal types in normal sessions", () => {
 	test.describe.configure({ timeout: 90_000 });
 
-	for (const proposal of CASES) {
+	for (const proposal of BROWSER_CASES) {
 		const title = proposal.type === "staff"
 			? "Staff proposal card opens a Staff tab, rehydrates, and dismisses from a normal session"
 			: `${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`;

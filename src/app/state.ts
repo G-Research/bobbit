@@ -319,6 +319,8 @@ export const state = {
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,
+	// SHA-256 identity for the currently mounted preview content tree.
+	previewPanelContentHash: "" as string,
 	previewPanelFullscreen: false,
 
 	// Dynamic per-session side-panel workspace. panelTabs / activePanelTabId are

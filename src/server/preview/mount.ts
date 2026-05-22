@@ -62,6 +62,8 @@ export interface MountResult {
 	entry: string;
 	/** mtime of the entry file in ms since epoch. */
 	mtime: number;
+	/** Stable SHA-256 identity for the mounted preview tree. */
+	contentHash: string;
 }
 
 /** Extension of MountResult returned by `mountFile`: echoes resolved assets. */
@@ -216,12 +218,14 @@ export function writeInline(sessionId: string, html: string, entry?: string): Mo
 		throw err;
 	}
 
+	const stat = fs.statSync(target);
 	return {
 		url: `/preview/${sessionId}/${safeEntry}`,
 		path: target,
 		relPath: path.posix.join(sessionId, safeEntry),
 		entry: safeEntry,
-		mtime: Math.floor(fs.statSync(target).mtimeMs),
+		mtime: Math.floor(stat.mtimeMs),
+		contentHash: hashMountDirectory(dir),
 	};
 }
 
@@ -388,14 +392,21 @@ export function mountFile(
 		throw new PreviewMountError(500, "Entry file missing after swap");
 	}
 
+	const stat = fs.statSync(target);
 	return {
 		url: `/preview/${sessionId}/${entry}`,
 		path: target,
 		relPath: path.posix.join(sessionId, entry),
 		entry,
-		mtime: Math.floor(fs.statSync(target).mtimeMs),
+		mtime: Math.floor(stat.mtimeMs),
+		contentHash: hashMountDirectory(destRoot),
 		assets: Array.from(resolvedAssets).sort(),
 	};
+}
+
+export function contentHashForMount(sessionId: string): string {
+	validateSessionId(sessionId);
+	return hashMountDirectory(mountDir(sessionId));
 }
 
 /**
@@ -497,6 +508,33 @@ export function watchMount(sessionId: string, onChange: () => void): () => void 
 // ──────────────────────────────────────────────────────────────────────────
 // Internals
 // ──────────────────────────────────────────────────────────────────────────
+
+function hashMountDirectory(root: string): string {
+	const hash = crypto.createHash("sha256");
+	for (const rel of listMountFiles(root)) {
+		hash.update(rel, "utf-8");
+		hash.update("\0");
+		hash.update(fs.readFileSync(path.join(root, ...rel.split("/"))));
+		hash.update("\0");
+	}
+	return hash.digest("hex");
+}
+
+function listMountFiles(root: string): string[] {
+	const out: string[] = [];
+	const walk = (dir: string, prefix: string) => {
+		let entries: fs.Dirent[];
+		try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+		for (const ent of entries) {
+			const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+			const abs = path.join(dir, ent.name);
+			if (ent.isDirectory()) walk(abs, rel);
+			else if (ent.isFile()) out.push(rel);
+		}
+	};
+	walk(root, "");
+	return out.sort();
+}
 
 function copyOneFile(src: string, dst: string): void {
 	try { fs.unlinkSync(dst); } catch { /* ignore */ }

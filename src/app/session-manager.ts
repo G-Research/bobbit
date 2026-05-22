@@ -983,6 +983,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
+		state.previewPanelContentHash = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -1653,6 +1654,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
+		state.previewPanelContentHash = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
