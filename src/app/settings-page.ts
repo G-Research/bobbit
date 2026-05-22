@@ -2631,6 +2631,10 @@ function getAccountProviderStatus(providerId: CloudProviderId): CloudProviderSta
 	return accountStatus?.providers.find(status => status.id === providerId) ?? defaultProviderStatus(provider);
 }
 
+function accountCloudAuthUxPaused(): boolean {
+	return accountStatus?.mode === "aigw" || accountStatus?.aigwConfigured === true;
+}
+
 function accountCloudVendorForModelProvider(provider: string | undefined): CloudProviderId | null {
 	const normalized = provider?.trim().toLowerCase();
 	if (!normalized) return null;
@@ -2750,6 +2754,16 @@ async function handleConnectProvider(providerId: CloudProviderId): Promise<void>
 	const status = getAccountProviderStatus(providerId);
 	accountProviderMessages = { ...accountProviderMessages, [providerId]: "" };
 
+	if (accountCloudAuthUxPaused()) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: "Cloud provider sign-in is paused while AI Gateway is configured.",
+		};
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
+	}
+
 	if (!status.oauthSupported) {
 		const message = providerId === "google"
 			? "Google sign-in is not available in this build. Add a Gemini API key instead."
@@ -2783,6 +2797,15 @@ async function handleConnectProvider(providerId: CloudProviderId): Promise<void>
 
 function openAccountApiKeyDialog(providerId: CloudProviderId): void {
 	accountProviderMessages = { ...accountProviderMessages, [providerId]: "" };
+	if (accountCloudAuthUxPaused()) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: "API-key setup is paused while AI Gateway is configured.",
+		};
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
+	}
 	accountApiKeyDialog = { providerId, key: "", saving: false };
 	renderApp();
 }
@@ -2790,6 +2813,11 @@ function openAccountApiKeyDialog(providerId: CloudProviderId): void {
 async function saveAccountApiKey(): Promise<void> {
 	const dialog = accountApiKeyDialog;
 	if (!dialog) return;
+	if (accountCloudAuthUxPaused()) {
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
+	}
 	const provider = getAccountProvider(dialog.providerId);
 	const key = dialog.key.trim();
 	if (!key) {
@@ -2932,6 +2960,7 @@ function renderAccountProviderCard(provider: AccountProviderDef) {
 	const inlineMessage = accountProviderMessages[provider.id] || (accountStatus?.mode !== "aigw" ? status.message : "") || "";
 	const reauthing = accountReauthing === provider.id;
 	const mutating = accountMutating === provider.id;
+	const authUxPaused = accountCloudAuthUxPaused();
 	const busy = accountReauthing !== null || accountMutating !== null || accountRemoving !== null || accountApiKeyDialog?.saving === true;
 	const connectLabel = reauthing
 		? "Authenticating…"
@@ -2983,20 +3012,24 @@ function renderAccountProviderCard(provider: AccountProviderDef) {
 			</div>
 
 			<div class="flex flex-wrap items-center gap-2">
-				<button
-					class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
-					data-testid=${`provider-connect-${provider.id}`}
-					?disabled=${busy}
-					@click=${() => handleConnectProvider(provider.id)}
-				>${connectLabel}</button>
-				${provider.apiKeyLabel && status.apiKeySupported ? html`
+				${authUxPaused ? html`
+					<p class="text-xs text-muted-foreground">Connect and API-key setup are managed by AI Gateway right now.</p>
+				` : html`
 					<button
 						class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
-						data-testid=${`provider-api-key-${provider.id}`}
+						data-testid=${`provider-connect-${provider.id}`}
 						?disabled=${busy}
-						@click=${() => openAccountApiKeyDialog(provider.id)}
-					>${provider.apiKeyLabel}</button>
-				` : ""}
+						@click=${() => handleConnectProvider(provider.id)}
+					>${connectLabel}</button>
+					${provider.apiKeyLabel && status.apiKeySupported ? html`
+						<button
+							class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+							data-testid=${`provider-api-key-${provider.id}`}
+							?disabled=${busy}
+							@click=${() => openAccountApiKeyDialog(provider.id)}
+						>${provider.apiKeyLabel}</button>
+					` : ""}
+				`}
 				${status.enabled ? html`
 					<button
 						class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
@@ -3019,7 +3052,7 @@ function renderAccountProviderCard(provider: AccountProviderDef) {
 }
 
 function renderAccountApiKeyDialog() {
-	if (!accountApiKeyDialog) return "";
+	if (!accountApiKeyDialog || accountCloudAuthUxPaused()) return "";
 	const provider = getAccountProvider(accountApiKeyDialog.providerId);
 	const status = getAccountProviderStatus(provider.id);
 	const hasSavedKey = status.credentialTypes.includes("api_key");

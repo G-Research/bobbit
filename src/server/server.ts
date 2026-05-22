@@ -144,6 +144,7 @@ import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, ImageProviderAuthFailureError, pickDefaultImageModelPref } from "./agent/image-generation.js";
 import {
 	cloudModelPrefIsUsable,
+	clearCloudProviderCredentialInvalid,
 	cloudVendorForModelPref,
 	cloudVendorForOAuthProvider,
 	cloudVendorForProviderKey,
@@ -4211,7 +4212,7 @@ async function handleApiRoute(
 		const all = preferencesStore.getAll();
 		const filtered: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(all)) {
-			if (!key.startsWith("providerKey.")) {
+			if (!key.startsWith("providerKey.") && !key.startsWith("providerCredentialInvalidFingerprint.")) {
 				filtered[key] = value;
 			}
 		}
@@ -4223,8 +4224,26 @@ async function handleApiRoute(
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
 	}
 
-	async function sendCloudAuthRequired(): Promise<void> {
+	function cloudCredentialInvalidSnapshot(): string {
+		const all = preferencesStore.getAll();
+		return JSON.stringify(Object.keys(all)
+			.filter((key) => key.startsWith("providerCredentialInvalid."))
+			.sort()
+			.map((key) => [key, all[key]]));
+	}
+
+	async function getCloudAuthStatusWithRecovery(): Promise<Awaited<ReturnType<typeof getCloudAuthStatus>>> {
+		const before = cloudCredentialInvalidSnapshot();
 		const status = await getCloudAuthStatus(preferencesStore);
+		if (before !== cloudCredentialInvalidSnapshot()) {
+			invalidateModelCache();
+			broadcastPreferencesChanged();
+		}
+		return status;
+	}
+
+	async function sendCloudAuthRequired(): Promise<void> {
+		const status = await getCloudAuthStatusWithRecovery();
 		json({
 			code: "cloud_auth_required",
 			error: "Choose at least one cloud provider to connect before starting cloud-backed work.",
@@ -4236,7 +4255,7 @@ async function handleApiRoute(
 		const vendor = cloudVendorForOAuthProvider(providerId);
 		if (!vendor) return;
 		setProviderEnabled(preferencesStore, vendor, true);
-		preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+		clearCloudProviderCredentialInvalid(preferencesStore, vendor);
 		invalidateModelCache();
 		broadcastPreferencesChanged();
 	}
@@ -4251,6 +4270,7 @@ async function handleApiRoute(
 		}
 		if (pref) return false;
 		if (!unresolvedMayUseCloud) return false;
+		await getCloudAuthStatusWithRecovery();
 		const selectableDefault = await pickDefaultSessionModel(preferencesStore);
 		if (selectableDefault) return rejectIfCloudAuthRequiredForModel(selectableDefault, false);
 		const status = await getCloudAuthStatus(preferencesStore);
@@ -4284,7 +4304,7 @@ async function handleApiRoute(
 
 	// GET /api/cloud-providers/status — redacted cloud-provider enablement/auth status
 	if (url.pathname === "/api/cloud-providers/status" && req.method === "GET") {
-		json(await getCloudAuthStatus(preferencesStore));
+		json(await getCloudAuthStatusWithRecovery());
 		return;
 	}
 
@@ -4435,6 +4455,7 @@ async function handleApiRoute(
 	// GET /api/models — unified model list from all sources
 	if (url.pathname === "/api/models" && req.method === "GET") {
 		try {
+			await getCloudAuthStatusWithRecovery();
 			const models = await getAvailableModels(preferencesStore);
 			json(models);
 		} catch (err: any) {
@@ -4446,6 +4467,7 @@ async function handleApiRoute(
 	// GET /api/image-models — image generation model list
 	if (url.pathname === "/api/image-models" && req.method === "GET") {
 		try {
+			await getCloudAuthStatusWithRecovery();
 			json(getAvailableImageModels(preferencesStore));
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load image models: ${err.message}` });
@@ -4630,7 +4652,7 @@ async function handleApiRoute(
 		const vendor = cloudVendorForProviderKey(provider);
 		if (vendor && body.enable !== false) {
 			setProviderEnabled(preferencesStore, vendor, true);
-			preferencesStore.remove(`providerCredentialInvalid.${vendor}`);
+			clearCloudProviderCredentialInvalid(preferencesStore, vendor);
 		}
 		invalidateModelCache();
 		broadcastPreferencesChanged();

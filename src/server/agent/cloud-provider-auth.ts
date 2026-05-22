@@ -1,8 +1,10 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { dirname } from "node:path";
 
 import { globalAuthPath } from "../bobbit-dir.js";
 import { getAigwUrl } from "./aigw-manager.js";
+import { resolveHostTokenValue } from "./host-tokens.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 export const CLOUD_PROVIDERS = ["anthropic", "openai", "google"] as const;
@@ -79,11 +81,27 @@ const ENV_ALIASES: Record<CloudProviderId, string[]> = {
 	google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
 };
 
+const HOST_TOKEN_ENV_ALIASES: Record<CloudProviderId, string[]> = {
+	anthropic: ["ANTHROPIC_OAUTH_TOKEN"],
+	openai: ["OPENAI_API_KEY"],
+	google: ["GEMINI_API_KEY"],
+};
+
 const ENABLED_PREFIX = "providerEnabled.";
+const INVALID_PREFIX = "providerCredentialInvalid.";
+const INVALID_FINGERPRINT_PREFIX = "providerCredentialInvalidFingerprint.";
 const MIGRATION_COMPLETE_KEY = "providerEnabled.migrationComplete";
 
 export function providerEnabledPreferenceKey(provider: CloudProviderId): string {
 	return `${ENABLED_PREFIX}${provider}`;
+}
+
+export function providerCredentialInvalidPreferenceKey(provider: CloudProviderId): string {
+	return `${INVALID_PREFIX}${provider}`;
+}
+
+export function providerCredentialInvalidFingerprintPreferenceKey(provider: CloudProviderId): string {
+	return `${INVALID_FINGERPRINT_PREFIX}${provider}`;
 }
 
 export function isCloudProviderId(value: string | undefined | null): value is CloudProviderId {
@@ -134,11 +152,18 @@ export function setProviderEnabled(prefs: PreferencesStore, provider: CloudProvi
 }
 
 export function markCloudProviderCredentialInvalid(prefs: PreferencesStore, provider: CloudProviderId): void {
-	prefs.set(`providerCredentialInvalid.${provider}`, true);
+	prefs.set(providerCredentialInvalidPreferenceKey(provider), true);
+	const fingerprint = currentCredentialFingerprint(prefs, provider)?.fingerprint;
+	if (fingerprint) {
+		prefs.set(providerCredentialInvalidFingerprintPreferenceKey(provider), fingerprint);
+	} else {
+		prefs.remove(providerCredentialInvalidFingerprintPreferenceKey(provider));
+	}
 }
 
 export function clearCloudProviderCredentialInvalid(prefs: PreferencesStore, provider: CloudProviderId): void {
-	prefs.remove(`providerCredentialInvalid.${provider}`);
+	prefs.remove(providerCredentialInvalidPreferenceKey(provider));
+	prefs.remove(providerCredentialInvalidFingerprintPreferenceKey(provider));
 }
 
 export function shouldBypassCloudAuthUx(prefs: PreferencesStore): boolean {
@@ -208,12 +233,21 @@ export function getCloudProviderCredentialStatus(
 		}
 	}
 
-	// Reserved for sandbox host-token integrations that do not surface as process.env.
-	// Current host-token resolution ultimately maps to env/auth/prefs above, so avoid
-	// reporting a duplicate source unless a future resolver sets this explicitly.
-	hostTokenConfigured = false;
+	for (const envVar of HOST_TOKEN_ENV_ALIASES[provider]) {
+		if (!firstNonEmpty(resolveHostTokenValue(envVar, prefs))) continue;
+		const googleOauthOnly = provider === "google" && oauthConfigured && !apiKeyConfigured && !envConfigured;
+		// Keep Google OAuth on the documented API-key fallback path, but do count
+		// host/env-managed tokens resolved by the host-token helper as usable.
+		if (!googleOauthOnly && (envConfigured || (!apiKeyConfigured && !oauthUsable))) {
+			hostTokenConfigured = true;
+			credentialTypes.add("host_token");
+		}
+	}
 
-	const invalid = prefs.get(`providerCredentialInvalid.${provider}`) === true;
+	let invalid = prefs.get(providerCredentialInvalidPreferenceKey(provider)) === true;
+	if (invalid && recoverInvalidCredentialIfExternalSourceChanged(prefs, provider)) {
+		invalid = false;
+	}
 	const configured = credentialTypes.size > 0 || oauthConfigured || apiKeyConfigured || envConfigured || hostTokenConfigured;
 	const authenticated = !invalid && (apiKeyConfigured || envConfigured || hostTokenConfigured || oauthUsable);
 
@@ -254,7 +288,7 @@ export function removeBobbitOwnedCloudProviderCredentials(
 		if (prefs.get(prefKey) !== undefined) removedProviderKeys.push(alias);
 		prefs.remove(prefKey);
 	}
-	prefs.remove(`providerCredentialInvalid.${provider}`);
+	clearCloudProviderCredentialInvalid(prefs, provider);
 
 	const authData = readAuthData();
 	const removedAuthJsonEntries: string[] = [];
@@ -370,6 +404,70 @@ function buildProviderStatus(prefs: PreferencesStore, provider: CloudProviderId,
 		...(credentials.expires !== undefined ? { expires: credentials.expires } : {}),
 		...(message ? { message } : {}),
 	};
+}
+
+interface CredentialFingerprint {
+	fingerprint: string;
+	hasHostManagedSource: boolean;
+}
+
+function recoverInvalidCredentialIfExternalSourceChanged(prefs: PreferencesStore, provider: CloudProviderId): boolean {
+	const current = currentCredentialFingerprint(prefs, provider);
+	if (!current) return false;
+	const previous = prefs.get(providerCredentialInvalidFingerprintPreferenceKey(provider));
+	if (typeof previous === "string" && previous === current.fingerprint) return false;
+	if (previous === undefined && !current.hasHostManagedSource) return false;
+	clearCloudProviderCredentialInvalid(prefs, provider);
+	return true;
+}
+
+function currentCredentialFingerprint(prefs: PreferencesStore, provider: CloudProviderId): CredentialFingerprint | undefined {
+	const parts: string[] = [];
+	let hasHostManagedSource = false;
+	const bobbitOwnedValues = bobbitOwnedCredentialValues(prefs, provider);
+
+	for (const envVar of ENV_ALIASES[provider]) {
+		const value = firstNonEmpty(process.env[envVar]);
+		if (!value) continue;
+		parts.push(`env:${envVar}:${fingerprintSecret(value)}`);
+		hasHostManagedSource = true;
+	}
+
+	for (const envVar of HOST_TOKEN_ENV_ALIASES[provider]) {
+		const value = firstNonEmpty(resolveHostTokenValue(envVar, prefs));
+		if (!value) continue;
+		parts.push(`host:${envVar}:${fingerprintSecret(value)}`);
+		if (!bobbitOwnedValues.has(value)) hasHostManagedSource = true;
+	}
+
+	const uniqueParts = Array.from(new Set(parts)).sort();
+	if (uniqueParts.length === 0) return undefined;
+	return {
+		fingerprint: crypto.createHash("sha256").update(uniqueParts.join("|")).digest("hex"),
+		hasHostManagedSource,
+	};
+}
+
+function bobbitOwnedCredentialValues(prefs: PreferencesStore, provider: CloudProviderId): Set<string> {
+	const values = new Set<string>();
+	for (const keyProvider of PROVIDER_KEY_ALIASES[provider]) {
+		const key = firstNonEmpty(prefs.get(`providerKey.${keyProvider}`));
+		if (key) values.add(key);
+	}
+	const authData = readAuthData();
+	for (const alias of new Set([...PROVIDER_KEY_ALIASES[provider], ...OAUTH_ALIASES[provider]])) {
+		const entry = authData?.[alias];
+		if (!entry || typeof entry !== "object") continue;
+		for (const value of [entry.key, entry.api_key, entry.apiKey, entry.access, entry.access_token]) {
+			const credential = firstNonEmpty(value);
+			if (credential) values.add(credential);
+		}
+	}
+	return values;
+}
+
+function fingerprintSecret(value: string): string {
+	return crypto.createHash("sha256").update(`bobbit-cloud-provider-auth:${value}`).digest("hex");
 }
 
 function readAuthData(): Record<string, any> | undefined {

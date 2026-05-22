@@ -60,6 +60,9 @@ async function cleanupCloudProviderState(): Promise<void> {
 		"providerCredentialInvalid.anthropic": null,
 		"providerCredentialInvalid.openai": null,
 		"providerCredentialInvalid.google": null,
+		"providerCredentialInvalidFingerprint.anthropic": null,
+		"providerCredentialInvalidFingerprint.openai": null,
+		"providerCredentialInvalidFingerprint.google": null,
 		"default.sessionModel": null,
 		"default.imageModel": null,
 		"aigw.url": null,
@@ -326,6 +329,11 @@ test.describe("Settings (full-stack UI)", () => {
 		await cleanupCloudProviderState();
 		try {
 			await putPreferences({ "aigw.url": "http://127.0.0.1:9" });
+			let oauthStartRequests = 0;
+			await page.route("**/api/oauth/start**", route => {
+				oauthStartRequests += 1;
+				return route.fulfill({ status: 500, body: "oauth start should be suppressed in AI Gateway mode" });
+			});
 
 			const statusResp = await apiFetch("/api/cloud-providers/status");
 			await expectResponseOk(statusResp);
@@ -338,11 +346,16 @@ test.describe("Settings (full-stack UI)", () => {
 			await expect(section.getByText("AI Gateway is handling model access")).toBeVisible({ timeout: 10_000 });
 			await expect(section).toContainText("Cloud provider sign-in prompts are paused while AI Gateway is configured.");
 
+			await expect(section.locator('[data-testid^="provider-connect-"]')).toHaveCount(0);
+			await expect(section.locator('[data-testid^="provider-api-key-"]')).toHaveCount(0);
+
 			for (const provider of CLOUD_PROVIDERS) {
 				const card = page.locator(`[data-testid='provider-card-${provider.id}']`);
 				await expect(card.locator(`[data-testid='provider-status-${provider.id}']`)).toContainText("Paused by AI Gateway", { timeout: 10_000 });
 				await expect(card).toContainText("AI Gateway is active, so Bobbit will not prompt for this provider.");
+				await expect(card).toContainText("Connect and API-key setup are managed by AI Gateway right now.");
 			}
+			expect(oauthStartRequests).toBe(0);
 		} finally {
 			await cleanupCloudProviderState();
 		}

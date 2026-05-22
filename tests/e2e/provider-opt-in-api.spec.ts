@@ -286,6 +286,70 @@ test.describe("provider opt-in API and model filtering", () => {
 		}
 	});
 
+	test("host-token/env-managed Google credentials count as authenticated without leaking values", async () => {
+		const secret = "AIzaHostManagedProviderOptInSecret111111";
+		process.env.GEMINI_API_KEY = secret;
+		await setCloudProviderEnabled("google", true);
+
+		const status = await getCloudStatus();
+		expect(status.authGateRequired).toBe(false);
+		const google = providerStatus(status, "google");
+		expect(google.enabled).toBe(true);
+		expect(google.configured).toBe(true);
+		expect(google.authenticated).toBe(true);
+		expect(google.needsReauth).toBe(false);
+		expect(google.status).toBe("authenticated");
+		expect(google.credentialTypes).toEqual(expect.arrayContaining(["env", "host_token"]));
+
+		const imageModels = await (await apiFetch("/api/image-models")).json();
+		expect(imageModels.some((model: any) => model.provider === "google" && model.authenticated === true)).toBe(true);
+		await expectPublicResponsesDoNotLeak([secret]);
+	});
+
+	test("host-managed credential rotation clears provider invalid state", async () => {
+		const badSecret = "AIzaInvalidHostManagedProviderOptIn111111";
+		const rotatedSecret = "AIzaRotatedHostManagedProviderOptIn222222";
+		process.env.GEMINI_API_KEY = badSecret;
+		await setCloudProviderEnabled("google", true);
+		await putPreferences({ "default.imageModel": "google/gemini-2.5-flash-image" });
+
+		await withImageProviderFetchMock(async (href) => {
+			if (!href.includes("generativelanguage.googleapis.com")) return undefined;
+			return new Response(JSON.stringify({
+				error: { message: `API key not valid: ${badSecret}` },
+			}), { status: 401, headers: { "Content-Type": "application/json" } });
+		}, async () => {
+			const res = await apiFetch("/api/image-generation/generate", {
+				method: "POST",
+				body: JSON.stringify({ prompt: "draw a host token recovery test", model: "google/gemini-2.5-flash-image" }),
+			});
+			expect(res.status).toBe(500);
+			expect(await res.text()).not.toContain(badSecret);
+		});
+
+		let prefs = await getPreferences();
+		expect(prefs["providerCredentialInvalid.google"]).toBe(true);
+		expect(prefs["providerCredentialInvalidFingerprint.google"]).toBeUndefined();
+		let google = providerStatus(await getCloudStatus(), "google");
+		expect(google.authenticated).toBe(false);
+		expect(google.needsReauth).toBe(true);
+		expect(google.status).toBe("invalid");
+
+		process.env.GEMINI_API_KEY = rotatedSecret;
+		google = providerStatus(await getCloudStatus(), "google");
+		expect(google.configured).toBe(true);
+		expect(google.authenticated).toBe(true);
+		expect(google.needsReauth).toBe(false);
+		expect(google.status).toBe("authenticated");
+		prefs = await getPreferences();
+		expect(prefs["providerCredentialInvalid.google"]).not.toBe(true);
+		expect(prefs["providerCredentialInvalidFingerprint.google"]).toBeUndefined();
+
+		const imageModels = await (await apiFetch("/api/image-models")).json();
+		expect(imageModels.some((model: any) => model.provider === "google" && model.authenticated === true)).toBe(true);
+		await expectPublicResponsesDoNotLeak([badSecret, rotatedSecret]);
+	});
+
 	test("definitive image provider auth failure marks credentials invalid and redacts status", async () => {
 		const secret = "sk-invalid-openai-secret-provider-opt-in";
 		await saveProviderKey("openai", secret);
@@ -402,6 +466,9 @@ async function resetProviderState(): Promise<void> {
 		"providerCredentialInvalid.anthropic": null,
 		"providerCredentialInvalid.openai": null,
 		"providerCredentialInvalid.google": null,
+		"providerCredentialInvalidFingerprint.anthropic": null,
+		"providerCredentialInvalidFingerprint.openai": null,
+		"providerCredentialInvalidFingerprint.google": null,
 		"default.sessionModel": null,
 		"customProviders": null,
 		"aigw.exclusive": null,
