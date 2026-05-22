@@ -3,6 +3,7 @@
  *
  * Validates:
  *   - POST /api/preview/mount?sessionId=<sid>  with {html} → 200 + {url, path, entry, mtime, contentHash}
+ *   - GET  /api/preview/mount?sessionId=<sid> after a mount → 200 + 64-hex contentHash
  *   - GET  /preview/<sid>/inline.html with valid cookie → 200 text/html + bridge inject
  *   - GET  /preview/<sid>/inline.html without cookie (forced auth) → 401
  *   - GET  /preview/<sid>/../../etc/passwd → 403 (or 400)
@@ -225,6 +226,33 @@ test.describe("POST /api/preview/mount (v3)", () => {
 			expect(resp.status).toBe(404);
 		} finally {
 			rmSync(src, { recursive: true, force: true });
+		}
+	});
+});
+
+test.describe("GET /api/preview/mount (v3)", () => {
+	test("current mount response includes a 64-hex contentHash", async () => {
+		const currentSessionId = await createSession();
+		try {
+			const mountResp = await apiFetch(`/api/preview/mount?sessionId=${currentSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<h1>bootstrap hash</h1>", entry: "current.html" }),
+			});
+			expect(mountResp.status).toBe(200);
+
+			const resp = await apiFetch(`/api/preview/mount?sessionId=${currentSessionId}`);
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body.url).toBe(`/preview/${currentSessionId}/current.html`);
+			expect(body.relPath).toBe(`${currentSessionId}/current.html`);
+			expect(body.entry).toBe("current.html");
+			expect(typeof body.path).toBe("string");
+			expect(body.path.length).toBeGreaterThan(0);
+			expect(typeof body.mtime).toBe("number");
+			expect(body.mtime).toBeGreaterThan(0);
+			expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+		} finally {
+			await deleteSession(currentSessionId).catch(() => {});
 		}
 	});
 });

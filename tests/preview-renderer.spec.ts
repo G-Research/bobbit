@@ -264,14 +264,24 @@ test.describe("PreviewOpenRenderer", () => {
 			await (window as any).__resetPreviewState();
 			await (window as any).__setPreviewWorkspace(sessionId, hash);
 			(window as any).__renderPreview(document.getElementById("container")!, { file: "relative/report.html" }, result, false);
+			(window as any).__setFetchResponse((url: string, init: any) => {
+				if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+					return { status: 404, body: { error: "file no longer available" } };
+				}
+				return { status: 200, body: { ok: true } };
+			});
 			(window as any).__resetFetchCalls();
 		}, [HASH, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH)] as any);
 
-		await page.locator("[data-preview-open-btn]").click();
-		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+		const btn = page.locator("[data-preview-open-btn]");
+		await expect(btn).not.toHaveText(/File no longer available/);
+		await btn.click();
+		await expect(btn).toHaveText(/Opened/, { timeout: 3000 });
+		await expect(btn).not.toHaveText(/File no longer available/);
 
 		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
+		expect(calls.some((call: any) => call.method === "POST" && String(call.url).includes("/api/preview/mount"))).toBe(false);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
 		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);

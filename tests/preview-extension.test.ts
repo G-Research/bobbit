@@ -245,6 +245,29 @@ describe("preview_open extension (v3 mount contract)", () => {
 		}
 	});
 
+	it("v3 builder omits contentHash when it would exceed the 250 byte cap", async () => {
+		const entry = "x".repeat(8) + ".html";
+		const url = `/preview/${SID}/${entry}`;
+		const relPath = `${SID}/${entry}`;
+		const withHashPayload = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({
+			kind: "preview",
+			url,
+			path: relPath,
+			contentHash: HASH,
+		}) + "\n";
+		assert.ok(withHashPayload.length > 250, `fixture must exceed cap with hash, got ${withHashPayload.length}`);
+
+		const block = buildPreviewSnapshotV3Block(url, relPath, HASH);
+		assert.ok(block.length <= 250, `fallback block must stay ≤ 250 bytes, got ${block.length} (${block})`);
+		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const parsed = parseSnapshot(block);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.path, relPath);
+			assert.strictEqual(parsed.contentHash, undefined);
+		}
+	});
+
 	it("builder still round-trips on long legacy host-absolute paths (contract preserved)", async () => {
 		// The builder accepts any non-empty string for backwards compatibility
 		// with archived sessions that recorded the legacy host-abs `path` form.
