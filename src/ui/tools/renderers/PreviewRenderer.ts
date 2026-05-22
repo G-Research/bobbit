@@ -453,11 +453,14 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					}
 					const mtime = mtimeFromPost ?? Date.now();
 					const mountedContentHash = contentHashFromPost || snapshotContentHash;
-					const remountMatchedSnapshot = !!postBody
-						&& !!snapshotContentHash
+					// v3 snapshot blocks may omit contentHash to stay under the marker cap.
+					// In that case, the remount response is the first usable content identity
+					// for collapsing the historical v3 card into the refreshed live preview.
+					const remountProducedV3LiveContent = !!postBody
+						&& parsed.kind === "preview"
 						&& !!contentHashFromPost
-						&& contentHashFromPost === snapshotContentHash;
-					const liveHasSnapshotAfterOpen = liveAlreadyHasSnapshot || remountMatchedSnapshot;
+						&& (!snapshotContentHash || contentHashFromPost === snapshotContentHash);
+					const liveHasSnapshotAfterOpen = liveAlreadyHasSnapshot || remountProducedV3LiveContent;
 					archiveCurrentLivePreview(appState, sessionId, mountedContentHash);
 					if (entry) (appState as any).previewPanelEntry = entry;
 					(appState as any).previewPanelMtime = mtime;
@@ -481,12 +484,14 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: tabSource,
 						state: tabState,
-						// Collapse v3 history into live only when live already matched before this click,
-						// or when this click remounted restorable content and the server hash proves it now matches.
-						dedupeWithLive: !snapshotContentHash || liveHasSnapshotAfterOpen,
+						// Collapse only v3 history into live, and only when content identity proves
+						// the historical artifact and current live mount are identical. Legacy
+						// v1/v2 snapshots predate content hashes and must remain distinct even
+						// when a remount response returns a hash for the newly written live mount.
+						dedupeWithLive: parsed.kind === "preview" && liveHasSnapshotAfterOpen,
 						select: true,
 					});
-					if (liveAlreadyHasSnapshot || remountMatchedSnapshot) {
+					if (liveHasSnapshotAfterOpen) {
 						rememberRestorableLivePreview(sessionId, mountedContentHash, {
 							id: tabId,
 							kind: "preview",

@@ -6,6 +6,8 @@
  * model because the assistant "Preview" tab is actually the proposal pane and
  * the HTML iframe is never exposed.
  */
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
@@ -30,6 +32,10 @@ function reviewTabRe(title: string): RegExp {
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function previewHtmlForBodyText(bodyText: string): string {
+	return `<!DOCTYPE html><html><body><h1>${bodyText}</h1></body></html>`;
 }
 
 async function openGoalAssistantProposal(page: Page): Promise<string> {
@@ -272,6 +278,12 @@ async function clickTopLevelTabByIndex(page: Page, index: number, errorPrefix: s
 	await tab.click();
 }
 
+async function matchingTabIndexes(page: Page, label: RegExp): Promise<number[]> {
+	return (await visiblePanelTabs(page))
+		.filter((tab) => label.test(tab.label))
+		.map((tab) => tab.index);
+}
+
 async function ensureChatInput(page: Page, errorPrefix: string): Promise<void> {
 	const textarea = page.locator("textarea").first();
 	if (await textarea.isVisible().catch(() => false)) return;
@@ -337,6 +349,10 @@ async function expectPreviewContains(page: Page, expectedText: string, errorPref
 	).toContainText(expectedText, { timeout: 10_000 });
 }
 
+async function rawPreviewBodyText(page: Page): Promise<string> {
+	return (await page.frameLocator(".goal-preview-panel iframe").locator("body").textContent({ timeout: 500 }).catch(() => "") || "").trim();
+}
+
 async function appendSyntheticToolCard(
 	page: Page,
 	args: { toolId: string; toolName: string; input: Record<string, unknown>; resultContent: string[] },
@@ -363,20 +379,22 @@ async function appendSyntheticToolCard(
 	}, args);
 }
 
-async function mountV3PreviewEntry(page: Page, sessionId: string, entry: string, bodyText: string): Promise<{ url: string; path: string; entry: string }> {
+async function mountV3PreviewEntry(page: Page, sessionId: string, entry: string, bodyText: string): Promise<PreviewMountSnapshot> {
 	const baseUrl = new URL(page.url()).origin;
-	const result = await page.evaluate(async ({ baseUrl, sessionId, entry, bodyText }) => {
+	const html = previewHtmlForBodyText(bodyText);
+	const result = await page.evaluate(async ({ baseUrl, sessionId, entry, html }) => {
 		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			credentials: "include",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ entry, html: `<!DOCTYPE html><html><body><h1>${bodyText}</h1></body></html>` }),
+			body: JSON.stringify({ entry, html }),
 		});
 		return { status: r.status, text: await r.text() };
-	}, { baseUrl, sessionId, entry, bodyText });
+	}, { baseUrl, sessionId, entry, html });
 	expect(result.status, `mount v3 preview entry ${entry}: ${result.text}`).toBe(200);
-	const parsed = JSON.parse(result.text) as { url: string; path?: string; relPath?: string; entry: string };
-	return { url: parsed.url, path: parsed.relPath || parsed.path || `${sessionId}/${entry}`, entry: parsed.entry };
+	const parsed = JSON.parse(result.text) as { url: string; path?: string; relPath?: string; entry: string; contentHash?: string };
+	expect(parsed.contentHash, `mount v3 preview entry ${entry} should return contentHash`).toMatch(/^[a-f0-9]{64}$/);
+	return { url: parsed.url, path: parsed.relPath || parsed.path || `${sessionId}/${entry}`, entry: parsed.entry, contentHash: parsed.contentHash! };
 }
 
 async function appendV3PreviewToolCard(page: Page, sessionId: string, toolId: string, entry: string, bodyText: string): Promise<string> {
@@ -390,6 +408,186 @@ async function appendV3PreviewToolCard(page: Page, sessionId: string, toolId: st
 	});
 	return bodyText;
 }
+
+type PreviewMountSnapshot = { url: string; path: string; entry: string; contentHash: string };
+
+async function getCurrentPreviewMountSnapshot(page: Page, sessionId: string): Promise<PreviewMountSnapshot> {
+	const baseUrl = new URL(page.url()).origin;
+	const result = await page.evaluate(async ({ baseUrl, sessionId }) => {
+		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
+			method: "GET",
+			credentials: "include",
+		});
+		return { status: r.status, text: await r.text() };
+	}, { baseUrl, sessionId });
+	expect(result.status, `GET current preview mount should succeed: ${result.text}`).toBe(200);
+	const parsed = JSON.parse(result.text) as { url: string; path?: string; relPath?: string; entry: string; contentHash?: string };
+	expect(parsed.contentHash, `GET current preview mount should include contentHash: ${result.text}`).toMatch(/^[a-f0-9]{64}$/);
+	return {
+		url: parsed.url,
+		path: parsed.relPath || parsed.path || `${sessionId}/${parsed.entry}`,
+		entry: parsed.entry,
+		contentHash: parsed.contentHash!,
+	};
+}
+
+function v3SnapshotBlock(mounted: PreviewMountSnapshot): string {
+	return `__preview_snapshot_v3__\n${JSON.stringify({ kind: "preview", url: mounted.url, path: mounted.path, entry: mounted.entry, contentHash: mounted.contentHash })}\n`;
+}
+
+function previewToolCardMessages(toolId: string, input: Record<string, unknown>, snapshot: string): any[] {
+	const now = Date.now();
+	return [
+		{
+			id: `assistant-${toolId}`,
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input }],
+			timestamp: now,
+		},
+		{
+			id: `tool-result-${toolId}`,
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: snapshot },
+			],
+			timestamp: now + 1,
+		},
+	];
+}
+
+function v3PreviewToolCardMessages(toolId: string, mounted: PreviewMountSnapshot, bodyText: string): any[] {
+	return previewToolCardMessages(toolId, { html: previewHtmlForBodyText(bodyText) }, v3SnapshotBlock(mounted));
+}
+
+function legacyV1InlinePreviewToolCardMessages(toolId: string, bodyText: string): any[] {
+	const html = previewHtmlForBodyText(bodyText);
+	return previewToolCardMessages(toolId, { html }, `__preview_snapshot_v1__\n${html}`);
+}
+
+function legacyV2FilePreviewToolCardMessages(toolId: string, filePath: string): any[] {
+	return previewToolCardMessages(
+		toolId,
+		{ file: filePath },
+		`__preview_snapshot_v2__\n${JSON.stringify({ kind: "file", path: filePath })}\n`,
+	);
+}
+
+async function setMockTranscript(gateway: any, sessionId: string, messages: any[]): Promise<void> {
+	const session = gateway.sessionManager?.getSession(sessionId);
+	if (!session) throw new Error(`session ${sessionId} not found`);
+	const mockAgent = session.rpcClient?._agent;
+	if (!mockAgent || !Array.isArray(mockAgent.conversationMessages)) {
+		throw new Error("expected in-process mock agent with conversationMessages");
+	}
+	mockAgent.conversationMessages = messages;
+}
+
+async function refreshTranscriptFromGateway(page: Page, expectedOpenButtons: number, errorPrefix: string): Promise<void> {
+	await expect.poll(async () => {
+		await page.evaluate(() => {
+			const agent = (window as any).bobbitState?.remoteAgent;
+			if (agent?.requestMessages) agent.requestMessages();
+		});
+		return page.locator(PREVIEW_OPEN_BUTTON_SELECTOR).count();
+	}, {
+		timeout: 15_000,
+		message: `${errorPrefix}: expected persisted preview_open tool cards to hydrate from the server transcript`,
+	}).toBe(expectedOpenButtons);
+}
+
+async function expectOnlyLivePreviewTab(page: Page, errorPrefix: string): Promise<void> {
+	await expect.poll(async () => (await visiblePanelTabs(page))
+		.filter((tab) => tab.kind === "preview")
+		.map((tab) => tab.id)
+		.sort(), {
+		timeout: 10_000,
+		message: `${errorPrefix}: matching historical preview should collapse to the single live preview tab`,
+	}).toEqual(["preview:live"]);
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.activePanelTabId ?? ""),
+		{ timeout: 5_000, message: `${errorPrefix}: collapsed preview should select the live preview tab` },
+	).toBe("preview:live");
+}
+
+async function expectPreviewTabCount(page: Page, expectedCount: number, errorPrefix: string): Promise<void> {
+	await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").length, {
+		timeout: 10_000,
+		message: `${errorPrefix}: expected ${expectedCount} visible preview tabs`,
+	}).toBe(expectedCount);
+}
+
+async function expectAtLeastPreviewTabCount(page: Page, expectedCount: number, errorPrefix: string): Promise<void> {
+	await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").length, {
+		timeout: 10_000,
+		message: `${errorPrefix}: expected at least ${expectedCount} visible preview tabs`,
+	}).toBeGreaterThanOrEqual(expectedCount);
+}
+
+async function expectLegacyPreviewTabsRemainSeparate(page: Page, expectedTexts: string[], errorPrefix: string): Promise<void> {
+	await expect.poll(async () => (await visiblePanelTabs(page))
+		.filter((tab) => tab.kind === "preview" && tab.id !== "preview:live").length, {
+		timeout: 10_000,
+		message: `${errorPrefix}: legacy preview snapshots should remain historical tabs, not collapse into only preview:live`,
+	}).toBeGreaterThanOrEqual(expectedTexts.length);
+	const previewTabs = (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview");
+	expect(
+		previewTabs.map((tab) => tab.id),
+		`${errorPrefix}: legacy preview tabs collapsed incorrectly; tabs=${JSON.stringify(previewTabs)}`,
+	).not.toEqual(["preview:live"]);
+	const previewTabTexts = await collectAllPreviewTabTexts(page, errorPrefix);
+	for (const expectedText of expectedTexts) {
+		expect(
+			previewTabTexts.some((text) => text.includes(expectedText)),
+			`${errorPrefix}: no legacy preview tab restored ${expectedText}; texts=${JSON.stringify(previewTabTexts)}`,
+		).toBe(true);
+	}
+}
+
+async function openLegacyPreviewToolCardAndExpectMountHash(page: Page, ordinal: number, expectedText: string, errorPrefix: string): Promise<string> {
+	const button = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR).nth(ordinal);
+	await button.scrollIntoViewIfNeeded();
+	await expect(button, `${errorPrefix}: legacy preview_open tool card ${ordinal + 1} Open button should be enabled`).toBeEnabled({ timeout: 5_000 });
+	const responsePromise = page.waitForResponse(
+		(response) => response.url().includes("/api/preview/mount") && response.request().method() === "POST" && response.ok(),
+		{ timeout: 15_000 },
+	);
+	await button.click();
+	const response = await responsePromise;
+	const body = await response.json() as { contentHash?: unknown };
+	const contentHash = typeof body.contentHash === "string" ? body.contentHash : "";
+	expect(contentHash, `${errorPrefix}: legacy remount POST should still return contentHash`).toMatch(/^[a-f0-9]{64}$/);
+	await expect(button, `${errorPrefix}: clicking legacy preview_open tool card ${ordinal + 1} should acknowledge that it opened`).toHaveText(/Opened/, { timeout: 5_000 });
+	await expectPreviewContains(page, expectedText, `${errorPrefix}: opening legacy preview_open tool card ${ordinal + 1} should select that snapshot immediately`);
+	return contentHash;
+}
+
+async function collectAllPreviewTabTexts(page: Page, errorPrefix: string): Promise<string[]> {
+	const previewTabIndexes = await matchingTabIndexes(page, PREVIEW_TAB_RE);
+	if (previewTabIndexes.length === 0) {
+		const labels = await visiblePanelTabLabels(page);
+		throw new Error(`${errorPrefix}: expected at least one preview tab; visible tabs were: ${labels.join(", ") || "<none>"}`);
+	}
+	const texts: string[] = [];
+	for (const index of previewTabIndexes) {
+		await clickTopLevelTabByIndex(page, index, errorPrefix);
+		await expect.poll(() => rawPreviewBodyText(page), {
+			timeout: 10_000,
+			message: `${errorPrefix}: preview tab ${index} should render non-empty iframe content`,
+		}).not.toBe("");
+		texts.push(await rawPreviewBodyText(page));
+	}
+	return texts;
+}
+
+async function reloadAndNavigateToSession(page: Page, sessionId: string): Promise<void> {
+	await page.reload({ waitUntil: "domcontentloaded" });
+	await navigateToSession(page, sessionId);
+}
+
 
 async function deliverReviewToolResult(page: Page, payload: Record<string, unknown>): Promise<void> {
 	await page.evaluate((payload) => {
@@ -672,7 +870,148 @@ test.describe("Dynamic chat tabs", () => {
 		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body reopened.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
 	});
 
+
+	test("legacy v1 and v2 preview_open snapshots remain distinct across reload", async ({ page, gateway }, testInfo) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const legacyInlineText = "Legacy V1 Inline Preview Content";
+		const legacyFileText = "Legacy V2 File Preview Content";
+		const legacyFilePath = testInfo.outputPath("legacy-v2-preview.html");
+		await mkdir(dirname(legacyFilePath), { recursive: true });
+		await writeFile(legacyFilePath, previewHtmlForBodyText(legacyFileText), "utf8");
+
+		await setMockTranscript(gateway, sessionId, [
+			...legacyV1InlinePreviewToolCardMessages("tool-legacy-v1-inline", legacyInlineText),
+			...legacyV2FilePreviewToolCardMessages("tool-legacy-v2-file", legacyFilePath),
+		]);
+		await refreshTranscriptFromGateway(page, 2, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
+
+		const firstHash = await openLegacyPreviewToolCardAndExpectMountHash(page, 0, legacyInlineText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
+		const secondHash = await openLegacyPreviewToolCardAndExpectMountHash(page, 1, legacyFileText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
+		expect(firstHash, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: fixtures should produce distinct legacy remount hashes").not.toBe(secondHash);
+		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG");
+
+		await reloadAndNavigateToSession(page, sessionId);
+		await refreshTranscriptFromGateway(page, 2, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
+		await openLegacyPreviewToolCardAndExpectMountHash(page, 0, legacyInlineText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
+		await openLegacyPreviewToolCardAndExpectMountHash(page, 1, legacyFileText, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
+		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: after reload");
+
+		// Preview tabs currently have no per-tab close affordance. Switching away
+		// and back is the available cleanup/non-collapse path for legacy history.
+		await ensureChatInput(page, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: cleanup/no-collapse check");
+		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: Preview should remain selectable for cleanup check");
+		await expectLegacyPreviewTabsRemainSeparate(page, [legacyInlineText, legacyFileText], "DYNAMIC_CHAT_TABS_LEGACY_PREVIEW_BUG: cleanup/no-collapse check");
+	});
+
+	test("same-content historical v3 first-open collapses to the live preview tab", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const previewText = await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, {
+			entry: "inline.html",
+			bodyText: "Content Hash Same Preview Content",
+		});
+		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: live preview tab should be selectable before opening history");
+		await expectPreviewContains(page, previewText, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: live preview should be populated before opening matching history");
+
+		const mounted = await getCurrentPreviewMountSnapshot(page, sessionId);
+		await setMockTranscript(gateway, sessionId, v3PreviewToolCardMessages("tool-v3-same-hash", mounted, previewText));
+		await refreshTranscriptFromGateway(page, 1, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG");
+
+		let remountPosts = 0;
+		page.on("request", (request) => {
+			if (request.method() === "POST" && request.url().includes("/api/preview/mount")) remountPosts += 1;
+		});
+
+		const button = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR).first();
+		await button.scrollIntoViewIfNeeded();
+		await button.click();
+		await expect(button, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: matching v3 preview should open without stale-file failure").toHaveText(/Opened/, { timeout: 5_000 });
+		expect(remountPosts, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: matching contentHash should skip the remount POST").toBe(0);
+		await expect(page.getByText("File no longer available"), "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: matching live content must not surface stale-file text").toHaveCount(0);
+		await expectOnlyLivePreviewTab(page, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG");
+		await expectPreviewContains(page, previewText, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: collapsed live preview should still load the matching content");
+
+		await reloadAndNavigateToSession(page, sessionId);
+		await refreshTranscriptFromGateway(page, 1, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: after reload");
+		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: live preview tab should remain selectable after reload");
+		await expectOnlyLivePreviewTab(page, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: after reload");
+		await expectPreviewContains(page, previewText, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: live preview content should survive reload");
+
+		await ensureChatInput(page, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: cleanup/no-duplicate check");
+		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: returning to Preview should not create duplicate history");
+		await expectOnlyLivePreviewTab(page, "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: after Chat/Preview cleanup check");
+		await expect(page.getByText("File no longer available"), "DYNAMIC_CHAT_TABS_V3_SAME_HASH_BUG: stale-file text should remain absent after reload cleanup").toHaveCount(0);
+	});
+
+	test("different-content historical v3 previews remain separately restorable across reload", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const firstPreviewText = "Content Hash Preview A Content";
+		const secondPreviewText = "Content Hash Preview B Content";
+		const firstMounted = await mountV3PreviewEntry(page, sessionId, "inline.html", firstPreviewText);
+		const secondMounted = await mountV3PreviewEntry(page, sessionId, "inline.html", secondPreviewText);
+		expect(firstMounted.contentHash, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: fixtures should have different v3 content hashes").not.toBe(secondMounted.contentHash);
+
+		await setMockTranscript(gateway, sessionId, [
+			...v3PreviewToolCardMessages("tool-v3-different-a", firstMounted, firstPreviewText),
+			...v3PreviewToolCardMessages("tool-v3-different-b", secondMounted, secondPreviewText),
+		]);
+		await refreshTranscriptFromGateway(page, 2, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG");
+
+		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
+		await buttons.nth(0).scrollIntoViewIfNeeded();
+		await buttons.nth(0).click();
+		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: opening preview A should select A content");
+		await buttons.nth(1).scrollIntoViewIfNeeded();
+		await buttons.nth(1).click();
+		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: opening preview B should select B content");
+		await expectAtLeastPreviewTabCount(page, 2, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: opening A then B should retain two different-content preview tabs");
+		let previewTabTexts = await collectAllPreviewTabTexts(page, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG");
+		expect(previewTabTexts.some((text) => text.includes(firstPreviewText)), `DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: no preview tab restored A; texts=${JSON.stringify(previewTabTexts)}`).toBe(true);
+		expect(previewTabTexts.some((text) => text.includes(secondPreviewText)), `DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: no preview tab restored B; texts=${JSON.stringify(previewTabTexts)}`).toBe(true);
+
+		await reloadAndNavigateToSession(page, sessionId);
+		await refreshTranscriptFromGateway(page, 2, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: after reload");
+		const previewCountAfterReload = (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").length;
+		if (previewCountAfterReload < 2) {
+			// Historical preview tabs do not expose a close/pin persistence control; the
+			// persisted transcript is the durable artifact. Reopen the two v3 cards after
+			// reload to prove the different content hashes remain separately restorable.
+			await buttons.nth(0).scrollIntoViewIfNeeded();
+			await buttons.nth(0).click();
+			await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview A should restore after reload");
+			await buttons.nth(1).scrollIntoViewIfNeeded();
+			await buttons.nth(1).click();
+			await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview B should restore after reload");
+		}
+		await expectAtLeastPreviewTabCount(page, 2, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: after reload");
+		previewTabTexts = await collectAllPreviewTabTexts(page, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: after reload");
+		expect(previewTabTexts.some((text) => text.includes(firstPreviewText)), `DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: no reloaded preview tab restored A; texts=${JSON.stringify(previewTabTexts)}`).toBe(true);
+		expect(previewTabTexts.some((text) => text.includes(secondPreviewText)), `DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: no reloaded preview tab restored B; texts=${JSON.stringify(previewTabTexts)}`).toBe(true);
+
+		// Preview tabs currently have no per-tab close affordance (unlike review tabs),
+		// so cleanup coverage asserts there is no accidental same-content collapse when
+		// moving focus away from and back to the preview workspace.
+		await ensureChatInput(page, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: cleanup/no-collapse check");
+		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: Preview should remain selectable for cleanup check");
+		await expectAtLeastPreviewTabCount(page, 2, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: cleanup should not collapse different-content preview tabs");
+		previewTabTexts = await collectAllPreviewTabTexts(page, "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: cleanup/no-collapse check");
+		expect(previewTabTexts.some((text) => text.includes(firstPreviewText))).toBe(true);
+		expect(previewTabTexts.some((text) => text.includes(secondPreviewText))).toBe(true);
+	});
+
 	test("v3 preview tabs expose source labels, disambiguate same-name snapshots, and reopen independently", async ({ page }) => {
+
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1280, height: 800 });
 

@@ -35,10 +35,14 @@ per-session server mount views: `preview:live` is titled from the active entry
 `preview_open` tool cards and represent chat artifacts that can be selected or
 remounted later.
 
-Preview tabs also carry content identity when available. Matching live and
-historical previews collapse by `contentHash`, so users do not see duplicate tabs
-for the same mounted bytes. Different-content preview artifacts keep separate
-tabs and remain independently restorable through the one live server mount.
+Preview tabs also carry content identity when available. v3 historical previews
+use `contentHash` to collapse same-content artifacts into `preview:live`, so
+users do not see duplicate tabs for the same mounted bytes. If a v3 marker omits
+the hash to stay within its size cap, the remount response can supply it and the
+artifact can still collapse after the refresh. Different-content preview
+artifacts keep separate tabs and remain independently restorable through the one
+live server mount. Legacy v1/v2 snapshots remain historical even when their
+remount response includes a hash; they predate the v3 content-identity contract.
 Proposal tabs distinguish the live editable draft from read-only historical
 revisions, and review documents appear as top-level `Review: <title>` tabs.
 Review tab IDs encode the title, so titles with spaces, slashes, `?`, `#`, or
