@@ -78,6 +78,12 @@ describe("Model registry", () => {
 			}
 		}
 	});
+
+	it("OpenAI-Codex gpt-5.5 uses pi-ai's provider-specific 272K window", () => {
+		const model = models.find((m) => m.provider === "openai-codex" && m.id === "gpt-5.5");
+		assert.ok(model, "openai-codex/gpt-5.5 should be available");
+		assert.equal(model.contextWindow, 272_000);
+	});
 });
 
 // Cleanup
