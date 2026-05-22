@@ -277,6 +277,26 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(previewState.previewPanelContentHash).toBe(HASH);
 	});
 
+	test("v3 marker: stale live preview still collapses to the live tab on first open", async ({ page }) => {
+		await gotoAndWait(page);
+		const oldHash = "c".repeat(64);
+		await page.evaluate(async ([oldHash, sessionId, result]) => {
+			await (window as any).__resetPreviewState();
+			await (window as any).__setPreviewWorkspace(sessionId, oldHash);
+			(window as any).__renderPreview(document.getElementById("container")!, { html: "<p>new</p>" }, result, false);
+			(window as any).__resetFetchCalls();
+		}, [oldHash, SESSION_ID, makePreviewResultWithSnapshot("inline.html", HASH)] as any);
+
+		await page.locator("[data-preview-open-btn]").click();
+		await expect(page.locator("[data-preview-open-btn]")).toHaveText(/Opened/, { timeout: 3000 });
+
+		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
+		const tabs = previewState.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+	});
+
 	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {
 		await gotoAndWait(page);
 		const filePath = "/abs/path/to/gone.html";

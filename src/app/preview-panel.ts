@@ -217,6 +217,36 @@ export function selectHtmlPreviewTab(args: {
 	};
 	const s = state as any;
 	const existingTabs = panelTabsForSession(s, sessionId);
+	const liveTabForSameContent = (): PanelWorkspaceTab => ({
+		...tab,
+		id: LIVE_PREVIEW_PANEL_TAB_ID,
+		source: {
+			...source,
+			live: true,
+			origin: typeof source.origin === "string" ? source.origin : "preview-open-dedupe",
+		} as PanelWorkspaceTab["source"],
+		state: tabState,
+	});
+	const currentLiveMatches = !!contentHash
+		&& !isLivePreviewTab(tab)
+		&& args.dedupeWithLive !== false
+		&& normalizePreviewContentHash(s.previewPanelContentHash) === contentHash;
+	if (currentLiveMatches) {
+		const duplicateIds = existingTabs
+			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview" && candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID && previewContentHashFromTab(candidate) === contentHash)
+			.map((candidate: PanelWorkspaceTab) => candidate.id);
+		const activeId = activePanelTabIdForSession(s, sessionId);
+		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+		const liveTab = liveTabForSameContent();
+		const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
+		selectPanelWorkspaceTab(liveTab, {
+			sessionId,
+			select: shouldSelect,
+			setAssistantTab: args.setAssistantTab,
+		});
+		if (shouldSelect) s.previewPanelMountedTabId = liveTab.id;
+		return;
+	}
 	const duplicateTabs = contentHash
 		? existingTabs.filter((candidate: PanelWorkspaceTab) => {
 			if (candidate.kind !== "preview" || candidate.id === tab.id || previewContentHashFromTab(candidate) !== contentHash) return false;
@@ -239,14 +269,15 @@ export function selectHtmlPreviewTab(args: {
 			return;
 		}
 		const canonical = duplicateTabs.find(isLivePreviewTab) ?? duplicateTabs[0];
-		const duplicateIds = duplicateTabs.filter(candidate => candidate.id !== canonical.id).map(candidate => candidate.id);
+		const selectedTab = isLivePreviewTab(canonical) ? liveTabForSameContent() : canonical;
+		const duplicateIds = duplicateTabs.filter(candidate => candidate.id !== selectedTab.id).map(candidate => candidate.id);
 		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
-		selectPanelWorkspaceTab(canonical, {
+		selectPanelWorkspaceTab(selectedTab, {
 			sessionId,
 			select: args.select,
 			setAssistantTab: args.setAssistantTab,
 		});
-		if (args.select !== false) s.previewPanelMountedTabId = canonical.id;
+		if (args.select !== false) s.previewPanelMountedTabId = selectedTab.id;
 		return;
 	}
 	selectPanelWorkspaceTab(tab, {
