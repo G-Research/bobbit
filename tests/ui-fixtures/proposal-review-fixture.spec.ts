@@ -65,6 +65,14 @@ async function loadFixture(page: Page): Promise<void> {
 	await expect(page.locator("[data-testid='fixture-chat'] textarea")).toBeVisible({ timeout: 10_000 });
 }
 
+async function reloadAndRehydrateFixture(page: Page): Promise<void> {
+	await page.reload();
+	await page.addScriptTag({ path: BUNDLE });
+	await page.waitForFunction(() => (window as any).__proposalReviewReady === true, null, { timeout: 10_000 });
+	await page.evaluate(() => (window as any).__rehydrateProposalReviewFixture());
+	await expect(page.locator("[data-testid='fixture-chat'] textarea")).toBeVisible({ timeout: 10_000 });
+}
+
 async function fixtures(page: Page): Promise<Array<{ type: ProposalType; initial: Record<string, unknown>; partial: Record<string, unknown> }>> {
 	return page.evaluate(() => (window as any).__proposalReviewFixtures);
 }
@@ -128,6 +136,52 @@ test.describe("Proposal/review lightweight fixture", () => {
 			expect(await page.evaluate((type) => (window as any).__proposalDismissalExists(type), expected.type)).toBe(false);
 		}
 	});
+
+	for (const expected of PROPOSAL_EXPECTATIONS) {
+		test(`[${expected.type}] dismissal sticks across page reload`, async ({ page }) => {
+			const fixture = (await fixtures(page)).find((f) => f.type === expected.type)!;
+			await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+				type: fixture.type,
+				fields: fixture.initial,
+			});
+			expect(await readSlot(page, expected.type), `${expected.type} slot should populate before dismiss`).not.toBeNull();
+
+			await page.evaluate((type) => (window as any).__markProposalDismissed(type), expected.type);
+			expect(await readSlot(page, expected.type), `${expected.type} slot should clear on dismiss`).toBeNull();
+			expect(await page.evaluate((type) => (window as any).__proposalDismissalExists(type), expected.type)).toBe(true);
+
+			await reloadAndRehydrateFixture(page);
+			expect(await readSlot(page, expected.type), `${expected.type} dismissed slot should not rehydrate`).toBeNull();
+			expect(await page.evaluate((type) => (window as any).__proposalDismissalExists(type), expected.type)).toBe(true);
+			expect(await page.evaluate(() => (window as any).bobbitState.assistantHasProposal)).toBe(false);
+		});
+
+		test(`[${expected.type}] restart survival rehydrates active proposal slot after page reload`, async ({ page }) => {
+			const fixture = (await fixtures(page)).find((f) => f.type === expected.type)!;
+			await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+				type: fixture.type,
+				fields: fixture.initial,
+			});
+			await page.evaluate(({ type, fields }) => (window as any).__emitProposalFixture(type, fields), {
+				type: fixture.type,
+				fields: fixture.partial,
+			});
+			const before = await readSlot(page, expected.type);
+			expect(before?.[expected.editedFieldKey], `${expected.type} edited field before reload`).toBe(expected.editedFieldValueAfter);
+			expect(before?.[expected.preservedFieldKey], `${expected.type} preserved field before reload`).toBeDefined();
+
+			await reloadAndRehydrateFixture(page);
+			const after = await readSlot(page, expected.type);
+			expect(after, `${expected.type} slot should rehydrate after reload`).not.toBeNull();
+			expect(after?.[expected.editedFieldKey], `${expected.type} edited field after reload`).toBe(expected.editedFieldValueAfter);
+			expect(after?.[expected.preservedFieldKey], `${expected.type} preserved field after reload`).toBeDefined();
+			expect(await page.evaluate(() => (window as any).bobbitState.assistantHasProposal)).toBe(true);
+
+			await expect(proposalTab(page, expected.label), `${expected.label} proposal tab after reload`).toBeVisible({ timeout: 10_000 });
+			await proposalTab(page, expected.label).click();
+			await expect(proposalPanel(page, expected), `${expected.label} panel after reload`).toBeVisible({ timeout: 10_000 });
+		});
+	}
 
 	test("proposal tabs and panes render every active proposal type; dismissing one preserves the rest", async ({ page }) => {
 		await page.evaluate(() => (window as any).__setAllProposalFixtures());

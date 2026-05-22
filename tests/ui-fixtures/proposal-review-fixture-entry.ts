@@ -14,9 +14,22 @@ type ProposalFixture = {
 	partial: Record<string, unknown>;
 };
 
+type StoredProposal = {
+	fields: Record<string, unknown>;
+	rev: number;
+	mode?: "provisional" | "registered";
+};
+
+type ResetOptions = {
+	clearDismissals?: boolean;
+	clearPersisted?: boolean;
+	hydrateProposals?: boolean;
+};
+
 const SESSION_ID = "proposal-review-fixture-session";
 const PROJECT_ID = "proposal-review-fixture-project";
 const PROJECT_ROOT = "/tmp/proposal-review-fixture";
+const PROPOSAL_STORE_KEY = `bobbit-proposal-review-fixture-proposals-${SESSION_ID}`;
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -111,6 +124,48 @@ function parseBody(init?: RequestInit): any {
 	try { return JSON.parse(init.body); } catch { return init.body; }
 }
 
+function cloneFields(fields: Record<string, unknown>): Record<string, unknown> {
+	return JSON.parse(JSON.stringify(fields));
+}
+
+function readPersistedProposals(): Partial<Record<ProposalType, StoredProposal>> {
+	try {
+		const raw = localStorage.getItem(PROPOSAL_STORE_KEY);
+		if (!raw) return {};
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+function writePersistedProposals(store: Partial<Record<ProposalType, StoredProposal>>): void {
+	try {
+		localStorage.setItem(PROPOSAL_STORE_KEY, JSON.stringify(store));
+	} catch {
+		/* ignore quota errors */
+	}
+}
+
+function clearPersistedProposals(): void {
+	try { localStorage.removeItem(PROPOSAL_STORE_KEY); } catch { /* ignore */ }
+}
+
+function persistProposalSlot(type: ProposalType, slot: StoredProposal): void {
+	const store = readPersistedProposals();
+	store[type] = { ...slot, fields: cloneFields(slot.fields) };
+	writePersistedProposals(store);
+}
+
+function rehydratePersistedProposals(): void {
+	const store = readPersistedProposals();
+	for (const fixture of PROPOSAL_FIXTURES) {
+		const persisted = store[fixture.type];
+		if (!persisted?.fields) continue;
+		emitProposal(fixture.type, persisted.fields, { rev: persisted.rev, ignoreDismissal: false });
+	}
+}
+
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const url = requestPath(input);
 	const method = (init?.method || "GET").toUpperCase();
@@ -148,11 +203,16 @@ function addFixtureStyle(): void {
 	document.head.appendChild(style);
 }
 
-function resetState(): void {
+function resetState(options: ResetOptions = {}): void {
+	const clearDismissals = options.clearDismissals ?? true;
+	const clearPersisted = options.clearPersisted ?? true;
 	fetchLog = [];
 	promptLog = [];
 	clearAllAnnotations(SESSION_ID);
-	for (const type of PROPOSAL_FIXTURES.map((f) => f.type)) clearProposalDismissed(SESSION_ID, type);
+	if (clearPersisted) clearPersistedProposals();
+	if (clearDismissals) {
+		for (const type of PROPOSAL_FIXTURES.map((f) => f.type)) clearProposalDismissed(SESSION_ID, type);
+	}
 	setProjects([PROJECT]);
 	Object.assign(state, {
 		appView: "authenticated",
@@ -219,6 +279,7 @@ function resetState(): void {
 	localStorage.setItem("gateway.url", window.location.origin);
 	localStorage.setItem("gateway.token", "fixture-token");
 	addFixtureStyle();
+	if (options.hydrateProposals) rehydratePersistedProposals();
 }
 
 function applyProposalMirrors(type: ProposalType, fields: Record<string, unknown>): void {
@@ -273,6 +334,7 @@ function emitProposal(type: ProposalType, fields: Record<string, unknown>, opts:
 		rev: opts.rev ?? prev?.rev ?? 1,
 	};
 	state.activeProposals[type] = slot;
+	persistProposalSlot(type, { fields: merged, rev: slot.rev, mode: slot.mode });
 	state.assistantHasProposal = true;
 	if (type === "project") delete state.projectProposalAcceptedBySessionId[SESSION_ID];
 	applyProposalMirrors(type, merged);
@@ -313,7 +375,11 @@ document.addEventListener("proposal-open", (event) => {
 });
 
 (window as any).__proposalReviewFixtures = PROPOSAL_FIXTURES;
-(window as any).__resetProposalReviewFixture = () => { resetState(); doRenderApp(); };
+(window as any).__resetProposalReviewFixture = (options?: ResetOptions) => { resetState(options); doRenderApp(); };
+(window as any).__rehydrateProposalReviewFixture = () => {
+	resetState({ clearDismissals: false, clearPersisted: false, hydrateProposals: true });
+	doRenderApp();
+};
 (window as any).__emitProposalFixture = (type: ProposalType, fields: Record<string, unknown>, opts?: { rev?: number; ignoreDismissal?: boolean }) => emitProposal(type, fields, opts || {});
 (window as any).__setAllProposalFixtures = () => {
 	for (const fixture of PROPOSAL_FIXTURES) emitProposal(fixture.type, fixture.initial);
