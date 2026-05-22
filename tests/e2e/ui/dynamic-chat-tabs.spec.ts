@@ -457,6 +457,17 @@ async function deliverReviewToolResult(page: Page, payload: Record<string, unkno
 	}, payload);
 }
 
+async function openReviewDocuments(page: Page, docs: readonly { title: string; body: string }[]): Promise<void> {
+	for (const doc of docs) {
+		await deliverReviewToolResult(page, {
+			action: "review_open",
+			title: doc.title,
+			markdown: `# ${doc.title}\n\n${doc.body}`,
+			replace: true,
+		});
+	}
+}
+
 async function seedProjectProposalRevision(page: Page, sessionId: string, fields: Record<string, unknown>): Promise<number> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
 		method: "POST",
@@ -702,60 +713,7 @@ test.describe("Dynamic chat tabs", () => {
 		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body reopened.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
 	});
 
-	test("multiple preview tabs expose source-derived visible labels or tooltips", async ({ page }) => {
-		test.setTimeout(90_000);
-		await page.setViewportSize({ width: 1280, height: 800 });
-
-		await openApp(page);
-		const sessionId = await createRegularSessionViaApi(page);
-		await appendV3PreviewToolCard(page, sessionId, "tool-label-a", "label-a.html", "Preview Label A Content");
-		await appendV3PreviewToolCard(page, sessionId, "tool-label-b", "label-b.html", "Preview Label B Content");
-
-		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
-		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: two preview_open tool cards should render Open buttons").toHaveCount(2, { timeout: 15_000 });
-		await buttons.nth(0).click();
-		await buttons.nth(1).click();
-
-		await waitForTopLevelTabCounts(
-			page,
-			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
-			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG: opening two preview artifacts should expose two preview tabs",
-		);
-		await expectPreviewTabsExposeUserFacingSourceNames(
-			page,
-			[/^Preview:\s*label-a\.html(?:\s+\(snapshot\))?$/i, /^Preview:\s*label-b\.html(?:\s+\(snapshot\))?$/i],
-			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG",
-		);
-	});
-
-	test("same-name live and historical preview tabs are visually disambiguated", async ({ page }) => {
-		test.setTimeout(90_000);
-		await page.setViewportSize({ width: 1280, height: 800 });
-
-		await openApp(page);
-		const sessionId = await createRegularSessionViaApi(page);
-		await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, {
-			entry: "inline.html",
-			bodyText: "Live Inline Preview Content",
-		});
-		await appendV3PreviewToolCard(page, sessionId, "tool-inline-snapshot", "inline.html", "Historical Inline Preview Content");
-
-		const buttons = page.locator(PREVIEW_OPEN_BUTTON_SELECTOR);
-		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: inline preview tool card should render an Open button").toHaveCount(1, { timeout: 15_000 });
-		await buttons.first().click();
-
-		await waitForTopLevelTabCounts(
-			page,
-			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
-			"DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: live and historical inline previews should both be selectable",
-		);
-		const labels = (await visiblePreviewTabPresentations(page)).map((tab) => tab.text || tab.tooltip);
-		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html");
-		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html (snapshot)");
-		expect(new Set(labels).size, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: duplicate preview labels: ${JSON.stringify(labels)}`).toBe(labels.length);
-	});
-
-	test("historical v3 preview tool-card reopen restores A and B as independent tabs", async ({ page }) => {
+	test("v3 preview tabs expose source labels, disambiguate same-name snapshots, and reopen independently", async ({ page }) => {
 		test.setTimeout(120_000);
 		await page.setViewportSize({ width: 1280, height: 800 });
 
@@ -776,6 +734,11 @@ test.describe("Dynamic chat tabs", () => {
 			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }],
 			"DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: opening A and B should create two top-level historical preview tabs",
 		);
+		await expectPreviewTabsExposeUserFacingSourceNames(
+			page,
+			[/^Preview:\s*v3-a\.html(?:\s+\(snapshot\))?$/i, /^Preview:\s*v3-b\.html(?:\s+\(snapshot\))?$/i],
+			"DYNAMIC_CHAT_TABS_PREVIEW_LABEL_BUG",
+		);
 
 		await buttons.nth(0).click();
 		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: reopening A from its tool card should restore A, not latest B");
@@ -783,6 +746,24 @@ test.describe("Dynamic chat tabs", () => {
 		await expectPreviewContains(page, secondPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: selecting B tab should show B content after A was reopened");
 		await selectTopLevelTabByTitle(page, /Preview:\s*v3-a\.html/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
 		await expectPreviewContains(page, firstPreviewText, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: selecting A tab should show A content after selecting B");
+
+		await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, {
+			entry: "inline.html",
+			bodyText: "Live Inline Preview Content",
+		});
+		await appendV3PreviewToolCard(page, sessionId, "tool-inline-snapshot", "inline.html", "Historical Inline Preview Content");
+		await expect(buttons, "DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: inline preview tool card should render an Open button").toHaveCount(3, { timeout: 15_000 });
+		await buttons.nth(2).click();
+
+		await waitForTopLevelTabCounts(
+			page,
+			[{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 4 }],
+			"DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: live and historical inline previews should both be selectable alongside existing snapshots",
+		);
+		const labels = (await visiblePreviewTabPresentations(page)).map((tab) => tab.text || tab.tooltip);
+		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html");
+		expect(labels, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: preview labels were ${JSON.stringify(labels)}`).toContain("Preview: inline.html (snapshot)");
+		expect(new Set(labels).size, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: duplicate preview labels: ${JSON.stringify(labels)}`).toBe(labels.length);
 	});
 
 	test("proposal revisions of the same type open as distinct tabs while the live proposal stays accessible", async ({ page }) => {
@@ -843,8 +824,7 @@ test.describe("Dynamic chat tabs", () => {
 			bodyText: "Mixed Preview Content",
 		});
 
-		await sendChatMessage(page, "review_multi", "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG");
-		await expect(page.getByText("Done. Used 3 tools.").first(), "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG: review_multi should open three review documents").toBeVisible({ timeout: 15_000 });
+		await openReviewDocuments(page, REVIEW_DOCS);
 
 		await waitForTopLevelTabCounts(
 			page,
@@ -891,8 +871,7 @@ test.describe("Dynamic chat tabs", () => {
 		await page.setViewportSize({ width: 360, height: 740 });
 
 		const sessionId = await openGoalAssistantProposalViaApi(page);
-		await sendChatMessage(page, "review_multi", "DYNAMIC_CHAT_TABS_MOBILE_BUG");
-		await expect(page.getByText("Done. Used 3 tools.").first(), "DYNAMIC_CHAT_TABS_MOBILE_BUG: review_multi should open three review documents on mobile").toBeVisible({ timeout: 15_000 });
+		await openReviewDocuments(page, REVIEW_DOCS);
 		const previewText = await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, {
 			entry: "mobile-mixed-preview.html",
 			bodyText: "Mobile Mixed Preview Content",

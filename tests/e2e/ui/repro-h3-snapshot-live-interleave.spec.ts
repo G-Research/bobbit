@@ -13,9 +13,10 @@
  * No production code is modified.
  */
 import { test, expect } from "./fixtures.js";
+import { apiFetch, nonGitCwd } from "../e2e-setup.js";
 import {
 	openApp,
-	createSessionViaUI,
+	navigateToHash,
 	sendMessage,
 } from "./ui-helpers.js";
 
@@ -74,12 +75,61 @@ async function countOkRows(page: import("@playwright/test").Page): Promise<numbe
 	});
 }
 
+async function createSessionViaApi(page: import("@playwright/test").Page): Promise<string> {
+	const resp = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd: nonGitCwd() }),
+	});
+	const bodyText = await resp.text();
+	expect(resp.status, `create session via API: ${bodyText}`).toBe(201);
+	const sessionId = JSON.parse(bodyText).id as string;
+	expect(sessionId, "API session id should be valid").toMatch(/^[a-f0-9-]{36}$/);
+
+	await navigateToHash(page, `#/session/${sessionId}`);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(
+		() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""),
+		{ timeout: 10_000, message: `selected session should be ${sessionId}` },
+	).toBe(sessionId);
+	return sessionId;
+}
+
 async function waitForRemoteAgentConnected(page: import("@playwright/test").Page) {
 	await page.waitForFunction(
 		() => !!(window as any).__bobbitState?.remoteAgent?.connected,
 		undefined,
 		{ timeout: 15_000 },
 	);
+}
+
+async function requestMessagesAndWaitForSnapshot(page: import("@playwright/test").Page): Promise<void> {
+	const expectedSnapshotCount = await page.evaluate(() => {
+		const ra = (window as any).__bobbitState?.remoteAgent;
+		if (!ra) throw new Error("remote agent is not ready");
+		if (!ra.__e2eSnapshotCounterInstalled) {
+			const originalApply = ra.apply?.bind(ra);
+			if (typeof originalApply !== "function") throw new Error("remote agent apply hook is not available");
+			ra.__e2eSnapshotCount = 0;
+			ra.apply = (action: any) => {
+				const result = originalApply(action);
+				if (action?.type === "snapshot") ra.__e2eSnapshotCount = (ra.__e2eSnapshotCount ?? 0) + 1;
+				return result;
+			};
+			ra.__e2eSnapshotCounterInstalled = true;
+		}
+		const expected = (ra.__e2eSnapshotCount ?? 0) + 1;
+		ra.requestMessages();
+		return expected;
+	});
+	await page.waitForFunction(
+		(expected) => ((window as any).__bobbitState?.remoteAgent?.__e2eSnapshotCount ?? 0) >= expected,
+		expectedSnapshotCount,
+		{ timeout: 10_000 },
+	);
+}
+
+async function yieldToClient(page: import("@playwright/test").Page): Promise<void> {
+	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 }
 
 test.describe("H3 — snapshot ↔ live interleave race", () => {
@@ -91,7 +141,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 	// See docs/design/snapshot-live-race-fix.md.
 	test.fixme("(A) mid-stream snapshot resync during STREAM_BURST does not lose rows", async ({ page }) => {
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaApi(page);
 		await waitForRemoteAgentConnected(page);
 
 		const failures: string[] = [];
@@ -147,10 +197,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				{ timeout: 30_000 },
 			).catch(() => { /* fall through */ });
 
-			await page.evaluate(() => {
-				(window as any).__bobbitState.remoteAgent.requestMessages();
-			});
-			await page.waitForTimeout(300); // let the snapshot land
+			await requestMessagesAndWaitForSnapshot(page);
 
 			const t = await readTranscript(page);
 			const userTurn = t.rows.find(
@@ -184,7 +231,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 	test("(B) rapid plain-text prompts with mid-burst resync — every reply present", async ({ page }) => {
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaApi(page);
 		await waitForRemoteAgentConnected(page);
 
 		const failures: string[] = [];
@@ -203,8 +250,8 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 			for (let k = 0; k < N; k++) {
 				await sendMessage(page, `tiny ${outer}-${k}`);
-				// Don't wait for idle — this is the point. Just yield.
-				await page.waitForTimeout(50);
+				// Don't wait for idle — this is the point. Just yield one frame.
+				await yieldToClient(page);
 			}
 
 			// Now wait for every prompt to settle.
@@ -214,10 +261,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				{ timeout: 60_000 },
 			).catch(() => {});
 			// Final resync to make sure server view is reflected.
-			await page.evaluate(() => {
-				(window as any).__bobbitState.remoteAgent.requestMessages();
-			});
-			await page.waitForTimeout(500);
+			await requestMessagesAndWaitForSnapshot(page);
 
 			const after = await countOkRows(page);
 			const delta = after - before;
@@ -234,7 +278,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 	test("(C) WS drop+reconnect mid-stream loses no rows", async ({ page }) => {
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaApi(page);
 		await waitForRemoteAgentConnected(page);
 
 		const failures: string[] = [];
@@ -304,10 +348,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 				{ timeout: 30_000 },
 			).catch(() => { /* fall through */ });
 
-			await page.evaluate(() => {
-				(window as any).__bobbitState.remoteAgent.requestMessages();
-			});
-			await page.waitForTimeout(300);
+			await requestMessagesAndWaitForSnapshot(page);
 
 			const t = await readTranscript(page);
 			const userMatches = t.rows.filter(
@@ -330,7 +371,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 	test("(D) two-tab visibility+resync convergence on identical transcripts", async ({ page, context }) => {
 		await openApp(page);
-		await createSessionViaUI(page);
+		await createSessionViaApi(page);
 		await waitForRemoteAgentConnected(page);
 
 		// Capture session id from the URL hash for tab 2 to navigate to it.
@@ -341,7 +382,7 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 		const page2 = await context.newPage();
 		await openApp(page2);
-		await page2.evaluate((id: string) => { window.location.hash = `#/session/${id}`; }, sessionId!);
+		await navigateToHash(page2, `#/session/${sessionId}`);
 		await waitForRemoteAgentConnected(page2);
 
 		const failures: string[] = [];
@@ -417,10 +458,9 @@ test.describe("H3 — snapshot ↔ live interleave race", () => {
 
 			// Force one more resync on each then compare projections.
 			await Promise.all([
-				page.evaluate(() => (window as any).__bobbitState.remoteAgent.requestMessages()),
-				page2.evaluate(() => (window as any).__bobbitState.remoteAgent.requestMessages()),
+				requestMessagesAndWaitForSnapshot(page),
+				requestMessagesAndWaitForSnapshot(page2),
 			]);
-			await page.waitForTimeout(500);
 
 			const [t1, t2] = await Promise.all([readTranscript(page), readTranscript(page2)]);
 
