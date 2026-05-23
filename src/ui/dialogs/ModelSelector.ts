@@ -105,69 +105,6 @@ function modelRecencyRank(id: string): number {
 	return 0;
 }
 
-type SelectorModel = Model<any> & {
-	id: string;
-	provider: string;
-	name?: string;
-	authenticated?: boolean;
-	available?: boolean;
-	disabled?: boolean;
-	locked?: boolean;
-	status?: string;
-	message?: string;
-	input?: ("text" | "image")[];
-	reasoning?: boolean;
-	contextWindow?: number;
-	maxTokens?: number;
-	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
-};
-
-type FilteredModelEntry = { provider: string; id: string; model: SelectorModel };
-
-const TARGET_CLOUD_MODEL_PROVIDERS = new Set(["anthropic", "openai", "openai-codex", "google", "google-gemini-cli"]);
-const UNSELECTABLE_MODEL_STATUSES = new Set([
-	"enabled_without_credential",
-	"expired",
-	"invalid",
-	"locked",
-	"unauthenticated",
-	"unavailable",
-	"oauth_unavailable",
-]);
-
-function isTargetCloudModelProvider(provider: string | undefined): boolean {
-	return !!provider && TARGET_CLOUD_MODEL_PROVIDERS.has(provider);
-}
-
-function isHiddenModel(model: SelectorModel): boolean {
-	return model.disabled === true || model.status === "disabled";
-}
-
-function isModelSelectable(model: SelectorModel): boolean {
-	if (!model || isHiddenModel(model)) return false;
-	if (model.locked === true || model.available === false) return false;
-	if (model.authenticated === false) return false;
-	if (model.status && UNSELECTABLE_MODEL_STATUSES.has(model.status)) return false;
-	return true;
-}
-
-function modelSettingsDestination(model: SelectorModel): { label: string; action: string; hash: string } {
-	if (isTargetCloudModelProvider(model.provider)) {
-		return { label: "Connect", action: "Connect in Settings > System > Account", hash: "#/settings/system/account" };
-	}
-	return { label: "Configure", action: "Configure in Settings > System > Models", hash: "#/settings/system/models" };
-}
-
-function modelUnavailableTitle(model: SelectorModel): string {
-	if (model.message) return model.message;
-	if (isTargetCloudModelProvider(model.provider)) return "Connect this provider in Settings > System > Account before selecting this model.";
-	return "Configure this provider in Settings > System > Models before selecting this model.";
-}
-
-function modelSupportsVision(model: SelectorModel): boolean {
-	return Array.isArray(model.input) && model.input.includes("image");
-}
-
 @customElement("agent-model-selector")
 export class ModelSelector extends DialogBase {
 	@state() currentModel: Model<any> | null = null;
@@ -176,7 +113,7 @@ export class ModelSelector extends DialogBase {
 	@state() filterVision = false;
 	@state() selectedIndex = 0;
 	@state() private navigationMode: "mouse" | "keyboard" = "mouse";
-	@state() private serverModels: SelectorModel[] = [];
+	@state() private serverModels: any[] = [];
 	@state() private loading = false;
 
 	private onSelectCallback?: (model: Model<any>) => void;
@@ -199,11 +136,7 @@ export class ModelSelector extends DialogBase {
 		try {
 			const res = await gatewayFetch("/api/models");
 			if (res.ok) {
-				const models = await res.json();
-				this.serverModels = Array.isArray(models)
-					? (models as SelectorModel[]).filter((model) => !isHiddenModel(model))
-					: [];
-				this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
+				this.serverModels = await res.json();
 			}
 		} catch (err) {
 			console.error("Failed to load models:", err);
@@ -251,17 +184,16 @@ export class ModelSelector extends DialogBase {
 		this.addEventListener("keydown", (e: KeyboardEvent) => {
 			// Get filtered models to know the bounds
 			const filteredModels = this.getFilteredModels();
-			if (filteredModels.length === 0) return;
 
 			if (e.key === "ArrowDown") {
 				e.preventDefault();
 				this.navigationMode = "keyboard";
-				this.selectedIndex = this.nextSelectableIndex(filteredModels, 1);
+				this.selectedIndex = Math.min(this.selectedIndex + 1, filteredModels.length - 1);
 				this.scrollToSelected();
 			} else if (e.key === "ArrowUp") {
 				e.preventDefault();
 				this.navigationMode = "keyboard";
-				this.selectedIndex = this.nextSelectableIndex(filteredModels, -1);
+				this.selectedIndex = Math.max(this.selectedIndex - 1, 0);
 				this.scrollToSelected();
 			} else if (e.key === "Enter") {
 				e.preventDefault();
@@ -272,56 +204,24 @@ export class ModelSelector extends DialogBase {
 		});
 	}
 
-	private formatTokens(tokens: number | undefined): string {
-		const value = Number.isFinite(tokens) ? (tokens as number) : 0;
-		if (value >= 1000000) return `${(value / 1000000).toFixed(0)}M`;
-		if (value >= 1000) return `${(value / 1000).toFixed(0)}`;
-		return String(value);
+	private formatTokens(tokens: number): string {
+		if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(0)}M`;
+		if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}`;
+		return String(tokens);
 	}
 
-	private firstSelectableIndex(models: FilteredModelEntry[]): number {
-		const index = models.findIndex(({ model }) => isModelSelectable(model));
-		return index >= 0 ? index : 0;
-	}
-
-	private nextSelectableIndex(models: FilteredModelEntry[], direction: 1 | -1): number {
-		if (models.length === 0) return 0;
-		const fallback = Math.min(Math.max(this.selectedIndex, 0), models.length - 1);
-		for (let i = fallback + direction; i >= 0 && i < models.length; i += direction) {
-			if (isModelSelectable(models[i].model)) return i;
+	private handleSelect(model: Model<any>) {
+		if (model) {
+			this.onSelectCallback?.(model);
+			this.close();
 		}
-		return fallback;
 	}
 
-	private currentModelNotice(): string | null {
-		if (!this.currentModel || this.loading) return null;
-		const current = this.serverModels.find((model) => modelsAreEqual(this.currentModel, model));
-		if (!current) {
-			return "The saved model is no longer available. Choose an available model or clear the preference to use Auto (best available).";
-		}
-		if (!isModelSelectable(current)) {
-			return "The saved model needs provider authentication before it can be selected. Connect the provider or choose another model.";
-		}
-		return null;
-	}
-
-	private openSettingsForModel(model: SelectorModel) {
-		const destination = modelSettingsDestination(model);
-		if (typeof window !== "undefined") window.location.hash = destination.hash;
-		this.close();
-	}
-
-	private handleSelect(model: SelectorModel) {
-		if (!model || !isModelSelectable(model)) return;
-		this.onSelectCallback?.(model);
-		this.close();
-	}
-
-	private getFilteredModels(): FilteredModelEntry[] {
-		const allModels: FilteredModelEntry[] = [];
+	private getFilteredModels(): Array<{ provider: string; id: string; model: any }> {
+		const allModels: Array<{ provider: string; id: string; model: any }> = [];
 
 		for (const model of this.serverModels) {
-			if (!isHiddenModel(model)) allModels.push({ provider: model.provider, id: model.id, model });
+			allModels.push({ provider: model.provider, id: model.id, model });
 		}
 
 		// Filter models based on search and capability filters
@@ -341,19 +241,21 @@ export class ModelSelector extends DialogBase {
 			filteredModels = filteredModels.filter(({ model }) => model.reasoning);
 		}
 		if (this.filterVision) {
-			filteredModels = filteredModels.filter(({ model }) => modelSupportsVision(model));
+			filteredModels = filteredModels.filter(({ model }) => model.input.includes("image"));
 		}
 
-		// Sort: selectable current model first, then selectable models, then by recency rank.
+		// Sort: current model first, then authenticated, then by recency rank
 		filteredModels.sort((a, b) => {
-			const aSelectable = isModelSelectable(a.model);
-			const bSelectable = isModelSelectable(b.model);
-			const aIsCurrent = aSelectable && modelsAreEqual(this.currentModel, a.model);
-			const bIsCurrent = bSelectable && modelsAreEqual(this.currentModel, b.model);
+			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
+			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
-			if (aSelectable && !bSelectable) return -1;
-			if (!aSelectable && bSelectable) return 1;
+
+			// Use authenticated field from server response
+			const aHasKey = a.model.authenticated ?? false;
+			const bHasKey = b.model.authenticated ?? false;
+			if (aHasKey && !bHasKey) return -1;
+			if (!aHasKey && bHasKey) return 1;
 
 			// Sort by model recency/tier (higher = newer/better)
 			const aRank = modelRecencyRank(a.id);
@@ -391,7 +293,7 @@ export class ModelSelector extends DialogBase {
 					inputRef: this.searchInputRef,
 					onInput: (e: Event) => {
 						this.searchQuery = (e.target as HTMLInputElement).value;
-						this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
+						this.selectedIndex = 0;
 						// Reset scroll position when search changes
 						if (this.scrollContainerRef.value) {
 							this.scrollContainerRef.value.scrollTop = 0;
@@ -404,7 +306,7 @@ export class ModelSelector extends DialogBase {
 						size: "sm",
 						onClick: () => {
 							this.filterThinking = !this.filterThinking;
-							this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
+							this.selectedIndex = 0;
 							if (this.scrollContainerRef.value) {
 								this.scrollContainerRef.value.scrollTop = 0;
 							}
@@ -417,7 +319,7 @@ export class ModelSelector extends DialogBase {
 						size: "sm",
 						onClick: () => {
 							this.filterVision = !this.filterVision;
-							this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
+							this.selectedIndex = 0;
 							if (this.scrollContainerRef.value) {
 								this.scrollContainerRef.value.scrollTop = 0;
 							}
@@ -428,38 +330,28 @@ export class ModelSelector extends DialogBase {
 				</div>
 			</div>
 
-			${this.currentModelNotice() ? html`
-				<div class="px-6 py-3 border-b border-border bg-muted/40 text-xs text-muted-foreground">
-					${this.currentModelNotice()}
-				</div>
-			` : ""}
-
 			<!-- Scrollable model list -->
 			<div class="flex-1 overflow-y-auto" ${ref(this.scrollContainerRef)}>
 				${this.loading && this.serverModels.length === 0
 					? html`<div class="flex items-center justify-center py-8 text-muted-foreground text-sm">Loading models...</div>`
-					: filteredModels.length === 0
-						? html`<div class="flex items-center justify-center py-8 px-6 text-muted-foreground text-sm text-center">No available models match these filters.</div>`
-						: filteredModels.map(({ provider, id, model }, index) => {
-						const isCurrent = isModelSelectable(model) && modelsAreEqual(this.currentModel, model);
+					: filteredModels.map(({ provider, id, model }, index) => {
+						const isCurrent = modelsAreEqual(this.currentModel, model);
 						const isSelected = index === this.selectedIndex;
-						const selectable = isModelSelectable(model);
-						const destination = modelSettingsDestination(model);
-						const cost = model.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+						const hasKey = model.authenticated ?? false;
 						return html`
 							<div
 								data-model-item
-								aria-disabled=${selectable ? "false" : "true"}
-								class="px-4 py-3 border-b border-border ${
-									selectable && this.navigationMode === "mouse" ? "hover:bg-muted" : ""
-								} ${selectable ? "cursor-pointer" : "cursor-default opacity-60"} ${isSelected && selectable ? "bg-accent" : ""}"
+								class="px-4 py-3 ${
+									this.navigationMode === "mouse" ? "hover:bg-muted" : ""
+								} cursor-pointer border-b border-border ${isSelected ? "bg-accent" : ""} ${hasKey ? "" : "opacity-45"}"
 								@click=${() => this.handleSelect(model)}
 								@mouseenter=${() => {
-									if (selectable && this.navigationMode === "mouse") {
+									// Only update selection in mouse mode
+									if (this.navigationMode === "mouse") {
 										this.selectedIndex = index;
 									}
 								}}
-								title=${selectable ? "" : modelUnavailableTitle(model)}
+								title=${hasKey ? "" : i18n("API key required — set up in Settings > Providers")}
 							>
 								<div class="flex items-center justify-between gap-2 mb-1">
 									<div class="flex items-center gap-2 flex-1 min-w-0">
@@ -467,25 +359,17 @@ export class ModelSelector extends DialogBase {
 										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
 									</div>
 									<div class="flex items-center gap-1.5">
-										${!selectable ? html`<span class="text-muted-foreground" title=${modelUnavailableTitle(model)}>${icon(KeyRound, "sm")}</span>` : ""}
+										${!hasKey ? html`<span class="text-muted-foreground" title=${i18n("API key required")}>${icon(KeyRound, "sm")}</span>` : ""}
 										${Badge(provider, "outline")}
 									</div>
 								</div>
-								<div class="flex items-center justify-between text-xs text-muted-foreground gap-3">
-									<div class="flex items-center gap-2 min-w-0">
+								<div class="flex items-center justify-between text-xs text-muted-foreground">
+									<div class="flex items-center gap-2">
 										<span class="${model.reasoning ? "" : "opacity-30"}">${icon(Brain, "sm")}</span>
-										<span class="${modelSupportsVision(model) ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
+										<span class="${model.input.includes("image") ? "" : "opacity-30"}">${icon(ImageIcon, "sm")}</span>
 										<span>${this.formatTokens(model.contextWindow)}K/${this.formatTokens(model.maxTokens)}K</span>
-										${!selectable ? html`<span class="truncate">${destination.action}</span>` : ""}
 									</div>
-									<div class="flex items-center gap-2 shrink-0">
-										${!selectable ? html`
-											<button
-												class="text-xs text-primary hover:underline"
-												@click=${(e: Event) => { e.stopPropagation(); this.openSettingsForModel(model); }}
-											>${destination.label}</button>
-										` : html`<span>${formatModelCost(cost)}</span>`}
-									</div>
+									<span>${formatModelCost(model.cost)}</span>
 								</div>
 							</div>
 						`;

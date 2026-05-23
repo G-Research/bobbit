@@ -81,7 +81,7 @@ Most AI coding tools are either locked inside an IDE or limited to a terminal. B
 - **Full agent power** — The agent has real shell access. It reads your codebase, edits files, runs builds and tests, searches the web, and automates browsers. No copy-pasting code snippets.
 - **Watch everything happen** — Every file read, shell command, and edit streams to your browser in real time with rich tool-call renderers. You see exactly what the agent is doing and can steer it at any point.
 - **Sessions survive everything** — Sessions persist to disk. Restart the server, close your browser, lose your connection — pick up right where you left off.
-- **Zero config** — `npx bobbit` and you're running. Bobbit uses existing `~/.pi/` credentials or prompts only when you opt into a direct-cloud provider; no Docker or cloud setup required.
+- **Zero config** — `npx bobbit` and you're running. No API keys to configure (uses your existing `~/.pi/` credentials), no Docker, no cloud setup.
 - **Runs anywhere, even offline** — `npm install bobbit` uses only the npm registry, with no compile step and no postinstall network fetches. The `fd` and `rg` search binaries ship as a small (~3–5 MB) per-platform optional npm sub-package so search works out of the box without runtime downloads; airgapped machines and corporate networks are first-class. A startup connectivity probe wires `PI_OFFLINE=1` through to agent subprocesses when the network is unreachable, so search tools fail fast with a clear error instead of stalling on doomed downloads.
 
 ## Features
@@ -128,7 +128,6 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Getting Started](docs/getting-started.md) | First session walkthrough and key concepts |
 | [Features](docs/features.md) | Detailed feature reference |
 | [Architecture](docs/architecture.md) | System design, layers, and dependencies |
-| [Provider Opt-In Auth](docs/provider-opt-in-auth.md) | Cloud vendor enablement, credentials, and auth gates |
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |

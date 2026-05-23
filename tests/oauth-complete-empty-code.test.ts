@@ -2,8 +2,8 @@
  * Unit test for `oauthComplete` in `src/server/auth/oauth.ts`.
  *
  * Contract:
- *   - Empty `authCode`              → { success: false, error: "code required", provider: "anthropic" }.
- *   - Whitespace-only `authCode`    → { success: false, error: "code required", provider: "anthropic" }.
+ *   - Empty `authCode`              → { success: false, error: "code required" }.
+ *   - Whitespace-only `authCode`    → { success: false, error: "code required" }.
  *   - Unknown `flowId`              → { success: false, error: "Unknown or expired flow ID" }.
  */
 import { describe, it } from "node:test";
@@ -16,30 +16,7 @@ const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-empty-"));
 mkdirSync(path.join(tmp, "agent"), { recursive: true });
 process.env.BOBBIT_AGENT_DIR = path.join(tmp, "agent");
 
-const { oauthComplete, oauthStart } = await import("../src/server/auth/oauth.js");
-
-async function completeAnthropicAndCaptureTokenBody(authCode: string): Promise<Record<string, any>> {
-	const previousFetch = globalThis.fetch;
-	let capturedBody: Record<string, any> | undefined;
-	globalThis.fetch = (async (url: any, init?: any) => {
-		assert.equal(String(url), "https://console.anthropic.com/v1/oauth/token");
-		capturedBody = JSON.parse(String(init?.body || "{}"));
-		return new Response(JSON.stringify({
-			access_token: "anthropic-access-token-test",
-			refresh_token: "anthropic-refresh-token-test",
-			expires_in: 3600,
-		}), { status: 200, headers: { "Content-Type": "application/json" } });
-	}) as typeof fetch;
-	try {
-		const start = await oauthStart("anthropic");
-		const res = await oauthComplete(start.flowId, authCode);
-		assert.deepEqual(res, { success: true, provider: "anthropic" });
-		assert.ok(capturedBody, "token exchange body should be captured");
-		return capturedBody;
-	} finally {
-		globalThis.fetch = previousFetch;
-	}
-}
+const { oauthComplete } = await import("../src/server/auth/oauth.js");
 
 describe("oauthComplete — input validation", () => {
 	it("unknown flowId → 'Unknown or expired flow ID'", async () => {
@@ -60,37 +37,13 @@ describe("oauthComplete — input validation", () => {
 		assert.ok(start.flowId, "flow id should be returned");
 
 		const res1 = await oauthComplete(start.flowId, "");
-		assert.deepEqual(res1, { success: false, error: "code required", provider: "anthropic" });
+		assert.deepEqual(res1, { success: false, error: "code required" });
 	});
 
 	it("whitespace-only authCode for a real flow → 'code required'", async () => {
+		const { oauthStart } = await import("../src/server/auth/oauth.js");
 		const start = await oauthStart("anthropic");
 		const res = await oauthComplete(start.flowId, "   \t\n  ");
-		assert.deepEqual(res, { success: false, error: "code required", provider: "anthropic" });
-	});
-
-	it("Anthropic manual fallback preserves raw code#state input", async () => {
-		const body = await completeAnthropicAndCaptureTokenBody("raw-code#raw-state");
-		assert.equal(body.code, "raw-code");
-		assert.equal(body.state, "raw-state");
-		assert.equal(body.redirect_uri, "https://console.anthropic.com/oauth/code/callback");
-		assert.equal(typeof body.code_verifier, "string");
-		assert.ok(body.code_verifier.length > 0);
-	});
-
-	it("Anthropic manual fallback parses callback URL query code and hash state", async () => {
-		const body = await completeAnthropicAndCaptureTokenBody(
-			"https://console.anthropic.com/oauth/code/callback?code=callback-code%2F123#callback-state",
-		);
-		assert.equal(body.code, "callback-code/123");
-		assert.equal(body.state, "callback-state");
-	});
-
-	it("Anthropic manual fallback parses code and state from URL hash parameters", async () => {
-		const body = await completeAnthropicAndCaptureTokenBody(
-			"https://console.anthropic.com/oauth/code/callback#code=hash-code&state=hash-state",
-		);
-		assert.equal(body.code, "hash-code");
-		assert.equal(body.state, "hash-state");
+		assert.deepEqual(res, { success: false, error: "code required" });
 	});
 });

@@ -162,20 +162,10 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
-		// Create an isolated fake agent auth store so general API E2E tests do not
-		// depend on the developer machine's ~/.bobbit credentials. Provider opt-in
-		// tests override BOBBIT_AGENT_DIR when they need a clean auth state.
-		const agentDir = join(bobbitDir, "agent");
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-			anthropic: { type: "oauth", access: "e2e-anthropic-access", refresh: "e2e-anthropic-refresh", expires: Date.now() + 86_400_000 },
-		}));
-
 		// Set BOBBIT_DIR env BEFORE importing server modules.
 		// Playwright workers are separate Node processes, so module singletons
 		// (bobbit-dir._projectRoot, caches) are per-worker — no cross-contamination.
 		process.env.BOBBIT_DIR = bobbitDir;
-		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";

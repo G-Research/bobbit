@@ -12,8 +12,6 @@ import { test, expect } from "../gateway-harness.js";
 import { waitForHealth } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
-const modelNamePattern = /mock-model|claude-|gpt-/;
-
 test.describe("Prompt stats E2E", () => {
 	test.describe.configure({ mode: "parallel" });
 
@@ -36,9 +34,8 @@ test.describe("Prompt stats E2E", () => {
 		// re-render can take noticeably longer than the agent's "OK" response,
 		// so use generous timeouts on every field.
 
-		// PI-15: Model name displayed. Provider opt-in auth enables an authenticated
-		// cloud default in E2E, so this may be the mock model or the selected vendor model.
-		await expect(statsBar).toContainText(modelNamePattern, { timeout: 20_000 });
+		// PI-15: Model name displayed
+		await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
 
 		// PI-17: Context usage bar shows percentage
 		const contextSpan = page.locator("span[title*='Context:']");
@@ -71,7 +68,7 @@ test.describe("Prompt stats E2E", () => {
 
 		// Popover content populates from state; use auto-retrying assertions
 		// rather than a one-shot textContent snapshot.
-		await expect(popover).toContainText(modelNamePattern, { timeout: 10_000 });
+		await expect(popover).toContainText("mock-model", { timeout: 10_000 });
 		await expect(popover).toContainText("Context Usage", { timeout: 5_000 });
 		await expect(popover).toContainText("Messages", { timeout: 5_000 });
 		await expect(popover).toContainText("Turns", { timeout: 5_000 });
@@ -104,7 +101,7 @@ test.describe("Prompt stats E2E", () => {
 
 		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
 		await expect(statsBar).toBeVisible({ timeout: 10_000 });
-		await expect(statsBar).toContainText(modelNamePattern, { timeout: 10_000 });
+		await expect(statsBar).toContainText("mock-model", { timeout: 10_000 });
 
 		await page.reload();
 
@@ -116,7 +113,7 @@ test.describe("Prompt stats E2E", () => {
 
 		// Post-reload, the stats bar re-fetches session metadata over WS.
 		// toContainText auto-retries until content matches or timeout.
-		await expect(statsBar).toContainText(modelNamePattern, { timeout: 15_000 });
+		await expect(statsBar).toContainText("mock-model", { timeout: 15_000 });
 	});
 
 

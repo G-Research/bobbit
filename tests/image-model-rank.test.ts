@@ -48,8 +48,6 @@ function withRegistry<T>(fn: (reg: ReturnType<typeof getAvailableImageModels>) =
 	const dir = mkdtempSync(path.join(tmpdir(), "bobbit-imr-"));
 	try {
 		const prefs = new PreferencesStore(dir);
-		prefs.set("providerEnabled.openai", true);
-		prefs.set("providerEnabled.google", true);
 		return fn(getAvailableImageModels(prefs));
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

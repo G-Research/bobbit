@@ -214,14 +214,13 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Mark setup as complete so the setup wizard doesn't appear in tests
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 
-		// Create a fake agent dir with auth.json so browser tests have an isolated
-		// authenticated direct-cloud provider. Provider opt-in auth requires a
-		// usable access token before session creation; the mock bridge never sends
-		// this token to a real vendor.
+		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
+		// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
+		// by setting BOBBIT_AGENT_DIR we redirect that to our isolated dir.
 		const agentDir = join(bobbitDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-			anthropic: { type: "oauth", access: "e2e-anthropic-access", refresh: "e2e-anthropic-refresh", expires: Date.now() + 86_400_000 },
+			anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
 		}));
 
 		// Set env BEFORE importing server modules. Playwright workers are
