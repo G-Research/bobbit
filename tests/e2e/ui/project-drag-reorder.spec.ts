@@ -293,14 +293,16 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		createdProjects = [];
 	});
 
-	test("desktop handle is hidden until hover/focus; header and action clicks do not start reorder", async ({ page }) => {
+	test("desktop affordances, pointer reorder persistence, live sync, cancel, and collapsed sidebar order", async ({ page }) => {
 		test.setTimeout(120_000);
-		const alpha = await createProjectFixture("desktop-affordance-alpha");
-		const beta = await createProjectFixture("desktop-affordance-beta");
+		const alpha = await createProjectFixture("desktop-alpha");
+		const beta = await createProjectFixture("desktop-beta");
+		const gamma = await createProjectFixture("desktop-gamma");
 
 		await openDesktop(page);
-		await waitForProjects(page, [alpha, beta]);
-		await expectSessionContentsVisible(page, [alpha, beta]);
+		await waitForProjects(page, [alpha, beta, gamma]);
+		await expectRenderedOrder(page, [alpha, beta, gamma]);
+		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
 
 		const header = projectHeader(page, alpha.id);
 		const handle = projectHandle(page, alpha.id);
@@ -328,33 +330,38 @@ test.describe("Project drag reorder (browser E2E)", () => {
 		await header.hover();
 		await header.locator('button[title="Project settings"]').click();
 		await expect(reorderMode(page), "project settings click should not start reorder mode").toHaveCount(0);
-		await expectRenderedOrder(page, [alpha, beta]);
+		await expectRenderedOrder(page, [alpha, beta, gamma]);
 
 		await header.locator('button[title^="New goal in"]').click();
 		await expect(reorderMode(page), "project new-goal click should not start reorder mode").toHaveCount(0);
-		await expectRenderedOrder(page, [alpha, beta]);
-		await page.keyboard.press("Escape");
-	});
-
-	test("desktop drag reorders, temporarily collapses contents, restores on drop/cancel, persists, and collapsed sidebar follows order", async ({ page }) => {
-		test.setTimeout(120_000);
-		const alpha = await createProjectFixture("desktop-alpha");
-		const beta = await createProjectFixture("desktop-beta");
-		const gamma = await createProjectFixture("desktop-gamma");
-
-		await openDesktop(page);
-		await waitForProjects(page, [alpha, beta, gamma]);
 		await expectRenderedOrder(page, [alpha, beta, gamma]);
-		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
+		await page.keyboard.press("Escape");
 
-		await startProjectDrag(page, gamma);
-		await expectSessionContentsCollapsed(page, [alpha, beta, gamma]);
-		await dropProjectOn(page, alpha, "before");
+		const peer = await page.context().newPage();
+		try {
+			await openDesktop(peer);
+			await waitForProjects(peer, [alpha, beta, gamma]);
+			await expectRenderedOrder(peer, [alpha, beta, gamma]);
+			await navigateToHash(peer, `#/session/${alpha.sessionId}`);
+			await waitForRemoteAgentConnected(peer, alpha.sessionId);
+			await expectRenderedOrder(peer, [alpha, beta, gamma]);
 
-		await expectRenderedOrder(page, [gamma, alpha, beta]);
-		await expectPersistedOrder([gamma, alpha, beta]);
-		await expectNoProjectOrderFailureDialog(page);
-		await expectSessionContentsVisible(page, [alpha, beta, gamma]);
+			// Prove the live update comes from the WebSocket broadcast, not the
+			// fallback project polling path used when no session WebSocket exists.
+			await blockProjectListFetches(peer);
+
+			await startProjectDrag(page, gamma);
+			await expectSessionContentsCollapsed(page, [alpha, beta, gamma]);
+			await dropProjectOn(page, alpha, "before");
+
+			await expectRenderedOrder(page, [gamma, alpha, beta]);
+			await expectPersistedOrder([gamma, alpha, beta]);
+			await expectNoProjectOrderFailureDialog(page);
+			await expectRenderedOrder(peer, [gamma, alpha, beta]);
+			await expectSessionContentsVisible(page, [alpha, beta, gamma]);
+		} finally {
+			await peer.close().catch(() => {});
+		}
 
 		await startProjectDrag(page, alpha);
 		await expectSessionContentsCollapsed(page, [alpha, beta, gamma]);
@@ -375,38 +382,6 @@ test.describe("Project drag reorder (browser E2E)", () => {
 			message: "collapsed sidebar should render sessions grouped in persisted project order",
 			timeout: 10_000,
 		}).toEqual(expectedTitles);
-	});
-
-	test("connected second page updates from projects_changed without reload", async ({ page }) => {
-		test.setTimeout(120_000);
-		const alpha = await createProjectFixture("live-sync-alpha");
-		const beta = await createProjectFixture("live-sync-beta");
-		const gamma = await createProjectFixture("live-sync-gamma");
-
-		await openDesktop(page);
-		await waitForProjects(page, [alpha, beta, gamma]);
-		await expectRenderedOrder(page, [alpha, beta, gamma]);
-
-		const peer = await page.context().newPage();
-		try {
-			await openDesktop(peer);
-			await waitForProjects(peer, [alpha, beta, gamma]);
-			await expectRenderedOrder(peer, [alpha, beta, gamma]);
-			await navigateToHash(peer, `#/session/${alpha.sessionId}`);
-			await waitForRemoteAgentConnected(peer, alpha.sessionId);
-			await expectRenderedOrder(peer, [alpha, beta, gamma]);
-
-			// Prove the live update comes from the WebSocket broadcast, not the
-			// fallback project polling path used when no session WebSocket exists.
-			await blockProjectListFetches(peer);
-
-			await startProjectDrag(page, gamma);
-			await dropProjectOn(page, alpha, "before");
-			await expectPersistedOrder([gamma, alpha, beta]);
-			await expectRenderedOrder(peer, [gamma, alpha, beta]);
-		} finally {
-			await peer.close().catch(() => {});
-		}
 	});
 
 	test("mobile handle is always visible; pointer drag reorders with temporary collapse/restore and reload persistence", async ({ page }) => {
