@@ -196,52 +196,6 @@ async function fetchRemoteTrackingBranch(worktreePath: string, branch: string): 
 	});
 }
 
-async function hasOriginRemote(worktreePath: string): Promise<boolean> {
-	try {
-		const { stdout } = await execGit(["config", "--get", "remote.origin.url"], {
-			cwd: worktreePath,
-			timeout: 5_000,
-		});
-		return stdout.trim().length > 0;
-	} catch {
-		return false;
-	}
-}
-
-async function localRemoteTrackingBranchExists(worktreePath: string, branch: string): Promise<boolean> {
-	try {
-		await execGit(["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`], {
-			cwd: worktreePath,
-			timeout: 5_000,
-		});
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function remoteBranchExists(worktreePath: string, branch: string): Promise<boolean> {
-	if (await localRemoteTrackingBranchExists(worktreePath, branch)) return true;
-
-	if (!(await hasOriginRemote(worktreePath))) return false;
-
-	try {
-		await execGit(["ls-remote", "--exit-code", "--heads", "origin", branch], {
-			cwd: worktreePath,
-			timeout: 10_000,
-		});
-		try {
-			await fetchRemoteTrackingBranch(worktreePath, branch);
-		} catch {
-			// Best-effort: --set-upstream-to below will fall back to clearing if the
-			// local tracking ref could not be materialized.
-		}
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 async function currentBranchUpstream(worktreePath: string, branch: string): Promise<string | null> {
 	try {
 		const { stdout } = await execGit(["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`], {
@@ -286,26 +240,10 @@ async function setBranchUpstreamToOrigin(worktreePath: string, branch: string): 
 async function ensureClaimedBranchSafeUpstream(worktreePath: string, branch: string): Promise<void> {
 	const desired = `origin/${branch}`;
 	const inherited = await currentBranchUpstream(worktreePath, branch);
-	if (inherited === desired) return;
+	if (!inherited || inherited === desired) return;
 
-	if (!inherited) {
-		// Fast path for normal pool entries with no upstream: avoid a synchronous
-		// remote probe unless we already know about origin/<branch> locally.
-		if (await localRemoteTrackingBranchExists(worktreePath, branch)) {
-			await setBranchUpstreamToOrigin(worktreePath, branch);
-		}
-		return;
-	}
-
-	if (await remoteBranchExists(worktreePath, branch)) {
-		try {
-			await setBranchUpstreamToOrigin(worktreePath, branch);
-			return;
-		} catch (err) {
-			console.warn(`[worktree-pool] Failed to set upstream for ${branch} to ${desired}; clearing inherited upstream: ${err instanceof Error ? err.message : err}`);
-		}
-	}
-
+	// Claim must never wait on the network. Drop inherited tracking immediately;
+	// background freshen publishes an explicit refspec and then sets origin/<branch>.
 	await clearBranchUpstream(worktreePath, branch);
 	const upstream = await currentBranchUpstream(worktreePath, branch);
 	if (upstream && upstream !== desired) {
@@ -408,8 +346,8 @@ export class WorktreePool {
 	 *
 	 * Steps performed synchronously (the caller awaits the rename):
 	 *   1. `git branch -m pool/_pool-<id> <targetBranch>`
-	 *   2. Clear any inherited upstream, or point it at `origin/<targetBranch>`
-	 *      when that remote branch already exists.
+	 *   2. Clear any inherited upstream unless it already points at
+	 *      `origin/<targetBranch>`.
 	 *   3. `git worktree move <oldPath> <newPath>` — on failure the call
 	 *      returns null (caller falls back to `createWorktree`). No persistent
 	 *      "degraded" state is emitted: post-refactor (see
@@ -570,7 +508,7 @@ export class WorktreePool {
 		}
 
 		// 2. Per-repo: rename the branch, clear any inherited upstream, and repair
-		// worktree pointers in parallel.
+		// worktree pointers in parallel. No remote probes run on the claim path.
 		const perRepo = await Promise.all(worktrees.map(async (w) => {
 			const oldWtPath = w.worktreePath;
 			const newWtPath = finalContainer === entry.worktreePath
