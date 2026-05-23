@@ -76,6 +76,32 @@ async function upstream(cwd: string): Promise<string | null> {
 	return result.ok ? result.stdout : null;
 }
 
+async function waitForPublishedUpstream(
+	root: string,
+	origin: string,
+	worktreePath: string,
+	branch: string,
+): Promise<{ upstreamName: string; remoteSha: string }> {
+	const expectedUpstream = `origin/${branch}`;
+	const deadline = Date.now() + 10_000;
+	let lastUpstream: string | null = null;
+	let lastRemoteSha: string | null = null;
+
+	while (Date.now() < deadline) {
+		lastUpstream = await upstream(worktreePath);
+		lastRemoteSha = await remoteRef(root, origin, `refs/heads/${branch}`);
+		if (lastUpstream === expectedUpstream && lastRemoteSha) {
+			return { upstreamName: lastUpstream, remoteSha: lastRemoteSha };
+		}
+		await new Promise(resolve => setTimeout(resolve, 100));
+	}
+
+	assert.fail(
+		`Timed out waiting for ${branch} to be published and track ${expectedUpstream}; ` +
+		`last upstream: ${lastUpstream ?? "<none>"}, last remote ref: ${lastRemoteSha ?? "<missing>"}`,
+	);
+}
+
 function cleanup(root: string): void {
 	try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
@@ -149,6 +175,39 @@ describe("goal/session branch push safety regressions", () => {
 				`Claimed branch must track origin/goal/foo or have no upstream; actual upstream: ${claimedUpstream ?? "<none>"}`,
 			);
 		} finally {
+			await cleanupAfterPoolFreshen(root);
+		}
+	});
+
+	it("claimed pool branch is published and repaired to origin/goal/foo upstream when push is enabled", async () => {
+		const { root, repo, origin } = await makeRemoteBackedRepo();
+		const testNoPush = process.env.BOBBIT_TEST_NO_PUSH;
+		try {
+			const poolBranch = "pool/_pool-publish-repair";
+			const poolWorktree = path.join(root, "repo-wt", "pool-_pool-publish-repair");
+			await git(repo, ["worktree", "add", "-b", poolBranch, poolWorktree, "origin/master"]);
+			await git(poolWorktree, ["branch", "--set-upstream-to=origin/master", poolBranch]);
+			assert.equal(await upstream(poolWorktree), "origin/master", "fixture must start with an inherited origin/master upstream");
+
+			delete process.env.BOBBIT_TEST_NO_PUSH;
+
+			const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
+			pool.registerExternalEntry(poolBranch, poolWorktree);
+
+			const claim = await pool.claim("goal/foo");
+			assert.ok(claim, "pool claim should succeed");
+			assert.notEqual(
+				await upstream(claim!.worktreePath),
+				"origin/master",
+				"claimed branch must synchronously drop inherited origin/master before background publish",
+			);
+
+			const repaired = await waitForPublishedUpstream(root, origin, claim!.worktreePath, "goal/foo");
+			assert.equal(repaired.upstreamName, "origin/goal/foo");
+			assert.ok(repaired.remoteSha, "background publish must create refs/heads/goal/foo on origin");
+		} finally {
+			if (testNoPush === undefined) delete process.env.BOBBIT_TEST_NO_PUSH;
+			else process.env.BOBBIT_TEST_NO_PUSH = testNoPush;
 			await cleanupAfterPoolFreshen(root);
 		}
 	});
