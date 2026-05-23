@@ -1,9 +1,10 @@
 /**
- * Add Project — preflight panel + archive CTA (browser E2E).
+ * Add Project — preflight panel, directory picker, and archive CTA (browser E2E).
  *
  * Server contract under test (see docs/design/robust-add-project.md):
  *  - `GET /api/projects/preflight?path=<abs>` → `PreflightReport` with
- *    pass/warn/fail checks. Submit is blocked while any check.level === "fail".
+ *    pass/warn/fail checks after typing a path or choosing one with Browse → Select.
+ *    Submit is blocked while any check.level === "fail".
  *  - `POST /api/projects/archive-bobbit` body `{ rootPath }` → moves
  *    project-scoped `.bobbit/` contents into `.bobbit-archive-NNN/`, never
  *    touching gateway-owned allowlist entries (state/gateway-url,
@@ -26,12 +27,12 @@
 import { test, expect, type Page } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
-function uniqueDir(label: string): string {
-	const dir = join(tmpdir(), `bobbit-e2e-preflight-${label}-${process.env.E2E_PORT}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+function uniqueDir(label: string, baseDir = tmpdir()): string {
+	const dir = join(baseDir, `bobbit-e2e-preflight-${label}-${process.env.E2E_PORT}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
@@ -74,6 +75,24 @@ async function preflightAvailable(): Promise<boolean> {
 	}
 }
 
+type PreflightWireReport = {
+	rootPath?: string;
+	hasFail?: boolean;
+	checks?: Array<{ id?: string; level?: string }>;
+};
+
+async function waitForNextPreflightReport(page: Page): Promise<PreflightWireReport> {
+	const res = await page.waitForResponse((response) => {
+		try {
+			return new URL(response.url()).pathname === "/api/projects/preflight";
+		} catch {
+			return false;
+		}
+	}, { timeout: 8_000 });
+	expect(res.ok()).toBe(true);
+	return await res.json() as PreflightWireReport;
+}
+
 test.describe("Add Project — preflight panel", () => {
 	test.afterEach(async () => {
 		const res = await apiFetch("/api/projects");
@@ -85,27 +104,67 @@ test.describe("Add Project — preflight panel", () => {
 		}
 	});
 
-	test("happy path: empty directory shows ready preflight and enabled Continue", async ({ page }, testInfo) => {
+	test("happy path: Browse selects empty directory, shows ready preflight, and enables Continue", async ({ page, gateway }, testInfo) => {
 		if (!(await preflightAvailable())) testInfo.skip(true, "preflight endpoint unavailable");
-		const dir = uniqueDir("happy");
+		const dir = uniqueDir("picker", gateway.bobbitDir);
+		const dirName = basename(dir);
 
-		await openAddProjectDialog(page);
-		await page.locator('input[placeholder="/path/to/project"]').fill(dir);
+		try {
+			await openAddProjectDialog(page);
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
 
-		const rendered = await waitForPreflight(page);
-		expect(rendered).toBe(true);
+			// Nothing typed yet: Browse → Select must be the action that starts preflight.
+			await expect(page.locator('[data-testid="preflight-panel"]')).toHaveCount(0);
+			await page.locator("button").filter({ hasText: "Browse" }).first().click();
+			const directoryBrowser = page.locator('[data-testid="directory-browser"]');
+			await expect(directoryBrowser).toBeVisible({ timeout: 5_000 });
 
-		const panel = page.locator('[data-testid="preflight-panel"]');
-		await expect(panel).toHaveAttribute("data-has-fail", "0");
-		await expect(page.locator('[data-testid="preflight-ok"]')).toBeVisible();
+			const entry = directoryBrowser.locator('[data-testid="browse-entry"]').filter({ hasText: dirName }).first();
+			await expect(entry).toBeVisible({ timeout: 5_000 });
+			const browseResponsePromise = page.waitForResponse((response) => {
+				try {
+					const url = new URL(response.url());
+					return url.pathname === "/api/browse-directory" && (url.searchParams.get("path") ?? "").includes(dirName);
+				} catch {
+					return false;
+				}
+			}, { timeout: 5_000 });
+			await entry.click();
+			await browseResponsePromise;
+			await expect.poll(
+				async () => (await directoryBrowser.locator("[title]").first().getAttribute("title")) ?? "",
+				{ timeout: 5_000 },
+			).toContain(dirName);
 
-		// At least the path.absolute + path.exists checks should be present.
-		await expect(page.locator('[data-testid="preflight-check"][data-check-id="path.absolute"]')).toBeVisible();
-		await expect(page.locator('[data-testid="preflight-check"][data-check-id="path.exists"]')).toBeVisible();
+			const preflightReportPromise = waitForNextPreflightReport(page);
+			const selectBtn = page.locator("button").filter({ hasText: "Select" }).first();
+			await expect(selectBtn).toBeEnabled({ timeout: 5_000 });
+			await selectBtn.click();
+			const report = await preflightReportPromise;
 
-		// Continue is enabled.
-		const cont = page.locator("button").filter({ hasText: "Continue" }).first();
-		await expect(cont).toBeEnabled();
+			await expect(directoryBrowser).not.toBeVisible({ timeout: 5_000 });
+			await expect.poll(async () => await pathInput.inputValue(), { timeout: 5_000 }).toContain(dirName);
+			expect(report.rootPath ?? "").toContain(dirName);
+			expect(report.hasFail).toBe(false);
+			expect(report.checks?.some(check => check.id === "path.exists" && check.level === "pass")).toBe(true);
+
+			const rendered = await waitForPreflight(page);
+			expect(rendered).toBe(true);
+
+			const panel = page.locator('[data-testid="preflight-panel"]');
+			await expect(panel).toHaveAttribute("data-has-fail", "0");
+			await expect(page.locator('[data-testid="preflight-ok"]')).toBeVisible();
+
+			// At least the path.absolute + path.exists checks should be present.
+			await expect(page.locator('[data-testid="preflight-check"][data-check-id="path.absolute"]')).toBeVisible();
+			await expect(page.locator('[data-testid="preflight-check"][data-check-id="path.exists"]')).toBeVisible();
+
+			// Continue is enabled for the empty directory selected via Browse.
+			const cont = page.locator("button").filter({ hasText: "Continue" }).first();
+			await expect(cont).toBeEnabled();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("fail blocks submit: nested-in-existing-project surfaces fail row and disables Continue", async ({ page }, testInfo) => {
@@ -143,6 +202,5 @@ test.describe("Add Project — preflight panel", () => {
 		const cont = page.locator("button").filter({ hasText: "Continue" }).first();
 		await expect(cont).toBeDisabled();
 	});
-
 
 });

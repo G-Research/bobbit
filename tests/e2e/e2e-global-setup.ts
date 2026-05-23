@@ -6,7 +6,7 @@
  * browser tests fail because the UI assets don't exist.
  */
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,16 +42,10 @@ export default function globalSetup() {
 	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
 	const uiDir = join(projectRoot, "dist", "ui");
 
-	// V8 compile cache root — each Playwright run gets a fresh parent, and
-	// each worker enables its own subdir below it (see gateway-harness.ts /
-	// in-process-harness.ts). A shared cache dir across concurrent workers —
-	// or across rebuilds when Windows reuses a worker pid — produced spurious
-	// "SyntaxError: module X does not provide an export Y" on first import.
-	const cacheRoot = join(tmpdir(), "bobbit-e2e-v8cache", `run-${process.pid}-${Date.now()}`);
-	try { mkdirSync(cacheRoot, { recursive: true }); } catch { /* best-effort */ }
-	process.env.BOBBIT_E2E_V8CACHE_ROOT = cacheRoot;
-	// Explicitly DO NOT set NODE_COMPILE_CACHE here — workers set their own
-	// per-worker subdir via module.enableCompileCache() before any dist/ import.
+	// Do not let a host-level Node compile cache leak into E2E workers. Stale or
+	// partial cache entries produced false ESM startup errors such as "module X
+	// does not provide an export Y" under concurrent Windows runs.
+	process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 	delete process.env.NODE_COMPILE_CACHE;
 
 	// Only build what's missing to keep repeated runs fast

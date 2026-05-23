@@ -20,6 +20,15 @@ function uniqueDir(label: string): string {
 	return realpathSync(dir);
 }
 
+function ensureE2EAgentAuth(): void {
+	const agentDir = process.env.BOBBIT_AGENT_DIR;
+	if (!agentDir) return;
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
+		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+	}));
+}
+
 /** Get all projects from the API. */
 async function getProjects(): Promise<any[]> {
 	const resp = await apiFetch("/api/projects");
@@ -72,7 +81,58 @@ async function findProvisionalProject(dir: string): Promise<any | undefined> {
 	return projects.find((p: any) => p.rootPath === dir && p.provisional);
 }
 
+/**
+ * Wait for the provisional accept cleanup to finish at the source of truth.
+ * The final sidebar assertion is intentionally after this API/client-state gate:
+ * Playwright's click returns before acceptProjectProposal() finishes its async
+ * promote → config write → terminate-session chain, so DOM-only polling can
+ * race a still-live assistant session under load.
+ */
+async function waitForProjectAssistantCleanup(
+	page: import("@playwright/test").Page,
+	sessionId: string,
+	projectId: string,
+): Promise<void> {
+	await expect(async () => {
+		const [sessionsResp, projects] = await Promise.all([
+			apiFetch("/api/sessions"),
+			getProjects(),
+		]);
+		expect(sessionsResp.ok).toBe(true);
+		const sessionsData = await sessionsResp.json();
+		const liveSessions = sessionsData.sessions || [];
+		const liveAssistant = liveSessions.find((s: any) =>
+			s.id === sessionId
+			|| (s.projectId === projectId && (s.assistantType === "project" || s.assistantType === "project-scaffolding")),
+		);
+		expect(liveAssistant, `project assistant session ${sessionId} should be gone from live sessions`).toBeUndefined();
+
+		const promoted = projects.find((p: any) => p.id === projectId);
+		expect(promoted, `project ${projectId} should still be registered`).toBeTruthy();
+		expect(promoted.provisional).toBeFalsy();
+	}).toPass({ timeout: 20_000 });
+
+	await page.waitForFunction(
+		({ sessionId: sid, projectId: pid }) => {
+			const state = (window as any).__bobbitState;
+			if (!state || !Array.isArray(state.gatewaySessions) || !Array.isArray(state.projects)) return false;
+			const liveAssistant = state.gatewaySessions.some((s: any) =>
+				s?.id === sid
+				|| (s?.projectId === pid && (s?.assistantType === "project" || s?.assistantType === "project-scaffolding")),
+			);
+			const promoted = state.projects.find((p: any) => p?.id === pid);
+			return !liveAssistant && !!promoted && !promoted.provisional;
+		},
+		{ sessionId, projectId },
+		{ timeout: 20_000 },
+	);
+}
+
 test.describe("Project assistant UX (consolidated) @quarantine", () => {
+	test.beforeEach(() => {
+		ensureE2EAgentAuth();
+	});
+
 	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 
@@ -137,8 +197,16 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		// Sidebar should no longer show "(setting up)"
 		await expect(sidebar.getByText("Test Project").first()).toBeVisible({ timeout: 15_000 });
 
-		// Project assistant session should be removed from the sidebar immediately
-		await expect(sidebar.getByText("Project Assistant")).toHaveCount(0, { timeout: 10_000 });
+		// Wait on server + hydrated client state before checking the rendered row.
+		await waitForProjectAssistantCleanup(page, sessionId, projectId);
+
+		// Project assistant session should be removed from this project's sidebar bucket after cleanup.
+		// Browser workers share a gateway across multiple spec files, so a broad sidebar
+		// text count can see an unrelated leftover Project Assistant from another project.
+		const projectSection = sidebar.locator(`.project-reorder-section[data-project-id="${projectId}"]`);
+		await expect(projectSection).toHaveCount(1, { timeout: 5_000 });
+		await expect(projectSection.locator(`[data-session-id="${sessionId}"]`)).toHaveCount(0, { timeout: 5_000 });
+		await expect(projectSection.getByText("Project Assistant")).toHaveCount(0, { timeout: 5_000 });
 
 		// Cleanup
 		await deleteSession(sessionId);

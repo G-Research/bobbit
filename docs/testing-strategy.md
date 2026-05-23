@@ -8,7 +8,7 @@
 |-------|-------|-------|---------|-------------|
 | Unit (file:// fixtures + Node) | ~105 | ~625 | <30s | Full (Playwright workers) |
 | API E2E (in-process gateway) | 69 | ~438 | ~60s | 4 workers |
-| Browser E2E (spawned gateway) | ~32 | ~140 | ~90s | 2 workers |
+| Browser E2E (spawned gateway) | ~32 | ~140 | ~90s | 3 workers, spec-serial |
 | Manual integration (real agent + Docker) | 1 | 8 serial steps | ~5 min | **None** |
 | **Total** | **~207** | **~1,211** | **~3 min + 5 min manual** | |
 
@@ -575,80 +575,145 @@ The manual integration tests remain as an optional "nuclear option" (`npm run te
 
 ## E2E suite parallelism budget
 
-The E2E suite historically produced ~12 intermittent "flaky" failures per full
-`npm test` run (708 tests). The same specs passed 100% of the time in isolation,
-even under `--repeat-each=15` — a classic suite-level contention signature.
-Root cause was not per-test logic but resource pressure when many workers each
-spun up a gateway + WebSocket + (for browser tests) a Chromium instance on a
-constrained Windows host. This section documents the budget that eliminated the
-flakes.
+The E2E suite historically produced suite-level contention flakes: specs passed
+in isolation, but full runs failed when many workers each spun up a gateway,
+WebSocket stack, and, for browser tests, a Chromium instance on a constrained
+Windows host. The current budget is intentionally conservative so speed gains do
+not come from over-parallelising a shared filesystem.
 
-### Worker counts
+### Worker and retry counts
 
 Configured in `playwright-e2e.config.ts`:
 
-- Top-level: `workers: 6`
-- `api` project: `workers: 4` (in-process gateway only)
-- `browser` project: `workers: 3`, **`fullyParallel: false`**
+- Top-level: `workers: 4`, `retries: 3`, `fullyParallel: true`.
+- `api` project: `workers: 4` and inherited `fullyParallel: true`.
+- `api-realpush` project: `workers: 1`, `fullyParallel: false`.
+- `browser` project: `workers: 3`, `fullyParallel: false`.
 
-Each worker runs a full in-process gateway; browser workers add a Chromium
-instance on top. On constrained machines — especially Windows, where the temp
-directory is heavily scanned by Defender — higher counts caused tmpdir lock
-storms and intermittent WS `waitFor` timeouts. Serialising the `browser` project
-(`fullyParallel: false`) keeps tests within a worker sequential, which
-dramatically reduces the simultaneous-browser-startup cost without gutting
-throughput across workers.
+Each worker owns a full gateway state directory; browser workers add Chromium
+and static UI serving. The browser and real-push projects stay spec-serial
+inside their project workers because their setup costs and filesystem side
+effects are heavier. The API project remains fully parallel because it uses the
+in-process harness and benefits from all four workers.
+
+### Playwright transform-cache isolation
+
+Run the root E2E suite through the npm wrapper:
+
+```bash
+npm run test:e2e
+```
+
+`npm run test:e2e` builds first, then calls `scripts/run-playwright-e2e.mjs`
+before Playwright's CLI imports transform-cache modules. The wrapper creates a
+run-scoped Playwright transform-cache root, injects
+`scripts/playwright-e2e-cache-bootstrap.cjs` through `NODE_OPTIONS`, and gives
+the runner plus each Playwright worker its own process-local `PWTEST_CACHE_DIR`.
+It also disables Node's compile cache for the run.
+
+This isolation matters because Bobbit agents often run E2E commands from
+overlapping worktrees. Playwright's default transform cache is shared by temp
+root, so concurrent cold imports can reuse partial or stale transforms and show
+false startup errors such as missing ESM exports. Setting the cache before
+Playwright imports its cache code avoids that cross-worktree sharing.
+
+Supported knobs:
+
+- `BOBBIT_E2E_PWTEST_CACHE_ROOT` — canonical base root override. The wrapper
+  creates `pwtest-transform-cache/<run-id>` below this root.
+- `BOBBIT_PWTEST_CACHE_ROOT` — legacy alias for the same base root. The
+  E2E-prefixed variable wins when both are set.
+- `BOBBIT_E2E_RUN_ID` — optional run-id segment for deterministic cache paths.
+- `BOBBIT_KEEP_PWTEST_CACHE=1` — keep an owned run cache after the command for
+  inspection.
+- `BOBBIT_DEBUG_PWTEST_CACHE=1` — print the run cache root at startup.
+
+Direct Playwright invocations are fallback-only:
+
+```bash
+npx playwright test --config playwright-e2e.config.ts
+```
+
+`playwright-e2e.config.ts` sets a run cache if `PWTEST_CACHE_DIR` is missing,
+and the bootstrap can derive one when preloaded with the cache-root env vars.
+That protects worker startup, but it is weaker than the npm wrapper because the
+direct `npx` runner may have already imported Playwright's default transform
+cache before the config executes.
 
 ### Windows temp root
 
 Windows `%LOCALAPPDATA%\Temp\` is scanned by Defender and has historically been
-the hottest FS path on the machine. The E2E harnesses relocate their scratch
-space:
+the hottest filesystem path on the machine. The E2E harnesses relocate their
+scratch space:
 
 - On Windows, the default temp root is `C:\bobbit-e2e\` (not `%LOCALAPPDATA%\Temp\bobbit-e2e\`).
-- Override with the env var `BOBBIT_E2E_TMP_ROOT` — useful for ramdisks or CI
-  runners with a dedicated scratch volume.
-- The Windows path branch and env-var override are duplicated across
-  `tests/e2e/gateway-harness.ts`, `tests/e2e/in-process-harness.ts`, and
-  `tests/e2e/e2e-teardown.ts`. Keep them in sync when editing.
+- Override with `BOBBIT_E2E_TMP_ROOT` for ramdisks or CI runners with a
+  dedicated scratch volume.
+- Keep the temp-root logic in the harnesses and `tests/e2e/e2e-teardown.ts` in
+  sync when editing.
 
 ### Teardown strategy
 
 Per-worker teardown uses **fire-and-forget async `rm`** to release the worker as
-soon as its tests finish. The global teardown
-(`tests/e2e/e2e-teardown.ts`) then sweeps any `.e2e-browser-*` and
-`.e2e-inproc-*` subdirectories under `E2E_TEMP_ROOT` at suite end as a safety
-net.
+soon as its tests finish. Global teardown (`tests/e2e/e2e-teardown.ts`) is a
+safety net only:
 
-Do **not** re-add synchronous `rmSync` to per-worker teardown. It serialises
-under FS pressure (Windows handle churn, Defender locks) and was one of the
-original causes of the flake pattern.
+- It removes the current run's legacy `BOBBIT_DIR` shapes when the env var
+  identifies one.
+- It removes old project-root `.e2e-worker-*` directories.
+- Under the shared E2E temp root, it removes only modern `.e2e-inproc-*` and
+  `.e2e-browser-*` harness directories whose encoded owner PID has exited.
+- It removes an owned Playwright transform cache unless `BOBBIT_KEEP_PWTEST_CACHE=1` is set.
+
+Do **not** change global teardown to sweep every `.e2e-*` directory under the
+shared temp root. Overlapping worktrees and active E2E runs use the same root;
+unknown or live directories must be left alone. Also do **not** re-add
+synchronous `rmSync` to per-worker teardown. It serialises under filesystem
+pressure and was one of the original causes of the flake pattern.
 
 ### Measurement protocol
 
-When changing anything that touches this budget — worker counts, temp root,
-teardown, or webServer hooks — measure with:
+Acceptance timing must use the exact command, including build and wrapper cache
+isolation:
 
 ```bash
-npx playwright test --config playwright-e2e.config.ts --retries=0
+npm run test:e2e
 ```
 
-Run the above **three times consecutively**. Target: **zero first-attempt
-failures across all three runs**.
+For flake experiments, prefer the same wrapper with retries disabled:
 
-`--retries=0` is a CLI flag used only for measurement. The committed config
-keeps `retries: 2` as the production value so real runs tolerate genuinely
-rare flakes (e.g. Windows port allocation races) without red-lighting CI.
+```bash
+npm run test:e2e -- --retries=0
+```
+
+If the build is already known fresh and you only need the Playwright portion,
+this wrapper-backed equivalent is acceptable:
+
+```bash
+npm run test:e2e:run -- --retries=0
+```
+
+Run flake experiments repeatedly enough to distinguish suite-level contention
+from one-off noise; three consecutive retry-free runs is the usual target for
+changes to worker counts, temp/cache roots, teardown, or webServer hooks. Direct
+`npx playwright test --config playwright-e2e.config.ts --retries=0` is only a
+fallback when the npm wrapper is unavailable, and its runner-cache isolation is
+weaker for the reason described above.
+
+`--retries=0` is a measurement flag only. The committed E2E config keeps
+`retries: 3` for normal runs so genuinely rare flakes do not red-light the full
+suite while they are being fixed.
 
 ### What not to change without re-measuring
 
-- Don't raise `workers` above 6.
-- Don't set `fullyParallel: true` on the `browser` project.
-- Don't remove the `BOBBIT_E2E_TMP_ROOT` env-var override or the Windows
-  `C:\bobbit-e2e\` path branch.
-- Don't serialise the `api` project — only `browser` needs it; `api` tests are
-  lightweight (no browser) and benefit from full parallelism within their
-  4-worker budget.
+- Don't raise the top-level worker budget above 4 as a primary speed strategy.
+- Don't set `fullyParallel: true` on the `browser` or `api-realpush` projects.
+- Don't serialise the `api` project; it is the lightweight in-process lane and
+  benefits from its 4-worker budget.
+- Don't remove the wrapper-backed `npm run test:e2e` path or replace it with raw
+  `npx` as the primary command.
+- Don't remove `BOBBIT_E2E_TMP_ROOT`, `BOBBIT_E2E_PWTEST_CACHE_ROOT`, or the
+  Windows `C:\bobbit-e2e\` default without measuring the filesystem impact.
 
-If a future change must violate any of the above, re-run the 3× measurement
+If a future change must violate any of the above, re-run the measurement
 protocol and update this section with the new numbers.

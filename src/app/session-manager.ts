@@ -633,14 +633,15 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 // ============================================================================
 // PROMPT DRAFT PERSISTENCE
 // ============================================================================
-// Module-level state prevents monkey-patch stacking across session switches.
-// Each call to _setupPromptDraftHandlers cancels the previous session's timers
-// and rebinds to the new session ID without wrapping old handlers.
+// Module-level state prevents listener stacking across session switches.
+// Bind the active session before the editor can become interactive; restore is
+// deliberately separate so late server reads never overwrite fresh local input.
 
 let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
+let _draftTouchedSinceBind = false;
 /** Tracks the in-flight save promise so session switches can await it. */
 let _pendingSave: Promise<void> | null = null;
 
@@ -651,25 +652,35 @@ let _draftGen = 0;
 /** The generation at which the last send occurred. Any draft with gen < this is stale. */
 let _draftSendGen = 0;
 
+function _trackPendingDraftSave(promise: Promise<void>): Promise<void> {
+	const tracked = promise.finally(() => {
+		if (_pendingSave === tracked) _pendingSave = null;
+	});
+	_pendingSave = tracked;
+	return tracked;
+}
+
 /** Immediately persist the given draft value (or delete if empty).
- *  Returns the save promise when content is non-empty so callers can await it. */
+ *  Returns the save promise so callers can await it. */
 function _flushDraft(rawVal?: string): Promise<void> | void {
 	if (!_draftSessionId) return;
 	if (_draftAbort) _draftAbort.abort();
 	// If no value provided, read from the editor
 	const val: string = rawVal !== undefined ? rawVal
 		: (document.querySelector("message-editor") as any)?.value ?? "";
+	const sid = _draftSessionId;
 	if (val.trim()) {
-		_draftAbort = new AbortController();
-		const sid = _draftSessionId;
+		const controller = new AbortController();
+		_draftAbort = controller;
 		const gen = ++_draftGen;
-		const p = saveDraftToServer(sid, 'prompt', { text: val, gen }, _draftAbort.signal)
-			.finally(() => { if (_draftAbort) _draftAbort = null; _pendingSave = null; });
-		_pendingSave = p;
-		return p;
-	} else {
-		deleteDraftFromServer(_draftSessionId, 'prompt');
+		return _trackPendingDraftSave(
+			saveDraftToServer(sid, 'prompt', { text: val, gen }, controller.signal)
+				.finally(() => {
+					if (_draftAbort === controller) _draftAbort = null;
+				}),
+		);
 	}
+	return _trackPendingDraftSave(deleteDraftFromServer(sid, 'prompt'));
 }
 
 /** Flush any pending draft save immediately (e.g. before HMR reload). */
@@ -700,14 +711,92 @@ function _teardownDraftHandlers(): void {
 	// MessageEditor.connectedCallback needs it to survive element recreation.
 	// It's cleaned up on send (message-send event) and overwritten on next save.
 	_draftSessionId = null;
+	_draftTouchedSinceBind = false;
 	_draftGen = 0;
 	_draftSendGen = 0;
 }
 
-function _setupPromptDraftHandlers(sessionId: string): void {
-	// Tear down any previous session's draft state
+function _ensurePromptDraftListeners(): void {
+	// Use document-level event listeners instead of monkey-patching.
+	// Lit re-renders overwrite property-based callbacks (.onSend, .onInput)
+	// on every state change, silently removing our patches. Native DOM
+	// events (composed: true) bubble through shadow DOM and survive re-renders.
+	if (_draftListenersInstalled) return;
+
+	// Debounced draft save on textarea input (native 'input' event is composed)
+	document.addEventListener("input", (e: Event) => {
+		const target = e.target as HTMLElement;
+		if (!target || target.tagName !== "TEXTAREA") return;
+		// Verify it's inside a message-editor
+		if (!target.closest("message-editor")) return;
+		const sid = _draftSessionId;
+		if (!sid) return;
+
+		_draftTouchedSinceBind = true;
+		const val = (target as HTMLTextAreaElement).value;
+		// Keep sessionStorage in sync immediately (synchronous, no debounce).
+		// This ensures MessageEditor.connectedCallback picks up the latest
+		// text if the element is recreated during a Lit re-render.
+		if (val.trim()) {
+			sessionStorage.setItem(`bobbit_draft_${sid}`, val);
+		} else {
+			sessionStorage.removeItem(`bobbit_draft_${sid}`);
+		}
+		if (_draftTimer) clearTimeout(_draftTimer);
+		_draftTimer = setTimeout(() => {
+			_draftTimer = null;
+			if (_draftSessionId !== sid) return;
+			_flushDraft(val);
+		}, 100);
+	});
+
+	// Clear draft on send (custom composed event from MessageEditor)
+	document.addEventListener("message-send", () => {
+		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+		if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+		const sid = _draftSessionId;
+		if (sid) {
+			_draftTouchedSinceBind = true;
+			// Increment gen and record the send generation. Then overwrite the
+			// draft with a tombstone at the new gen. Even if a stale save (from
+			// an aborted-but-already-sent request) arrives at the server after
+			// this, the load will see gen <= _draftSendGen and ignore it.
+			const gen = ++_draftGen;
+			_draftSendGen = gen;
+			sessionStorage.setItem(`draft-send-gen-${sid}`, String(gen));
+			sessionStorage.removeItem(`bobbit_draft_${sid}`);
+			_trackPendingDraftSave(saveDraftToServer(sid, 'prompt', { text: "", gen }));
+		}
+	});
+
+	// Flush draft on page unload (hard refresh, tab close) via sendBeacon.
+	// Regular fetch is killed by the browser during unload, so we use
+	// sendBeacon which is guaranteed to be sent. This fixes PI-04b draft
+	// loss on Ctrl+R / F5 when the debounce hasn't fired yet.
+	window.addEventListener("beforeunload", () => {
+		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+		if (!_draftSessionId) return;
+		const editor = document.querySelector("message-editor") as any;
+		const val: string = editor?.value ?? "";
+		if (!val.trim()) return;
+		const gen = ++_draftGen;
+		const url = localStorage.getItem("gateway.url") || window.location.origin;
+		const token = localStorage.getItem("gateway.token") || "";
+		const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
+		const blob = new Blob([body], { type: "application/json" });
+		// sendBeacon doesn't support custom headers, so pass token as query param.
+		// The server already accepts ?token= for auth (used by WebSocket connections).
+		navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
+	});
+
+	_draftListenersInstalled = true;
+}
+
+function _bindPromptDraftSession(sessionId: string): void {
+	// Tear down any previous session's draft state.
 	_teardownDraftHandlers();
 	_draftSessionId = sessionId;
+	_draftTouchedSinceBind = false;
 	// Restore send gen from sessionStorage (survives HMR/reload)
 	_draftSendGen = parseInt(sessionStorage.getItem(`draft-send-gen-${sessionId}`) || "0", 10);
 	// Start _draftGen above _draftSendGen so new saves are never rejected as
@@ -716,21 +805,21 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	// switch get gen=1 which is <= sendGen, causing them to be silently
 	// discarded on load (PI-04b).
 	_draftGen = _draftSendGen;
+	_ensurePromptDraftListeners();
+}
 
-	// Restore existing draft from server
-	(async () => {
+function _restorePromptDraft(sessionId: string): void {
+	void (async () => {
 		try {
 			// Wait for any in-flight save from the previous session to land
 			// before loading, so we don't get stale data on rapid switch-back.
-			if (_pendingSave) {
-				await _pendingSave;
-				_pendingSave = null;
-			}
+			const pending = _pendingSave;
+			if (pending) await pending;
 			const draft = await loadDraftFromServer(sessionId, 'prompt');
-			// Only apply if we're still on the same session
-			if (_draftSessionId !== sessionId) return;
-			const editor = document.querySelector("message-editor") as any;
-			if (!editor) return;
+			// Only apply if we're still on the same session and the user has not
+			// typed since binding. This closes the first-paint window where the
+			// editor can be visible before slower REST hydration completes.
+			if (_draftSessionId !== sessionId || _draftTouchedSinceBind) return;
 
 			// Handle both old format (plain string) and new format ({ text, gen })
 			let text: string | null = null;
@@ -747,89 +836,24 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 				text = d.text || null;
 			}
 
-			if (text) {
-				// Store in sessionStorage so MessageEditor can read it synchronously
-				// in connectedCallback — this survives element recreation by Lit.
-				sessionStorage.setItem(`bobbit_draft_${sessionId}`, text);
-				// Also apply directly to any existing editor
+			if (!text) return;
+			// Store in sessionStorage so MessageEditor can read it synchronously
+			// in connectedCallback — this survives element recreation by Lit.
+			sessionStorage.setItem(`bobbit_draft_${sessionId}`, text);
+
+			let frames = 0;
+			const apply = () => {
+				if (_draftSessionId !== sessionId || _draftTouchedSinceBind) return;
 				const editor = document.querySelector("message-editor") as any;
 				if (editor) editor.value = text;
-			}
+				if (frames++ < 5) requestAnimationFrame(apply);
+			};
+			apply();
 		} catch { /* ignore */ }
 	})();
+}
 
-	// Use document-level event listeners instead of monkey-patching.
-	// Lit re-renders overwrite property-based callbacks (.onSend, .onInput)
-	// on every state change, silently removing our patches. Native DOM
-	// events (composed: true) bubble through shadow DOM and survive re-renders.
-	if (!_draftListenersInstalled) {
-		// Debounced draft save on textarea input (native 'input' event is composed)
-		document.addEventListener("input", (e: Event) => {
-			const target = e.target as HTMLElement;
-			if (!target || target.tagName !== "TEXTAREA") return;
-			// Verify it's inside a message-editor
-			if (!target.closest("message-editor")) return;
-			if (!_draftSessionId) return;
-
-			const val = (target as HTMLTextAreaElement).value;
-			// Keep sessionStorage in sync immediately (synchronous, no debounce).
-			// This ensures MessageEditor.connectedCallback picks up the latest
-			// text if the element is recreated during a Lit re-render.
-			if (_draftSessionId) {
-				if (val.trim()) {
-					sessionStorage.setItem(`bobbit_draft_${_draftSessionId}`, val);
-				} else {
-					sessionStorage.removeItem(`bobbit_draft_${_draftSessionId}`);
-				}
-			}
-			if (_draftTimer) clearTimeout(_draftTimer);
-			_draftTimer = setTimeout(() => {
-				_draftTimer = null;
-				_flushDraft(val);
-			}, 100);
-		});
-
-		// Clear draft on send (custom composed event from MessageEditor)
-		document.addEventListener("message-send", () => {
-			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-			if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
-			if (_draftSessionId) {
-				// Increment gen and record the send generation. Then overwrite the
-				// draft with a tombstone at the new gen. Even if a stale save (from
-				// an aborted-but-already-sent request) arrives at the server after
-				// this, the load will see gen <= _draftSendGen and ignore it.
-				const gen = ++_draftGen;
-				_draftSendGen = gen;
-				sessionStorage.setItem(`draft-send-gen-${_draftSessionId}`, String(gen));
-				sessionStorage.removeItem(`bobbit_draft_${_draftSessionId}`);
-				saveDraftToServer(_draftSessionId, 'prompt', { text: "", gen });
-			}
-		});
-
-		// Flush draft on page unload (hard refresh, tab close) via sendBeacon.
-		// Regular fetch is killed by the browser during unload, so we use
-		// sendBeacon which is guaranteed to be sent. This fixes PI-04b draft
-		// loss on Ctrl+R / F5 when the debounce hasn't fired yet.
-		window.addEventListener("beforeunload", () => {
-			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-			if (!_draftSessionId) return;
-			const editor = document.querySelector("message-editor") as any;
-			const val: string = editor?.value ?? "";
-			if (!val.trim()) return;
-			const gen = ++_draftGen;
-			const url = localStorage.getItem("gateway.url") || window.location.origin;
-			const token = localStorage.getItem("gateway.token") || "";
-			const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
-			const blob = new Blob([body], { type: "application/json" });
-			// sendBeacon doesn't support custom headers, so pass token as query param.
-			// The server already accepts ?token= for auth (used by WebSocket connections).
-			navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
-		});
-
-		_draftListenersInstalled = true;
-	}
-
-	// Focus the textarea
+function _focusPromptEditor(): void {
 	requestAnimationFrame(() => {
 		const editor = document.querySelector("message-editor") as any;
 		const textarea = editor?.querySelector("textarea");
@@ -850,7 +874,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	// Flush and teardown draft handlers for the outgoing session immediately.
 	// This prevents stale _draftSessionId from saving to the wrong session
-	// during the async gap before _setupPromptDraftHandlers binds the new one.
+	// during the async gap before the next session binds autosave.
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 	_flushDraft();
 	_teardownDraftHandlers();
@@ -1036,10 +1060,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
+		// Bind draft autosave before rendering the cached editor interactive.
+		_bindPromptDraftSession(sessionId);
 		renderApp();
-
-		// Re-bind draft handlers AFTER render so the cached message-editor is in the DOM.
-		_setupPromptDraftHandlers(sessionId);
+		_restorePromptDraft(sessionId);
+		_focusPromptEditor();
 
 		// Reset tri-state on cached switch-back (last-known data still rendered).
 		if (state.chatPanel?.agentInterface) {
@@ -1672,6 +1697,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
 		else stopInboxSubscription();
 
+		// Bind draft autosave before setAgent can render an interactive editor;
+		// setAgent awaits lazy imports after assigning agentInterface, so Lit can
+		// paint the textarea before setAgent returns under load.
+		_bindPromptDraftSession(sessionId);
+
 		// ── Bind the agent to the early ChatPanel (created before connect
 		// to show the "Connecting…" shell instantly).
 		await state.chatPanel!.setAgent(remote as any, {
@@ -2016,8 +2046,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		await backgroundWork;
 		if (isStale()) { cleanupRemote(remote); return; }
 
-		// Restore prompt draft from server and set up auto-save
-		_setupPromptDraftHandlers(sessionId);
+		// Restore prompt draft from server after background renders settle.
+		// Autosave was already bound before setAgent exposed the editor.
+		_restorePromptDraft(sessionId);
+		_focusPromptEditor();
 	} catch (err) {
 		if (!isStale()) {
 			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner

@@ -1,12 +1,37 @@
 /**
  * Global teardown: remove ephemeral state directories and Docker containers
- * created for this test run.
+ * created for this test run. Shared temp-root cleanup is best-effort only and
+ * skips live worker-owned dirs from overlapping E2E runs.
  * Handles both legacy `.e2e-bobbit-*` dirs and per-worker `.e2e-worker-*` dirs.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+function harnessOwnerPid(entry: string): number | undefined {
+	const match = /^\.e2e-(?:inproc|browser)-(\d+)-\d+-\d+$/.exec(entry);
+	if (!match) return undefined;
+	const pid = Number(match[1]);
+	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as { code?: string })?.code === "EPERM";
+	}
+}
+
+function removeIfOwnerExited(tmpRoot: string, entry: string): void {
+	const ownerPid = harnessOwnerPid(entry);
+	// Modern harness dirs include their worker PID. Unknown legacy shapes are not
+	// safe to sweep from a shared temp root because they may belong to another run.
+	if (!ownerPid || isProcessAlive(ownerPid)) return;
+	try { rmSync(join(tmpRoot, entry), { recursive: true, force: true }); } catch {}
+}
 
 export default function globalTeardown() {
 	// Legacy: single shared dir from config env
@@ -26,9 +51,10 @@ export default function globalTeardown() {
 	} catch {}
 
 	// Current worker dirs live under E2E_TEMP_ROOT/.e2e-{inproc,browser}-*.
-	// Must match the logic in gateway-harness.ts / in-process-harness.ts so the
-	// global sweep actually finds per-worker dirs on Windows (which now live
-	// under C:\bobbit-e2e to avoid %LOCALAPPDATA%\Temp\ Defender contention).
+	// This temp root is shared by overlapping worktrees/runs, so global teardown
+	// must never delete a directory whose owning worker process is still alive.
+	// Worker fixtures remove their own dirs first; this is only a best-effort
+	// stale/deferred cleanup for exited workers.
 	const tmpRoot = existsSync("/.dockerenv")
 		? "/tmp"
 		: process.platform === "win32"
@@ -38,16 +64,30 @@ export default function globalTeardown() {
 		try {
 			for (const entry of readdirSync(tmpRoot)) {
 				if (entry.startsWith(".e2e-inproc-") || entry.startsWith(".e2e-browser-")) {
-					try { rmSync(join(tmpRoot, entry), { recursive: true, force: true }); } catch {}
+					removeIfOwnerExited(tmpRoot, entry);
 				}
 			}
 		} catch {}
 	}
 
-	// Per-run V8 compile cache created by e2e-global-setup.ts.
+	// Legacy cleanup for V8 compile-cache dirs from older harness versions.
 	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT;
 	if (cacheRoot && cacheRoot.includes("bobbit-e2e-v8cache")) {
 		try { rmSync(cacheRoot, { recursive: true, force: true }); } catch {}
+	}
+
+	// Per-run Playwright transform cache from scripts/run-playwright-e2e.mjs or
+	// the direct-npx fallback in playwright-e2e.config.ts. The default Windows
+	// location is shared across worktrees; these managed dirs are isolated and
+	// safe to remove once the run has ended.
+	const pwtestCacheDir = process.env.BOBBIT_E2E_PWTEST_CACHE_DIR;
+	if (
+		process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1" &&
+		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED === "1" &&
+		pwtestCacheDir &&
+		pwtestCacheDir.includes("pwtest-transform-cache")
+	) {
+		try { rmSync(pwtestCacheDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
 	}
 
 	// Clean up Docker containers created by E2E sandbox tests.

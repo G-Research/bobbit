@@ -13,6 +13,8 @@
  *  - After the user types a symlinked path and clicks Continue, a confirm
  *    modal appears showing both paths (data-testid="symlink-confirm" with
  *    "symlink-rootpath" and "symlink-canonical" children).
+ *  - Clicking Cancel closes only the confirm modal, returns to the add-project
+ *    dialog, and does not register either path.
  *  - Clicking "Use canonical path" (data-testid="confirm-use-canonical")
  *    re-submits with acceptCanonical:true and the project lands at the
  *    canonical path.
@@ -75,8 +77,8 @@ test.describe("Add Project — symlink confirm flow", () => {
 		}
 	});
 
-	test("symlinked rootPath → confirm dialog → canonical path stored, persists across reload", async ({ page }) => {
-		const pair = makeSymlinkPair("confirm");
+	test("symlinked rootPath confirm handles cancel, canonical storage, and reload persistence", async ({ page }) => {
+		const pair = makeSymlinkPair("confirm-cancel");
 		test.skip(!pair, "Cannot create symlinks on this platform (EPERM). Skipping.");
 		const { canonical, link } = pair!;
 
@@ -84,7 +86,8 @@ test.describe("Add Project — symlink confirm flow", () => {
 
 		// Open Add-Project dialog.
 		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
-		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
+		const pathInput = page.locator('input[placeholder="/path/to/project"]');
+		await expect(pathInput).toBeVisible({ timeout: 5_000 });
 
 		// Need .bobbit/config/project.yaml to trigger Path A (auto-import → registerProject).
 		// Without it, /api/projects/detect returns hasBobbit=false (since commit 54d5b710
@@ -94,22 +97,34 @@ test.describe("Add Project — symlink confirm flow", () => {
 		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
 		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
 
-		// Type the symlinked path.
-		await page.locator('input[placeholder="/path/to/project"]').fill(link);
-
-		// Click Continue.
+		// Type the symlinked path and open the confirm modal.
+		await pathInput.fill(link);
 		await page.locator("button").filter({ hasText: "Continue" }).first().click();
 
 		// Confirm modal appears with both paths visible.
-		await expect(page.locator('[data-testid="symlink-confirm"]')).toBeVisible({ timeout: 10_000 });
+		const symlinkConfirm = page.locator('[data-testid="symlink-confirm"]');
+		await expect(symlinkConfirm).toBeVisible({ timeout: 10_000 });
 		await expect(page.locator('[data-testid="symlink-rootpath"]')).toContainText(link);
 		await expect(page.locator('[data-testid="symlink-canonical"]')).toContainText(canonical);
 
-		// Click "Use canonical path".
+		// Cancel closes only the confirm dialog and does not register either path.
+		await page.locator("button").filter({ hasText: "Cancel" }).last().click();
+		await expect(symlinkConfirm).not.toBeVisible({ timeout: 5_000 });
+		await expect(pathInput).toBeVisible();
+		const cancelRes = await apiFetch("/api/projects");
+		const cancelData = await cancelRes.json();
+		const cancelProjects = cancelData.projects || cancelData || [];
+		const cancelStored = cancelProjects.find((p: any) => p.rootPath === canonical || p.rootPath === link);
+		expect(cancelStored).toBeFalsy();
+
+		// Continue again from the same add-project dialog and accept the canonical path.
+		await pathInput.fill(link);
+		await page.locator("button").filter({ hasText: "Continue" }).first().click();
+		await expect(symlinkConfirm).toBeVisible({ timeout: 10_000 });
 		await page.locator('[data-testid="confirm-use-canonical"]').click();
 
 		// Both dialogs close → path input no longer visible.
-		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });
+		await expect(pathInput).not.toBeVisible({ timeout: 10_000 });
 
 		// Verify via API: project stored under the canonical path.
 		await expect(async () => {
@@ -131,41 +146,5 @@ test.describe("Add Project — symlink confirm flow", () => {
 		const projects2 = data2.projects || data2 || [];
 		const stored2 = projects2.find((p: any) => p.rootPath === canonical);
 		expect(stored2).toBeTruthy();
-	});
-
-	test("Cancel on confirm dialog returns to add-project dialog without registering", async ({ page }) => {
-		const pair = makeSymlinkPair("cancel");
-		test.skip(!pair, "Cannot create symlinks on this platform (EPERM). Skipping.");
-		const { canonical, link } = pair!;
-
-		await openApp(page);
-
-		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
-		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
-
-		// Add .bobbit/config/project.yaml so Path A is taken (hasBobbit=true).
-		mkdirSync(join(canonical, ".bobbit", "config"), { recursive: true });
-		mkdirSync(join(canonical, ".bobbit", "state"), { recursive: true });
-		writeFileSync(join(canonical, ".bobbit", "config", "project.yaml"), "name: test\n");
-
-		await page.locator('input[placeholder="/path/to/project"]').fill(link);
-		await page.locator("button").filter({ hasText: "Continue" }).first().click();
-
-		// Confirm dialog appears.
-		await expect(page.locator('[data-testid="symlink-confirm"]')).toBeVisible({ timeout: 10_000 });
-
-		// Cancel.
-		await page.locator("button").filter({ hasText: "Cancel" }).last().click();
-
-		// Confirm dialog gone, add-project dialog still visible.
-		await expect(page.locator('[data-testid="symlink-confirm"]')).not.toBeVisible({ timeout: 5_000 });
-		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible();
-
-		// No project registered.
-		const res = await apiFetch("/api/projects");
-		const data = await res.json();
-		const projects = data.projects || data || [];
-		const any = projects.find((p: any) => p.rootPath === canonical || p.rootPath === link);
-		expect(any).toBeFalsy();
 	});
 });
