@@ -22,6 +22,9 @@ const SEED_SCRIPT = path.resolve(
 	"qa-seed",
 	"seed.mjs",
 );
+const PROJECT_CONFIG = path.resolve(import.meta.dirname, "..", ".bobbit", "config", "project.yaml");
+const SAFE_BRANCH_REFSPEC = "{{branch}}:refs/heads/{{branch}}";
+const BARE_BRANCH_PUSH = /git push origin \{\{branch\}\}(?!:)/;
 
 let tmpDir: string;
 let stateDir: string;
@@ -46,6 +49,35 @@ function readJSON(filename: string): any {
 function readJSONL(filePath: string): any[] {
 	const content = fs.readFileSync(filePath, "utf-8").trim();
 	return content.split("\n").map((line) => JSON.parse(line));
+}
+
+function readyToMergeBranchPushStep(workflow: any, label: string): string {
+	const gates = Array.isArray(workflow?.gates) ? workflow.gates : [];
+	const gate = gates.find((g: any) => g.id === "ready-to-merge");
+	assert.ok(gate, `${label} must include a ready-to-merge gate`);
+	const steps = Array.isArray(gate.verify) ? gate.verify : [];
+	const step = steps.find((s: any) => s.type === "command" && typeof s.run === "string" && s.run.includes("git push origin"));
+	assert.ok(step?.run, `${label} ready-to-merge gate must include a git push command step`);
+	return step.run;
+}
+
+function branchPushTemplatesFromText(text: string, label: string): string[] {
+	const templates = [...text.matchAll(/git push origin \{\{branch\}\}[^\r\n"']*/g)]
+		.map((match) => match[0].trim());
+	assert.ok(templates.length > 0, `${label} must include ready-to-merge git push commands`);
+	return templates;
+}
+
+function assertSafeBranchPushTemplate(label: string, template: string): void {
+	assert.ok(
+		template.includes(SAFE_BRANCH_REFSPEC),
+		`${label} must push with explicit destination refspec ${SAFE_BRANCH_REFSPEC}; got: ${template}`,
+	);
+	assert.doesNotMatch(
+		template,
+		BARE_BRANCH_PUSH,
+		`${label} must not use bare git push origin {{branch}} because upstream config can target origin/master`,
+	);
 }
 
 // ── File existence ──────────────────────────────────────────────────
@@ -378,6 +410,24 @@ describe("qa-seed: agentSessionFile paths", () => {
 					`agentSessionFile for ${session.id} should exist: ${session.agentSessionFile}`,
 				);
 			}
+		}
+	});
+});
+
+// ── Workflow push safety ────────────────────────────────────────────
+describe("qa-seed: workflow push safety", () => {
+	it("generated frozen workflow ready-to-merge push uses an explicit destination refspec", () => {
+		const goals = readJSON("goals.json");
+		assert.equal(goals.length, 1, "qa seed should generate one frozen workflow goal");
+		const template = readyToMergeBranchPushStep(goals[0].workflow, "qa-seed generated frozen workflow");
+		assertSafeBranchPushTemplate("qa-seed generated frozen workflow", template);
+	});
+
+	it("active project workflow snapshot ready-to-merge pushes use explicit destination refspecs", () => {
+		const projectConfig = fs.readFileSync(PROJECT_CONFIG, "utf-8");
+		const templates = branchPushTemplatesFromText(projectConfig, ".bobbit/config/project.yaml");
+		for (const template of templates) {
+			assertSafeBranchPushTemplate(".bobbit/config/project.yaml ready-to-merge", template);
 		}
 	});
 });
