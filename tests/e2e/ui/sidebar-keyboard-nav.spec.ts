@@ -156,7 +156,9 @@ test.describe("Sidebar keyboard navigation contract", () => {
 	let projectA: { id: string; rootPath: string; name: string } | undefined;
 	let projectB: { id: string; rootPath: string; name: string } | undefined;
 	const createdSessionIds: string[] = [];
+	const liveGoalIds: string[] = [];
 	const createdGoalIds: string[] = [];
+	let archivedGoalId: string | undefined;
 
 	test.beforeAll(async () => {
 		await waitForHealth();
@@ -170,6 +172,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 			worktree: false,
 			cwd: nonGitCwd(),
 		});
+		liveGoalIds.push(goalA.id);
 		createdGoalIds.push(goalA.id);
 		createdSessionIds.push(await createSession({ projectId: projectA.id, goalId: goalA.id }));
 		createdSessionIds.push(await createSession({ projectId: projectA.id }));
@@ -180,8 +183,25 @@ test.describe("Sidebar keyboard navigation contract", () => {
 			worktree: false,
 			cwd: nonGitCwd(),
 		});
+		liveGoalIds.push(goalB.id);
 		createdGoalIds.push(goalB.id);
 		createdSessionIds.push(await createSession({ projectId: projectB.id, goalId: goalB.id }));
+
+		const archivedGoal = await createGoal({
+			title: `KBNavArchived-${stamp}`,
+			projectId: projectB.id,
+			worktree: false,
+			cwd: nonGitCwd(),
+		});
+		archivedGoalId = archivedGoal.id;
+		createdGoalIds.push(archivedGoalId);
+		await deleteGoal(archivedGoalId);
+		await expect.poll(async () => {
+			const resp = await apiFetch(`/api/goals?archived=true&projectId=${encodeURIComponent(projectB!.id)}&limit=50`);
+			if (!resp.ok) return false;
+			const body = await resp.json();
+			return Array.isArray(body.goals) && body.goals.some((g: { id?: string }) => g.id === archivedGoalId);
+		}, { timeout: 5_000 }).toBe(true);
 	});
 
 	test.afterAll(async () => {
@@ -191,8 +211,14 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		if (projectB) await apiFetch(`/api/projects/${projectB.id}`, { method: "DELETE" }).catch(() => {});
 	});
 
-	test("visible row IDs, wrap order, search filtering, project collapse/expand, and goal auto-open", async ({ page }) => {
+	test("visible row IDs, wrap order, search filtering, project collapse/expand, goal auto-open, and archived cycle", async ({ page }) => {
 		test.setTimeout(60_000);
+		await page.addInitScript(() => {
+			if (!sessionStorage.getItem("navkb-show-archived-seeded")) {
+				localStorage.setItem("bobbit-show-archived", "false");
+				sessionStorage.setItem("navkb-show-archived-seeded", "1");
+			}
+		});
 		await openApp(page);
 		await waitForShortcutsReady(page);
 		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
@@ -200,7 +226,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		const requiredNavIds = [
 			`project:${projectA!.id}`,
 			`project:${projectB!.id}`,
-			...createdGoalIds.map((id) => `goal:${id}`),
+			...liveGoalIds.map((id) => `goal:${id}`),
 			...createdSessionIds.map((id) => `session:${id}`),
 		];
 		const domOrder = await waitForStableNavOrder(page, requiredNavIds);
@@ -229,7 +255,7 @@ test.describe("Sidebar keyboard navigation contract", () => {
 			() => page.evaluate(() => (window as any).bobbitState?.searchQuery ?? ""),
 			{ timeout: 5_000 },
 		).toBe("KBNavGoalA");
-		const filtered = await waitForStableNavOrder(page, [`goal:${createdGoalIds[0]}`]);
+		const filtered = await waitForStableNavOrder(page, [`goal:${liveGoalIds[0]}`]);
 		expect(filtered.length, `${MARK}: search must still render at least one nav row`).toBeGreaterThan(0);
 		await resetNavStart(page);
 		const visitedFiltered = new Set((await walkDown(page, filtered.length + 2, filtered)).filter((id): id is string => !!id));
@@ -298,124 +324,71 @@ test.describe("Sidebar keyboard navigation contract", () => {
 		const hash = await page.evaluate(() => window.location.hash);
 		expect(hash, `${MARK}: landing on goal header must route to goal dashboard`).toContain(goalId);
 		expect(hash).toMatch(/#\/goal\//);
-	});
 
-	test("Show Archived adds/removes archived rows from the Ctrl+ArrowDown cycle and persists across reload", async ({ page }) => {
-		test.setTimeout(60_000);
-		const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-		const projC = await registerProject(`navkb-charlie-${stamp}`);
-		let liveGoalId: string | undefined;
-		let liveSessId: string | undefined;
-		let archGoalId: string | undefined;
+		const projectBNavId = `project:${projectB!.id}`;
+		const liveGoalBNavId = `goal:${liveGoalIds[1]}`;
+		const archHeaderNavId = `archived-header:${projectB!.id}`;
+		const archGoalNavId = `goal:${archivedGoalId}`;
 
-		try {
-			const liveGoal = await createGoal({
-				title: `KBNavCharlieLive-${stamp}`,
-				projectId: projC.id,
-				worktree: false,
-				cwd: nonGitCwd(),
-			});
-			liveGoalId = liveGoal.id;
-			liveSessId = await createSession({ projectId: projC.id, goalId: liveGoalId });
+		await expect(page.locator(`[data-nav-id="${projectBNavId}"]`), `${MARK}: Project B header must render`).toHaveCount(1, { timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="${liveGoalBNavId}"]`), `${MARK}: live goal must render`).toHaveCount(1, { timeout: 10_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+			{ timeout: 5_000 },
+		).toBe(false);
 
-			const archGoal = await createGoal({
-				title: `KBNavCharlieArch-${stamp}`,
-				projectId: projC.id,
-				worktree: false,
-				cwd: nonGitCwd(),
-			});
-			archGoalId = archGoal.id;
-			await deleteGoal(archGoalId);
-			await expect.poll(async () => {
-				const resp = await apiFetch(`/api/goals?archived=true&projectId=${encodeURIComponent(projC.id)}&limit=50`);
-				if (!resp.ok) return false;
-				const body = await resp.json();
-				return Array.isArray(body.goals) && body.goals.some((g: { id?: string }) => g.id === archGoalId);
-			}, { timeout: 5_000 }).toBe(true);
+		const offIds = await waitForStableNavOrder(page, [projectBNavId, liveGoalBNavId], [archHeaderNavId, archGoalNavId]);
+		expect(offIds.includes(archHeaderNavId), `${MARK}: archived header hidden when Show Archived is off`).toBe(false);
+		expect(offIds.includes(archGoalNavId), `${MARK}: archived goal hidden when Show Archived is off`).toBe(false);
+		await resetNavStart(page);
+		const visitedOff = new Set((await walkDown(page, offIds.length + 2, offIds)).filter((id): id is string => !!id));
+		expect(visitedOff.has(archHeaderNavId), `${MARK}: archived header not visited when Show Archived is off`).toBe(false);
+		expect(visitedOff.has(archGoalNavId), `${MARK}: archived goal not visited when Show Archived is off`).toBe(false);
 
-			await page.addInitScript(() => {
-				if (!sessionStorage.getItem("navkb-show-archived-seeded")) {
-					localStorage.setItem("bobbit-show-archived", "false");
-					sessionStorage.setItem("navkb-show-archived-seeded", "1");
-				}
-			});
-			await openApp(page);
-			await waitForShortcutsReady(page);
-			await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
+		await expect(filtersButton(page), `${MARK}: filters button must be reachable`).toBeVisible({ timeout: 5_000 });
+		await clickShowArchivedToggle(page);
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+			{ timeout: 5_000 },
+		).toBe(true);
+		await expect(page.locator(`[data-nav-id="${archHeaderNavId}"]`), `${MARK}: archived header must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
+		await expect(page.locator(`[data-nav-id="${archGoalNavId}"]`), `${MARK}: archived goal must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
 
-			const projCNavId = `project:${projC.id}`;
-			const liveGoalNavId = `goal:${liveGoalId}`;
-			const archHeaderNavId = `archived-header:${projC.id}`;
-			const archGoalNavId = `goal:${archGoalId}`;
+		const onIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
+		expect(onIds.includes(archHeaderNavId), `${MARK}: archived header in DOM when Show Archived is on`).toBe(true);
+		expect(onIds.includes(archGoalNavId), `${MARK}: archived goal in DOM when Show Archived is on`).toBe(true);
+		await resetNavStart(page);
+		const visitedOn = new Set((await walkDown(page, onIds.length + 2, onIds)).filter((id): id is string => !!id));
+		expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
+		expect(visitedOn.has(archGoalNavId), `${MARK}: archived goal visited when Show Archived is on`).toBe(true);
 
-			await expect(page.locator(`[data-nav-id="${projCNavId}"]`), `${MARK}: Project C header must render`).toHaveCount(1, { timeout: 10_000 });
-			await expect(page.locator(`[data-nav-id="${liveGoalNavId}"]`), `${MARK}: live goal must render`).toHaveCount(1, { timeout: 10_000 });
-			await expect.poll(
-				() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-				{ timeout: 5_000 },
-			).toBe(false);
+		await page.reload();
+		await waitForShortcutsReady(page);
+		await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
+		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("true");
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+			{ timeout: 5_000 },
+		).toBe(true);
+		const reloadedIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
+		await resetNavStart(page);
+		const visitedAfterReload = new Set((await walkDown(page, reloadedIds.length + 2, reloadedIds)).filter((id): id is string => !!id));
+		expect(visitedAfterReload.has(archHeaderNavId), `${MARK}: archived header remains in cycle after reload`).toBe(true);
+		expect(visitedAfterReload.has(archGoalNavId), `${MARK}: archived goal remains in cycle after reload`).toBe(true);
 
-			const offIds = await waitForStableNavOrder(page, [projCNavId, liveGoalNavId], [archHeaderNavId, archGoalNavId]);
-			expect(offIds.includes(archHeaderNavId), `${MARK}: archived header hidden when Show Archived is off`).toBe(false);
-			expect(offIds.includes(archGoalNavId), `${MARK}: archived goal hidden when Show Archived is off`).toBe(false);
-			await resetNavStart(page);
-			const visitedOff = new Set((await walkDown(page, offIds.length + 2, offIds)).filter((id): id is string => !!id));
-			expect(visitedOff.has(archHeaderNavId), `${MARK}: archived header not visited when Show Archived is off`).toBe(false);
-			expect(visitedOff.has(archGoalNavId), `${MARK}: archived goal not visited when Show Archived is off`).toBe(false);
-
-			await expect(filtersButton(page), `${MARK}: filters button must be reachable`).toBeVisible({ timeout: 5_000 });
-			await clickShowArchivedToggle(page);
-			await expect.poll(
-				() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-				{ timeout: 5_000 },
-			).toBe(true);
-			await expect(page.locator(`[data-nav-id="${archHeaderNavId}"]`), `${MARK}: archived header must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
-			await expect(page.locator(`[data-nav-id="${archGoalNavId}"]`), `${MARK}: archived goal must render when Show Archived is on`).toHaveCount(1, { timeout: 10_000 });
-
-			const onIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
-			expect(onIds.includes(archHeaderNavId), `${MARK}: archived header in DOM when Show Archived is on`).toBe(true);
-			expect(onIds.includes(archGoalNavId), `${MARK}: archived goal in DOM when Show Archived is on`).toBe(true);
-			await resetNavStart(page);
-			const visitedOn = new Set((await walkDown(page, onIds.length + 2, onIds)).filter((id): id is string => !!id));
-			expect(visitedOn.has(archHeaderNavId), `${MARK}: archived header visited when Show Archived is on`).toBe(true);
-			expect(visitedOn.has(archGoalNavId), `${MARK}: archived goal visited when Show Archived is on`).toBe(true);
-
-			await page.reload();
-			await waitForShortcutsReady(page);
-			await expect(page.locator(".sidebar-edge")).toBeVisible({ timeout: 10_000 });
-			await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("true");
-			await expect.poll(
-				() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-				{ timeout: 5_000 },
-			).toBe(true);
-			const reloadedIds = await waitForStableNavOrder(page, [archHeaderNavId, archGoalNavId]);
-			await resetNavStart(page);
-			const visitedAfterReload = new Set((await walkDown(page, reloadedIds.length + 2, reloadedIds)).filter((id): id is string => !!id));
-			expect(visitedAfterReload.has(archHeaderNavId), `${MARK}: archived header remains in cycle after reload`).toBe(true);
-			expect(visitedAfterReload.has(archGoalNavId), `${MARK}: archived goal remains in cycle after reload`).toBe(true);
-
-			await clickShowArchivedToggle(page);
-			await expect.poll(
-				() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
-				{ timeout: 5_000 },
-			).toBe(false);
-			await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("false");
-			await expect(page.locator(`[data-nav-id="${archHeaderNavId}"]`), `${MARK}: archived header disappears when Show Archived is off again`).toHaveCount(0, { timeout: 10_000 });
-			const offIdsAgain = await waitForStableNavOrder(page, [projCNavId, liveGoalNavId], [archHeaderNavId, archGoalNavId]);
-			expect(offIdsAgain.includes(archHeaderNavId), `${MARK}: archived header removed from cycle`).toBe(false);
-			expect(offIdsAgain.includes(archGoalNavId), `${MARK}: archived goal removed from cycle`).toBe(false);
-			await resetNavStart(page);
-			const visitedOffAgain = new Set((await walkDown(page, offIdsAgain.length + 2, offIdsAgain)).filter((id): id is string => !!id));
-			expect(visitedOffAgain.has(archHeaderNavId), `${MARK}: archived header not visited after Show Archived cleanup`).toBe(false);
-			expect(visitedOffAgain.has(archGoalNavId), `${MARK}: archived goal not visited after Show Archived cleanup`).toBe(false);
-		} finally {
-			await page.evaluate(() => {
-				localStorage.setItem("bobbit-show-archived", "false");
-			}).catch(() => {});
-			if (liveSessId) await deleteSession(liveSessId).catch(() => {});
-			if (liveGoalId) await deleteGoal(liveGoalId).catch(() => {});
-			if (archGoalId) await deleteGoal(archGoalId).catch(() => {});
-			await apiFetch(`/api/projects/${projC.id}`, { method: "DELETE" }).catch(() => {});
-		}
+		await clickShowArchivedToggle(page);
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.showArchived === true),
+			{ timeout: 5_000 },
+		).toBe(false);
+		await expect.poll(() => page.evaluate(() => localStorage.getItem("bobbit-show-archived")), { timeout: 5_000 }).toBe("false");
+		await expect(page.locator(`[data-nav-id="${archHeaderNavId}"]`), `${MARK}: archived header disappears when Show Archived is off again`).toHaveCount(0, { timeout: 10_000 });
+		const offIdsAgain = await waitForStableNavOrder(page, [projectBNavId, liveGoalBNavId], [archHeaderNavId, archGoalNavId]);
+		expect(offIdsAgain.includes(archHeaderNavId), `${MARK}: archived header removed from cycle`).toBe(false);
+		expect(offIdsAgain.includes(archGoalNavId), `${MARK}: archived goal removed from cycle`).toBe(false);
+		await resetNavStart(page);
+		const visitedOffAgain = new Set((await walkDown(page, offIdsAgain.length + 2, offIdsAgain)).filter((id): id is string => !!id));
+		expect(visitedOffAgain.has(archHeaderNavId), `${MARK}: archived header not visited after Show Archived cleanup`).toBe(false);
+		expect(visitedOffAgain.has(archGoalNavId), `${MARK}: archived goal not visited after Show Archived cleanup`).toBe(false);
 	});
 });
