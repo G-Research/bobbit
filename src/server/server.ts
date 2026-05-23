@@ -316,12 +316,28 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
 }
 
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
+async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+	if (containerId) {
+		const { stdout } = await execFileAsync("docker", [
+			"exec", "-w", cwd, containerId, "git", ...args,
+		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+		return stdout.trim();
+	}
+	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
+	return stdout.trim();
 }
 
-function safeBranchPublishCommand(branch: string): string {
-	return `git push origin ${shellQuote(`HEAD:refs/heads/${branch}`)}`;
+function branchPublishGitArgs(branch: string): {
+	push: string[];
+	fetchRemoteTracking: string[];
+	setUpstream: string[];
+} {
+	if (!branch) throw new Error("Cannot push: no current branch");
+	return {
+		push: ["push", "origin", `HEAD:refs/heads/${branch}`],
+		fetchRemoteTracking: ["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`],
+		setUpstream: ["branch", `--set-upstream-to=origin/${branch}`, branch],
+	};
 }
 
 async function publishCurrentBranchToOrigin(
@@ -329,12 +345,12 @@ async function publishCurrentBranchToOrigin(
 	branch: string,
 	opts: { containerId?: string; setUpstream?: boolean } = {},
 ): Promise<string> {
-	if (!branch) throw new Error("Cannot push: no current branch");
-	const output = await execGit(safeBranchPublishCommand(branch), cwd, 30_000, opts.containerId);
+	const args = branchPublishGitArgs(branch);
+	const output = await execGitArgs(args.push, cwd, 30_000, opts.containerId);
 	if (opts.setUpstream) {
 		try {
-			await execGit(`git fetch origin ${shellQuote(`refs/heads/${branch}:refs/remotes/origin/${branch}`)}`, cwd, 15_000, opts.containerId);
-			await execGit(`git branch --set-upstream-to=${shellQuote(`origin/${branch}`)} ${shellQuote(branch)}`, cwd, 10_000, opts.containerId);
+			await execGitArgs(args.fetchRemoteTracking, cwd, 15_000, opts.containerId);
+			await execGitArgs(args.setUpstream, cwd, 10_000, opts.containerId);
 		} catch {
 			// Publishing succeeded; upstream repair is best-effort for compatibility.
 		}
