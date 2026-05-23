@@ -3,7 +3,7 @@ import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
+import { StaffStore, normalizeStaffAccessory, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
@@ -293,7 +293,7 @@ export class StaffManager {
 		systemPrompt: string,
 		cwd: string,
 		sessionManager: SessionManager,
-		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean; worktree?: boolean },
+		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean; worktree?: boolean; accessory?: string },
 	): Promise<PersistedStaff> {
 		const now = Date.now();
 		const id = randomUUID();
@@ -321,6 +321,7 @@ export class StaffManager {
 			triggers,
 			memory: "",
 			roleId: opts?.roleId,
+			accessory: normalizeStaffAccessory(opts?.accessory),
 			createdAt: now,
 			updatedAt: now,
 			projectId,
@@ -366,6 +367,7 @@ export class StaffManager {
 				// through to undefined and the resolvers return defaults — staff roles with
 				// `model`/`thinkingLevel` overrides would be silently ignored.
 				roleName: staff.roleId,
+				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: id },
 				// Persisted so inbox tools survive respawn — see
 				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
@@ -433,6 +435,7 @@ export class StaffManager {
 			triggers?: StaffTrigger[];
 			memory?: string;
 			roleId?: string;
+			accessory?: string;
 			currentSessionId?: string;
 			contextPolicy?: "preserve" | "compact";
 			/** Updated by `InboxNudger.applyPolicyThenNudge`; no longer mutated by `StaffManager`. */
@@ -620,6 +623,7 @@ export class StaffManager {
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				roleName: staff.roleId,
+				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: staffId },
 				// Persisted so inbox tools survive respawn — see
 				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
@@ -666,6 +670,7 @@ export class StaffManager {
 			}
 		}
 
+		sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
 		await this.refreshWorktree(staff, found.projectId);
 
 		return staff.currentSessionId;

@@ -1299,7 +1299,22 @@ export interface StaffAgent {
 	projectId?: string;
 	sandboxed?: boolean;
 	contextPolicy?: "preserve" | "compact";
+	accessory?: string;
 }
+
+export type CreateStaffAgentData = {
+	name: string;
+	description: string;
+	systemPrompt: string;
+	cwd?: string;
+	worktree?: boolean;
+	triggers?: any[];
+	projectId?: string;
+	sandboxed?: boolean;
+	accessory?: string;
+};
+
+export type StaffAgentUpdate = Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy" | "accessory">>;
 
 export async function fetchStaff(projectId?: string): Promise<StaffAgent[]> {
 	try {
@@ -1349,7 +1364,7 @@ export async function fetchStaffAgent(id: string): Promise<StaffAgent | null> {
 	}
 }
 
-export async function createStaffAgent(data: { name: string; description: string; systemPrompt: string; cwd?: string; worktree?: boolean; triggers?: any[]; projectId?: string; sandboxed?: boolean }): Promise<StaffAgent | null> {
+export async function createStaffAgent(data: CreateStaffAgentData): Promise<StaffAgent | null> {
 	try {
 		const res = await gatewayFetch("/api/staff", {
 			method: "POST",
@@ -1364,7 +1379,7 @@ export async function createStaffAgent(data: { name: string; description: string
 	}
 }
 
-export async function updateStaffAgent(id: string, updates: Partial<Pick<StaffAgent, "name" | "description" | "systemPrompt" | "cwd" | "state" | "triggers" | "memory" | "contextPolicy">>): Promise<boolean> {
+export async function updateStaffAgent(id: string, updates: StaffAgentUpdate): Promise<boolean> {
 	try {
 		const res = await gatewayFetch(`/api/staff/${id}`, {
 			method: "PUT",
