@@ -200,9 +200,13 @@ test.describe("Project assistant UX (consolidated) @quarantine", () => {
 		// Wait on server + hydrated client state before checking the rendered row.
 		await waitForProjectAssistantCleanup(page, sessionId, projectId);
 
-		// Project assistant session should be removed from the sidebar after cleanup.
-		await expect(sidebar.locator(`[data-session-id="${sessionId}"]`)).toHaveCount(0, { timeout: 5_000 });
-		await expect(sidebar.getByText("Project Assistant")).toHaveCount(0, { timeout: 5_000 });
+		// Project assistant session should be removed from this project's sidebar bucket after cleanup.
+		// Browser workers share a gateway across multiple spec files, so a broad sidebar
+		// text count can see an unrelated leftover Project Assistant from another project.
+		const projectSection = sidebar.locator(`.project-reorder-section[data-project-id="${projectId}"]`);
+		await expect(projectSection).toHaveCount(1, { timeout: 5_000 });
+		await expect(projectSection.locator(`[data-session-id="${sessionId}"]`)).toHaveCount(0, { timeout: 5_000 });
+		await expect(projectSection.getByText("Project Assistant")).toHaveCount(0, { timeout: 5_000 });
 
 		// Cleanup
 		await deleteSession(sessionId);
