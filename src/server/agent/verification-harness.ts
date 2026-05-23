@@ -171,6 +171,267 @@ export function resolveStep(
 	return { cwd: branchContainer, runString: step.run };
 }
 
+export interface VerificationPushSafetyVars {
+	branch?: string;
+	baseBranch?: string;
+	master?: string;
+}
+
+export type VerificationPushSafetyResult = { ok: true } | { ok: false; reason: string };
+
+const SHELL_COMMAND_SEPARATORS = new Set(["&&", "||", ";", "|"]);
+
+function shellTokenize(command: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | null = null;
+
+	const flush = () => {
+		if (current.length > 0) {
+			tokens.push(current);
+			current = "";
+		}
+	};
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") quote = null;
+			else current += ch;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') quote = null;
+			else if (ch === "\\" && i + 1 < command.length) current += command[++i];
+			else current += ch;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			current += command[++i];
+			continue;
+		}
+		if (ch === "\n" || ch === ";") {
+			flush();
+			tokens.push(";");
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			flush();
+			continue;
+		}
+		const next = command[i + 1];
+		if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+			flush();
+			tokens.push(ch + next);
+			i++;
+			continue;
+		}
+		if (ch === "|") {
+			flush();
+			tokens.push("|");
+			continue;
+		}
+		current += ch;
+	}
+	flush();
+	return tokens;
+}
+
+function isShellSeparator(token: string): boolean {
+	return SHELL_COMMAND_SEPARATORS.has(token);
+}
+
+function commandEnd(tokens: string[], start: number): number {
+	let end = start;
+	while (end < tokens.length && !isShellSeparator(tokens[end])) end++;
+	return end;
+}
+
+function skipGitGlobalOption(tokens: string[], index: number, end: number): number {
+	const token = tokens[index];
+	if (token === "-C" || token === "-c" || token === "--git-dir" || token === "--work-tree" || token === "--namespace" || token === "--config-env") {
+		return Math.min(index + 2, end);
+	}
+	return index + 1;
+}
+
+function normalizeBranchRef(ref: string | undefined): string {
+	let value = (ref || "").trim();
+	while (value.startsWith("+")) value = value.slice(1);
+	if (value.startsWith("refs/remotes/origin/")) value = value.slice("refs/remotes/origin/".length);
+	if (value.startsWith("origin/")) value = value.slice("origin/".length);
+	if (value.startsWith("refs/heads/")) value = value.slice("refs/heads/".length);
+	return value;
+}
+
+function normalizePushedSource(src: string, currentBranch: string): string {
+	const normalized = normalizeBranchRef(src);
+	if (normalized === "HEAD" || normalized === "@") return currentBranch;
+	return normalized;
+}
+
+function protectedBranchSet(vars: VerificationPushSafetyVars): Set<string> {
+	const branches = [vars.baseBranch, vars.master, "master"]
+		.map(normalizeBranchRef)
+		.filter((b) => b.length > 0);
+	return new Set(branches);
+}
+
+function protectedBranchLabel(branches: Set<string>): string {
+	return [...branches].map((b) => `refs/heads/${b}`).join(" or ") || "the primary branch";
+}
+
+function findGitPushes(tokens: string[]): Array<{ gitIndex: number; pushIndex: number; end: number }> {
+	const pushes: Array<{ gitIndex: number; pushIndex: number; end: number }> = [];
+	for (let i = 0; i < tokens.length; i++) {
+		if (tokens[i] !== "git") continue;
+		const end = commandEnd(tokens, i + 1);
+		let j = i + 1;
+		while (j < end) {
+			const token = tokens[j];
+			if (token === "push") {
+				pushes.push({ gitIndex: i, pushIndex: j, end });
+				break;
+			}
+			if (token.startsWith("-")) {
+				j = skipGitGlobalOption(tokens, j, end);
+				continue;
+			}
+			break;
+		}
+		i = end;
+	}
+	return pushes;
+}
+
+function pushOptionConsumesValue(token: string): boolean {
+	return token === "--repo" || token === "--receive-pack" || token === "--exec" || token === "--push-option" || token === "-o";
+}
+
+function parsePushArgs(tokens: string[], pushIndex: number, end: number): { remote?: string; refspecs: string[]; pushesAllBranches: boolean; tagsOnly: boolean } {
+	let remote: string | undefined;
+	const refspecs: string[] = [];
+	let pushesAllBranches = false;
+	let tagsOnly = false;
+
+	for (let i = pushIndex + 1; i < end; i++) {
+		const token = tokens[i];
+		if (token === "--repo") {
+			remote = tokens[i + 1] || remote;
+			i++;
+			continue;
+		}
+		if (token.startsWith("--repo=")) {
+			remote = token.slice("--repo=".length);
+			continue;
+		}
+		if (token === "--all" || token === "--mirror") {
+			pushesAllBranches = true;
+			continue;
+		}
+		if (token === "--tags") {
+			tagsOnly = true;
+			continue;
+		}
+		if (token.startsWith("-") && token !== "-") {
+			if (pushOptionConsumesValue(token)) i++;
+			continue;
+		}
+		if (!remote) {
+			remote = token;
+			continue;
+		}
+		refspecs.push(token);
+	}
+
+	return { remote, refspecs, pushesAllBranches, tagsOnly };
+}
+
+function unsafePushReason(pushCommand: string, detail: string, vars: VerificationPushSafetyVars, protectedBranches: Set<string>): VerificationPushSafetyResult {
+	const branch = normalizeBranchRef(vars.branch) || "HEAD";
+	return {
+		ok: false,
+		reason: `[verification] Refusing unsafe git push in verification command: ${pushCommand}\n${detail}\nCurrent branch: ${branch}; protected destination: ${protectedBranchLabel(protectedBranches)}. Use an explicit destination refspec such as \`git push origin ${branch}:refs/heads/${branch}\` for branch publication checks.`,
+	};
+}
+
+function inspectPushRefspec(pushCommand: string, refspec: string, currentBranch: string, vars: VerificationPushSafetyVars, protectedBranches: Set<string>): VerificationPushSafetyResult | null {
+	const clean = refspec.replace(/^\+/, "");
+	if (!clean || clean.startsWith("refs/tags/")) return null;
+
+	if (clean.includes(":")) {
+		const colon = clean.indexOf(":");
+		const src = clean.slice(0, colon);
+		const dst = clean.slice(colon + 1);
+		const dstBranch = normalizeBranchRef(dst);
+		if (dstBranch && protectedBranches.has(dstBranch)) {
+			const srcBranch = normalizePushedSource(src, currentBranch);
+			if (currentBranch !== dstBranch || srcBranch !== dstBranch) {
+				return unsafePushReason(
+					pushCommand,
+					`Refspec \`${refspec}\` targets \`refs/heads/${dstBranch}\` from \`${srcBranch || "(delete/empty source)"}\`. Verification must not update a protected base branch from a different branch.`,
+					vars,
+					protectedBranches,
+				);
+			}
+		}
+		return null;
+	}
+
+	const branch = normalizeBranchRef(clean);
+	if (!branch) return null;
+	if (protectedBranches.has(branch)) {
+		if (currentBranch === branch) return null;
+		return unsafePushReason(
+			pushCommand,
+			`Bare ref \`${refspec}\` can update protected branch \`refs/heads/${branch}\` while verification is running on \`${currentBranch || "HEAD"}\`.`,
+			vars,
+			protectedBranches,
+		);
+	}
+
+	return unsafePushReason(
+		pushCommand,
+		`Bare ref \`${refspec}\` has no destination ref. With inherited upstream configuration (for example \`push.default=upstream\`), Git can push it to a protected branch instead of \`refs/heads/${branch}\`.`,
+		vars,
+		protectedBranches,
+	);
+}
+
+export function validateVerificationPushSafety(command: string, vars: VerificationPushSafetyVars): VerificationPushSafetyResult {
+	const tokens = shellTokenize(command);
+	const protectedBranches = protectedBranchSet(vars);
+	const currentBranch = normalizeBranchRef(vars.branch);
+	const currentIsProtected = currentBranch.length > 0 && protectedBranches.has(currentBranch);
+
+	for (const push of findGitPushes(tokens)) {
+		const parsed = parsePushArgs(tokens, push.pushIndex, push.end);
+		if (parsed.remote && parsed.remote !== "origin") continue;
+		const pushCommand = tokens.slice(push.gitIndex, push.end).join(" ");
+
+		if (parsed.pushesAllBranches && !currentIsProtected) {
+			return unsafePushReason(pushCommand, "Pushing all branches from a non-primary verification branch can update the protected base branch.", vars, protectedBranches);
+		}
+		if (parsed.refspecs.length === 0) {
+			if (!currentIsProtected && !parsed.tagsOnly) {
+				return unsafePushReason(pushCommand, "A push with no explicit refspec can use inherited upstream configuration and update the protected base branch.", vars, protectedBranches);
+			}
+			continue;
+		}
+
+		for (const refspec of parsed.refspecs) {
+			const result = inspectPushRefspec(pushCommand, refspec, currentBranch, vars, protectedBranches);
+			if (result) return result;
+		}
+	}
+
+	return { ok: true };
+}
+
 /** Create a deferred promise with exposed resolve/reject. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: any) => void } {
 	let resolve!: (value: T) => void;
@@ -1715,77 +1976,82 @@ export class VerificationHarness {
 							if (skipReason) {
 								result = { passed: true, output: skipReason };
 							} else {
-							const expectFailure = step.expect === "failure";
+								const pushSafety = validateVerificationPushSafety(cmd, builtinVars);
+								if (!pushSafety.ok) {
+									result = { passed: false, output: pushSafety.reason };
+								} else {
+									const expectFailure = step.expect === "failure";
 
-							// Look up error_pattern for expect: failure steps
-							let errorPattern: string | undefined;
-							if (expectFailure) {
-								errorPattern = agentVars["error_pattern"];
-								if (!errorPattern && allGateStates) {
-									for (const [, gs] of allGateStates) {
-										if (gs.metadata?.["error_pattern"]) {
-											errorPattern = gs.metadata["error_pattern"];
-											break;
-										}
-									}
-								}
-							}
-
-							const streamCtx = {
-								goalId: signal.goalId, gateId: signal.gateId,
-								signalId: signal.id, stepIndex: index,
-							};
-
-							// For sandboxed goals, resolve the project container ID
-							// so the command runs inside the container (where the code lives).
-							// Also resolve the container-internal worktree path so the command
-							// runs on the goal's branch, not /workspace (the main branch).
-							let commandContainerId: string | undefined;
-							let commandCwd = resolvedCwd;
-							const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-							const isSandboxedGoal = sandboxedGoal?.sandboxed;
-							if (isSandboxedGoal && this.sessionManager) {
-								const sandboxMgr = this.sessionManager.getSandboxManager();
-								const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
-								if (sandboxMgr && goalCtx) {
-									const projectSandbox = sandboxMgr.get(goalCtx.project.id);
-									if (projectSandbox) {
-										try {
-											commandContainerId = await projectSandbox.getContainerId();
-											// Resolve the container worktree path for this goal's branch.
-											// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
-											const goalBranchName = sandboxedGoal?.branch;
-											if (goalBranchName) {
-												commandCwd = `/workspace-wt/${goalBranchName}`;
-											} else {
-												commandCwd = "/workspace";
+									// Look up error_pattern for expect: failure steps
+									let errorPattern: string | undefined;
+									if (expectFailure) {
+										errorPattern = agentVars["error_pattern"];
+										if (!errorPattern && allGateStates) {
+											for (const [, gs] of allGateStates) {
+												if (gs.metadata?.["error_pattern"]) {
+													errorPattern = gs.metadata["error_pattern"];
+													break;
+												}
 											}
-										} catch {
-											// Container unavailable — fall through to warning
 										}
 									}
-								}
-								if (!commandContainerId) {
-									const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
-									console.warn(warning);
-									this.broadcastFn(streamCtx.goalId, {
-										type: "gate_verification_step_output",
-										goalId: streamCtx.goalId, gateId: streamCtx.gateId,
-										signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
-										stream: "stderr", text: warning + "\n", ts: Date.now(),
-									});
-								}
-							}
 
-							if (this.commandSemaphore.available === 0) {
-								console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-							}
-							await this.commandSemaphore.acquire();
-							try {
-								result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
-							} finally {
-								this.commandSemaphore.release();
-							}
+									const streamCtx = {
+										goalId: signal.goalId, gateId: signal.gateId,
+										signalId: signal.id, stepIndex: index,
+									};
+
+									// For sandboxed goals, resolve the project container ID
+									// so the command runs inside the container (where the code lives).
+									// Also resolve the container-internal worktree path so the command
+									// runs on the goal's branch, not /workspace (the main branch).
+									let commandContainerId: string | undefined;
+									let commandCwd = resolvedCwd;
+									const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+									const isSandboxedGoal = sandboxedGoal?.sandboxed;
+									if (isSandboxedGoal && this.sessionManager) {
+										const sandboxMgr = this.sessionManager.getSandboxManager();
+										const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
+										if (sandboxMgr && goalCtx) {
+											const projectSandbox = sandboxMgr.get(goalCtx.project.id);
+											if (projectSandbox) {
+												try {
+													commandContainerId = await projectSandbox.getContainerId();
+													// Resolve the container worktree path for this goal's branch.
+													// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
+													const goalBranchName = sandboxedGoal?.branch;
+													if (goalBranchName) {
+														commandCwd = `/workspace-wt/${goalBranchName}`;
+													} else {
+														commandCwd = "/workspace";
+													}
+												} catch {
+													// Container unavailable — fall through to warning
+												}
+											}
+										}
+										if (!commandContainerId) {
+											const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
+											console.warn(warning);
+											this.broadcastFn(streamCtx.goalId, {
+												type: "gate_verification_step_output",
+												goalId: streamCtx.goalId, gateId: streamCtx.gateId,
+												signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
+												stream: "stderr", text: warning + "\n", ts: Date.now(),
+											});
+										}
+									}
+
+									if (this.commandSemaphore.available === 0) {
+										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
+									}
+									await this.commandSemaphore.acquire();
+									try {
+										result = await this.runCommandStep(cmd, commandCwd, step.timeout || 300, expectFailure, streamCtx, errorPattern, commandContainerId);
+									} finally {
+										this.commandSemaphore.release();
+									}
+								}
 							}
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
