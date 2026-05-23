@@ -189,6 +189,68 @@ async function moveWorktree(repoPath: string, oldPath: string, newPath: string):
 	});
 }
 
+async function fetchRemoteTrackingBranch(worktreePath: string, branch: string): Promise<void> {
+	await execGit(["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
+		cwd: worktreePath,
+		timeout: 15_000,
+	});
+}
+
+async function currentBranchUpstream(worktreePath: string, branch: string): Promise<string | null> {
+	try {
+		const { stdout } = await execGit(["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`], {
+			cwd: worktreePath,
+			timeout: 5_000,
+		});
+		const upstream = stdout.trim();
+		return upstream || null;
+	} catch {
+		return null;
+	}
+}
+
+async function clearBranchUpstream(worktreePath: string, branch: string): Promise<void> {
+	try {
+		await execGit(["branch", "--unset-upstream", branch], {
+			cwd: worktreePath,
+			timeout: 5_000,
+		});
+	} catch {
+		// No upstream is already safe; continue with direct config cleanup as a belt-and-suspenders fallback.
+	}
+	for (const key of [`branch.${branch}.remote`, `branch.${branch}.merge`]) {
+		try {
+			await execGit(["config", "--unset-all", key], {
+				cwd: worktreePath,
+				timeout: 5_000,
+			});
+		} catch {
+			// Key absent or branch name requires Git's quoted subsection form; branch --unset-upstream handled normal cases.
+		}
+	}
+}
+
+async function setBranchUpstreamToOrigin(worktreePath: string, branch: string): Promise<void> {
+	await execGit(["branch", `--set-upstream-to=origin/${branch}`, branch], {
+		cwd: worktreePath,
+		timeout: 10_000,
+	});
+}
+
+async function ensureClaimedBranchSafeUpstream(worktreePath: string, branch: string): Promise<void> {
+	const desired = `origin/${branch}`;
+	const inherited = await currentBranchUpstream(worktreePath, branch);
+	if (!inherited || inherited === desired) return;
+
+	// Claim must never wait on the network. Drop inherited tracking immediately;
+	// background freshen publishes an explicit refspec and then sets origin/<branch>.
+	await clearBranchUpstream(worktreePath, branch);
+	const upstream = await currentBranchUpstream(worktreePath, branch);
+	if (upstream && upstream !== desired) {
+		throw new Error(`branch ${branch} still tracks ${upstream} after upstream safety cleanup`);
+	}
+}
+
 export class WorktreePool {
 	private pool: PoolEntry[] = [];
 	private filling = false;
@@ -284,15 +346,18 @@ export class WorktreePool {
 	 *
 	 * Steps performed synchronously (the caller awaits the rename):
 	 *   1. `git branch -m pool/_pool-<id> <targetBranch>`
-	 *   2. `git worktree move <oldPath> <newPath>` — on failure the call
+	 *   2. Clear any inherited upstream unless it already points at
+	 *      `origin/<targetBranch>`.
+	 *   3. `git worktree move <oldPath> <newPath>` — on failure the call
 	 *      returns null (caller falls back to `createWorktree`). No persistent
 	 *      "degraded" state is emitted: post-refactor (see
 	 *      `docs/design/remove-session-worktree-rename.md`) we never persist a
 	 *      session whose dir name doesn't match its branch.
 	 *
 	 * Steps performed in the background (caller does NOT await):
-	 *   3. `git fetch origin` + `git reset --hard <remote-primary>`
-	 *   4. `git push -u origin <targetBranch>` (skipped under BOBBIT_TEST_NO_PUSH=1)
+	 *   4. `git fetch origin` + `git reset --hard <remote-primary>`
+	 *   5. Explicitly push `<targetBranch>:refs/heads/<targetBranch>` and set
+	 *      upstream to `origin/<targetBranch>` (skipped under BOBBIT_TEST_NO_PUSH=1).
 	 *
 	 * Returns null if the pool is empty, or if the directory rename fails
 	 * (caller falls back to createWorktree).
@@ -306,6 +371,7 @@ export class WorktreePool {
 			multiRepo: 0,
 			readyAfterShift: 0,
 			branchRenameErrors: 0,
+			upstreamSafetyErrors: 0,
 			moveErrors: 0,
 			success: 0,
 			degraded: 0,
@@ -348,6 +414,22 @@ export class WorktreePool {
 		} catch (err) {
 			if (counters) counters.branchRenameErrors = 1;
 			console.error(`[worktree-pool] Branch rename failed (${entry.branchName} → ${targetBranch}):`, err);
+			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
+			recordClaimTimer();
+			return null;
+		}
+
+		try {
+			await ensureClaimedBranchSafeUpstream(entry.worktreePath, targetBranch);
+		} catch (err) {
+			if (counters) counters.upstreamSafetyErrors = 1;
+			console.error(`[worktree-pool] Upstream safety cleanup failed for ${targetBranch}:`, err);
+			try {
+				await execGit(["branch", "-m", targetBranch, entry.branchName], {
+					cwd: entry.worktreePath,
+					timeout: 10_000,
+				});
+			} catch { /* best-effort */ }
 			cleanupWorktree(this.repoPath, entry.worktreePath, entry.branchName, true).catch(() => {});
 			recordClaimTimer();
 			return null;
@@ -425,7 +507,8 @@ export class WorktreePool {
 			}
 		}
 
-		// 2. Per-repo: rename the branch and repair worktree pointers in parallel.
+		// 2. Per-repo: rename the branch, clear any inherited upstream, and repair
+		// worktree pointers in parallel. No remote probes run on the claim path.
 		const perRepo = await Promise.all(worktrees.map(async (w) => {
 			const oldWtPath = w.worktreePath;
 			const newWtPath = finalContainer === entry.worktreePath
@@ -438,6 +521,18 @@ export class WorktreePool {
 					timeout: 10_000,
 				});
 				renamed = true;
+				try {
+					await ensureClaimedBranchSafeUpstream(newWtPath, targetBranch);
+				} catch (err) {
+					console.warn(`[worktree-pool] multi-repo: upstream safety cleanup failed for ${w.repo}: ${err instanceof Error ? err.message : err}`);
+					try {
+						await execGit(["branch", "-m", targetBranch, entry.branchName], {
+							cwd: newWtPath,
+							timeout: 10_000,
+						});
+					} catch { /* best-effort */ }
+					renamed = false;
+				}
 			} catch (err) {
 				console.warn(`[worktree-pool] multi-repo: git branch -m failed for ${w.repo}: ${err instanceof Error ? err.message : err}`);
 			}
@@ -455,9 +550,9 @@ export class WorktreePool {
 			return { repo: w.repo, worktreePath: newWtPath, renamed };
 		}));
 
-		// Background freshen for each repo (independent).
+		// Background freshen for each successfully renamed repo (independent).
 		for (const r of perRepo) {
-			this.freshenInBackground(r.worktreePath, targetBranch);
+			if (r.renamed) this.freshenInBackground(r.worktreePath, targetBranch);
 		}
 
 		const degraded = perRepo.some(r => !r.renamed);
@@ -472,7 +567,7 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Background freshen: fetch origin + reset --hard <base> + push -u.
+	 * Background freshen: fetch origin + reset --hard <base> + explicit branch push.
 	 * Resolves the base via `resolveBaseRef(repoPath, baseRefResolver())` so
 	 * pool entries adopt the project's currently-configured `base_ref` at the
 	 * moment they're freshened — no drain / no recorded-base needed.
@@ -503,7 +598,13 @@ export class WorktreePool {
 			}
 			if (!shouldSkipRemotePush()) {
 				try {
-					await execGit(["push", "-u", "origin", branch], { cwd: worktreePath, timeout: 30_000 });
+					await execGit(["push", "origin", `${branch}:refs/heads/${branch}`], { cwd: worktreePath, timeout: 30_000 });
+					try {
+						await fetchRemoteTrackingBranch(worktreePath, branch);
+						await setBranchUpstreamToOrigin(worktreePath, branch);
+					} catch (err) {
+						console.warn(`[worktree-pool] Failed to set upstream for published ${branch}:`, err instanceof Error ? err.message : err);
+					}
 				} catch {
 					if (counters) counters.pushErrors = 1;
 					// Push failure is non-fatal (offline, auth issues, etc.)

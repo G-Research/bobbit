@@ -497,12 +497,13 @@ class WorktreePool {
 
 For each repo in the pool entry, in parallel:
 
-1. `git branch -m pool/<poolId> <targetBranch>` (fast, <50 ms).
-2. `git worktree move <pool-path> <target-path>` — atomic since git 2.17. On failure (typically Windows file locks), **degraded fallback**: skip the move; log `[worktree-pool] degraded: dir kept at pool path for <repo>`. The branch rename succeeded so the agent can still work; only the directory name is stale. The boot sweeper will reclaim it later.
+1. `git branch -m pool/<poolId> <targetBranch>` (fast, local ref rename).
+2. Clear any inherited upstream unless it already points at `origin/<targetBranch>`. This happens before the caller receives the claimed worktree, so a pool branch that tracked `origin/master` cannot leak that upstream into a goal/session branch.
+3. `git worktree move <pool-path> <target-path>` — atomic since git 2.17. On failure (typically Windows file locks), **degraded fallback**: skip the move; log `[worktree-pool] degraded: dir kept at pool path for <repo>`. The branch rename succeeded so the agent can still work; only the directory name is stale. The boot sweeper will reclaim it later.
 
-3. **Hand control to the caller now.** The remaining steps run in the background:
-   - `git fetch origin` then `git reset --hard <remote-primary>`.
-   - `git push -u origin <targetBranch>` (fire-and-forget, skipped under `BOBBIT_TEST_NO_PUSH=1`).
+4. **Hand control to the caller now.** The remaining steps run in the background:
+   - `git fetch origin` then `git reset --hard <base-ref>`.
+   - `git push origin <targetBranch>:refs/heads/<targetBranch>` (fire-and-forget, skipped under `BOBBIT_TEST_NO_PUSH=1`), then fetch the remote-tracking ref and set upstream to `origin/<targetBranch>`.
 
 Replenishment kicks off immediately. Pool target is `worktree_pool_size` × number of distinct repos (so pool slot count is per-set, not per-repo).
 
@@ -623,11 +624,11 @@ export function readHandoff(task: PersistedTask, repo: string):
 
 ### 6.3 PR-per-repo
 
-Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
+Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}:refs/heads/{{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
 
 ```yaml
 - { name: "Push api", type: command, component: "api",
-    run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+    run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 - { name: "Push web", type: command, component: "web", run: "…" }
 ```
 

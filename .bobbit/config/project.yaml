@@ -400,7 +400,7 @@ workflows:
         verify:
           - name: Branch pushed to remote
             type: command
-            run: git push origin {{branch}} && git ls-remote --heads origin {{branch}} |
+            run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} |
               grep -q .
           - name: Master merged into branch
             type: command
@@ -1124,7 +1124,7 @@ workflows:
         verify:
           - name: Branch pushed to remote
             type: command
-            run: git push origin {{branch}} && git ls-remote --heads origin {{branch}} |
+            run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} |
               grep -q .
           - name: Master merged into branch
             type: command
@@ -1616,7 +1616,7 @@ workflows:
         verify:
           - name: Branch pushed to remote
             type: command
-            run: git push origin {{branch}} && git ls-remote --heads origin {{branch}} |
+            run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} |
               grep -q .
           - name: Master merged into branch
             type: command
@@ -1732,7 +1732,7 @@ workflows:
         verify:
           - name: Branch pushed to remote
             type: command
-            run: git push origin {{branch}} && git ls-remote --heads origin {{branch}} |
+            run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} |
               grep -q .
           - name: Master merged into branch
             type: command

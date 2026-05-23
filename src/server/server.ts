@@ -316,6 +316,48 @@ async function execGitSafe(cmd: string, cwd: string, fallback = "", containerId?
 	try { return await execGit(cmd, cwd, 5000, containerId); } catch { return fallback; }
 }
 
+async function execGitArgs(args: string[], cwd: string, timeout = 5000, containerId?: string): Promise<string> {
+	if (containerId) {
+		const { stdout } = await execFileAsync("docker", [
+			"exec", "-w", cwd, containerId, "git", ...args,
+		], { encoding: "utf-8", timeout, env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" } });
+		return stdout.trim();
+	}
+	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
+	return stdout.trim();
+}
+
+function branchPublishGitArgs(branch: string): {
+	push: string[];
+	fetchRemoteTracking: string[];
+	setUpstream: string[];
+} {
+	if (!branch) throw new Error("Cannot push: no current branch");
+	return {
+		push: ["push", "origin", `HEAD:refs/heads/${branch}`],
+		fetchRemoteTracking: ["fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`],
+		setUpstream: ["branch", `--set-upstream-to=origin/${branch}`, branch],
+	};
+}
+
+async function publishCurrentBranchToOrigin(
+	cwd: string,
+	branch: string,
+	opts: { containerId?: string; setUpstream?: boolean } = {},
+): Promise<string> {
+	const args = branchPublishGitArgs(branch);
+	const output = await execGitArgs(args.push, cwd, 30_000, opts.containerId);
+	if (opts.setUpstream) {
+		try {
+			await execGitArgs(args.fetchRemoteTracking, cwd, 15_000, opts.containerId);
+			await execGitArgs(args.setUpstream, cwd, 10_000, opts.containerId);
+		} catch {
+			// Publishing succeeded; upstream repair is best-effort for compatibility.
+		}
+	}
+	return output;
+}
+
 /** Git status result shape (+ optional partial/untrackedIncluded flags). */
 export interface GitStatusResult {
 	branch: string; primaryBranch: string; isOnPrimary: boolean;
@@ -6979,13 +7021,14 @@ async function handleApiRoute(
 
 		json(result);
 
-		// Auto-push: for feature branches with unpushed commits, push in background
+		// Auto-push: for feature branches with unpushed commits, publish the current
+		// branch to its matching remote ref regardless of inherited upstream config.
 		if (!shouldSkipRemotePush()) {
-			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream) {
-				execAsync('git push', { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
+				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
 			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
-				// Session branches without upstream: set up tracking and push
-				execAsync(`git push -u origin ${result.branch}`, { cwd, encoding: "utf-8", timeout: 30000 }).catch(() => {});
+				// Session branches without upstream: publish safely, then set tracking.
+				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
 			}
 		}
 		return;
@@ -7313,7 +7356,9 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		try {
-			const output = await execGit('git push', cwd, 30000, cid);
+			const branch = await execGit('git symbolic-ref --short HEAD', cwd, 5000, cid);
+			const upstream = await execGitSafe('git rev-parse --abbrev-ref --symbolic-full-name @{u}', cwd, "", cid);
+			const output = await publishCurrentBranchToOrigin(cwd, branch, { containerId: cid, setUpstream: !upstream });
 			invalidateGitStatusCache(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
