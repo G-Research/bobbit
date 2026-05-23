@@ -217,6 +217,12 @@ There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
 - { name: "Push branch", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
+Use an explicit destination refspec for branch publication. Do **not** write
+`git push origin {{branch}}`: inherited upstream config and
+`push.default=upstream` can redirect a bare branch push to the base/primary
+branch. The verification runner rejects unsafe bare pushes and direct updates
+to protected base branches before executing command steps.
+
 Validator rules:
 
 - Cannot have both `command:` and `run:` on the same step.

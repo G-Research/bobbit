@@ -10,7 +10,7 @@ hard-coded reference is also baked into:
 
 - workflow gate verify commands (`{{master}}` for the ready-to-merge gate),
 - the LLM-review prompts the project assistant seeds for new projects,
-- the per-branch upstream that `git push -u` sets at worktree-creation time,
+- the per-branch upstream used by status/ahead-behind checks after branch publication,
 - the "primary" comparator the git-status widget uses for the
   `aheadOfPrimary` / `behindPrimary` counters in `git-status-native.ts`.
 
@@ -184,10 +184,19 @@ design — there is an explicit `git fetch origin <goal-branch>` immediately
 preceding the `createWorktree` call. This is a different base concept (the
 goal's branch, not the project's integration target).
 
-### 2. Upstream tracking
+### 2. Upstream tracking and safe publication
 
-After the worktree is created (and after the existing `git push -u origin
-<branch>` runs for backup / origin visibility), `createWorktree` issues:
+After the worktree is created, `createWorktree` publishes the branch with an
+explicit destination refspec and then fetches the matching remote-tracking ref:
+
+```bash
+git -C <worktree> push origin <branch>:refs/heads/<branch>
+git -C <worktree> fetch origin refs/heads/<branch>:refs/remotes/origin/<branch>
+git -C <worktree> branch --set-upstream-to=origin/<branch> <branch>
+```
+
+If `base_ref` is configured, `createWorktree` then points `@{u}` at that base
+for status/ahead-behind semantics:
 
 ```bash
 git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
@@ -195,12 +204,17 @@ git -C <worktree> branch --set-upstream-to=<base-ref> <branch>
 
 Effect:
 
-- Local base → local upstream. `git status` ahead/behind compares against the
-  local base. Push still happens (we keep `git push -u origin <branch>` for
-  crash-recovery / inspection), but `--set-upstream-to` then overrides what
-  `@{u}` resolves to.
-- Remote base (`origin/X`) → remote upstream. `git push` defaults work
-  normally.
+- Branch publication never depends on the local upstream or `push.default`.
+  Bobbit-owned publishes target `refs/heads/<branch>` directly, so an inherited
+  upstream such as `origin/master` cannot redirect the push.
+- Local base → local upstream for non-pool worktrees. `git status` ahead/behind
+  compares against the local base after the override.
+- Remote base (`origin/X`) → remote upstream for non-pool worktrees. Workflow
+  variables and merge-base checks still use `{{baseBranch}}` explicitly; the
+  push destination remains the work branch, not the base branch.
+- Pool-claimed worktrees are the exception: claim clears any inherited upstream
+  synchronously, then background publish repairs tracking to `origin/<branch>`.
+  The pool still resets to the current configured base before handoff.
 
 Save-time validation guarantees the base is a branch ref, so `--set-upstream-to`
 never fails on tag/SHA at runtime. Defence-in-depth error if it does fail
@@ -242,6 +256,7 @@ authoring guide documents the distinction:
 `{{baseBranch}}` instead of `{{master}}`:
 
 - Ready-to-Merge gate:
+  - `git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q .`
   - `git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}`
   - `gh pr list --head {{branch}} --base {{baseBranch}}`
 - Code-review / design / impl prompts: `origin/{{baseBranch}}` throughout.
@@ -374,6 +389,14 @@ new WorktreePool(
 - No "recorded base" field on pool entries.
 - No drain on setting change.
 - Pool entries auto-adopt the current base whenever they're touched.
+
+On claim, a pool branch may have inherited upstream tracking from its prebuilt
+`pool/_pool-*` branch. `claim()` synchronously unsets any upstream that is not
+already `origin/<targetBranch>` before returning the worktree. The background
+freshen path then publishes with `git push origin <targetBranch>:refs/heads/<targetBranch>`,
+fetches the remote-tracking ref, and sets upstream to `origin/<targetBranch>`.
+This keeps claim fast while preventing a stale `origin/master` upstream from
+influencing later Bobbit-owned pushes.
 
 The unconditional `git fetch origin` in `freshenInBackground` stays — harmless
 when base is local, useful for refreshing any other tracking branches the
