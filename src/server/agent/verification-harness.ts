@@ -202,7 +202,7 @@ function shellTokenize(command: string): string[] {
 		}
 		if (quote === '"') {
 			if (ch === '"') quote = null;
-			else if (ch === "\\" && i + 1 < command.length) current += command[++i];
+			else if (ch === "\\" && i + 1 < command.length && ['"', "\\", "$", "`", "\n"].includes(command[i + 1])) current += command[++i];
 			else current += ch;
 			continue;
 		}
@@ -285,10 +285,20 @@ function protectedBranchLabel(branches: Set<string>): string {
 	return [...branches].map((b) => `refs/heads/${b}`).join(" or ") || "the primary branch";
 }
 
+function executableBasename(token: string): string {
+	const normalized = token.replace(/\\/g, "/");
+	return normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+}
+
+function isGitExecutableToken(token: string): boolean {
+	const base = executableBasename(token);
+	return base === "git" || base === "git.exe" || base === "git.cmd" || base === "git.bat";
+}
+
 function findGitPushes(tokens: string[]): Array<{ gitIndex: number; pushIndex: number; end: number }> {
 	const pushes: Array<{ gitIndex: number; pushIndex: number; end: number }> = [];
 	for (let i = 0; i < tokens.length; i++) {
-		if (tokens[i] !== "git") continue;
+		if (!isGitExecutableToken(tokens[i])) continue;
 		const end = commandEnd(tokens, i + 1);
 		let j = i + 1;
 		while (j < end) {
@@ -410,7 +420,6 @@ export function validateVerificationPushSafety(command: string, vars: Verificati
 
 	for (const push of findGitPushes(tokens)) {
 		const parsed = parsePushArgs(tokens, push.pushIndex, push.end);
-		if (parsed.remote && parsed.remote !== "origin") continue;
 		const pushCommand = tokens.slice(push.gitIndex, push.end).join(" ");
 
 		if (parsed.pushesAllBranches && !currentIsProtected) {
