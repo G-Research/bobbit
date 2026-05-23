@@ -9,7 +9,15 @@
  *
  * Global setup ensures both server and UI are built (builds only what's missing).
  */
-import { defineConfig } from "@playwright/test";
+function disableE2ENodeCompileCache(): void {
+	// Must run in the Playwright config process before test workers spawn.
+	// A host-level NODE_COMPILE_CACHE caused false ESM "missing export" errors
+	// when multiple Windows workers cold-imported dist/server concurrently.
+	process.env.NODE_DISABLE_COMPILE_CACHE = "1";
+	delete process.env.NODE_COMPILE_CACHE;
+}
+
+disableE2ENodeCompileCache();
 
 // Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
 // reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
@@ -20,7 +28,7 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 // Retries policy: 3 everywhere for now. Real bugs fail all 4 attempts;
 // flakes (Windows-FS races, goal-assistant cold-start timeouts) absorb
 // the retry. Will tighten back to 0 once the flake floor is fully fixed.
-export default defineConfig({
+export default {
 	timeout: 30_000,
 	retries: 3,
 	fullyParallel: true,
@@ -116,4 +124,4 @@ export default defineConfig({
 			fullyParallel: false,
 		},
 	],
-});
+};
