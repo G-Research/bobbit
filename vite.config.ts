@@ -349,10 +349,23 @@ export default defineConfig({
 	server: {
 		host,
 		watch: {
-			// Exclude worktree directories — test runners and agent sessions create
-			// clones under these dirs, and Vite's watcher triggers page reloads for
-			// every file in them.
-			ignored: ["**/.e2e-*/**", "**/bobbit-wt/**", "**/*-wt/**"],
+			// Keep Vite's watcher scoped to source files. Bobbit's runtime writes
+			// heavily under these generated/state directories; watching them causes
+			// idle chokidar churn and thousands of FSWatcher handles on Windows.
+			ignored: [
+				"**/.bobbit/**",
+				"**/.bobbit-*/**",
+				"**/.e2e-*/**",
+				"**/.e2e-fullstack/**",
+				"**/.playwright-mcp/**",
+				"**/.bobbit-qa/**",
+				"**/bobbit-wt/**",
+				"**/*-wt/**",
+				"**/dist/**",
+				"**/coverage/**",
+				"**/playwright-report/**",
+				"**/test-results/**",
+			],
 		},
 		fs: {
 			deny: [".bobbit", "node_modules/.vite"],
