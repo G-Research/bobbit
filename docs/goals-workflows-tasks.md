@@ -215,6 +215,16 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 
 **Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — the bare branch name derived from `base_ref` (or `detectPrimaryBranch()` when unset). `{{master}}` is intentionally unchanged and continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
 
+**Branch publication safety:** Ready-to-Merge templates publish the goal branch with an explicit destination refspec:
+
+```bash
+git push origin {{branch}}:refs/heads/{{branch}}
+```
+
+Do not use bare forms such as `git push origin {{branch}}` in verification. Bare branch pushes can be redirected by inherited upstream config or `push.default=upstream` (for example, to `origin/master`). Bobbit-owned branch publication for goal/session/team worktrees uses the same rule (`<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`), so `base_ref` controls baselines and status comparisons but never the remote push destination.
+
+**Verification push guard:** before running any command step, the harness checks substituted shell text for unsafe `git push` invocations. From a non-primary goal/session branch it rejects pushes with no explicit refspec, bare branch refspecs, `--all`/`--mirror`, and explicit destinations that update the protected base/primary branch (`{{baseBranch}}`, `{{master}}`, or the primary fallback). The check also catches the wrapper forms covered by regression tests, such as absolute `git` executable paths and `env ... git push ...`. Safe publication to the current branch (`{{branch}}:refs/heads/{{branch}}`) is allowed.
+
 **How the harness enforces this per-gate:** reviewer/architect/spec-auditor role YAMLs contain a `{{REVIEW_CONTEXT}}` placeholder in their preamble. `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` substitutes it with either (a) an "implementation review" block containing the concrete `origin/<primary>...HEAD` diff instructions and the resolved baseline SHA, or (b) a "pre-implementation" notice that explicitly forbids `git diff` / `git log` and reminds the reviewer that zero goal-unique commits is the normal state. The branching decision uses `isPreImplementationGate()` on the signalled gate — role YAMLs never hardcode diff commands.
 
 **Migration note for user-authored workflows:** `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. Pre-existing files there are folded into `project.yaml::workflows` on first boot by `migrate-project-yaml.ts` and the directory is removed. The harness resolves `{{master}}` to the dynamically-detected primary branch, but the `origin/` prefix is now injected only by built-in workflow content. User-authored prompts that still say `{{master}}...HEAD` (without `origin/`) will diff against the local ref — rewrite to `origin/{{master}}...HEAD` to get the full fix. Pre-implementation gates automatically benefit regardless, because that logic lives in the harness's review-prompt builder.
@@ -376,7 +386,7 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. Those safety-net publishes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
 
 #### Multi-repo git handoff
 

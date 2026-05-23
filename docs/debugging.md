@@ -11,6 +11,14 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Confirm a kill**: poll `process.kill(pid, 0)` against the recorded step pid — it throws `ESRCH` once the tree is reaped (within `killGraceMs`, so ~5s on timeout, ~1s on cancel). `ps -o pid= -g <pgid>` (POSIX) or `tasklist /FI "PID eq <pid>"` (Windows) should return empty in the same window. The failed step's `output` ends with `— killed subprocess tree`.
 - **Pinning tests**: `tests/verification-harness-timeout.test.ts` (unit), `tests/e2e/verification-timeout.spec.ts` (E2E).
 
+## Ready-to-merge fails with "Refusing unsafe git push"
+
+- **Symptom**: a command verification step fails before running and its output starts with `[verification] Refusing unsafe git push in verification command`.
+- **Cause**: the workflow contains a push that could update the protected base/primary branch from a goal/session branch. Common examples are `git push origin {{branch}}`, `git push` with no refspec, `git push --all`, or `git push origin {{branch}}:refs/heads/{{baseBranch}}`.
+- **Fix**: publish the work branch with an explicit destination refspec: `git push origin {{branch}}:refs/heads/{{branch}}`. The Ready-to-Merge template should keep the follow-up `git ls-remote --heads origin {{branch}} | grep -q .` check.
+- **Where to look**: custom workflow command steps in `project.yaml::workflows.*.gates.*.verify[].run`; runtime guard in `verification-harness.ts::validateVerificationPushSafety`; authoring guidance in [goals-workflows-tasks.md](goals-workflows-tasks.md#gate-verification-baselines).
+- **Pinning tests**: `tests/verification-push-guard.test.ts` and `tests/goal-push-safety-regression.test.ts`.
+
 ## Streaming performance (UI sluggishness)
 
 - **Architecture**: `StreamingMessageContainer` owns rendering during streaming via `setMessage()` with `requestAnimationFrame` batching. `AgentInterface` must NOT call `this.requestUpdate()` in the `message_update` event handler — only the streaming container updates on each token.
