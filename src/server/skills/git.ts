@@ -250,7 +250,7 @@ export interface WorktreeResult {
  *   Empty/undefined falls back to today's behavior (`resolveRemotePrimary`).
  *   Only fires `--set-upstream-to` when this is non-empty — explicit-startPoint
  *   callers (e.g. team-manager's hierarchical branching) keep today's
- *   `push -u origin <branch>` upstream semantics.
+ *   `origin/<branch>` upstream semantics after a safe explicit-refspec publish.
  */
 export async function createWorktree(repoPath: string, branchName: string, opts?: { startPoint?: string; skipPush?: boolean; worktreeRoot?: string; configuredBaseRef?: string }): Promise<WorktreeResult> {
 	// Validate repoPath exists — execFile with a bad cwd throws a misleading
@@ -354,23 +354,33 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 		}
 	}
 
-	// Push the new branch and set upstream tracking so git-status can report ahead/behind
-	// and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
+	// Push the new branch with an explicit destination refspec so inherited
+	// upstream config (for example origin/master) can never redirect the publish.
+	// Set upstream tracking only after that safe publish succeeds so git-status can
+	// report ahead/behind and `git rev-parse @{u}` doesn't emit "fatal: no upstream" errors.
 	if (!opts?.skipPush && !shouldSkipRemotePush()) {
 		try {
-			await execGit(["push", "-u", "origin", branchName], {
+			await execGit(["push", "origin", `${branchName}:refs/heads/${branchName}`], {
 				cwd: worktreePath,
 				timeout: 30_000, // 30s max for push
 			});
+			await execGit(["fetch", "origin", `refs/heads/${branchName}:refs/remotes/origin/${branchName}`], {
+				cwd: worktreePath,
+				timeout: 15_000,
+			});
+			await execGit(["branch", `--set-upstream-to=origin/${branchName}`, branchName], {
+				cwd: worktreePath,
+				timeout: 10_000,
+			});
 		} catch {
-			// Push may fail (no remote, auth issues, offline) — not fatal
+			// Push/upstream setup may fail (no remote, auth issues, offline) — not fatal
 		}
 	}
 
 	// When the project has a configured `base_ref`, override the per-branch
 	// upstream so `@{u}` (and the ahead/behind pair in git-status-native) points
-	// at the configured integration target rather than `origin/<branch>` that
-	// `git push -u` just set. Runs whether the base is local (`master`) or
+	// at the configured integration target rather than `origin/<branch>` created
+	// above. Runs whether the base is local (`master`) or
 	// remote (`origin/develop`) — save-time validation guarantees the ref
 	// resolves at PUT time; the defence-in-depth try/catch below catches the
 	// edge case where it has been deleted between save and worktree creation.
