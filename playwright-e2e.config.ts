@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * E2E test config: split into API (in-process) and browser (process-spawned) projects.
@@ -24,6 +24,14 @@ function sanitizeCacheSegment(value: string): string {
 	return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "run";
 }
 
+function e2ePwtestCacheBaseRoot(): string {
+	// Canonical external override. BOBBIT_PWTEST_CACHE_ROOT is a legacy alias
+	// accepted for older local wrappers.
+	return process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT?.trim()
+		|| process.env.BOBBIT_PWTEST_CACHE_ROOT?.trim()
+		|| e2eTempRoot();
+}
+
 function prepareE2ERuntimeCaches(): void {
 	// Must run in the Playwright config process before test workers spawn.
 	// A host-level NODE_COMPILE_CACHE caused false ESM "missing export" errors
@@ -41,11 +49,15 @@ function prepareE2ERuntimeCaches(): void {
 			process.env.BOBBIT_E2E_RUN_ID?.trim()
 				|| `direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
 		);
-		process.env.PWTEST_CACHE_DIR = join(e2eTempRoot(), "pwtest-transform-cache", runId);
+		const runCacheRoot = join(resolve(e2ePwtestCacheBaseRoot()), "pwtest-transform-cache", runId);
+		process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = runCacheRoot;
+		process.env.PWTEST_CACHE_DIR = runCacheRoot;
 		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
 	}
 	const transformCacheDir = process.env.PWTEST_CACHE_DIR!;
-	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT || transformCacheDir;
+	const runCacheRoot = process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT?.trim() || transformCacheDir;
+	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = runCacheRoot;
+	mkdirSync(runCacheRoot, { recursive: true });
 	mkdirSync(transformCacheDir, { recursive: true });
 }
 

@@ -30,23 +30,32 @@ function e2eTempRoot() {
   return join(tmpdir(), "bobbit-e2e");
 }
 
+function cacheRootOverride() {
+  // Canonical external override. BOBBIT_PWTEST_CACHE_ROOT is a legacy alias
+  // kept for local scripts that predate the E2E-prefixed name.
+  return process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT?.trim()
+    || process.env.BOBBIT_PWTEST_CACHE_ROOT?.trim()
+    || "";
+}
+
 function makeRunCacheDir() {
   const explicit = process.env.PWTEST_CACHE_DIR?.trim();
-  if (explicit) return { cacheDir: resolve(explicit), owned: false };
+  if (explicit) return { cacheDir: resolve(explicit), baseRoot: undefined, owned: false };
 
   const runId = sanitizeSegment(
     process.env.BOBBIT_E2E_RUN_ID?.trim()
       || `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
   );
-  const base = resolve(process.env.BOBBIT_PWTEST_CACHE_ROOT?.trim() || e2eTempRoot());
-  return { cacheDir: join(base, "pwtest-transform-cache", runId), owned: true };
+  const baseRoot = resolve(cacheRootOverride() || e2eTempRoot());
+  return { cacheDir: join(baseRoot, "pwtest-transform-cache", runId), baseRoot, owned: true };
 }
 
-const { cacheDir, owned: ownsCacheDir } = makeRunCacheDir();
+const { cacheDir, baseRoot, owned: ownsCacheDir } = makeRunCacheDir();
 mkdirSync(cacheDir, { recursive: true });
 
 const env = { ...process.env };
-env.BOBBIT_E2E_PWTEST_CACHE_ROOT = cacheDir;
+if (baseRoot) env.BOBBIT_E2E_PWTEST_CACHE_ROOT = baseRoot;
+env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = cacheDir;
 env.PWTEST_CACHE_DIR = join(cacheDir, `runner-${process.pid}`);
 env.BOBBIT_E2E_PWTEST_CACHE_DIR = cacheDir;
 if (ownsCacheDir) env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
@@ -56,7 +65,7 @@ delete env.NODE_COMPILE_CACHE;
 env.NODE_OPTIONS = [`--require=${cacheBootstrap}`, env.NODE_OPTIONS].filter(Boolean).join(" ");
 
 if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
-  console.error(`[e2e] PWTEST_CACHE_ROOT=${cacheDir}`);
+  console.error(`[e2e] BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT=${cacheDir}`);
 }
 
 function playwrightInvocation() {
