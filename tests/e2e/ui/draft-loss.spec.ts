@@ -17,12 +17,20 @@ test.describe("Draft persistence bugs", () => {
 		await waitForHealth();
 	});
 
-	test("draft survives send→switch→reload and immediate hard reload", async ({ page }) => {
+	test("draft survives send→switch→reload, immediate hard reload, and late restore", async ({ page }) => {
 		const sessionA = await createSession();
 		const sessionB = await createSession();
 		const sessionC = await createSession();
+		const sessionD = await createSession();
+		let releaseDelayedDraftRestore: (() => void) | undefined;
+		let delayedDraftRestoreReleased = false;
+		const releaseDelayedRestoreIfNeeded = () => {
+			if (delayedDraftRestoreReleased) return;
+			delayedDraftRestoreReleased = true;
+			releaseDelayedDraftRestore?.();
+		};
 		try {
-			await Promise.all([sessionA, sessionB, sessionC].map((id) => waitForSessionStatus(id, "idle")));
+			await Promise.all([sessionA, sessionB, sessionC, sessionD].map((id) => waitForSessionStatus(id, "idle")));
 			await openApp(page);
 
 			// Scenario 1: after sending in A, switching away and back must not make
@@ -75,8 +83,71 @@ test.describe("Draft persistence bugs", () => {
 				const val = await page.locator("textarea").first().inputValue();
 				expect(val).toBe(hardReloadDraft);
 			}).toPass({ intervals: [250, 500, 1000, 1000, 2000, 2000], timeout: 20_000 });
+
+			// Scenario 3: autosave must be bound before the editor becomes
+			// interactive. A delayed stale server restore must not overwrite a fresh
+			// local draft typed during first paint/initial navigation.
+			const staleServerDraft = "stale server draft from slow restore";
+			const freshLocalDraft = "fresh local draft typed before restore returns";
+			await apiFetch(`/api/sessions/${sessionD}/draft`, {
+				method: "PUT",
+				body: JSON.stringify({ type: "prompt", data: { text: staleServerDraft, gen: 1 } }),
+			});
+
+			let delayedRestoreSeen = false;
+			let delayedRestoreHandled = false;
+			let resolveDelayedRestoreResponse!: () => void;
+			const delayedRestoreResponse = new Promise<void>((resolve) => { resolveDelayedRestoreResponse = resolve; });
+			let releaseRestore!: () => void;
+			const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+			releaseDelayedDraftRestore = releaseRestore;
+			delayedDraftRestoreReleased = false;
+			const matchDelayedPromptDraft = (url: URL) =>
+				url.pathname === `/api/sessions/${sessionD}/draft` && url.searchParams.get("type") === "prompt";
+			const delayedPromptDraftRoute = async (
+				route: import("@playwright/test").Route,
+				request: import("@playwright/test").Request,
+			) => {
+				if (request.method() !== "GET" || delayedRestoreHandled) {
+					await route.fallback();
+					return;
+				}
+				delayedRestoreHandled = true;
+				delayedRestoreSeen = true;
+				try {
+					await restoreGate;
+					await route.fulfill({
+						status: 200,
+						contentType: "application/json",
+						body: JSON.stringify({ type: "prompt", data: { text: staleServerDraft, gen: 1 } }),
+					});
+				} finally {
+					resolveDelayedRestoreResponse();
+				}
+			};
+			await page.route(matchDelayedPromptDraft, delayedPromptDraftRoute);
+
+			await navigateToSession(page, sessionD);
+			const textarea = page.locator("textarea").first();
+			await expect(textarea).toBeEditable({ timeout: 15_000 });
+			await textarea.fill(freshLocalDraft);
+			await expect(async () => {
+				expect(delayedRestoreSeen).toBe(true);
+			}).toPass({ intervals: [100, 250, 500, 1000], timeout: 10_000 });
+			releaseDelayedRestoreIfNeeded();
+			await delayedRestoreResponse;
+			await page.unroute(matchDelayedPromptDraft, delayedPromptDraftRoute);
+
+			await expect(textarea).toHaveValue(freshLocalDraft, { timeout: 5_000 });
+			await expect(async () => {
+				const resp = await apiFetch(`/api/sessions/${sessionD}/draft?type=prompt`);
+				expect(resp.ok).toBe(true);
+				const body = await resp.json() as { data?: { text?: string } };
+				expect(body.data?.text).toBe(freshLocalDraft);
+			}).toPass({ intervals: [250, 500, 1000, 1000, 2000], timeout: 15_000 });
 		} finally {
-			await Promise.all([sessionA, sessionB, sessionC].map((id) => deleteSession(id).catch(() => { /* best-effort */ })));
+			releaseDelayedRestoreIfNeeded();
+			await Promise.all([sessionA, sessionB, sessionC, sessionD].map((id) => deleteSession(id).catch(() => { /* best-effort */ })));
 		}
 	});
 });
