@@ -304,17 +304,18 @@ export class ProjectSandbox {
 		// Install post-commit hook for push-to-remote durability
 		await this._installPostCommitHook(containerId, worktreePath);
 
-		// Set upstream tracking (non-fatal)
+		// Publish with an explicit destination refspec, then set upstream tracking
+		// only after that safe publish succeeds (non-fatal).
 		if (!shouldSkipRemotePush()) {
 			try {
-				await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: worktreePath });
-			} catch { /* push may fail if branch doesn't exist on remote yet */ }
+				await this._publishBranchToOrigin(containerId, worktreePath, branch, true);
+			} catch { /* push may fail with no remote, auth issues, or offline */ }
 		}
 
 		// When the project has a configured `base_ref`, override the per-branch
 		// upstream so `@{u}` (and the ahead/behind pair) points at the configured
-		// integration target rather than `origin/<branch>` that `git push -u`
-		// just set. Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
+		// integration target rather than `origin/<branch>` created above.
+		// Mirrors host-side `createWorktree` (see `docs/design/base-ref.md` §2).
 		// Non-fatal in the sandbox — host-side save-time validation already
 		// guarantees the ref resolves; this is defence-in-depth.
 		const configuredBaseRefTrimmed = (configuredBaseRef ?? "").trim();
@@ -410,8 +411,8 @@ export class ProjectSandbox {
 
 			if (!shouldSkipRemotePush()) {
 				try {
-					await this._dockerExec(containerId, ["git", "push", "-u", "origin", branch], { cwd: wtPath });
-				} catch { /* push may fail if branch doesn't exist on remote yet */ }
+					await this._publishBranchToOrigin(containerId, wtPath, branch, true);
+				} catch { /* push may fail with no remote, auth issues, or offline */ }
 			}
 
 			// Override per-branch upstream to the configured `base_ref` when set,
@@ -899,6 +900,22 @@ export class ProjectSandbox {
 
 	// ── Private: Post-commit hook ──────────────────────────────────────
 
+	private async _publishBranchToOrigin(containerId: string, worktreePath: string, branch: string, setUpstream: boolean): Promise<void> {
+		await this._dockerExec(containerId, ["git", "push", "origin", `${branch}:refs/heads/${branch}`], {
+			cwd: worktreePath,
+			timeout: 30_000,
+		});
+		if (!setUpstream) return;
+		await this._dockerExec(containerId, ["git", "fetch", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
+			cwd: worktreePath,
+			timeout: 15_000,
+		});
+		await this._dockerExec(containerId, ["git", "branch", `--set-upstream-to=origin/${branch}`, branch], {
+			cwd: worktreePath,
+			timeout: 10_000,
+		});
+	}
+
 	private async _installPostCommitHook(containerId: string, worktreePath: string): Promise<void> {
 		if (shouldSkipRemotePush()) return; // No push hook in test mode
 
@@ -906,7 +923,7 @@ export class ProjectSandbox {
 		const hookScript = [
 			"#!/bin/sh",
 			'branch=$(git symbolic-ref --short HEAD 2>/dev/null)',
-			'[ -n "$branch" ] && git push origin "$branch" 2>/dev/null &',
+			'[ -n "$branch" ] && git push origin "HEAD:refs/heads/$branch" 2>/dev/null &',
 		].join("\n");
 
 		try {
