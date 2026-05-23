@@ -8486,6 +8486,7 @@ async function handleApiRoute(
 				{
 					triggers: body.triggers,
 					roleId: body.roleId,
+					accessory: body.accessory,
 					projectId,
 					sandboxed: body.sandboxed === true,
 					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
@@ -8575,6 +8576,7 @@ async function handleApiRoute(
 				}
 			}
 
+			const hasAccessoryUpdate = Object.prototype.hasOwnProperty.call(body, "accessory");
 			const ok = staffManager.updateStaff(id, {
 				name: body.name,
 				description: body.description,
@@ -8584,13 +8586,18 @@ async function handleApiRoute(
 				triggers: body.triggers,
 				memory: body.memory,
 				roleId: body.roleId,
+				accessory: hasAccessoryUpdate ? body.accessory : undefined,
 				contextPolicy:
 					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
 						? body.contextPolicy
 						: undefined,
 			});
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			json(staffManager.getStaff(id));
+			const staff = staffManager.getStaff(id);
+			if (hasAccessoryUpdate && staff?.currentSessionId) {
+				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
+			}
+			json(staff);
 			return;
 		}
 
