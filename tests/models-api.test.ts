@@ -18,6 +18,10 @@ const { PreferencesStore } = await import("../src/server/agent/preferences-store
 const { getAvailableModels } = await import("../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(tmpDir);
+// This metadata-focused registry test intentionally opts OpenAI in so
+// OpenAI-Codex rows are visible under provider opt-in rules. It does not seed
+// credentials, leaving authentication state to the normal credential detectors.
+prefs.set("providerEnabled.openai", true);
 
 // Fetch models once — all tests validate the same snapshot
 const models = await getAvailableModels(prefs);

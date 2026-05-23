@@ -11,6 +11,10 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
 - **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
 
+## Provider Opt-In Auth
+
+Direct-cloud providers are opt-in per vendor: Anthropic, OpenAI, and Google Gemini can be enabled or disabled independently. Disabling a provider hides its models and suppresses auth prompts without deleting saved credentials. When AI Gateway is configured, Bobbit bypasses all vendor-specific auth gates, Settings auth actions, and reauth reminders. See [provider-opt-in-auth.md](provider-opt-in-auth.md) for the full behavior and API links.
+
 ## Goals
 
 Goals are a task-tracking layer on top of sessions. A goal has a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`).

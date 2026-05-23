@@ -430,11 +430,112 @@ export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean>
 	return true;
 }
 
+type CloudProviderId = "anthropic" | "openai" | "google";
+type CloudAuthReason = "create-session" | "start-goal" | "start-team" | "send-message" | "image-generation";
+type ProviderStatusValue = "disabled" | "enabled_without_credential" | "authenticated" | "expired" | "invalid" | "oauth_unavailable" | "aigw_bypass";
+
+export interface CloudProviderStatus {
+	id: CloudProviderId;
+	label?: string;
+	enabled: boolean;
+	configured: boolean;
+	authenticated: boolean;
+	expired: boolean;
+	needsReauth: boolean;
+	status: ProviderStatusValue;
+	credentialTypes: Array<"oauth" | "api_key" | "env" | "host_token">;
+	oauthSupported: boolean;
+	apiKeySupported: boolean;
+	expires?: number;
+	message?: string;
+}
+
+export interface CloudAuthStatus {
+	mode: "aigw" | "direct-cloud";
+	aigwConfigured: boolean;
+	authGateRequired: boolean;
+	providers: CloudProviderStatus[];
+}
+
+export interface EnsureDirectCloudAuthReadyOptions {
+	reason: CloudAuthReason;
+	continuationLabel?: string;
+	modelProvider?: string;
+}
+
+const CLOUD_PROVIDER_LABELS: Record<CloudProviderId, string> = {
+	anthropic: "Anthropic",
+	openai: "OpenAI",
+	google: "Google Gemini",
+};
+const CLOUD_PROVIDER_DESCRIPTIONS: Record<CloudProviderId, string> = {
+	anthropic: "Claude models through Anthropic direct cloud.",
+	openai: "GPT models and OpenAI image models.",
+	google: "Gemini models and Google image models.",
+};
+const TARGET_MODEL_PROVIDERS = new Set(["anthropic", "openai", "openai-codex", "google", "google-gemini-cli"]);
+
+function cloudProviderLabel(provider: string): string {
+	const normalized = provider === "openai-codex" ? "openai" : provider;
+	if (normalized === "anthropic" || normalized === "openai" || normalized === "google") return CLOUD_PROVIDER_LABELS[normalized];
+	return provider.split(/[\s_-]+/).filter(Boolean).map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ") || provider;
+}
+
+function oauthProviderForVendor(provider: CloudProviderId): string {
+	return provider === "openai" ? "openai-codex" : provider;
+}
+
+function cloudVendorForModelProvider(provider?: string): CloudProviderId | undefined {
+	if (!provider) return undefined;
+	const p = provider.trim().toLowerCase();
+	if (p === "anthropic") return "anthropic";
+	if (p === "openai" || p === "openai-codex") return "openai";
+	if (p === "google" || p === "google-gemini" || p === "google-gemini-cli" || p === "gemini") return "google";
+	return undefined;
+}
+
+function explicitProviderIsNonTarget(provider?: string): boolean {
+	if (!provider) return false;
+	const p = provider.trim().toLowerCase();
+	if (!p) return false;
+	if (p === "aigw") return true;
+	return cloudVendorForModelProvider(p) === undefined && !TARGET_MODEL_PROVIDERS.has(p);
+}
+
+function providerFromPref(pref: unknown): string | undefined {
+	if (typeof pref !== "string") return undefined;
+	const slash = pref.indexOf("/");
+	return slash > 0 ? pref.slice(0, slash) : undefined;
+}
+
+async function hasExplicitNonTargetDefault(reason: CloudAuthReason): Promise<boolean> {
+	try {
+		const res = await gatewayFetch("/api/preferences");
+		if (!res.ok) return false;
+		const prefs = await res.json();
+		const key = reason === "image-generation" ? "default.imageModel" : "default.sessionModel";
+		return explicitProviderIsNonTarget(providerFromPref(prefs?.[key]));
+	} catch {
+		return false;
+	}
+}
+
+async function fetchCloudAuthStatus(): Promise<CloudAuthStatus | null> {
+	try {
+		const res = await gatewayFetch("/api/cloud-providers/status");
+		if (!res.ok) return null;
+		const data = await res.json();
+		if (!data || typeof data !== "object" || !Array.isArray(data.providers)) return null;
+		return data as CloudAuthStatus;
+	} catch {
+		return null;
+	}
+}
+
 export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
 		document.body.appendChild(container);
-
 		let flowId = "";
 		let authUrl = "";
 		let callbackServer = false;
@@ -445,10 +546,8 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		let pollTimer: number | undefined;
 		let pollStartMs = 0;
 		let pollDelayMs = 1000;
-		const POLL_MAX_DELAY_MS = 8000;
-		const POLL_MAX_TOTAL_MS = 5 * 60 * 1000;
-
-		const providerName = provider === "openai-codex" || provider === "openai" ? "OpenAI" : "Anthropic";
+		const providerName = cloudProviderLabel(provider);
+		const isGoogle = provider === "google" || provider === "gemini" || provider === "google-gemini";
 
 		const cleanup = (result: boolean) => {
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
@@ -456,11 +555,16 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			container.remove();
 			resolve(result);
 		};
-
+		const normalizeError = (message: string) => {
+			if (isGoogle && /unavailable|unsupported|not supported|not registered/i.test(message)) {
+				return "Google sign-in is not available in this build. Add a Gemini API key instead.";
+			}
+			return message;
+		};
 		const pollFlowStatus = async () => {
 			if (!flowId || step !== "waiting") return;
 			if (pollStartMs === 0) pollStartMs = Date.now();
-			if (Date.now() - pollStartMs > POLL_MAX_TOTAL_MS) {
+			if (Date.now() - pollStartMs > 5 * 60 * 1000) {
 				error = "OAuth flow timed out after 5 minutes";
 				step = "error";
 				renderOAuthDialog();
@@ -477,171 +581,263 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 						return;
 					}
 					if (data.error) {
-						error = data.error;
+						error = normalizeError(data.error);
 						step = "error";
 						renderOAuthDialog();
 						return;
 					}
 				}
-			} catch {
-				// Keep polling; the manual paste path remains available.
-			}
-			// Exponential backoff: 1s → 2s → 4s → 8s (cap), capped at 5min total wait.
+			} catch { /* keep polling; manual paste remains available */ }
 			pollTimer = window.setTimeout(pollFlowStatus, pollDelayMs);
-			pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_DELAY_MS);
+			pollDelayMs = Math.min(pollDelayMs * 2, 8000);
 		};
-
 		const startFlow = async () => {
 			try {
-				const res = await gatewayFetch("/api/oauth/start", {
-					method: "POST",
-					body: JSON.stringify({ provider }),
-				});
-				if (!res.ok) throw new Error("Failed to start OAuth flow");
+				error = "";
+				const res = await gatewayFetch("/api/oauth/start", { method: "POST", body: JSON.stringify({ provider }) });
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({} as any));
+					throw new Error(data?.error || `Failed to start ${providerName} sign-in`);
+				}
 				const data = await res.json();
 				flowId = data.flowId;
 				authUrl = data.url;
 				callbackServer = data.callbackServer === true;
 				instructions = data.instructions || "";
 				step = "waiting";
-				window.open(authUrl, "_blank");
+				if (authUrl) window.open(authUrl, "_blank");
 				renderOAuthDialog();
 				if (callbackServer) pollFlowStatus();
 			} catch (err) {
-				error = err instanceof Error ? err.message : String(err);
+				error = normalizeError(err instanceof Error ? err.message : String(err));
 				step = "error";
 				renderOAuthDialog();
 			}
 		};
-
 		const handleSubmitCode = async () => {
 			if (!codeValue.trim()) return;
 			step = "exchanging";
 			renderOAuthDialog();
-
 			try {
-				const res = await gatewayFetch("/api/oauth/complete", {
-					method: "POST",
-					body: JSON.stringify({ flowId, code: codeValue.trim() }),
-				});
-				const data = await res.json();
+				const res = await gatewayFetch("/api/oauth/complete", { method: "POST", body: JSON.stringify({ flowId, code: codeValue.trim() }) });
+				const data = await res.json().catch(() => ({} as any));
 				if (data.success) {
 					step = "done";
 					renderOAuthDialog();
 					setTimeout(() => cleanup(true), 500);
 				} else {
-					error = data.error || "OAuth exchange failed";
+					error = normalizeError(data.error || "OAuth exchange failed");
 					step = "error";
 					renderOAuthDialog();
 				}
 			} catch (err) {
-				error = err instanceof Error ? err.message : String(err);
+				error = normalizeError(err instanceof Error ? err.message : String(err));
 				step = "error";
 				renderOAuthDialog();
 			}
 		};
-
 		const renderOAuthDialog = () => {
-			const content = (() => {
-				switch (step) {
-					case "loading":
-						return html`<p class="text-sm text-muted-foreground">Starting OAuth flow...</p>`;
-					case "waiting":
-						return html`
-							<div class="flex flex-col gap-3">
-								<p class="text-sm text-muted-foreground">
-									A browser tab has been opened for ${providerName} authentication.
-									${callbackServer
-										? "This should complete automatically after authorizing. If it does not, paste the full redirect URL or authorization code below."
-										: "After authorizing, copy the code and paste it below."}
-								</p>
-								${instructions ? html`<p class="text-xs text-muted-foreground">${instructions}</p>` : ""}
-								<div>
-									<label class="text-xs text-muted-foreground mb-1 block">Authorization Code</label>
-									${Input({
-										type: "text",
-										placeholder: callbackServer ? "Paste redirect URL or code" : "Paste code here (format: code#state)",
-										value: codeValue,
-										onInput: (e: Event) => {
-											codeValue = (e.target as HTMLInputElement).value;
-											renderOAuthDialog();
-										},
-										onKeyDown: (e: KeyboardEvent) => {
-											if (e.key === "Enter") {
-												e.preventDefault();
-												handleSubmitCode();
-											}
-										},
-									})}
-								</div>
-								<p class="text-xs text-muted-foreground">
-									Didn't open?
-									<a href="${authUrl}" target="_blank" class="underline text-foreground">Click here</a>
-								</p>
-							</div>
-						`;
-					case "exchanging":
-						return html`<p class="text-sm text-muted-foreground">Exchanging code for tokens...</p>`;
-					case "done":
-						return html`<p class="text-sm text-green-600 dark:text-green-400">Authenticated successfully.</p>`;
-					case "error":
-						return html`
-							<div class="flex flex-col gap-2">
-								<error-details .message=${error}></error-details>
-								${Button({ variant: "default", size: "sm", onClick: () => { step = "loading"; startFlow(); }, children: "Try again" })}
-							</div>
-						`;
-				}
-			})();
-
-			render(
-				Dialog({
-					isOpen: true,
-					onClose: () => cleanup(false),
-					width: "min(480px, 92vw)",
-					height: "auto",
-					backdropClassName: "bg-black/50 backdrop-blur-sm",
-					children: html`
-						${DialogContent({
-							children: html`
-								${DialogHeader({ title: `${providerName} Login` })}
-								<div class="mt-2">${content}</div>
-							`,
-						})}
-						${step === "waiting"
-							? DialogFooter({
-									className: "px-6 pb-4",
-									children: html`
-										<div class="flex gap-2 justify-end">
-											${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}
-											${Button({
-												variant: "default",
-												onClick: handleSubmitCode,
-												disabled: !codeValue.trim(),
-												children: "Submit",
-											})}
-										</div>
-									`,
-								})
-							: step === "error"
-								? DialogFooter({
-										className: "px-6 pb-4",
-										children: html`
-											<div class="flex gap-2 justify-end">
-												${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}
-											</div>
-										`,
-									})
-								: ""}
-					`,
-				}),
-				container,
-			);
+			const content = step === "loading" ? html`<p class="text-sm text-muted-foreground">Opening ${providerName} sign-in…</p>`
+				: step === "waiting" ? html`
+					<div class="flex flex-col gap-3">
+						<p class="text-sm text-muted-foreground">A browser tab opened for ${providerName}. Bobbit will continue automatically after you approve access. If it does not, paste the redirect URL or authorization code below.</p>
+						${instructions ? html`<p class="text-xs text-muted-foreground">${instructions}</p>` : ""}
+						<div>
+							<label class="text-xs text-muted-foreground mb-1 block">Redirect URL or authorization code</label>
+							${Input({
+								type: "text",
+								placeholder: "Paste redirect URL or code",
+								value: codeValue,
+								onInput: (e: Event) => { codeValue = (e.target as HTMLInputElement).value; renderOAuthDialog(); },
+								onKeyDown: (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); handleSubmitCode(); } },
+							})}
+						</div>
+						${authUrl ? html`<p class="text-xs text-muted-foreground"><a href="${authUrl}" target="_blank" class="underline text-foreground">Open sign-in page</a></p>` : ""}
+					</div>`
+				: step === "exchanging" ? html`<p class="text-sm text-muted-foreground">Finishing sign-in…</p>`
+				: step === "done" ? html`<p class="text-sm text-green-600 dark:text-green-400">${providerName} connected.</p>`
+				: html`<div class="flex flex-col gap-2"><p class="text-sm font-medium text-foreground">Could not connect ${providerName}</p><error-details .message=${error}></error-details>${Button({ variant: "default", size: "sm", onClick: () => { step = "loading"; startFlow(); }, children: "Try again" })}</div>`;
+			render(Dialog({
+				isOpen: true,
+				onClose: () => cleanup(false),
+				width: "min(480px, 92vw)",
+				height: "auto",
+				backdropClassName: "bg-black/50 backdrop-blur-sm",
+				children: html`
+					${DialogContent({ children: html`${DialogHeader({ title: `Connect ${providerName}` })}<div class="mt-2">${content}</div>` })}
+					${step === "waiting" ? DialogFooter({ className: "px-6 pb-4", children: html`<div class="flex gap-2 justify-end">${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}${Button({ variant: "default", onClick: handleSubmitCode, disabled: !codeValue.trim(), children: "Submit code" })}</div>` })
+						: step === "error" ? DialogFooter({ className: "px-6 pb-4", children: html`<div class="flex gap-2 justify-end">${Button({ variant: "ghost", onClick: () => cleanup(false), children: "Cancel" })}</div>` }) : ""}
+				`,
+			}), container);
 		};
-
 		renderOAuthDialog();
 		startFlow();
 	});
+}
+
+function openCloudProviderApiKeyDialog(provider: CloudProviderId): Promise<boolean> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		let keyValue = "";
+		let saving = false;
+		let error = "";
+		const label = CLOUD_PROVIDER_LABELS[provider];
+		const placeholder = provider === "google" ? "Paste Gemini API key" : provider === "openai" ? "Paste OpenAI API key" : `Paste ${label} API key`;
+		const cleanup = (result: boolean) => { render(html``, container); container.remove(); resolve(result); };
+		const saveKey = async () => {
+			const key = keyValue.trim();
+			if (!key || saving) return;
+			saving = true;
+			error = "";
+			renderDialog();
+			try {
+				const res = await gatewayFetch(`/api/provider-keys/${encodeURIComponent(provider)}`, { method: "POST", body: JSON.stringify({ key, enable: true }) });
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({} as any));
+					throw new Error(data?.error || `Failed to save ${label} API key`);
+				}
+				cleanup(true);
+			} catch (err) {
+				error = err instanceof Error ? err.message : String(err);
+				saving = false;
+				renderDialog();
+			}
+		};
+		const renderDialog = () => render(Dialog({
+			isOpen: true,
+			onClose: () => cleanup(false),
+			width: "min(420px, 92vw)",
+			height: "auto",
+			backdropClassName: "bg-black/50 backdrop-blur-sm",
+			children: html`
+				${DialogContent({ children: html`
+					${DialogHeader({ title: `Add ${label} API key` })}
+					<div class="mt-2 flex flex-col gap-3">
+						<p class="text-sm text-muted-foreground">Bobbit stores this key locally and never shows it again.</p>
+						<div><label class="text-xs text-muted-foreground mb-1 block">API key</label>${Input({ type: "password", placeholder, value: keyValue, onInput: (e: Event) => { keyValue = (e.target as HTMLInputElement).value; renderDialog(); }, onKeyDown: (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); saveKey(); } } })}</div>
+						${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
+					</div>` })}
+				${DialogFooter({ className: "px-6 pb-4", children: html`<div class="flex gap-2 justify-end">${Button({ variant: "ghost", onClick: () => cleanup(false), disabled: saving, children: "Cancel" })}${Button({ variant: "default", onClick: saveKey, disabled: saving || !keyValue.trim(), children: saving ? "Saving…" : "Save key" })}</div>` })}
+			`,
+		}), container);
+		renderDialog();
+		requestAnimationFrame(() => (container.querySelector("input") as HTMLInputElement | null)?.focus());
+	});
+}
+
+export function openDirectCloudAuthGate(status: CloudAuthStatus, opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		const requiredProvider = cloudVendorForModelProvider(opts.modelProvider);
+		const providers = status.providers.filter((p) => (p.id === "anthropic" || p.id === "openai" || p.id === "google") && (!requiredProvider || p.id === requiredProvider));
+		const selected = new Set<CloudProviderId>();
+		if (requiredProvider && providers.some((p) => p.id === requiredProvider)) selected.add(requiredProvider);
+		const connected = new Set<CloudProviderId>();
+		const failed = new Set<CloudProviderId>();
+		const method: Record<CloudProviderId, "oauth" | "api_key"> = { anthropic: "oauth", openai: "oauth", google: "oauth" };
+		const rowError: Partial<Record<CloudProviderId, string>> = {};
+		for (const p of providers) if ((!p.oauthSupported || p.status === "oauth_unavailable") && p.apiKeySupported) method[p.id] = "api_key";
+		let processing = false;
+		let attempted = false;
+		let statusText = requiredProvider ? `Connect ${CLOUD_PROVIDER_LABELS[requiredProvider]} to continue.` : "Select one or more providers to connect.";
+		const cleanup = (result: boolean) => { render(html``, container); container.remove(); resolve(result); };
+		const hasRequiredAuth = async (): Promise<{ ok: boolean; statusLoaded: boolean }> => {
+			const refreshed = await fetchCloudAuthStatus();
+			if (!refreshed) return { ok: false, statusLoaded: false };
+			return {
+				ok: refreshed.mode === "aigw" || refreshed.providers.some((p) => p.enabled && p.authenticated && (!requiredProvider || p.id === requiredProvider)),
+				statusLoaded: true,
+			};
+		};
+		const connectOne = async (p: CloudProviderStatus) => {
+			rowError[p.id] = "";
+			renderDialog();
+			const ok = method[p.id] === "api_key" ? await openCloudProviderApiKeyDialog(p.id) : await openOAuthDialog(oauthProviderForVendor(p.id));
+			const verified = ok ? await hasRequiredAuth() : { ok: false, statusLoaded: true };
+			if (verified.ok) {
+				connected.add(p.id);
+				failed.delete(p.id);
+				return;
+			}
+			failed.add(p.id);
+			rowError[p.id] = !verified.statusLoaded
+				? "Connected, but Bobbit could not verify provider status. Check your connection and try again."
+				: p.id === "google" && p.apiKeySupported
+					? "Google sign-in is not available in this build. Add a Gemini API key instead."
+					: p.apiKeySupported ? "Sign-in did not complete. Try again or use an API key instead." : "Sign-in did not complete.";
+		};
+		const connectSelected = async () => {
+			if (connected.size > 0 && attempted && failed.size > 0) return cleanup(true);
+			if (selected.size === 0 || processing) return;
+			processing = true;
+			attempted = true;
+			statusText = "Connecting selected providers…";
+			renderDialog();
+			for (const id of Array.from(selected)) {
+				const p = providers.find((candidate) => candidate.id === id);
+				if (p) await connectOne(p);
+			}
+			processing = false;
+			if (connected.size > 0 && failed.size === 0) {
+				statusText = "Connected. Continuing your original action…";
+				renderDialog();
+				setTimeout(() => cleanup(true), 400);
+				return;
+			}
+			statusText = connected.size > 0 ? "At least one provider is connected. You can continue or fix the remaining provider." : "No provider connected yet. Try again or choose an API key option where available.";
+			renderDialog();
+		};
+		const methodButtons = (p: CloudProviderStatus) => {
+			if (!p.apiKeySupported) return "";
+			if (!p.oauthSupported || p.status === "oauth_unavailable") return html`<p class="text-xs text-muted-foreground mt-2">Google sign-in is not available in this build. Add a Gemini API key instead.</p>`;
+			return html`<div class="flex gap-1 mt-2" @click=${(e: Event) => e.stopPropagation()}>
+				${Button({ variant: method[p.id] === "oauth" ? "secondary" as any : "ghost", size: "sm", disabled: processing, onClick: () => { method[p.id] = "oauth"; renderDialog(); }, children: "Sign in" })}
+				${Button({ variant: method[p.id] === "api_key" ? "secondary" as any : "ghost", size: "sm", disabled: processing, onClick: () => { method[p.id] = "api_key"; renderDialog(); }, children: "Use API key instead" })}
+			</div>`;
+		};
+		const renderProvider = (p: CloudProviderStatus) => {
+			const checked = selected.has(p.id);
+			const detailId = `cloud-auth-gate-provider-${p.id}-detail`;
+			const toggle = () => { if (processing) return; checked ? selected.delete(p.id) : selected.add(p.id); renderDialog(); };
+			const rowStatus = connected.has(p.id) ? "Connected" : checked ? (processing ? "Connecting…" : "Ready to connect") : "Not selected";
+			return html`<label class="block rounded-lg border p-3 cursor-pointer ${checked ? "border-primary bg-primary/5" : "border-border hover:bg-secondary/30"}" data-testid="cloud-auth-gate-provider-${p.id}">
+				<div class="flex items-start gap-3"><input type="checkbox" class="mt-1" .checked=${checked} ?disabled=${processing} aria-describedby=${detailId} @change=${toggle} />
+					<div class="min-w-0 flex-1"><div class="flex items-center justify-between gap-2"><div class="text-sm font-medium text-foreground">${p.label || CLOUD_PROVIDER_LABELS[p.id]}</div><div class="text-xs text-muted-foreground">${rowStatus}</div></div>
+					<p id=${detailId} class="text-xs text-muted-foreground mt-1">${CLOUD_PROVIDER_DESCRIPTIONS[p.id]}</p>${checked ? methodButtons(p) : ""}${rowError[p.id] ? html`<p class="text-xs text-red-500 mt-2">${rowError[p.id]}</p>` : ""}</div>
+				</div></label>`;
+		};
+		const primaryLabel = () => processing ? "Connecting…" : connected.size > 0 && attempted && failed.size > 0 ? "Continue with connected providers" : selected.size === 0 ? "Select a provider" : "Connect selected";
+		const renderDialog = () => render(Dialog({
+			isOpen: true,
+			onClose: () => cleanup(false),
+			width: "min(520px, 92vw)",
+			height: "auto",
+			backdropClassName: "bg-black/50 backdrop-blur-sm",
+			children: html`
+				${DialogContent({ children: html`<div data-testid="cloud-auth-gate">${DialogHeader({ title: "Connect a model provider" })}<div class="mt-2 flex flex-col gap-3"><p class="text-sm text-muted-foreground">Bobbit needs at least one enabled cloud provider before it can start this work. Choose the vendors you want to connect. You can change this later in Settings &gt; System &gt; Account.</p><div class="flex flex-col gap-2">${providers.map(renderProvider)}</div><div class="text-xs text-muted-foreground" role="status" aria-live="polite" data-testid="cloud-auth-gate-status">${statusText}</div><button class="text-xs underline text-muted-foreground hover:text-foreground w-fit" @click=${() => { cleanup(false); window.location.hash = "#/settings/system/models"; }}>Set up AI Gateway instead</button></div></div>` })}
+				${DialogFooter({ className: "px-6 pb-4", children: html`<div class="flex gap-2 justify-end">${Button({ variant: "ghost", onClick: () => cleanup(false), disabled: processing, children: html`<span data-testid="cloud-auth-gate-cancel">Cancel</span>` })}${Button({ variant: "default", onClick: connectSelected, disabled: processing || (selected.size === 0 && !(connected.size > 0 && attempted && failed.size > 0)), children: html`<span data-testid="cloud-auth-gate-connect">${primaryLabel()}</span>` })}</div>` })}
+			`,
+		}), container);
+		renderDialog();
+	});
+}
+
+export async function ensureDirectCloudAuthReady(opts: EnsureDirectCloudAuthReadyOptions): Promise<boolean> {
+	if (explicitProviderIsNonTarget(opts.modelProvider)) return true;
+	const requestedProvider = cloudVendorForModelProvider(opts.modelProvider);
+	if (!requestedProvider && await hasExplicitNonTargetDefault(opts.reason)) return true;
+	const status = await fetchCloudAuthStatus();
+	if (!status) return false;
+	if (status.mode === "aigw" || status.aigwConfigured) return true;
+	if (requestedProvider) {
+		const providerStatus = status.providers.find((p) => p.id === requestedProvider);
+		if (providerStatus?.enabled && providerStatus.authenticated) return true;
+		return openDirectCloudAuthGate(status, opts);
+	}
+	if (!status.authGateRequired) return true;
+	return openDirectCloudAuthGate(status, opts);
 }
 
 // ============================================================================
@@ -1300,6 +1496,7 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 		return;
 	}
 	if (state.creatingSession) return;
+	if (!(await ensureDirectCloudAuthReady({ reason: "create-session", continuationLabel: "Create goal assistant" }))) return;
 	state.creatingSession = true;
 	renderApp();
 	try {
@@ -1941,6 +2138,7 @@ export function showProjectDialog(): void {
 
 export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string; existingProjectName?: string }): Promise<void> {
 	if (state.creatingSession) return;
+	if (!(await ensureDirectCloudAuthReady({ reason: "create-session", continuationLabel: scaffolding ? "Start setup assistant" : "Start project assistant" }))) return;
 	state.creatingSession = true;
 	renderApp();
 	try {

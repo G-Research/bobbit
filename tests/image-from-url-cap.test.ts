@@ -31,6 +31,7 @@ before(() => {
 	// No OAuth credential — we set the OpenAI key via prefs below so the
 	// non-GPT-Image path is used.
 	prefs = new PreferencesStore(tmp);
+	prefs.set("providerEnabled.openai", true);
 	prefs.set("providerKey.openai", "test-key");
 	origFetch = globalThis.fetch;
 });

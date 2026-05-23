@@ -2419,125 +2419,775 @@ function renderDirectoriesTab() {
 
 // ── Account tab state ──
 
-type AccountProviderId = "anthropic" | "openai-codex";
+type CloudProviderId = "anthropic" | "openai" | "google";
+type AccountOAuthProviderId = "anthropic" | "openai-codex" | "google";
+type AccountCredentialType = "oauth" | "api_key" | "env" | "host_token";
+type AccountProviderStatusValue =
+	| "disabled"
+	| "enabled_without_credential"
+	| "authenticated"
+	| "expired"
+	| "invalid"
+	| "oauth_unavailable"
+	| "aigw_bypass";
 
-const ACCOUNT_PROVIDERS: Array<{
-	id: AccountProviderId;
+type AccountProviderTone = "neutral" | "warning" | "positive" | "danger";
+
+interface AccountProviderDef {
+	id: CloudProviderId;
 	title: string;
 	description: string;
-	authenticatedLabel: string;
-}> = [
+	oauthProviderId: AccountOAuthProviderId;
+	connectLabel: string;
+	apiKeyLabel?: string;
+	apiKeyPlaceholder?: string;
+}
+
+interface CloudProviderStatus {
+	id: CloudProviderId;
+	label: string;
+	enabled: boolean;
+	configured: boolean;
+	authenticated: boolean;
+	expired: boolean;
+	needsReauth: boolean;
+	status: AccountProviderStatusValue;
+	credentialTypes: AccountCredentialType[];
+	oauthSupported: boolean;
+	apiKeySupported: boolean;
+	expires?: number;
+	message?: string;
+}
+
+interface CloudAuthStatus {
+	mode: "aigw" | "direct-cloud";
+	aigwConfigured: boolean;
+	authGateRequired: boolean;
+	providers: CloudProviderStatus[];
+}
+
+const ACCOUNT_PROVIDERS: AccountProviderDef[] = [
 	{
 		id: "anthropic",
-		title: "Anthropic OAuth",
-		description: "OAuth credentials used by agent sessions to access the Anthropic API. Re-authenticate to refresh expired tokens or switch accounts.",
-		authenticatedLabel: "Authenticated",
+		title: "Anthropic",
+		description: "Claude models through Anthropic direct cloud.",
+		oauthProviderId: "anthropic",
+		connectLabel: "Connect Anthropic",
 	},
 	{
-		id: "openai-codex",
-		title: "OpenAI OAuth",
-		description: "OAuth credentials used by agent sessions to access ChatGPT subscription GPT models through the OpenAI Codex provider.",
-		authenticatedLabel: "Authenticated",
+		id: "openai",
+		title: "OpenAI",
+		description: "GPT models, OpenAI Codex OAuth, and OpenAI image models.",
+		oauthProviderId: "openai-codex",
+		connectLabel: "Connect OpenAI",
+		apiKeyLabel: "Add API key",
+		apiKeyPlaceholder: "Paste OpenAI API key",
+	},
+	{
+		id: "google",
+		title: "Google Gemini",
+		description: "Gemini text models and Google image models.",
+		oauthProviderId: "google",
+		connectLabel: "Connect Google",
+		apiKeyLabel: "Add API key",
+		apiKeyPlaceholder: "Paste Gemini API key",
 	},
 ];
 
-let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
+let accountStatus: CloudAuthStatus | null = null;
 let accountLoading = false;
-let accountReauthing: AccountProviderId | null = null;
+let accountStatusError = "";
+let accountReauthing: CloudProviderId | null = null;
+let accountMutating: CloudProviderId | null = null;
+let accountRemoving: CloudProviderId | null = null;
+let accountNotice = "";
+let accountNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let accountProviderMessages: Partial<Record<CloudProviderId, string>> = {};
+let accountApiKeyDialog: { providerId: CloudProviderId; key: string; saving: boolean; error?: string } | null = null;
+let accountRemoveDialog: CloudProviderId | null = null;
+
+function defaultProviderStatus(provider: AccountProviderDef): CloudProviderStatus {
+	return {
+		id: provider.id,
+		label: provider.title,
+		enabled: false,
+		configured: false,
+		authenticated: false,
+		expired: false,
+		needsReauth: false,
+		status: "disabled",
+		credentialTypes: [],
+		oauthSupported: provider.id !== "google",
+		apiKeySupported: Boolean(provider.apiKeyLabel),
+	};
+}
+
+function defaultCloudAuthStatus(): CloudAuthStatus {
+	return {
+		mode: "direct-cloud",
+		aigwConfigured: false,
+		authGateRequired: true,
+		providers: ACCOUNT_PROVIDERS.map(defaultProviderStatus),
+	};
+}
+
+function isAccountProviderStatusValue(value: unknown): value is AccountProviderStatusValue {
+	return value === "disabled"
+		|| value === "enabled_without_credential"
+		|| value === "authenticated"
+		|| value === "expired"
+		|| value === "invalid"
+		|| value === "oauth_unavailable"
+		|| value === "aigw_bypass";
+}
+
+function isAccountCredentialType(value: unknown): value is AccountCredentialType {
+	return value === "oauth" || value === "api_key" || value === "env" || value === "host_token";
+}
+
+function normaliseProviderStatus(raw: any, provider: AccountProviderDef): CloudProviderStatus {
+	const credentialTypes = Array.isArray(raw?.credentialTypes)
+		? raw.credentialTypes.filter(isAccountCredentialType)
+		: [];
+	const enabled = raw?.enabled === true;
+	const configured = raw?.configured === true || credentialTypes.length > 0;
+	const authenticated = raw?.authenticated === true;
+	const expired = raw?.expired === true;
+	const needsReauth = raw?.needsReauth === true;
+	const status = isAccountProviderStatusValue(raw?.status)
+		? raw.status
+		: !enabled
+			? "disabled"
+			: authenticated
+				? "authenticated"
+				: needsReauth || expired
+					? "expired"
+					: "enabled_without_credential";
+
+	return {
+		id: provider.id,
+		label: typeof raw?.label === "string" && raw.label.trim() ? raw.label : provider.title,
+		enabled,
+		configured,
+		authenticated,
+		expired,
+		needsReauth,
+		status,
+		credentialTypes,
+		oauthSupported: typeof raw?.oauthSupported === "boolean" ? raw.oauthSupported : provider.id !== "google",
+		apiKeySupported: typeof raw?.apiKeySupported === "boolean" ? raw.apiKeySupported : Boolean(provider.apiKeyLabel),
+		expires: typeof raw?.expires === "number" ? raw.expires : undefined,
+		message: typeof raw?.message === "string" ? raw.message : undefined,
+	};
+}
+
+function normaliseCloudAuthStatus(raw: any): CloudAuthStatus {
+	const rawProviders = new Map<CloudProviderId, any>();
+	if (Array.isArray(raw?.providers)) {
+		for (const provider of raw.providers) {
+			if (provider?.id === "anthropic" || provider?.id === "openai" || provider?.id === "google") {
+				rawProviders.set(provider.id, provider);
+			}
+		}
+	}
+
+	const mode: CloudAuthStatus["mode"] = raw?.mode === "aigw" ? "aigw" : "direct-cloud";
+	return {
+		mode,
+		aigwConfigured: raw?.aigwConfigured === true || mode === "aigw",
+		authGateRequired: raw?.authGateRequired === true,
+		providers: ACCOUNT_PROVIDERS.map(provider => normaliseProviderStatus(rawProviders.get(provider.id), provider)),
+	};
+}
+
+async function accountResponseError(res: Response, fallback: string): Promise<string> {
+	try {
+		const body = await res.clone().json();
+		if (body && typeof body.error === "string") return body.error;
+		if (body && typeof body.message === "string") return body.message;
+	} catch {
+		// Fall through to fallback.
+	}
+	return `${fallback} (${res.status})`;
+}
+
+function showAccountNotice(message: string): void {
+	accountNotice = message;
+	if (accountNoticeTimer) clearTimeout(accountNoticeTimer);
+	accountNoticeTimer = setTimeout(() => {
+		accountNotice = "";
+		accountNoticeTimer = null;
+		renderApp();
+	}, 3000);
+	renderApp();
+}
+
+function getAccountProvider(providerId: CloudProviderId): AccountProviderDef {
+	return ACCOUNT_PROVIDERS.find(provider => provider.id === providerId) ?? ACCOUNT_PROVIDERS[0];
+}
+
+function getAccountProviderStatus(providerId: CloudProviderId): CloudProviderStatus {
+	const provider = getAccountProvider(providerId);
+	return accountStatus?.providers.find(status => status.id === providerId) ?? defaultProviderStatus(provider);
+}
+
+function accountCloudAuthUxPaused(): boolean {
+	return accountStatus?.mode === "aigw" || accountStatus?.aigwConfigured === true;
+}
+
+function accountCloudVendorForModelProvider(provider: string | undefined): CloudProviderId | null {
+	const normalized = provider?.trim().toLowerCase();
+	if (!normalized) return null;
+	if (normalized === "anthropic") return "anthropic";
+	if (normalized === "openai" || normalized === "openai-codex") return "openai";
+	if (normalized === "google" || normalized === "google-gemini" || normalized === "google-gemini-cli" || normalized === "gemini") return "google";
+	return null;
+}
+
+function accountModelProviderFromPref(pref: unknown): string | undefined {
+	if (typeof pref !== "string") return undefined;
+	const slash = pref.indexOf("/");
+	return slash > 0 ? pref.slice(0, slash) : undefined;
+}
+
+function accountModelPrefBelongsToProvider(pref: unknown, providerId: CloudProviderId): boolean {
+	return accountCloudVendorForModelProvider(accountModelProviderFromPref(pref)) === providerId;
+}
+
+async function resetDefaultModelsForDisabledProvider(providerId: CloudProviderId): Promise<{ reset: string[]; error?: string }> {
+	try {
+		const prefsRes = await gatewayFetch("/api/preferences");
+		if (!prefsRes.ok) throw new Error(await accountResponseError(prefsRes, "Could not load default model preferences"));
+		const prefs = await prefsRes.json().catch(() => ({}));
+		const updates: Record<string, null> = {};
+		const reset: string[] = [];
+		if (accountModelPrefBelongsToProvider(prefs?.["default.sessionModel"], providerId)) {
+			updates["default.sessionModel"] = null;
+			prefSessionModel = "";
+			reset.push("session model");
+		}
+		if (accountModelPrefBelongsToProvider(prefs?.["default.imageModel"], providerId)) {
+			updates["default.imageModel"] = null;
+			prefImageModel = "";
+			reset.push("image model");
+		}
+		if (reset.length === 0) return { reset };
+		const saveRes = await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(updates),
+		});
+		if (!saveRes.ok) throw new Error(await accountResponseError(saveRes, "Could not reset default model preferences"));
+		return { reset };
+	} catch (err) {
+		return { reset: [], error: err instanceof Error ? err.message : "Could not reset default model preferences" };
+	}
+}
+
+function formatResetDefaultsMessage(reset: string[]): string {
+	if (reset.length === 0) return "";
+	return ` ${reset.length === 1 ? `Default ${reset[0]} was` : "Default session and image models were"} reset to Auto (best available).`;
+}
+
+async function refreshAccountStatus(force = false): Promise<void> {
+	if (accountLoading && !force) return;
+	accountLoading = true;
+	if (force) accountStatus = null;
+	renderApp();
+	try {
+		const res = await gatewayFetch("/api/cloud-providers/status");
+		if (!res.ok) throw new Error(await accountResponseError(res, "Failed to load cloud provider status"));
+		accountStatus = normaliseCloudAuthStatus(await res.json());
+		accountStatusError = "";
+	} catch (err) {
+		accountStatus = defaultCloudAuthStatus();
+		accountStatusError = err instanceof Error ? err.message : "Failed to load cloud provider status";
+	} finally {
+		accountLoading = false;
+		renderApp();
+	}
+}
 
 function loadAccountStatus(): void {
 	if (accountLoading) return;
-	accountLoading = true;
-	(async () => {
-		try {
-			const entries = await Promise.all(ACCOUNT_PROVIDERS.map(async (provider) => {
-				try {
-					const res = await gatewayFetch(`/api/oauth/status?provider=${encodeURIComponent(provider.id)}`);
-					return [provider.id, res.ok ? await res.json() : { authenticated: false }] as const;
-				} catch {
-					return [provider.id, { authenticated: false }] as const;
-				}
-			}));
-			accountStatus = Object.fromEntries(entries) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
-		} catch {
-			accountStatus = Object.fromEntries(ACCOUNT_PROVIDERS.map(provider => [provider.id, { authenticated: false }])) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
-		} finally {
-			accountLoading = false;
-			renderApp();
-		}
-	})();
+	void refreshAccountStatus();
 }
 
-async function handleReauthenticate(provider: AccountProviderId): Promise<void> {
-	accountReauthing = provider;
+async function handleProviderEnabled(providerId: CloudProviderId, enabled: boolean): Promise<void> {
+	if (accountMutating || accountReauthing) return;
+	const provider = getAccountProvider(providerId);
+	accountMutating = providerId;
+	accountProviderMessages = { ...accountProviderMessages, [providerId]: "" };
 	renderApp();
 	try {
-		const success = await openOAuthDialog(provider);
-		if (success) {
-			// Refresh status after successful re-auth
-			accountStatus = null;
-			loadAccountStatus();
+		const res = await gatewayFetch(`/api/cloud-providers/${encodeURIComponent(providerId)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ enabled }),
+		});
+		if (!res.ok) throw new Error(await accountResponseError(res, `Could not ${enabled ? "enable" : "disable"} ${provider.title}`));
+		const resetResult: { reset: string[]; error?: string } = enabled ? { reset: [] } : await resetDefaultModelsForDisabledProvider(providerId);
+		showAccountNotice(enabled
+			? `${provider.title} enabled. Connect a credential to use its models.`
+			: `${provider.title} disabled. Saved credentials were kept.${formatResetDefaultsMessage(resetResult.reset)}`);
+		if (resetResult.error) {
+			accountProviderMessages = {
+				...accountProviderMessages,
+				[providerId]: `Provider was disabled, but ${resetResult.error}`,
+			};
 		}
+		await refreshAccountStatus(true);
+	} catch (err) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: err instanceof Error ? err.message : `Could not ${enabled ? "enable" : "disable"} ${provider.title}`,
+		};
+	} finally {
+		accountMutating = null;
+		renderApp();
+	}
+}
+
+async function handleConnectProvider(providerId: CloudProviderId): Promise<void> {
+	if (accountReauthing !== null) return;
+	const provider = getAccountProvider(providerId);
+	const status = getAccountProviderStatus(providerId);
+	accountProviderMessages = { ...accountProviderMessages, [providerId]: "" };
+
+	if (accountCloudAuthUxPaused()) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: "Cloud provider sign-in is paused while AI Gateway is configured.",
+		};
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
+	}
+
+	if (!status.oauthSupported) {
+		const message = providerId === "google"
+			? "Google sign-in is not available in this build. Add a Gemini API key instead."
+			: `${provider.title} sign-in is not available in this build.`;
+		accountProviderMessages = { ...accountProviderMessages, [providerId]: message };
+		if (provider.apiKeyLabel && status.apiKeySupported) {
+			accountApiKeyDialog = { providerId, key: "", saving: false };
+		}
+		renderApp();
+		return;
+	}
+
+	accountReauthing = providerId;
+	renderApp();
+	try {
+		const success = await openOAuthDialog(provider.oauthProviderId);
+		if (success) {
+			showAccountNotice(`${provider.title} connected.`);
+			await refreshAccountStatus(true);
+		}
+	} catch (err) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: err instanceof Error ? err.message : `Could not connect ${provider.title}`,
+		};
 	} finally {
 		accountReauthing = null;
 		renderApp();
 	}
 }
 
-function renderAccountTab() {
-	if (!accountStatus && !accountLoading) loadAccountStatus();
-
-	if (accountLoading && !accountStatus) {
-		return html`<p class="text-sm text-muted-foreground">Loading...</p>`;
+function openAccountApiKeyDialog(providerId: CloudProviderId): void {
+	accountProviderMessages = { ...accountProviderMessages, [providerId]: "" };
+	if (accountCloudAuthUxPaused()) {
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: "API-key setup is paused while AI Gateway is configured.",
+		};
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
 	}
+	accountApiKeyDialog = { providerId, key: "", saving: false };
+	renderApp();
+}
+
+async function saveAccountApiKey(): Promise<void> {
+	const dialog = accountApiKeyDialog;
+	if (!dialog) return;
+	if (accountCloudAuthUxPaused()) {
+		accountApiKeyDialog = null;
+		renderApp();
+		return;
+	}
+	const provider = getAccountProvider(dialog.providerId);
+	const key = dialog.key.trim();
+	if (!key) {
+		accountApiKeyDialog = { ...dialog, error: "Enter an API key." };
+		renderApp();
+		return;
+	}
+	accountApiKeyDialog = { ...dialog, saving: true, error: "" };
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/provider-keys/${encodeURIComponent(provider.id)}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ key, enable: true }),
+		});
+		if (!res.ok) throw new Error(await accountResponseError(res, `Could not save ${provider.title} API key`));
+		accountApiKeyDialog = null;
+		showAccountNotice(`${provider.title} API key saved.`);
+		await refreshAccountStatus(true);
+	} catch (err) {
+		accountApiKeyDialog = {
+			...dialog,
+			saving: false,
+			error: err instanceof Error ? err.message : `Could not save ${provider.title} API key`,
+		};
+		renderApp();
+	}
+}
+
+function openRemoveAccountCredentialDialog(providerId: CloudProviderId): void {
+	accountRemoveDialog = providerId;
+	renderApp();
+}
+
+async function removeAccountCredential(): Promise<void> {
+	if (!accountRemoveDialog || accountRemoving) return;
+	const providerId = accountRemoveDialog;
+	const provider = getAccountProvider(providerId);
+	accountRemoving = providerId;
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/provider-keys/${encodeURIComponent(providerId)}`, { method: "DELETE" });
+		if (!res.ok) throw new Error(await accountResponseError(res, `Could not remove ${provider.title} credential`));
+		accountRemoveDialog = null;
+		showAccountNotice(`${provider.title} credential removed.`);
+		await refreshAccountStatus(true);
+	} catch (err) {
+		accountRemoveDialog = null;
+		accountProviderMessages = {
+			...accountProviderMessages,
+			[providerId]: err instanceof Error ? err.message : `Could not remove ${provider.title} credential`,
+		};
+	} finally {
+		accountRemoving = null;
+		renderApp();
+	}
+}
+
+function accountCredentialLine(status: CloudProviderStatus): string {
+	if (!status.configured && status.enabled) return "No credential saved.";
+	if (!status.configured) return "";
+	const labels = status.credentialTypes.map(type => {
+		switch (type) {
+			case "oauth": return "OAuth";
+			case "api_key": return "API key saved";
+			case "env": return "environment variable (host-managed; Bobbit cannot remove it)";
+			case "host_token": return "host token (host-managed; Bobbit cannot remove it)";
+		}
+	});
+	if (!status.enabled && status.status !== "aigw_bypass") {
+		return labels.length ? `Saved credential kept: ${labels.join(", ")}.` : "Saved credential kept.";
+	}
+	return labels.length ? `Credential: ${labels.join(", ")}` : "Credential saved.";
+}
+
+function accountProviderDisplay(status: CloudProviderStatus): { pill: string; detail: string; tone: AccountProviderTone; symbol: string } {
+	if (accountStatus?.mode === "aigw" || status.status === "aigw_bypass") {
+		return {
+			pill: "Paused by AI Gateway",
+			detail: "AI Gateway is active, so Bobbit will not prompt for this provider.",
+			tone: "neutral",
+			symbol: "•",
+		};
+	}
+	if (!status.enabled || status.status === "disabled") {
+		return {
+			pill: "Disabled",
+			detail: "Models hidden. Auth prompts are off.",
+			tone: "neutral",
+			symbol: "×",
+		};
+	}
+	if (status.status === "expired" || status.status === "invalid" || status.needsReauth || status.expired) {
+		return {
+			pill: "Needs re-authentication",
+			detail: "The saved credential is expired or was rejected. Models stay hidden until you reconnect.",
+			tone: "danger",
+			symbol: "!",
+		};
+	}
+	if (status.status === "authenticated" || status.authenticated) {
+		return {
+			pill: "Authenticated",
+			detail: "Ready. Models are available in selectors.",
+			tone: "positive",
+			symbol: "✓",
+		};
+	}
+	return {
+		pill: "Enabled · no credential",
+		detail: "Connect this provider before Bobbit can use its models.",
+		tone: "warning",
+		symbol: "!",
+	};
+}
+
+function accountPillClass(tone: AccountProviderTone): string {
+	const base = "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium";
+	switch (tone) {
+		case "positive": return `${base} bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/30`;
+		case "warning": return `${base} bg-warning/10 text-warning border-warning/30`;
+		case "danger": return `${base} bg-destructive/10 text-destructive border-destructive/30`;
+		case "neutral":
+		default: return `${base} bg-secondary text-muted-foreground border-border`;
+	}
+}
+
+function accountMessageClass(message: string): string {
+	return /could not|failed|error/i.test(message) ? "text-destructive" : "text-muted-foreground";
+}
+
+function canRemoveAccountCredential(status: CloudProviderStatus): boolean {
+	return status.credentialTypes.includes("api_key") || status.credentialTypes.includes("oauth");
+}
+
+function renderAccountProviderCard(provider: AccountProviderDef) {
+	const status = getAccountProviderStatus(provider.id);
+	const display = accountProviderDisplay(status);
+	const credentialLine = accountCredentialLine(status);
+	const inlineMessage = accountProviderMessages[provider.id] || (accountStatus?.mode !== "aigw" ? status.message : "") || "";
+	const reauthing = accountReauthing === provider.id;
+	const mutating = accountMutating === provider.id;
+	const authUxPaused = accountCloudAuthUxPaused();
+	const busy = accountReauthing !== null || accountMutating !== null || accountRemoving !== null || accountApiKeyDialog?.saving === true;
+	const connectLabel = reauthing
+		? "Authenticating…"
+		: (status.configured || status.needsReauth || status.expired)
+			? "Re-authenticate"
+			: provider.connectLabel;
 
 	return html`
-		<div class="flex flex-col gap-4">
-			${ACCOUNT_PROVIDERS.map((provider) => {
-				const status = accountStatus?.[provider.id];
-				const authenticated = status?.authenticated ?? false;
-				const expires = status?.expires;
-				const expiresDate = expires ? new Date(expires) : null;
-				const isExpired = expires ? Date.now() > expires : false;
-				const isReauthing = accountReauthing === provider.id;
-
-				return html`
-					<div class="flex flex-col gap-4">
-						<div class="flex flex-col gap-1.5">
-							<h3 class="text-sm font-semibold text-foreground">${provider.title}</h3>
-							<p class="text-xs text-muted-foreground">${provider.description}</p>
-						</div>
-
-						<div class="flex flex-col gap-2 rounded-md border border-border p-3">
-							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium text-foreground">Status:</span>
-								${authenticated
-									? html`<span class="text-sm text-green-600 dark:text-green-400">${provider.authenticatedLabel}</span>`
-									: html`<span class="text-sm text-destructive">${isExpired ? "Expired" : "Not authenticated"}</span>`}
-							</div>
-							${expiresDate
-								? html`<div class="flex items-center gap-2">
-									<span class="text-sm font-medium text-foreground">Expires:</span>
-									<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}">${expiresDate.toLocaleString()}</span>
-								</div>`
-								: ""}
-						</div>
-
-						<div>
-							${Button({
-								variant: authenticated ? "outline" : "default",
-								size: "sm",
-								// Disable every provider's auth button while ANY provider is mid-flow
-								// to prevent concurrent OAuth attempts from clobbering each other's
-								// pendingFlows entries. Cleared in handleReauthenticate's finally block.
-								disabled: accountReauthing !== null,
-								onClick: () => handleReauthenticate(provider.id),
-								children: isReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
-							})}
-						</div>
+		<div
+			class="flex flex-col gap-3 rounded-md border border-border bg-card/40 p-3"
+			data-testid=${`provider-card-${provider.id}`}
+		>
+			<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<div class="flex flex-wrap items-center gap-2">
+						<h3 class="text-sm font-semibold text-foreground">${provider.title}</h3>
+						<span class=${accountPillClass(display.tone)} data-testid=${`provider-status-${provider.id}`}>
+							<span aria-hidden="true">${display.symbol}</span>
+							${display.pill}
+						</span>
 					</div>
-				`;
-			})}
+					<p class="text-xs text-muted-foreground">${provider.description}</p>
+				</div>
+				<label class="inline-flex shrink-0 items-center gap-2 text-sm text-foreground">
+					<input
+						type="checkbox"
+						class="accent-primary"
+						data-testid=${`provider-enabled-${provider.id}`}
+						aria-label=${`${provider.title} enabled`}
+						aria-describedby=${`provider-detail-${provider.id}`}
+						.checked=${status.enabled}
+						?disabled=${busy}
+						@change=${(e: Event) => handleProviderEnabled(provider.id, (e.target as HTMLInputElement).checked)}
+					/>
+					<span>Enabled</span>
+					${mutating ? html`<span class="text-xs text-muted-foreground">Saving…</span>` : ""}
+				</label>
+			</div>
+
+			<div class="flex flex-col gap-1 text-xs">
+				<p id=${`provider-detail-${provider.id}`} class="text-muted-foreground">${display.detail}</p>
+				${credentialLine ? html`<p class="text-muted-foreground">${credentialLine}</p>` : ""}
+				${status.expires && status.configured ? html`
+					<p class="text-muted-foreground">Expires: ${new Date(status.expires).toLocaleString()}</p>
+				` : ""}
+				${inlineMessage ? html`
+					<p class=${`text-xs ${accountMessageClass(inlineMessage)}`}>${inlineMessage}</p>
+				` : ""}
+			</div>
+
+			<div class="flex flex-wrap items-center gap-2">
+				${authUxPaused ? html`
+					<p class="text-xs text-muted-foreground">Connect and API-key setup are managed by AI Gateway right now.</p>
+				` : html`
+					<button
+						class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						data-testid=${`provider-connect-${provider.id}`}
+						?disabled=${busy}
+						@click=${() => handleConnectProvider(provider.id)}
+					>${connectLabel}</button>
+					${provider.apiKeyLabel && status.apiKeySupported ? html`
+						<button
+							class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+							data-testid=${`provider-api-key-${provider.id}`}
+							?disabled=${busy}
+							@click=${() => openAccountApiKeyDialog(provider.id)}
+						>${provider.apiKeyLabel}</button>
+					` : ""}
+				`}
+				${status.enabled ? html`
+					<button
+						class="px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						data-testid=${`provider-disable-${provider.id}`}
+						?disabled=${busy}
+						@click=${() => handleProviderEnabled(provider.id, false)}
+					>Disable</button>
+				` : ""}
+				${canRemoveAccountCredential(status) ? html`
+					<button
+						class="px-3 py-1.5 text-sm rounded-md border border-destructive/40 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+						data-testid=${`provider-remove-credential-${provider.id}`}
+						?disabled=${busy}
+						@click=${() => openRemoveAccountCredentialDialog(provider.id)}
+					>Remove credential…</button>
+				` : ""}
+			</div>
+		</div>
+	`;
+}
+
+function renderAccountApiKeyDialog() {
+	if (!accountApiKeyDialog || accountCloudAuthUxPaused()) return "";
+	const provider = getAccountProvider(accountApiKeyDialog.providerId);
+	const status = getAccountProviderStatus(provider.id);
+	const hasSavedKey = status.credentialTypes.includes("api_key");
+	return html`
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" role="presentation">
+			<div class="w-[min(480px,92vw)] rounded-lg border border-border bg-card text-card-foreground shadow-xl" role="dialog" aria-modal="true" aria-labelledby="account-api-key-title">
+				<div class="p-6">
+					<h2 id="account-api-key-title" class="text-base font-semibold text-foreground">Add ${provider.title} API key</h2>
+					<div class="mt-2 flex flex-col gap-3">
+						<p class="text-sm text-muted-foreground">Bobbit stores this key locally and never shows it again.</p>
+						${hasSavedKey ? html`<p class="text-xs text-muted-foreground">A key is already saved. Saving a new key replaces it.</p>` : ""}
+						<label class="flex flex-col gap-1 text-sm text-foreground">
+							<span>API key</span>
+							<input
+								type="password"
+								class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+								placeholder=${provider.apiKeyPlaceholder || "Paste API key"}
+								autocomplete="off"
+								.value=${accountApiKeyDialog.key}
+								?disabled=${accountApiKeyDialog.saving}
+								@input=${(e: Event) => {
+									if (!accountApiKeyDialog) return;
+									accountApiKeyDialog = { ...accountApiKeyDialog, key: (e.target as HTMLInputElement).value, error: "" };
+								}}
+								@keydown=${(e: KeyboardEvent) => {
+									if (e.key === "Enter") {
+										e.preventDefault();
+										void saveAccountApiKey();
+									}
+								}}
+							/>
+						</label>
+						${accountApiKeyDialog.error ? html`<p class="text-xs text-destructive">${accountApiKeyDialog.error}</p>` : ""}
+					</div>
+				</div>
+				<div class="flex justify-end gap-2 border-t border-border px-6 pb-4 pt-3">
+					<button
+						class="px-3 py-1.5 text-sm rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						?disabled=${accountApiKeyDialog.saving}
+						@click=${() => { accountApiKeyDialog = null; renderApp(); }}
+					>Cancel</button>
+					<button
+						class="px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+						?disabled=${accountApiKeyDialog.saving || !accountApiKeyDialog.key.trim()}
+						@click=${() => void saveAccountApiKey()}
+					>${accountApiKeyDialog.saving ? "Saving…" : "Save key"}</button>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+function renderAccountRemoveDialog() {
+	if (!accountRemoveDialog) return "";
+	const provider = getAccountProvider(accountRemoveDialog);
+	const removing = accountRemoving === accountRemoveDialog;
+	return html`
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" role="presentation">
+			<div class="w-[min(480px,92vw)] rounded-lg border border-border bg-card text-card-foreground shadow-xl" role="dialog" aria-modal="true" aria-labelledby="account-remove-credential-title">
+				<div class="p-6">
+					<h2 id="account-remove-credential-title" class="text-base font-semibold text-foreground">Remove ${provider.title} credential?</h2>
+					<p class="mt-2 text-sm text-muted-foreground">
+						This deletes Bobbit's saved OAuth or API-key credential for ${provider.title}. Provider enablement is unchanged. Environment variables and host-managed tokens cannot be removed by Bobbit.
+					</p>
+				</div>
+				<div class="flex justify-end gap-2 border-t border-border px-6 pb-4 pt-3">
+					<button
+						class="px-3 py-1.5 text-sm rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-50"
+						?disabled=${removing}
+						@click=${() => { accountRemoveDialog = null; renderApp(); }}
+					>Cancel</button>
+					<button
+						class="px-3 py-1.5 text-sm rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50"
+						?disabled=${removing}
+						@click=${() => void removeAccountCredential()}
+					>${removing ? "Removing…" : "Remove credential"}</button>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+function renderAccountTab() {
+	if (!accountStatus && !accountLoading) loadAccountStatus();
+	const status = accountStatus ?? defaultCloudAuthStatus();
+	const showingAigwBanner = status.mode === "aigw" || status.aigwConfigured;
+
+	return html`
+		<div class="flex flex-col gap-4" data-testid="settings-account-cloud-providers">
+			<div class="flex flex-col gap-1.5">
+				<h3 class="text-sm font-semibold text-foreground">Cloud model providers</h3>
+				<p class="text-xs text-muted-foreground">
+					Choose which cloud vendors Bobbit can use directly. Disabling a provider hides its models and suppresses auth prompts. Saved credentials are kept until you remove them.
+				</p>
+			</div>
+
+			${accountNotice ? html`
+				<div class="rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-foreground" role="status">${accountNotice}</div>
+			` : ""}
+
+			${accountStatusError ? html`
+				<div class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive" role="status">${accountStatusError}</div>
+			` : ""}
+
+			${showingAigwBanner ? html`
+				<div class="rounded-md border border-border bg-secondary/40 p-3">
+					<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+						<div class="flex flex-col gap-1">
+							<h4 class="text-sm font-medium text-foreground">AI Gateway is handling model access</h4>
+							<p class="text-xs text-muted-foreground">
+								Cloud provider sign-in prompts are paused while AI Gateway is configured. Bobbit will not ask you to sign in to Anthropic, OpenAI, or Google Gemini.
+							</p>
+						</div>
+						<button
+							class="shrink-0 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors"
+							@click=${() => setHashRoute("settings", "system/models")}
+						>Manage AI Gateway</button>
+					</div>
+				</div>
+			` : ""}
+
+			${accountLoading && !accountStatus ? html`
+				<div class="flex items-center gap-2 rounded-md border border-border p-3 text-sm text-muted-foreground">
+					${icon(Loader2, "sm", "animate-spin")}
+					Loading provider status…
+				</div>
+			` : html`
+				<div class="flex flex-col gap-3">
+					${ACCOUNT_PROVIDERS.map(provider => renderAccountProviderCard(provider))}
+				</div>
+			`}
+
+			${accountLoading && accountStatus ? html`<p class="text-xs text-muted-foreground">Refreshing provider status…</p>` : ""}
+			${renderAccountApiKeyDialog()}
+			${renderAccountRemoveDialog()}
 		</div>
 	`;
 }

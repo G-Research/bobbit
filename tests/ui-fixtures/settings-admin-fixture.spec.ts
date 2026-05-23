@@ -91,11 +91,14 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/settings/system/palette");
 
 		await renderSettings(page, "#/settings/system/account");
-		await expect(page.getByText("Anthropic OAuth")).toBeVisible();
-		await expect(page.getByText("OpenAI OAuth")).toBeVisible();
-		await expect(page.getByText("ChatGPT subscription GPT models")).toBeVisible();
-		await expect(page.getByText("Authenticated", { exact: true })).toBeVisible();
-		await expect(page.getByText("Not authenticated", { exact: true })).toBeVisible();
+		await expect(page.locator("[data-testid='settings-account-cloud-providers']")).toBeVisible();
+		await expect(page.getByText("Cloud model providers")).toBeVisible();
+		await expect(page.locator("[data-testid='provider-card-anthropic']")).toContainText("Anthropic");
+		await expect(page.locator("[data-testid='provider-card-openai']")).toContainText("OpenAI");
+		await expect(page.locator("[data-testid='provider-card-google']")).toContainText("Google Gemini");
+		await expect(page.locator("[data-testid='provider-status-anthropic']")).toContainText("Authenticated");
+		await expect(page.locator("[data-testid='provider-status-openai']")).toContainText("Enabled · no credential");
+		await expect(page.locator("[data-testid='provider-status-google']")).toContainText("Disabled");
 
 		await renderSettings(page, "#/settings/proj-1/appearance");
 		await expect(page.locator("button").filter({ hasText: "Scope UI Project" })).toBeVisible();
@@ -146,20 +149,24 @@ test.describe("Settings/admin UI fixture", () => {
 		await expect.poll(async () => (await prefs(page)).skillsCatalogBudget).toBeUndefined();
 	});
 
-	test("account login buttons all disable while any OAuth flow is in flight", async ({ page }) => {
+	test("account provider action buttons all disable while any OAuth flow is in flight", async ({ page }) => {
 		await renderSettings(page, "#/settings/system/account");
-		const loginButtons = page.locator("button").filter({ hasText: /Log in|Re-authenticate|Authenticating/ });
-		await expect(loginButtons.first()).toBeVisible();
-		await expect(loginButtons).toHaveCount(2);
-		for (let i = 0; i < await loginButtons.count(); i++) {
-			await expect(loginButtons.nth(i)).toBeEnabled();
+		const providerActions = page.locator([
+			"[data-testid^='provider-connect-']",
+			"[data-testid^='provider-api-key-']",
+			"[data-testid^='provider-disable-']",
+			"[data-testid^='provider-remove-credential-']",
+		].join(","));
+		await expect(page.locator("[data-testid='provider-connect-anthropic']")).toBeVisible();
+		await expect(providerActions).toHaveCount(8);
+		for (let i = 0; i < await providerActions.count(); i++) {
+			await expect(providerActions.nth(i)).toBeEnabled();
 		}
 
-		await loginButtons.first().click();
-		const disabledButtons = page.locator("button").filter({ hasText: /Log in|Re-authenticate|Authenticating/ });
-		await expect(disabledButtons).toHaveCount(2);
-		for (let i = 0; i < await disabledButtons.count(); i++) {
-			await expect(disabledButtons.nth(i)).toBeDisabled();
+		await page.locator("[data-testid='provider-connect-anthropic']").click();
+		await expect(page.locator("[data-testid='provider-connect-anthropic']")).toHaveText("Authenticating…");
+		for (let i = 0; i < await providerActions.count(); i++) {
+			await expect(providerActions.nth(i)).toBeDisabled();
 		}
 	});
 

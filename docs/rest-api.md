@@ -438,8 +438,62 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/preferences` | Get all preferences |
+| `GET` | `/api/preferences` | Get preferences with sensitive credential values filtered out |
 | `PUT` | `/api/preferences` | Merge preferences (set `null` to delete a key) |
+
+`GET /api/preferences` exposes non-secret provider enablement keys such as `providerEnabled.anthropic`, but filters `providerKey.*` and provider invalid-credential fingerprints.
+
+### Cloud provider auth
+
+Provider opt-in auth covers direct-cloud Anthropic, OpenAI, and Google Gemini. It is bypassed when AI Gateway is configured. See [provider-opt-in-auth.md](provider-opt-in-auth.md) for the user-facing behavior.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/cloud-providers/status` | Redacted enablement and credential status for Anthropic/OpenAI/Google |
+| `PUT` | `/api/cloud-providers/:provider` | Enable or disable a provider (`{ enabled: boolean }`) without mutating credentials |
+| `GET` | `/api/provider-keys` | List provider ids with Bobbit-owned API keys, without key values |
+| `POST` | `/api/provider-keys/:provider` | Store a Bobbit-owned API key (`{ key, enable? }`) |
+| `DELETE` | `/api/provider-keys/:provider` | Remove Bobbit-owned API-key/OAuth credentials for the owning cloud vendor |
+
+Supported `:provider` ids for `/api/cloud-providers/:provider`: `anthropic`, `openai`, `google`. Provider-key routes also accept cloud aliases such as `openai-codex` and `google-gemini-cli`; deletion removes all Bobbit-owned aliases for the owning vendor.
+
+`GET /api/cloud-providers/status` returns:
+
+```ts
+interface CloudAuthStatus {
+  mode: "aigw" | "direct-cloud";
+  aigwConfigured: boolean;
+  authGateRequired: boolean;
+  providers: CloudProviderStatus[];
+}
+
+interface CloudProviderStatus {
+  id: "anthropic" | "openai" | "google";
+  label: string;
+  enabled: boolean;
+  configured: boolean;
+  authenticated: boolean;
+  expired: boolean;
+  needsReauth: boolean;
+  status: "disabled" | "enabled_without_credential" | "authenticated" | "expired" | "invalid" | "oauth_unavailable" | "aigw_bypass";
+  credentialTypes: Array<"oauth" | "api_key" | "env" | "host_token">;
+  oauthSupported: boolean;
+  apiKeySupported: boolean;
+  expires?: number;
+  message?: string;
+}
+```
+
+Notes:
+
+- `authGateRequired` is `true` only in direct-cloud mode when no enabled provider has a valid credential.
+- `aigw_bypass` suppresses vendor auth gates, Settings auth actions, and reauth reminders.
+- `PUT /api/cloud-providers/:provider` only writes `providerEnabled.<provider>`.
+- `POST /api/provider-keys/:provider` enables the owning vendor by default; pass `{ enable: false }` to save without enabling.
+- `DELETE /api/provider-keys/:provider` removes Bobbit-owned aliases for that vendor and leaves `providerEnabled.*` unchanged. It cannot remove environment variables or host-managed tokens.
+- Status responses never include bearer tokens or API key values.
+
+Work-starting endpoints may reject with `409 { code: "cloud_auth_required", status }` when direct-cloud work would otherwise start without a usable enabled credential.
 
 ### Models
 
@@ -450,6 +504,12 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
+Provider filtering:
+
+- Disabled direct-cloud vendors are omitted from `/api/models`.
+- Enabled direct-cloud vendors without a valid credential may appear with `authenticated: false`; selectors show them as unavailable and do not allow selection.
+- Default model selection uses only authenticated selectable models, so Bobbit does not silently auto-select an unauthenticated cloud model.
+
 `POST /api/models/test` responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
@@ -457,7 +517,7 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 - `404 { ok: false, error: "Model \"...\" is not in the current available-models list..." }` — pref does not resolve against `/api/models`.
 - `422 { ok: false, error: "Test not supported for this provider yet..." }` — non-aigw providers are not probed.
 
-Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debug a review or naming model picking the wrong model under AI Gateway](../AGENTS.md).
+Used by the Settings → Models tab per-row Test button.
 
 ### AI Gateway
 
@@ -472,28 +532,38 @@ Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debu
 
 ### OAuth
 
-Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic` and `openai-codex`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
+Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently; every endpoint takes a `provider` discriminator so flow IDs and credential rows do not bleed across providers.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires? }`. |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns no secret values. |
 | `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. |
-| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true }` (200) or `{ success: false, error }` (400). |
-| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error? }`. |
+| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true, provider? }` (200) or `{ success: false, error, provider? }` (400). |
+| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight callback-based flow. Returns `{ complete, error? }`. |
 
-**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token) and `openai-codex` (ChatGPT subscription → bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; an unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider".
+**Provider IDs and aliases:**
 
-**Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
+| Input | Normalized id | Current support |
+|---|---|---|
+| omitted, `anthropic` | `anthropic` | Supported; Claude sign-in with manual redirect/code fallback. |
+| `openai`, `openai-codex` | `openai-codex` | Supported through OpenAI Codex OAuth. |
+| `google`, `gemini`, `google-gemini` | `google` | Not available in this build; use a Gemini API key instead. |
+
+Unsupported values are rejected by provider normalization. Callers should treat any non-2xx response with an `error` field as a failed provider selection.
+
+**Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for more than one provider. Keying operations by `provider` alongside `flowId` keeps state partitioned and lets the UI render Settings → Account as independent provider rows.
 
 **`GET /api/oauth/status?provider=<id>`** responses:
 
-- `200 { provider: "anthropic", authenticated: true, expires: 1775812345000 }` — credential present and not expired.
-- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or the stored credential is expired.
-- `400 { error: "<message>" }` — provider value rejected by `normalizeProvider`.
+- `200 { provider: "anthropic", authenticated: true, configured: true, expires: 1775812345000, oauthSupported: true }` — OAuth credential present and not expired.
+- `200 { provider: "anthropic", authenticated: false, configured: false, oauthSupported: true }` — no stored OAuth credential.
+- `200 { provider: "anthropic", authenticated: false, configured: true, expired: true, needsReauth: true, oauthSupported: true }` — stored OAuth credential exists but needs reauth.
+- `200 { provider: "google", authenticated: false, configured: true, oauthSupported: false, message: "Google sign-in is not available in this build. Add a Gemini API key instead." }` — Google OAuth data exists but cannot be used at runtime.
+- `400 { error: "<message>" }` — provider value rejected by normalization.
 
-The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
+The response intentionally does **not** echo bearer tokens or API keys.
 
-**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" }`. Returns:
+**`POST /api/oauth/start`** body: `{ provider: "anthropic" | "openai-codex" | "google" }`. Successful response:
 
 ```json
 {
@@ -505,20 +575,22 @@ The response intentionally does **not** echo the bearer token / API key — stri
 }
 ```
 
-- `url`: opens in a system browser; the provider's redirect lands on Bobbit's callback handler.
-- `callbackServer`: `true` for OAuth providers that complete via the embedded callback server (e.g. `openai-codex`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`).
+- `url`: opens in a browser; callback-capable providers can complete through Bobbit's callback handler.
+- `callbackServer`: `true` when the provider supports automatic callback completion; otherwise the UI keeps the manual paste fallback visible.
 - `instructions`: optional human-readable string the UI may render alongside the URL.
+- Google currently returns `501 { error: "Google sign-in is not available in this build. Add a Gemini API key instead." }`.
 
-**`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider, so the body does not repeat it). Returns:
+**`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider). On success the server stores the token and enables the owning cloud provider (`anthropic`, `openai`, or `google`). Responses:
 
-- `200 { success: true }` — token stored.
+- `200 { success: true, provider: "anthropic" }` — token stored.
 - `400 { error: "Missing flowId or code" }` — either field missing or empty.
-- `400 { success: false, error: "code required" }` — `code` empty / whitespace-only after the trim check.
+- `400 { success: false, error: "code required", provider: "anthropic" }` — `code` empty / whitespace-only after the trim check.
 - `400 { success: false, error: "Unknown or expired flow ID" }` — the `flowId` was never created or has been garbage-collected.
-- `400 { success: false, error: "OAuth flow expired" }` — the flow exceeded its TTL.
-- `400 { success: false, error: "<provider message>" }` — token-exchange or login-promise rejection. Body always includes `success: false` for non-200 responses from `oauthComplete`; raw thrown exceptions are surfaced as `500 { error: "<message>" }` with no `success` field.
+- `400 { success: false, error: "OAuth flow expired", provider: "openai-codex" }` — the flow exceeded its TTL.
+- `400 { success: false, error: "<provider message>", provider: "openai-codex" }` — token-exchange or login-promise rejection.
+- `500 { error: "<message>" }` — unexpected exception.
 
-**`GET /api/oauth/flow-status?flowId=<id>&provider=<id>`** is the polling endpoint used by the Settings → Account UI while the user is in the browser. Returns:
+**`GET /api/oauth/flow-status?flowId=<id>&provider=<id>`** is the polling endpoint used while the user is in the browser. Returns:
 
 ```json
 { "complete": false }
@@ -528,19 +600,19 @@ or on success / failure:
 
 ```json
 { "complete": true }
-{ "complete": true, "error": "user denied access" }
+{ "complete": false, "error": "user denied access" }
 ```
 
 Response contract:
 
-- `complete: boolean` — `false` while the flow is still pending, `true` once the provider's callback has resolved (regardless of success).
-- `error?: string` — present only when the flow failed (or when the `flowId` is unknown / cross-provider mismatched, in which case the body is `{ complete: false, error: "flow not found" }` with HTTP 404).
+- `complete: boolean` — `false` while the flow is pending; `true` after a callback flow has stored credentials.
+- `error?: string` — present when the flow failed, or when the `flowId` is unknown / cross-provider mismatched.
 - HTTP 400 `{ error: "Missing flowId" }` if `flowId` query param is absent.
-- HTTP 404 `{ complete: false, error: "flow not found" }` if the `flowId` is unknown, expired, **or** belongs to a different provider than the supplied `provider` query param.
+- HTTP 404 `{ complete: false, error: "flow not found" }` if the `flowId` is unknown, expired, or belongs to a different provider than the supplied `provider` query param.
 
-`provider` is recommended as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
+A successful callback poll enables the owning cloud provider but does not expose the provider id or token values on the wire.
 
-See [AGENTS.md — Add / debug per-provider OAuth](../AGENTS.md#add--debug-per-provider-oauth) for the file map and the Settings → Account UI walkthrough.
+See [provider-opt-in-auth.md](provider-opt-in-auth.md) for provider status and UI behavior.
 
 ### Image generation
 
@@ -568,7 +640,7 @@ interface ApiImageModel {
 }
 ```
 
-Unauthenticated rows (`authenticated: false`) still appear so the Settings → Models → Image picker can render a red "Unavailable" badge with a tooltip pointing at the missing credential. On internal failure the endpoint returns `500 { error: "Failed to load image models: <msg>" }`. See [docs/internals.md — Image generation routing](internals.md#image-generation-routing) for the full data flow.
+Provider filtering follows the same opt-in rules as text models: disabled OpenAI/Google image providers are omitted, enabled providers without credentials may appear with `authenticated: false`, and providers marked expired/invalid are hidden until reconnected. The image picker renders unauthenticated rows as unavailable and will not select them. On internal failure the endpoint returns `500 { error: "Failed to load image models: <msg>" }`. See [docs/internals.md — Image generation routing](internals.md#image-generation-routing) for the full data flow.
 
 **`POST /api/image-generation/generate`** is the back-end called by the `generate_image` tool extension. Request body:
 
@@ -576,7 +648,7 @@ Unauthenticated rows (`authenticated: false`) still appear so the Settings → M
 |---|---|---|---|
 | `prompt` | `string` | yes | Free-form prompt. Capped at 8192 chars. |
 | `n` | `integer` | no | Number of images. Must be an integer in `[1, 4]`. Defaults to `1`. |
-| `model` | `string` | no | Override id in `provider/modelId` form. Both sides are canonicalised before comparison. If unrecognised, the request silently falls back to the session's selected image model rather than rejecting. |
+| `model` | `string` | no | Override id in `provider/modelId` form. Both sides are canonicalised before comparison. With a `sessionId`, the override is honoured only when it matches the selected model or the user visibly mentioned that model; otherwise Bobbit uses the session/default image model. |
 | `size` | `string` | no | Provider-specific size token (e.g. `1024x1024`). |
 | `quality` | `string` | no | Provider-specific quality token (e.g. `auto`, `hd`). |
 | `background` | `string` | no | One of `transparent`, `opaque`, `auto` (OpenAI-only). |
@@ -609,11 +681,12 @@ Error responses:
 - `400 { error: "Missing prompt" }` — `prompt` missing or non-string. Note the capital `M`.
 - `400 { error: "prompt exceeds 8192 chars" }` — prompt over the cap.
 - `400 { error: "n must be 1..4" }` — `n` is not an integer or is outside `[1, 4]`.
-- `500 { error: "<provider message>" }` — provider helper threw. The message comes straight from `err.message` (typically prefixed with the upstream HTTP status, never `[object Object]`). Provider-specific failure modes (Codex `n=1` clamp, `remote image exceeds 25 MB cap`, missing credentials) all surface here as `500`.
+- `409 { code: "cloud_auth_required", status }` — direct-cloud mode has no authenticated enabled image provider; the UI opens the provider auth gate.
+- `500 { error: "<provider message>" }` — provider helper threw. The message comes straight from `err.message` (typically prefixed with the upstream HTTP status, never `[object Object]`). Provider-specific failure modes (Codex `n=1` clamp, `remote image exceeds 25 MB cap`, missing credentials after a requested override) all surface here as `500`.
 
-The gateway does **not** return `502` or `503` from this endpoint, and there is no separate `400 { error: "unknown image model" }` path — unknown `model` values silently fall back to the session default (the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md)).
+The gateway does **not** return `502` or `503` from this endpoint, and there is no separate `400 { error: "unknown image model" }` path. Unknown or unauthenticated image-model prefs fail closed through the selected/default-model resolver or the direct-cloud auth gate; the strict registry check lives on the `set_image_model` WS message instead, see [docs/websocket-protocol.md](websocket-protocol.md).
 
-Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [AGENTS.md — Image generation failure debugging](../AGENTS.md) for the full diagnostic path. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
+Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallback chain (env var `BOBBIT_OPENAI_CODEX_IMAGE_DRIVER_MODEL` → `gpt-5.5` → `gpt-5` → `gpt-4o`) — see [debugging.md — Image generation failure](debugging.md#image-generation-failure) for diagnostics. The agent-facing routing rules (when to use `model="openai/gpt-image-2"` vs Google IDs) live in `defaults/system-prompt.md` and the per-tool `Parameters` table is in `defaults/tools/images/generate_image.yaml::detail_docs` (single source of truth).
 
 ### MCP Servers
 
