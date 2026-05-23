@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, gatewayFetch, refreshSessions, type StaffAgent } from "./api.js";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, refreshSessions, type StaffAgent } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
@@ -123,7 +123,7 @@ async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
 		? state.gatewaySessions.find((s) => s.id === agent.currentSessionId)
 		: undefined;
 	editColorIndex = session ? (sessionColorMap.get(session.id) ?? -1) : -1;
-	editAccessory = session?.accessory || "none";
+	editAccessory = agent.accessory || "none";
 }
 
 // ============================================================================
@@ -142,30 +142,27 @@ async function handleSave(): Promise<void> {
 		triggers: editTriggers,
 		memory: editMemory,
 		contextPolicy: editContextPolicy,
+		accessory: editAccessory,
 	});
-	// Save session appearance (color, accessory)
+	// Save session appearance (color only; staff accessory is persisted on the staff record).
 	if (selectedStaff.currentSessionId) {
 		const sid = selectedStaff.currentSessionId;
-		const session = state.gatewaySessions.find((s) => s.id === sid);
 		const origColor = sessionColorMap.get(sid) ?? -1;
-		const origAccessory = session?.accessory || "none";
 		if (editColorIndex !== origColor && editColorIndex >= 0) {
 			setSessionColor(sid, editColorIndex);
 		}
-		const patchBody: Record<string, unknown> = {};
-		if (editAccessory !== origAccessory) patchBody.accessory = editAccessory;
-		if (Object.keys(patchBody).length > 0) {
-			await gatewayFetch(`/api/sessions/${sid}`, {
-				method: "PATCH",
-				body: JSON.stringify(patchBody),
-			});
-			await refreshSessions();
-		}
 	}
 	if (ok) {
-		staffList = await fetchStaff();
+		const [updatedStaff] = await Promise.all([
+			fetchStaff(),
+			refreshSessions(),
+		]);
+		staffList = updatedStaff;
 		const updated = staffList.find((s) => s.id === selectedStaff!.id);
-		if (updated) selectedStaff = updated;
+		if (updated) {
+			selectedStaff = updated;
+			editAccessory = updated.accessory || "none";
+		}
 	}
 	saving = false;
 	renderApp();
