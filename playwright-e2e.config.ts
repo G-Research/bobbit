@@ -1,3 +1,7 @@
+import { existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 /**
  * E2E test config: split into API (in-process) and browser (process-spawned) projects.
  *
@@ -9,15 +13,43 @@
  *
  * Global setup ensures both server and UI are built (builds only what's missing).
  */
-function disableE2ENodeCompileCache(): void {
+function e2eTempRoot(): string {
+	if (existsSync("/.dockerenv")) return "/tmp";
+	return process.platform === "win32"
+		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
+		: join(tmpdir(), "bobbit-e2e");
+}
+
+function sanitizeCacheSegment(value: string): string {
+	return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "run";
+}
+
+function prepareE2ERuntimeCaches(): void {
 	// Must run in the Playwright config process before test workers spawn.
 	// A host-level NODE_COMPILE_CACHE caused false ESM "missing export" errors
 	// when multiple Windows workers cold-imported dist/server concurrently.
 	process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 	delete process.env.NODE_COMPILE_CACHE;
+
+	// npm run test:e2e launches through scripts/run-playwright-e2e.mjs, which
+	// sets PWTEST_CACHE_DIR before Playwright imports its transform cache. This
+	// fallback protects direct `npx playwright ... --config playwright-e2e.config.ts`
+	// runs before worker startup, even though the runner process may already have
+	// loaded Playwright's default transform-cache module while loading this config.
+	if (!process.env.PWTEST_CACHE_DIR) {
+		const runId = sanitizeCacheSegment(
+			process.env.BOBBIT_E2E_RUN_ID?.trim()
+				|| `direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
+		);
+		process.env.PWTEST_CACHE_DIR = join(e2eTempRoot(), "pwtest-transform-cache", runId);
+		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
+	}
+	const transformCacheDir = process.env.PWTEST_CACHE_DIR!;
+	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT || transformCacheDir;
+	mkdirSync(transformCacheDir, { recursive: true });
 }
 
-disableE2ENodeCompileCache();
+prepareE2ERuntimeCaches();
 
 // Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
 // reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.

@@ -50,6 +50,20 @@ export default function globalTeardown() {
 		try { rmSync(cacheRoot, { recursive: true, force: true }); } catch {}
 	}
 
+	// Per-run Playwright transform cache from scripts/run-playwright-e2e.mjs or
+	// the direct-npx fallback in playwright-e2e.config.ts. The default Windows
+	// location is shared across worktrees; these managed dirs are isolated and
+	// safe to remove once the run has ended.
+	const pwtestCacheDir = process.env.BOBBIT_E2E_PWTEST_CACHE_DIR;
+	if (
+		process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1" &&
+		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED === "1" &&
+		pwtestCacheDir &&
+		pwtestCacheDir.includes("pwtest-transform-cache")
+	) {
+		try { rmSync(pwtestCacheDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
+	}
+
 	// Clean up Docker containers created by E2E sandbox tests.
 	// These are labeled `bobbit-project=<uuid>` and bound to temp dirs.
 	cleanTestDockerContainers();
