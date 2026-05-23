@@ -16,11 +16,6 @@ export interface ImageGenerationModel {
 	provider: string;
 	api: "openai-images" | "gemini-images" | "google-imagen";
 	authenticated?: boolean;
-	available?: boolean;
-	disabled?: boolean;
-	locked?: boolean;
-	status?: string;
-	message?: string;
 	sizes?: string[];
 	qualities?: string[];
 	aspectRatios?: string[];
@@ -42,42 +37,6 @@ export function imageModelRank(model: ImageGenerationModel, registry: readonly I
 
 function sameModel(a: ImageGenerationModel | null, b: ImageGenerationModel): boolean {
 	return !!a && a.provider === b.provider && a.id === b.id;
-}
-
-const TARGET_CLOUD_IMAGE_PROVIDERS = new Set(["openai", "google"]);
-const UNSELECTABLE_IMAGE_STATUSES = new Set([
-	"enabled_without_credential",
-	"expired",
-	"invalid",
-	"locked",
-	"unauthenticated",
-	"unavailable",
-	"oauth_unavailable",
-]);
-
-function isHiddenImageModel(model: ImageGenerationModel): boolean {
-	return model.disabled === true || model.status === "disabled";
-}
-
-function isImageModelSelectable(model: ImageGenerationModel): boolean {
-	if (!model || isHiddenImageModel(model)) return false;
-	if (model.locked === true || model.available === false) return false;
-	if (model.authenticated === false) return false;
-	if (model.status && UNSELECTABLE_IMAGE_STATUSES.has(model.status)) return false;
-	return true;
-}
-
-function imageModelSettingsDestination(model: ImageGenerationModel): { label: string; action: string; hash: string } {
-	if (TARGET_CLOUD_IMAGE_PROVIDERS.has(model.provider)) {
-		return { label: "Connect", action: "Connect in Settings > System > Account", hash: "#/settings/system/account" };
-	}
-	return { label: "Configure", action: "Configure in Settings > System > Models", hash: "#/settings/system/models" };
-}
-
-function imageModelUnavailableTitle(model: ImageGenerationModel): string {
-	if (model.message) return model.message;
-	if (TARGET_CLOUD_IMAGE_PROVIDERS.has(model.provider)) return "Connect this provider in Settings > System > Account before selecting this image model.";
-	return "Configure this provider in Settings > System > Models before selecting this image model.";
 }
 
 @customElement("image-model-selector")
@@ -106,13 +65,7 @@ export class ImageModelSelector extends DialogBase {
 		this.loading = true;
 		try {
 			const res = await gatewayFetch("/api/image-models");
-			if (res.ok) {
-				const models = await res.json();
-				this.serverModels = Array.isArray(models)
-					? (models as ImageGenerationModel[]).filter((model) => !isHiddenImageModel(model))
-					: [];
-				this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
-			}
+			if (res.ok) this.serverModels = await res.json();
 		} catch (err) {
 			console.error("Failed to load image models:", err);
 		} finally {
@@ -129,14 +82,13 @@ export class ImageModelSelector extends DialogBase {
 		if (!isMobile) this.searchInputRef.value?.focus();
 		this.addEventListener("keydown", (e: KeyboardEvent) => {
 			const filtered = this.getFilteredModels();
-			if (filtered.length === 0) return;
 			if (e.key === "ArrowDown") {
 				e.preventDefault();
-				this.selectedIndex = this.nextSelectableIndex(filtered, 1);
+				this.selectedIndex = Math.min(this.selectedIndex + 1, filtered.length - 1);
 				this.scrollToSelected();
 			} else if (e.key === "ArrowUp") {
 				e.preventDefault();
-				this.selectedIndex = this.nextSelectableIndex(filtered, -1);
+				this.selectedIndex = Math.max(this.selectedIndex - 1, 0);
 				this.scrollToSelected();
 			} else if (e.key === "Enter" && filtered[this.selectedIndex]) {
 				e.preventDefault();
@@ -145,55 +97,21 @@ export class ImageModelSelector extends DialogBase {
 		});
 	}
 
-	private firstSelectableIndex(models: ImageGenerationModel[]): number {
-		const index = models.findIndex((model) => isImageModelSelectable(model));
-		return index >= 0 ? index : 0;
-	}
-
-	private nextSelectableIndex(models: ImageGenerationModel[], direction: 1 | -1): number {
-		if (models.length === 0) return 0;
-		const fallback = Math.min(Math.max(this.selectedIndex, 0), models.length - 1);
-		for (let i = fallback + direction; i >= 0 && i < models.length; i += direction) {
-			if (isImageModelSelectable(models[i])) return i;
-		}
-		return fallback;
-	}
-
-	private currentModelNotice(): string | null {
-		if (!this.currentModel || this.loading) return null;
-		const current = this.serverModels.find((model) => sameModel(this.currentModel, model));
-		if (!current) {
-			return "The saved image model is no longer available. Choose an available model or clear the preference to use Auto.";
-		}
-		if (!isImageModelSelectable(current)) {
-			return "The saved image model needs provider authentication before it can be selected. Connect the provider or choose another model.";
-		}
-		return null;
-	}
-
-	private openSettingsForModel(model: ImageGenerationModel) {
-		const destination = imageModelSettingsDestination(model);
-		if (typeof window !== "undefined") window.location.hash = destination.hash;
-		this.close();
-	}
-
 	private getFilteredModels(): ImageGenerationModel[] {
 		const q = this.searchQuery.toLowerCase().trim();
-		let models = this.serverModels.filter((model) => !isHiddenImageModel(model));
+		let models = this.serverModels;
 		if (q) {
 			const tokens = q.split(/\s+/).filter(Boolean);
 			models = models.filter((m) => tokens.every((t) => `${m.provider} ${m.id} ${m.name}`.toLowerCase().includes(t)));
 		}
 		const registry = this.serverModels;
 		return [...models].sort((a, b) => {
-			const aSelectable = isImageModelSelectable(a);
-			const bSelectable = isImageModelSelectable(b);
-			const aCurrent = aSelectable && sameModel(this.currentModel, a);
-			const bCurrent = bSelectable && sameModel(this.currentModel, b);
+			const aCurrent = sameModel(this.currentModel, a);
+			const bCurrent = sameModel(this.currentModel, b);
 			if (aCurrent && !bCurrent) return -1;
 			if (!aCurrent && bCurrent) return 1;
-			if (aSelectable && !bSelectable) return -1;
-			if (!aSelectable && bSelectable) return 1;
+			if (!!a.authenticated && !b.authenticated) return -1;
+			if (!a.authenticated && !!b.authenticated) return 1;
 			const rankDiff = imageModelRank(b, registry) - imageModelRank(a, registry);
 			if (rankDiff) return rankDiff;
 			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
@@ -201,7 +119,6 @@ export class ImageModelSelector extends DialogBase {
 	}
 
 	private handleSelect(model: ImageGenerationModel) {
-		if (!isImageModelSelectable(model)) return;
 		this.onSelectCallback?.(model);
 		this.close();
 	}
@@ -224,34 +141,25 @@ export class ImageModelSelector extends DialogBase {
 					inputRef: this.searchInputRef,
 					onInput: (e: Event) => {
 						this.searchQuery = (e.target as HTMLInputElement).value;
-						this.selectedIndex = this.firstSelectableIndex(this.getFilteredModels());
+						this.selectedIndex = 0;
 						if (this.scrollContainerRef.value) this.scrollContainerRef.value.scrollTop = 0;
 					},
 				})}
 			</div>
-			${this.currentModelNotice() ? html`
-				<div class="px-6 py-3 border-b border-border bg-muted/40 text-xs text-muted-foreground">
-					${this.currentModelNotice()}
-				</div>
-			` : ""}
 			<div class="flex-1 overflow-y-auto" ${ref(this.scrollContainerRef)}>
 				${this.loading && this.serverModels.length === 0
 					? html`<div class="flex items-center justify-center py-8 text-muted-foreground text-sm">Loading models...</div>`
-					: filteredModels.length === 0
-						? html`<div class="flex items-center justify-center py-8 px-6 text-muted-foreground text-sm text-center">No available image models match these filters.</div>`
-						: filteredModels.map((model, index) => {
-						const selectable = isImageModelSelectable(model);
-						const isCurrent = selectable && sameModel(this.currentModel, model);
+					: filteredModels.map((model, index) => {
+						const isCurrent = sameModel(this.currentModel, model);
 						const isSelected = index === this.selectedIndex;
-						const destination = imageModelSettingsDestination(model);
+						const hasKey = model.authenticated ?? false;
 						return html`
 							<div
 								data-image-model-item
-								aria-disabled=${selectable ? "false" : "true"}
-								class="px-4 py-3 border-b border-border ${selectable ? "hover:bg-muted cursor-pointer" : "cursor-default opacity-60"} ${isSelected && selectable ? "bg-accent" : ""}"
-								title=${selectable ? "" : imageModelUnavailableTitle(model)}
+								class="px-4 py-3 hover:bg-muted cursor-pointer border-b border-border ${isSelected ? "bg-accent" : ""} ${hasKey ? "" : "opacity-45"}"
+								title=${hasKey ? "" : i18n("API key required — set up in Settings > Providers")}
 								@click=${() => this.handleSelect(model)}
-								@mouseenter=${() => { if (selectable) this.selectedIndex = index; }}
+								@mouseenter=${() => { this.selectedIndex = index; }}
 							>
 								<div class="flex items-center justify-between gap-2 mb-1">
 									<div class="flex items-center gap-2 flex-1 min-w-0">
@@ -260,18 +168,13 @@ export class ImageModelSelector extends DialogBase {
 										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
 									</div>
 									<div class="flex items-center gap-1.5">
-										${!selectable ? html`<span class="text-muted-foreground" title=${imageModelUnavailableTitle(model)}>${icon(KeyRound, "sm")}</span>` : ""}
+										${!hasKey ? html`<span class="text-muted-foreground" title=${i18n("API key required")}>${icon(KeyRound, "sm")}</span>` : ""}
 										${Badge(model.provider, "outline")}
 									</div>
 								</div>
 								<div class="text-xs text-muted-foreground flex items-center justify-between gap-2">
 									<span class="truncate">${model.id}</span>
-									<div class="flex items-center gap-2 shrink-0">
-										${!selectable ? html`
-											<span class="hidden sm:inline">${destination.action}</span>
-											<button class="text-primary hover:underline" @click=${(e: Event) => { e.stopPropagation(); this.openSettingsForModel(model); }}>${destination.label}</button>
-										` : html`<span>${model.api === "gemini-images" ? "Gemini" : model.api === "google-imagen" ? "Imagen" : "Images API"}</span>`}
-									</div>
+									<span>${model.api === "gemini-images" ? "Gemini" : model.api === "google-imagen" ? "Imagen" : "Images API"}</span>
 								</div>
 							</div>
 						`;

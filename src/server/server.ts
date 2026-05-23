@@ -139,23 +139,9 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, pickDefaultSessionModel } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
-import { canonicalImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText, ImageProviderAuthFailureError, pickDefaultImageModelPref } from "./agent/image-generation.js";
-import {
-	cloudModelPrefIsUsable,
-	clearCloudProviderCredentialInvalid,
-	cloudVendorForModelPref,
-	cloudVendorForOAuthProvider,
-	cloudVendorForProviderKey,
-	getCloudAuthStatus,
-	isCloudProviderId,
-	removeBobbitOwnedCloudProviderCredentials,
-	isProviderEnabled,
-	migrateExistingCloudProviderPreferences,
-	setProviderEnabled,
-	shouldBypassCloudAuthUx,
-} from "./agent/cloud-provider-auth.js";
+import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
 import { runPreflight } from "./agent/project-preflight.js";
 import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js";
@@ -710,7 +696,6 @@ export function createGateway(config: GatewayConfig) {
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
-	migrateExistingCloudProviderPreferences(preferencesStore);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
 	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
@@ -1335,7 +1320,7 @@ export function createGateway(config: GatewayConfig) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, preferencesStore);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager);
 		});
 	});
 
@@ -3621,9 +3606,6 @@ async function handleApiRoute(
 			autoSandboxBranch = `session/s-${shortId}`;
 		}
 
-		const initialModelPref = sessionManager.resolveInitialModel(createOpts?.role, resolvedProjectId);
-		if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
-
 		try {
 			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
 
@@ -4212,7 +4194,7 @@ async function handleApiRoute(
 		const all = preferencesStore.getAll();
 		const filtered: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(all)) {
-			if (!key.startsWith("providerKey.") && !key.startsWith("providerCredentialInvalidFingerprint.")) {
+			if (!key.startsWith("providerKey.")) {
 				filtered[key] = value;
 			}
 		}
@@ -4222,61 +4204,6 @@ async function handleApiRoute(
 	/** Broadcast preferences_changed with sensitive keys filtered out. */
 	function broadcastPreferencesChanged(): void {
 		broadcastToAll({ type: "preferences_changed", preferences: getSafePreferences() });
-	}
-
-	function cloudCredentialInvalidSnapshot(): string {
-		const all = preferencesStore.getAll();
-		return JSON.stringify(Object.keys(all)
-			.filter((key) => key.startsWith("providerCredentialInvalid."))
-			.sort()
-			.map((key) => [key, all[key]]));
-	}
-
-	async function getCloudAuthStatusWithRecovery(): Promise<Awaited<ReturnType<typeof getCloudAuthStatus>>> {
-		const before = cloudCredentialInvalidSnapshot();
-		const status = await getCloudAuthStatus(preferencesStore);
-		if (before !== cloudCredentialInvalidSnapshot()) {
-			invalidateModelCache();
-			broadcastPreferencesChanged();
-		}
-		return status;
-	}
-
-	async function sendCloudAuthRequired(): Promise<void> {
-		const status = await getCloudAuthStatusWithRecovery();
-		json({
-			code: "cloud_auth_required",
-			error: "Choose at least one cloud provider to connect before starting cloud-backed work.",
-			status,
-		}, 409);
-	}
-
-	function enableProviderAfterOAuth(providerId: string | undefined | null): void {
-		const vendor = cloudVendorForOAuthProvider(providerId);
-		if (!vendor) return;
-		setProviderEnabled(preferencesStore, vendor, true);
-		clearCloudProviderCredentialInvalid(preferencesStore, vendor);
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-	}
-
-	async function rejectIfCloudAuthRequiredForModel(pref: string | undefined | null, unresolvedMayUseCloud = true): Promise<boolean> {
-		if (shouldBypassCloudAuthUx(preferencesStore)) return false;
-		const vendor = cloudVendorForModelPref(pref);
-		if (vendor) {
-			if (cloudModelPrefIsUsable(preferencesStore, pref)) return false;
-			await sendCloudAuthRequired();
-			return true;
-		}
-		if (pref) return false;
-		if (!unresolvedMayUseCloud) return false;
-		await getCloudAuthStatusWithRecovery();
-		const selectableDefault = await pickDefaultSessionModel(preferencesStore);
-		if (selectableDefault) return rejectIfCloudAuthRequiredForModel(selectableDefault, false);
-		const status = await getCloudAuthStatus(preferencesStore);
-		if (!status.authGateRequired) return false;
-		await sendCloudAuthRequired();
-		return true;
 	}
 
 	// GET /api/preferences — return all preferences (filter sensitive keys)
@@ -4296,35 +4223,8 @@ async function handleApiRoute(
 				preferencesStore.set(key, value);
 			}
 		}
-		invalidateModelCache();
 		json({ ok: true });
 		broadcastPreferencesChanged();
-		return;
-	}
-
-	// GET /api/cloud-providers/status — redacted cloud-provider enablement/auth status
-	if (url.pathname === "/api/cloud-providers/status" && req.method === "GET") {
-		json(await getCloudAuthStatusWithRecovery());
-		return;
-	}
-
-	// PUT /api/cloud-providers/:provider — enable/disable a cloud vendor without mutating credentials
-	const cloudProviderMatch = url.pathname.match(/^\/api\/cloud-providers\/([^/]+)$/);
-	if (cloudProviderMatch && req.method === "PUT") {
-		const provider = decodeURIComponent(cloudProviderMatch[1]);
-		if (!isCloudProviderId(provider)) {
-			json({ error: "Unsupported cloud provider" }, 400);
-			return;
-		}
-		const body = await readBody(req);
-		if (!body || typeof body !== "object" || typeof body.enabled !== "boolean") {
-			json({ error: "Missing boolean 'enabled' field" }, 400);
-			return;
-		}
-		setProviderEnabled(preferencesStore, provider, body.enabled);
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true, provider, enabled: body.enabled });
 		return;
 	}
 
@@ -4455,7 +4355,6 @@ async function handleApiRoute(
 	// GET /api/models — unified model list from all sources
 	if (url.pathname === "/api/models" && req.method === "GET") {
 		try {
-			await getCloudAuthStatusWithRecovery();
 			const models = await getAvailableModels(preferencesStore);
 			json(models);
 		} catch (err: any) {
@@ -4467,7 +4366,6 @@ async function handleApiRoute(
 	// GET /api/image-models — image generation model list
 	if (url.pathname === "/api/image-models" && req.method === "GET") {
 		try {
-			await getCloudAuthStatusWithRecovery();
 			json(getAvailableImageModels(preferencesStore));
 		} catch (err: any) {
 			jsonError(500, err, { error: `Failed to load image models: ${err.message}` });
@@ -4505,11 +4403,11 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionPref = sessionId ? sessionManager.getImageModelForSession(sessionId) : undefined;
-		const defaultPref = pickDefaultImageModelPref(preferencesStore);
+		const defaultPref = (preferencesStore.get("default.imageModel") as string | undefined) || defaultImageModelPref();
 		// Canonicalise both sides so equality compares apples-to-apples (e.g. user
 		// pref "google/nano-banana" vs requested "google/gemini-2.5-flash-image").
 		const selectedModelRaw = sessionPref ? `${sessionPref.provider}/${sessionPref.id}` : defaultPref;
-		const selectedModel = selectedModelRaw ? (canonicalImageModelPref(selectedModelRaw) || selectedModelRaw) : undefined;
+		const selectedModel = canonicalImageModelPref(selectedModelRaw) || selectedModelRaw;
 		const requestedModel = typeof body.model === "string" && body.model ? canonicalImageModelPref(body.model) : undefined;
 		const lastUserPrompt = sessionId ? sessionManager.getLastPromptText(sessionId) : undefined;
 		const model = requestedModel
@@ -4537,15 +4435,6 @@ async function handleApiRoute(
 				images: result.images,
 			});
 		} catch (err: any) {
-			const message = err instanceof Error ? err.message : String(err);
-			if (!shouldBypassCloudAuthUx(preferencesStore) && message.includes("No authenticated image generation provider configured")) {
-				await sendCloudAuthRequired();
-				return;
-			}
-			if (err instanceof ImageProviderAuthFailureError) {
-				invalidateModelCache();
-				broadcastPreferencesChanged();
-			}
 			jsonError(500, err);
 		}
 		return;
@@ -4649,14 +4538,7 @@ async function handleApiRoute(
 			return;
 		}
 		preferencesStore.set(`providerKey.${provider}`, body.key);
-		const vendor = cloudVendorForProviderKey(provider);
-		if (vendor && body.enable !== false) {
-			setProviderEnabled(preferencesStore, vendor, true);
-			clearCloudProviderCredentialInvalid(preferencesStore, vendor);
-		}
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true, ...(vendor ? { provider: vendor, enabled: isProviderEnabled(preferencesStore, vendor) } : {}) });
+		json({ ok: true });
 		return;
 	}
 
@@ -4667,15 +4549,8 @@ async function handleApiRoute(
 			json({ error: "Missing provider name" }, 400);
 			return;
 		}
-		const vendor = cloudVendorForProviderKey(provider);
-		if (vendor) {
-			removeBobbitOwnedCloudProviderCredentials(preferencesStore, vendor);
-		} else {
-			preferencesStore.remove(`providerKey.${provider}`);
-		}
-		invalidateModelCache();
-		broadcastPreferencesChanged();
-		json({ ok: true, ...(vendor ? { provider: vendor } : {}) });
+		preferencesStore.remove(`providerKey.${provider}`);
+		json({ ok: true });
 		return;
 	}
 
@@ -5796,8 +5671,6 @@ async function handleApiRoute(
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
 		try {
-			const initialModelPref = sessionManager.resolveInitialModel(undefined, getGoalAcrossProjects(goalId)?.projectId);
-			if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
 			const session = await teamManager.startTeam(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
@@ -5827,8 +5700,6 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const initialModelPref = sessionManager.resolveInitialModel(typeof body.role === "string" ? body.role : undefined, spawnGoal?.projectId);
-			if (await rejectIfCloudAuthRequiredForModel(initialModelPref, true)) return;
 			const spawnOpts: { workflowGateId?: string; inputGateIds?: string[] } = {};
 			if (typeof body.workflowGateId === "string") spawnOpts.workflowGateId = body.workflowGateId;
 			if (Array.isArray(body.inputGateIds)) spawnOpts.inputGateIds = body.inputGateIds as string[];
@@ -6381,11 +6252,6 @@ async function handleApiRoute(
 			json({ error: "source project no longer registered" }, 410);
 			return;
 		}
-		const persistedModelPref = ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined;
-		const canUsePersistedModel = !!persistedModelPref && cloudModelPrefIsUsable(preferencesStore, persistedModelPref);
-		const fallbackModelPref = canUsePersistedModel ? undefined : (sessionManager.resolveInitialModel(ps.role, ps.projectId) || await pickDefaultSessionModel(preferencesStore));
-		const continuedModelPref = canUsePersistedModel ? persistedModelPref : fallbackModelPref;
-		if (await rejectIfCloudAuthRequiredForModel(continuedModelPref, true)) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
 		// sessions whose persisted `agentSessionFile` was never populated.
@@ -6479,13 +6345,13 @@ async function handleApiRoute(
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
 			preExistingAgentSessionFile: destJsonl,
-			// We'll set the chosen model explicitly below when one is usable.
-			skipAutoModel: !!continuedModelPref,
+			// We'll set the model explicitly below; skip the auto-selection fire-and-forget.
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
 		};
-		// Pin the chosen model at spawn time so pi-coding-agent doesn't emit a
+		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default.
-		if (continuedModelPref) {
-			createOpts.initialModel = continuedModelPref;
+		if (ps.modelProvider && ps.modelId) {
+			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		}
 		if (role) {
 			createOpts.rolePrompt = role.promptTemplate;
@@ -6520,7 +6386,7 @@ async function handleApiRoute(
 		// "Continued: …" once the user sends their first prompt in the new session.
 		sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
 
-		if (canUsePersistedModel && ps.modelProvider && ps.modelId) {
+		if (ps.modelProvider && ps.modelId) {
 			// Model is pinned at spawn via createOpts.initialModel above; just
 			// persist the choice so a later restore picks it up. No redundant
 			// post-spawn setModel — that's the whole point of spawn-time pinning.
@@ -6979,11 +6845,10 @@ async function handleApiRoute(
 		const provider = url.searchParams.get("provider") || undefined;
 		const status = oauthFlowStatus(flowId, provider);
 		if (status.error === "flow not found") {
-			json({ complete: status.complete, error: status.error }, 404);
+			json(status, 404);
 			return;
 		}
-		if (status.complete) enableProviderAfterOAuth(status.provider ?? provider);
-		json(status.error ? { complete: status.complete, error: status.error } : { complete: status.complete });
+		json(status);
 		return;
 	}
 
@@ -6994,8 +6859,7 @@ async function handleApiRoute(
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			jsonError(message.includes("Google sign-in is not available") ? 501 : 500, err);
+			jsonError(500, err);
 		}
 		return;
 	}
@@ -7009,7 +6873,6 @@ async function handleApiRoute(
 		}
 		try {
 			const result = await oauthComplete(body.flowId, body.code);
-			if (result.success) enableProviderAfterOAuth(result.provider);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);

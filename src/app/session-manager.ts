@@ -19,7 +19,7 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
-import { showConnectionError, confirmAction, ensureDirectCloudAuthReady } from "./dialogs.js";
+import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
@@ -592,6 +592,10 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 		throw new Error(`Gateway error: ${healthRes.status}`);
 	}
 
+	// Skip OAuth when running on localhost or when an AI Gateway is configured.
+	// Localhost: only local processes can connect, no cloud auth needed.
+	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
+	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
 	// Extract setup status from health response (avoids extra fetch)
 	if (typeof healthData.setupComplete === "boolean") {
@@ -600,6 +604,14 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	if (typeof healthData.orphanedTranscripts === "number") {
 		state.orphanedTranscriptsCount = healthData.orphanedTranscripts;
 	}
+	if (!healthData.localhost && !healthData.aigw) {
+		const hasAuth = await checkOAuthStatus();
+		if (!hasAuth) {
+			const success = await openOAuthDialog();
+			if (!success) throw new Error("OAuth login required");
+		}
+	}
+
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
 	if (route.view !== "session" && route.view !== "goal-dashboard" && !isConfigPageRoute()) {
@@ -1132,11 +1144,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
-			if (autoPrompt) {
-				const ready = await ensureDirectCloudAuthReady({ reason: "send-message", continuationLabel: "Start assistant" });
-				if (ready) remote.prompt(autoPrompt);
-				else showHeaderToast("Provider connection cancelled. Work was not started.");
-			}
+			if (autoPrompt) remote.prompt(autoPrompt);
 		}
 
 		// Apply restored model (already resolved or resolving in parallel)
@@ -2051,10 +2059,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 export async function createAndConnectSession(goalId?: string, roleId?: string, cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
-	if (!(await ensureDirectCloudAuthReady({ reason: "create-session", continuationLabel: "Create session" }))) {
-		showHeaderToast("Provider connection cancelled. Work was not started.");
-		return;
-	}
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
 	renderApp();
@@ -2675,10 +2679,6 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 
 export async function startReattempt(goalId: string): Promise<void> {
 	if (state.creatingSession) return;
-	if (!(await ensureDirectCloudAuthReady({ reason: "create-session", continuationLabel: "Start re-attempt" }))) {
-		showHeaderToast("Provider connection cancelled. Work was not started.");
-		return;
-	}
 	// Pre-fill preview project/cwd from the original goal so the proposal panel
 	// binds to the correct project immediately and avoids a brief
 	// "No project selected for this goal" flash on connect.

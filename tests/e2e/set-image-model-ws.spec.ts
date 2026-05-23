@@ -14,37 +14,14 @@ import { apiFetch, connectWs, createSession } from "./e2e-setup.js";
 
 test.setTimeout(20_000);
 
-async function saveImageProviderKey(provider: "openai" | "google", key = `test-${provider}-image-key`): Promise<void> {
-	const resp = await apiFetch(`/api/provider-keys/${provider}`, {
-		method: "POST",
-		body: JSON.stringify({ key, enable: true }),
-	});
-	expect(resp.ok).toBe(true);
-}
-
-async function cleanupImageProvider(provider: "openai" | "google"): Promise<void> {
-	await apiFetch(`/api/provider-keys/${provider}`, { method: "DELETE" }).catch(() => {});
-	await apiFetch(`/api/cloud-providers/${provider}`, {
-		method: "PUT",
-		body: JSON.stringify({ enabled: false }),
-	}).catch(() => {});
-}
-
 test.describe("WS set_image_model", () => {
-	test.beforeEach(async () => {
-		await saveImageProviderKey("openai");
-	});
-
-	test.afterEach(async () => {
-		await cleanupImageProvider("openai");
-	});
-
 	test("happy path: valid (provider, modelId) updates imageGenerationModel and broadcasts state", async () => {
 		const sessionId = await createSession();
 		try {
 			const ws = await connectWs(sessionId);
 			try {
-				// Pick a known-valid pair from the provider-aware server registry.
+				// Pick a known-valid pair from the server registry — gpt-image-2
+				// is always present per `image-generation-registry.test.ts`.
 				ws.send({ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" });
 
 				const stateMsg = await ws.waitFor(

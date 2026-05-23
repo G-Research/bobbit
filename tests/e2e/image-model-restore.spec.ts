@@ -25,31 +25,7 @@ import { apiFetch, connectWs, createSession } from "./e2e-setup.js";
 
 test.setTimeout(20_000);
 
-async function saveImageProviderKey(provider: "openai" | "google", key = `test-${provider}-image-key`): Promise<void> {
-	const resp = await apiFetch(`/api/provider-keys/${provider}`, {
-		method: "POST",
-		body: JSON.stringify({ key, enable: true }),
-	});
-	expect(resp.ok).toBe(true);
-}
-
-async function cleanupImageProvider(provider: "openai" | "google"): Promise<void> {
-	await apiFetch(`/api/provider-keys/${provider}`, { method: "DELETE" }).catch(() => {});
-	await apiFetch(`/api/cloud-providers/${provider}`, {
-		method: "PUT",
-		body: JSON.stringify({ enabled: false }),
-	}).catch(() => {});
-}
-
 test.describe("session image model: archive→restore round-trip", () => {
-	test.beforeEach(async () => {
-		await saveImageProviderKey("openai");
-	});
-
-	test.afterEach(async () => {
-		await cleanupImageProvider("openai");
-	});
-
 	test("per-session imageModel survives archive and is restorable", async ({ gateway }) => {
 		const sessionId = await createSession();
 
@@ -87,7 +63,7 @@ test.describe("session image model: archive→restore round-trip", () => {
 		const sessionId = await createSession();
 		try {
 			// No set_image_model — getImageModelForSession should return the
-			// authenticated OpenAI image default once the provider is opted in.
+			// parsed defaultImageModelPref(), which is "openai/gpt-image-2".
 			const model = gateway.sessionManager.getImageModelForSession(sessionId);
 			expect(model).toEqual({ provider: "openai", id: "gpt-image-2" });
 		} finally {

@@ -18,12 +18,11 @@ const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
 const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
 
-export type OAuthProviderId = "anthropic" | "openai-codex" | "google";
+export type OAuthProviderId = "anthropic" | "openai-codex";
 
 const OAUTH_PROVIDER_LABELS: Record<OAuthProviderId, string> = {
 	anthropic: "Anthropic",
 	"openai-codex": "OpenAI",
-	google: "Google Gemini",
 };
 
 interface PendingAnthropicOAuth {
@@ -33,7 +32,7 @@ interface PendingAnthropicOAuth {
 }
 
 interface PendingExternalOAuth {
-	provider: Exclude<OAuthProviderId, "anthropic">;
+	provider: "openai-codex";
 	createdAt: number;
 	submitCode: (code: string) => void;
 	rejectCode: (err: Error) => void;
@@ -100,67 +99,10 @@ async function generatePKCE(): Promise<{ verifier: string; challenge: string }> 
 	return { verifier, challenge };
 }
 
-export function normalizeProvider(provider?: string | null): OAuthProviderId {
-	const normalized = (provider || "anthropic").toLowerCase();
-	if (normalized === "anthropic") return "anthropic";
-	if (normalized === "openai" || normalized === "openai-codex") return "openai-codex";
-	if (normalized === "google" || normalized === "gemini" || normalized === "google-gemini") return "google";
+function normalizeProvider(provider?: string | null): OAuthProviderId {
+	if (!provider || provider === "anthropic") return "anthropic";
+	if (provider === "openai" || provider === "openai-codex") return "openai-codex";
 	throw new Error(`Unsupported OAuth provider: ${provider}`);
-}
-
-function safeDecodeURIComponent(value: string): string {
-	try {
-		return decodeURIComponent(value.replace(/\+/g, "%20"));
-	} catch {
-		return value;
-	}
-}
-
-function firstNonEmptyParam(params: URLSearchParams, ...names: string[]): string | undefined {
-	for (const name of names) {
-		const value = params.get(name);
-		if (value && value.trim()) return value.trim();
-	}
-	return undefined;
-}
-
-function parseHashFragment(fragment: string): { code?: string; state?: string } {
-	const trimmed = fragment.replace(/^#/, "").replace(/^\?/, "").trim();
-	if (!trimmed) return {};
-	if (trimmed.includes("=") || trimmed.includes("&")) {
-		const params = new URLSearchParams(trimmed);
-		const code = firstNonEmptyParam(params, "code", "authorization_code");
-		const state = firstNonEmptyParam(params, "state");
-		return { ...(code ? { code } : {}), ...(state ? { state } : {}) };
-	}
-	return { state: safeDecodeURIComponent(trimmed) };
-}
-
-function parseOAuthCompletionInput(input: string): { code: string; state?: string } | undefined {
-	const trimmed = input.trim();
-	if (!trimmed) return undefined;
-
-	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
-		try {
-			const parsed = new URL(trimmed);
-			const queryCode = firstNonEmptyParam(parsed.searchParams, "code", "authorization_code");
-			const queryState = firstNonEmptyParam(parsed.searchParams, "state");
-			const hash = parseHashFragment(parsed.hash);
-			const code = queryCode || hash.code;
-			const state = queryState || hash.state;
-			if (!code) return undefined;
-			return { code, ...(state ? { state } : {}) };
-		} catch {
-			// Fall through to raw-code parsing below. Never echo the pasted URL.
-		}
-	}
-
-	// Preserve the historical manual fallback: raw "code" or "code#state".
-	const parts = trimmed.split("#");
-	const code = parts[0]?.trim();
-	if (!code) return undefined;
-	const state = parts[1]?.trim();
-	return { code, ...(state ? { state } : {}) };
 }
 
 function cleanupExpiredFlows(): void {
@@ -208,11 +150,6 @@ function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCred
 	writeAuthData(authData);
 }
 
-function getOAuthCredential(authData: Record<string, any>, provider: OAuthProviderId): any | undefined {
-	if (provider === "openai-codex") return authData["openai-codex"] || authData.openai;
-	return authData[provider];
-}
-
 /**
  * Start an OAuth flow. Returns the authorization URL and a flow ID.
  */
@@ -247,9 +184,6 @@ export async function oauthStart(providerInput?: string): Promise<{ flowId: stri
 }
 
 async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic">): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
-	if (provider === "google") {
-		throw new Error("Google sign-in is not available in this build. Add a Gemini API key instead.");
-	}
 	const oauthProvider = getOAuthProvider(provider);
 	if (!oauthProvider) throw new Error(`OAuth provider unavailable: ${provider}`);
 	await Promise.all([import("node:crypto"), import("node:http")]);
@@ -322,7 +256,7 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 export async function oauthComplete(
 	flowId: string,
 	authCode: string,
-): Promise<{ success: boolean; error?: string; provider?: OAuthProviderId }> {
+): Promise<{ success: boolean; error?: string }> {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) {
 		return { success: false, error: "Unknown or expired flow ID" };
@@ -333,35 +267,34 @@ export async function oauthComplete(
 			flow.rejectCode(new Error("OAuth flow expired"));
 		}
 		pendingFlows.delete(flowId);
-		return { success: false, error: "OAuth flow expired", provider: flow.provider };
+		return { success: false, error: "OAuth flow expired" };
 	}
 
 	if (flow.provider !== "anthropic") {
 		if (!authCode || !authCode.trim()) {
-			return { success: false, error: "code required", provider: flow.provider };
+			return { success: false, error: "code required" };
 		}
 		flow.submitCode(authCode.trim());
 		try {
 			await flow.loginPromise;
 			pendingFlows.delete(flowId);
-			return { success: true, provider: flow.provider };
+			return { success: true };
 		} catch (err) {
 			pendingFlows.delete(flowId);
-			return { success: false, error: err instanceof Error ? redactSensitive(err.message) : redactSensitive(String(err)), provider: flow.provider };
+			return { success: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	}
 
 	if (!authCode || !authCode.trim()) {
-		return { success: false, error: "code required", provider: flow.provider };
+		return { success: false, error: "code required" };
 	}
 
-	const parsedAuth = parseOAuthCompletionInput(authCode);
-	if (!parsedAuth) {
-		return { success: false, error: "code required", provider: flow.provider };
-	}
 	pendingFlows.delete(flowId);
 
-	const { code, state } = parsedAuth;
+	// The auth code from the callback page is in format "code#state"
+	const parts = authCode.split("#");
+	const code = parts[0];
+	const state = parts[1];
 
 	try {
 		const tokenResponse = await fetch(TOKEN_URL, {
@@ -378,14 +311,14 @@ export async function oauthComplete(
 		});
 
 		if (!tokenResponse.ok) {
-			const errorText = redactSensitive(await tokenResponse.text());
+			const errorText = await tokenResponse.text();
 			// Truncate provider-supplied error bodies so we never echo a multi-KB
 			// HTML/JSON page back through the API surface or the UI dialog.
 			const MAX_ERR_CHARS = 256;
 			const truncated = errorText.length > MAX_ERR_CHARS
 				? `${errorText.slice(0, MAX_ERR_CHARS)}…`
 				: errorText;
-			return { success: false, error: `Token exchange failed: ${truncated}`, provider: "anthropic" };
+			return { success: false, error: `Token exchange failed: ${truncated}` };
 		}
 
 		const tokenData = (await tokenResponse.json()) as {
@@ -405,58 +338,42 @@ export async function oauthComplete(
 
 		writeAuthData(authData);
 
-		return { success: true, provider: "anthropic" };
+		return { success: true };
 	} catch (err) {
-		return { success: false, error: redactSensitive(String(err)), provider: "anthropic" };
+		return { success: false, error: String(err) };
 	}
 }
 
 /**
  * Check if OAuth credentials exist and are valid (not expired).
  */
-export function oauthStatus(providerInput?: string): {
-	authenticated: boolean;
-	expires?: number;
-	provider: OAuthProviderId;
-	configured?: boolean;
-	expired?: boolean;
-	needsReauth?: boolean;
-	oauthSupported?: boolean;
-	message?: string;
-} {
+export function oauthStatus(providerInput?: string): { authenticated: boolean; expires?: number; provider: OAuthProviderId } {
 	const provider = normalizeProvider(providerInput);
 	const authPath = getAuthJsonPath();
-	const oauthSupported = provider !== "google";
-	if (!existsSync(authPath)) return { authenticated: false, provider, configured: false, oauthSupported };
+	if (!existsSync(authPath)) return { authenticated: false, provider };
 
 	try {
 		const data = JSON.parse(readFileSync(authPath, "utf-8"));
-		const cred = getOAuthCredential(data, provider);
-		if (!cred || cred.type !== "oauth") return { authenticated: false, provider, configured: false, oauthSupported };
+		const cred = data[provider];
+		if (!cred || cred.type !== "oauth") return { authenticated: false, provider };
 
-		const expired = Boolean(cred.expires && Date.now() > cred.expires);
-		const authenticated = oauthSupported && !expired && Boolean(cred.access || cred.access_token);
+		const expired = cred.expires && Date.now() > cred.expires;
 
 		// strict-OAuth contract: never echo bearer credentials in /status
 		return {
 			provider,
-			authenticated,
-			configured: true,
-			expired,
-			needsReauth: oauthSupported && expired,
-			oauthSupported,
+			authenticated: !expired,
 			expires: cred.expires,
-			...(oauthSupported ? {} : { message: "Google sign-in is not available in this build. Add a Gemini API key instead." }),
 		};
 	} catch {
-		return { authenticated: false, provider, configured: false, oauthSupported };
+		return { authenticated: false, provider };
 	}
 }
 
 export function oauthFlowStatus(
 	flowId: string,
 	providerInput?: string,
-): { complete: boolean; error?: string; provider?: OAuthProviderId } {
+): { complete: boolean; error?: string } {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) return { complete: false, error: "flow not found" };
 	// Defence-in-depth: if a provider was supplied and disagrees with the stored
@@ -474,7 +391,7 @@ export function oauthFlowStatus(
 	if (flow.provider === "anthropic") return { complete: false };
 	if (flow.completed) {
 		pendingFlows.delete(flowId);
-		return { complete: true, provider: flow.provider };
+		return { complete: true };
 	}
 	if (flow.error) {
 		pendingFlows.delete(flowId);
@@ -488,8 +405,7 @@ export function oauthFlowStatus(
  * Updates ~/.bobbit/agent/auth.json with the new credentials.
  * Returns the new access token, or null if refresh fails.
  */
-export async function refreshOAuthToken(providerInput: string = "anthropic"): Promise<string | null> {
-	const provider = normalizeProvider(providerInput);
+export async function refreshOAuthToken(): Promise<string | null> {
 	const authPath = getAuthJsonPath();
 	if (!existsSync(authPath)) return null;
 
@@ -500,15 +416,13 @@ export async function refreshOAuthToken(providerInput: string = "anthropic"): Pr
 		return null;
 	}
 
-	const cred = getOAuthCredential(authData, provider);
-	if (!cred || cred.type !== "oauth") return null;
+	const cred = authData.anthropic;
+	if (!cred || cred.type !== "oauth" || !cred.refresh) return null;
 
-	// Skip refresh if token is still valid (5-minute buffer already baked into expires).
-	if (cred.expires && Date.now() < cred.expires) return cred.access || cred.access_token || null;
-	if (provider !== "anthropic") return null;
-	if (!cred.refresh) return null;
+	// Skip refresh if token is still valid (5-minute buffer already baked into expires)
+	if (cred.expires && Date.now() < cred.expires) return cred.access;
 
-	console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]} access token expired, refreshing...`);
+	console.log("[oauth] Access token expired, refreshing...");
 
 	try {
 		const tokenResponse = await fetch(TOKEN_URL, {
@@ -522,7 +436,7 @@ export async function refreshOAuthToken(providerInput: string = "anthropic"): Pr
 		});
 
 		if (!tokenResponse.ok) {
-			const errText = redactSensitive(await tokenResponse.text());
+			const errText = await tokenResponse.text();
 			console.error(`[oauth] Token refresh failed (${tokenResponse.status}): ${errText}`);
 			// Only clear credentials on definitive auth failures (invalid/revoked tokens).
 			// Transient errors (5xx, 429, network) should not destroy valid credentials.
@@ -530,7 +444,7 @@ export async function refreshOAuthToken(providerInput: string = "anthropic"): Pr
 			if (status === 400 || status === 401 || status === 403) {
 				console.log("[oauth] Credentials revoked or invalid, clearing stored credentials");
 				delete authData.anthropic;
-				writeAuthData(authData);
+				writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
 			}
 			return null;
 		}
@@ -548,40 +462,14 @@ export async function refreshOAuthToken(providerInput: string = "anthropic"): Pr
 			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
 		};
 
-		writeAuthData(authData);
+		writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
+		try { chmodSync(authPath, 0o600); } catch {}
+
+		clearOAuthCache();
 		console.log("[oauth] Token refreshed successfully");
 		return tokenData.access_token;
 	} catch (err) {
 		console.error("[oauth] Token refresh error:", err);
 		return null;
 	}
-}
-
-export async function refreshConfiguredOAuthProviders(
-	providers: Array<"anthropic" | "openai" | "google">,
-): Promise<Record<"anthropic" | "openai" | "google", "ok" | "not_configured" | "expired" | "failed">> {
-	const result: Record<"anthropic" | "openai" | "google", "ok" | "not_configured" | "expired" | "failed"> = {
-		anthropic: "not_configured",
-		openai: "not_configured",
-		google: "not_configured",
-	};
-	for (const provider of providers) {
-		const oauthProvider: OAuthProviderId = provider === "openai" ? "openai-codex" : provider;
-		const status = oauthStatus(oauthProvider);
-		if (!status.configured) {
-			result[provider] = "not_configured";
-			continue;
-		}
-		if (status.authenticated) {
-			result[provider] = "ok";
-			continue;
-		}
-		if (status.expired) {
-			const refreshed = await refreshOAuthToken(oauthProvider);
-			result[provider] = refreshed ? "ok" : "expired";
-			continue;
-		}
-		result[provider] = "failed";
-	}
-	return result;
 }

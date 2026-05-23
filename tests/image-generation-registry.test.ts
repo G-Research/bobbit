@@ -24,16 +24,8 @@ function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	}
 }
 
-function enableProviders(prefs: PreferencesStore, ...providers: Array<"openai" | "google">): void {
-	for (const provider of providers) {
-		prefs.set(`providerEnabled.${provider}`, true);
-	}
-}
-
-test("image model registry includes explicitly enabled GPT Image 2 and Google image models", () => {
+test("image model registry includes GPT Image 2 and Google image models", () => {
 	withPrefs((prefs) => {
-		assert.equal(getAvailableImageModels(prefs).some((m) => m.provider === "openai" || m.provider === "google"), false);
-		enableProviders(prefs, "openai", "google");
 		const models = getAvailableImageModels(prefs);
 		assert.ok(models.some((m) => m.provider === "openai" && m.id === "gpt-image-2"));
 		assert.ok(models.some((m) => m.provider === "google" && m.id === "gemini-3.1-flash-image-preview"));
@@ -49,9 +41,8 @@ test("image model prefs use provider/modelId format", () => {
 	assert.equal(parseImageModelPref("openai/"), undefined);
 });
 
-test("image model registry marks enabled provider auth from preferences", () => {
+test("image model registry marks provider auth from preferences", () => {
 	withPrefs((prefs) => {
-		enableProviders(prefs, "openai");
 		prefs.set("providerKey.openai", "test-key");
 		const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
 		assert.equal(model?.authenticated, true);
@@ -71,7 +62,6 @@ test("image model registry marks OpenAI auth from Codex auth.json API key", () =
 			},
 		}), "utf-8");
 		withPrefs((prefs) => {
-			enableProviders(prefs, "openai");
 			const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
 			assert.equal(model?.authenticated, true);
 		});
@@ -109,7 +99,6 @@ test("image model registry marks OpenAI auth from Codex OAuth", () => {
 			},
 		}), "utf-8");
 		withPrefs((prefs) => {
-			enableProviders(prefs, "openai");
 			const model = getAvailableImageModels(prefs).find((m) => m.provider === "openai" && m.id === "gpt-image-2");
 			assert.equal(model?.authenticated, true);
 		});
@@ -161,7 +150,6 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 			return new Response(sse, { status: 200 });
 		}) as typeof fetch;
 		await withPrefs(async (prefs) => {
-			enableProviders(prefs, "openai");
 			const result = await generateImage(prefs, { prompt: "test", model: "openai/gpt-image-2" });
 			assert.equal(result.images[0].data, Buffer.from("fakepng").toString("base64"));
 		});
@@ -183,7 +171,6 @@ test("OpenAI image generation can use Codex OAuth backend", async () => {
 
 test("image model override detection requires a user-visible model mention", () => {
 	withPrefs((prefs) => {
-		enableProviders(prefs, "openai", "google");
 		assert.equal(
 			imageModelMentionedInText(prefs, "google/gemini-2.5-flash-image", "Generate a diagram with the selected model"),
 			false,
@@ -201,7 +188,6 @@ test("image model override detection requires a user-visible model mention", () 
 
 test("Google image model aliases resolve to API model IDs", () => {
 	withPrefs((prefs) => {
-		enableProviders(prefs, "google");
 		assert.equal(canonicalImageModelPref("google/nano-banana-2"), "google/gemini-3-pro-image-preview");
 		assert.equal(canonicalImageModelPref("google/gemini-3-pro-image"), "google/gemini-3-pro-image-preview");
 		assert.equal(canonicalImageModelPref("google/gemini-2.5-flash-image-preview"), "google/gemini-2.5-flash-image");

@@ -9,21 +9,11 @@ import {
 	type Project,
 } from "./state.js";
 // Re-export for back-compat: many call sites import `gatewayFetch` from
-// `./api.js`. The low-level implementation lives in `./gateway-fetch.js` (tiny,
-// dependency-free) so utility modules like `fetch-tool-content.ts` can import it
-// without pulling the app-shell graph. This wrapper handles safe cloud-auth 409
-// retries for work-starting REST calls only.
-import { gatewayFetch as rawGatewayFetch } from "./gateway-fetch.js";
-
-export async function gatewayFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	const res = await rawGatewayFetch(path, options);
-	const reason = await cloudAuthRetryReason(path, options, res);
-	if (!reason) return res;
-	const { ensureDirectCloudAuthReady } = await import("./dialogs.js");
-	const ready = await ensureDirectCloudAuthReady({ reason, continuationLabel: "Continue" });
-	if (!ready) return res;
-	return rawGatewayFetch(path, options);
-}
+// `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
+// dependency-free) so utility modules like `fetch-tool-content.ts` can
+// import it without pulling the entire app-shell graph.
+import { gatewayFetch } from "./gateway-fetch.js";
+export { gatewayFetch };
 import { setHashRoute } from "./routing.js";
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -44,38 +34,6 @@ const PR_POLL_INTERVAL_MS = 60_000;
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
 export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
-}
-
-type CloudAuthReason = "create-session" | "start-goal" | "start-team" | "send-message" | "image-generation";
-
-function safeCloudAuthRetryReason(path: string, options: RequestInit): CloudAuthReason | null {
-	const method = String(options.method || "GET").toUpperCase();
-	if (method !== "POST") return null;
-	const pathname = path.split("?")[0];
-	if (pathname === "/api/sessions") return "create-session";
-	if (/^\/api\/sessions\/[^/]+\/continue$/.test(pathname)) return "create-session";
-	if (pathname === "/api/goals") return "start-goal";
-	if (/^\/api\/goals\/[^/]+\/team\/start$/.test(pathname)) return "start-team";
-	if (pathname === "/api/image-generation/generate") return "image-generation";
-	return null;
-}
-
-async function cloudAuthRetryReason(path: string, options: RequestInit, res: Response): Promise<CloudAuthReason | null> {
-	const reason = safeCloudAuthRetryReason(path, options);
-	if (!reason || res.status !== 409) return null;
-	try {
-		const body = await res.clone().json();
-		const code = typeof body?.code === "string" ? body.code : "";
-		const error = typeof body?.error === "string" ? body.error : "";
-		return code === "cloud_auth_required" || error === "cloud_auth_required" ? reason : null;
-	} catch {
-		return null;
-	}
-}
-
-async function ensureCloudAuthReady(reason: CloudAuthReason, continuationLabel: string): Promise<boolean> {
-	const { ensureDirectCloudAuthReady } = await import("./dialogs.js");
-	return ensureDirectCloudAuthReady({ reason, continuationLabel });
 }
 
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
@@ -951,7 +909,6 @@ export async function fetchGoalGitStatus(
 
 export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean }): Promise<Goal | null> {
 	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam } = opts ?? {};
-	if (!(await ensureCloudAuthReady("start-goal", autoStartTeam === false ? "Create goal" : "Start goal"))) return null;
 	try {
 		const body: Record<string, any> = { title, cwd, spec, team: true, worktree: true };
 		if (workflowId) body.workflowId = workflowId;
@@ -1049,7 +1006,6 @@ export function patchSession(sessionId: string, updates: Record<string, unknown>
 // ============================================================================
 
 export async function startTeam(goalId: string): Promise<string | null> {
-	if (!(await ensureCloudAuthReady("start-team", "Start team"))) return null;
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
 			method: "POST",
