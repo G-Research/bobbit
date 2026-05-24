@@ -324,8 +324,8 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 	selectPanelWorkspaceTab({
 		id: proposalPanelTabId(type, rev),
 		kind: "proposal",
-		title: rev ? `${baseTitle} rev ${rev}` : baseTitle,
-		label: rev ? `${baseTitle.replace(/ Proposal$/, "")} r${rev}` : (PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type),
+		title: rev ? `${baseTitle} (v${rev})` : baseTitle,
+		label: rev ? `${baseTitle.replace(/ Proposal$/, "")} (v${rev})` : (PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type),
 		legacyTab: type as LegacyPanelTab,
 		source: { type: "proposal", proposalType: type as any, sessionId, rev, historical: rev != null },
 		state: rev != null ? {
