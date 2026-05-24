@@ -8157,7 +8157,7 @@ async function handleApiRoute(
 		const [, sessionId, processId] = bgLogsMatch;
 		const logs = bgProcessManager.getLogs(sessionId, processId);
 		if (!logs) { json({ error: "Process not found" }, 404); return; }
-		const tail = parseInt(url.searchParams.get("tail") || "200", 10);
+		const tail = parseInt(url.searchParams.get("tail") || "15", 10);
 		json({
 			log: logs.log.slice(-tail),
 			stdout: logs.stdout.slice(-tail),
