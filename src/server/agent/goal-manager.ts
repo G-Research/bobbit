@@ -8,14 +8,18 @@ import type { Component } from "./project-config-store.js";
 
 /**
  * Sanitize a goal title into a valid git branch name.
- * Lowercase, replace non-alphanumeric with hyphens, trim, truncate.
+ * Lowercase, replace non-alphanumeric with hyphens, truncate, trim.
+ *
+ * Trim must run *after* the slice so truncation can't reintroduce a
+ * trailing hyphen (the `e2e-speed--` artefact). Exported for pinning
+ * tests; see `tests/team-branch-shape.test.ts`.
  */
-function toBranchName(title: string): string {
+export function toBranchName(title: string): string {
 	return title
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-|-$/g, "")
-		.slice(0, 10) || "goal";
+		.slice(0, 14)
+		.replace(/^-+|-+$/g, "") || "goal";
 }
 
 

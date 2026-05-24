@@ -741,7 +741,7 @@ See [internals.md — Per-component `worktree_setup_command`](internals.md#sessi
 
 ## Leaked remote branches
 
-Symptom: `origin` accumulates `session/*`, `goal/*`, `goal-goal-*-<role>-*`, or `staff-*` branches that should have been cleaned up when their owning session/goal/staff was archived.
+Symptom: `origin` accumulates `session/*`, `goal/*`, `goal/<id8>/<role>-*` (team-member; legacy `goal-goal-*-<role>-*` from before the `pithier-te` rename), or `staff-*` branches that should have been cleaned up when their owning session/goal/staff was archived.
 
 **Diagnose:**
 
@@ -754,7 +754,7 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 **Checklist:**
 
 1. Confirm `BOBBIT_TEST_NO_PUSH` is **unset** in the production env. Every push-delete is gated by `shouldSkipRemotePush()` in `src/server/skills/git.ts`; if the env var leaks into a real server (e.g. inherited from a test runner) all cleanup silently no-ops.
-2. For per-role goal branches (`goal-goal-<slug>-<id>-<role>-<short>`): verify the DELETE `/api/goals/:id` handler in `src/server/server.ts` snapshots `agentBranches` into a `string[]` **before** calling `teamManager.teardownTeam(id)`. Teardown's `dismissRole` mutates `entry.agents` in place — reading the entry afterwards sees an empty array.
+2. For per-role goal branches (`goal/<goalId8>/<role>-<short4>`, or legacy `goal-goal-<slug>-<id>-<role>-<short>` from before the `pithier-te` rename — the same cleanup path handles both because it consumes the branch names as opaque strings): verify the DELETE `/api/goals/:id` handler in `src/server/server.ts` snapshots `agentBranches` into a `string[]` **before** calling `teamManager.teardownTeam(id)`. Teardown's `dismissRole` mutates `entry.agents` in place — reading the entry afterwards sees an empty array.
 3. For `session/*` branches: verify `session-manager.ts::terminateSession` invokes `eagerDeleteRemoteSessionBranch` from `src/server/agent/session-eager-branch-delete.ts` for non-delegate sessions. The helper requires the branch to be fully merged into `origin/<primary>` (via `git merge-base --is-ancestor`); unmerged branches defer to the 7-day `purgeOneSession` worktree cleanup.
 4. For `staff-*` branches: `cleanupWorktree(..., deleteBranch=true)` in `skills/git.ts` already push-deletes. If a staff branch leaks, check that `staff-manager.ts` is actually calling `cleanupWorktree` with `deleteBranch=true` on dismiss.
 5. Pre-existing backlog (predates the fix): drain with a one-shot script. Out of scope for the runtime cleanup contract.
