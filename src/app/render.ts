@@ -2849,9 +2849,20 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live") || !isHistoricalPreviewTab(tab)) {
 		const liveEntry = previewEntryFromTab(tab);
 		const liveHash = previewContentHashFromTab(tab);
-		if (liveEntry) state.previewPanelEntry = liveEntry;
-		if (liveHash) (state as any).previewPanelContentHash = liveHash;
-		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
+		// IMPORTANT: setUnifiedActiveTab runs on every render via ensureUnifiedActiveTab,
+		// which calls this function. If this tab is already the mounted live preview and
+		// state.previewPanelEntry already matches, skip the state.previewPanelMtime/Entry/
+		// ContentHash assignment so an out-of-band refresh (which bumps previewPanelMtime)
+		// is not clobbered by stale tabState values on the next render. Pinned by
+		// tests/e2e/ui/preview-refresh.spec.ts and preview-happy-path.spec.ts.
+		const alreadyMounted = currentMountedPreviewTabId() === tab.id
+			&& !!liveEntry
+			&& state.previewPanelEntry === liveEntry;
+		if (!alreadyMounted) {
+			if (liveEntry) state.previewPanelEntry = liveEntry;
+			if (liveHash) (state as any).previewPanelContentHash = liveHash;
+			state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
+		}
 		clearPreviewTabRestoreError(sessionId, tab.id);
 		markPreviewTabMounted(tab);
 		return;
