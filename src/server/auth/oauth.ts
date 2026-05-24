@@ -234,17 +234,17 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 	// Construct the real loginPromise; the .then/.catch callbacks reference
 	// `flow` (already in scope above) without TDZ risk.
 	const loginPromise = oauthProvider.login({
-		onAuth: (info) => {
-			// Surface auth info both to server log and the started promise so
-			// the UI dialog can display { url, instructions }. As of pi-ai
-			// 0.75.x the device-authorisation-grant user code (when present)
-			// is already packed into `info.instructions` by the provider, so a
-			// dedicated onDeviceCode callback is no longer needed (it was
-			// removed from OAuthLoginCallbacks upstream).
-			if (info.instructions) {
-				console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(info.instructions)}`);
-			}
-			safeResolveStarted(info);
+		onAuth: (info) => safeResolveStarted(info),
+		onDeviceCode: (info) => {
+			// Device Authorization Grant: surface user-code + verification URI
+			// both to the server log AND through the started promise so the UI
+			// dialog can display them. Bobbit does not currently render a
+			// dedicated device-code dialog, so we reuse the existing
+			// { url, instructions } shape by pointing url at the verification
+			// URI and packing the user code into instructions.
+			const instructions = `Visit ${info.verificationUri} and enter code ${info.userCode}`;
+			console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
+			safeResolveStarted({ url: info.verificationUri, instructions });
 		},
 		onPrompt: async () => manualCodePromise,
 		onManualCodeInput: async () => manualCodePromise,
