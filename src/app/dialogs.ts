@@ -5,7 +5,6 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
-import QRCode from "qrcode";
 import {
 	state,
 	renderApp,
@@ -804,6 +803,7 @@ export async function showQrCodeDialog(): Promise<void> {
 	let firstTimeOs: null | "ios" | "android" = null;
 
 	try {
+		const { default: QRCode } = await import("qrcode");
 		[sessionQr, certQr] = await Promise.all([
 			QRCode.toDataURL(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
 			QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
