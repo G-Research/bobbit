@@ -459,6 +459,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				let mtimeFromPost: number | undefined;
 				let contentHashFromPost: string | undefined;
 				let urlFromPost: string | undefined;
+				let artifactIdFromPost: string | undefined;
 				const postMountSnapshot = async (postBody: Record<string, unknown>) => {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 						method: "POST",
@@ -478,6 +479,15 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
 						if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
 						contentHashFromPost = normalizeContentHash(data?.contentHash);
+						// The server now persists an immutable artifact on every successful mount
+						// and returns its id. Capture it so the resulting tab can restore by
+						// artifact later (e.g. switching back to this filename tab after another
+						// preview overwrote the live mount). Without this, legacy v1/v2 or
+						// v3-without-artifactId markers create tabs with no restore source and
+						// the iframe 404s the next time the tab is selected — pinned by
+						// tests/e2e/ui/dynamic-chat-tabs.spec.ts "legacy v1 and v2 preview_open
+						// snapshots remain distinct across reload".
+						if (typeof data?.artifactId === "string" && data.artifactId) artifactIdFromPost = data.artifactId;
 					} catch { /* ignore — body parse is best-effort */ }
 					return true;
 				};
@@ -496,6 +506,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 							if (typeof data?.entry === "string" && data.entry) entry = data.entry;
 							if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
 							if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
+							if (typeof data?.artifactId === "string" && data.artifactId) artifactIdFromPost = data.artifactId;
 							const restoredHash = normalizeContentHash(data?.contentHash);
 							if (snapshotContentHash && !restoredHash) {
 								selectRestoreError(502, "Preview artifact unavailable");
@@ -539,6 +550,12 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				if (version != null) {
 					tabSource.version = version;
 					tabState.version = version;
+				}
+				const resolvedArtifactId = artifactIdFromPost
+					|| (parsed.kind === "preview" ? parsed.artifactId : undefined);
+				if (resolvedArtifactId) {
+					tabSource.artifactId = resolvedArtifactId;
+					tabState.artifactId = resolvedArtifactId;
 				}
 				previewPanel.selectHtmlPreviewTab({
 					sessionId,
