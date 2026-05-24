@@ -48,7 +48,14 @@ test.describe("pill strip overflow — promotion after dismiss", () => {
 		await waitForHealth();
 	});
 
-	test("hidden pills are promoted back into the strip after visible pills are dismissed (B-A1 regression)", async ({ page, rec }) => {
+	// 90s test budget: the test sequences 10 REST POSTs to create bg processes,
+	// opens then closes the more-popover, sequences ~3 REST DELETEs, then waits
+	// for WS-driven re-renders + rAF re-measures to refill the strip. Each step
+	// is small but the chain accumulates, and the assertion timeout further down
+	// is intentionally generous (30s) because the cascade can stall on cold-
+	// loaded UI runners. Without this override the default 30s budget is too
+	// tight to leave headroom for any one step in the chain.
+	test("hidden pills are promoted back into the strip after visible pills are dismissed (B-A1 regression)", { timeout: 90_000 }, async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
