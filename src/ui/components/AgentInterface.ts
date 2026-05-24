@@ -27,14 +27,22 @@ async function openImageModelSelector(...args: Parameters<typeof ImageModelSelec
 import type { MessageEditor } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
-import "./GitStatusWidget.js";
-import "./BgProcessPill.js";
+// <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
+// keep its 52 kB chunk out of the entry bundle. AgentInterface's
+// connectedCallback fires the import; goal-dashboard mirrors the same
+// trigger. Lit upgrades the unknown `<git-status-widget>` tag once
+// the chunk lands; property bindings are preserved across upgrade.
+// All four of these elements are conditional-render (bg pill strip,
+// cost popover, continue-session chooser, git-status). Static imports
+// would force their chunks into the entry bundle even when the user
+// never sees them on a given session view. Lazy via `app/lazy-widgets`
+// instead — connectedCallback below fires the imports as fire-and-
+// forget, Lit upgrades the unknown tags when each chunk lands.
+import { ensureGitStatusWidget, ensureBgProcessPill, ensureCostPopover, ensureContinueSessionChooser } from "../../app/lazy-widgets.js";
 import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
-import "./CostPopover.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
-import "./ContinueSessionChooser.js";
 import { state as appState, renderApp } from "../../app/state.js";
 import { gatewayFetch } from "../../app/api.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -651,6 +659,14 @@ export class AgentInterface extends LitElement {
 
 	override async connectedCallback() {
 		super.connectedCallback();
+		// Fire-and-forget the conditional-render widget chunks on first
+		// chat mount so they're ready by the time the corresponding
+		// state flips on (gitRepoKnown, bgProcesses populated, cost
+		// popover opened, continue-session prompt shown).
+		void ensureGitStatusWidget();
+		void ensureBgProcessPill();
+		void ensureCostPopover();
+		void ensureContinueSessionChooser();
 
 		this.style.display = "flex";
 		this.style.flexDirection = "column";

@@ -44,16 +44,16 @@
   "optionalDependencies": {
     "@bobbit/binaries-darwin-arm64": "0.9.0",
     "@bobbit/binaries-darwin-x64": "0.9.0",
-    "@bobbit/binaries-linux-x64": "0.9.0",
     "@bobbit/binaries-linux-arm64": "0.9.0",
+    "@bobbit/binaries-linux-x64": "0.9.0",
     "@bobbit/binaries-win32-x64": "0.9.0"
   },
   "dependencies": {
-    "@lmstudio/sdk": "^1.5.0",
-    "@mariozechner/mini-lit": "^0.2.0",
     "@earendil-works/pi-agent-core": "0.75.5",
     "@earendil-works/pi-ai": "0.75.5",
     "@earendil-works/pi-coding-agent": "0.75.5",
+    "@lmstudio/sdk": "^1.5.0",
+    "@mariozechner/mini-lit": "^0.2.0",
     "@recogito/text-annotator": "^3.4.9",
     "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",
@@ -78,6 +78,7 @@
     "c8": "^11.0.0",
     "concurrently": "^9.2.1",
     "knip": "^6.1.0",
+    "rollup-plugin-visualizer": "^7.0.1",
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
     "vite": "^7.1.6"

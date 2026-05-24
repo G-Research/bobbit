@@ -19,7 +19,7 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
 import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
-import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs.js";
+import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";

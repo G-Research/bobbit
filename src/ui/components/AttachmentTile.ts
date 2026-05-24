@@ -3,7 +3,10 @@ import { LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { html } from "lit/html.js";
 import { FileText, X } from "lucide";
-import { AttachmentOverlay } from "../dialogs/AttachmentOverlay.js";
+// AttachmentOverlay is loaded on demand — the 14 kB overlay only
+// appears after the user clicks a tile, so the click handler awaits
+// `loadAttachmentOverlay()` from `app/lazy-widgets`.
+import { loadAttachmentOverlay } from "../../app/lazy-widgets.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 
@@ -23,8 +26,9 @@ export class AttachmentTile extends LitElement {
 		this.classList.add("max-h-16");
 	}
 
-	private handleClick = () => {
-		AttachmentOverlay.open(this.attachment);
+	private handleClick = async () => {
+		const mod = await loadAttachmentOverlay();
+		mod.AttachmentOverlay.open(this.attachment);
 	};
 
 	override render() {

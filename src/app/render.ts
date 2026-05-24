@@ -42,22 +42,51 @@ function isSessionArchived(sessionId: string | null | undefined): boolean {
 	if (!sessionId) return false;
 	return state.archivedSessions.some((s) => s.id === sessionId);
 }
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+// Route every dialog open through the lazy wrappers so the ~66 kB
+// `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
+// fires the same shared `import("./dialogs.js")` on first use; the
+// chunk is shared across all UI surfaces that open dialogs.
+import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
-import "../ui/components/SearchBox.js";
-import "../ui/components/SearchResults.js";
-// Register review pane web components
+// <search-box> + <search-results> appear in the mobile landing + search
+// route. Lazy-load via the shared widgets registrar so their combined
+// ~9 kB stays out of entry; Lit upgrades the unknown tag once the
+// chunk lands. The mobile landing's first render shows an unupgraded
+// `<search-box>` for ~50 ms which is visually identical (the element
+// is empty until properties are applied anyway).
+import { ensureSearchBox } from "./lazy-widgets.js";
+void ensureSearchBox();
+// Register review pane web components. <review-pane> and
+// <commentable-markdown> are cheap shells; their connectedCallback
+// lazy-loads <review-document> + <annotation-popover> + the
+// @recogito/text-annotator chain. Keep this import static so the
+// shell elements upgrade synchronously on first render.
 import "../ui/components/review/ReviewPane.js";
-import "../ui/components/review/ReviewDocument.js";
-import "../ui/components/review/AnnotationPopover.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
 import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
-import { viewTabs as projectViewTabs, componentsView as projectComponentsView, workflowsView as projectWorkflowsView, type ViewMode as ProjectViewMode, type ProposalComponent, type ProposalWorkflow } from "./project-proposal-views.js";
+// Lazy-load the 12 kB project-proposal views graph — only used when a
+// project proposal panel is on screen. The thin getter below caches the
+// module after first fetch and triggers a re-render once it lands.
+import type { ViewMode as ProjectViewMode, ProposalComponent, ProposalWorkflow } from "./project-proposal-views.js";
+
+let _projectProposalViewsMod: typeof import("./project-proposal-views.js") | null = null;
+let _projectProposalViewsLoading = false;
+function ensureProjectProposalViews(): typeof import("./project-proposal-views.js") | null {
+	if (_projectProposalViewsMod) return _projectProposalViewsMod;
+	if (!_projectProposalViewsLoading) {
+		_projectProposalViewsLoading = true;
+		void import("./project-proposal-views.js").then((m) => {
+			_projectProposalViewsMod = m;
+			renderApp();
+		});
+	}
+	return null;
+}
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -1706,215 +1735,49 @@ function toolPreviewPanel() {
 import { createStaffAgent } from "./api.js";
 import { reloadStaffList } from "./sidebar.js";
 
-interface TriggerDef {
-	type: string;
-	config: Record<string, any>;
-	enabled: boolean;
-	prompt?: string;
-}
-
-function parseTriggers(json: string): TriggerDef[] {
-	try {
-		const arr = JSON.parse(json);
-		return Array.isArray(arr) ? arr : [];
-	} catch {
-		return [];
+// ── Trigger editor (lazy module) ─────────────────────────────────────
+//
+// The trigger editor (~10 kB of templates) lives in `./render-triggers.js`
+// and only loads when the staff-assistant proposal panel is on screen.
+// Until the chunk lands the proxies below return a JSON-only fallback
+// for `parseTriggers` + a placeholder for the editor; the panel re-renders
+// once the module resolves.
+import type { TriggerDef as _TriggerDef } from "./render-triggers.js";
+let _triggersMod: typeof import("./render-triggers.js") | null = null;
+let _triggersModLoading = false;
+function ensureTriggersMod(): typeof import("./render-triggers.js") | null {
+	if (_triggersMod) return _triggersMod;
+	if (!_triggersModLoading) {
+		_triggersModLoading = true;
+		void import("./render-triggers.js").then((m) => {
+			_triggersMod = m;
+			renderApp();
+		});
 	}
+	return null;
 }
 
-function updateTrigger(index: number, updater: (t: TriggerDef) => void) {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	if (triggers[index]) {
-		updater(triggers[index]);
-		state.staffPreviewTriggers = JSON.stringify(triggers);
-		state.staffPreviewTriggersEdited = true;
-		renderApp();
-	}
-}
-
-function removeTrigger(index: number) {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	triggers.splice(index, 1);
-	state.staffPreviewTriggers = JSON.stringify(triggers);
-	state.staffPreviewTriggersEdited = true;
-	renderApp();
+function parseTriggers(json: string): _TriggerDef[] {
+	const mod = ensureTriggersMod();
+	if (mod) return mod.parseTriggers(json);
+	// Pure JSON parse — safe to inline as the synchronous fallback so the
+	// "+ Add trigger" button works even before the editor chunk lands.
+	try { const a = JSON.parse(json); return Array.isArray(a) ? a : []; } catch { return []; }
 }
 
 function renderTriggersEditor() {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	if (triggers.length === 0) {
-		return html`<div class="text-xs text-muted-foreground italic p-3 border border-dashed border-border rounded-md">No triggers configured. Add one above.</div>`;
+	const mod = ensureTriggersMod();
+	if (!mod) {
+		return html`<div class="text-xs text-muted-foreground italic p-3 border border-dashed border-border rounded-md">Loading triggers editor…</div>`;
 	}
-	return html`<div class="flex flex-col gap-2">${triggers.map((t, i) => renderTriggerCard(t, i))}</div>`;
+	return mod.renderTriggersEditor();
 }
 
 function hasInvalidGoalTriggersForPreview(): boolean {
-	const triggers = parseTriggers(state.staffPreviewTriggers);
-	return triggers.some((t) =>
-		(t.type === "goal_created" || t.type === "goal_archived") &&
-		(t.prompt || "").trim().length === 0,
-	);
-}
-
-function renderTriggerCard(trigger: TriggerDef, index: number) {
-	const typeLabel: Record<string, string> = {
-		schedule: "⏰ Schedule",
-		git: "🔀 Git",
-		manual: "👆 Manual",
-		goal_created: "\uD83C\uDFAF Goal created",
-		goal_archived: "\uD83D\uDDC4 Goal archived",
-	};
-	const typeOptions = ["schedule", "git", "manual", "goal_created", "goal_archived"];
-	const inputClass = "w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
-	const isGoalTrigger = trigger.type === "goal_created" || trigger.type === "goal_archived";
-	const goalPromptMissing = isGoalTrigger && (trigger.prompt || "").trim().length === 0;
-
-	const onTypeChange = (e: Event) => {
-		const newType = (e.target as HTMLSelectElement).value;
-		updateTrigger(index, (t) => {
-			t.type = newType;
-			if (newType === "schedule") t.config = { cron: "0 9 * * *" };
-			else if (newType === "git") t.config = { event: "push", branch: "master" };
-			else t.config = {};
-		});
-	};
-
-	return html`
-		<div class="rounded-md border border-border bg-secondary/20 p-3">
-			<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
-				<select
-					class="text-xs px-2 py-1 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-					.value=${trigger.type}
-					@change=${onTypeChange}
-				>
-					${typeOptions.map((opt) => html`<option value=${opt} ?selected=${trigger.type === opt}>${typeLabel[opt] || opt}</option>`)}
-				</select>
-				<label style="display:flex; align-items:center; gap:4px; margin-left:auto; font-size:11px" class="text-muted-foreground cursor-pointer select-none">
-					<input
-						type="checkbox"
-						class="accent-primary"
-						.checked=${trigger.enabled !== false}
-						@change=${(e: Event) => updateTrigger(index, (t) => { t.enabled = (e.target as HTMLInputElement).checked; })}
-					/> Enabled
-				</label>
-				<button
-					class="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-					title="Remove trigger"
-					@click=${() => removeTrigger(index)}
-				>✕</button>
-			</div>
-
-			${trigger.type === "schedule" ? html`
-				<div style="margin-bottom:4px">
-					<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Cron expression (UTC)</label>
-					<input
-						type="text"
-						class=${inputClass}
-						placeholder="0 9 * * *"
-						.value=${trigger.config?.cron || ""}
-						@input=${(e: Event) => updateTrigger(index, (t) => { t.config.cron = (e.target as HTMLInputElement).value; })}
-					/>
-				</div>
-				<div class="text-[10px] text-muted-foreground" style="margin-bottom:8px">${describeCron(trigger.config?.cron || "")}</div>
-			` : ""}
-
-			${trigger.type === "git" ? html`
-				<div style="display:grid; grid-template-columns:100px 1fr; gap:8px; margin-bottom:8px">
-					<div>
-						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Event</label>
-						<select
-							class=${inputClass}
-							.value=${trigger.config?.event || "push"}
-							@change=${(e: Event) => updateTrigger(index, (t) => { t.config.event = (e.target as HTMLSelectElement).value; })}
-						>
-							<option value="push" ?selected=${trigger.config?.event === "push"}>push</option>
-						</select>
-					</div>
-					<div>
-						<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Branch</label>
-						<input
-							type="text"
-							class=${inputClass}
-							placeholder="master"
-							.value=${trigger.config?.branch || ""}
-							@input=${(e: Event) => updateTrigger(index, (t) => { t.config.branch = (e.target as HTMLInputElement).value; })}
-						/>
-					</div>
-				</div>
-			` : ""}
-
-			<div style="margin-top:${trigger.type === "manual" ? "0" : "0"}">
-				<label class="text-[10px] ${goalPromptMissing ? "text-destructive" : "text-muted-foreground"}" style="display:block; margin-bottom:2px">${isGoalTrigger ? "Wake prompt (required)" : "Wake prompt (optional)"}</label>
-				<textarea
-					class="w-full p-2 text-xs rounded-md border ${goalPromptMissing ? "border-destructive" : "border-border"} bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-					rows="2"
-					data-testid="trigger-prompt-${index}"
-					placeholder="Message sent to the agent when this trigger fires"
-					.value=${trigger.prompt || ""}
-					@input=${(e: Event) => updateTrigger(index, (t) => { t.prompt = (e.target as HTMLTextAreaElement).value; })}
-				></textarea>
-				${goalPromptMissing ? html`<div class="text-[10px] text-destructive" style="margin-top:2px" data-testid="trigger-prompt-error-${index}">Goal triggers require a non-empty wake prompt.</div>` : ""}
-			</div>
-		</div>
-	`;
-}
-
-/** Produce a human-readable description of a cron expression. */
-function describeCron(cron: string): string {
-	const parts = cron.trim().split(/\s+/);
-	if (parts.length !== 5) return cron ? `Custom: ${cron}` : "";
-	const [min, hour, dom, mon, dow] = parts;
-
-	const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-	let timeStr = "";
-	if (min !== "*" && hour !== "*") {
-		const h = parseInt(hour, 10);
-		const m = parseInt(min, 10);
-		if (!isNaN(h) && !isNaN(m)) {
-			const ampm = h >= 12 ? "PM" : "AM";
-			const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-			timeStr = `${h12}:${m.toString().padStart(2, "0")} ${ampm}`;
-		}
-	}
-
-	// Every N hours
-	if (hour.startsWith("*/")) {
-		const n = hour.slice(2);
-		const base = min === "0" ? "on the hour" : `at :${min.padStart(2, "0")}`;
-		return `Every ${n} hour${n === "1" ? "" : "s"}, ${base}`;
-	}
-
-	// Every N minutes
-	if (min.startsWith("*/")) {
-		const n = min.slice(2);
-		return `Every ${n} minute${n === "1" ? "" : "s"}`;
-	}
-
-	// Daily
-	if (dom === "*" && mon === "*" && dow === "*" && timeStr) {
-		return `Daily at ${timeStr}`;
-	}
-
-	// Weekdays only
-	if (dom === "*" && mon === "*" && dow === "1-5" && timeStr) {
-		return `Weekdays at ${timeStr}`;
-	}
-
-	// Specific day of week
-	if (dom === "*" && mon === "*" && dow !== "*" && timeStr) {
-		const dowNum = parseInt(dow, 10);
-		const dayName = !isNaN(dowNum) && dowNum >= 0 && dowNum <= 6 ? dayNames[dowNum] : dow;
-		return `Every ${dayName} at ${timeStr}`;
-	}
-
-	// Specific day of month
-	if (dom !== "*" && mon === "*" && dow === "*" && timeStr) {
-		const suffix = dom === "1" ? "st" : dom === "2" ? "nd" : dom === "3" ? "rd" : "th";
-		return `${dom}${suffix} of each month at ${timeStr}`;
-	}
-
-	return cron ? `Custom: ${cron}` : "";
+	const mod = ensureTriggersMod();
+	// Until the editor chunk lands no trigger UI has been mounted, so
+	// nothing could be in an invalid-prompt state — return false.
+	return mod ? mod.hasInvalidGoalTriggersForPreview() : false;
 }
 
 function staffPreviewSessionId(): string | undefined {
@@ -2403,6 +2266,8 @@ function projectProposalPanel() {
 	const activeView = _projectProposalView;
 	const onView = (m: ProjectViewMode) => { _projectProposalView = m; renderApp(); };
 
+	const projectViews = ensureProjectProposalViews();
+
 	const settingsView = html`
 		<div data-testid="settings-view" class="flex flex-col gap-4">
 			${renderRow("name", "Project Name")}
@@ -2436,15 +2301,19 @@ function projectProposalPanel() {
 				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
 				<div class="text-[11px] text-muted-foreground font-mono truncate min-w-0" title=${fields.root_path || ""}>${fields.root_path || ""}</div>
 			</div>
-			${projectViewTabs(activeView, onView, {
-				components: structuredComponents.length,
-				workflows: Object.keys(structuredWorkflows).length,
-			})}
+			${projectViews
+				? projectViews.viewTabs(activeView, onView, {
+					components: structuredComponents.length,
+					workflows: Object.keys(structuredWorkflows).length,
+				})
+				: html`<div class="px-5 py-2 text-xs text-muted-foreground">Loading project views…</div>`}
 			<div ${ref(projectOuterScrollRef)} class="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-5 ${streaming ? STREAMING_BORDER : ""}">
-				${activeView === "components"
-					? projectComponentsView(structuredComponents)
+				${!projectViews || activeView === "settings"
+					? settingsView
+					: activeView === "components"
+					? projectViews.componentsView(structuredComponents)
 					: activeView === "workflows"
-					? projectWorkflowsView(structuredWorkflows, structuredComponents)
+					? projectViews.workflowsView(structuredWorkflows, structuredComponents)
 					: settingsView}
 			</div>
 			<div class="shrink-0 flex items-center justify-end gap-2 px-5 py-3 border-t border-border">

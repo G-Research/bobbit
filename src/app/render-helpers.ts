@@ -21,7 +21,7 @@ import {
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
-import { showRenameDialog } from "./dialogs.js";
+import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
