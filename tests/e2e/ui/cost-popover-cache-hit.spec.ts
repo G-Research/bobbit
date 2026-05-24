@@ -1,16 +1,12 @@
 /**
- * Browser E2E — CostPopover renders the derived `cacheHitRate` field on the
- * goal-dashboard cost popover, surviving a full page reload.
+ * Browser E2E — CostPopover renders the derived `cacheHitRate` field on both
+ * the goal-dashboard and session stats-bar cost popovers.
  *
- * The CostPopover lives in two surfaces (session stats-bar + goal-dashboard
- * meta-row); the goal-dashboard variant is the easier test bed because:
- *   - the dashboard fetches `/api/goals/<id>/cost` on entry, and only the
- *     non-zero `totalCost` branch renders the clickable `$` trigger that
- *     opens the popover.
- *   - the popover fetches `/api/goals/<id>/cost/breakdown` on open.
- * We mock both endpoints with `page.route()` so the test is independent of
- * how the server derives `cacheHitRate`. (Server derivation has its own
- * unit + API-E2E coverage.)
+ * The goal-dashboard cases mock `/api/goals/<id>/cost` and
+ * `/api/goals/<id>/cost/breakdown` so they can focus on formatting boundaries.
+ * The session stats-bar case seeds real cumulative session cost, opens the
+ * actual session footer trigger, and asserts the row populated from
+ * `/api/sessions/<id>/cost/breakdown`.
  *
  * UI contract under test (CostPopover.ts::_renderCacheHitRow):
  *   - The aggregate breakdown ALWAYS renders a stable "Cache hit" row
@@ -21,8 +17,9 @@
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { createGoal, deleteGoal } from "../e2e-setup.js";
-import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+import type { GatewayInfo } from "../gateway-harness.js";
+import { createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
+import { openApp, navigateToGoalDashboard, navigateToHash } from "./ui-helpers.js";
 
 interface CostAggregate {
 	inputTokens: number;
@@ -63,6 +60,18 @@ async function routeGoalCost(
 			body: options.breakdownBody ?? JSON.stringify({ aggregate: options.breakdownAggregate ?? aggregate, sessions: [] }),
 		});
 	});
+}
+
+async function seedSessionCost(gateway: GatewayInfo, sessionId: string, usage: {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cost: number;
+}): Promise<CostAggregate> {
+	const session = gateway.sessionManager?.getSession(sessionId);
+	if (!session?.projectId) throw new Error(`session ${sessionId} missing projectId`);
+	return gateway.sessionManager.getCostTracker(session.projectId).recordUsage(sessionId, usage) as CostAggregate;
 }
 
 async function openGoalCostPopover(page: Page, goalId: string) {
@@ -130,6 +139,46 @@ test.describe("CostPopover cache-hit row", () => {
 			await expect(cacheHitRowAfter).toContainText("75%");
 		} finally {
 			await deleteGoal(goalId);
+		}
+	});
+
+	test("renders cacheHitRate from the session stats-bar cost popover", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			const seeded = await seedSessionCost(gateway, sessionId, {
+				inputTokens: 100,
+				outputTokens: 50,
+				cacheReadTokens: 300,
+				cacheWriteTokens: 0,
+				cost: 0.2,
+			});
+			expect(seeded.cacheHitRate).toBe(0.75);
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const costTrigger = page.locator("agent-interface").getByText("$0.2", { exact: true }).first();
+			await expect(costTrigger).toBeVisible({ timeout: 10_000 });
+
+			const breakdownResponse = page.waitForResponse((response) =>
+				response.request().method() === "GET" &&
+				response.url().includes(`/api/sessions/${sessionId}/cost/breakdown`),
+			);
+			await costTrigger.click();
+
+			const response = await breakdownResponse;
+			expect(response.ok()).toBe(true);
+			const body = await response.json();
+			expect(body.session.cacheHitRate).toBe(0.75);
+
+			const cacheHitRow = page.locator('agent-interface cost-popover [data-testid="cost-cache-hit"]').first();
+			await expect(cacheHitRow).toBeVisible({ timeout: 10_000 });
+			await expect(cacheHitRow).toContainText("Cache hit");
+			await expect(cacheHitRow).toContainText("75%");
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 
