@@ -16,19 +16,18 @@
  *     __preview_snapshot_v2__\n{"kind":"file","path":"/abs/path/to/report.html"}\n
  *
  *   v3 (current — per-session preview mount; constant ≤250 byte payload;
- *   `contentHash` is included when it fits the cap):
- *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","contentHash":"<sha256>"}\n
+ *   `artifactId`, `entry`, and `contentHash` are included when they fit the cap):
+ *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}\n
  *
- *   The `path` field carries the project-root-relative identifier
+ *   The `path` field normally carries the project-root-relative identifier
  *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
- *   host-absolute path. Block size is therefore bounded by content shape,
- *   not by where `bobbitStateDir()` lives on disk — so the 250 B per-block
- *   cap holds on macOS (`/private/var/folders/...`) and on Windows
- *   (`C:\Users\...\AppData\Local\Temp\bobbit-e2e\...`) too. The agent
- *   tool (`defaults/tools/html/extension.ts`) is responsible for picking
- *   the relative form before calling `buildPreviewSnapshotV3Block`.
- *   Archived sessions that recorded the legacy host-absolute path still
- *   parse — `parseSnapshot` only requires a non-empty string.
+ *   host-absolute path. When artifact metadata plus the SHA-256 hash would
+ *   exceed the 250 B cap, the builder emits compact aliases (`e`/`a`/`h`) and
+ *   may shorten `path` to the entry filename because `entry` is explicit.
+ *   Block size is therefore bounded by content shape, not by where
+ *   `bobbitStateDir()` lives on disk. Archived sessions that recorded the
+ *   legacy host-absolute path still parse — `parseSnapshot` only requires a
+ *   non-empty string.
  *
  * v1 and v2 marker constants and parser arms are preserved for archived-session
  * compatibility. New code emits **only** v3 — the v1/v2 *builder* functions have
@@ -70,7 +69,7 @@ export function extractSnapshot(text: string): string {
 export type ParsedSnapshot =
 	| { kind: "inline"; html: string }
 	| { kind: "file"; path: string }
-	| { kind: "preview"; url: string; path: string; contentHash?: string };
+	| { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string; artifactId?: string };
 
 /**
  * Parse a snapshot text block into a discriminated union. Returns null if
@@ -86,6 +85,20 @@ function normalizeContentHash(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const hash = value.trim().toLowerCase();
 	return /^[a-f0-9]{64}$/.test(hash) ? hash : undefined;
+}
+
+function normalizeArtifactId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const artifactId = value.trim();
+	return /^[A-Za-z0-9_-]{6,64}$/.test(artifactId) ? artifactId : undefined;
+}
+
+function normalizeEntry(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const entry = value.trim();
+	if (!entry || entry.length > 255) return undefined;
+	if (entry.includes("\0") || entry.includes("/") || entry.includes("\\")) return undefined;
+	return entry;
 }
 
 export function parseSnapshot(text: unknown): ParsedSnapshot | null {
@@ -116,9 +129,17 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 				typeof parsed.path === "string" && parsed.path.length > 0
 			) {
 				const contentHash = normalizeContentHash(parsed.contentHash);
-				return contentHash
-					? { kind: "preview", url: parsed.url, path: parsed.path, contentHash }
-					: { kind: "preview", url: parsed.url, path: parsed.path };
+				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid);
+				const entry = normalizeEntry(parsed.entry ?? parsed.e);
+				const result: { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string; artifactId?: string } = {
+					kind: "preview",
+					url: parsed.url,
+					path: parsed.path,
+				};
+				if (entry) result.entry = entry;
+				if (contentHash) result.contentHash = contentHash;
+				if (artifactId) result.artifactId = artifactId;
+				return result;
 			}
 		} catch {
 			/* fall through */
@@ -135,20 +156,68 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
  * asserts this for typical session id + `report.html`).
  *
  * @param url       Content-origin URL (always `/preview/<sid>/<entry>`).
- * @param entryPath The path identifier shown in the block. **Callers must
- *                  pass a project-root-relative form** (`<sid>/<entry>`)
- *                  to keep block size bounded by content shape rather than
- *                  install location. Builder accepts any non-empty string
- *                  for backwards compatibility with archived host-absolute
- *                  payloads, but the cap-test only holds for the short form.
+ * @param entryPath The path identifier shown in the block. Callers should pass
+ *                  the project-root-relative form (`<sid>/<entry>`) when
+ *                  available. Artifact-backed blocks may compact `path` to the
+ *                  entry filename if needed to keep `contentHash` under the
+ *                  250 B cap.
  */
-export function buildPreviewSnapshotV3Block(url: string, entryPath: string, contentHash?: string): string {
+export function buildPreviewSnapshotV3Block(
+	url: string,
+	entryPath: string,
+	contentHash?: string,
+	options?: { artifactId?: string; entry?: string },
+): string {
 	const hash = normalizeContentHash(contentHash);
-	const basePayload = { kind: "preview", url, path: entryPath };
-	if (hash) {
-		const payload = JSON.stringify({ ...basePayload, contentHash: hash });
-		const block = PREVIEW_SNAPSHOT_MARKER_V3 + payload + "\n";
+	const artifactId = normalizeArtifactId(options?.artifactId);
+	const entry = normalizeEntry(options?.entry);
+	const payloads: Array<Record<string, string>> = [];
+	const addPayload = (payload: Record<string, string>) => {
+		const key = JSON.stringify(payload);
+		if (!payloads.some(p => JSON.stringify(p) === key)) payloads.push(payload);
+	};
+	const shortUrl = entry ? compactPreviewUrl(url, entry) : undefined;
+
+	const basePayload: Record<string, string> = { kind: "preview", url, path: entryPath };
+	if (entry) basePayload.entry = entry;
+	if (artifactId) basePayload.artifactId = artifactId;
+	if (hash) addPayload({ ...basePayload, contentHash: hash });
+
+	if (entry && hash) {
+		const compactFull: Record<string, string> = {
+			kind: "preview",
+			url: shortUrl || url,
+			path: entry,
+			entry,
+			contentHash: hash,
+		};
+		if (artifactId) compactFull.artifactId = artifactId;
+		addPayload(compactFull);
+		if (artifactId) addPayload({ ...compactFull, artifactId: undefined as never, aid: artifactId });
+	}
+
+	addPayload(basePayload);
+	if (entry) {
+		const compactNoHash: Record<string, string> = { kind: "preview", url: shortUrl || url, path: entry, entry };
+		if (artifactId) compactNoHash.artifactId = artifactId;
+		addPayload(compactNoHash);
+		if (artifactId) addPayload({ ...compactNoHash, artifactId: undefined as never, aid: artifactId });
+	}
+	addPayload({ kind: "preview", url, path: entryPath });
+
+	for (const payload of payloads) {
+		for (const [key, value] of Object.entries(payload)) {
+			if (value === undefined) delete payload[key];
+		}
+		const block = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(payload) + "\n";
 		if (block.length <= 250) return block;
 	}
-	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(basePayload) + "\n";
+
+	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({ kind: "preview", url, path: entryPath }) + "\n";
+}
+
+function compactPreviewUrl(url: string, entry: string): string | undefined {
+	const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const match = new RegExp(`^(/preview/[A-Fa-f0-9-]{36}/)${escaped}$`).exec(url);
+	return match ? match[1] : undefined;
 }
