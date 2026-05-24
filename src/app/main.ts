@@ -11,6 +11,12 @@ import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
 import "./storage.js"; // must initialize before anything else
+// Eagerly register <bg-process-pill> so it's available the moment the chat
+// view mounts. Lazy-loading via `ensureBgProcessPill()` (lazy-widgets.ts) was
+// 9.3 kB cheaper but produced occasional pill-overflow test flakes during the
+// first paint on cold start, before the chunk had landed. Trading 9 kB raw
+// (still well under the 600 kB entry budget) for deterministic upgrade.
+import "../ui/components/BgProcessPill.js";
 import { ChatPanel } from "../ui/index.js";
 import {
 	state,
