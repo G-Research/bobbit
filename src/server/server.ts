@@ -136,6 +136,7 @@ import { handlePreviewRequest } from "./preview/content-route.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
+import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, inferMeta } from "./agent/aigw-manager.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
@@ -1275,6 +1276,11 @@ export function createGateway(config: GatewayConfig) {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
+		}
+		if (info.reason === "purged") {
+			try { previewArtifacts.removeArtifacts(sessionId); } catch (err) {
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+			}
 		}
 	});
 
@@ -7891,12 +7897,17 @@ async function handleApiRoute(
 			return;
 		}
 		const body = await readBody(req).catch(() => ({}));
+		const hasArtifact = typeof body?.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body?.html === "string";
 		const hasFile = typeof body?.file === "string" && body.file.length > 0;
 		const hasAssets = Array.isArray(body?.assets);
 		const hasManifest = typeof body?.manifest === "string" && body.manifest.length > 0;
-		if (!hasHtml && !hasFile) {
-			json({ error: "Body must contain one of 'html' or 'file'" }, 400);
+		if (hasArtifact && (hasHtml || hasFile || hasAssets || hasManifest)) {
+			json({ error: "`artifactId` restore cannot be combined with `html`, `file`, `assets`, or `manifest`" }, 400);
+			return;
+		}
+		if (!hasArtifact && !hasHtml && !hasFile) {
+			json({ error: "Body must contain one of 'html', 'file', or 'artifactId'" }, 400);
 			return;
 		}
 		if (hasHtml && (hasAssets || hasManifest)) {
@@ -7904,7 +7915,20 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			let result: previewMount.MountResult | previewMount.MountFileResult;
+			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
+			if (hasArtifact) {
+				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+				broadcastPreviewChanged(sessionId, {
+					entry: restored.entry,
+					mtime: restored.mtime,
+					url: restored.url,
+					path: restored.path,
+					contentHash: restored.contentHash,
+					artifactId: restored.artifactId,
+				});
+				json(restored);
+				return;
+			}
 			if (hasHtml) {
 				// `html` wins over `file` when both are provided.
 				let entry: string | undefined;
@@ -7994,21 +8018,69 @@ async function handleApiRoute(
 				}
 				result = previewMount.mountFile(sessionId, filePath, dedup);
 			}
+			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
+			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
 			broadcastPreviewChanged(sessionId, {
 				entry: result.entry,
 				mtime: result.mtime,
 				url: result.url,
 				path: result.path,
 				contentHash: result.contentHash,
+				artifactId: artifact.artifactId,
 			});
-			json(result);
+			json(resultWithArtifact);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
 				jsonError(err.statusCode, err);
 				return;
 			}
+			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
+				jsonError(err.statusCode, err);
+				return;
+			}
 			jsonError(500, err, { error: `preview mount failed: ${err?.message ?? String(err)}` });
+			return;
+		}
+	}
+
+	// POST /api/preview/artifacts/:artifactId/restore?sessionId=<sid> — restore
+	// an immutable preview artifact into the single live preview mount.
+	const previewArtifactRestoreMatch = url.pathname.match(/^\/api\/preview\/artifacts\/([^/]+)\/restore$/);
+	if (previewArtifactRestoreMatch && req.method === "POST") {
+		const sessionId = url.searchParams.get("sessionId") || "";
+		const artifactId = decodeURIComponent(previewArtifactRestoreMatch[1] || "");
+		if (!VALID_SESSION_ID.test(sessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		if (sandboxScope && !sandboxScope.sessionIds.has(sessionId)) {
+			json({ error: "Forbidden: session out of scope" }, 403);
+			return;
+		}
+		const body = await readBody(req).catch(() => ({}));
+		if (typeof body?.artifactId === "string" && body.artifactId.length > 0 && body.artifactId !== artifactId) {
+			json({ error: "artifactId body does not match route" }, 400);
+			return;
+		}
+		try {
+			const restored = previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
+			broadcastPreviewChanged(sessionId, {
+				entry: restored.entry,
+				mtime: restored.mtime,
+				url: restored.url,
+				path: restored.path,
+				contentHash: restored.contentHash,
+				artifactId: restored.artifactId,
+			});
+			json(restored);
+			return;
+		} catch (err: any) {
+			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
+				jsonError(err.statusCode, err);
+				return;
+			}
+			jsonError(500, err, { error: `preview artifact restore failed: ${err?.message ?? String(err)}` });
 			return;
 		}
 	}
@@ -8040,13 +8112,16 @@ async function handleApiRoute(
 				json({ error: "no preview mount" }, 404);
 				return;
 			}
+			const contentHash = previewMount.contentHashForMount(sessionId);
+			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
 			json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
 				relPath: path.posix.join(sessionId, entry),
 				entry,
 				mtime: Math.floor(stat.mtimeMs),
-				contentHash: previewMount.contentHashForMount(sessionId),
+				contentHash,
+				artifactId: artifact?.artifactId,
 			});
 			return;
 		} catch (err: any) {
@@ -8106,12 +8181,15 @@ async function handleApiRoute(
 				if (entry) {
 					const entryPath = path.join(dir, entry);
 					const stat = fs.statSync(entryPath);
+					const contentHash = previewMount.contentHashForMount(sid);
+					const artifact = previewArtifacts.findPreviewArtifactByHash(sid, contentHash);
 					res.write(`event: preview-changed\ndata: ${JSON.stringify({
 						entry,
 						mtime: Math.floor(stat.mtimeMs),
 						url: `/preview/${sid}/${entry}`,
 						path: entryPath,
-						contentHash: previewMount.contentHashForMount(sid),
+						contentHash,
+						artifactId: artifact?.artifactId,
 					})}\n\n`);
 				}
 			}

@@ -17,6 +17,7 @@ export interface PreviewChangedEvent {
 	url?: string;
 	path?: string;
 	contentHash?: string;
+	artifactId?: string;
 }
 
 const emitters = new Map<string, EventEmitter>();
