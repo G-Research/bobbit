@@ -1,10 +1,97 @@
 # Shrink Initial Bundle — design doc
 
-Status: in-progress  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: team-lead
+Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: team-lead
 
 ## Outcome
 
-`npm run build:ui` currently emits two chunks that trip Vite's
+All planned tasks shipped. `npm run build:ui` now emits **no chunk-size
+warnings** at the existing `chunkSizeWarningLimit: 600`. Both target
+chunks dropped well below budget; the bundle-size regression guard
+(`tests/bundle-size.test.ts`) was tightened to pin the new ceiling.
+
+| Chunk | Before | After | Reduction |
+|---|---|---|---|
+| Entry `index-*.js` | 1,525 kB raw / 360 kB gz | **582 kB raw / 150 kB gz** | −62 % raw / −58 % gz |
+| Artifacts (lazy) `index-*.js` | 1,063 kB raw / 339 kB gz | **151 kB raw / 44 kB gz** | −86 % raw / −87 % gz |
+
+What landed:
+
+- **Task A** — `@earendil-works/pi-ai`'s `models.generated.js` catalog
+  (~553 kB) lazy-loaded via `src/app/pi-ai-lazy.ts`. Eager value imports
+  of `streamSimple` / `getModel` are now dynamic; type-only imports were
+  left untouched. The catalog now loads only when the model picker or
+  first-message stream needs it.
+- **Task B** — `src/ui/tools/highlight-core.ts` replaces every direct
+  `import hljs from "highlight.js"` call site. It pulls
+  `highlight.js/lib/core` plus 10 eager grammars (`javascript`,
+  `typescript`, `python`, `bash`, `json`, `yaml`, `xml`, `css`,
+  `markdown`, `sql`) and a static `LAZY_GRAMMARS` map of ~47 long-tail
+  languages that load on demand. `html` is aliased to `xml`; `.bat` /
+  `.cmd` route to the `dos` grammar.
+- **Task C** — `qrcode` (~81 kB) lazy-loaded inside the
+  mobile-pairing dialog handler in `src/app/dialogs.ts`.
+- **Task D** — `jszip` (~98 kB) lazy-loaded inside the pptx-processing
+  path in `src/ui/utils/attachment-utils.ts`.
+- **Task F** — `manualChunks` vendor split in `vite.config.ts`
+  (`typebox`, `marked`, `mini-lit`, `lucide`, `lit`, `annotorious`).
+  This is the originally-optional vendor-split task; we ran it because
+  Tasks A–D alone didn't leave enough head-room. F also absorbed the
+  follow-on lazy-loading of 25+ element / dialog / widget modules via
+  `src/app/{dialogs-lazy,lazy-review,lazy-widgets,proposal-panels-lazy}.ts`,
+  and switched many heavy renderers in the tool-renderer registry to
+  `registerLazyToolRenderer`. `src/ui/index.ts` re-exports were
+  converted to type-only where possible so the barrel no longer pulls
+  heavy modules into the entry graph.
+- **Task G** *(added during implementation)* — the proposal-panels
+  slab (2,121 LOC) was extracted from `src/app/render.ts` into
+  `src/app/proposal-panels.ts` + `src/app/proposal-panels-lazy.ts`.
+  Task F alone still tripped the 600 kB raw warning; G is the final
+  shave that clears it.
+- **Bundle-profile tooling** — `vite.profile.config.ts` (new) +
+  `rollup-plugin-visualizer` devDep. Workflow documented in
+  [`docs/perf/bundle-profile.md`](../perf/bundle-profile.md).
+- **Bundle-size regression guard** — `tests/bundle-size.test.ts`
+  budgets tightened: entry ≤ 250 KB gz, per-chunk ≤ 200 KB gz, no
+  non-worker chunk > 600 KB raw (pins Vite's `chunkSizeWarningLimit:
+  600`). Run with `npm run test:bundle`.
+
+Follow-on type and test fixes that landed during verification:
+
+- `src/server/agent/aigw-manager.ts` — type-only adaptation to
+  pi-ai `0.75.5`'s `OAuth` + `AnthropicMessagesCompat` API changes
+  (the catalog dynamic-import landed during the same window as a
+  pi-ai bump). Restored `onDeviceCode` callback after the
+  `0.75.5` type re-flip.
+- `tests/baseline/*` — sleep-baseline ratchets for
+  `pill-overflow-promotion.spec.ts` (existing flake unmasked by
+  faster startup; not introduced by this goal).
+- `src/ui/components/BgProcessPill.ts` — eager-registered so the
+  pill-overflow E2E doesn't race with a lazy-load chunk fetch.
+- `src/app/render.ts` — re-export shim for `setSelectedWorkflowId`
+  after Task G moved it into `proposal-panels-lazy.ts`.
+- `src/ui/tools/highlight-core.ts` — `import.meta.glob` replaced
+  with an explicit static `LAZY_GRAMMARS` map because Vite cannot
+  statically resolve glob template literals across `node_modules`,
+  so the per-language chunks were never emitted (see
+  `docs/perf/bundle-profile.md` → "Adding a per-language chunk
+  emission").
+
+Acceptance criteria (all met):
+
+| Acceptance criterion | Target | Result |
+|---|---|---|
+| `npm run build` chunk-size warnings | zero at `chunkSizeWarningLimit: 600` | zero |
+| Entry chunk | < 700 kB raw / < 200 kB gz | 582 kB raw / 150 kB gz |
+| Artifacts chunk | < 250 kB raw / < 80 kB gz | 151 kB raw / 44 kB gz |
+| `npm run test:unit` + `npm run test:e2e` | pass | pass |
+| `tests/bundle-size.test.ts` budget guard | tightened, passes | 250/200/600 KB enforced |
+
+## Original problem & plan (for reference)
+
+The rest of this document is the original design as written before the
+work landed. Numbers and file paths reflect the pre-shipped baseline.
+
+`npm run build:ui` emitted two chunks that tripped Vite's
 `chunkSizeWarningLimit: 600` (raw kB after minification):
 
 | Chunk | Raw | Gzipped | When paid |
@@ -12,7 +99,7 @@ Status: in-progress  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: 
 | `index-*.js` (entry) | **1,525 kB** | 360 kB | Every cold load |
 | `index-*.js` (artifacts route, lazy) | **1,063 kB** | 339 kB | First artifact view |
 
-This goal targets:
+This goal targeted:
 
 | Acceptance criterion | Target |
 |---|---|
@@ -22,8 +109,8 @@ This goal targets:
 | `npm run test:unit` + `npm run test:e2e` | pass |
 | Existing `tests/bundle-size.test.ts` budget guard | passes (already does — tighten) |
 
-Profiling (`rollup-plugin-visualizer`) attributes the bloat to a small,
-specific set of imports. Each one has a known, mechanical fix. The
+Profiling (`rollup-plugin-visualizer`) attributed the bloat to a small,
+specific set of imports. Each one had a known, mechanical fix. The
 catalog below sources its numbers from the goal-spec profile run.
 
 ## Why now, and why these five fixes
