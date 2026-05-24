@@ -116,10 +116,16 @@ function normalizeContentHash(value: unknown): string | undefined {
 	return /^[a-f0-9]{64}$/.test(hash) ? hash : undefined;
 }
 
+// Mirrors VALID_ARTIFACT_ID in src/server/preview/artifacts.ts. Keeping the
+// client-side check in sync gives the user a clean "unavailable" state instead
+// of a generic "Failed — retry" when a marker carries a malformed id (which the
+// server would also reject with 400/404).
+const VALID_ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
 function normalizeArtifactId(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const artifactId = value.trim();
-	return artifactId ? artifactId : undefined;
+	if (!artifactId || !VALID_ARTIFACT_ID_RE.test(artifactId)) return undefined;
+	return artifactId;
 }
 
 function baseName(path: string | undefined): string {

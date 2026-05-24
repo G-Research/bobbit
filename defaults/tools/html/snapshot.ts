@@ -171,20 +171,23 @@ export function buildPreviewSnapshotV3Block(
 	const hash = normalizeContentHash(contentHash);
 	const artifactId = normalizeArtifactId(options?.artifactId);
 	const entry = normalizeEntry(options?.entry);
-	const payloads: Array<Record<string, string>> = [];
-	const addPayload = (payload: Record<string, string>) => {
+	// Payloads carry `string | undefined` so we can stage "omit artifactId,
+	// use aid instead" variants without an `as never` cast. Undefined fields
+	// are stripped before serialisation below.
+	const payloads: Array<Record<string, string | undefined>> = [];
+	const addPayload = (payload: Record<string, string | undefined>) => {
 		const key = JSON.stringify(payload);
 		if (!payloads.some(p => JSON.stringify(p) === key)) payloads.push(payload);
 	};
 	const shortUrl = entry ? compactPreviewUrl(url, entry) : undefined;
 
-	const basePayload: Record<string, string> = { kind: "preview", url, path: entryPath };
+	const basePayload: Record<string, string | undefined> = { kind: "preview", url, path: entryPath };
 	if (entry) basePayload.entry = entry;
 	if (artifactId) basePayload.artifactId = artifactId;
 	if (hash) addPayload({ ...basePayload, contentHash: hash });
 
 	if (entry && hash) {
-		const compactFull: Record<string, string> = {
+		const compactFull: Record<string, string | undefined> = {
 			kind: "preview",
 			url: shortUrl || url,
 			path: entry,
@@ -193,15 +196,15 @@ export function buildPreviewSnapshotV3Block(
 		};
 		if (artifactId) compactFull.artifactId = artifactId;
 		addPayload(compactFull);
-		if (artifactId) addPayload({ ...compactFull, artifactId: undefined as never, aid: artifactId });
+		if (artifactId) addPayload({ ...compactFull, artifactId: undefined, aid: artifactId });
 	}
 
 	addPayload(basePayload);
 	if (entry) {
-		const compactNoHash: Record<string, string> = { kind: "preview", url: shortUrl || url, path: entry, entry };
+		const compactNoHash: Record<string, string | undefined> = { kind: "preview", url: shortUrl || url, path: entry, entry };
 		if (artifactId) compactNoHash.artifactId = artifactId;
 		addPayload(compactNoHash);
-		if (artifactId) addPayload({ ...compactNoHash, artifactId: undefined as never, aid: artifactId });
+		if (artifactId) addPayload({ ...compactNoHash, artifactId: undefined, aid: artifactId });
 	}
 	addPayload({ kind: "preview", url, path: entryPath });
 

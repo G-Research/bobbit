@@ -176,8 +176,13 @@ export function restorePreviewArtifact(sessionId: string, artifactId: string): P
 	let hadLiveMount = false;
 	try {
 		// Stage from the immutable artifact before touching the live mount.
-		const previewParent = path.dirname(previewMount.mountDir(sessionId));
-		liveMount = path.join(previewParent, sessionId);
+		// Use mountPath() (which returns the path WITHOUT creating it) so that
+		// `hadLiveMount = fs.existsSync(liveMount)` is honest for fresh sessions.
+		// Previously this used `path.dirname(previewMount.mountDir(sessionId))`
+		// whose mkdir side-effect made hadLiveMount always true and caused an
+		// unnecessary backup copy of an empty directory.
+		liveMount = previewMount.mountPath(sessionId);
+		const previewParent = path.dirname(liveMount);
 		tmpRestore = path.join(previewParent, `.restore-${sessionId}-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
 		copyDirectory(sourceMount, tmpRestore);
 		if (hashDirectory(tmpRestore) !== record.contentHash) {
@@ -359,7 +364,11 @@ function validateContentHash(contentHash: string): void {
 
 function validateEntry(entry: string): void {
 	if (!entry || typeof entry !== "string") throw new PreviewArtifactError(400, "Invalid entry");
-	if (entry.includes("\0") || entry === "." || entry === ".." || entry.includes("/") || entry.includes("\\") || entry.includes("..")) {
+	// Entry is a single filename segment. `/` and `\` block path components;
+	// `entry === ".."` blocks the bare parent segment. Substring `".."` was
+	// previously rejected too but that is over-broad (e.g. `file..html` is a
+	// legal filename and cannot escape because slashes are already blocked).
+	if (entry.includes("\0") || entry === "." || entry === ".." || entry.includes("/") || entry.includes("\\")) {
 		throw new PreviewArtifactError(400, "Invalid entry");
 	}
 }
