@@ -1266,8 +1266,9 @@ function goalPreviewPanel() {
 		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 
+	const isHistorical = _proposalOverride?.type === "goal";
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal" data-historical-proposal=${isHistorical ? "true" : "false"}>
 			${proposalToast()}
 			${renderGoalForm({
 				title: state.previewTitle,
@@ -2441,8 +2442,9 @@ function projectProposalPanel() {
 		</div>
 	`;
 
+	const isHistoricalProject = _proposalOverride?.type === "project";
 	return html`
-		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
+		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode} data-historical-proposal=${isHistoricalProject ? "true" : "false"}>
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
 				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}

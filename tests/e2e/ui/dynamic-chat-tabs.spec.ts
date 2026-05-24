@@ -13,7 +13,7 @@ import type { Page } from "@playwright/test";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
 
-const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
 const PREVIEW_TAB_RE = /\.html(?:\s*\(v\d+\))?$/i;
@@ -537,9 +537,9 @@ test.describe("Dynamic chat tabs", () => {
 			timeout: 10_000,
 			message: "PREVIEW_FILENAME_TABS_BUG: inline.html, 1.html, and 2.html should each have exactly one current tab",
 		}).toEqual(["1.html", "2.html", "inline.html"]);
-		await expect(page.locator('button.goal-tab-pill[data-panel-tab-kind="preview"] .goal-tab-close')).toHaveCount(3);
+		await expect(page.locator('.goal-tab-pill[data-panel-tab-kind="preview"] .goal-tab-close')).toHaveCount(3);
 
-		await page.locator('button.goal-tab-pill[data-panel-tab-title="1.html"] .goal-tab-close').click();
+		await page.locator('.goal-tab-pill[data-panel-tab-title="1.html"] .goal-tab-close').click();
 		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").map((tab) => tab.label).sort(), {
 			timeout: 5_000,
 			message: "PREVIEW_FILENAME_TABS_BUG: dismissing a preview tab should remove only that filename tab",
