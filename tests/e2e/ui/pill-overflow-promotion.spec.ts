@@ -55,7 +55,8 @@ test.describe("pill strip overflow — promotion after dismiss", () => {
 	// is intentionally generous (30s) because the cascade can stall on cold-
 	// loaded UI runners. Without this override the default 30s budget is too
 	// tight to leave headroom for any one step in the chain.
-	test("hidden pills are promoted back into the strip after visible pills are dismissed (B-A1 regression)", { timeout: 90_000 }, async ({ page, rec }) => {
+	test("hidden pills are promoted back into the strip after visible pills are dismissed (B-A1 regression)", async ({ page, rec }) => {
+		test.setTimeout(90_000);
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
