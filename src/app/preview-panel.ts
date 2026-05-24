@@ -1,3 +1,4 @@
+import { hasCurrentProposalSlotForSession } from "./proposal-registry.js";
 import { state, renderApp, activeSessionId } from "./state.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -285,6 +286,10 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		: undefined;
 	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
 	const rev = activeRev === requestedRev ? undefined : requestedRev;
+	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId)) {
+		removePanelWorkspaceTabs([proposalPanelTabId(type)], { sessionId, select: false, clearCollapse: false });
+		return;
+	}
 	const baseTitle = PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
 	selectPanelWorkspaceTab({
 		id: proposalPanelTabId(type, rev),

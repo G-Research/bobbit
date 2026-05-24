@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
 	PROPOSAL_TYPE_REGISTRY,
+	hasCurrentProposalSlotForSession,
 	isProposalType,
 	type ProposalType,
 } from "../src/app/proposal-registry.ts";
@@ -105,6 +106,71 @@ describe("PROPOSAL_TYPE_REGISTRY.mergeFields", () => {
 				// non-aliasing: out should be a fresh object
 				assert.notEqual(out, prev);
 			});
+		}
+	});
+});
+
+describe("hasCurrentProposalSlotForSession", () => {
+	it("allows current proposal tabs only when the typed slot belongs to the session", () => {
+		const stateLike = {
+			activeProposals: {
+				tool: { sessionId: "s1", fields: {}, streaming: false, rev: 1 },
+			},
+		};
+
+		assert.equal(hasCurrentProposalSlotForSession(stateLike, "tool", "s1"), true);
+		assert.equal(hasCurrentProposalSlotForSession(stateLike, "tool", "s2"), false);
+		assert.equal(hasCurrentProposalSlotForSession(stateLike, "goal", "s1"), false);
+	});
+
+	it("does not let assistant fallback resurrect a dismissed tab while other typed slots remain", () => {
+		const stateLike = {
+			assistantType: "tool",
+			assistantHasProposal: true,
+			activeProposals: {
+				goal: { sessionId: "s1", fields: {}, streaming: false, rev: 1 },
+			},
+		};
+
+		assert.equal(hasCurrentProposalSlotForSession(stateLike, "tool", "s1"), false);
+	});
+
+	it("keeps legacy assistant current proposal fallback when no typed slots exist", () => {
+		const stateLike = {
+			assistantType: "project-scaffolding",
+			assistantHasProposal: true,
+			activeProposals: {},
+		};
+
+		assert.equal(hasCurrentProposalSlotForSession(stateLike, "project", "s1"), true);
+	});
+
+	it("drops stale current proposal tabs instead of reselecting them", () => {
+		const previous = (globalThis as any).bobbitState;
+		const stateLike = {
+			activeProposals: {
+				goal: { sessionId: "s1", fields: {}, streaming: false, rev: 1 },
+			},
+			panelWorkspaceActiveBySession: { s1: "proposal:tool" },
+			panelTabsBySession: {
+				s1: [{
+					id: "proposal:tool",
+					kind: "proposal",
+					title: "Tool Proposal",
+					label: "Tool",
+					legacyTab: "tool",
+					source: { type: "proposal", proposalType: "tool", sessionId: "s1" },
+				}],
+			},
+		};
+		try {
+			(globalThis as any).bobbitState = stateLike;
+			PROPOSAL_TYPE_REGISTRY.tool.onFirstEmit({ sessionId: "s1", fields: {}, streaming: false, rev: 1 }, { isAssistant: false, isMobile: false });
+
+			assert.deepEqual(stateLike.panelTabsBySession.s1.map((tab) => tab.id), []);
+			assert.equal(stateLike.panelWorkspaceActiveBySession.s1, "");
+		} finally {
+			(globalThis as any).bobbitState = previous;
 		}
 	});
 });
