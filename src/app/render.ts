@@ -2869,7 +2869,9 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (previewRestoreInFlight.has(tab.id)) return;
 
 	let body: Record<string, unknown> | null = null;
+	let restoreUrl = `/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`;
 	if (artifactId) {
+		restoreUrl = `/api/preview/artifacts/${encodeURIComponent(artifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`;
 		body = { artifactId };
 	} else if (snapshotKind === "inline" && snapshotHtml) {
 		body = { html: snapshotHtml };
@@ -2902,7 +2904,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	previewRestoreInFlight.add(tab.id);
 	void (async () => {
 		try {
-			const response = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
+			const response = await gatewayFetch(restoreUrl, {
 				method: "POST",
 				body: JSON.stringify(body),
 			});
