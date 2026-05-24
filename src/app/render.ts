@@ -24,6 +24,10 @@ import { backToSessions, createAndConnectSession, terminateSession } from "./ses
 // the wrapper itself in the entry bundle while the ~80 kB body of
 // goal/role/tool/staff/project preview panels lands on first view.
 import * as lazyProposalPanels from "./proposal-panels-lazy.js";
+// Re-export functions whose home moved during the proposal-panels extraction
+// (see docs/design/shrink-initial-bundle.md, Task G). Test fixtures and a few
+// external entry points still import from `render.ts` — keep them working.
+export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 
 // Route every dialog open through the lazy wrappers so the ~66 kB
 // `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
