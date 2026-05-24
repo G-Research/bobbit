@@ -241,8 +241,7 @@ async function oauthStartExternal(provider: Exclude<OAuthProviderId, "anthropic"
 			// dialog can display them. Bobbit does not currently render a
 			// dedicated device-code dialog, so we reuse the existing
 			// { url, instructions } shape by pointing url at the verification
-			// URI and packing the user code into instructions. Future UI work
-			// can split these cleanly without changing this contract.
+			// URI and packing the user code into instructions.
 			const instructions = `Visit ${info.verificationUri} and enter code ${info.userCode}`;
 			console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
 			safeResolveStarted({ url: info.verificationUri, instructions });

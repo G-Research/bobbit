@@ -5,7 +5,6 @@ import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
 import { WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
-import QRCode from "qrcode";
 import {
 	state,
 	renderApp,
@@ -804,6 +803,7 @@ export async function showQrCodeDialog(): Promise<void> {
 	let firstTimeOs: null | "ios" | "android" = null;
 
 	try {
+		const { default: QRCode } = await import("qrcode");
 		[sessionQr, certQr] = await Promise.all([
 			QRCode.toDataURL(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
 			QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
@@ -1291,7 +1291,11 @@ async function createGoalAssistantSession(projectId?: string): Promise<void> {
 	// through `startNewGoalFlow()` or passes an explicit projectId.
 	if (!projectId) {
 		const msg = "showGoalDialog() called without projectId for goal creation — callers must go through startNewGoalFlow() or pass an explicit projectId.";
-		if ((import.meta as any)?.env?.DEV) throw new Error(msg);
+		// Hard-fail in dev so the misuse is impossible to miss; soft-fail in
+		// production. Read DEV from globalThis (set via Vite's `define`) rather
+		// than `import.meta.env` so esbuild iife test-fixture bundles don't trip
+		// the empty-import-meta warning.
+		if ((globalThis as any).__BOBBIT_DEV__) throw new Error(msg);
 		console.error(msg);
 		return;
 	}

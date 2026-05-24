@@ -23,6 +23,8 @@ Follow-on bug fixes during stabilisation:
 
 A pre-existing PWA-resume cold-offline test was skipped (verified flaky on `master` at `94143ba8`) and is tracked separately.
 
+**Follow-up:** a second pass landed in [shrink-initial-bundle.md](./shrink-initial-bundle.md) (HEAD `ed850b65`) that dropped the entry chunk further to ~150 kB gz and the artifacts chunk to ~44 kB gz — lazy `pi-ai` catalog, `highlight.js` core + lazy grammars, lazy `qrcode` / `jszip`, vendor-chunk split, and a proposal-panels extraction.
+
 ## Problem
 
 `npm run build:ui` emits a 3.6 MB / 999 kB-gzipped main chunk. The chunk dominates cold-launch parse-and-execute time and PWA snapshot resume. The goal spec mandates main chunk ≤ 600 kB gzipped (≥40% reduction) without architectural rewrites or new deps.
