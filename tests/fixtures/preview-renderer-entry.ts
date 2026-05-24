@@ -68,12 +68,13 @@ void renderTool;
 	const { state } = await import("../../src/app/state.js");
 	(state as any).remoteAgent = { state: { messages } };
 };
-(window as any).__setPreviewWorkspace = async (sessionId: string, hash: string) => {
+(window as any).__setPreviewWorkspace = async (sessionId: string, hash: string, entry = "inline.html", previousHashes: string[] = []) => {
 	const { state } = await import("../../src/app/state.js");
 	const { previewEntryTabId, registerPreviewVersion } = await import("../../src/app/panel-workspace.js");
-	const tabId = previewEntryTabId("inline.html");
-	registerPreviewVersion(state, sessionId, "inline.html", hash, { current: true });
-	(state as any).previewPanelEntry = "inline.html";
+	const tabId = previewEntryTabId(entry);
+	for (const previousHash of previousHashes) registerPreviewVersion(state, sessionId, entry, previousHash, { current: false });
+	const version = registerPreviewVersion(state, sessionId, entry, hash, { current: true });
+	(state as any).previewPanelEntry = entry;
 	(state as any).previewPanelMtime = 123;
 	(state as any).previewPanelContentHash = hash;
 	(state as any).isPreviewSession = true;
@@ -81,16 +82,17 @@ void renderTool;
 		[sessionId]: [{
 			id: tabId,
 			kind: "preview",
-			title: "inline.html",
-			label: "inline.html",
+			title: entry,
+			label: entry,
 			legacyTab: "preview",
-			source: { type: "preview", entry: "inline.html", sessionId, live: true, contentHash: hash, version: 1 },
-			state: { entry: "inline.html", contentHash: hash, version: 1 },
+			source: { type: "preview", entry, sessionId, live: true, contentHash: hash, version },
+			state: { entry, contentHash: hash, version },
 		}],
 	};
 	(state as any).panelTabs = (state as any).panelTabsBySession[sessionId];
 	(state as any).panelWorkspaceActiveBySession = { [sessionId]: tabId };
 	(state as any).activePanelTabId = tabId;
+	(state as any).previewPanelMountedTabId = tabId;
 };
 (window as any).__setLivePreviewHash = (sessionId: string, hash: string) => {
 	(appState as any).previewPanelContentHash = hash;
@@ -129,6 +131,7 @@ void renderTool;
 		previewPanelEntry: (state as any).previewPanelEntry,
 		previewPanelMtime: (state as any).previewPanelMtime,
 		previewPanelContentHash: (state as any).previewPanelContentHash,
+		previewPanelMountedTabId: (state as any).previewPanelMountedTabId,
 		panelTabsBySession: (state as any).panelTabsBySession,
 		activePanelTabId: (state as any).activePanelTabId,
 		panelWorkspaceActiveBySession: (state as any).panelWorkspaceActiveBySession,
@@ -139,7 +142,9 @@ void renderTool;
 	(state as any).previewPanelEntry = "";
 	(state as any).previewPanelMtime = 0;
 	(state as any).previewPanelContentHash = "";
+	(state as any).previewPanelMountedTabId = "";
 	(state as any).panelTabsBySession = {};
+	(state as any).previewVersionsBySession = {};
 	(state as any).panelTabs = [];
 	(state as any).activePanelTabId = "chat";
 	(state as any).panelWorkspaceActiveBySession = {};
