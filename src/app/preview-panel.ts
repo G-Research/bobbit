@@ -1,3 +1,4 @@
+import { hasCurrentProposalSlotForSession } from "./proposal-registry.js";
 import { state, renderApp, activeSessionId } from "./state.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -5,11 +6,10 @@ import {
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
 	isHistoricalPreviewTab,
-	registerPreviewVersion,
 	previewEntryLabel,
 	previewEntryTabId,
-	previewTabDisplayTitle,
-	previewVersionedTabId,
+	previewTabIdentityForContent,
+	previewVersionRecordFor,
 	normalizePreviewContentHash,
 	panelTabsForSession,
 	previewContentHashFromTab,
@@ -194,15 +194,60 @@ export function selectHtmlPreviewTab(args: {
 	const contentHash = normalizePreviewContentHash(args.contentHash)
 		|| (normalizePreviewContentHash(args.state?.contentHash) || normalizePreviewContentHash(args.source?.contentHash))
 		|| (!requestedHistorical ? normalizePreviewContentHash(s.previewPanelContentHash) : "");
-	const version = registerPreviewVersion(s, sessionId, entry, contentHash, { current: !requestedHistorical, version: explicitVersion });
-	const isVersionedHistorical = requestedHistorical
-		&& typeof version === "number"
-		&& Number.isFinite(version)
-		&& version > 0;
-	const id = isVersionedHistorical
-		? previewVersionedTabId(entry, version)
-		: previewEntryTabId(entry);
-	const title = previewTabDisplayTitle(entry, version, isVersionedHistorical);
+	const existingTabs = panelTabsForSession(s, sessionId);
+	const entryForTab = (candidate: PanelWorkspaceTab): string => {
+		const candidateSource = candidate.source as Record<string, unknown>;
+		const candidateState = (candidate.state || {}) as Record<string, unknown>;
+		const raw = typeof candidateState.entry === "string" ? candidateState.entry : typeof candidateSource.entry === "string" ? candidateSource.entry : "inline.html";
+		return previewEntryLabel(raw);
+	};
+	const currentFilenameTab = existingTabs.find((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
+		&& candidate.id === previewEntryTabId(entry)
+		&& !isHistoricalPreviewTab(candidate)
+		&& entryForTab(candidate) === entry);
+	// When the caller explicitly opts out of live dedupe (e.g. PreviewRenderer
+	// opening an older artifact whose hash already matches the SSE-updated
+	// current tab), respect that intent and force the versioned tab path. The
+	// PreviewRenderer already decided collapse-vs-historical before getting
+	// here based on the pre-restore current tab hash.
+	const collapseToCurrent = requestedHistorical
+		&& args.dedupeWithLive !== false
+		&& !!contentHash
+		&& !!currentFilenameTab
+		&& previewContentHashFromTab(currentFilenameTab) === contentHash;
+	const shouldUseHistorical = requestedHistorical && !collapseToCurrent;
+
+	// Detect a live SSE event that's rehydrating an older registered version
+	// (e.g. the server just restored a historical artifact into the live mount
+	// and broadcast the older content hash). The current filename tab still
+	// represents the LATEST fresh write — don't overwrite its metadata with
+	// older bytes, and don't change the active tab id (the user may be viewing
+	// the historical tab they just opened).
+	const isLiveEvent = (args.source as Record<string, unknown> | undefined)?.live === true
+		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-events"
+		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-bootstrap";
+	if (isLiveEvent && !requestedHistorical && contentHash && currentFilenameTab) {
+		const record = previewVersionRecordFor(s, sessionId, entry);
+		const latestVersion = record?.latestVersion ?? 0;
+		const hashVersion = record?.hashToVersion?.[contentHash];
+		if (latestVersion > 0 && typeof hashVersion === "number" && hashVersion > 0 && hashVersion < latestVersion) {
+			// Older version rehydration via live mount — keep the current tab's
+			// metadata, its label, and the active selection intact. The live mount
+			// state (s.previewPanelContentHash etc) is updated by the caller and
+			// drives the iframe; this filename tab will trigger a re-restore via
+			// `restoreHistoricalPreviewTab` next time it's selected.
+			return;
+		}
+	}
+	const identity = previewTabIdentityForContent(s, sessionId, entry, contentHash, {
+		current: !shouldUseHistorical,
+		historical: shouldUseHistorical,
+		version: explicitVersion,
+	});
+	const version = identity.version;
+	const isVersionedHistorical = identity.historical;
+	const id = identity.id;
+	const title = identity.title;
 	const source: Record<string, unknown> = {
 		type: "html-preview",
 		sessionId,
@@ -231,6 +276,8 @@ export function selectHtmlPreviewTab(args: {
 	} else {
 		source.historical = false;
 		tabState.historical = false;
+		delete source.dedupeWithLive;
+		delete tabState.dedupeWithLive;
 		if (args.select !== false) source.live = true;
 	}
 	const tab: PanelWorkspaceTab = {
@@ -242,28 +289,6 @@ export function selectHtmlPreviewTab(args: {
 		source: source as PanelWorkspaceTab["source"],
 		state: tabState,
 	};
-	const existingTabs = panelTabsForSession(s, sessionId);
-	const entryForTab = (candidate: PanelWorkspaceTab): string => {
-		const candidateSource = candidate.source as Record<string, unknown>;
-		const candidateState = (candidate.state || {}) as Record<string, unknown>;
-		const raw = typeof candidateState.entry === "string" ? candidateState.entry : typeof candidateSource.entry === "string" ? candidateSource.entry : "inline.html";
-		return previewEntryLabel(raw);
-	};
-	if (isVersionedHistorical && contentHash && args.dedupeWithLive !== false) {
-		const currentForSameVersion = existingTabs.find((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
-			&& !isHistoricalPreviewTab(candidate)
-			&& entryForTab(candidate) === entry
-			&& previewContentHashFromTab(candidate) === contentHash);
-		if (currentForSameVersion) {
-			selectPanelWorkspaceTab(currentForSameVersion, {
-				sessionId,
-				select: args.select,
-				setAssistantTab: args.setAssistantTab,
-			});
-			if (args.select !== false) s.previewPanelMountedTabId = currentForSameVersion.id;
-			return;
-		}
-	}
 	if (!isVersionedHistorical && args.select !== false) {
 		for (let i = 0; i < existingTabs.length; i++) {
 			const candidate = existingTabs[i];
@@ -291,6 +316,10 @@ export function selectProposalWorkspaceTab(type: string, options: PanelWorkspace
 		: undefined;
 	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
 	const rev = activeRev === requestedRev ? undefined : requestedRev;
+	if (rev == null && !hasCurrentProposalSlotForSession(state as any, type, sessionId)) {
+		removePanelWorkspaceTabs([proposalPanelTabId(type)], { sessionId, select: false, clearCollapse: false });
+		return;
+	}
 	const baseTitle = PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
 	selectPanelWorkspaceTab({
 		id: proposalPanelTabId(type, rev),
@@ -386,6 +415,7 @@ export function startPreviewSubscription(sessionId: string): void {
 			let entry = "";
 			let mtime: number | undefined;
 			let contentHash = "";
+			const artifactId = typeof data?.artifactId === "string" && data.artifactId ? data.artifactId : undefined;
 			if (typeof data?.entry === "string" && data.entry) {
 				entry = data.entry;
 				state.previewPanelEntry = data.entry;
@@ -403,7 +433,8 @@ export function startPreviewSubscription(sessionId: string): void {
 					mtime,
 					contentHash,
 					id: LIVE_PREVIEW_PANEL_TAB_ID,
-					source: { live: true, origin: "preview-bootstrap" },
+					source: { live: true, origin: "preview-bootstrap", ...(artifactId ? { artifactId } : {}) },
+					state: artifactId ? { artifactId } : undefined,
 					select: state.previewPanelTab === "preview" || state.previewPanelActiveTab === "preview",
 				});
 			}
@@ -431,6 +462,7 @@ export function startPreviewSubscription(sessionId: string): void {
 					state.previewPanelMtime = mtime;
 				}
 				const contentHash = normalizePreviewContentHash(data?.contentHash);
+				const artifactId = typeof data?.artifactId === "string" && data.artifactId ? data.artifactId : undefined;
 				(state as any).previewPanelContentHash = contentHash;
 				if (entry) {
 					selectHtmlPreviewTab({
@@ -439,7 +471,8 @@ export function startPreviewSubscription(sessionId: string): void {
 						mtime,
 						contentHash,
 						id: LIVE_PREVIEW_PANEL_TAB_ID,
-						source: { live: true, origin: "preview-events" },
+						source: { live: true, origin: "preview-events", ...(artifactId ? { artifactId } : {}) },
+						state: artifactId ? { artifactId } : undefined,
 						select: activeSessionId() === sessionId,
 					});
 				}

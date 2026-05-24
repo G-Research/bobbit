@@ -40,12 +40,18 @@ function clearDashboardState(): void {
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
+import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
 
 // ============================================================================
 // WIRE UP RENDER
 // ============================================================================
 
 setRenderApp(doRenderApp);
+
+// Restore side-pane tab order, active tab, and preview-version registry from
+// localStorage so user reorders survive reload. Persistence is keyed per
+// session; the corresponding writes live in panel-workspace.ts.
+loadPersistedPanelWorkspace(state);
 
 // Expose state on window for E2E tests (harmless in production — the state
 // object is already mutable from devtools and contains no secrets).

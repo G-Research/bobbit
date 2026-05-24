@@ -95,6 +95,17 @@ function previewRoot(): string {
 	return _previewRootOverride ?? path.join(bobbitStateDir(), "preview");
 }
 
+/**
+ * Path to the per-session mount directory WITHOUT creating it as a side
+ * effect. Use this when you need to check `fs.existsSync(mountPath(sid))`
+ * (e.g. to decide whether a live mount exists before staging a restore).
+ * Differs from `mountDir(sid)` which calls `fs.mkdirSync(dir, { recursive: true })`.
+ */
+export function mountPath(sessionId: string): string {
+	validateSessionId(sessionId);
+	return path.join(previewRoot(), sessionId);
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Validation helpers
 // ──────────────────────────────────────────────────────────────────────────

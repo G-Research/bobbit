@@ -2153,7 +2153,7 @@ Agent process → message_update (full content)
 
 ## Preview snapshots & reopening
 
-The `preview_open` tool drives one live server mount per session, rendered through the dynamic side-panel workspace. Each new call updates the live preview tab through SSE, and past `preview_open` widgets render an **Open** button that creates/selects a source-derived historical preview tab. Restorable inline/file snapshots remount into the same live mount when selected; non-restorable v3 snapshots still select their tab by entry/mtime, so users can switch between previous preview artifacts without re-running the agent.
+The `preview_open` tool drives one live server mount per session, rendered through the dynamic side-panel workspace. Each new call updates the live preview tab through SSE, and past `preview_open` widgets render an **Open** button that restores a source-derived historical preview tab from an **immutable preview artifact** captured at the original mount time. Reopening an older card therefore shows the bytes that were live then — not whatever happens to be in the source file now. New `preview_open` calls always select the unversioned filename tab; older differing artifacts open a versioned tab (`file.html (vN)`). Full tab semantics live in [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md).
 
 ### Why
 
@@ -2166,23 +2166,40 @@ Agent calls preview_open({html|file})
    └─→ extension (defaults/tools/html/extension.ts)
         1. PATCH /api/sessions/:id {preview:true}
         2. POST  /api/preview/mount?sessionId=... {html} or {file}
-           - server writes into <stateDir>/preview/<sid>/, broadcasts
-             preview-changed via subscribePreviewChanged
+           - server writes into <stateDir>/preview/<sid>/
+           - persistPreviewArtifact() copies the populated mount into
+             <stateDir>/preview-artifacts/<sid>/<artifactId>/ as an
+             immutable snapshot (dedupes by contentHash within session)
+           - broadcastPreviewChanged emits {entry, mtime, url, path,
+             contentHash, artifactId}
         tool_result = [
           {type:"text", text:"Preview panel is open ..."},
-          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON {kind:"preview", url, path}}
+          {type:"text", text: PREVIEW_SNAPSHOT_MARKER_V3 + JSON
+             {kind:"preview", url, path, entry?, contentHash?, artifactId?}}
         ]  // path = relPath: "<sid>/<entry>", host-invariant, forward slashes on all OSes
-   └─→ session.jsonl persists both blocks (each ≤ 250 bytes total)
+   └─→ session.jsonl persists both blocks (snapshot block ≤ 250 bytes
+       — builder uses `aid` alias for artifactId when needed to fit budget)
    └─→ Browser SSE subscriber on /api/sessions/:sid/preview-events receives
-       {entry, mtime, url, path}; iframe src bumps `#mtime=<n>` and reloads.
+       {entry, mtime, url, path, contentHash, artifactId?}; iframe src bumps
+       `?mtime=<n>` and reloads.
 
 User clicks Open on widget #N (PreviewRenderer.ts):
-   └─→ parse v3 marker + original tool params
-   └─→ create/select a source-derived preview tab in the per-session workspace
-   └─→ if inline/file bytes are restorable, POST /api/preview/mount?sessionId=...
-       {html|file}; otherwise select by recorded entry/mtime and reuse the
-       existing mount path.
+   └─→ parse v3 marker (artifactId, contentHash, entry)
+   └─→ if snapshot.contentHash equals the current filename tab's hash:
+          select preview:entry:<entry> and skip remount.
+   └─→ else open/select preview:entry:<entry>:v:<N> historical tab and:
+        - v3 marker with artifactId: POST /api/preview/artifacts/<id>/restore
+        - legacy v1/v2 (or v3 missing artifactId): POST /api/preview/mount
+          with the original {html} / {file} payload (best-effort — source
+          files may have been deleted)
 ```
+
+The server persists an artifact on every successful mount regardless of marker
+version, so legacy markers also pick up an `artifactId` from the POST response
+and store it on the tab for later restore. Artifacts survive across reloads and
+session archival; they are removed only when the owning session is purged
+(`removeArtifacts(sid)` in `src/server/agent/session-manager.ts`) or by the
+explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 
 ### Key design decisions
 
@@ -2198,9 +2215,10 @@ User clicks Open on widget #N (PreviewRenderer.ts):
 
 | File | Purpose |
 |---|---|
-| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch) |
+| `src/server/preview/mount.ts` | Per-session mount lifecycle (write/copy/remove/watch); exports `mountPath(sid)` for side-effect-free path lookup |
+| `src/server/preview/artifacts.ts` | Immutable preview artifact store — `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash` (dedupe), `removeArtifacts`, `sweepOrphanArtifacts` |
 | `src/server/preview/content-route.ts` | `/preview/<sid>/<path>` static serve + bridge injection |
-| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel |
+| `src/server/preview/events.ts` | `subscribePreviewChanged` / `broadcastPreviewChanged` event channel (payload now includes `contentHash` + `artifactId`) |
 | `src/server/auth/cookie.ts` | `bobbit_session` cookie store and verifier |
 | `defaults/tools/html/snapshot.ts` | v3 marker constant + builder + parser; v1/v2 parser arms preserved for archived sessions |
 | `defaults/tools/html/extension.ts` | Tool extension emits `[status, v3-snapshot]` tool_result after PATCH + POST mount |
@@ -2684,6 +2702,7 @@ Only truly global state lives in the server's central state directory.
 | `rpc-debug.log` | `rpc-bridge.ts` | RPC event log |
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
+| `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 | `auth-cookies.json` | `src/server/auth/cookie.ts` | `bobbit_session` cookie store (HttpOnly, server-side; mode `0o600`). |
 
 ### Global

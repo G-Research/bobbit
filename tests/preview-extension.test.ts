@@ -30,6 +30,7 @@ const fetchCalls: Array<{ url: string; init: any }> = [];
 
 const SID = "11111111-1111-1111-1111-111111111111";
 const HASH = "a".repeat(64);
+const ARTIFACT_ID = "pa_abc123xyz";
 
 before(() => {
 	process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:1/";
@@ -53,6 +54,7 @@ before(() => {
 					entry: "inline.html",
 					mtime: 1714512345678,
 					contentHash: HASH,
+					artifactId: ARTIFACT_ID,
 				}),
 				{ status: 200 },
 			);
@@ -92,7 +94,11 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 		const parsed = parseSnapshot(res.content[1].text);
 		assert.ok(parsed && parsed.kind === "preview");
-		if (parsed && parsed.kind === "preview") assert.strictEqual(parsed.contentHash, HASH);
+		if (parsed && parsed.kind === "preview") {
+			assert.strictEqual(parsed.contentHash, HASH);
+			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
+			assert.strictEqual(parsed.entry, "inline.html");
+		}
 
 		// Body bytes must NEVER appear in the snapshot.
 		assert.ok(!res.content[1].text.includes("<h1>Hello</h1>"));
@@ -129,6 +135,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 						entry: "report.html",
 						mtime: 1714512345678,
 						contentHash: HASH,
+						artifactId: ARTIFACT_ID,
 					},
 				};
 			}
@@ -148,10 +155,11 @@ describe("preview_open extension (v3 mount contract)", () => {
 			assert.ok(parsed && parsed.kind === "preview");
 			if (parsed && parsed.kind === "preview") {
 				assert.match(parsed.url, /^\/preview\//);
-				// The snapshot block carries the host-invariant relPath form, NOT
-				// the host-absolute path — that's what keeps the v3 block under
-				// the 250 B cap regardless of where the project lives on disk.
-				assert.strictEqual(parsed.path, `${SID}/report.html`);
+				// Artifact-backed v3 snapshots keep the entry explicit. The builder may
+				// compact `path` to the entry filename to preserve the 250 B marker cap.
+				assert.strictEqual(parsed.path, "report.html");
+				assert.strictEqual(parsed.entry, "report.html");
+				assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 			}
 
 			const mountPosts = fetchCalls.filter(
@@ -231,7 +239,7 @@ describe("preview_open extension (v3 mount contract)", () => {
 		// This is what the extension feeds the builder in production.
 		const url = `/preview/${SID}/report.html`;
 		const relPath = `${SID}/report.html`;
-		const block = buildPreviewSnapshotV3Block(url, relPath, HASH);
+		const block = buildPreviewSnapshotV3Block(url, relPath, HASH, { artifactId: ARTIFACT_ID, entry: "report.html" });
 		assert.ok(
 			block.length <= 250,
 			`v3 block must be ≤ 250 bytes, got ${block.length} (${block})`,
@@ -240,8 +248,10 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const parsed = parseSnapshot(block);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, relPath);
+			assert.strictEqual(parsed.path, "report.html");
+			assert.strictEqual(parsed.entry, "report.html");
 			assert.strictEqual(parsed.contentHash, HASH);
+			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 		}
 	});
 

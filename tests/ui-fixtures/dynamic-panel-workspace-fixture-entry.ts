@@ -5,6 +5,8 @@ import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	panelWorkspaceSessionKey,
+	previewTabDisplayTitle,
+	previewVersionedTabId,
 	registerPreviewVersion,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
@@ -371,9 +373,9 @@ function makeHistoricalPreviewTab(sessionId: string, preview: HistoricalPreviewI
 	const htmlText = previewHtmlForBodyText(preview.bodyText);
 	knownPreviews.push({ sessionId, entry: preview.entry, html: htmlText, contentHash: preview.contentHash });
 	const version = registerPreviewVersion(state, sessionId, preview.entry, preview.contentHash, { current: false });
-	const title = preview.title || (version ? `${preview.entry} (v${version})` : preview.entry);
+	const title = preview.title || previewTabDisplayTitle(preview.entry, version, true);
 	return {
-		id: `preview:tool:${preview.toolId}:1`,
+		id: version ? previewVersionedTabId(preview.entry, version) : `preview:entry:${encodeURIComponent(preview.entry)}`,
 		kind: "preview",
 		title,
 		label: preview.label || title,

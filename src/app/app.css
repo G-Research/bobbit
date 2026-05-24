@@ -553,6 +553,21 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	line-height: 1.4;
 }
 
+.goal-tab-pill--draggable {
+	cursor: grab;
+	touch-action: pan-x;
+}
+
+.goal-tab-pill--dragging {
+	cursor: grabbing;
+	opacity: 0.72;
+	box-shadow: 0 2px 8px color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+
+.goal-tab-pill--pinned {
+	cursor: default;
+}
+
 .goal-tab-pill-label {
 	min-width: 0;
 	max-width: 14rem;
@@ -608,6 +623,55 @@ details.wf-proposal-workflow .wf-proposal-gates {
 
 .goal-tab-pill--active .goal-tab-dot {
 	background: var(--color-primary-foreground, hsl(var(--primary-foreground)));
+}
+
+.preview-restore-error {
+	background: var(--color-background, hsl(var(--background)));
+	color: var(--color-foreground, hsl(var(--foreground)));
+}
+
+.preview-restore-error-card {
+	width: min(420px, 100%);
+	border: 1px solid var(--color-border, hsl(var(--border)));
+	border-radius: 12px;
+	background: var(--color-card, hsl(var(--card)));
+	padding: 18px;
+	box-shadow: 0 12px 32px color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+.preview-restore-error-title {
+	font-weight: 600;
+	font-size: 14px;
+	margin-bottom: 6px;
+}
+
+.preview-restore-error-body {
+	font-size: 13px;
+	line-height: 1.45;
+	color: var(--color-muted-foreground, hsl(var(--muted-foreground)));
+	overflow-wrap: anywhere;
+}
+
+.preview-restore-error-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 14px;
+	justify-content: flex-end;
+}
+
+.preview-restore-error-button {
+	border: 1px solid var(--color-border, hsl(var(--border)));
+	border-radius: 8px;
+	padding: 5px 10px;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--color-foreground, hsl(var(--foreground)));
+	background: var(--color-background, hsl(var(--background)));
+	cursor: pointer;
+}
+
+.preview-restore-error-button:hover {
+	background: var(--color-secondary, hsl(var(--secondary)));
 }
 
 /* ============================================================================
