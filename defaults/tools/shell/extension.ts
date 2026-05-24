@@ -292,7 +292,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.Optional(Type.String({ description: "Short process name, max 3 words (create)." })),
 			id: Type.Optional(Type.String({ description: "Background process ID." })),
 			timeout: Type.Optional(Type.Number({ description: "Max seconds to wait. Default 300 (wait)." })),
-			tail: Type.Optional(Type.Number({ description: "Lines from end. Default 200 (logs)." })),
+			tail: Type.Optional(Type.Number({ description: "Lines from end. Default 15 (logs)." })),
 			pattern: Type.Optional(Type.String({ description: "Search pattern, string or regex (grep)." })),
 			context: Type.Optional(Type.Number({ description: "Lines of context around match. Default 0 (grep)." })),
 			max_results: Type.Optional(Type.Number({ description: "Max matches. Default 50 (grep)." })),
@@ -333,7 +333,7 @@ export default function (pi: ExtensionAPI) {
 					case "logs": {
 						if (!id) return text("Error: 'id' is required for logs");
 						const [logs, hdr] = await Promise.all([
-							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any,
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail ?? 15}`) as any,
 							header(id),
 						]);
 						const output = logs.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";
