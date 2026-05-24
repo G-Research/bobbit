@@ -66,7 +66,8 @@ Component map (all in `src/server/agent/`):
 | `inbox-store.ts` | Per-staff JSON persistence. Lazy load, synchronous writes. |
 | `inbox-manager.ts` | Cross-project façade. Owns enqueue + transitions + WS broadcast + nudger poke. |
 | `inbox-nudger.ts` | 15 s tick + microtask poke. Owns the only path that wakes a staff. |
-| `staff-trigger-engine.ts` | Cron/git triggers — `fireTrigger()` now calls `inboxManager.enqueue()`. |
+| `staff-trigger-engine.ts` | Polled `schedule` / `git` triggers — `fireTrigger()` calls `inboxManager.enqueue()`. |
+| `goal-trigger-dispatcher.ts` | Push-based `goal_created` / `goal_archived` triggers fired synchronously from `GoalStore` mutations. See [staff-triggers.md](staff-triggers.md). |
 
 UI surface (all in `src/app/` and `src/ui/inbox/`):
 
@@ -130,7 +131,7 @@ where an entry came from:
 
 | Source | How it gets there | UI badge |
 |---|---|---|
-| `trigger` | Cron / git trigger fires; `staff-trigger-engine.ts::fireTrigger()` enqueues. `source.triggerId` is set. | "trigger" + trigger id. |
+| `trigger` | Any staff trigger fires — `schedule` / `git` via the polled engine, or `goal_created` / `goal_archived` via the push dispatcher. `source.triggerId` is set in either case. See [staff-triggers.md](staff-triggers.md). | "trigger" + trigger id. |
 | `manual_api` | External integration `POST`s `/api/staff/:id/inbox`. The server normalises `source.type` to `manual_api` when the caller doesn't supply `manual_ui`. | "manual_api" + optional `actorId`. |
 | `manual_ui` | User clicks "+ Add to inbox" in the inbox panel or hits "Wake Now" on the staff edit page (both POST `/api/staff/:id/inbox` with `source.type = "manual_ui"`). | "manual_ui" + optional `actorId`. |
 
@@ -402,6 +403,9 @@ operation today.
 
 - [docs/staff-agents.md](staff-agents.md) — staff agent lifecycle, sandbox
   mode, edit page conventions.
+- [docs/staff-triggers.md](staff-triggers.md) — trigger type reference,
+  including the push-based `goal_created` / `goal_archived` dispatcher
+  and its required-prompt rule.
 - [docs/design/staff-inbox.md](design/staff-inbox.md) — original design
   document (kept for reference).
 - [docs/rest-api.md](rest-api.md) — REST surface index.
