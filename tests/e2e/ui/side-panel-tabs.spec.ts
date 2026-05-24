@@ -5,7 +5,7 @@ import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createSession, defaultProject, nonGitCwd } from "../e2e-setup.js";
 import { openApp, navigateToHash, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
-const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
 
 type PanelTab = {
@@ -56,6 +56,10 @@ async function visiblePanelTabs(page: Page): Promise<PanelTab[]> {
 			const rect = el.getBoundingClientRect();
 			const style = window.getComputedStyle(el);
 			if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") return null;
+			// The mobile Chat pill is a UI affordance for swiping to the chat
+			// pane; it is NOT part of the persisted panel-tab list. Filter it
+			// out so visible-tab assertions match the persisted shape.
+			if (button.getAttribute("data-panel-tab-kind") === "chat") return null;
 			const label = (button.textContent || "").replace(/\s+/g, " ").replace(/[×✕]/g, "").trim();
 			const title = (button.getAttribute("data-panel-tab-title") || button.getAttribute("title") || label).replace(/\s+/g, " ").trim();
 			return {
@@ -122,10 +126,12 @@ async function expectActivePanelTabId(page: Page, expected: string, message: str
 }
 
 async function expectNoChatTab(page: Page): Promise<void> {
+	// visiblePanelTabs filters the mobile Chat pill out (kind="chat"), so this
+	// check ensures no LEGACY chat tab leaked into the persisted panel-tab list.
 	const tabs = await visiblePanelTabs(page);
 	expect(
 		tabs.filter((tab) => tab.id === "chat" || tab.kind === "chat" || /^Chat$/i.test(tab.label) || /^Chat$/i.test(tab.title)),
-		`side-pane tabs must not expose Chat; tabs=${JSON.stringify(tabs)}`,
+		`persisted side-pane tabs must not expose Chat; tabs=${JSON.stringify(tabs)}`,
 	).toEqual([]);
 	await expect(page.locator(`${PANEL_TAB_SELECTOR}[data-panel-tab-id="chat"]`)).toHaveCount(0);
 }
@@ -674,7 +680,7 @@ test.describe("Side-panel tab contract", () => {
 		await expectActivePanelTabId(page, proposalId, "proposal update should focus its existing tab in place");
 	});
 
-	test("9. Mobile side-pane tabs exclude Chat, swipes reveal chat/panel, and touch does not reorder tabs", async ({ page }) => {
+	test("9. Mobile side-pane tabs include pinned Chat pill (not persisted), swipes reveal chat/panel, and touch does not reorder tabs", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);
@@ -684,7 +690,11 @@ test.describe("Side-panel tab contract", () => {
 		const mobileA = previewId("mobile-a.html");
 		const mobileB = previewId("mobile-b.html");
 		await expectPanelTabs(page, [mobileA, mobileB], "mobile tab strip should contain only side-pane preview tabs");
-		await expect(page.locator(".goal-tab-bar button.goal-tab-pill", { hasText: /^Chat$/ })).toHaveCount(0);
+		// Mobile now includes a pinned Chat pill as the first tab — a UI
+		// affordance that swipes the slider to the chat pane. It is rendered
+		// outside the persisted panel-tab list, so it never appears in
+		// `state.panelTabsBySession`.
+		await expect(page.locator(".goal-tab-bar .goal-tab-pill[data-panel-tab-kind='chat']")).toHaveCount(1);
 		await expectNoPersistedChatTab(page, sessionId);
 
 		const beforeTouchDrag = await visiblePanelTabIds(page);

@@ -82,7 +82,7 @@ async function readSlot(page: Page, type: ProposalType): Promise<Record<string, 
 }
 
 function proposalTab(page: Page, label: string) {
-	return page.locator(`button.goal-tab-pill[title="${label}"]`).first();
+	return page.locator(`.goal-tab-pill[title="${label}"]`).first();
 }
 
 function proposalPanel(page: Page, expected: ProposalExpectation) {
@@ -93,7 +93,7 @@ function proposalPanel(page: Page, expected: ProposalExpectation) {
 }
 
 function reviewPanelTab(page: Page, title: string) {
-	return page.locator(`.goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-title="Review: ${title}"]`);
+	return page.locator(`.goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-title="Review: ${title}"]`);
 }
 
 test.describe("Proposal/review lightweight fixture", () => {
@@ -202,7 +202,10 @@ test.describe("Proposal/review lightweight fixture", () => {
 
 		await page.setViewportSize({ width: 390, height: 800 });
 		await page.evaluate(() => (window as any).__setAllProposalFixtures());
-		await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 10_000 });
+		// Mobile renders a pinned Chat pill as the first tab in the unified bar
+		// (UI affordance for swiping to the chat pane). It is not persisted as a
+		// panel-tab row, so the slot list still excludes Chat.
+		await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(1, { timeout: 10_000 });
 		await proposalTab(page, "Staff").click();
 		await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 10_000 });
 	});
@@ -214,7 +217,7 @@ test.describe("Proposal/review lightweight fixture", () => {
 			{ title: "Document C", markdown: "# Document C\n\nThird document content." },
 		]));
 
-		await expect(page.locator(".goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review']")).toHaveCount(3, { timeout: 10_000 });
+		await expect(page.locator(".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']")).toHaveCount(3, { timeout: 10_000 });
 		await reviewPanelTab(page, "Document B").click();
 		await expect(page.locator("review-pane .review-tab")).toHaveCount(3, { timeout: 10_000 });
 		await expect(page.locator("review-document").getByText("Second document content").first()).toBeVisible({ timeout: 10_000 });

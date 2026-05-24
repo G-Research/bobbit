@@ -115,6 +115,7 @@ New endpoint:
 | Route | Behaviour |
 |---|---|
 | `POST /api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | `restorePreviewArtifact` rehydrates the named artifact into the single live mount and fires `broadcastPreviewChanged` so SSE subscribers see the restored content. Validation and staging happen before the live mount is touched, so missing / wrong-session / corrupt artifacts cannot alias to current content. Body may include `{ artifactId }` for symmetry but must match the route. |
+| `GET /preview/<sid>/_artifact/<artifactId>/<rel-path>` | Direct read from the per-artifact mount directory. Bypasses the single live mount slot, so switching between artifact-backed preview tabs is a pure iframe `src` change — no POST round-trip, no iframe blanking, no mount swap. Same `<base>` + theme-snapshot + bridge-script rewrites as `/preview/<sid>/...` (the base href is the artifact-prefixed path). Authoritative dir: `artifactMountDir(sid, artifactId)`. |
 
 Mount-endpoint extensions:
 
@@ -130,9 +131,17 @@ Mount-endpoint extensions:
   whenever a known artifact matches the broadcast `contentHash`.
 
 The live mount stays single — the artifact store is an additional
-immutable restore source, not a second live mount. Historical preview
-tabs restore their artifact into the same live mount before the iframe
-renders them.
+immutable restore source, not a second live mount.
+
+For artifact-backed preview tabs, the client now uses the per-artifact
+URL (`/preview/<sid>/_artifact/<artifactId>/<entry>`) directly instead of
+restoring into the live mount. This is what powers instant switching
+between multiple preview tabs without re-mounting on every click. The
+active tab's `artifactId` is read off the panel-tab itself, not mirrored
+into global state, so SSE / bootstrap updates of `state.previewPanelEntry`
+can never desync the iframe `src` from the visible tab. The live mount
+slot remains the source for tabs without an `artifactId` (assistant /
+live preview).
 
 ### Reopen-tab decision flow
 
@@ -576,7 +585,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 | File | Responsibility |
 |---|---|
 | `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `mountFile` (explicit asset opt-in), `contentHash` calculation, watcher |
-| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler, entry pick, `<base>` + bridge injection |
+| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler (live mount) and `/preview/<sid>/_artifact/<id>/<rel>` (per-artifact stable URL), entry pick, `<base>` + bridge injection |
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
 | `src/server/preview/events.ts` | Per-session `preview-changed` channel carrying mount identity payloads |
@@ -590,7 +599,7 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/ui/tools/renderers/PreviewRenderer.ts` | Open button on tool cards; artifact restore → source remount → recorded-entry fallback; live-hash remount skip; filename-keyed tab dispatch |
 | `src/app/panel-workspace.ts` | Side-pane tab id grammar (`preview:entry:<file>[:v:N]`, `proposal:<type>[:rev:N]`, `review:<title>`, `inbox`), per-filename version ledger, pinned-first ordering, drag reorder, persistence |
 | `src/app/preview-panel.ts` | EventSource subscription, mount bootstrap, current-vs-historical upsert, older-version-rehydration guard |
-| `src/app/render.ts` | Side-pane tab strip rendering, mobile pane bar, pointer drag handlers, active-content lookup by id only |
+| `src/app/render.ts` | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos), mobile pane bar with pinned Chat pill, SortableJS drag integration with X-axis lock, active-content lookup by id only, artifact-id derived from active tab so iframe src never desyncs from state.previewPanelEntry |
 
 ## Acceptance properties
 

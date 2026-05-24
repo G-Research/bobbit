@@ -148,7 +148,7 @@ async function otherProposalSlots(page: Page, type: ProposalType): Promise<Recor
 }
 
 function proposalTab(page: Page, proposal: ProposalCase): Locator {
-	return page.locator(`button.goal-tab-pill[title="${proposal.label}"]`).first();
+	return page.locator(`.goal-tab-pill[title="${proposal.label}"]`).first();
 }
 
 function proposalPane(page: Page, proposal: ProposalCase): Locator {
@@ -191,7 +191,10 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 	await page.setViewportSize({ width: 390, height: 800 });
 	await expectProposalTabAndPane(page, proposal);
 
-	await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
+	// Mobile renders a pinned Chat pill as the first tab in the unified bar
+	// (a UI affordance for swiping to the chat pane). It is not persisted as
+	// a panel-tab row, so the slot list still excludes it.
+	await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(1, { timeout: 5_000 });
 	await proposalTab(page, proposal).click();
 	await expect(proposalTab(page, proposal)).toHaveClass(/goal-tab-pill--active/);
 	await expect(proposalPane(page, proposal)).toBeVisible({ timeout: 5_000 });
@@ -211,7 +214,7 @@ async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, session
 	);
 	await waitForProposalSlot(page, proposal.type);
 
-	await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
+	await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
 	const openButton = await expectProposalToolCard(page, proposal);
 	await openButton.scrollIntoViewIfNeeded();
 	await openButton.click();

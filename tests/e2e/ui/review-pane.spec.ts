@@ -8,7 +8,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
-const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review']";
+const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
 
 test.describe("Review Pane", () => {
 	test("opens review pane with inline markdown via review_open @smoke", async ({ page }) => {

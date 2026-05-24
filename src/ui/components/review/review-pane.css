@@ -188,6 +188,19 @@ review-pane review-document {
   line-height: 1.3;
 }
 
+/* Don't add a top margin when a heading is the first element in the
+   rendered markdown — otherwise proposal specs and review documents
+   start with a visible blank gap above the first heading. */
+.review-document-content > :first-child,
+.review-document-content > :first-child h1,
+.review-document-content > :first-child h2,
+.review-document-content > :first-child h3,
+.review-document-content > :first-child h4,
+.review-document-content > :first-child h5,
+.review-document-content > :first-child h6 {
+  margin-top: 0;
+}
+
 .review-document-content h1 { font-size: 1.5em; }
 .review-document-content h2 { font-size: 1.3em; }
 .review-document-content h3 { font-size: 1.15em; }

@@ -268,6 +268,73 @@ describe("handlePreviewRequest — error mapping", () => {
 	});
 });
 
+describe("handlePreviewRequest — per-artifact URL", () => {
+	// `/preview/<sid>/_artifact/<artifactId>/<rel>` serves directly from the
+	// per-artifact mount dir instead of the session's live mount slot, so
+	// multiple preview tabs (each backed by a different artifact) can be
+	// loaded at their own stable URLs without mount swapping.
+	const ARTIFACT_ID = "abc123";
+	let artifactMountPath: string;
+	before(() => {
+		artifactMountPath = path.join(workspaceRoot, "state", "preview-artifacts", SID, ARTIFACT_ID, "mount");
+		mkdirSync(artifactMountPath, { recursive: true });
+		writeFileSync(path.join(artifactMountPath, "01.html"), "<!doctype html><html><head><title>a1</title></head><body>v1</body></html>");
+		writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
+	});
+
+	it("serves an artifact HTML file with artifact-prefixed <base>", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/01.html`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
+		assert.equal(res.statusCode, 200);
+		const txt = bodyText(res);
+		assert.match(txt, new RegExp(`<base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
+		assert.match(txt, /v1<\/body>/);
+	});
+
+	it("serves non-HTML artifact assets unmodified", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/styles.css`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
+		assert.equal(res.statusCode, 200);
+		assert.equal(bodyText(res), "body{color:blue}");
+	});
+
+	it("400 on invalid artifactId", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/has space/01.html`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, decodeURI(url).replace("%20", " "), o);
+		assert.equal(res.statusCode, 400);
+	});
+
+	it("404 on unknown artifactId (no mount dir)", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/missing0/01.html`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
+		assert.equal(res.statusCode, 404);
+	});
+
+	it("404 on missing file inside an existing artifact", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/nope.html`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
+		assert.equal(res.statusCode, 404);
+	});
+
+	it("rejects traversal out of artifact mount", async () => {
+		const o = makeOpts(true);
+		const res = fakeRes();
+		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/..\\evil.html`;
+		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
+		assert.equal(res.statusCode, 403);
+	});
+});
+
 describe("handlePreviewRequest — admin bearer fallback", () => {
 	it("accepts ?token=<admin>", async () => {
 		const store = new CookieStore(mkdtempSync(path.join(workspaceRoot, "ab-")));

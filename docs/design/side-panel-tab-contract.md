@@ -319,28 +319,76 @@ its own last active id; it never borrows another session's active tab.
 
 ## 7. Drag reorder
 
-Source of truth: [`src/app/render.ts`](../../src/app/render.ts) (pill drag
-handlers) and `reorderSidePanelTab` in
-[`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts).
+Source of truth: [SortableJS](https://github.com/SortableJS/Sortable) bound
+to the tab-bar container in [`src/app/render.ts`](../../src/app/render.ts)
+(`ensurePanelSortable`), plus `reorderSidePanelTab` in
+[`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) for any
+programmatic reorder paths (drag commits a fresh order directly off the DOM).
 
-- Desktop pointer drag reorders side-pane tab pills horizontally.
-- Pinned Inbox stays fixed at the start of the strip. `reorderSidePanelTab`
-  refuses to move a pinned tab and clamps any insert index to
-  `pinnedCount`, so other tabs cannot drop before it.
+- Desktop pointer drag reorders side-pane tab pills horizontally via a
+  SortableJS instance attached after every render to the inner tab-bar
+  container (`[data-panel-tab-bar]`). `ensurePanelSortable` is idempotent
+  — it re-uses the existing instance unless the container element
+  changes (workspace switch).
+- `forceFallback: true` is on so SortableJS uses its own pointer
+  emulator instead of native HTML5 DnD. This:
+  - lets it work with `<div role="button">` pills (button elements
+    swallow `pointerdown` and break native DnD);
+  - gives us a JS-positioned floating clone (`Sortable.ghost`) we can
+    re-style and constrain via inline `transform`;
+  - keeps drag-detect responsive on touch devices.
+- **Chrome-style Y-axis lock**: `startPanelDragYLock` runs a
+  `requestAnimationFrame` loop while a drag is in progress. Each frame
+  it reads the floating clone's `transform: matrix(a,b,c,d,e,f)` and
+  rewrites `f` (translateY) to `0`. The dragged tab tracks the cursor
+  horizontally; vertical cursor wander has no visual effect.
+- Pinned tabs (Inbox, mobile Chat pill) are skipped via the SortableJS
+  `filter: ".goal-tab-pill--pinned, .goal-tab-close"` selector —
+  attempting to pick one up does nothing. The `onMove` handler also
+  returns `false` when the related drop target is pinned, blocking
+  drops in front of the pinned slot.
+- `setRenderSuppressed(true)` is invoked in `onStart` so any
+  `renderApp()` calls during the drag are buffered. SortableJS owns the
+  DOM during the drag; on `onEnd` the new tab id order is read off the
+  DOM children, committed to `panelTabsBySession[sid]`, and renders
+  resume with a single flush.
 - Non-pinned tabs persist their stored order in `panelTabsBySession[sid]`
   (saved under the `bobbit-panel-tabs-by-session` localStorage key) and
   survive reload / session switch.
 - New agent-opened tabs append at the **end** of the non-pinned tabs.
-- The drag uses a captured snapshot of the side-pane tab list at
-  `pointerdown` (`draggingPanelOriginalTabs`) for all mid-drag reorder
-  math. This prevents fast pointer sweeps from cascading — the reorder
-  computation never runs against the mutated live array.
-- Hovering a pinned tab is an explicit "drop before pinned" intent, which
-  is forbidden. The handler reverts any incidental in-progress reorder so
-  the user sees the original order while parked over the pinned slot.
-- Touch devices keep the existing main-chat ↔ side-pane swipe gesture;
-  no touch drag reorder in this iteration.
+- Touch devices fall through SortableJS's touch emulator. The existing
+  main-chat ↔ side-pane swipe gesture remains.
 - No keyboard reorder shortcuts in this iteration.
+
+## 7a. Historical proposal tabs
+
+Proposal panel tabs follow the same canonical-vs-historical pattern as
+preview tabs:
+
+- The canonical tab id is `proposal:<type>` and always renders
+  `state.activeProposals[type]` (the live slot, latest revision). Updates
+  via `proposal_update` / `edit_proposal` flow into the slot and the
+  canonical tab's panel re-renders in place. Label: `Goal`, `Project`,
+  etc.
+- Historical revisions get separate, immutable tabs at id
+  `proposal:<type>:rev:<N>`. Label: `Goal (vN)` (matches preview
+  versioned-tab format). The tab stores its frozen fields in
+  `tab.state.fields` and the revision in `tab.state.rev`.
+- Historical tabs are **never auto-spawned**. They appear only when the
+  user explicitly opens an older revision card from the chat
+  (`proposalOpenHandler` in `src/app/session-manager.ts` calls
+  `selectProposalWorkspaceTab(type, { rev, fields, select: true })`).
+- Historical tabs are **editable + submittable**, not read-only. When
+  the user activates one, `proposalPanelContent` (in render.ts) sets a
+  module-level `_proposalOverride = { type, fields, rev }`. The standard
+  editable panel reads from the override (via `syncProposalFormState`
+  and `projectProposalPanel`'s synthetic slot) instead of
+  `state.activeProposals[type]`. The live slot is never clobbered —
+  each tab is independent. Switching back to the canonical tab clears
+  the override and re-hydrates from the live slot.
+- The `data-historical-proposal="true"` attribute on the panel root
+  marks the override branch so tests can distinguish historical vs live
+  renders of the same editable form.
 
 ## 8. Cross-kind harmony
 
@@ -366,7 +414,7 @@ So:
 |---|---|
 | [`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) | Tab id grammar, normalization, persistence, version ledger, pinned ordering, `nextActivePanelTabId`, `reorderSidePanelTab`. |
 | [`src/app/preview-panel.ts`](../../src/app/preview-panel.ts) | `selectHtmlPreviewTab` (upsert / split / collapse), SSE bootstrap and live update, older-version-rehydration guard. |
-| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering, mobile pane bar, pointer drag handlers, active-content lookup by id only. |
+| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, active-content lookup by id only. |
 | [`src/ui/tools/renderers/PreviewRenderer.ts`](../../src/ui/tools/renderers/PreviewRenderer.ts) | Tool-card Open button; chooses between artifact restore, source remount, and recorded-entry select; computes collapse-to-current before invoking `selectHtmlPreviewTab`. |
 | [`src/server/preview/artifacts.ts`](../../src/server/preview/artifacts.ts) | `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash`, `sweepOrphanArtifacts`. |
 | [`src/server/server.ts`](../../src/server/server.ts) (`/api/preview/mount`, `/api/preview/artifacts/:id/restore`, SSE) | Capture artifact on mount; include `artifactId` in mount responses, SSE bootstrap, and live events. |
@@ -399,9 +447,12 @@ spec):
    pinned first, has no close button, cannot be dragged, and remains
    when other tabs are closed. Other tabs open beside it and close
    normally.
-6. **Drag reorder persistence** — drag non-pinned tabs, assert stored
-   order, reload, assert the same order. Verify drag never creates a
-   Chat pill and cannot move a tab before pinned Inbox.
+6. **Drag reorder persistence** — drag non-pinned tabs (SortableJS), assert
+   stored order, reload, assert the same order. Verify drag cannot move a
+   tab before pinned Inbox.
+   Y-axis is locked during the drag: the floating clone tracks the cursor
+   only horizontally regardless of vertical movement.
+   The mobile Chat pill is pinned (filtered) and cannot be dragged.
 7. **Tab id == rendered content** — with preview + proposal + review +
    inbox visible, click every tab and assert `activePanelTabId` equals
    the clicked id and the rendered content matches that id. Repeat after
@@ -410,9 +461,13 @@ spec):
    firing a new `preview_open` appends-or-updates the preview tab and
    takes focus. Subsequent updates / refreshes never reorder existing
    tabs unless a brand-new tab is appended.
-9. **Mobile** — at phone viewport, the side-pane tab bar contains only
-   side-pane tabs (no Chat pill). The existing swipe gesture reveals
-   chat and the side pane; no touch drag reorder.
+9. **Mobile** — at phone viewport, the side-pane tab bar leads with a
+   pinned Chat pill that swipes the slider to the chat pane on tap; the
+   remaining tabs are the side-pane tabs (preview / proposal / review /
+   inbox). The Chat pill is NOT persisted in `panelTabsBySession[sid]`
+   — it's a pure UI affordance rendered only when the bar is visible.
+   The existing swipe gesture reveals chat and the side pane; no touch
+   drag reorder.
 
 Helper / reducer behaviour (id normalisation, version assignment, pinned
 ordering, next-active selection) is covered by unit tests against the

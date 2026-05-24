@@ -16,7 +16,7 @@ const REVIEW_PANE_SRC = path.resolve("src/ui/components/review/ReviewPane.ts");
 const REVIEW_DOCUMENT_SRC = path.resolve("src/ui/components/review/ReviewDocument.ts");
 const ANNOTATION_STORE_SRC = path.resolve("src/ui/components/review/AnnotationStore.ts");
 
-const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
 const PREVIEW_TAB_RE = /\.html(?:\s*\(v\d+\))?$/i;
 const REVIEW_DOCS = [
@@ -219,7 +219,7 @@ async function mobileTabBarDiagnostics(page: Page): Promise<{ labels: string[]; 
 	return page.evaluate(() => {
 		const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
 		const bars = [...document.querySelectorAll(".goal-tab-bar")].map((bar) => {
-			const labels = [...bar.querySelectorAll("button.goal-tab-pill")].map((button) => normalize(button.getAttribute("title") || button.textContent));
+			const labels = [...bar.querySelectorAll(".goal-tab-pill")].map((button) => normalize(button.getAttribute("title") || button.textContent));
 			const hasGoal = labels.some((label) => /^Goal( Proposal)?$/i.test(label));
 			const hasPreview = labels.some((label) => /\.html(?:\s*\(v\d+\))?$/i.test(label));
 			const reviewCount = labels.filter((label) => /^(Review:\s*)?Document [ABC]$/i.test(label)).length;

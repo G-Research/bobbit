@@ -452,7 +452,9 @@ function renderGoalForm(config: GoalFormConfig) {
 		reconcileFollowTail(goalSpecTextareaRef.value);
 	});
 
-	const goalRev = state.activeProposals.goal?.rev ?? 0;
+	// When viewing a historical Goal (vN) tab, show that revision's number
+	// in the panel header instead of the live slot's latest rev.
+	const goalRev = (_proposalOverride?.type === "goal" ? _proposalOverride.rev : state.activeProposals.goal?.rev) ?? 0;
 	return html`
 		<div class="flex-1 overflow-y-auto px-5 pt-3 md:pt-4 pb-3 flex flex-col gap-2.5">
 			${goalRev > 0 ? html`<div class="text-xs text-muted-foreground -mb-1" data-testid="proposal-panel-rev">rev ${goalRev}</div>` : ""}
@@ -800,8 +802,9 @@ function goalPreviewPanel() {
 		await createProjectAssistantSession(linked.rootPath, false, { projectId: linked.id, existingProjectName: linked.name || "" });
 	};
 
+	const isHistorical = _proposalOverride?.type === "goal";
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal">
+		<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0 relative" data-panel="goal-proposal" data-historical-proposal=${isHistorical ? "true" : "false"}>
 			${proposalToast()}
 			${renderGoalForm({
 				title: state.previewTitle,
@@ -1628,7 +1631,15 @@ export function resetProjectProposalPanel(): void {
 }
 
 function projectProposalPanel() {
-	const proposal = state.activeProposals.project;
+	const proposal = _proposalOverride?.type === "project"
+		? {
+			sessionId: state.activeProposals.project?.sessionId ?? "",
+			fields: _proposalOverride.fields,
+			streaming: false,
+			rev: _proposalOverride.rev,
+			mode: state.activeProposals.project?.mode,
+		} as typeof state.activeProposals.project
+		: state.activeProposals.project;
 	const streaming = isProposalStreaming("project_proposal");
 	queueMicrotask(() => {
 		reconcileFollowTail(projectOuterScrollRef.value);
@@ -1798,8 +1809,9 @@ function projectProposalPanel() {
 		</div>
 	`;
 
+	const isHistoricalProject = _proposalOverride?.type === "project";
 	return html`
-		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode}>
+		<div class="flex-1 flex flex-col min-h-0 min-w-0 w-full overflow-hidden" data-panel="project-proposal" data-mode=${mode} data-historical-proposal=${isHistoricalProject ? "true" : "false"}>
 			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0">
 				<div class="text-sm font-medium shrink-0">${fields.name || "(unnamed project)"}</div>
 				${proposal.rev > 0 ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${proposal.rev}</span>` : ""}
@@ -1845,52 +1857,26 @@ function proposalPanelForType(type: ProposalType) {
 	}
 }
 
-function proposalFieldText(value: unknown): string {
-	if (value == null) return "";
-	if (typeof value === "string") return value;
-	try { return JSON.stringify(value, null, 2) ?? String(value); } catch { return String(value); }
+// Dispatcher used by both the live current-proposal path and the
+// historical-override path. Goal proposals from the assistant flow render
+// via `goalPreviewPanel()`; everything else (including project, role, tool,
+// staff, and non-assistant goal proposals) goes through `proposalPanelForType`.
+function proposalPanelForWorkspaceType(type: ProposalType, currentAssistantProposalType: () => ProposalType | null) {
+	if (type === "goal" && currentAssistantProposalType() === "goal") return goalPreviewPanel();
+	return proposalPanelForType(type);
 }
 
-const PROPOSAL_TITLE_FIELD: Record<ProposalType, string> = {
-	goal: "title",
-	project: "name",
-	role: "name",
-	tool: "tool",
-	staff: "name",
-};
-
-function historicalProposalPanel(tab: PanelWorkspaceTab) {
+// Loading shim shown while a historical proposal tab's fields are still being
+// fetched. Once fields land, `proposalPanelContent` seeds `_proposalOverride`
+// and renders the standard editable panel.
+function historicalProposalLoadingPanel(tab: PanelWorkspaceTab) {
 	if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
 	const type = tab.source.proposalType;
 	const rev = proposalRevisionFromPanelTab(tab);
-	const fields = tab.state?.fields && typeof tab.state.fields === "object" && !Array.isArray(tab.state.fields)
-		? tab.state.fields as Record<string, unknown>
-		: undefined;
-	if (!fields) {
-		return html`
-			<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel=${`${type}-proposal`} data-historical-proposal="true">
-				<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
-					Loading proposal revision${rev ? ` ${rev}` : ""}…
-				</div>
-			</div>
-		`;
-	}
-	const titleKey = PROPOSAL_TITLE_FIELD[type];
-	const title = proposalFieldText(fields[titleKey]) || `${type.charAt(0).toUpperCase()}${type.slice(1)} proposal`;
 	return html`
-		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full overflow-hidden" data-panel=${`${type}-proposal`} data-historical-proposal="true">
-			<div class="shrink-0 px-5 pt-4 pb-3 flex items-baseline gap-3 min-w-0 border-b border-border">
-				<div class="text-sm font-medium truncate">${title}</div>
-				${rev ? html`<span class="text-xs text-muted-foreground shrink-0" data-testid="proposal-panel-rev">rev ${rev}</span>` : ""}
-				<span class="text-[11px] text-muted-foreground shrink-0">historical snapshot</span>
-			</div>
-			<div class="flex-1 min-h-0 overflow-auto p-5 flex flex-col gap-4">
-				${Object.entries(fields).map(([key, value]) => html`
-					<div data-field=${key}>
-						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">${key}</label>
-						<pre class="text-sm whitespace-pre-wrap break-words rounded-md border border-border bg-secondary/30 p-3 text-foreground/90">${proposalFieldText(value) || "—"}</pre>
-					</div>
-				`)}
+		<div class="goal-preview-panel flex-1 flex flex-col min-h-0 w-full" data-panel=${`${type}-proposal`} data-historical-proposal="true">
+			<div class="flex-1 flex items-center justify-center text-muted-foreground text-sm p-5">
+				Loading proposal revision${rev ? ` ${rev}` : ""}…
 			</div>
 		</div>
 	`;
@@ -1914,9 +1900,20 @@ let _proposalAutoStartTeam = true;
 let _proposalEnabledOptionalSteps: string[] = [];
 let _proposalInitializedFrom: string | null = null;
 
+// When a historical proposal tab is the active panel tab, the dispatcher
+// sets this to an override that supplies the form state for that revision.
+// The override is read by `syncProposalFormState`, `renderGoalForm`,
+// `goalPreviewPanel`, and `projectProposalPanel` instead of
+// `state.activeProposals[type]`, so the live current-proposal slot is never
+// clobbered when the user views an older snapshot.
+let _proposalOverride: { type: ProposalType; fields: Record<string, unknown>; rev: number } | null = null;
+
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
-	const proposal = state.activeProposals.goal?.fields as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
+	const raw = _proposalOverride?.type === "goal"
+		? _proposalOverride.fields
+		: state.activeProposals.goal?.fields;
+	const proposal = raw as undefined | { title: string; spec: string; cwd?: string; workflow?: string; options?: string };
 	if (!proposal) return;
 	// Use a simple identity check to avoid re-initializing on every render
 	const key = `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}`;
@@ -2111,9 +2108,29 @@ export function proposalPanelContent(
 ) {
 	if (tab.kind !== "proposal" || tab.source.type !== "proposal") return "";
 	const type = tab.source.proposalType;
-	if (isHistoricalProposalTab(tab)) return historicalProposalPanel(tab);
-	if (type === "goal" && currentAssistantProposalType() === "goal") return goalPreviewPanel();
-	return proposalPanelForType(type);
+	if (isHistoricalProposalTab(tab)) {
+		const fields = tab.state?.fields && typeof tab.state.fields === "object" && !Array.isArray(tab.state.fields)
+			? tab.state.fields as Record<string, unknown>
+			: undefined;
+		if (!fields) return historicalProposalLoadingPanel(tab);
+		// Seed an override (NOT activeProposals) so the historical snapshot
+		// flows through the editable panel without clobbering the live
+		// current-proposal slot. Switching back to the current tab clears
+		// the override and the live slot's content is restored verbatim.
+		const rev = proposalRevisionFromPanelTab(tab) || 1;
+		if (!_proposalOverride || _proposalOverride.type !== type || _proposalOverride.fields !== fields || _proposalOverride.rev !== rev) {
+			_proposalOverride = { type, fields, rev };
+			_proposalInitializedFrom = null;
+		}
+		return proposalPanelForWorkspaceType(type, currentAssistantProposalType);
+	}
+	if (_proposalOverride && _proposalOverride.type === type) {
+		// Returning to the current tab: drop the override and force a
+		// re-hydration of the form from the live activeProposals slot.
+		_proposalOverride = null;
+		_proposalInitializedFrom = null;
+	}
+	return proposalPanelForWorkspaceType(type, currentAssistantProposalType);
 }
 
 // Mark some imports referenced only for re-export / future use as used to

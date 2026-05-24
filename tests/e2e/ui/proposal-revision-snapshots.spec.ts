@@ -62,10 +62,10 @@ async function activeSessionId(page: Page): Promise<string> {
 	return sid as string;
 }
 
-const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
+const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_PROPOSAL_TAB_TITLE_RE = /^Goal Proposal$/i;
 const PROJECT_PROPOSAL_TAB_TITLE_RE = /^Project Proposal$/i;
-const PROJECT_PROPOSAL_HISTORICAL_TAB_TITLE_RE = /^Project Proposal rev 1$/i;
+const PROJECT_PROPOSAL_HISTORICAL_TAB_TITLE_RE = /^Project Proposal \(v1\)$/i;
 
 async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; label: string; title: string; id: string; kind: string; active: boolean }>> {
 	return page.locator(PANEL_TAB_SELECTOR).evaluateAll((buttons) => buttons

@@ -370,6 +370,7 @@ export default defineConfig(({ mode }) => ({
 					if (id.includes("/marked")) return "vendor-marked";
 					if (id.includes("/@mariozechner/mini-lit/")) return "vendor-mini-lit";
 					if (id.includes("/lucide")) return "vendor-lucide";
+					if (id.includes("/sortablejs/")) return "vendor-sortable";
 					if (id.includes("/@recogito/") || id.includes("/@annotorious/") || id.includes("/rbush")) return "vendor-annotator";
 					if (id.includes("/lit-html/") || id.includes("/lit-element/") || id.includes("/@lit/") || /\/lit\//.test(id)) return "vendor-lit";
 					return undefined;

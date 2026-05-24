@@ -18,6 +18,7 @@ import fs from "node:fs";
 import type http from "node:http";
 
 import { mountDir } from "./mount.js";
+import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
@@ -104,14 +105,42 @@ export async function handlePreviewRequest(
 	const remainder = pathname.slice("/preview/".length);
 	const slashIdx = remainder.indexOf("/");
 	const sid = slashIdx < 0 ? remainder : remainder.slice(0, slashIdx);
-	const rel = slashIdx < 0 ? "" : remainder.slice(slashIdx + 1);
+	let rel = slashIdx < 0 ? "" : remainder.slice(slashIdx + 1);
 
 	if (!sid || !VALID_SESSION_ID.test(sid)) {
 		send(res, 400, JSON.stringify({ error: "Invalid sessionId" }));
 		return true;
 	}
 
-	const baseDir = mountDir(sid);
+	// `/preview/<sid>/_artifact/<artifactId>/<rel>` — serve directly from the
+	// stable per-artifact directory instead of the session's live mount slot.
+	// This lets the client switch between preview tabs (each backed by its own
+	// artifact) by just changing the iframe src — no POST/restore round-trip
+	// needed, since each artifact's bytes live at their own URL forever.
+	let baseDir = mountDir(sid);
+	let baseHrefPrefix = `/preview/${sid}/`;
+	if (rel.startsWith("_artifact/")) {
+		const afterPrefix = rel.slice("_artifact/".length);
+		const nextSlash = afterPrefix.indexOf("/");
+		const artifactId = nextSlash < 0 ? afterPrefix : afterPrefix.slice(0, nextSlash);
+		const artRel = nextSlash < 0 ? "" : afterPrefix.slice(nextSlash + 1);
+		if (!artifactId || !/^[A-Za-z0-9_-]{1,64}$/.test(artifactId)) {
+			send(res, 400, JSON.stringify({ error: "Invalid artifactId" }));
+			return true;
+		}
+		try {
+			baseDir = artifactMountDir(sid, artifactId);
+		} catch {
+			send(res, 400, JSON.stringify({ error: "Invalid artifactId" }));
+			return true;
+		}
+		if (!fs.existsSync(baseDir)) {
+			send(res, 404, JSON.stringify({ error: "Preview artifact not found" }));
+			return true;
+		}
+		baseHrefPrefix = `/preview/${sid}/_artifact/${artifactId}/`;
+		rel = artRel;
+	}
 
 	// `/preview/<sid>` → 301 redirect to add trailing slash so relative URLs resolve.
 	if (slashIdx < 0) {
@@ -131,7 +160,7 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
 		}
-		res.writeHead(302, { Location: `/preview/${sid}/${encodeURIComponent(entry)}`, "Cache-Control": "no-store" });
+		res.writeHead(302, { Location: `${baseHrefPrefix}${encodeURIComponent(entry)}`, "Cache-Control": "no-store" });
 		res.end();
 		return true;
 	}
@@ -170,7 +199,7 @@ export async function handlePreviewRequest(
 		// standalone-tab opens (where the runtime parent-pull bridge no-ops) still
 		// resolve `var(--background)` etc. The runtime bridge continues to flow
 		// live theme toggles into embedded iframes where `parent !== window`.
-		const baseTag = `<base href="/preview/${sid}/">` + getPreviewThemeSnapshot();
+		const baseTag = `<base href="${baseHrefPrefix}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS);
 		res.writeHead(200, {
 			"Content-Type": contentType,

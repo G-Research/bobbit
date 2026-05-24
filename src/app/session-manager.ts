@@ -1556,7 +1556,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const nextRev = (typeof serverRev === "number" && serverRev > 0)
 				? Math.trunc(serverRev)
 				: (prev?.rev ?? 0);
-			const slot: ProposalSlot = {
+		const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
 				streaming: false,
