@@ -1,5 +1,6 @@
 import { ChatPanel } from "../ui/index.js";
-import { startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorkspaceTab, startPreviewPolling, stopPreviewPolling } from "./preview-panel.js";
+import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
 import {
@@ -22,7 +23,7 @@ import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog }
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./render.js";
+import { setSelectedWorkflowId, showHeaderToast, showProposalToast, resetProposalAnnCount } from "./render.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
@@ -36,7 +37,16 @@ import {
 	markProposalDismissed as markProposalDismissedTyped,
 	clearProposalDismissed as clearProposalDismissedTyped,
 } from "./proposal-helpers.js";
-import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import { PROPOSAL_TYPE_REGISTRY, PROPOSAL_TYPES, isProposalType, revealProposalPanel, type ProposalType, type ProposalSlot } from "./proposal-registry.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	activePanelTabIdForSession,
+	firstContentPanelTab,
+	isHistoricalProposalTab,
+	panelTabsForSession,
+	proposalPanelTabId,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
 
 /**
  * Extract the markdown body field from a proposal's fields object.
@@ -50,6 +60,38 @@ function extractProposalBody(
 	if (!fields) return "";
 	if (type === "goal") return String((fields as any).spec ?? "");
 	return String((fields as any).prompt ?? "");
+}
+
+function projectRootForSession(sessionId: string): string {
+	const session = state.gatewaySessions.find(s => s.id === sessionId)
+		|| state.archivedSessions.find(s => s.id === sessionId);
+	let projectId = session?.projectId;
+	const activeId = activeSessionId();
+	if (!projectId && (sessionId === activeId || sessionId === state.selectedSessionId || sessionId === state.remoteAgent?.gatewaySessionId)) {
+		projectId = state.chatPanel?.agentInterface?.projectId;
+	}
+	if (!projectId) return "";
+	return state.projects.find(p => p.id === projectId)?.rootPath || "";
+}
+
+function proposalCwdOrProjectRoot(proposalCwd: unknown, sessionId: string): string {
+	const cwd = typeof proposalCwd === "string" ? proposalCwd : "";
+	return cwd.trim() ? cwd : projectRootForSession(sessionId);
+}
+
+function resetStaffProposalPreview(sessionId: string): void {
+	state.staffPreviewName = "";
+	state.staffPreviewDescription = "";
+	state.staffPreviewPrompt = "";
+	state.staffPreviewTriggers = "[]";
+	state.staffPreviewCwd = projectRootForSession(sessionId);
+	state.staffPreviewWorktree = true;
+	state.staffPreviewNameEdited = false;
+	state.staffPreviewDescriptionEdited = false;
+	state.staffPreviewPromptEdited = false;
+	state.staffPreviewTriggersEdited = false;
+	state.staffPreviewCwdEdited = false;
+	state.assistantHasProposal = false;
 }
 
 // ============================================================================
@@ -142,6 +184,79 @@ function resolveProjectMode(sessionId: string): "provisional" | "registered" {
 	return project?.provisional ? "provisional" : "registered";
 }
 
+function isAssistantProposalType(type: ProposalType): boolean {
+	return state.assistantType === type || (type === "project" && state.assistantType === "project-scaffolding");
+}
+
+function revealActiveProposalPanel(type: ProposalType, sessionId: string): void {
+	const isMatchingAssistant = isAssistantProposalType(type);
+	revealProposalPanel(type, { sessionId }, {
+		isAssistant: isMatchingAssistant,
+		isMobile: !isDesktop(),
+	});
+	if (state.assistantType && !isMatchingAssistant) {
+		state.assistantHasProposal = true;
+		if (!isDesktop()) state.assistantTab = "preview";
+	}
+}
+
+function liveProposalSlotForSession(type: ProposalType, sessionId: string): ProposalSlot | undefined {
+	const slot = state.activeProposals[type];
+	if (!slot) return undefined;
+	if (slot.sessionId && slot.sessionId !== sessionId) return undefined;
+	return slot;
+}
+
+function hasObjectFields(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+function isSelectableFallbackContentTab(tab: PanelWorkspaceTab, failedTabId: string, sessionId: string): boolean {
+	if (!tab || tab.id === failedTabId || tab.kind === "chat") return false;
+	const sourceSessionId = typeof (tab.source as any)?.sessionId === "string" ? (tab.source as any).sessionId : "";
+	if (sourceSessionId && sourceSessionId !== sessionId) return false;
+	if (tab.kind === "proposal" && tab.source.type === "proposal") {
+		if (isHistoricalProposalTab(tab)) return hasObjectFields(tab.state?.fields);
+		return !!liveProposalSlotForSession(tab.source.proposalType, sessionId) || isAssistantProposalType(tab.source.proposalType);
+	}
+	return true;
+}
+
+function selectChatPanelTab(sessionId: string): void {
+	selectPanelWorkspaceTab({
+		id: CHAT_PANEL_TAB_ID,
+		kind: "chat",
+		title: "Chat",
+		label: "Chat",
+		legacyTab: "chat",
+		source: { type: "chat", sessionId },
+	}, { sessionId, select: true, setAssistantTab: true, clearCollapse: false });
+}
+
+function selectProposalSnapshotFallback(type: ProposalType, sessionId: string, failedTabId: string): void {
+	const tabs = panelTabsForSession(state, sessionId);
+	if (liveProposalSlotForSession(type, sessionId)) {
+		selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true });
+		return;
+	}
+	const fallback = firstContentPanelTab(tabs.filter((tab) => isSelectableFallbackContentTab(tab, failedTabId, sessionId)));
+	if (fallback) {
+		selectPanelWorkspaceTab(fallback, { sessionId, select: true, setAssistantTab: true });
+		return;
+	}
+	selectChatPanelTab(sessionId);
+}
+
+function handleProposalSnapshotUnavailable(type: ProposalType, sessionId: string, rev: number, reason: unknown): void {
+	const failedTabId = proposalPanelTabId(type, rev);
+	const wasActive = activePanelTabIdForSession(state, sessionId) === failedTabId;
+	console.warn("[proposal] snapshot read failed:", { type, rev, reason });
+	removePanelWorkspaceTabs([failedTabId], { sessionId, select: false, clearCollapse: false });
+	if (wasActive) selectProposalSnapshotFallback(type, sessionId, failedTabId);
+	if (activeSessionId() === sessionId) showHeaderToast(`Proposal revision ${rev} is no longer available`);
+	renderApp();
+}
+
 /**
  * Slice E gap-closure: dismissal helpers are now thin shims forwarding to the
  * typed (per-ProposalType) implementations in `./proposal-helpers.ts`.
@@ -224,6 +339,13 @@ function createDraftManager<T>(config: {
 				const draft = await loadDraftFromServer(sessionId, config.type);
 				if (!draft) return false;
 				config.restore(sessionId, draft as T);
+				// Pin the contract: after a successful restore, schedule a render
+				// so the fast-path connectToSession (which fire-and-forgets this
+				// promise) repaints the proposal panel with the rehydrated state.
+				// The slow path already renders implicitly in connectToSession's
+				// terminal finally{}; this keeps both paths symmetric. Pinned by
+				// tests/proposal-rehydrate-client.test.ts.
+				renderApp();
 				return true;
 			} catch (err) {
 				console.error(`[${config.type}-draft] Failed to restore draft:`, err);
@@ -250,7 +372,7 @@ const goalDraft = createDraftManager({
 	type: 'goal',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeGoalProposal: (state.activeProposals.goal?.fields as any) ?? undefined,
+		activeGoalProposal: state.activeProposals.goal ?? undefined,
 		previewTitle: state.previewTitle,
 		previewSpec: state.previewSpec,
 		previewCwd: state.previewCwd,
@@ -264,7 +386,16 @@ const goalDraft = createDraftManager({
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
 		if (draft.activeGoalProposal) {
-			const fields = draft.activeGoalProposal as Record<string, unknown>;
+			const stored = draft.activeGoalProposal as any;
+			const hasStoredSlot = stored.fields && typeof stored.fields === "object" && !Array.isArray(stored.fields);
+			const storedFields = (hasStoredSlot ? stored.fields : stored) as Record<string, unknown>;
+			const storedRev = hasStoredSlot
+				? (typeof stored.rev === "number" && Number.isFinite(stored.rev) && stored.rev > 0 ? Math.trunc(stored.rev) : 0)
+				: 1;
+			const existing = state.activeProposals.goal?.sessionId === _sessionId ? state.activeProposals.goal : undefined;
+			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
+			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
+			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
 			if (isProposalDismissedTyped(_sessionId, "goal", fields)) {
 				// User previously dismissed this proposal — keep the draft on disk
 				// (so future edit_proposal events can rehydrate it) but don't
@@ -276,8 +407,8 @@ const goalDraft = createDraftManager({
 				state.activeProposals.goal = {
 					sessionId: _sessionId,
 					fields,
-					streaming: false,
-					rev: 1,
+					streaming: existing?.streaming ?? false,
+					rev,
 				};
 			}
 		} else {
@@ -321,7 +452,7 @@ const roleDraft = createDraftManager({
 	type: 'role',
 	serialize: (sessionId) => ({
 		sessionId,
-		activeRoleProposal: (state.activeProposals.role?.fields as any) ?? undefined,
+		activeRoleProposal: state.activeProposals.role ?? undefined,
 		previewName: state.rolePreviewName,
 		previewLabel: state.rolePreviewLabel,
 		previewPrompt: state.rolePreviewPrompt,
@@ -338,7 +469,16 @@ const roleDraft = createDraftManager({
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
 		if (draft.activeRoleProposal) {
-			const fields = draft.activeRoleProposal as Record<string, unknown>;
+			const stored = draft.activeRoleProposal as any;
+			const hasStoredSlot = stored.fields && typeof stored.fields === "object" && !Array.isArray(stored.fields);
+			const storedFields = (hasStoredSlot ? stored.fields : stored) as Record<string, unknown>;
+			const storedRev = hasStoredSlot
+				? (typeof stored.rev === "number" && Number.isFinite(stored.rev) && stored.rev > 0 ? Math.trunc(stored.rev) : 0)
+				: 1;
+			const existing = state.activeProposals.role?.sessionId === _sessionId ? state.activeProposals.role : undefined;
+			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev) && existing.rev > 0 ? Math.trunc(existing.rev) : 0;
+			const fields = existing && existingRev >= storedRev ? existing.fields : storedFields;
+			const rev = existing && existingRev >= storedRev ? existingRev : storedRev;
 			if (isProposalDismissedTyped(_sessionId, "role", fields)) {
 				delete state.activeProposals.role;
 				dismissed = true;
@@ -346,8 +486,8 @@ const roleDraft = createDraftManager({
 				state.activeProposals.role = {
 					sessionId: _sessionId,
 					fields,
-					streaming: false,
-					rev: 1,
+					streaming: existing?.streaming ?? false,
+					rev,
 				};
 			}
 		} else {
@@ -493,14 +633,15 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 // ============================================================================
 // PROMPT DRAFT PERSISTENCE
 // ============================================================================
-// Module-level state prevents monkey-patch stacking across session switches.
-// Each call to _setupPromptDraftHandlers cancels the previous session's timers
-// and rebinds to the new session ID without wrapping old handlers.
+// Module-level state prevents listener stacking across session switches.
+// Bind the active session before the editor can become interactive; restore is
+// deliberately separate so late server reads never overwrite fresh local input.
 
 let _draftSessionId: string | null = null;
 let _draftTimer: ReturnType<typeof setTimeout> | null = null;
 let _draftAbort: AbortController | null = null;
 let _draftListenersInstalled = false;
+let _draftTouchedSinceBind = false;
 /** Tracks the in-flight save promise so session switches can await it. */
 let _pendingSave: Promise<void> | null = null;
 
@@ -511,25 +652,35 @@ let _draftGen = 0;
 /** The generation at which the last send occurred. Any draft with gen < this is stale. */
 let _draftSendGen = 0;
 
+function _trackPendingDraftSave(promise: Promise<void>): Promise<void> {
+	const tracked = promise.finally(() => {
+		if (_pendingSave === tracked) _pendingSave = null;
+	});
+	_pendingSave = tracked;
+	return tracked;
+}
+
 /** Immediately persist the given draft value (or delete if empty).
- *  Returns the save promise when content is non-empty so callers can await it. */
+ *  Returns the save promise so callers can await it. */
 function _flushDraft(rawVal?: string): Promise<void> | void {
 	if (!_draftSessionId) return;
 	if (_draftAbort) _draftAbort.abort();
 	// If no value provided, read from the editor
 	const val: string = rawVal !== undefined ? rawVal
 		: (document.querySelector("message-editor") as any)?.value ?? "";
+	const sid = _draftSessionId;
 	if (val.trim()) {
-		_draftAbort = new AbortController();
-		const sid = _draftSessionId;
+		const controller = new AbortController();
+		_draftAbort = controller;
 		const gen = ++_draftGen;
-		const p = saveDraftToServer(sid, 'prompt', { text: val, gen }, _draftAbort.signal)
-			.finally(() => { if (_draftAbort) _draftAbort = null; _pendingSave = null; });
-		_pendingSave = p;
-		return p;
-	} else {
-		deleteDraftFromServer(_draftSessionId, 'prompt');
+		return _trackPendingDraftSave(
+			saveDraftToServer(sid, 'prompt', { text: val, gen }, controller.signal)
+				.finally(() => {
+					if (_draftAbort === controller) _draftAbort = null;
+				}),
+		);
 	}
+	return _trackPendingDraftSave(deleteDraftFromServer(sid, 'prompt'));
 }
 
 /** Flush any pending draft save immediately (e.g. before HMR reload). */
@@ -560,14 +711,92 @@ function _teardownDraftHandlers(): void {
 	// MessageEditor.connectedCallback needs it to survive element recreation.
 	// It's cleaned up on send (message-send event) and overwritten on next save.
 	_draftSessionId = null;
+	_draftTouchedSinceBind = false;
 	_draftGen = 0;
 	_draftSendGen = 0;
 }
 
-function _setupPromptDraftHandlers(sessionId: string): void {
-	// Tear down any previous session's draft state
+function _ensurePromptDraftListeners(): void {
+	// Use document-level event listeners instead of monkey-patching.
+	// Lit re-renders overwrite property-based callbacks (.onSend, .onInput)
+	// on every state change, silently removing our patches. Native DOM
+	// events (composed: true) bubble through shadow DOM and survive re-renders.
+	if (_draftListenersInstalled) return;
+
+	// Debounced draft save on textarea input (native 'input' event is composed)
+	document.addEventListener("input", (e: Event) => {
+		const target = e.target as HTMLElement;
+		if (!target || target.tagName !== "TEXTAREA") return;
+		// Verify it's inside a message-editor
+		if (!target.closest("message-editor")) return;
+		const sid = _draftSessionId;
+		if (!sid) return;
+
+		_draftTouchedSinceBind = true;
+		const val = (target as HTMLTextAreaElement).value;
+		// Keep sessionStorage in sync immediately (synchronous, no debounce).
+		// This ensures MessageEditor.connectedCallback picks up the latest
+		// text if the element is recreated during a Lit re-render.
+		if (val.trim()) {
+			sessionStorage.setItem(`bobbit_draft_${sid}`, val);
+		} else {
+			sessionStorage.removeItem(`bobbit_draft_${sid}`);
+		}
+		if (_draftTimer) clearTimeout(_draftTimer);
+		_draftTimer = setTimeout(() => {
+			_draftTimer = null;
+			if (_draftSessionId !== sid) return;
+			_flushDraft(val);
+		}, 100);
+	});
+
+	// Clear draft on send (custom composed event from MessageEditor)
+	document.addEventListener("message-send", () => {
+		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+		if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
+		const sid = _draftSessionId;
+		if (sid) {
+			_draftTouchedSinceBind = true;
+			// Increment gen and record the send generation. Then overwrite the
+			// draft with a tombstone at the new gen. Even if a stale save (from
+			// an aborted-but-already-sent request) arrives at the server after
+			// this, the load will see gen <= _draftSendGen and ignore it.
+			const gen = ++_draftGen;
+			_draftSendGen = gen;
+			sessionStorage.setItem(`draft-send-gen-${sid}`, String(gen));
+			sessionStorage.removeItem(`bobbit_draft_${sid}`);
+			_trackPendingDraftSave(saveDraftToServer(sid, 'prompt', { text: "", gen }));
+		}
+	});
+
+	// Flush draft on page unload (hard refresh, tab close) via sendBeacon.
+	// Regular fetch is killed by the browser during unload, so we use
+	// sendBeacon which is guaranteed to be sent. This fixes PI-04b draft
+	// loss on Ctrl+R / F5 when the debounce hasn't fired yet.
+	window.addEventListener("beforeunload", () => {
+		if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
+		if (!_draftSessionId) return;
+		const editor = document.querySelector("message-editor") as any;
+		const val: string = editor?.value ?? "";
+		if (!val.trim()) return;
+		const gen = ++_draftGen;
+		const url = localStorage.getItem("gateway.url") || window.location.origin;
+		const token = localStorage.getItem("gateway.token") || "";
+		const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
+		const blob = new Blob([body], { type: "application/json" });
+		// sendBeacon doesn't support custom headers, so pass token as query param.
+		// The server already accepts ?token= for auth (used by WebSocket connections).
+		navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
+	});
+
+	_draftListenersInstalled = true;
+}
+
+function _bindPromptDraftSession(sessionId: string): void {
+	// Tear down any previous session's draft state.
 	_teardownDraftHandlers();
 	_draftSessionId = sessionId;
+	_draftTouchedSinceBind = false;
 	// Restore send gen from sessionStorage (survives HMR/reload)
 	_draftSendGen = parseInt(sessionStorage.getItem(`draft-send-gen-${sessionId}`) || "0", 10);
 	// Start _draftGen above _draftSendGen so new saves are never rejected as
@@ -576,21 +805,21 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 	// switch get gen=1 which is <= sendGen, causing them to be silently
 	// discarded on load (PI-04b).
 	_draftGen = _draftSendGen;
+	_ensurePromptDraftListeners();
+}
 
-	// Restore existing draft from server
-	(async () => {
+function _restorePromptDraft(sessionId: string): void {
+	void (async () => {
 		try {
 			// Wait for any in-flight save from the previous session to land
 			// before loading, so we don't get stale data on rapid switch-back.
-			if (_pendingSave) {
-				await _pendingSave;
-				_pendingSave = null;
-			}
+			const pending = _pendingSave;
+			if (pending) await pending;
 			const draft = await loadDraftFromServer(sessionId, 'prompt');
-			// Only apply if we're still on the same session
-			if (_draftSessionId !== sessionId) return;
-			const editor = document.querySelector("message-editor") as any;
-			if (!editor) return;
+			// Only apply if we're still on the same session and the user has not
+			// typed since binding. This closes the first-paint window where the
+			// editor can be visible before slower REST hydration completes.
+			if (_draftSessionId !== sessionId || _draftTouchedSinceBind) return;
 
 			// Handle both old format (plain string) and new format ({ text, gen })
 			let text: string | null = null;
@@ -607,89 +836,24 @@ function _setupPromptDraftHandlers(sessionId: string): void {
 				text = d.text || null;
 			}
 
-			if (text) {
-				// Store in sessionStorage so MessageEditor can read it synchronously
-				// in connectedCallback — this survives element recreation by Lit.
-				sessionStorage.setItem(`bobbit_draft_${sessionId}`, text);
-				// Also apply directly to any existing editor
+			if (!text) return;
+			// Store in sessionStorage so MessageEditor can read it synchronously
+			// in connectedCallback — this survives element recreation by Lit.
+			sessionStorage.setItem(`bobbit_draft_${sessionId}`, text);
+
+			let frames = 0;
+			const apply = () => {
+				if (_draftSessionId !== sessionId || _draftTouchedSinceBind) return;
 				const editor = document.querySelector("message-editor") as any;
 				if (editor) editor.value = text;
-			}
+				if (frames++ < 5) requestAnimationFrame(apply);
+			};
+			apply();
 		} catch { /* ignore */ }
 	})();
+}
 
-	// Use document-level event listeners instead of monkey-patching.
-	// Lit re-renders overwrite property-based callbacks (.onSend, .onInput)
-	// on every state change, silently removing our patches. Native DOM
-	// events (composed: true) bubble through shadow DOM and survive re-renders.
-	if (!_draftListenersInstalled) {
-		// Debounced draft save on textarea input (native 'input' event is composed)
-		document.addEventListener("input", (e: Event) => {
-			const target = e.target as HTMLElement;
-			if (!target || target.tagName !== "TEXTAREA") return;
-			// Verify it's inside a message-editor
-			if (!target.closest("message-editor")) return;
-			if (!_draftSessionId) return;
-
-			const val = (target as HTMLTextAreaElement).value;
-			// Keep sessionStorage in sync immediately (synchronous, no debounce).
-			// This ensures MessageEditor.connectedCallback picks up the latest
-			// text if the element is recreated during a Lit re-render.
-			if (_draftSessionId) {
-				if (val.trim()) {
-					sessionStorage.setItem(`bobbit_draft_${_draftSessionId}`, val);
-				} else {
-					sessionStorage.removeItem(`bobbit_draft_${_draftSessionId}`);
-				}
-			}
-			if (_draftTimer) clearTimeout(_draftTimer);
-			_draftTimer = setTimeout(() => {
-				_draftTimer = null;
-				_flushDraft(val);
-			}, 100);
-		});
-
-		// Clear draft on send (custom composed event from MessageEditor)
-		document.addEventListener("message-send", () => {
-			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-			if (_draftAbort) { _draftAbort.abort(); _draftAbort = null; }
-			if (_draftSessionId) {
-				// Increment gen and record the send generation. Then overwrite the
-				// draft with a tombstone at the new gen. Even if a stale save (from
-				// an aborted-but-already-sent request) arrives at the server after
-				// this, the load will see gen <= _draftSendGen and ignore it.
-				const gen = ++_draftGen;
-				_draftSendGen = gen;
-				sessionStorage.setItem(`draft-send-gen-${_draftSessionId}`, String(gen));
-				sessionStorage.removeItem(`bobbit_draft_${_draftSessionId}`);
-				saveDraftToServer(_draftSessionId, 'prompt', { text: "", gen });
-			}
-		});
-
-		// Flush draft on page unload (hard refresh, tab close) via sendBeacon.
-		// Regular fetch is killed by the browser during unload, so we use
-		// sendBeacon which is guaranteed to be sent. This fixes PI-04b draft
-		// loss on Ctrl+R / F5 when the debounce hasn't fired yet.
-		window.addEventListener("beforeunload", () => {
-			if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
-			if (!_draftSessionId) return;
-			const editor = document.querySelector("message-editor") as any;
-			const val: string = editor?.value ?? "";
-			if (!val.trim()) return;
-			const gen = ++_draftGen;
-			const url = localStorage.getItem("gateway.url") || window.location.origin;
-			const token = localStorage.getItem("gateway.token") || "";
-			const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
-			const blob = new Blob([body], { type: "application/json" });
-			// sendBeacon doesn't support custom headers, so pass token as query param.
-			// The server already accepts ?token= for auth (used by WebSocket connections).
-			navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
-		});
-
-		_draftListenersInstalled = true;
-	}
-
-	// Focus the textarea
+function _focusPromptEditor(): void {
 	requestAnimationFrame(() => {
 		const editor = document.querySelector("message-editor") as any;
 		const textarea = editor?.querySelector("textarea");
@@ -710,7 +874,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	// Flush and teardown draft handlers for the outgoing session immediately.
 	// This prevents stale _draftSessionId from saving to the wrong session
-	// during the async gap before _setupPromptDraftHandlers binds the new one.
+	// during the async gap before the next session binds autosave.
 	if (_draftTimer) { clearTimeout(_draftTimer); _draftTimer = null; }
 	_flushDraft();
 	_teardownDraftHandlers();
@@ -737,15 +901,17 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	state.selectedSessionId = sessionId;
 
-	// Project proposal is scoped to the session that emitted it. Clear it the
-	// moment the user navigates away so it never bleeds into other sessions.
-	// connectToSession() rehydrates from the persisted draft if the user comes
-	// back to the originating session.
-	if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
-		delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
-		delete state.activeProposals.project;
-		state.assistantHasProposal = false;
+	// Proposals are scoped to the session that emitted them. Clear stale slots
+	// the moment the user navigates away so they never bleed into other sessions.
+	// connectToSession() rehydrates from persisted proposal files when returning.
+	for (const type of PROPOSAL_TYPES) {
+		const slot = state.activeProposals[type];
+		if (slot && slot.sessionId !== sessionId) {
+			if (type === "project") delete state.projectProposalAcceptedBySessionId[slot.sessionId];
+			delete state.activeProposals[type];
+		}
 	}
+	state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type]?.sessionId === sessionId);
 
 	// Fade out the current chat panel instantly
 	if (state.chatPanel) {
@@ -831,18 +997,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// annotations re-anchoring as orphans because their referenced text
 		// disappeared). Mirrors the slow-path guard at the bottom of
 		// connectToSession (~line 1675).
-		for (const t of ["goal", "role", "staff"] as const) {
+		for (const t of PROPOSAL_TYPES) {
 			const slot = state.activeProposals[t];
 			if (slot && slot.sessionId !== sessionId) {
 				delete state.activeProposals[t];
 			}
 		}
 		// Recompute hasProposal from what's left.
-		state.assistantHasProposal =
-			(state.activeProposals.goal != null && state.activeProposals.goal.sessionId === sessionId)
-			|| (state.activeProposals.role != null && state.activeProposals.role.sessionId === sessionId)
-			|| (state.activeProposals.staff != null && state.activeProposals.staff.sessionId === sessionId)
-			|| (state.activeProposals.project != null && state.activeProposals.project.sessionId === sessionId);
+		state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t]?.sessionId === sessionId);
 		state.previewTitle = "";
 		state.previewSpec = "";
 		state.previewCwd = "";
@@ -857,11 +1019,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.isPreviewSession = sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
+		state.previewPanelContentHash = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
 
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
@@ -894,10 +1060,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
+		// Bind draft autosave before rendering the cached editor interactive.
+		_bindPromptDraftSession(sessionId);
 		renderApp();
-
-		// Re-bind draft handlers AFTER render so the cached message-editor is in the DOM.
-		_setupPromptDraftHandlers(sessionId);
+		_restorePromptDraft(sessionId);
+		_focusPromptEditor();
 
 		// Reset tri-state on cached switch-back (last-known data still rendered).
 		if (state.chatPanel?.agentInterface) {
@@ -1149,9 +1316,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				const pill = ai.querySelector(`bg-process-pill[data-id="${msg.processId}"]`) as any;
 				if (pill?.appendOutput) pill.appendOutput(msg.text, msg.ts);
 			} else if (msg.type === "bg_process_exited" && msg.processId) {
-				// Update status in the process list
+				// Update status in the process list. Older servers may omit endTime;
+				// preserve a non-growing null fallback instead of implying Date.now().
 				ai.bgProcesses = ai.bgProcesses.map((p) =>
-					p.id === msg.processId ? { ...p, status: "exited" as const, exitCode: msg.exitCode ?? null } : p
+					p.id === msg.processId
+						? { ...p, status: "exited" as const, exitCode: msg.exitCode ?? null, endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null }
+						: p
 				);
 			}
 		};
@@ -1299,7 +1469,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (!state.staffPreviewDescriptionEdited) state.staffPreviewDescription = proposal.description;
 			if (!state.staffPreviewPromptEdited) state.staffPreviewPrompt = proposal.prompt;
 			if (!state.staffPreviewTriggersEdited) state.staffPreviewTriggers = proposal.triggers || "[]";
-			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposal.cwd || "";
+			if (!state.staffPreviewCwdEdited) state.staffPreviewCwd = proposalCwdOrProjectRoot(proposal.cwd, sessionId);
 			state.assistantHasProposal = true;
 			if (state.assistantTab === "chat" && !isDesktop()) {
 				state.assistantTab = "preview";
@@ -1340,7 +1510,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				}
 				delete state.activeProposals[type];
 				// Recompute assistantHasProposal across remaining slots.
-				state.assistantHasProposal = Object.keys(state.activeProposals).length > 0;
+				state.assistantHasProposal = PROPOSAL_TYPES.some((t) => state.activeProposals[t] != null);
 				renderApp();
 				return;
 			}
@@ -1369,10 +1539,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				return;
 			}
 			// Server-stamped rev (from proposal_update events) is the source of truth.
-			// Fall back to client-incremented for streaming-partial / legacy paths.
+			// Streaming/final tool-use scans are only an in-memory preview path; they
+			// must never synthesize revision numbers or a streamed proposal can race
+			// ahead of the immutable snapshot counter and make the current tool card
+			// look stale. Legacy no-rev paths keep the existing rev (or 0 = unknown).
 			const nextRev = (typeof serverRev === "number" && serverRev > 0)
-				? serverRev
-				: (prev?.rev ?? 0) + 1;
+				? Math.trunc(serverRev)
+				: (prev?.rev ?? 0);
 			const slot: ProposalSlot = {
 				sessionId,
 				fields: merged,
@@ -1388,10 +1561,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				delete state.projectProposalAcceptedBySessionId[sessionId];
 			}
 			if (isFirstEmit) {
+				const isMatchingAssistant = isAssistantProposalType(type);
 				plugin.onFirstEmit(slot, {
-					isAssistant: state.assistantType === type,
+					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
 				});
+				if (state.assistantType && !isMatchingAssistant && !isDesktop()) {
+					state.assistantTab = "preview";
+				}
 			}
 			renderApp();
 		};
@@ -1406,39 +1583,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Slice E: clear per-type dismissal for ALL types so "Open proposal"
 			// always re-opens the panel (the user explicitly clicked it).
 			clearProposalDismissedTyped(sessionId, type);
-
-			// Snapshot-restore branch — server is authoritative; the broadcast
-			// rebuilds the slot via remote.onProposal. We also fan out to the
-			// legacy per-type callback so per-form state (state.previewTitle
-			// etc.) is populated.
-			if (typeof rev === "number" && Number.isFinite(rev) && rev > 0) {
-				try {
-					const { restoreProposalSnapshot } = await import("./api.js");
-					const res = await restoreProposalSnapshot(sessionId, type, rev);
-					if (res && (res as any).ok) {
-						const restoredFields = (res as any).fields as Record<string, unknown> | undefined;
-						if (restoredFields) {
-							const legacyMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
-								goal: remote.onGoalProposal,
-								role: remote.onRoleProposal,
-								tool: remote.onToolProposal,
-								staff: remote.onStaffProposal,
-								project: remote.onProjectProposal,
-							};
-							const legacyCb = legacyMap[type];
-							if (legacyCb) legacyCb(restoredFields, false);
-						}
-					} else {
-						console.warn(`[proposal] restore failed:`, res);
-					}
-				} catch (err) {
-					console.warn("[proposal] restore threw:", err);
-				}
-				return;
-			}
-
-			// Legacy fields path (archived sessions with no rev marker).
-			if (!fields) return;
+			const numericRev = typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
+			const proposalFields = fields && typeof fields === "object" && !Array.isArray(fields)
+				? fields as Record<string, unknown>
+				: undefined;
 			const callbackMap: Record<string, ((p: any, streaming: boolean) => void) | undefined> = {
 				goal: remote.onGoalProposal,
 				role: remote.onRoleProposal,
@@ -1446,11 +1594,68 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				staff: remote.onStaffProposal,
 				project: remote.onProjectProposal,
 			};
-			const cb = callbackMap[type];
-			if (cb) cb(fields, /* streaming */ false);
-			if (remote.onProposal) {
-				remote.onProposal(type, fields as Record<string, unknown>, false);
+			const openLiveProposal = (liveFields?: Record<string, unknown>, liveRev?: number) => {
+				revealActiveProposalPanel(type, sessionId);
+				if (!liveFields) {
+					renderApp();
+					return;
+				}
+				const cb = callbackMap[type];
+				if (cb) cb(liveFields, /* streaming */ false);
+				if (remote.onProposal) {
+					remote.onProposal(type, liveFields, false, liveRev);
+				}
+			};
+
+			if (numericRev) {
+				const activeSlot = state.activeProposals[type];
+				const activeRev = activeSlot?.sessionId === sessionId && typeof activeSlot.rev === "number" && Number.isFinite(activeSlot.rev) && activeSlot.rev > 0
+					? Math.trunc(activeSlot.rev)
+					: undefined;
+				if (activeRev === numericRev) {
+					openLiveProposal(proposalFields ?? activeSlot?.fields, activeRev);
+					return;
+				}
+				if ((activeRev == null || numericRev > activeRev) && proposalFields) {
+					openLiveProposal(proposalFields, numericRev);
+					return;
+				}
+
+				selectProposalWorkspaceTab(type, { sessionId, select: true, setAssistantTab: true, rev: numericRev, fields: proposalFields });
+				renderApp();
+				if (proposalFields) return;
+				try {
+					const { readProposalSnapshot } = await import("./api.js");
+					const res = await readProposalSnapshot(sessionId, type, numericRev);
+					if (res && (res as any).ok && hasObjectFields((res as any).fields)) {
+						const snapshotFields = (res as any).fields as Record<string, unknown>;
+						const latestSlot = state.activeProposals[type];
+						const latestRev = latestSlot?.sessionId === sessionId && typeof latestSlot.rev === "number" && Number.isFinite(latestSlot.rev) && latestSlot.rev > 0
+							? Math.trunc(latestSlot.rev)
+							: undefined;
+						if (latestRev == null || numericRev >= latestRev) {
+							openLiveProposal(snapshotFields, numericRev);
+						} else {
+							selectProposalWorkspaceTab(type, {
+								sessionId,
+								select: true,
+								setAssistantTab: true,
+								rev: numericRev,
+								fields: snapshotFields,
+							});
+							renderApp();
+						}
+					} else {
+						handleProposalSnapshotUnavailable(type, sessionId, numericRev, res);
+					}
+				} catch (err) {
+					handleProposalSnapshotUnavailable(type, sessionId, numericRev, err);
+				}
+				return;
 			}
+
+			// Legacy fields path (archived sessions with no rev marker).
+			openLiveProposal(proposalFields);
 		}) as EventListener;
 		document.addEventListener("proposal-open", proposalOpenHandler);
 
@@ -1482,11 +1687,20 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.isPreviewSession = options?.isPreview || sessionData?.preview || false;
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
+		state.previewPanelContentHash = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
+		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
+		else stopInboxSubscription();
+
+		// Bind draft autosave before setAgent can render an interactive editor;
+		// setAgent awaits lazy imports after assigning agentInterface, so Lit can
+		// paint the textarea before setAgent returns under load.
+		_bindPromptDraftSession(sessionId);
 
 		// ── Bind the agent to the early ChatPanel (created before connect
 		// to show the "Connecting…" shell instantly).
@@ -1716,27 +1930,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Mirror the project-slot pattern below: keep the slot when it's
 			// scoped to this session, drop it only when it's left over from a
 			// different session.
-			if (state.assistantType !== "goal") {
-				const slot = state.activeProposals.goal;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.goal;
+			for (const type of PROPOSAL_TYPES) {
+				const slot = state.activeProposals[type];
+				if (slot && slot.sessionId !== sessionId) {
+					if (type === "project") delete state.projectProposalAcceptedBySessionId[slot.sessionId];
+					delete state.activeProposals[type];
+				}
 			}
-			if (state.assistantType !== "role") {
-				const slot = state.activeProposals.role;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.role;
-			}
-			if (state.assistantType !== "staff") {
-				const slot = state.activeProposals.staff;
-				if (slot && slot.sessionId !== sessionId) delete state.activeProposals.staff;
-			}
-			// Project proposal is scoped to the originating session and transient
-			// for non-assistant sessions — mirrors the goal-proposal model. The
-			// project-assistant branch below handles persistence for that session
-			// type only (its session is dedicated to building the proposal).
-			if (state.activeProposals.project && state.activeProposals.project.sessionId !== sessionId) {
-				delete state.projectProposalAcceptedBySessionId[state.activeProposals.project.sessionId];
-				delete state.activeProposals.project;
-				state.assistantHasProposal = false;
-			}
+			state.assistantHasProposal = PROPOSAL_TYPES.some((type) => state.activeProposals[type]?.sessionId === sessionId);
 
 			if (state.assistantType === "goal") {
 				const restored = await restoreGoalDraft(sessionId);
@@ -1784,17 +1985,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				state.toolPreviewRendererHtml = "";
 			} else if (state.assistantType === "staff") {
 				state.assistantTab = "chat";
-				state.staffPreviewName = "";
-				state.staffPreviewDescription = "";
-				state.staffPreviewPrompt = "";
-				state.staffPreviewTriggers = "[]";
-				state.staffPreviewCwd = "";
-				state.staffPreviewNameEdited = false;
-				state.staffPreviewDescriptionEdited = false;
-				state.staffPreviewPromptEdited = false;
-				state.staffPreviewTriggersEdited = false;
-				state.staffPreviewCwdEdited = false;
-				state.assistantHasProposal = false;
+				resetStaffProposalPreview(sessionId);
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
@@ -1855,8 +2046,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		await backgroundWork;
 		if (isStale()) { cleanupRemote(remote); return; }
 
-		// Restore prompt draft from server and set up auto-save
-		_setupPromptDraftHandlers(sessionId);
+		// Restore prompt draft from server after background renders settle.
+		// Autosave was already bound before setAgent exposed the editor.
+		_restorePromptDraft(sessionId);
+		_focusPromptEditor();
 	} catch (err) {
 		if (!isStale()) {
 			// Clear the early ChatPanel so the UI doesn't show a stuck "Connecting…" spinner
@@ -2001,9 +2194,9 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 		}
 	}
 
-	// Clear project proposal if it belonged to this session
-	if (state.activeProposals.project?.sessionId === sessionId) {
-		delete state.activeProposals.project;
+	// Clear proposal slots if they belonged to this session.
+	for (const type of PROPOSAL_TYPES) {
+		if (state.activeProposals[type]?.sessionId === sessionId) delete state.activeProposals[type];
 	}
 	delete state.projectProposalAcceptedBySessionId[sessionId];
 
@@ -2226,6 +2419,7 @@ export function backToSessions(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.cwdDropdownOpen = false;
 	localStorage.removeItem(GW_SESSION_KEY);
 	state.appView = "authenticated";
@@ -2250,6 +2444,7 @@ export function disconnectGateway(): void {
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
 	stopPreviewPolling();
+	stopInboxSubscription();
 	state.appView = "disconnected";
 	localStorage.removeItem(GW_SESSION_KEY);
 	teardownMobileScrollTracking();

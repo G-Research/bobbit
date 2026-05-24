@@ -1,0 +1,90 @@
+name: inbox_dismiss
+description: "Dismiss an inbox entry as failed or cancelled with a reason."
+summary: "Dismiss an inbox entry"
+params: [entry_id, outcome, reason]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Inbox
+docs: |-
+  Required: `entry_id`, `outcome` (`failed` or `cancelled`), `reason`. Transitions the entry from `pending` to the chosen terminal state and stores `reason` as the `error` field.
+detail_docs: >-
+  ## Purpose
+
+
+  Dismiss an inbox entry without completing the work. Use `outcome="failed"`
+  when you tried to do the work and it failed, and `outcome="cancelled"` when
+  you decided not to do it (e.g. duplicate, no longer relevant, out-of-scope).
+
+  The `reason` is stored on the entry as the `error` field and shown in the
+  inbox history panel.
+
+
+  ## Parameters
+
+
+  | Name | Type | Required | Description |
+
+  |------|------|----------|-------------|
+
+  | `entry_id` | string | **Yes** | The entry id (UUID) returned by `inbox_list`. |
+
+  | `outcome` | string | **Yes** | `failed` or `cancelled`. |
+
+  | `reason` | string | **Yes** | Short explanation. Surfaces in the UI; future
+  triage depends on it. |
+
+
+  ## When to Use
+
+
+  - **Failure** — the work was attempted but produced no usable result (API
+  error, ambiguous request, missing context). `outcome="failed"`.
+
+  - **Cancellation** — the work is not appropriate to do (duplicate, stale,
+  out of scope, user request superseded). `outcome="cancelled"`.
+
+
+  ## When NOT to Use
+
+
+  - **Successful work** — use `inbox_complete` (with `summary`).
+
+  - **Already-terminal entries** — the server returns 409 Conflict if the
+  entry is not in `pending` state.
+
+
+  ## Examples
+
+
+  ```
+
+  # Failed attempt
+
+  inbox_dismiss(entry_id="ec3...", outcome="failed",
+    reason="External API returned 503. Will retry on next trigger.")
+
+  # Out-of-scope request
+
+  inbox_dismiss(entry_id="ec4...", outcome="cancelled",
+    reason="Request asks for filesystem changes outside this staff agent's remit.")
+
+  # Duplicate trigger
+
+  inbox_dismiss(entry_id="ec5...", outcome="cancelled",
+    reason="Duplicate of completed entry ec1. Cron fired twice due to clock skew.")
+
+  ```
+
+
+  ## Notes / Gotchas
+
+
+  - **`failed` vs `cancelled` matters** — `failed` signals that retry/triage
+  is appropriate; `cancelled` signals deliberate suppression. Choose
+  honestly so future audits make sense.
+
+  - **`reason` is mandatory** — server rejects empty reasons. Dismissed entries
+  without explanations are useless for triage.
+
+  - **Staff-only** — this tool is only registered for staff sessions.

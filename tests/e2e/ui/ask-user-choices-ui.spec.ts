@@ -6,161 +6,126 @@
  *  - User clicks options across tabs (auto-advance verified).
  *  - "Other" is always rendered (no allow_other knob) with an always-visible
  *    text input; selecting Other does not auto-advance.
- *  - Submit enables only when every question answered.
+ *  - Escape clears the active question's selection and Other text.
+ *  - Pending widgets survive reload; submitted widgets restore read-only.
  *  - After Submit, widget is read-only and the tool result lands in chat.
  *  - Cross-client finalization: a second tab showing the same session flips
  *    to read-only when the first tab submits (via the envelope user message
  *    arriving through the normal message_end stream).
+ *  - Keyboard-only multi-question submission.
  */
 import { test, expect } from "./fixtures.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 test.describe("ask_user_choices widget (full-stack UI)", () => {
-	test("happy path — pick answers, submit, widget flips to read-only", async ({ page, rec }) => {
+	test("composite widget lifecycle — Other cleanup, reload persistence, and read-only restore", async ({ page, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await rec.capture("Empty session ready");
 
-		// Trigger the mock agent's ask_user_choices branch.
-		await sendMessage(page, "please use ask_user_choices");
+		// Trigger the mock agent's ask_user_choices branch with a composite tool_use_id.
+		await sendMessage(page, "please use ask_user_choices_composite");
 
 		// Widget appears.
 		const widget = page.locator("ask-user-choices-widget").first();
 		await expect(widget).toBeVisible({ timeout: 20_000 });
+		await expect.poll(
+			() => widget.evaluate((el) => (el as any).toolUseId as string),
+			{ timeout: 10_000 },
+		).toContain("|");
 		await rec.capture("Widget rendered");
 
-		// Two tabs.
+		// Two tabs, with tab 1 active.
 		const tabs = widget.locator('[role="tab"]');
 		await expect(tabs).toHaveCount(2, { timeout: 10_000 });
-
-		// Tab 1 is active.
 		await expect(widget.locator('[role="tab"][data-tab-index="0"]'))
 			.toHaveAttribute("aria-selected", "true");
-
-		// Pick "blue" on Q1 — should auto-advance to Q2.
-		await widget.locator('label:has(input[value="blue"])').click();
-		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
-		await rec.capture("Q1 answered — auto-advanced to Q2");
 
 		// "Other" is rendered for the active panel; the free-text input is always
 		// visible — even before Other is checked. (Only the active panel is in DOM.)
 		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		const input = widget.locator(".ask-other-input");
+		await expect(input).toBeVisible();
+
+		// Type into Other speculatively, select it, then Escape clears both the
+		// selection and text without removing the always-visible input.
+		await input.fill("abc");
+		await expect(input).toHaveValue("abc");
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
+			.not.toBeChecked();
+		await widget.locator('label:has(input[value="__OTHER__"])').first().click();
+		await expect(widget.locator('[role="tab"][data-tab-index="0"]'))
+			.toHaveAttribute("aria-selected", "true");
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first()).toBeChecked();
+		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
+		await page.keyboard.press("Escape");
+		await expect(input).toHaveValue("");
+		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
+			.not.toBeChecked();
+		await expect(input).toBeVisible();
+		await rec.capture("Other cleared by Escape");
+
+		// Switch to Q2; Other still renders with an always-visible text input.
+		await widget.locator('[role="tab"][data-tab-index="1"]').click();
+		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
 		await expect(widget.locator(".ask-other-input")).toBeVisible();
+
+		// Reload mid-flow. The pending interactive widget re-renders from the transcript.
+		await page.reload();
+		await expect(
+			page.locator("button").filter({ hasText: "Settings" }).first(),
+		).toBeVisible({ timeout: 20_000 });
+		const restored = page.locator("ask-user-choices-widget").first();
+		await expect(restored).toBeVisible({ timeout: 20_000 });
+		await expect(restored.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
+		await expect(restored.locator(".ask-other-input")).toBeVisible();
+		await expect(restored.locator(".ask-submit")).toBeVisible();
+		await rec.capture("Pending widget restored after reload");
+
+		// Pick "blue" on Q1 — should auto-advance to Q2.
+		await restored.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(restored.locator('[role="tab"][data-tab-index="0"]'))
+			.toHaveAttribute("aria-selected", "true");
+		await restored.locator('label:has(input[value="blue"])').click();
+		await expect(restored.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+		await rec.capture("Q1 answered — auto-advanced to Q2");
+
 		// Pick "Other" on Q2 — last tab, no advance, input already visible.
-		await widget.locator('label:has(input[value="__OTHER__"])').click();
-		await expect(widget.locator(".ask-other-input")).toBeVisible({ timeout: 5_000 });
+		await restored.locator('label:has(input[value="__OTHER__"])').click();
+		await expect(restored.locator(".ask-other-input")).toBeVisible({ timeout: 5_000 });
 
 		// Submit is still disabled until text is typed.
-		const submit = widget.locator(".ask-submit");
+		const submit = restored.locator(".ask-submit");
 		await expect(submit).toBeDisabled();
-
-		await widget.locator(".ask-other-input").fill("tiny");
+		await restored.locator(".ask-other-input").fill("tiny");
 		await expect(submit).toBeEnabled({ timeout: 5_000 });
 		await rec.capture("Other text typed — Submit enabled");
 
 		// Click Submit — widget should go read-only (no Submit button).
 		await submit.click();
-		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(restored.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.locator("user-message").filter({ hasText: "ask_user_choices_response" })).toHaveCount(0);
+		await expect(restored.locator('input[type="radio"]').first()).toBeDisabled();
 		await rec.capture("Submitted — widget read-only");
 
-		// Radio inputs are disabled in read-only mode.
-		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
-
 		// Switch back to Q1 tab, confirm "blue" is shown as the final answer.
-		await widget.locator('[role="tab"][data-tab-index="0"]').click();
-		await expect(widget.locator('input[type="radio"][value="blue"]')).toBeChecked();
+		await restored.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(restored.locator('input[type="radio"][value="blue"]')).toBeChecked();
 		await rec.capture("Q1 tab — blue retained");
-	});
 
-	test("persistence across reload — Other still rendered with always-visible input", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "please use ask_user_choices");
-
-		const widget = page.locator("ask-user-choices-widget").first();
-		await expect(widget).toBeVisible({ timeout: 20_000 });
-		// Pre-submit: Other rendered on the active panel; text input visible.
-		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
-		await expect(widget.locator(".ask-other-input")).toBeVisible();
-		// Switch to Q2; Other still rendered, input still visible.
-		await widget.locator('[role="tab"][data-tab-index="1"]').click();
-		await expect(widget.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
-		await expect(widget.locator(".ask-other-input")).toBeVisible();
-
-		// Reload the page mid-flow.
+		// Reload after submission. The persisted tool result restores read-only state.
 		await page.reload();
 		await expect(
 			page.locator("button").filter({ hasText: "Settings" }).first(),
 		).toBeVisible({ timeout: 20_000 });
-
-		// Widget re-renders; Other row + always-visible text input survive on the active panel.
-		const restored = page.locator("ask-user-choices-widget").first();
-		await expect(restored).toBeVisible({ timeout: 20_000 });
-		await expect(restored.locator("label:has(input[value=\"__OTHER__\"])")).toHaveCount(1);
-		await expect(restored.locator(".ask-other-input")).toBeVisible();
+		const readOnly = page.locator("ask-user-choices-widget").first();
+		await expect(readOnly).toBeVisible({ timeout: 20_000 });
+		await expect(readOnly.locator(".ask-submit")).toHaveCount(0);
+		await expect(readOnly.locator('input[type="radio"]').first()).toBeDisabled();
 	});
 
-	test("cleanup — Escape clears the always-visible Other text input", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "please use ask_user_choices");
-
-		const widget = page.locator("ask-user-choices-widget").first();
-		await expect(widget).toBeVisible({ timeout: 20_000 });
-
-		// Type into Other input speculatively (without selecting Other).
-		const input = widget.locator(".ask-other-input");
-		await input.fill("abc");
-		await expect(input).toHaveValue("abc");
-		// Other radio not yet checked.
-		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
-			.not.toBeChecked();
-
-		// Click Other to check it, then press Escape on the active tab to clear.
-		await widget.locator('label:has(input[value="__OTHER__"])').first().click();
-		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first()).toBeChecked();
-		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
-		await page.keyboard.press("Escape");
-
-		// After Escape: text empty, Other unchecked, input still rendered.
-		await expect(input).toHaveValue("");
-		await expect(widget.locator('input[type="radio"][value="__OTHER__"]').first())
-			.not.toBeChecked();
-		await expect(input).toBeVisible();
-	});
-
-	test("reload → widget restored read-only from persisted tool result", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-
-		await sendMessage(page, "please use ask_user_choices");
-		const widget = page.locator("ask-user-choices-widget").first();
-		await expect(widget).toBeVisible({ timeout: 20_000 });
-
-		// Answer Q1 (auto-advance), then answer Q2 non-Other, then submit.
-		await widget.locator('label:has(input[value="red"])').click();
-		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
-			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
-		await widget.locator('label:has(input[value="medium"])').click();
-		await widget.locator(".ask-submit").click();
-		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
-
-		// Reload the page.
-		await page.reload();
-
-		// App is ready again.
-		await expect(
-			page.locator("button").filter({ hasText: "Settings" }).first(),
-		).toBeVisible({ timeout: 20_000 });
-
-		// Widget renders from persisted tool result, no Submit button.
-		const restored = page.locator("ask-user-choices-widget").first();
-		await expect(restored).toBeVisible({ timeout: 20_000 });
-		await expect(restored.locator(".ask-submit")).toHaveCount(0);
-	});
-
-	test("cross-client finalization — second tab flips to read-only", async ({ page, context, rec }) => {
+	test("cross-client finalization via keyboard-only submission", async ({ page, context, rec }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "please use ask_user_choices");
@@ -169,6 +134,11 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget).toBeVisible({ timeout: 20_000 });
 		await rec.capture("Tab 1 — widget rendered");
 		const pendingUrl = page.url();
+
+		// Tab strip uses lettered tab_label.
+		const letters = widget.locator('[role="tab"] .ask-tab-letter');
+		await expect(letters.first()).toHaveText("A.");
+		await expect(letters.nth(1)).toHaveText("B.");
 
 		// Open a second tab pointed at the same session.
 		const page2 = await context.newPage();
@@ -179,14 +149,30 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(widget2.locator(".ask-submit")).toBeVisible();
 		await rec.capture("Tab 2 — widget mirrors pending state");
 
-		// Submit from the first tab.
-		await widget.locator('label:has(input[value="blue"])').click();
+		// Submit from the first tab using only the keyboard.
+		await widget.locator('[role="tab"][data-tab-index="0"]').focus();
+		await page.keyboard.press("1");
 		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
 			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
-		await widget.locator('label:has(input[value="large"])').click();
-		await widget.locator(".ask-submit").click();
+
+		// Re-focus for keyboard targeting on the new tab panel.
+		await widget.locator('[role="tab"][data-tab-index="1"]').focus();
+		await page.keyboard.press("2");
+		await expect(widget.locator('input[type="radio"][value="medium"]')).toBeChecked();
+
+		// Primary button should now be Submit (last tab) and enabled.
+		const submit = widget.locator(".ask-submit");
+		await expect(submit).toHaveText("Submit");
+		await expect(submit).toBeEnabled();
+		await submit.focus();
+		await page.keyboard.press("Enter");
 		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
 		await rec.capture("Tab 1 submitted — read-only");
+
+		// Confirm Q1 "red" survived as the recorded answer.
+		await widget.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(widget.locator('input[type="radio"][value="red"]')).toBeChecked();
 
 		// Second tab should also flip to read-only — the envelope user message
 		// appended by /submit is broadcast via the normal message_end stream,

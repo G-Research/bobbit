@@ -6,7 +6,7 @@
  * browser tests fail because the UI assets don't exist.
  */
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,19 +42,10 @@ export default function globalSetup() {
 	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
 	const uiDir = join(projectRoot, "dist", "ui");
 
-	// V8 compile cache root — each Playwright worker enables its own
-	// per-worker subdir below this root in its fixture setup (see
-	// gateway-harness.ts / in-process-harness.ts). A single shared cache dir
-	// across all 3 concurrent browser workers cold-importing the same dist
-	// files produced spurious "SyntaxError: module X does not provide an
-	// export Y" on the first run after a build (race between two workers
-	// rename()-ing the same cache file). Per-worker subdirs avoid the race
-	// entirely while still keeping the cache warm for re-runs.
-	const cacheRoot = join(tmpdir(), "bobbit-e2e-v8cache");
-	try { mkdirSync(cacheRoot, { recursive: true }); } catch { /* best-effort */ }
-	process.env.BOBBIT_E2E_V8CACHE_ROOT = cacheRoot;
-	// Explicitly DO NOT set NODE_COMPILE_CACHE here — workers set their own
-	// per-worker subdir via module.enableCompileCache() before any dist/ import.
+	// Do not let a host-level Node compile cache leak into E2E workers. Stale or
+	// partial cache entries produced false ESM startup errors such as "module X
+	// does not provide an export Y" under concurrent Windows runs.
+	process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 	delete process.env.NODE_COMPILE_CACHE;
 
 	// Only build what's missing to keep repeated runs fast

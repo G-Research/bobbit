@@ -40,7 +40,7 @@ test.describe("Add Project flow (UI)", () => {
 		}
 	});
 
-	test("path-only dialog renders without name or color fields", async ({ page }) => {
+	test("path-only dialog and directory browser render without legacy fields", async ({ page }) => {
 		await openApp(page);
 
 		// Click "Add Project" button in sidebar
@@ -62,6 +62,15 @@ test.describe("Add Project flow (UI)", () => {
 		// Should NOT have "Project Name" or "Color" labels (old dialog fields)
 		await expect(page.getByText("Project Name")).not.toBeVisible();
 		await expect(page.getByText("Color (optional)")).not.toBeVisible();
+
+		// Directory browser opens, Select closes it, and the chosen path is copied back.
+		await page.locator("button").filter({ hasText: "Browse" }).first().click();
+		await expect(page.locator('[data-testid="directory-browser"]')).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator("button").filter({ hasText: "Select" }).first()).toBeVisible();
+		await page.locator("button").filter({ hasText: "Select" }).first().click();
+		await expect(page.locator('[data-testid="directory-browser"]')).not.toBeVisible({ timeout: 5_000 });
+		await expect(pathInput).toBeVisible();
+		expect((await pathInput.inputValue()).length).toBeGreaterThan(0);
 	});
 
 	test("auto-import project with existing .bobbit directory", async ({ page }) => {
@@ -103,35 +112,6 @@ test.describe("Add Project flow (UI)", () => {
 		}
 	});
 
-	test("browse button opens directory browser and navigation works", async ({ page }) => {
-		await openApp(page);
-
-		// Click "Add Project"
-		await page.locator("button").filter({ hasText: "Add Project" }).first().click();
-		await expect(page.locator('input[placeholder="/path/to/project"]')).toBeVisible({ timeout: 5_000 });
-
-		// Click Browse
-		await page.locator("button").filter({ hasText: "Browse" }).first().click();
-
-		// Directory browser should appear
-		await expect(page.locator('[data-testid="directory-browser"]')).toBeVisible({ timeout: 5_000 });
-
-		// Should show a current path
-		await expect(page.locator('[data-testid="directory-browser"]')).toBeVisible();
-
-		// Should have Select and Cancel buttons
-		await expect(page.locator("button").filter({ hasText: "Select" }).first()).toBeVisible();
-
-		// Click Select to pick the current directory
-		await page.locator("button").filter({ hasText: "Select" }).first().click();
-
-		// Browser should close and path input should be visible again with a value
-		await expect(page.locator('[data-testid="directory-browser"]')).not.toBeVisible({ timeout: 5_000 });
-		const pathInput = page.locator('input[placeholder="/path/to/project"]');
-		await expect(pathInput).toBeVisible();
-		const val = await pathInput.inputValue();
-		expect(val.length).toBeGreaterThan(0);
-	});
 
 	test("non-empty directory without .bobbit opens project assistant", async ({ page }) => {
 		// Create a temp dir with a file (non-empty, no .bobbit)

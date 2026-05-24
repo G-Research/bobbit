@@ -3,7 +3,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
 import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, updateStaffAgent, deleteStaffAgent, wakeStaffAgent, gatewayFetch, refreshSessions, type StaffAgent } from "./api.js";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, refreshSessions, type StaffAgent } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
@@ -30,6 +30,9 @@ let editPromptEditMode = false;
 let editCwd = "";
 let editTriggers: TriggerDef[] = [];
 let editMemory = "";
+let editContextPolicy: "preserve" | "compact" = "compact";
+let editWakePrompt = "Manual wake";
+let wakeFeedback: string | null = null;
 
 // Session appearance state
 let editColorIndex = -1;
@@ -78,6 +81,8 @@ function showEdit(agent: StaffAgent): void {
 	editCwd = agent.cwd;
 	editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 	editMemory = agent.memory || "";
+	editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+	wakeFeedback = null;
 	saving = false;
 	deleting = false;
 	loadSessionAppearance(agent);
@@ -96,6 +101,8 @@ export function navigateToStaffEdit(staffId: string): void {
 		editCwd = agent.cwd;
 		editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 		editMemory = agent.memory || "";
+		editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+		wakeFeedback = null;
 		saving = false;
 		deleting = false;
 		loadSessionAppearance(agent);
@@ -116,7 +123,7 @@ async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
 		? state.gatewaySessions.find((s) => s.id === agent.currentSessionId)
 		: undefined;
 	editColorIndex = session ? (sessionColorMap.get(session.id) ?? -1) : -1;
-	editAccessory = session?.accessory || "none";
+	editAccessory = agent.accessory || "none";
 }
 
 // ============================================================================
@@ -134,30 +141,28 @@ async function handleSave(): Promise<void> {
 		cwd: editCwd,
 		triggers: editTriggers,
 		memory: editMemory,
+		contextPolicy: editContextPolicy,
+		accessory: editAccessory,
 	});
-	// Save session appearance (color, accessory)
+	// Save session appearance (color only; staff accessory is persisted on the staff record).
 	if (selectedStaff.currentSessionId) {
 		const sid = selectedStaff.currentSessionId;
-		const session = state.gatewaySessions.find((s) => s.id === sid);
 		const origColor = sessionColorMap.get(sid) ?? -1;
-		const origAccessory = session?.accessory || "none";
 		if (editColorIndex !== origColor && editColorIndex >= 0) {
 			setSessionColor(sid, editColorIndex);
 		}
-		const patchBody: Record<string, unknown> = {};
-		if (editAccessory !== origAccessory) patchBody.accessory = editAccessory;
-		if (Object.keys(patchBody).length > 0) {
-			await gatewayFetch(`/api/sessions/${sid}`, {
-				method: "PATCH",
-				body: JSON.stringify(patchBody),
-			});
-			await refreshSessions();
-		}
 	}
 	if (ok) {
-		staffList = await fetchStaff();
+		const [updatedStaff] = await Promise.all([
+			fetchStaff(),
+			refreshSessions(),
+		]);
+		staffList = updatedStaff;
 		const updated = staffList.find((s) => s.id === selectedStaff!.id);
-		if (updated) selectedStaff = updated;
+		if (updated) {
+			selectedStaff = updated;
+			editAccessory = updated.accessory || "none";
+		}
 	}
 	saving = false;
 	renderApp();
@@ -191,10 +196,18 @@ async function handleTogglePause(): Promise<void> {
 
 async function handleWake(): Promise<void> {
 	if (!selectedStaff) return;
-	const result = await wakeStaffAgent(selectedStaff.id, "Manual wake");
-	if (result?.sessionId) {
-		await connectToSession(result.sessionId, false);
+	const prompt = editWakePrompt.trim() || "Manual wake";
+	const result = await enqueueInboxManual(selectedStaff.id, {
+		title: "Manual wake",
+		prompt,
+		source: { type: "manual_ui" },
+	});
+	if (result?.entry) {
+		wakeFeedback = "Enqueued. The agent will process when idle.";
+	} else {
+		wakeFeedback = "Failed to enqueue. Check connection.";
 	}
+	renderApp();
 }
 
 // ============================================================================
@@ -648,6 +661,35 @@ function renderEditView(): TemplateResult {
 						@input=${(e: Event) => { editMemory = (e.target as HTMLTextAreaElement).value; }}
 					></textarea>
 				</div>
+
+				<div class="context-policy-group" data-testid="context-policy">
+					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</label>
+					<p class="text-[10px] text-muted-foreground mb-1">What happens before a wake digest is sent when the inbox has pending entries.</p>
+					<div class="flex gap-3">
+						<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+							<input
+								type="radio"
+								name="contextPolicy"
+								value="compact"
+								.checked=${editContextPolicy === "compact"}
+								@change=${() => { editContextPolicy = "compact"; renderApp(); }}
+							/>
+							<span>Compact <span class="text-[10px] text-muted-foreground">(default)</span></span>
+						</label>
+						<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+							<input
+								type="radio"
+								name="contextPolicy"
+								value="preserve"
+								.checked=${editContextPolicy === "preserve"}
+								@change=${() => { editContextPolicy = "preserve"; renderApp(); }}
+							/>
+							<span>Preserve</span>
+						</label>
+					</div>
+				</div>
+
+				${wakeFeedback ? html`<div class="text-xs text-muted-foreground border border-border rounded p-2 bg-secondary/30" data-testid="wake-feedback">${wakeFeedback}</div>` : ""}
 
 				<div class="flex items-center justify-end gap-2 pt-2 border-t border-border">
 					${Button({

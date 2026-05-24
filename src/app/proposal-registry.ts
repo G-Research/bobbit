@@ -10,6 +10,8 @@
  * unused for Slice E and reserved for future work.
  */
 
+import { panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession, type PanelWorkspaceTab } from "./panel-workspace.js";
+
 // NOTE: We do NOT import `./state.js` at module load — state.ts touches
 // `localStorage` at module init which would break node-only unit tests of
 // the registry's pure mergeFields helpers. The onFirstEmit hooks lazy-import
@@ -116,40 +118,65 @@ function getState(): any {
 	return (globalThis as any).bobbitState ?? {};
 }
 
-function goalFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
+const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
+	goal: "Goal Proposal",
+	project: "Project Proposal",
+	role: "Role Proposal",
+	tool: "Tool Proposal",
+	staff: "Staff Proposal",
+};
+
+function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+	const s = getState();
+	const tab: PanelWorkspaceTab = {
+		id: proposalPanelTabId(type),
+		kind: "proposal",
+		title: PROPOSAL_TAB_LABELS[type],
+		label: PROPOSAL_TAB_LABELS[type].replace(/ Proposal$/, ""),
+		legacyTab: type,
+		source: { type: "proposal", proposalType: type, sessionId },
+	};
+	const tabs = panelTabsForSession(s, sessionId);
+	const idx = tabs.findIndex((t: any) => t?.id === tab.id);
+	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
+	else tabs.push(tab);
+	setActivePanelTabIdForSession(s, sessionId, tab.id);
+	try {
+		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
+			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
+		}
+	} catch { /* ignore */ }
+}
+
+function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): void {
+	upsertProposalWorkspaceTab(type, sessionId);
+	void import("./preview-panel.js")
+		.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab }))
+		.catch(() => { /* optional browser-only integration */ });
+}
+
+/**
+ * Reveal the UI surface for a proposal slot. Assistant sessions keep legacy
+ * mobile `assistantTab` compatibility while also selecting the typed proposal
+ * tab for the dynamic workspace.
+ */
+export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot, "sessionId">, opts: ProposalFirstEmitOpts): void {
 	const s = getState();
 	if (opts.isAssistant) {
 		s.assistantHasProposal = true;
 		if (s.assistantTab === "chat" && opts.isMobile) {
 			s.assistantTab = "preview";
 		}
-	} else {
-		s.previewPanelActiveTab = "goal";
-		clearCollapseKey(slot.sessionId);
-		if (opts.isMobile) s.previewPanelTab = "goal";
 	}
+
+	s.previewPanelActiveTab = type;
+	s.previewPanelTab = type;
+	selectProposalWorkspaceTab(type, slot.sessionId, !opts.isAssistant || opts.isMobile);
+	clearCollapseKey(slot.sessionId);
 }
 
-function projectFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
-	const s = getState();
-	if (opts.isAssistant) {
-		s.assistantHasProposal = true;
-		if (s.assistantTab === "chat" && opts.isMobile) {
-			s.assistantTab = "preview";
-		}
-	} else {
-		s.previewPanelActiveTab = "project";
-		clearCollapseKey(slot.sessionId);
-		if (opts.isMobile) s.previewPanelTab = "project";
-	}
-}
-
-function assistantOnlyFirstEmit(_slot: ProposalSlot, opts: ProposalFirstEmitOpts): void {
-	const s = getState();
-	s.assistantHasProposal = true;
-	if (s.assistantTab === "chat" && opts.isMobile) {
-		s.assistantTab = "preview";
-	}
+function proposalFirstEmit(type: ProposalType): ProposalTypePlugin["onFirstEmit"] {
+	return (slot, opts) => revealProposalPanel(type, slot, opts);
 }
 
 // ---- validators ----
@@ -211,11 +238,11 @@ function makePlugin(type: ProposalType, cfg: PluginConfig): ProposalTypePlugin {
 }
 
 export const PROPOSAL_TYPE_REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
-	goal: makePlugin("goal", { mergeFields: goalMerge, onFirstEmit: goalFirstEmit, validate: goalValidate }),
-	project: makePlugin("project", { mergeFields: projectMerge, onFirstEmit: projectFirstEmit, validate: projectValidate }),
-	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: roleValidate }),
-	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: toolValidate }),
-	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: assistantOnlyFirstEmit, validate: staffValidate }),
+	goal: makePlugin("goal", { mergeFields: goalMerge, onFirstEmit: proposalFirstEmit("goal"), validate: goalValidate }),
+	project: makePlugin("project", { mergeFields: projectMerge, onFirstEmit: proposalFirstEmit("project"), validate: projectValidate }),
+	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("role"), validate: roleValidate }),
+	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("tool"), validate: toolValidate }),
+	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("staff"), validate: staffValidate }),
 };
 
 export function isProposalType(s: unknown): s is ProposalType {

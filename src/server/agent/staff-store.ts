@@ -22,6 +22,40 @@ export interface StaffTrigger {
 	lastSeenSha?: string;
 }
 
+const STAFF_ACCESSORY_IDS = new Set([
+	"none",
+	"crown",
+	"bandana",
+	"magnifier",
+	"palette",
+	"pencil",
+	"shield",
+	"set-square",
+	"flask",
+	"wizard-hat",
+	"wand",
+	"stamp",
+	"clipboard",
+]);
+
+export function normalizeStaffAccessory(value: unknown): string {
+	if (typeof value !== "string") return "none";
+	const id = value.trim();
+	return STAFF_ACCESSORY_IDS.has(id) ? id : "none";
+}
+
+function normalizeStaffRecord(staff: PersistedStaff): PersistedStaff {
+	// Legacy records lack `sandboxed`; normalise to false.
+	staff.sandboxed = !!staff.sandboxed;
+	// Legacy records lack `contextPolicy`; normalise to "compact".
+	if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact") {
+		staff.contextPolicy = "compact";
+	}
+	// Legacy/malformed records lack a valid accessory; normalise to "none".
+	staff.accessory = normalizeStaffAccessory((staff as { accessory?: unknown }).accessory);
+	return staff;
+}
+
 export interface PersistedStaff {
 	id: string;
 	name: string;
@@ -32,12 +66,18 @@ export interface PersistedStaff {
 	triggers: StaffTrigger[];
 	memory: string;
 	roleId?: string;
+	/** Pixel-art accessory ID for the staff identity/avatar. */
+	accessory: string;
 	createdAt: number;
 	updatedAt: number;
 	lastWakeAt?: number;
 	currentSessionId?: string;
 	worktreePath?: string;
 	branch?: string;
+	/** Primary repo/container root used to provision the staff worktree. */
+	repoPath?: string;
+	/** Multi-repo staff worktrees keyed by component repo name. */
+	repoWorktrees?: Record<string, string>;
 	projectId?: string;
 	/**
 	 * Per-staff sandbox preference. Chosen at creation, persisted on the record,
@@ -46,6 +86,18 @@ export interface PersistedStaff {
 	 * Legacy records loaded without this field normalise to `false`.
 	 */
 	sandboxed: boolean;
+	/**
+	 * What the InboxNudger does to context before injecting a wake digest.
+	 * - "preserve" — leave conversation context as-is (long-running threads).
+	 * - "compact"  — run /compact before nudging (default).
+	 *
+	 * Optional at the type level so creation paths can omit it; both load
+	 * normalisation (see `StaffStore.load`) and put-time normalisation
+	 * (see `StaffStore.put`) coerce missing/invalid values to "compact".
+	 * A future "clear" policy (terminate + respawn) is deferred — see
+	 * docs/design/staff-inbox.md §10.
+	 */
+	contextPolicy?: "preserve" | "compact";
 }
 
 /**
@@ -70,9 +122,7 @@ export class StaffStore {
 				if (Array.isArray(data)) {
 					for (const s of data) {
 						if (s.id) {
-							// Legacy records lack `sandboxed`; normalise to false.
-							s.sandboxed = !!s.sandboxed;
-							this.staff.set(s.id, s);
+							this.staff.set(s.id, normalizeStaffRecord(s));
 						}
 					}
 				}
@@ -95,7 +145,9 @@ export class StaffStore {
 	}
 
 	put(staff: PersistedStaff): void {
-		this.staff.set(staff.id, staff);
+		// Normalise on every write so the in-memory record always carries
+		// real values. Mirrors the load-side normalisation.
+		this.staff.set(staff.id, normalizeStaffRecord(staff));
 		this.save();
 	}
 
@@ -127,6 +179,7 @@ export class StaffStore {
 			}
 		}
 		existing.updatedAt = Date.now();
+		normalizeStaffRecord(existing);
 		this.save();
 		return true;
 	}

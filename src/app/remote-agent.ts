@@ -1,13 +1,15 @@
 import { getModel } from "@earendil-works/pi-ai";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
-import { state, renderApp } from "./state.js";
+import { state, renderApp, setProjectsIfChanged } from "./state.js";
+import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention } from "./notification-policy.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
+import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
@@ -52,6 +54,80 @@ const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
 	project: "onProjectProposal",
 };
 
+function parseToolPayload(value: unknown): Record<string, unknown> | null {
+	if (!value) return null;
+	if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+	if (typeof value === "string") {
+		try {
+			const parsed = JSON.parse(value);
+			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? parsed as Record<string, unknown>
+				: null;
+		} catch {
+			return null;
+		}
+	}
+	return null;
+}
+
+function mergeToolPayloads(...payloads: Array<Record<string, unknown> | null | undefined>): Record<string, unknown> | null {
+	let merged: Record<string, unknown> | null = null;
+	for (const payload of payloads) {
+		if (!payload) continue;
+		if (!merged) {
+			merged = { ...payload };
+			continue;
+		}
+		for (const [key, value] of Object.entries(payload)) {
+			const current = merged[key];
+			if ((current === undefined || current === null || current === "") && value !== undefined && value !== null && value !== "") {
+				merged[key] = value;
+			} else if (value !== undefined && value !== null && value !== "") {
+				merged[key] = value;
+			}
+		}
+	}
+	return merged;
+}
+
+function isReviewWorkspaceSelectionActive(title?: string): boolean {
+	const s = state as any;
+	const activeId = typeof s.activePanelTabId === "string" ? s.activePanelTabId
+		: typeof s.panelWorkspace?.activeTabId === "string" ? s.panelWorkspace.activeTabId
+		: "";
+	if (activeId) return activeId.startsWith("review:") || (!!title && activeId === `review:${encodeURIComponent(title)}`);
+	return s.previewPanelTab === "review" || s.previewPanelActiveTab === "review";
+}
+
+function normalizeProposalToolCallInputs(message: any, inputByToolId?: (id: string) => unknown): any {
+	if (!message || !Array.isArray(message.content)) return message;
+	let changed = false;
+	const content = message.content.map((block: any) => {
+		if (block?.type !== "toolCall" && block?.type !== "tool_use") return block;
+		const toolName = block.name || block.toolName;
+		if (typeof toolName !== "string" || !toolName.startsWith("propose_")) return block;
+		const blockId = typeof block.id === "string" ? block.id : (typeof block.toolCallId === "string" ? block.toolCallId : "");
+		const merged = mergeToolPayloads(
+			blockId ? parseToolPayload(inputByToolId?.(blockId)) : null,
+			parseToolPayload(block.input),
+			parseToolPayload(block.arguments),
+		);
+		if (!merged) return block;
+		changed = true;
+		return {
+			...block,
+			input: merged,
+			arguments: merged,
+		};
+	});
+	return changed ? { ...message, content } : message;
+}
+
+function toolEventId(event: any): string | undefined {
+	const id = event?.toolCallId ?? event?.toolId;
+	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 /**
  * A remote agent adapter that connects to the Bobbit Gateway via WebSocket.
  * Duck-types the Agent interface from pi-agent-core so it can be used
@@ -84,6 +160,7 @@ export class RemoteAgent {
 	private _gatewayUrl = "";
 	private _authToken = "";
 	private _sessionId = "";
+	private _toolCallInputsById = new Map<string, unknown>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
 	// Reducer-owned message state. The reducer is the single source of truth
@@ -359,7 +436,7 @@ export class RemoteAgent {
 	onGoalSetupEvent?: () => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
-	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; process?: any }) => void;
+	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; endTime?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
@@ -1173,6 +1250,12 @@ export class RemoteAgent {
 				if (msg.data?.imageGenerationModel) {
 					this._state.imageGenerationModel = msg.data.imageGenerationModel;
 				}
+				if (msg.data && Object.prototype.hasOwnProperty.call(msg.data, "serverCost")) {
+					this._state.serverCost = msg.data.serverCost ?? null;
+					if (this._state.serverCost) {
+						this.emit({ type: "cost_update" as any, cost: this._state.serverCost });
+					}
+				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
 
@@ -1436,9 +1519,36 @@ export class RemoteAgent {
 				this._appendNotification(`Agent ${(msg as any).name} (${(msg as any).role}) finished`, "team");
 				break;
 
+			case "inbox.entry.added": {
+				const sid = (msg as any).staffId as string;
+				const entry = (msg as any).entry;
+				if (sid && entry) applyInboxEntryAdded(sid, entry);
+				break;
+			}
+
+			case "inbox.entry.updated": {
+				const sid = (msg as any).staffId as string;
+				const entry = (msg as any).entry;
+				if (sid && entry) applyInboxEntryUpdated(sid, entry);
+				break;
+			}
+
+			case "inbox.entry.removed": {
+				const sid = (msg as any).staffId as string;
+				const entryId = (msg as any).entryId as string;
+				if (sid && entryId) applyInboxEntryRemoved(sid, entryId);
+				break;
+			}
+
 			case "preferences_changed":
 				this._applyPreferences(msg.preferences);
 				break;
+
+			case "projects_changed": {
+				const projects = Array.isArray((msg as any).projects) ? (msg as any).projects : null;
+				if (projects && setProjectsIfChanged(projects)) renderApp();
+				break;
+			}
 
 			case "preview_changed":
 				this.onPreviewChanged?.(msg.sessionId, msg.preview);
@@ -1768,6 +1878,7 @@ export class RemoteAgent {
 				state.reviewActiveTab = data.title;
 				state.previewPanelActiveTab = "review";
 				state.previewPanelTab = "review";
+				selectReviewWorkspaceTab(data.title, { sessionId: this._sessionId || "", select: true });
 				// Un-collapse panel on desktop
 				if (this._sessionId) {
 					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
@@ -1775,20 +1886,31 @@ export class RemoteAgent {
 				renderApp();
 			} else if (data.action === "review_close") {
 				const sid = this._sessionId || "";
+				const closingTitle = typeof data.title === "string" ? data.title : undefined;
+				const shouldReselect = isReviewWorkspaceSelectionActive(closingTitle);
 				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (data.title) {
-					state.reviewDocuments.delete(data.title);
-					clearAnnotations(sid, data.title);
-					if (state.reviewActiveTab === data.title) {
+				if (closingTitle) {
+					state.reviewDocuments.delete(closingTitle);
+					clearAnnotations(sid, closingTitle);
+					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
 					}
+					closeReviewWorkspaceTabs([closingTitle], { sessionId: sid, select: false });
 				} else {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					clearAllAnnotations(sid);
+					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
+				if (shouldReselect) {
+					if (state.reviewPanelOpen && state.reviewActiveTab) {
+						selectReviewWorkspaceTab(state.reviewActiveTab, { sessionId: sid, select: true });
+					} else {
+						selectSensiblePanelWorkspaceTab({ sessionId: sid, select: true });
+					}
+				}
 				renderApp();
 			}
 		}
@@ -1924,10 +2046,12 @@ export class RemoteAgent {
 
 			case "message_update":
 				if (event.message) {
+					const normalizedMessage = normalizeProposalToolCallInputs(event.message, (id) => this._toolCallInputsById.get(id));
+					event = { ...event, message: normalizedMessage };
 					// Throttle stream updates when content has truncated blocks
 					// to reduce Lit re-render pressure (2x/sec instead of every token).
-					const hasTruncated = Array.isArray(event.message.content) &&
-						event.message.content.some((c: any) =>
+					const hasTruncated = Array.isArray(normalizedMessage.content) &&
+						normalizedMessage.content.some((c: any) =>
 							c.type === "toolCall" &&
 							typeof c.arguments?.content === "object" &&
 							c.arguments?.content?._truncated === true,
@@ -1940,18 +2064,18 @@ export class RemoteAgent {
 						this._lastTruncatedStreamUpdate = now;
 					}
 
-					this._state.streamingMessage = event.message;
+					this._state.streamingMessage = normalizedMessage;
 					// Check for proposals during streaming so preview syncs live.
 					// Pass streaming=true so blocks are NOT marked as processed —
 					// the final fire on message_end marks them.
-					this._checkToolProposals(event.message, /* streaming */ true);
-					this._checkProposals(event.message);
+					this._checkToolProposals(normalizedMessage, /* streaming */ true);
+					this._checkProposals(normalizedMessage);
 				}
 				break;
 
 			case "message_end":
 				if (event.message) {
-					let msg = event.message;
+					let msg = normalizeProposalToolCallInputs(event.message, (id) => this._toolCallInputsById.get(id));
 					if (msg.role === "assistant") {
 						// Overflow-recovery suppression: when pi-coding-agent auto-compacts
 						// on overflow, it sometimes fires a retry from the still-in-flight
@@ -2069,14 +2193,23 @@ export class RemoteAgent {
 				}
 				break;
 
-			case "tool_execution_start":
-				if (event.toolCallId) {
+			case "tool_execution_start": {
+				const id = toolEventId(event);
+				if (id) {
 					this._state.pendingToolCalls = new Set(this._state.pendingToolCalls);
-					this._state.pendingToolCalls.add(event.toolCallId);
+					this._state.pendingToolCalls.add(id);
+					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
+					if (input) this._toolCallInputsById.set(id, input);
 				}
 				break;
+			}
 
-			case "tool_execution_update":
+			case "tool_execution_update": {
+				const id = toolEventId(event);
+				if (id) {
+					const input = parseToolPayload(event.input) ?? parseToolPayload(event.arguments);
+					if (input) this._toolCallInputsById.set(id, input);
+				}
 				// Store partial results from long-running tools (e.g., skill invocations)
 				// so the UI can show real-time progress.
 				if (event.toolCallId && event.partialResult) {
@@ -2093,6 +2226,7 @@ export class RemoteAgent {
 					return; // skip default emit at end
 				}
 				break;
+			}
 
 			case "tool_execution_end":
 				if (event.toolCallId) {

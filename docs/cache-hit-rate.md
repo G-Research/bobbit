@@ -67,7 +67,7 @@ The `CostPopover` component shows a **Cache hit** row in the token breakdown sec
 - Warm session: rounded percentage, e.g. `89%`
 - Cold session, unsupported provider, missing field, or non-finite value: em dash (`—`)
 
-The value updates live from `cost_update` WebSocket events on the same path as the existing token counters. No new dialog or affordance is added; it is one additional line in the existing breakdown.
+Dashboard cost summaries update from `cost_update` WebSocket events on the same path as the existing token counters. `CostPopover` fetches the latest `/cost/breakdown` payload when opened and renders the cache-hit row from that response; the open popover is not directly live-updated by `cost_update` frames. No new dialog or affordance is added; it is one additional line in the existing breakdown.
 
 ## Implementation notes
 

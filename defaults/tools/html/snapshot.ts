@@ -15,8 +15,9 @@
  *   v2 (legacy file-mode, just a path on disk — read-only, archived sessions only):
  *     __preview_snapshot_v2__\n{"kind":"file","path":"/abs/path/to/report.html"}\n
  *
- *   v3 (current — per-session preview mount; constant ~150 byte payload):
- *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>"}\n
+ *   v3 (current — per-session preview mount; constant ≤250 byte payload;
+ *   `contentHash` is included when it fits the cap):
+ *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","contentHash":"<sha256>"}\n
  *
  *   The `path` field carries the project-root-relative identifier
  *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
@@ -69,7 +70,7 @@ export function extractSnapshot(text: string): string {
 export type ParsedSnapshot =
 	| { kind: "inline"; html: string }
 	| { kind: "file"; path: string }
-	| { kind: "preview"; url: string; path: string };
+	| { kind: "preview"; url: string; path: string; contentHash?: string };
 
 /**
  * Parse a snapshot text block into a discriminated union. Returns null if
@@ -81,6 +82,12 @@ export type ParsedSnapshot =
  *
  * Malformed v2/v3 payloads return null (caller should treat as missing).
  */
+function normalizeContentHash(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const hash = value.trim().toLowerCase();
+	return /^[a-f0-9]{64}$/.test(hash) ? hash : undefined;
+}
+
 export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 	if (typeof text !== "string") return null;
 	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V1)) {
@@ -108,7 +115,10 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 				typeof parsed.url === "string" && parsed.url.length > 0 &&
 				typeof parsed.path === "string" && parsed.path.length > 0
 			) {
-				return { kind: "preview", url: parsed.url, path: parsed.path };
+				const contentHash = normalizeContentHash(parsed.contentHash);
+				return contentHash
+					? { kind: "preview", url: parsed.url, path: parsed.path, contentHash }
+					: { kind: "preview", url: parsed.url, path: parsed.path };
 			}
 		} catch {
 			/* fall through */
@@ -132,7 +142,13 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
  *                  for backwards compatibility with archived host-absolute
  *                  payloads, but the cap-test only holds for the short form.
  */
-export function buildPreviewSnapshotV3Block(url: string, entryPath: string): string {
-	const payload = JSON.stringify({ kind: "preview", url, path: entryPath });
-	return PREVIEW_SNAPSHOT_MARKER_V3 + payload + "\n";
+export function buildPreviewSnapshotV3Block(url: string, entryPath: string, contentHash?: string): string {
+	const hash = normalizeContentHash(contentHash);
+	const basePayload = { kind: "preview", url, path: entryPath };
+	if (hash) {
+		const payload = JSON.stringify({ ...basePayload, contentHash: hash });
+		const block = PREVIEW_SNAPSHOT_MARKER_V3 + payload + "\n";
+		if (block.length <= 250) return block;
+	}
+	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(basePayload) + "\n";
 }

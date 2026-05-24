@@ -1,7 +1,47 @@
 import { execFileSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { SessionManager } from "./session-manager.js";
+import type { InboxManager } from "./inbox-manager.js";
 import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
+
+function childErrorCode(err: unknown): string {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
+}
+
+function execGitSync(args: readonly string[], cwd: string, timeout = 5_000): Buffer {
+	if (!cpuDiagnosticsEnabled()) {
+		return execFileSync("git", args, {
+			cwd,
+			stdio: "pipe",
+			timeout,
+		});
+	}
+	const start = performance.now();
+	let success = 0;
+	let errorCode = "none";
+	try {
+		const result = execFileSync("git", args, {
+			cwd,
+			stdio: "pipe",
+			timeout,
+		});
+		success = 1;
+		return result;
+	} catch (err) {
+		errorCode = childErrorCode(err);
+		throw err;
+	} finally {
+		getCpuDiagnostics().recordChildProcess("staff-trigger:git", performance.now() - start, {
+			operation: args[0] || "git",
+			success,
+			errorCode,
+			timeoutMs: timeout,
+		});
+	}
+}
 
 /**
  * Check whether a single cron field matches a given numeric value.
@@ -96,13 +136,17 @@ export function cronMatches(expr: string, date: Date): boolean {
  */
 export class TriggerEngine {
 	private intervalHandle: ReturnType<typeof setInterval> | null = null;
-	/** Staff IDs currently in the process of waking (prevents concurrent wake race) */
-	private wakingInProgress = new Set<string>();
 
 	constructor(
 		private staffManager: StaffManager,
 		private sessionManager: SessionManager,
-	) {}
+		private inboxManager: InboxManager,
+	) {
+		// `sessionManager` kept on the instance for future use (e.g. trigger
+		// preflight checks that need session state). `fireTrigger` itself no
+		// longer touches it — enqueueing is pure I/O against the inbox store.
+		void this.sessionManager;
+	}
 
 	start(): void {
 		this.tick();
@@ -119,28 +163,54 @@ export class TriggerEngine {
 	}
 
 	private tick(): void {
-		const allStaff = this.staffManager.listStaff();
-		for (const staff of allStaff) {
-			if (staff.state !== "active") continue;
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		const counters = diagEnabled ? {
+			ticks: 1,
+			staffScanned: 0,
+			activeStaff: 0,
+			skippedInactive: 0,
+			triggersScanned: 0,
+			disabledTriggers: 0,
+			scheduleChecks: 0,
+			gitChecks: 0,
+			manualTriggers: 0,
+			fired: 0,
+		} : undefined;
+		try {
+			const allStaff = this.staffManager.listStaff();
+			if (counters) counters.staffScanned = allStaff.length;
+			for (const staff of allStaff) {
+				if (staff.state !== "active") { if (counters) counters.skippedInactive++; continue; }
+				if (counters) counters.activeStaff++;
 
-			// Skip if a wake is already in-flight for this staff (async race guard)
-			if (this.wakingInProgress.has(staff.id)) continue;
+				// No streaming/starting skip and no in-flight guard — enqueueing is
+				// synchronous against the JSON-backed inbox store, so there is no
+				// race to gate. The InboxNudger separately decides when to deliver
+				// the accumulated work to the agent.
 
-			// Skip if the staff's permanent session is currently busy (streaming or starting)
-			if (staff.currentSessionId) {
-				const session = this.sessionManager.getSession(staff.currentSessionId);
-				if (session && (session.status === "streaming" || session.status === "starting")) continue;
+				for (const trigger of staff.triggers) {
+					if (!trigger.enabled) { if (counters) counters.disabledTriggers++; continue; }
+					if (counters) counters.triggersScanned++;
+					let fired = false;
+					if (trigger.type === "schedule") {
+						if (counters) counters.scheduleChecks++;
+						fired = this.checkScheduleTrigger(staff, trigger);
+					} else if (trigger.type === "git") {
+						if (counters) counters.gitChecks++;
+						fired = this.checkGitTrigger(staff, trigger);
+					} else if (counters) {
+						counters.manualTriggers++;
+					}
+					// "manual" triggers are only fired via the API, never by the engine
+
+					// Once a trigger fires for this staff, skip remaining triggers this tick
+					if (fired) { if (counters) counters.fired++; break; }
+				}
 			}
-
-			for (const trigger of staff.triggers) {
-				if (!trigger.enabled) continue;
-				let fired = false;
-				if (trigger.type === "schedule") fired = this.checkScheduleTrigger(staff, trigger);
-				else if (trigger.type === "git") fired = this.checkGitTrigger(staff, trigger);
-				// "manual" triggers are only fired via the API, never by the engine
-
-				// Once a trigger fires for this staff, skip remaining triggers this tick
-				if (fired) break;
+		} finally {
+			if (diagEnabled) {
+				getCpuDiagnostics().recordTimer("staff-trigger-engine:tick", performance.now() - diagStart, counters);
 			}
 		}
 	}
@@ -158,7 +228,7 @@ export class TriggerEngine {
 			if (lastFiredMinute === currentMinute) return false;
 		}
 
-		void this.fireTrigger(staff, trigger);
+		this.fireTrigger(staff, trigger);
 		return true;
 	}
 
@@ -169,11 +239,7 @@ export class TriggerEngine {
 
 		let sha: string;
 		try {
-			sha = execFileSync("git", ["log", "--format=%H", "-1", branch], {
-				cwd: repo,
-				stdio: "pipe",
-				timeout: 5_000,
-			})
+			sha = execGitSync(["log", "--format=%H", "-1", branch], repo)
 				.toString()
 				.trim();
 		} catch {
@@ -189,11 +255,7 @@ export class TriggerEngine {
 			// New commit(s) detected — build context and fire
 			let context = `New commit on ${branch}: ${sha}`;
 			try {
-				const log = execFileSync("git", ["log", "--oneline", `${previousSha}..${sha}`], {
-					cwd: repo,
-					stdio: "pipe",
-					timeout: 5_000,
-				})
+				const log = execGitSync(["log", "--oneline", `${previousSha}..${sha}`], repo)
 					.toString()
 					.trim();
 				if (log) context += "\n\nRecent commits:\n" + log;
@@ -203,7 +265,7 @@ export class TriggerEngine {
 
 			// Always update lastSeenSha before firing
 			this.staffManager.updateTriggerState(staff.id, trigger.id, { lastSeenSha: sha });
-			void this.fireTrigger(staff, trigger, context);
+			this.fireTrigger(staff, trigger, context);
 			return true;
 		}
 
@@ -212,10 +274,16 @@ export class TriggerEngine {
 		return false;
 	}
 
-	private async fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): Promise<void> {
+	/**
+	 * Append a new entry to the staff's inbox. Synchronous — returns once
+	 * the JSON file has been written. `InboxManager.enqueue` calls
+	 * `nudger.poke(staffId)` so an already-idle staff is woken on the next
+	 * microtask; otherwise the 15 s nudger tick picks it up the next time
+	 * the staff goes idle.
+	 */
+	private fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): void {
 		console.log(`[trigger-engine] Firing ${trigger.type} trigger "${trigger.id}" for staff "${staff.name}"`);
 
-		this.wakingInProgress.add(staff.id);
 		this.staffManager.updateTriggerState(staff.id, trigger.id, { lastFired: Date.now() });
 
 		let prompt = trigger.prompt || `Trigger fired: ${trigger.type}`;
@@ -223,12 +291,16 @@ export class TriggerEngine {
 			prompt += "\n\n" + extraContext;
 		}
 
+		const titleHint = trigger.config.cron ?? trigger.config.branch ?? trigger.id;
 		try {
-			await this.staffManager.wake(staff.id, prompt, this.sessionManager);
+			this.inboxManager.enqueue(staff.id, {
+				title: `${trigger.type}: ${titleHint}`,
+				prompt,
+				context: extraContext,
+				source: { type: "trigger", triggerId: trigger.id },
+			});
 		} catch (err) {
-			console.error(`[trigger-engine] Failed to wake staff "${staff.name}":`, err);
-		} finally {
-			this.wakingInProgress.delete(staff.id);
+			console.error(`[trigger-engine] Failed to enqueue inbox entry for staff "${staff.name}":`, err);
 		}
 	}
 }

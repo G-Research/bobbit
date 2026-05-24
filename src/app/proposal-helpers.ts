@@ -74,20 +74,27 @@ function migrateLegacyDismissalKeyIfGoal(sessionId: string, type: ProposalType):
 }
 
 /**
- * Normalise per-type fields so the fingerprint is stable across the
- * file-on-disk round-trip (Slice B). The goal serializer appends a
- * trailing newline to `spec` (markdown body); the parser returns it
- * verbatim. Without this normalisation a dismissal recorded pre-reload
- * (in-memory "Body.") wouldn't match the post-rehydrate fingerprint
- * ("Body.\n") and dismissal stickiness silently breaks for goal.
+ * Normalise per-type body fields so the fingerprint is stable across the
+ * file-on-disk / snapshot round-trip. Body serializers may preserve or append
+ * trailing whitespace while tool-card fields often omit it; dismissal should
+ * stay sticky for the same proposal body without weakening metadata fields.
  */
+const TRAILING_BODY_FIELDS: Partial<Record<ProposalType, readonly string[]>> = {
+	goal: ["spec"],
+	role: ["prompt"],
+	staff: ["prompt"],
+};
+
 function normaliseFieldsForFingerprint(
 	type: ProposalType,
 	fields: Record<string, unknown>,
 ): Record<string, unknown> {
-	if (type !== "goal") return fields;
+	const bodyFields = TRAILING_BODY_FIELDS[type];
+	if (!bodyFields) return fields;
 	const out: Record<string, unknown> = { ...fields };
-	if (typeof out.spec === "string") out.spec = out.spec.replace(/\s+$/u, "");
+	for (const field of bodyFields) {
+		if (typeof out[field] === "string") out[field] = out[field].replace(/\s+$/u, "");
+	}
 	return out;
 }
 

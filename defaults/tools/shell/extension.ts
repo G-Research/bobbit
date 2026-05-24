@@ -276,7 +276,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash_bg",
 		label: "Background Process",
-		description: "Manage background shell processes: create, logs, grep, head, slice, kill, list, wait.",
+		description: "Manage background shell processes. bash_bg does not notify on completion. If you need to take follow up actions, use bash_bg wait",
 		parameters: Type.Object({
 			action: Type.Union([
 				Type.Literal("create"),
@@ -292,7 +292,7 @@ export default function (pi: ExtensionAPI) {
 			name: Type.Optional(Type.String({ description: "Short process name, max 3 words (create)." })),
 			id: Type.Optional(Type.String({ description: "Background process ID." })),
 			timeout: Type.Optional(Type.Number({ description: "Max seconds to wait. Default 300 (wait)." })),
-			tail: Type.Optional(Type.Number({ description: "Lines from end. Default 200 (logs)." })),
+			tail: Type.Optional(Type.Number({ description: "Lines from end. Default 15 (logs)." })),
 			pattern: Type.Optional(Type.String({ description: "Search pattern, string or regex (grep)." })),
 			context: Type.Optional(Type.Number({ description: "Lines of context around match. Default 0 (grep)." })),
 			max_results: Type.Optional(Type.Number({ description: "Max matches. Default 50 (grep)." })),
@@ -328,12 +328,12 @@ export default function (pi: ExtensionAPI) {
 						if (!command) return text("Error: 'command' is required for create");
 						if (!name) return text("Error: 'name' is required for create — provide a short descriptive name (max 3 words)");
 						const result = await api("POST", `/api/sessions/${sessionId}/bg-processes`, { command, name }) as any;
-						return text(`Background process started.\nID: ${result.id}\nPID: ${result.pid}\nCommand: ${command}\n\nUse bash_bg with action "logs" and id "${result.id}" to check output.\nUse bash_bg with action "kill" and id "${result.id}" to terminate.`);
+						return text(`Background process started.\nID: ${result.id}\nPID: ${result.pid}\nCommand: ${command}\n\nbash_bg does not notify on completion. If you need to take follow up actions, use bash_bg wait.\nUse bash_bg with action "logs" and id "${result.id}" to check output.\nUse bash_bg with action "kill" and id "${result.id}" to terminate.`);
 					}
 					case "logs": {
 						if (!id) return text("Error: 'id' is required for logs");
 						const [logs, hdr] = await Promise.all([
-							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail || 200}`) as any,
+							api("GET", `/api/sessions/${sessionId}/bg-processes/${id}/logs?tail=${tail ?? 15}`) as any,
 							header(id),
 						]);
 						const output = logs.log?.map((e: any) => typeof e === "string" ? e : e.text ?? String(e)).join("\n") || "(no output)";

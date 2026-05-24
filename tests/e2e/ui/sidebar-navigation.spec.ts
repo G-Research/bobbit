@@ -1,10 +1,7 @@
 /**
- * Sidebar navigation E2E tests — SB-01, SB-02, SB-03, SB-04, SB-21.
- *
- * Tests project collapse/expand with persistence, session click + highlight,
- * goal team navigation, active session auto-expand, rapid session switching,
- * and goal dashboard navigation.
+ * Sidebar navigation E2E tests — SB-01, SB-02/SB-03, SB-04, SB-21.
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import {
 	createSession,
@@ -13,11 +10,62 @@ import {
 	startTeam,
 	teardownTeam,
 	deleteGoal,
-	apiFetch,
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
+
+async function waitForActiveSessionReady(page: Page, sessionId: string): Promise<void> {
+	await expect.poll(
+		() => page.evaluate((id) => {
+			const state = (window as any).__bobbitState;
+			const visibleActiveSessionIds = Array.from(
+				document.querySelectorAll<HTMLElement>("[data-session-id][data-nav-active='true']"),
+			)
+				.filter((row) => row.getClientRects().length > 0)
+				.map((row) => row.getAttribute("data-session-id"));
+			return {
+				hash: window.location.hash,
+				selectedSessionId: state?.selectedSessionId ?? null,
+				connectingSessionId: state?.connectingSessionId ?? null,
+				remoteSessionId: state?.remoteAgent?.gatewaySessionId ?? null,
+				connectionStatus: state?.connectionStatus ?? null,
+				storedSessionId: localStorage.getItem("gateway.sessionId"),
+				visibleActiveSessionIds,
+				hasComposer: Boolean(document.querySelector("message-editor textarea, textarea")),
+			};
+		}, sessionId),
+		{ timeout: 15_000, intervals: [50, 100, 250, 500] },
+	).toEqual({
+		hash: `#/session/${sessionId}`,
+		selectedSessionId: sessionId,
+		connectingSessionId: null,
+		remoteSessionId: sessionId,
+		connectionStatus: "connected",
+		storedSessionId: sessionId,
+		visibleActiveSessionIds: [sessionId],
+		hasComposer: true,
+	});
+}
+
+async function clickSessionRow(page: Page, sessionId: string): Promise<void> {
+	const row = page.locator(`[data-session-id="${sessionId}"]`).first();
+	await expect(row).toBeVisible({ timeout: 10_000 });
+	await row.click();
+}
+
+async function rapidlyClickSessionRows(page: Page, sessionIdsToClick: string[]): Promise<void> {
+	for (const sessionId of sessionIdsToClick) {
+		await expect(page.locator(`[data-session-id="${sessionId}"]`).first()).toBeVisible({ timeout: 10_000 });
+	}
+	await page.evaluate((ids) => {
+		for (const id of ids) {
+			const row = document.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
+			if (!row) throw new Error(`Session row not found for ${id}`);
+			row.click();
+		}
+	}, sessionIdsToClick);
+}
 
 test.describe("Sidebar navigation", () => {
 	const sessionIds: string[] = [];
@@ -26,58 +74,33 @@ test.describe("Sidebar navigation", () => {
 	test.afterAll(async () => {
 		for (const gid of goalIds) {
 			await teardownTeam(gid).catch(() => {});
-			await deleteGoal(gid);
+			await deleteGoal(gid).catch(() => {});
 		}
-		for (const sid of sessionIds) {
-			await deleteSession(sid);
-		}
+		for (const sid of sessionIds) await deleteSession(sid).catch(() => {});
 	});
 
-	// SB-01 collapse persistence: covered by stories-sidebar.spec.ts via localStorage verification.
-	// Removed: reload-based variant was redundant and unreliable under server load.
-
-	// ---------------------------------------------------------------
-	// SB-01: Click session to navigate and highlight
-	// ---------------------------------------------------------------
-	test("SB-01: clicking session row connects and highlights it @smoke", async ({ page }) => {
-		const id1 = await createSession();
-		const id2 = await createSession();
-		sessionIds.push(id1, id2);
-
-		await waitForSessionStatus(id1, "idle");
-		await waitForSessionStatus(id2, "idle");
+	test("SB-01/SB-04: session navigation highlights active row and rapid switching settles on last @smoke", async ({ page }) => {
+		const idA = await createSession();
+		const idB = await createSession();
+		const idC = await createSession();
+		sessionIds.push(idA, idB, idC);
+		await waitForSessionStatus(idA, "idle");
+		await waitForSessionStatus(idB, "idle");
+		await waitForSessionStatus(idC, "idle");
 
 		await openApp(page);
 
-		// Navigate to session 1 via hash
-		await navigateToHash(page, `#/session/${id1}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+		await clickSessionRow(page, idA);
+		await waitForActiveSessionReady(page, idA);
 
-		// Verify URL contains session 1
-		let hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(id1);
+		await clickSessionRow(page, idB);
+		await waitForActiveSessionReady(page, idB);
 
-		// Verify the active row has the sidebar-session-active class
-		const activeRow1 = page.locator(".sidebar-session-active");
-		await expect(activeRow1).toBeVisible({ timeout: 5_000 });
-
-		// Navigate to session 2
-		await navigateToHash(page, `#/session/${id2}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
-
-		// Verify URL contains session 2
-		hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(id2);
-
-		// Only one row should be active
-		const activeRows = page.locator(".sidebar-session-active");
-		await expect(activeRows).toHaveCount(1, { timeout: 5_000 });
+		await rapidlyClickSessionRows(page, [idA, idB, idC]);
+		await waitForActiveSessionReady(page, idC);
 	});
 
-	// ---------------------------------------------------------------
-	// SB-02: Goal team navigation — expand goal, see team lead + children
-	// ---------------------------------------------------------------
-	test("SB-02: goal group shows team lead with expandable children @smoke", async ({ page }) => {
+	test("SB-02/SB-03: team goal expands and navigating to team lead highlights it", async ({ page }) => {
 		const goal = await createGoal({
 			title: "Nav Team Test",
 			worktree: false,
@@ -87,134 +110,22 @@ test.describe("Sidebar navigation", () => {
 		const teamLeadId = await startTeam(goal.id);
 
 		await openApp(page);
-
-		// Find the goal in the sidebar — goal titles are rendered with CSS uppercase
-		// The text content is original case ("Nav Team Test"), displayed as uppercase via CSS class
 		const goalHeader = page.getByText("Nav Team Test", { exact: false }).first();
 		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
+		await expect(goalHeader.locator("xpath=ancestor-or-self::*[contains(@class, 'uppercase')]").first()).toBeVisible();
 
-		// Verify the goal header uses uppercase CSS class
-		const headerEl = goalHeader.locator("xpath=ancestor-or-self::*[contains(@class, 'uppercase')]").first();
-		await expect(headerEl).toBeVisible();
-
-		// Click the "Expand goal" chevron to expand the goal group
-		const expandChevron = page.locator("[title='Expand goal']").first();
 		const collapseChevron = page.locator("[title='Collapse goal']").first();
-
-		// If already expanded, no need to click
-		const alreadyExpanded = await collapseChevron.isVisible().catch(() => false);
-		if (!alreadyExpanded) {
-			await expandChevron.click();
+		if (!(await collapseChevron.isVisible().catch(() => false))) {
+			await page.locator("[title='Expand goal']").first().click();
 		}
 
-		// Wait for team lead session to appear — the team start creates a session with "Team Lead" title
-		// or the default title. Let's look for the session row inside the goal group.
 		await waitForSessionStatus(teamLeadId, "idle");
-
-		// After expanding, wait for the sidebar to render the team lead session
-		// Navigate directly to the team lead to ensure it connects
 		await navigateToHash(page, `#/session/${teamLeadId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		// Verify URL contains the team lead session ID
-		const hash = await page.evaluate(() => window.location.hash);
-		expect(hash).toContain(teamLeadId);
+		expect(await page.evaluate(() => window.location.hash)).toContain(teamLeadId);
+		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 10_000 });
 	});
 
-	// ---------------------------------------------------------------
-	// SB-03: Navigating to a session inside an expanded goal highlights it
-	// ---------------------------------------------------------------
-	test("SB-03: navigating to session inside expanded goal shows it highlighted", async ({ page }) => {
-		const goal = await createGoal({
-			title: "AutoExp Test",
-			worktree: false,
-			team: true,
-		});
-		goalIds.push(goal.id);
-		const teamLeadId = await startTeam(goal.id);
-
-		await openApp(page);
-
-		// The goal should be auto-expanded (createGoal adds to expandedGoals)
-		const goalHeader = page.getByText("AutoExp Test", { exact: false }).first();
-		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
-
-		// Ensure goal is expanded — look for "Collapse goal" chevron
-		const collapseChevron = page.locator("[title='Collapse goal']").first();
-		const isExpanded = await collapseChevron.isVisible().catch(() => false);
-		if (!isExpanded) {
-			// Expand it
-			const expandChevron = page.locator("[title='Expand goal']").first();
-			await expandChevron.click();
-		}
-
-		// Navigate directly to the team lead session via URL
-		await navigateToHash(page, `#/session/${teamLeadId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		// The session row should be highlighted as active in the sidebar
-		const activeRow = page.locator(".sidebar-session-active");
-		await expect(activeRow).toBeVisible({ timeout: 10_000 });
-	});
-
-	// ---------------------------------------------------------------
-	// SB-04: Rapid session switching settles on last clicked
-	// ---------------------------------------------------------------
-	test("SB-04: rapid switching settles on last clicked session", async ({ page }) => {
-		const idA = await createSession();
-		const idB = await createSession();
-		const idC = await createSession();
-		sessionIds.push(idA, idB, idC);
-
-		await waitForSessionStatus(idA, "idle");
-		await waitForSessionStatus(idB, "idle");
-		await waitForSessionStatus(idC, "idle");
-
-		await openApp(page);
-
-		// Event-driven settle: navigate to session A first so the sidebar finishes
-		// its initial WS hydration / refreshSessions roundtrip and renders an
-		// active row. This replaces a flat 1s sleep that was the dominant SB-04
-		// flake source under load.
-		await navigateToHash(page, `#/session/${idA}`);
-		await expect(page.locator(".sidebar-session-active")).toBeVisible({ timeout: 15_000 });
-
-		// Rapidly switch sessions via hash — no awaits between
-		await page.evaluate(
-			([a, b, c]) => {
-				window.location.hash = `#/session/${a}`;
-				// Use a microtask-level delay to simulate rapid clicks
-				setTimeout(() => { window.location.hash = `#/session/${b}`; }, 50);
-				setTimeout(() => { window.location.hash = `#/session/${c}`; }, 100);
-			},
-			[idA, idB, idC],
-		);
-
-		// Wait for session C to load — textarea visible means session is connected
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-
-		// Poll until URL contains session C (the last one) — may take time to settle
-		await expect(async () => {
-			const hash = await page.evaluate(() => window.location.hash);
-			expect(hash).toContain(idC);
-		}).toPass({ timeout: 10_000 });
-
-		// Only one session should be active in sidebar
-		const activeRows = page.locator(".sidebar-session-active");
-		await expect(activeRows).toHaveCount(1, { timeout: 5_000 });
-
-		// Check for console errors (filter out known benign ones)
-		const messages = await page.evaluate(() => {
-			// Access console messages collected by the page if available
-			return (window as any).__consoleErrors || [];
-		});
-		// Note: we primarily verify there are no uncaught exceptions via the
-		// absence of error-state UI rather than console interception
-	});
-
-	// ---------------------------------------------------------------
-	// SB-21: Dashboard button navigates to goal dashboard
-	// ---------------------------------------------------------------
 	test("SB-21: dashboard button navigates to goal dashboard", async ({ page }) => {
 		test.setTimeout(60_000);
 		const goal = await createGoal({
@@ -225,29 +136,14 @@ test.describe("Sidebar navigation", () => {
 		goalIds.push(goal.id);
 
 		await openApp(page);
-
-		// Find the goal header in sidebar
 		const goalHeader = page.getByText("DASHNAV TEST", { exact: false }).first();
 		await expect(goalHeader).toBeVisible({ timeout: 15_000 });
 
-		// The dashboard button is inside a `sidebar-actions hidden group-hover:flex` container.
-		// In headless Chromium, CSS :hover on .group may not reliably trigger group-hover.
-		// Find the button within the same goal header row and click via JavaScript.
 		const goalRow = goalHeader.locator("xpath=ancestor::div[contains(@class, 'group')]").first();
-		// Wait until the hidden dashboard button is attached to the DOM before
-		// invoking click. The previous `if (btn) btn.click()` silently swallowed
-		// the case where the button wasn't yet rendered, causing flaky failures
-		// where navigation never happened.
 		await expect.poll(
-			() => goalRow.evaluate((row) =>
-				!!row.querySelector("button[title='Goal dashboard']"),
-			),
+			() => goalRow.evaluate((row) => !!row.querySelector("button[title='Goal dashboard']")),
 			{ timeout: 10_000 },
 		).toBe(true);
-		// Click the button to exercise the real navigation path. Retry the
-		// click if the hash is subsequently clobbered by a concurrent
-		// hashchange handler (e.g. session poll / session connect racing
-		// with our navigation under heavy parallel load).
 		await expect(async () => {
 			await goalRow.evaluate((row) => {
 				const btn = row.querySelector<HTMLButtonElement>("button[title='Goal dashboard']");
@@ -259,18 +155,7 @@ test.describe("Sidebar navigation", () => {
 			expect(h).toMatch(/goal/i);
 		}).toPass({ timeout: 15_000 });
 
-		// Verify dashboard content loads. The dashboard container must stay
-		// rendered (not just flash briefly) and a tab must appear. Assert both
-		// together inside expect().toPass() so that transient re-renders
-		// (e.g. `refreshSessions()` completing after navigation) don't break
-		// the assertion mid-poll.
-		// The dashboard container appears immediately with a loading animation,
-		// then the tab bar renders once loadDashboardData resolves. Assert the
-		// final state (tab visible) with a generous single timeout — under 5x
-		// parallel load the fetch can take 10–15s.
-		await expect(page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 20_000 });
-		await expect(page.locator(".tab").first())
-			.toBeVisible({ timeout: 25_000 });
+		await expect(page.locator(".dashboard-container").first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator(".tab").first()).toBeVisible({ timeout: 25_000 });
 	});
 });

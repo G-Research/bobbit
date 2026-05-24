@@ -6,7 +6,7 @@
  * Pattern: navigate → happy path → assert removal in sidebar.
  */
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
+import { apiFetch, registerProject } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -35,14 +35,8 @@ test.describe("Settings → Remove Project (any position)", () => {
 
 			const nameA = `rm-first-A-${Date.now()}`;
 			const nameB = `rm-first-B-${Date.now()}`;
-			const projA = await apiFetch("/api/projects", {
-				method: "POST",
-				body: JSON.stringify({ name: nameA, rootPath: dirA }),
-			}).then(r => r.json());
-			const projB = await apiFetch("/api/projects", {
-				method: "POST",
-				body: JSON.stringify({ name: nameB, rootPath: dirB }),
-			}).then(r => r.json());
+			const projA = await registerProject({ name: nameA, rootPath: dirA, seedWorkflows: false });
+			const projB = await registerProject({ name: nameB, rootPath: dirB, seedWorkflows: false });
 
 			// Determine which project the client sees at index 0 — that is the
 			// one the old `isDefault` gate excluded. Server returns the registry
@@ -78,7 +72,10 @@ test.describe("Settings → Remove Project (any position)", () => {
 
 			await removeBtn.click();
 
-			// The deleted project disappears from /api/projects; the other remains.
+			// The settings flow navigates away from the deleted project.
+			await expect(page).toHaveURL(/#.*settings.*system/, { timeout: 5_000 });
+
+			// The deleted project disappears from /api/projects and the sidebar; the other remains.
 			await expect.poll(async () =>
 				(await listVisibleProjects()).map(p => p.name),
 				{ timeout: 10_000 },
@@ -86,6 +83,8 @@ test.describe("Settings → Remove Project (any position)", () => {
 
 			const remaining = (await listVisibleProjects()).map(p => p.name);
 			expect(remaining).toContain(otherName);
+			const sidebar = page.locator(".sidebar-edge").first();
+			await expect(sidebar.getByText(firstName)).not.toBeVisible({ timeout: 3_000 });
 			expect(errorDialogs, "no error alerts should fire").toEqual([]);
 		} finally {
 			// Cleanup: remove anything still registered.

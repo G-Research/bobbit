@@ -17,11 +17,28 @@
  * the goal "Faster git status".
  */
 import { execFile as execFileCb } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import type { GitStatusResult } from "../server.js";
 import { parseBaseRef } from "./git.js";
 
 const execFileAsync = promisify(execFileCb);
+
+function childErrorCode(err: unknown): string {
+	const code = (err as { code?: unknown } | null)?.code;
+	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
+}
+
+function statusGitOperation(args: readonly string[]): string {
+	const [cmd, sub] = args;
+	if (cmd === "-c") return "status";
+	if (cmd === "rev-list") return "rev-list";
+	if (cmd === "rev-parse") return "rev-parse";
+	if (cmd === "symbolic-ref") return "symbolic-ref";
+	if (cmd === "diff") return "diff";
+	return sub ? `${cmd} ${sub}` : (cmd || "git");
+}
 
 export interface BatchGitStatusOpts {
 	/** When true, runs porcelain with -uall (untracked included). Default false → -uno. */
@@ -57,6 +74,10 @@ async function runGit(
 	timeoutMs = PER_CALL_TIMEOUT_MS,
 	trim = true,
 ): Promise<{ stdout: string; ok: boolean }> {
+	const diagEnabled = cpuDiagnosticsEnabled();
+	const diagStart = diagEnabled ? performance.now() : 0;
+	let success = 0;
+	let errorCode = "none";
 	try {
 		let stdout: string;
 		if (containerId) {
@@ -75,9 +96,21 @@ async function runGit(
 			});
 			stdout = r.stdout;
 		}
+		success = 1;
 		return { stdout: trim ? stdout.trim() : stdout.replace(/\r?\n$/, ""), ok: true };
-	} catch {
+	} catch (err) {
+		errorCode = childErrorCode(err);
 		return { stdout: "", ok: false };
+	} finally {
+		if (diagEnabled) {
+			getCpuDiagnostics().recordChildProcess(containerId ? "docker exec git status" : "git status", performance.now() - diagStart, {
+				mode: containerId ? "container" : "host",
+				operation: statusGitOperation(args),
+				success,
+				errorCode,
+				timeoutMs,
+			});
+		}
 	}
 }
 
@@ -287,16 +320,38 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		'printf "%s" "$PREF"',
 	].join("\n");
 
-	const { stdout } = await execFileAsync(
-		"docker",
-		["exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript],
-		{
-			encoding: "utf-8",
-			timeout: CONTAINER_BATCH_TIMEOUT_MS,
-			env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
-			windowsHide: true,
-		},
-	);
+	const diagEnabled = cpuDiagnosticsEnabled();
+	const diagStart = diagEnabled ? performance.now() : 0;
+	let success = 0;
+	let errorCode = "none";
+	let stdout: string;
+	try {
+		const result = await execFileAsync(
+			"docker",
+			["exec", "-w", cwd, containerId, "/bin/sh", "-c", batchScript],
+			{
+				encoding: "utf-8",
+				timeout: CONTAINER_BATCH_TIMEOUT_MS,
+				env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
+				windowsHide: true,
+			},
+		);
+		success = 1;
+		stdout = result.stdout;
+	} catch (err) {
+		errorCode = childErrorCode(err);
+		throw err;
+	} finally {
+		if (diagEnabled) {
+			getCpuDiagnostics().recordChildProcess("docker exec git status", performance.now() - diagStart, {
+				mode: "container-batch",
+				operation: "batch",
+				success,
+				errorCode,
+				timeoutMs: CONTAINER_BATCH_TIMEOUT_MS,
+			});
+		}
+	}
 
 	const sections = stdout.split("\0").map((s) => s.replace(/\s+$/, ""));
 	const branchRaw = sections[0] || "";

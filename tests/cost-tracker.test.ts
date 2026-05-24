@@ -274,6 +274,13 @@ describe("CostTracker", () => {
 			);
 		});
 
+		it("deriveCacheHitRate returns 1 when all input tokens are cache reads", () => {
+			assert.equal(
+				deriveCacheHitRate({ inputTokens: 0, cacheReadTokens: 300 }),
+				1,
+			);
+		});
+
 		it("deriveCacheHitRate ignores cacheWriteTokens (writes are not hits)", () => {
 			// cacheWriteTokens is not part of the formula. Same input/read with
 			// arbitrary write count must give same rate.
@@ -297,6 +304,16 @@ describe("CostTracker", () => {
 				cost: 0.001,
 			});
 			assert.equal(result.cacheHitRate, 0.75);
+		});
+
+		it("recordUsage returns cacheHitRate = 1 for cache-read-only usage", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {
+				inputTokens: 0,
+				cacheReadTokens: 300,
+				cost: 0.001,
+			});
+			assert.equal(result.cacheHitRate, 1);
 		});
 
 		it("cacheHitRate updates across repeated recordUsage calls", () => {

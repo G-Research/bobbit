@@ -1,5 +1,5 @@
 name: bash_bg
-description: "Create, log, grep, slice, kill, or list background processes"
+description: "Manage background shell processes. bash_bg does not notify on completion. If you need to take follow up actions, use bash_bg wait"
 summary: "Manage background shell processes"
 params: [action, name?, command?, id?, pattern?, context?, max_results?, lines?, from?, to?, tail?, timeout?]
 provider:
@@ -8,7 +8,7 @@ provider:
 group: Shell
 renderer: src/ui/tools/renderers/BgProcessRenderer.ts
 docs: |-
-  Actions: create, logs, grep, head, slice, kill, list. Use `bash_bg` instead of `bash` for any command that might take longer than 2 minutes or produce large output you may not need to read in full. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill), `tail` (log lines, default 200), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice).
+  Actions: create, logs, grep, head, slice, kill, list, wait. bash_bg does not notify on completion. If you need to take follow up actions, use bash_bg wait. Use `bash_bg` instead of `bash` for any command that might take longer than 2 minutes or produce large output you may not need to read in full. Parameters: `command` (for create), `name` (required for create — a short max-3-word label like "dev server" or "test runner"), `id` (for logs/grep/head/slice/kill/wait), `tail` (log lines, default 15), `pattern` (for grep — string or regex), `context` (grep context lines, default 0), `max_results` (grep max matches, default 50), `lines` (for head, default 50), `from`/`to` (1-indexed line range for slice), `timeout` (for wait, default 300).
 detail_docs: |
   Manage background shell processes that don't block the agent.
 
@@ -28,6 +28,9 @@ detail_docs: |
   explore it selectively with `grep`, `head`, and `slice` — pulling only
   the lines you need into your context window instead of ingesting
   thousands of lines of build output.
+
+  bash_bg does not notify on completion. If you need to take follow up
+  actions, use bash_bg wait.
 
   ## Actions
 
@@ -59,7 +62,7 @@ detail_docs: |
   - `command` (for create): Shell command to run in the background
   - `name` (required for create): Short descriptive name, max 3 words (e.g. "dev server", "test runner", "color echo loop")
   - `id` (for logs/grep/head/slice/kill): Background process ID (e.g. "bg-1")
-  - `tail` (for logs): Number of log lines to return from end (default: 200)
+  - `tail` (for logs): Number of log lines to return from end (default: 15)
   - `pattern` (for grep): Search pattern — string or regex, case-insensitive
   - `context` (for grep): Lines of context around each match (default: 0)
   - `max_results` (for grep): Max matches to return (default: 50)

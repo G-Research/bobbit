@@ -1,10 +1,9 @@
 /**
  * Browser E2E test for sidebar child auto-loading.
  *
- * Verifies that the on-demand child fetch endpoint
- * (GET /api/goals/:id/team/agents?include=archived) returns archived sessions
- * affiliated with a team goal, and that expanding a goal in the sidebar
- * shows children.
+ * Verifies that expanding a goal in the sidebar shows children. API-only
+ * coverage for GET /api/goals/:id/team/agents?include=archived lives in
+ * tests/e2e/sidebar-api.spec.ts.
  */
 import { test, expect } from "../gateway-harness.js";
 import {
@@ -12,7 +11,6 @@ import {
 	startTeam,
 	teardownTeam,
 	deleteGoal,
-	apiFetch,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
@@ -27,35 +25,6 @@ test.describe("Sidebar child auto-loading", () => {
 		}
 	});
 
-	test("on-demand agents endpoint returns archived team lead after teardown", async ({ page }) => {
-		// 1. Create a team goal, start team, then teardown (archives team lead)
-		const goal = await createGoal({
-			title: "ChildLoad API",
-			worktree: false,
-			team: true,
-		});
-		goalIds.push(goal.id);
-		const teamLeadId = await startTeam(goal.id);
-		await waitForSessionStatus(teamLeadId, "idle");
-
-		// Teardown archives the team lead
-		await teardownTeam(goal.id);
-
-		// 2. Verify the on-demand endpoint returns the archived team lead
-		const agentsResp = await apiFetch(`/api/goals/${goal.id}/team/agents?include=archived`);
-		expect(agentsResp.status).toBe(200);
-		const agentsBody = await agentsResp.json();
-		const agentSessionIds = (agentsBody.agents as any[]).map((a: any) => a.sessionId);
-
-		expect(
-			agentSessionIds,
-			"On-demand agents endpoint should include the archived team lead",
-		).toContain(teamLeadId);
-
-		// Verify it's marked as archived
-		const archivedAgent = (agentsBody.agents as any[]).find((a: any) => a.sessionId === teamLeadId);
-		expect(archivedAgent.status).toBe("archived");
-	});
 
 	test("expanding a team goal in sidebar shows team lead child", async ({ page }) => {
 		// 1. Create a team goal and start the team

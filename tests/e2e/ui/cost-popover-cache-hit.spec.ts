@@ -19,9 +19,89 @@
  *   - Missing / null / non-finite values render as an em dash (—),
  *     never "0%" — that's the rule the design doc pins.
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+
+interface CostAggregate {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalCost: number;
+	cacheHitRate?: number | null;
+}
+
+const BASE_AGGREGATE: CostAggregate = {
+	inputTokens: 100,
+	outputTokens: 50,
+	cacheReadTokens: 300,
+	cacheWriteTokens: 0,
+	totalCost: 0.01,
+	cacheHitRate: 0.75,
+};
+
+async function routeGoalCost(
+	page: Page,
+	aggregate: CostAggregate,
+	options: { breakdownAggregate?: CostAggregate; breakdownBody?: string } = {},
+): Promise<void> {
+	await page.route(/\/api\/goals\/[^/]+\/cost(?:\?.*)?$/, async (route, req) => {
+		if (req.method() !== "GET") return route.fallback();
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify(aggregate),
+		});
+	});
+	await page.route(/\/api\/goals\/[^/]+\/cost\/breakdown(?:\?.*)?$/, async (route, req) => {
+		if (req.method() !== "GET") return route.fallback();
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: options.breakdownBody ?? JSON.stringify({ aggregate: options.breakdownAggregate ?? aggregate, sessions: [] }),
+		});
+	});
+}
+
+async function openGoalCostPopover(page: Page, goalId: string) {
+	await openApp(page);
+	await navigateToGoalDashboard(page, goalId);
+
+	// The $ cost trigger only renders when totalCost > 0. Our mocks supply
+	// 0.01, so the cost-tag must be visible. Click it to open the popover.
+	const costTag = page.locator(".cost-tag").first();
+	await expect(costTag).toBeVisible({ timeout: 15_000 });
+	await costTag.click();
+
+	// Popover loads /cost/breakdown asynchronously. The Cache hit row is always
+	// rendered (even for null), so wait on the testid before asserting content.
+	const cacheHitRow = page.locator('[data-testid="cost-cache-hit"]').first();
+	await expect(cacheHitRow).toBeVisible({ timeout: 10_000 });
+	await expect(cacheHitRow).toContainText("Cache hit");
+	return cacheHitRow;
+}
+
+async function assertCacheHitText(
+	page: Page,
+	aggregate: CostAggregate,
+	expectedText: string,
+	options: { breakdownAggregate?: CostAggregate; breakdownBody?: string } = {},
+): Promise<void> {
+	const goal = await createGoal({ title: `Cache-hit popover ${Date.now()}` });
+	const goalId = goal.id;
+	try {
+		await routeGoalCost(page, aggregate, options);
+		const cacheHitRow = await openGoalCostPopover(page, goalId);
+		await expect(cacheHitRow).toContainText(expectedText);
+		if (expectedText === "\u2014") {
+			await expect(cacheHitRow).not.toContainText("0%");
+		}
+	} finally {
+		await deleteGoal(goalId);
+	}
+}
 
 test.describe("CostPopover cache-hit row", () => {
 	test("renders cacheHitRate as a percent and persists across reload @smoke", async ({ page }) => {
@@ -29,54 +109,14 @@ test.describe("CostPopover cache-hit row", () => {
 		const goalId = goal.id;
 
 		try {
-			// Mock both the polled cost summary and the on-open breakdown so the
-			// dashboard sees totalCost>0 (renders the $ trigger) and the popover
-			// receives a deterministic payload with cacheHitRate=0.75.
-			const aggregate = {
-				inputTokens: 100,
-				outputTokens: 50,
-				cacheReadTokens: 300,
-				cacheWriteTokens: 0,
-				totalCost: 0.01,
-				cacheHitRate: 0.75,
-			};
-			await page.route(/\/api\/goals\/[^/]+\/cost(?:\?.*)?$/, async (route, req) => {
-				if (req.method() !== "GET") return route.fallback();
-				await route.fulfill({
-					status: 200,
-					contentType: "application/json",
-					body: JSON.stringify(aggregate),
-				});
-			});
-			await page.route(/\/api\/goals\/[^/]+\/cost\/breakdown(?:\?.*)?$/, async (route, req) => {
-				if (req.method() !== "GET") return route.fallback();
-				await route.fulfill({
-					status: 200,
-					contentType: "application/json",
-					body: JSON.stringify({ aggregate, sessions: [] }),
-				});
-			});
+			await routeGoalCost(page, BASE_AGGREGATE);
 
-			await openApp(page);
-			await navigateToGoalDashboard(page, goalId);
-
-			// The $ cost trigger only renders when totalCost > 0. Our mock supplies
-			// 0.01, so the cost-tag must be visible. Click it to open the popover.
-			const costTag = page.locator(".cost-tag").first();
-			await expect(costTag).toBeVisible({ timeout: 15_000 });
-			await costTag.click();
-
-			// Popover loads /cost/breakdown asynchronously. The Cache hit row is
-			// always rendered (even for null), so wait on the testid then assert
-			// the percent text.
-			const cacheHitRow = page.locator('[data-testid="cost-cache-hit"]').first();
-			await expect(cacheHitRow).toBeVisible({ timeout: 10_000 });
-			await expect(cacheHitRow).toContainText("Cache hit");
+			const cacheHitRow = await openGoalCostPopover(page, goalId);
 			await expect(cacheHitRow).toContainText("75%");
 
 			// Persistence: reload, re-open the popover, re-assert. Because
-			// `cacheHitRate` is derived server-side from raw counters, a
-			// returning user must see the same value after refresh.
+			// `cacheHitRate` is derived server-side from raw counters, a returning
+			// user must see the same value after refresh.
 			await page.reload();
 			// page.route registrations survive reload in Playwright.
 			await navigateToGoalDashboard(page, goalId);
@@ -93,49 +133,53 @@ test.describe("CostPopover cache-hit row", () => {
 		}
 	});
 
-	test("renders em dash when cacheHitRate is missing or null", async ({ page }) => {
-		// Older servers / cold sessions report cost without `cacheHitRate`.
-		// The UI must render "—", never "0%".
-		const goal = await createGoal({ title: `Cache-hit popover null ${Date.now()}` });
-		const goalId = goal.id;
+	test("renders 0% when cacheHitRate is zero", async ({ page }) => {
+		await assertCacheHitText(page, {
+			...BASE_AGGREGATE,
+			inputTokens: 300,
+			cacheReadTokens: 0,
+			cacheHitRate: 0,
+		}, "0%");
+	});
 
-		try {
-			// No cacheHitRate field at all — simulates an older server payload.
-			const aggregate = {
-				inputTokens: 0,
-				outputTokens: 50,
-				cacheReadTokens: 0,
-				cacheWriteTokens: 0,
-				totalCost: 0.01,
-			};
-			await page.route(/\/api\/goals\/[^/]+\/cost(?:\?.*)?$/, async (route, req) => {
-				if (req.method() !== "GET") return route.fallback();
-				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(aggregate) });
-			});
-			await page.route(/\/api\/goals\/[^/]+\/cost\/breakdown(?:\?.*)?$/, async (route, req) => {
-				if (req.method() !== "GET") return route.fallback();
-				await route.fulfill({
-					status: 200,
-					contentType: "application/json",
-					body: JSON.stringify({ aggregate: { ...aggregate, cacheHitRate: null }, sessions: [] }),
-				});
-			});
+	test("renders 100% when all input tokens are cache reads", async ({ page }) => {
+		await assertCacheHitText(page, {
+			...BASE_AGGREGATE,
+			inputTokens: 0,
+			cacheReadTokens: 300,
+			cacheHitRate: 1,
+		}, "100%");
+	});
 
-			await openApp(page);
-			await navigateToGoalDashboard(page, goalId);
+	test("renders em dash when cacheHitRate is truly missing/undefined", async ({ page }) => {
+		// Explicit `undefined` is dropped by JSON.stringify, matching an older
+		// server payload where the field is absent and becomes `undefined` in JS.
+		await assertCacheHitText(page, {
+			...BASE_AGGREGATE,
+			inputTokens: 0,
+			cacheReadTokens: 0,
+			cacheHitRate: undefined,
+		}, "\u2014");
+	});
 
-			const costTag = page.locator(".cost-tag").first();
-			await expect(costTag).toBeVisible({ timeout: 15_000 });
-			await costTag.click();
+	test("renders em dash when cacheHitRate is null", async ({ page }) => {
+		await assertCacheHitText(page, {
+			...BASE_AGGREGATE,
+			inputTokens: 0,
+			cacheReadTokens: 0,
+			cacheHitRate: null,
+		}, "\u2014");
+	});
 
-			const cacheHitRow = page.locator('[data-testid="cost-cache-hit"]').first();
-			await expect(cacheHitRow).toBeVisible({ timeout: 10_000 });
-			await expect(cacheHitRow).toContainText("Cache hit");
-			// Em dash, NOT "0%".
-			await expect(cacheHitRow).toContainText("\u2014");
-			await expect(cacheHitRow).not.toContainText("0%");
-		} finally {
-			await deleteGoal(goalId);
-		}
+	test("renders em dash when cacheHitRate is non-finite", async ({ page }) => {
+		// JSON can carry a huge exponent (`1e999`) that parses to JavaScript
+		// Infinity. This pins the UI's non-finite fallback without invalid JSON.
+		const nonFiniteBreakdown = `{"aggregate":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":300,"cacheWriteTokens":0,"totalCost":0.01,"cacheHitRate":1e999},"sessions":[]}`;
+		await assertCacheHitText(
+			page,
+			BASE_AGGREGATE,
+			"\u2014",
+			{ breakdownBody: nonFiniteBreakdown },
+		);
 	});
 });

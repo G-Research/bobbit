@@ -5,7 +5,9 @@
  * so the server's `trackCostFromEvent` path emits a `cost_update`. We assert
  * the broadcast message includes a `cacheHitRate` field on `cost`, and that
  * its value matches the formula `cacheReadTokens / (cacheReadTokens + inputTokens)`
- * (returning `null` when the denominator is 0).
+ * (returning `null` when the denominator is 0). A deterministic synthetic
+ * assistant usage event also pins non-zero `cacheRead` → `cacheReadTokens`
+ * mapping for both WS and REST snapshots.
  *
  * See design: "Cache-Hit Metric".
  */
@@ -29,6 +31,23 @@ test.describe.configure({ mode: "serial" });
 
 let sessionId: string;
 let wsConn: WsConnection;
+
+function emitAssistantUsage(gateway: any, targetSessionId: string, usage: Record<string, unknown>): void {
+	const session = gateway.sessionManager.getSession(targetSessionId);
+	expect(session, `session ${targetSessionId} should be live`).toBeTruthy();
+	const listeners = [...((session!.rpcClient as any).eventListeners || [])] as Array<(event: any) => void>;
+	expect(listeners.length).toBeGreaterThan(0);
+	for (const listener of listeners) {
+		listener({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "synthetic cache usage" }],
+				usage,
+			},
+		});
+	}
+}
 
 test.beforeAll(async () => {
 	sessionId = await createSession();
@@ -90,5 +109,44 @@ test("/api/sessions/:id/cost REST snapshot includes cacheHitRate", async () => {
 		expect(typeof body.cacheHitRate).toBe("number");
 		expect(body.cacheHitRate).toBeGreaterThanOrEqual(0);
 		expect(body.cacheHitRate).toBeLessThanOrEqual(1);
+	}
+});
+
+test("cost_update and REST map non-zero cacheRead usage into cacheHitRate", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	const ws = await connectWs(targetSessionId);
+	try {
+		const cursor = ws.messageCount();
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 50,
+			output: 10,
+			cacheRead: 150,
+			cacheWrite: 25,
+			totalTokens: 235,
+			cost: { input: 0.001, output: 0.002, cacheRead: 0.0003, cacheWrite: 0.0004, total: 0.0037 },
+		});
+
+		const msg = await ws.waitForFrom(
+			cursor,
+			(m) => m.type === "cost_update" && m.sessionId === targetSessionId,
+			5_000,
+		);
+
+		expect(msg.cost.inputTokens).toBe(50);
+		expect(msg.cost.outputTokens).toBe(10);
+		expect(msg.cost.cacheReadTokens).toBe(150);
+		expect(msg.cost.cacheWriteTokens).toBe(25);
+		expect(msg.cost.totalCost).toBeCloseTo(0.0037, 10);
+		expect(msg.cost.cacheHitRate).toBeCloseTo(0.75, 10);
+
+		const resp = await apiFetch(`/api/sessions/${targetSessionId}/cost`);
+		expect(resp.status).toBe(200);
+		const body = await resp.json();
+		expect(body.inputTokens).toBe(50);
+		expect(body.cacheReadTokens).toBe(150);
+		expect(body.cacheHitRate).toBeCloseTo(0.75, 10);
+	} finally {
+		ws.close();
+		await deleteSession(targetSessionId).catch(() => {});
 	}
 });

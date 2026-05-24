@@ -13,7 +13,6 @@ import { readFileSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { expect } from "@playwright/test";
 import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
@@ -116,12 +115,19 @@ export function gitCwd(): string {
  * does NOT retry. Use `readE2ETokenAsync()` from new code; over time we'd
  * like every caller to be async so we can retry transient FS errors.
  */
+function envToken(): string | undefined {
+	const t = process.env.BOBBIT_TOKEN?.trim();
+	return t && t.length >= 64 ? t : undefined;
+}
+
 export function readE2EToken(): string {
 	const p = join(bobbitDir(), "state", "token");
 	try {
 		return readFileSync(p, "utf-8").trim();
 	} catch (err: any) {
 		if (err?.code === "ENOENT") {
+			const fallback = envToken();
+			if (fallback) return fallback;
 			throw new Error(
 				`E2E token missing at ${p}. ` +
 				`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
@@ -157,6 +163,8 @@ export async function readE2ETokenAsync(): Promise<string> {
 		}
 	}
 	if (lastErr?.code === "ENOENT") {
+		const fallback = envToken();
+		if (fallback) return fallback;
 		throw new Error(
 			`E2E token missing at ${p} (after 6 retries). ` +
 			`Either the gateway fixture didn't write it, or process.env.BOBBIT_DIR ` +
@@ -428,8 +436,169 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
 	throw new Error("apiFetch: unreachable");
 }
 
+type ProjectSummary = {
+	id?: string;
+	name?: string;
+	rootPath?: string;
+	hidden?: boolean;
+};
+
+type LiveProjectState =
+	| { ok: true; status: number; projects: ProjectSummary[]; rawKind: string }
+	| { ok: false; status?: number; body?: string; error?: string };
+
+function safeJson(value: unknown): string {
+	try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+async function responseText(resp: Response): Promise<string> {
+	try {
+		const text = await resp.text();
+		return text || "<empty>";
+	} catch (err) {
+		return `<failed to read body: ${err instanceof Error ? err.message : String(err)}>`;
+	}
+}
+
+async function readLiveProjectState(): Promise<LiveProjectState> {
+	try {
+		const resp = await fetch(`${base()}/api/projects`, {
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token()}`,
+			},
+		});
+		const text = await resp.text().catch(() => "<failed to read body>");
+		if (!resp.ok) return { ok: false, status: resp.status, body: text };
+		let parsed: unknown;
+		try { parsed = text ? JSON.parse(text) : []; } catch {
+			return { ok: false, status: resp.status, body: `invalid JSON: ${text}` };
+		}
+		const list = Array.isArray(parsed)
+			? parsed
+			: Array.isArray((parsed as any)?.projects)
+				? (parsed as any).projects
+				: undefined;
+		if (!Array.isArray(list)) {
+			return { ok: false, status: resp.status, body: `unexpected project list shape: ${text}` };
+		}
+		return {
+			ok: true,
+			status: resp.status,
+			rawKind: Array.isArray(parsed) ? "array" : "object.projects",
+			projects: list.map((p: any) => ({
+				id: typeof p?.id === "string" ? p.id : undefined,
+				name: typeof p?.name === "string" ? p.name : undefined,
+				rootPath: typeof p?.rootPath === "string" ? p.rootPath : undefined,
+				hidden: typeof p?.hidden === "boolean" ? p.hidden : undefined,
+			})),
+		};
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+function formatLiveProjectState(state: LiveProjectState): string {
+	if (!state.ok) {
+		return safeJson({ ok: false, status: state.status, body: state.body, error: state.error });
+	}
+	return safeJson({ ok: true, status: state.status, rawKind: state.rawKind, projects: state.projects });
+}
+
+async function seedHarnessDefaultProjectWorkflows(projectId: string, reason: string): Promise<void> {
+	try {
+		const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+		const headers = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${token()}`,
+		};
+		let current: Record<string, any> = {};
+		try {
+			const cfgResp = await fetch(`${base()}/api/projects/${projectId}/config`, { headers });
+			if (cfgResp.ok) current = await cfgResp.json();
+		} catch { /* fall back to additive seed */ }
+		const existingWorkflows = current.workflows && typeof current.workflows === "object" && !Array.isArray(current.workflows)
+			? current.workflows as Record<string, unknown>
+			: {};
+		const workflows = { ...testWorkflows(), ...existingWorkflows };
+		const existingComponents = Array.isArray(current.components) ? current.components : [];
+		const componentNames = new Set(existingComponents.map((c: any) => c?.name).filter((name: unknown): name is string => typeof name === "string"));
+		const components = componentNames.has(TEST_DEFAULT_COMPONENT.name)
+			? existingComponents
+			: [...existingComponents, TEST_DEFAULT_COMPONENT];
+		const resp = await fetch(`${base()}/api/projects/${projectId}/config`, {
+			method: "PUT",
+			headers,
+			body: JSON.stringify({ components, workflows }),
+		});
+		if (!resp.ok) {
+			throw new Error(`${resp.status} ${resp.statusText} body=${await responseText(resp)}`);
+		}
+	} catch (err) {
+		throw new Error(
+			`E2E default project workflow seed failed (${reason}): ` +
+			`${err instanceof Error ? err.message : String(err)} port=${port()} bobbitDir=${bobbitDir()}`,
+		);
+	}
+}
+
+async function registerHarnessDefaultProject(reason: string): Promise<ProjectSummary> {
+	const p = port();
+	const request = { name: "default", rootPath: bobbitDir(), upsert: true, acceptCanonical: true };
+	let resp: Response;
+	try {
+		resp = await fetch(`${base()}/api/projects`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token()}`,
+			},
+			body: JSON.stringify(request),
+		});
+	} catch (err) {
+		delete _defaultProjectIdCache[p];
+		throw new Error(
+			`E2E default project registration failed (${reason}): ${err instanceof Error ? err.message : String(err)} ` +
+			`request=${safeJson(request)} port=${p} bobbitDir=${bobbitDir()}`,
+		);
+	}
+	const text = await resp.text().catch(() => "<failed to read body>");
+	if (resp.status < 200 || resp.status >= 300) {
+		delete _defaultProjectIdCache[p];
+		throw new Error(
+			`E2E default project registration failed (${reason}): ${resp.status} ${resp.statusText} ` +
+			`body=${text || "<empty>"} request=${safeJson(request)} port=${p} bobbitDir=${bobbitDir()}`,
+		);
+	}
+	let project: ProjectSummary;
+	try { project = JSON.parse(text) as ProjectSummary; } catch {
+		delete _defaultProjectIdCache[p];
+		throw new Error(
+			`E2E default project registration returned invalid JSON (${reason}): body=${text || "<empty>"} ` +
+			`request=${safeJson(request)} port=${p} bobbitDir=${bobbitDir()}`,
+		);
+	}
+	if (!project?.id) {
+		delete _defaultProjectIdCache[p];
+		throw new Error(
+			`E2E default project registration returned no id (${reason}): body=${text || "<empty>"} ` +
+			`request=${safeJson(request)} port=${p} bobbitDir=${bobbitDir()}`,
+		);
+	}
+	_defaultProjectIdCache[p] = project.id;
+	await seedHarnessDefaultProjectWorkflows(project.id, reason);
+	return project;
+}
+
+async function requestDiagnosticContext(request: Record<string, unknown>): Promise<string> {
+	const liveProjects = await readLiveProjectState();
+	return `request=${safeJson(request)} port=${port()} base=${base()} bobbitDir=${bobbitDir()} ` +
+		`cachedDefaultProjectId=${_defaultProjectIdCache[port()] ?? "<none>"} liveProjects=${formatLiveProjectState(liveProjects)}`;
+}
+
 /**
- * Look up the harness-registered "default" project id.
+ * Look up the harness-registered "default" project id, re-registering it when
+ * a shared worker was drained to zero projects or our cached id was deleted.
  *
  * The gateway harness (see gateway-harness.ts / in-process-harness.ts) registers
  * a single project named "default" at the server CWD after startup. The server
@@ -441,36 +610,51 @@ export async function apiFetch(path: string, opts: RequestInit = {}): Promise<Re
  * cached here would then point at a deleted project and the next
  * `createSession()` would 500 with "Cannot resolve session store". To stay
  * robust under shared-worker harness reuse, every call re-checks the live
- * project list and re-derives the cache from it; the caller still gets
- * O(1)-ish behaviour because /api/projects is in-memory and dirt cheap.
+ * project list and re-derives the cache from the live "default" project;
+ * the caller still gets O(1)-ish behaviour because /api/projects is
+ * in-memory and dirt cheap.
  */
 const _defaultProjectIdCache: Record<string, string> = {};
 export async function defaultProjectId(): Promise<string | undefined> {
 	const p = port();
-	try {
-		const resp = await apiFetch("/api/projects");
-		if (!resp.ok) {
-			delete _defaultProjectIdCache[p];
-			return undefined;
-		}
-		const list = await resp.json() as Array<{ id: string; name: string }>;
-		if (!Array.isArray(list)) {
-			delete _defaultProjectIdCache[p];
-			return undefined;
-		}
-		// If a previously-cached id still exists in the live list, keep using
-		// it (stable across calls). Otherwise pick the "default" project, or
-		// fall back to the first registered project.
-		const cachedId = _defaultProjectIdCache[p];
-		if (cachedId && list.some(pr => pr.id === cachedId)) return cachedId;
-		const match = list.find(pr => pr.name === "default") ?? list[0];
-		if (match?.id) {
-			_defaultProjectIdCache[p] = match.id;
-			return match.id;
-		}
+	const state = await readLiveProjectState();
+	if (!state.ok) {
 		delete _defaultProjectIdCache[p];
-	} catch { /* zero-project harnesses are a valid state (see GR-09) */ }
-	return undefined;
+		throw new Error(`defaultProjectId failed to list projects: ${formatLiveProjectState(state)} port=${p} bobbitDir=${bobbitDir()}`);
+	}
+	const visibleProjects = state.projects.filter(pr => !pr.hidden);
+	const cachedId = _defaultProjectIdCache[p];
+	if (cachedId && visibleProjects.some(pr => pr.id === cachedId && pr.name === "default")) return cachedId;
+	if (cachedId && !visibleProjects.some(pr => pr.id === cachedId)) {
+		return (await registerHarnessDefaultProject(`cached project ${cachedId} missing from live list`)).id;
+	}
+	const match = visibleProjects.find(pr => pr.name === "default");
+	if (match?.id) {
+		_defaultProjectIdCache[p] = match.id;
+		return match.id;
+	}
+	delete _defaultProjectIdCache[p];
+	return (await registerHarnessDefaultProject(
+		visibleProjects.length === 0 ? "live visible project list is empty" : "default project missing from live list",
+	)).id;
+}
+
+export async function defaultProject(): Promise<{ id: string; rootPath: string; name?: string }> {
+	const id = await defaultProjectId();
+	if (!id) throw new Error(`defaultProject failed to resolve id port=${port()} bobbitDir=${bobbitDir()}`);
+	const state = await readLiveProjectState();
+	if (!state.ok) {
+		throw new Error(`defaultProject failed to list projects: ${formatLiveProjectState(state)} port=${port()} bobbitDir=${bobbitDir()}`);
+	}
+	const project = state.projects.find(pr => pr.id === id && !pr.hidden);
+	if (!project?.rootPath) {
+		throw new Error(`defaultProject ${id} missing rootPath: ${formatLiveProjectState(state)} port=${port()} bobbitDir=${bobbitDir()}`);
+	}
+	return { id, rootPath: project.rootPath, name: project.name };
+}
+
+export async function defaultProjectRootPath(): Promise<string> {
+	return (await defaultProject()).rootPath;
 }
 
 /**
@@ -493,9 +677,8 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		// project). Auto-inject the harness default projectId whenever the
 		// caller didn't specify one — safe because the server prefers
 		// projectId over cwd. Tests that deliberately exercise the 400 path
-		// call apiFetch("/api/sessions", ...) directly and bypass this helper.
-		const pid = await defaultProjectId();
-		if (pid) body.projectId = pid;
+		// call rawApiFetch("/api/sessions", ...) and bypass this helper.
+		body.projectId = await defaultProjectId();
 	}
 	// Retry on transient server 500s. Under heavy parallel test load the
 	// server occasionally fails session creation with a 500 (e.g. worktree
@@ -505,18 +688,16 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 	//
 	// Bumped from 3 to 5 attempts with backoff to absorb persistent FS
 	// contention under heavy parallel browser load, and we now capture and
-	// surface the server's error body so a failed retry tells us *why*
-	// instead of just "got 500".
+	// surface the server's final error body and live project context so a
+	// failed retry tells us *why* instead of just "got 500".
 	let resp: Response | undefined;
-	let lastBody: string | undefined;
 	for (let attempt = 0; attempt < 5; attempt++) {
 		resp = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify(body),
 		});
-		if (resp.status !== 500) break;
-		try { lastBody = await resp.clone().text(); } catch { /* ignore */ }
-		if (attempt === 4) break;
+		if (resp.status !== 500 || attempt === 4) break;
+		await responseText(resp).catch(() => "<ignored>");
 		try {
 			const { mkdirSync } = await import("node:fs");
 			mkdirSync(join(bobbitDir(), "state", "session-prompts"), { recursive: true });
@@ -524,10 +705,9 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 		await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
 	}
 	if (resp!.status !== 201) {
-		// Surface the server-side error body in the assertion message so flaky
-		// 500s can be diagnosed without a separate log dive.
+		const finalBody = await responseText(resp!);
 		throw new Error(
-			`createSession expected 201, got ${resp!.status}. body=${lastBody ?? "<empty>"}`,
+			`createSession expected 201, got ${resp!.status}. body=${finalBody}. ${await requestDiagnosticContext(body)}`,
 		);
 	}
 	return (await resp!.json()).id;
@@ -609,15 +789,19 @@ export async function createGoal(opts: {
 	if (!body.projectId) {
 		// Auto-inject harness default projectId when caller didn't specify one.
 		// Server prefers projectId over cwd. Tests that exercise the 400 path
-		// call apiFetch("/api/goals", ...) directly and bypass this helper.
-		const pid = await defaultProjectId();
-		if (pid) body.projectId = pid;
+		// call rawApiFetch("/api/goals", ...) and bypass this helper.
+		body.projectId = await defaultProjectId();
 	}
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify(body),
 	});
-	expect(resp.status).toBe(201);
+	if (resp.status !== 201) {
+		const finalBody = await responseText(resp);
+		throw new Error(
+			`createGoal expected 201, got ${resp.status}. body=${finalBody}. ${await requestDiagnosticContext(body)}`,
+		);
+	}
 	return resp.json();
 }
 

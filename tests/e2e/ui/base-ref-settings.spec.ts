@@ -1,7 +1,7 @@
 /**
  * Browser E2E — Settings → General → "Base Ref" field.
  *
- * Covers persistence happy path, inline error rendering for each
+ * Covers persistence happy path plus inline error rendering for each
  * validation row (tag, grammar, sandbox-local, multi-repo missing).
  * See docs/design/base-ref.md.
  */
@@ -12,6 +12,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+
+type BrowserPage = Parameters<typeof openApp>[0];
 
 function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): void {
 	mkdirSync(dir, { recursive: true });
@@ -50,206 +52,140 @@ async function createProject(name: string, rootPath: string, components?: Array<
 	return proj.id;
 }
 
+async function openBaseRefSettings(page: BrowserPage, projectId: string) {
+	await navigateToHash(page, `#/settings/${projectId}/general`);
+	const input = page.locator("[data-testid='base-ref-input']");
+	await expect(input).toBeVisible({ timeout: 10_000 });
+	return input;
+}
+
+async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<void> {
+	const savePromise = page.waitForResponse(
+		resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
+			resp.request().method() === "PUT" &&
+			resp.status() === expectedStatus,
+	);
+	await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
+	await savePromise;
+}
+
+async function deleteProjects(projectIds: string[]): Promise<void> {
+	await Promise.all(projectIds.map(projectId =>
+		apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {}),
+	));
+}
+
 test.describe("Settings → Base Ref field", () => {
 	test("persists across reload (happy path)", async ({ page }) => {
-		const dir = uniqueProjectDir("happy");
-		gitInit(dir, { remoteRefs: ["develop"] });
-		const projectId = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
+		const projectIds: string[] = [];
 		try {
+			const dir = uniqueProjectDir("happy");
+			gitInit(dir, { remoteRefs: ["develop"] });
+			const projectId = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
+			projectIds.push(projectId);
+
 			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-
+			const input = await openBaseRefSettings(page, projectId);
 			await input.fill("origin/develop");
-
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 200,
-			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
+			await saveBaseRef(page, projectId, 200);
 
 			// Reload — value should persist.
 			await page.reload();
 			await expect(
 				page.locator("button").filter({ hasText: "Settings" }).first(),
 			).toBeVisible({ timeout: 15_000 });
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-			const inputAfter = page.locator("[data-testid='base-ref-input']");
-			await expect(inputAfter).toBeVisible({ timeout: 10_000 });
+			const inputAfter = await openBaseRefSettings(page, projectId);
 			await expect(inputAfter).toHaveValue("origin/develop");
 		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+			await deleteProjects(projectIds);
 		}
 	});
 
-	test("inline tag error renders verbatim", async ({ page }) => {
-		const dir = uniqueProjectDir("tag");
-		gitInit(dir, { tags: ["v1.2.3"] });
-		const projectId = await createProject(`baseref-ui-tag-${Date.now()}`, dir);
+	test("renders validation errors and clears stale inline errors", async ({ page }) => {
+		const projectIds: string[] = [];
 		try {
-			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
+			const tagDir = uniqueProjectDir("tag");
+			gitInit(tagDir, { tags: ["v1.2.3"] });
+			const tagProjectId = await createProject(`baseref-ui-tag-${Date.now()}`, tagDir);
+			projectIds.push(tagProjectId);
 
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-			await input.fill("v1.2.3");
+			const grammarDir = uniqueProjectDir("grammar");
+			gitInit(grammarDir);
+			const grammarProjectId = await createProject(`baseref-ui-grammar-${Date.now()}`, grammarDir);
+			projectIds.push(grammarProjectId);
 
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 400,
+			const sandboxDir = uniqueProjectDir("sandbox");
+			gitInit(sandboxDir);
+			const sandboxProjectId = await createProject(`baseref-ui-sandbox-${Date.now()}`, sandboxDir);
+			projectIds.push(sandboxProjectId);
+			// Pre-set sandbox=docker via API so the UI only needs to drive base_ref.
+			const putRes = await apiFetch(`/api/projects/${sandboxProjectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "docker" }),
+			});
+			expect(putRes.ok).toBe(true);
+
+			const root = uniqueProjectDir("multi");
+			const repoA = join(root, "api");
+			const repoB = join(root, "web");
+			const repoC = join(root, "shared");
+			gitInit(repoA, { remoteRefs: ["develop"] });
+			gitInit(repoB); // missing origin/develop
+			gitInit(repoC); // missing origin/develop
+			const multiProjectId = await createProject(
+				`baseref-ui-multi-${Date.now()}`,
+				root,
+				[
+					{ name: "api", repo: "api" },
+					{ name: "web", repo: "web" },
+					{ name: "shared", repo: "shared" },
+				],
 			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
+			projectIds.push(multiProjectId);
 
-			const errBox = page.locator("[data-testid='base-ref-error']");
+			await openApp(page);
+
+			let input = await openBaseRefSettings(page, tagProjectId);
+			await input.fill("v1.2.3");
+			await saveBaseRef(page, tagProjectId, 400);
+			let errBox = page.locator("[data-testid='base-ref-error']");
 			await expect(errBox).toBeVisible({ timeout: 5_000 });
 			await expect(errBox).toContainText(
 				"base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3",
 			);
-		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		}
-	});
-
-	test("inline grammar error renders", async ({ page }) => {
-		const dir = uniqueProjectDir("grammar");
-		gitInit(dir);
-		const projectId = await createProject(`baseref-ui-grammar-${Date.now()}`, dir);
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-			await input.fill("feature foo");
-
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 400,
-			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
-
-			const errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText("base_ref must be a valid branch name. Got: feature foo");
-		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		}
-	});
-
-	test("sandbox + local ref shows sandbox-specific error", async ({ page }) => {
-		const dir = uniqueProjectDir("sandbox");
-		gitInit(dir);
-		const projectId = await createProject(`baseref-ui-sandbox-${Date.now()}`, dir);
-		// Pre-set sandbox=docker via API so the UI only needs to drive base_ref.
-		const putRes = await apiFetch(`/api/projects/${projectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify({ sandbox: "docker" }),
-		});
-		expect(putRes.ok).toBe(true);
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-			await input.fill("master");
-
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 400,
-			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
-
-			const errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText(
-				"base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
-			);
-		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		}
-	});
-
-	test("multi-repo: per-component bullets render when ref is missing", async ({ page }) => {
-		const root = uniqueProjectDir("multi");
-		const repoA = join(root, "api");
-		const repoB = join(root, "web");
-		gitInit(repoA, { remoteRefs: ["develop"] });
-		gitInit(repoB); // missing origin/develop
-		const projectId = await createProject(
-			`baseref-ui-multi-${Date.now()}`,
-			root,
-			[
-				{ name: "api", repo: "api" },
-				{ name: "web", repo: "web" },
-			],
-		);
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-			await input.fill("origin/develop");
-
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 400,
-			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
-
-			const errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
-			await expect(errBox).toContainText("base_ref 'origin/develop' is not present in 1 of 2 component repos");
-			// At least one per-component bullet renders for `web`.
-			await expect(errBox.locator("li")).toHaveCount(1);
-			await expect(errBox.locator("li")).toContainText("web");
-			await expect(errBox.locator("li")).toContainText("ref not found");
-		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-		}
-	});
-
-	test("editing the input clears any prior inline error", async ({ page }) => {
-		const dir = uniqueProjectDir("clear");
-		gitInit(dir, { tags: ["v9.9.9"] });
-		const projectId = await createProject(`baseref-ui-clear-${Date.now()}`, dir);
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/settings/${projectId}/general`);
-
-			const input = page.locator("[data-testid='base-ref-input']");
-			await expect(input).toBeVisible({ timeout: 10_000 });
-			await input.fill("v9.9.9");
-
-			const savePromise = page.waitForResponse(
-				resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
-					resp.request().method() === "PUT" &&
-					resp.status() === 400,
-			);
-			await page.locator("button").filter({ hasText: /^Save$/ }).first().click();
-			await savePromise;
-
-			const errBox = page.locator("[data-testid='base-ref-error']");
-			await expect(errBox).toBeVisible({ timeout: 5_000 });
 
 			// Typing into the input clears the inline error immediately.
 			await input.fill("master");
 			await expect(errBox).toHaveCount(0);
+
+			input = await openBaseRefSettings(page, grammarProjectId);
+			await input.fill("feature foo");
+			await saveBaseRef(page, grammarProjectId, 400);
+			errBox = page.locator("[data-testid='base-ref-error']");
+			await expect(errBox).toBeVisible({ timeout: 5_000 });
+			await expect(errBox).toContainText("base_ref must be a valid branch name. Got: feature foo");
+
+			input = await openBaseRefSettings(page, sandboxProjectId);
+			await input.fill("master");
+			await saveBaseRef(page, sandboxProjectId, 400);
+			errBox = page.locator("[data-testid='base-ref-error']");
+			await expect(errBox).toBeVisible({ timeout: 5_000 });
+			await expect(errBox).toContainText(
+				"base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
+			);
+
+			input = await openBaseRefSettings(page, multiProjectId);
+			await input.fill("origin/develop");
+			await saveBaseRef(page, multiProjectId, 400);
+			errBox = page.locator("[data-testid='base-ref-error']");
+			await expect(errBox).toBeVisible({ timeout: 5_000 });
+			await expect(errBox).toContainText("base_ref 'origin/develop' is not present in 2 of 3 component repos");
+			const bullets = errBox.locator("li");
+			await expect(bullets).toHaveCount(2);
+			await expect(bullets.filter({ hasText: "web" })).toContainText("ref not found");
+			await expect(bullets.filter({ hasText: "shared" })).toContainText("ref not found");
 		} finally {
-			await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+			await deleteProjects(projectIds);
 		}
 	});
 });

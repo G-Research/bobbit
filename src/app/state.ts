@@ -1,5 +1,7 @@
 import type { ChatPanel } from "../ui/index.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
+import type { InboxEntry } from "../server/agent/inbox-store.js";
+import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import { isConfigPageRoute } from "./routing.js";
 
 // ============================================================================
@@ -313,19 +315,37 @@ export const state = {
 
 	// HTML preview panel (for live visual iteration — same pattern as goal/role assistant)
 	isPreviewSession: false,
-	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project",
+	previewPanelTab: "chat" as "chat" | "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 	previewPanelMtime: 0 as number,
 	// WP-E: per-session preview mount entry path (e.g. "index.html"). Pushed by SSE.
 	previewPanelEntry: "" as string,
+	// SHA-256 identity for the currently mounted preview content tree.
+	previewPanelContentHash: "" as string,
 	previewPanelFullscreen: false,
 
-	// Unified preview panel tab (for non-assistant sessions with preview or goal proposal)
-	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project",
+	// Dynamic per-session side-panel workspace. panelTabs / activePanelTabId are
+	// compatibility mirrors for the active session's keyed workspace below.
+	panelTabsBySession: {} as Record<string, PanelWorkspaceTab[]>,
+	panelTabs: [] as PanelWorkspaceTab[],
+	activePanelTabId: "chat",
+	panelWorkspaceActiveBySession: {} as Record<string, string>,
+	panelWorkspacePreviewKeyBySession: {} as Record<string, string>,
+
+	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
+	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
 	// Review pane state (agent-initiated markdown review documents)
 	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,
+
+	// Inbox panel (per-session split panel for staff session views)
+	/** Pending + recent terminal inbox entries for the active staff session. Reset on session switch. */
+	inboxEntries: [] as InboxEntry[],
+	/** Whether the inbox panel is mounted for the active session (true iff active session has staffId). */
+	inboxPanelOpen: false,
+	/** Whether the manual "Add to inbox" composer dialog is showing. */
+	inboxAddDialogOpen: false,
 
 	/** Currently viewed goal dashboard (null = not on dashboard) */
 	goalDashboardId: null as string | null,
@@ -342,6 +362,7 @@ export const state = {
 	staffPreviewPrompt: "",
 	staffPreviewTriggers: "[]",
 	staffPreviewCwd: "",
+	staffPreviewWorktree: true,
 	staffPreviewNameEdited: false,
 	staffPreviewDescriptionEdited: false,
 	staffPreviewPromptEdited: false,
@@ -543,6 +564,30 @@ export function setProjects(projects: Project[]): void {
 	if (!state.activeProjectId || !projects.some(p => p.id === state.activeProjectId)) {
 		state.activeProjectId = projects[0]?.id ?? null;
 	}
+}
+
+function projectSignature(project: Project): string {
+	const record = project as unknown as Record<string, unknown>;
+	const sorted: Record<string, unknown> = {};
+	for (const key of Object.keys(record).sort()) {
+		sorted[key] = record[key];
+	}
+	return JSON.stringify(sorted);
+}
+
+export function projectsEqual(a: Project[], b: Project[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].id !== b[i].id) return false;
+		if (projectSignature(a[i]) !== projectSignature(b[i])) return false;
+	}
+	return true;
+}
+
+export function setProjectsIfChanged(projects: Project[]): boolean {
+	if (projectsEqual(state.projects, projects)) return false;
+	setProjects(projects);
+	return true;
 }
 
 // ============================================================================

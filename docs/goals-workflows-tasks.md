@@ -8,7 +8,7 @@ This document explains how Bobbit's goal orchestration system works — how goal
 
 A **goal** is a unit of work with a title, spec (markdown), working directory, and state (`todo` | `in-progress` | `complete` | `shelved`). Every goal is scoped to a registered project via its `projectId` field (see [internals.md — Multi-project architecture](internals.md#multi-project-architecture)). Worktrees are created relative to that project's `rootPath`.
 
-`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` matching a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
+`POST /api/goals` requires the caller to identify the project: either an explicit `projectId` in the request body, or a `cwd` inside a registered project's `rootPath`. There is no default-project fallback — a request with neither resolvable returns **400**. See the [Project resolution contract](rest-api.md#project-resolution-contract) in the REST API docs for the exact error shape.
 
 Goals can run in **team mode**, where a Team Lead agent orchestrates multiple role agents (coders, reviewers, testers) working concurrently in their own worktrees. Goals carry an `autoStartTeam` flag (defaults to `true`). When enabled, the server automatically calls `teamManager.startTeam()` after worktree setup completes — no manual "Start Team" click needed. If auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable; the user can start the team manually. The retry-setup handler also respects this flag.
 
@@ -142,7 +142,7 @@ workflows:
         depends_on: [implementation]
         verify:
           # Pure free-form (cwd = per-branch container root):
-          - { name: "Branch pushed", type: command, run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+          - { name: "Branch pushed", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
 ```
 
 **Why structural references.** Editing `components[name].commands[name]` updates every workflow step that references it — no regeneration required for command edits. Validation at load time catches typos and stale references (component renamed, command removed) before the agent runs anything. Cleaner audit trail in gate output: shows the `(component, command)` pair, not just a literal shell string.
@@ -214,6 +214,16 @@ Gate verification is **baseline-aware** — different gate kinds compare against
 **Primary branch detection:** the harness calls `detectPrimaryBranch(cwd)` from `src/server/skills/git.ts`, which uses `git symbolic-ref refs/remotes/origin/HEAD` with a `master` → `main` fallback. Never hardcode `"master"` in new gate logic — always resolve via this helper. The resolved baseline (e.g. `origin/main@abc1234`) is printed into every review prompt's "Signal Context" so failures are trivial to diagnose.
 
 **Configurable integration target (`base_ref`):** the project-level `base_ref` setting lets workflows track a different branch (e.g. `develop`, a release branch) as the integration target. New built-in/seeded workflows substitute `{{baseBranch}}` — the bare branch name derived from `base_ref` (or `detectPrimaryBranch()` when unset). `{{master}}` is intentionally unchanged and continues to resolve via `detectPrimaryBranch()` regardless of `base_ref`, so existing user-authored workflows keep their meaning. Write `origin/{{baseBranch}}` explicitly when a remote ref is needed. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+
+**Branch publication safety:** Ready-to-Merge templates publish the goal branch with an explicit destination refspec:
+
+```bash
+git push origin {{branch}}:refs/heads/{{branch}}
+```
+
+Do not use bare forms such as `git push origin {{branch}}` in verification. Bare branch pushes can be redirected by inherited upstream config or `push.default=upstream` (for example, to `origin/master`). Bobbit-owned branch publication for goal/session/team worktrees uses the same rule (`<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`), so `base_ref` controls baselines and status comparisons but never the remote push destination.
+
+**Verification push guard:** before running any command step, the harness checks substituted shell text for unsafe `git push` invocations. From a non-primary goal/session branch it rejects pushes with no explicit refspec, bare branch refspecs, `--all`/`--mirror`, and explicit destinations that update the protected base/primary branch (`{{baseBranch}}`, `{{master}}`, or the primary fallback). The check also catches the wrapper forms covered by regression tests, such as absolute `git` executable paths and `env ... git push ...`. Safe publication to the current branch (`{{branch}}:refs/heads/{{branch}}`) is allowed.
 
 **How the harness enforces this per-gate:** reviewer/architect/spec-auditor role YAMLs contain a `{{REVIEW_CONTEXT}}` placeholder in their preamble. `buildReviewPrompt()` in `src/server/agent/verification-harness.ts` substitutes it with either (a) an "implementation review" block containing the concrete `origin/<primary>...HEAD` diff instructions and the resolved baseline SHA, or (b) a "pre-implementation" notice that explicitly forbids `git diff` / `git log` and reminds the reviewer that zero goal-unique commits is the normal state. The branching decision uses `isPreImplementationGate()` on the signalled gate — role YAMLs never hardcode diff commands.
 
@@ -376,7 +386,7 @@ These fields replace the old `commitSha` field, which was a single optional fiel
 | Team lead merges | Team lead | `git merge <task.branch>` locally — no remote fetch needed |
 | Cleanup | Team lead | `team_dismiss` cleans up the agent's worktree |
 
-Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
+Agents still push to origin as a safety net (crash recovery, inspection), but the merge path is purely local. Those safety-net publishes use explicit destination refspecs (`HEAD:refs/heads/<branch>` or `<branch>:refs/heads/<branch>`) so local upstream tracking cannot redirect them to the base/primary branch. The only PR in the workflow is the final goal-to-primary-branch PR for human review.
 
 #### Multi-repo git handoff
 

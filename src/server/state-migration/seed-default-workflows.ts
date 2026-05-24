@@ -59,7 +59,7 @@ export function readyToMergeGate(): SeededGate {
 		name: "Ready to Merge",
 		depends_on: ["documentation"],
 		verify: [
-			{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." },
+			{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." },
 			{ name: "Base ref merged into branch", type: "command", run: "git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}" },
 			{ name: "PR raised", type: "command", run: "gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url -q \".[0].url\" | grep -q ." },
 		],

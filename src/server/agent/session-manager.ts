@@ -31,14 +31,15 @@ import { getAssistantDef } from "./assistant-registry.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, persistPromptSections, purgePromptSectionsJson, type PromptParts } from "./system-prompt.js";
 import { profile } from "./profiling.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
-import { CostTracker } from "./cost-tracker.js";
+import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTool, type EffectiveTool } from "./tool-activation.js";
 import { discoverSlashSkills } from "../skills/slash-skills.js";
-import { shouldSkipRemotePush, detectPrimaryBranch } from "../skills/git.js";
+import { shouldSkipRemotePush, detectPrimaryBranch, isGitRepo, getRepoRoot } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy } from "./role-store.js";
 import { applyModelString } from "./review-model-override.js";
@@ -63,9 +64,11 @@ import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from 
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import { WorktreePool } from "./worktree-pool.js";
+import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
+	type SandboxWiringOptions,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -73,11 +76,16 @@ import {
 	sendDelegatePrompt,
 	DELEGATE_SPAWN_TIMEOUT_MS,
 	nextBackoffDelay,
+	applySandboxCwdOffset,
+	normalizeSandboxCwdOffset,
+	relativeSandboxCwdOffset,
 } from "./session-setup.js";
 
 const execFileAsync = promisify(execFileCb);
 
-
+function isSandboxContainerPath(cwd?: string): boolean {
+	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+}
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
 
@@ -123,6 +131,17 @@ function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	const snippet = (errMsg || "unknown error").slice(0, 200);
 	return `[SYSTEM: previous turn failed with: ${snippet}. Ignore the incomplete last turn and handle the following.]\n\n${userText}`;
 }
+
+/** Provenance of a prompt enqueued into a session. Read by TeamManager on
+ *  agent_start to decide whether to reset idle-nudge backoff counters.
+ *  Only "user" and "system" reset the counter; everything else preserves it. */
+export type PromptSource =
+	| "user"
+	| "auto-nudge"
+	| "task-notification"
+	| "verification"
+	| "system"
+	| "agent";
 
 export interface SessionInfo {
 	id: string;
@@ -211,6 +230,10 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** Provenance of the last prompt enqueued to this session. Set by
+	 *  enqueuePrompt / deliverLiveSteer. Defaults to "user" when callers
+	 *  don't supply a source. Read by TeamManager.subscribeTeamLeadEvents. */
+	lastPromptSource?: PromptSource;
 	/** Pending grant request from the guard extension's long-poll */
 	pendingGrantRequest?: {
 		resolve: (result: { granted: boolean; tools?: string[] }) => void;
@@ -345,9 +368,56 @@ const _warnedClients = new WeakSet<WebSocket>();
 const _pendingOverflowCheck = new WeakSet<WebSocket>();
 
 function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
+	if (!cpuDiagnosticsEnabled()) {
+		const data = JSON.stringify(msg);
+		for (const client of clients) {
+			if (client.readyState !== 1) continue;
+			const buffered = (client as any).bufferedAmount ?? 0;
+			const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
+				overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+				warnBytes: WS_BUFFER_WARN_BYTES,
+			});
+			if (action.kind === "send-and-defer-check" && !_pendingOverflowCheck.has(client)) {
+				_pendingOverflowCheck.add(client);
+				console.warn(
+					`[ws] bufferedAmount=${buffered}B > ${WS_BUFFER_OVERFLOW_BYTES}B threshold; deferring terminate decision 10ms.`,
+				);
+				setTimeout(() => {
+					_pendingOverflowCheck.delete(client);
+					if (client.readyState !== 1) return;
+					const bufferedNow = (client as any).bufferedAmount ?? 0;
+					const recheck = decideOverflowAction(bufferedNow, /* isDeferredRecheck */ true, {
+						overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
+						warnBytes: WS_BUFFER_WARN_BYTES,
+					});
+					if (recheck.kind === "terminate") {
+						console.warn(
+							`[ws] confirmed overflow after 10ms drain attempt: ${bufferedNow}B; terminating client. ` +
+							`Last msg type=${(msg as any).type}.`,
+						);
+						try { client.terminate(); } catch { /* ignore */ }
+					}
+				}, 10);
+			}
+			if (buffered > WS_BUFFER_WARN_BYTES && !_warnedClients.has(client)) {
+				_warnedClients.add(client);
+				console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
+			}
+			client.send(data);
+		}
+		return;
+	}
+
+	const stringifyStart = performance.now();
 	const data = JSON.stringify(msg);
+	const stringifyMs = performance.now() - stringifyStart;
+	const sendStart = performance.now();
+	let scanned = 0;
+	let recipients = 0;
+	let skipped = 0;
 	for (const client of clients) {
-		if (client.readyState !== 1) continue;
+		scanned++;
+		if (client.readyState !== 1) { skipped++; continue; }
 		const buffered = (client as any).bufferedAmount ?? 0;
 		const action = decideOverflowAction(buffered, /* isDeferredRecheck */ false, {
 			overflowBytes: WS_BUFFER_OVERFLOW_BYTES,
@@ -380,7 +450,17 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 			console.warn(`[ws] client bufferedAmount=${buffered}B (warn threshold ${WS_BUFFER_WARN_BYTES}B); type=${(msg as any).type}`);
 		}
 		client.send(data);
+		recipients++;
 	}
+	getCpuDiagnostics().recordWsBroadcast("session-manager:broadcast", (msg as { type?: string }).type || "unknown", {
+		frames: 1,
+		scanned,
+		recipients,
+		skipped,
+		bytes: Buffer.byteLength(data) * recipients,
+		stringifyMs,
+		sendMs: performance.now() - sendStart,
+	});
 }
 
 // `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
@@ -398,7 +478,19 @@ import { broadcastStatus } from "./session-status.js";
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[] }> }, truncated: unknown): void {
 	const spliced = spliceSkillExpansionsIntoEvent(session, truncated);
 	const entry = session.eventBuffer.push(spliced);
-	broadcast(session.clients, { type: "event", data: spliced, seq: entry.seq, ts: entry.ts });
+	const frame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
+	if (cpuDiagnosticsEnabled()) {
+		const eventType = spliced && typeof spliced === "object" && typeof (spliced as { type?: unknown }).type === "string"
+			? (spliced as { type: string }).type
+			: "unknown";
+		getCpuDiagnostics().recordWsBroadcast("session-manager:emitSessionEvent", eventType, {
+			frames: 1,
+			recipients: session.clients.size,
+			bytes: Buffer.byteLength(JSON.stringify(frame)) * session.clients.size,
+			bufferSize: session.eventBuffer.size,
+		});
+	}
+	broadcast(session.clients, frame);
 }
 
 /**
@@ -472,6 +564,8 @@ export interface SessionManagerOptions {
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
+	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
+	private sessionsWithConnectedClients = new Set<SessionInfo>();
 	private agentCliPath?: string;
 	private systemPromptPath?: string;
 	/** @internal Test-only session store (used when no PCM is available). */
@@ -493,6 +587,13 @@ export class SessionManager {
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
+	/**
+	 * Optional inbox nudger. Wired late from `server.ts` boot via
+	 * `setInboxNudger` so the nudger's `onAgentStart` hook can clear its
+	 * per-staff `nudgePending` flag when a staff session begins streaming
+	 * a turn. Stays null on test paths that don't construct a nudger.
+	 */
+	private _inboxNudger: import("./inbox-nudger.js").InboxNudger | null = null;
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: Array<(sessionId: string, info: { projectId?: string; reason: "terminated" | "archived" | "purged" }) => void> = [];
@@ -534,6 +635,10 @@ export class SessionManager {
 
 	setSandboxManager(manager: SandboxManager | null): void {
 		this.sandboxManager = manager;
+	}
+
+	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
+		this._inboxNudger = nudger;
 	}
 
 	/**
@@ -657,20 +762,59 @@ export class SessionManager {
 		}
 	}
 
+	private _trackConnectedSession(session: SessionInfo): void {
+		if (this.sessions.get(session.id) === session && session.status !== "terminated" && session.clients.size > 0) {
+			this.sessionsWithConnectedClients.add(session);
+		} else {
+			this.sessionsWithConnectedClients.delete(session);
+		}
+	}
+
+	private _untrackConnectedSession(session: SessionInfo): void {
+		this.sessionsWithConnectedClients.delete(session);
+	}
+
 	/**
 	 * Re-broadcast the current `session_status` for every session that has
 	 * connected clients, WITHOUT bumping `statusVersion`. Heartbeat. Idempotent
 	 * on the client (they ignore frames whose version <= lastStatusVersion).
 	 */
 	private _emitStatusHeartbeat(): void {
-		for (const session of this.sessions.values()) {
-			if (session.clients.size === 0) continue;
-			if (session.status === "terminated") continue;
+		const diagEnabled = cpuDiagnosticsEnabled();
+		const diagStart = diagEnabled ? performance.now() : 0;
+		let sessionsScanned = 0;
+		let sessionsWithClients = 0;
+		let frames = 0;
+		let recipients = 0;
+		for (const session of this.sessionsWithConnectedClients) {
+			sessionsScanned++;
+			if (this.sessions.get(session.id) !== session || session.clients.size === 0 || session.status === "terminated") {
+				this.sessionsWithConnectedClients.delete(session);
+				continue;
+			}
+			sessionsWithClients++;
+			frames++;
+			recipients += session.clients.size;
 			broadcast(session.clients, {
 				type: "session_status",
 				status: session.status,
 				statusVersion: session.statusVersion ?? 0,
 				...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
+			});
+		}
+		if (diagEnabled) {
+			const durationMs = performance.now() - diagStart;
+			getCpuDiagnostics().recordTimer("session-manager:statusHeartbeat", durationMs, {
+				sessionsScanned,
+				sessionsWithClients,
+				frames,
+				recipients,
+			});
+			getCpuDiagnostics().recordWsBroadcast("session-manager:statusHeartbeat", "session_status", {
+				frames,
+				scanned: sessionsScanned,
+				recipients,
+				sendMs: durationMs,
 			});
 		}
 	}
@@ -956,6 +1100,58 @@ export class SessionManager {
 		}
 	}
 
+	private async resolveSandboxCwdOffset(
+		cwd: string,
+		projectId?: string,
+		goalId?: string,
+		explicitOffset?: string,
+	): Promise<string | undefined> {
+		const explicit = normalizeSandboxCwdOffset(explicitOffset);
+		if (explicit) return explicit;
+		if (!cwd || isSandboxContainerPath(cwd)) return undefined;
+
+		// Goal/team sessions often pass a host worktree cwd without worktreeOpts.
+		// Prefer the goal's stable repo/worktree metadata when available.
+		if (goalId) {
+			const goal = this.resolveGoal(goalId);
+			const goalCwd = goal?.cwd || cwd;
+			const goalWorktreeOffset = relativeSandboxCwdOffset(goal?.worktreePath, goalCwd);
+			if (goalWorktreeOffset) return goalWorktreeOffset;
+			const goalRepoOffset = relativeSandboxCwdOffset(goal?.repoPath, goalCwd);
+			if (goalRepoOffset) return goalRepoOffset;
+		}
+
+		try {
+			if (await isGitRepo(cwd)) {
+				const repoRoot = await getRepoRoot(cwd);
+				const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
+				if (repoOffset) return repoOffset;
+			}
+		} catch {
+			// Fall back to project-root containment below.
+		}
+
+		if (projectId && this.projectContextManager) {
+			const project = this.projectContextManager.getOrCreate(projectId)?.project;
+			const projectRoot = project?.rootPath;
+			if (projectRoot) {
+				try {
+					if (await isGitRepo(projectRoot)) {
+						const repoRoot = await getRepoRoot(projectRoot);
+						const repoOffset = relativeSandboxCwdOffset(repoRoot, cwd);
+						if (repoOffset) return repoOffset;
+					}
+				} catch {
+					// Project may be non-git; project-relative offset still works for /workspace.
+				}
+				const projectOffset = relativeSandboxCwdOffset(projectRoot, cwd);
+				if (projectOffset) return projectOffset;
+			}
+		}
+
+		return undefined;
+	}
+
 	/**
 	 * Apply Docker sandbox wiring to bridge options.
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
@@ -971,7 +1167,7 @@ export class SessionManager {
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: { projectId?: string; goalId?: string; sandboxBranch?: string; sandboxBaseBranch?: string }
+		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
 		if (!this.projectConfigStore) return false;
 		const sandboxConfig = this.projectConfigStore.get("sandbox") || "none";
@@ -1032,10 +1228,10 @@ export class SessionManager {
 				opts.sandboxBranch,
 				opts.sandboxBaseBranch,
 			);
-			bridgeOptions.cwd = worktreePath;
-		} else if (!bridgeOptions.cwd || !bridgeOptions.cwd.startsWith("/")) {
-			// Regular (non-goal) sessions default to /workspace
-			bridgeOptions.cwd = "/workspace";
+			bridgeOptions.cwd = applySandboxCwdOffset(worktreePath, opts.sandboxCwdOffset);
+		} else if (!isSandboxContainerPath(bridgeOptions.cwd)) {
+			// Regular no-worktree sessions run from the project clone in /workspace.
+			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
@@ -1061,7 +1257,84 @@ export class SessionManager {
 		throw new Error("No cost tracker available");
 	}
 
+	/** Return persisted cumulative cost for a session, without creating a zero-cost record. */
+	getSessionCost(sessionId: string): SessionCost | undefined {
+		const live = this.sessions.get(sessionId);
+		if (live) {
+			try {
+				const cost = this.resolveCostTracker(live).getSessionCost(sessionId);
+				if (cost) return cost;
+			} catch {
+				// Fall through to persisted/store scans below.
+			}
+		}
 
+		const persisted = this.getPersistedSession(sessionId);
+		if (persisted?.projectId || !this.projectContextManager) {
+			try {
+				const cost = this.getCostTracker(persisted?.projectId).getSessionCost(sessionId);
+				if (cost) return cost;
+			} catch {
+				// Fall through to cross-project scan.
+			}
+		}
+
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				const cost = ctx.costTracker.getSessionCost(sessionId);
+				if (cost) return cost;
+			}
+		}
+		return undefined;
+	}
+
+	/** Merge authoritative persisted cost into a state snapshot when cost exists. */
+	withSessionCostInState(sessionId: string, data: unknown): unknown {
+		const cost = this.getSessionCost(sessionId);
+		if (!cost) return data;
+		if (data && typeof data === "object" && !Array.isArray(data)) {
+			return { ...(data as Record<string, unknown>), serverCost: cost };
+		}
+		return { serverCost: cost };
+	}
+
+	/** Build the cumulative cost_update payload used for attach/reconnect hydration. */
+	getSessionCostUpdate(sessionId: string): Extract<ServerMessage, { type: "cost_update" }> | null {
+		const cost = this.getSessionCost(sessionId);
+		if (!cost) return null;
+		const live = this.sessions.get(sessionId);
+		const persisted = live ? undefined : this.getPersistedSession(sessionId);
+		return {
+			type: "cost_update",
+			sessionId,
+			goalId: live?.goalId ?? persisted?.goalId,
+			taskId: this.resolveTaskIdForSession(sessionId),
+			cost,
+		};
+	}
+
+	/** Broadcast cumulative persisted cost to connected clients, if this session has cost data. */
+	broadcastSessionCost(session: SessionInfo): void {
+		const update = this.getSessionCostUpdate(session.id);
+		if (update) broadcast(session.clients, update);
+	}
+
+	private resolveTaskIdForSession(sessionId: string): string | undefined {
+		const live = this.sessions.get(sessionId);
+		if (live?.taskId) return live.taskId;
+		const persisted = this.getPersistedSession(sessionId);
+		if (persisted?.taskId) return persisted.taskId;
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				const tm = new TaskManager(ctx.taskStore);
+				const tasks = tm.getTasksForSession(sessionId);
+				if (tasks.length > 0) return tasks[0].id;
+			}
+			return undefined;
+		}
+		const tasks = this._testTaskManager?.getTasksForSession(sessionId) ?? [];
+		return tasks.length > 0 ? tasks[0].id : undefined;
+	}
 
 	getMcpManager(): McpManager | null {
 		return this.mcpManager;
@@ -1397,9 +1670,13 @@ export class SessionManager {
 		modelText?: string;
 		/** Resolved slash-skill expansions, in original-text order. UI-only metadata. */
 		skillExpansions?: SkillExpansion[];
+		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
+		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
+		source?: PromptSource;
 	}): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
+		session.lastPromptSource = opts?.source ?? "user";
 
 		// modelText is what the model sees; text is the user's verbatim input.
 		// When no expansions, both are equal and dispatch is byte-equal to today.
@@ -1516,9 +1793,10 @@ export class SessionManager {
 	 * Returns the underlying rpcClient.steer() promise so callers can await
 	 * or attach their own error handler.
 	 */
-	deliverLiveSteer(sessionId: string, message: string): Promise<unknown> {
+	deliverLiveSteer(sessionId: string, message: string, opts?: { source?: PromptSource }): Promise<unknown> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
+		session.lastPromptSource = opts?.source ?? "user";
 
 		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
 		// there is no live turn to inject into, so we either dispatch a regular
@@ -1542,7 +1820,7 @@ export class SessionManager {
 			);
 			// enqueuePrompt handles its own state-clear + pending-timer cancel +
 			// prefix application; we just route through it with the raw message.
-			return this.enqueuePrompt(sessionId, message, { isSteered: true });
+			return this.enqueuePrompt(sessionId, message, { isSteered: true, source: opts?.source });
 		}
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
@@ -1857,6 +2135,17 @@ export class SessionManager {
 			session.streamingStartedAt = Date.now();
 			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			// Clear the inbox nudger's per-staff guard so a fresh batch can be
+			// delivered next time the staff goes idle with pending entries.
+			// Hook fires for every session that starts a turn; the nudger
+			// itself filters down to staff sessions via its own staff lookup.
+			if (this._inboxNudger && session.staffId) {
+				try {
+					this._inboxNudger.onAgentStart(session.id);
+				} catch (err) {
+					console.warn(`[session-manager] inboxNudger.onAgentStart failed for ${session.id}:`, err);
+				}
+			}
 		} else if (event.type === "agent_end") {
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
@@ -2420,6 +2709,7 @@ export class SessionManager {
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
 		try { await session.rpcClient.stop(); } catch { /* already dead */ }
 
+		this._untrackConnectedSession(session);
 		this.sessions.delete(session.id);
 		(ps as any)._restartFrameOfReference = frameOfRef;
 		opts?.mutatePs?.(ps);
@@ -2435,6 +2725,7 @@ export class SessionManager {
 				if ((ws as any).readyState === 1) restored.clients.add(ws);
 			}
 			broadcastStatus(restored, opts?.finalStatus ?? "idle");
+			this._trackConnectedSession(restored);
 		}
 		return restored;
 	}
@@ -2791,9 +3082,12 @@ export class SessionManager {
 						const sandbox = this.sandboxManager.get(ps.projectId);
 						if (sandbox) {
 							try {
-								// Derive worktree name from the persisted cwd, not the branch name
-								// e.g. /workspace-wt/session/s-9241bb92 → session/s-9241bb92
-								const worktreeName = ps.cwd!.replace(/^\/workspace-wt\//, "");
+								// Derive the container worktree root, not a cwd subdirectory offset.
+								// e.g. /workspace-wt/session/s-9241bb92/packages/app → session/s-9241bb92
+								const branchWorktreeRoot = `/workspace-wt/${ps.branch}`;
+								const worktreeName = (ps.cwd === branchWorktreeRoot || ps.cwd!.startsWith(`${branchWorktreeRoot}/`))
+									? ps.branch
+									: ps.cwd!.replace(/^\/workspace-wt\//, "");
 								await sandbox.createWorktree(worktreeName, ps.branch);
 								console.log(`[session-manager] Sandbox worktree recovered for ${ps.id}: ${ps.cwd}`);
 								recovered = true;
@@ -3061,7 +3355,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; accessory?: string; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
@@ -3069,6 +3363,9 @@ export class SessionManager {
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
+		const sandboxCwdOffset = opts?.sandboxed
+			? await this.resolveSandboxCwdOffset(cwd, projectId, goalId, opts?.sandboxCwdOffset)
+			: undefined;
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (opts?.worktreeOpts) {
@@ -3147,6 +3444,10 @@ export class SessionManager {
 				cwd,
 				goalId,
 				taskId: opts?.taskId,
+				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
+				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
+				// without it `BOBBIT_STAFF_ID` is lost on respawn and the inbox tools refuse to register.
+				staffId: opts?.staffId,
 				worktreePath,
 				repoPath,
 				branch,
@@ -3162,6 +3463,7 @@ export class SessionManager {
 				projectId,
 				sandboxBranch: opts?.sandboxBranch,
 				sandboxBaseBranch: opts?.sandboxBaseBranch,
+				sandboxCwdOffset,
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
 				initialModel: opts?.initialModel,
@@ -3204,6 +3506,9 @@ export class SessionManager {
 			goalId,
 			assistantType,
 			taskId: opts?.taskId,
+			// Load-bearing wire: same contract as the worktree branch above.
+			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
+			staffId: opts?.staffId,
 			sandboxed: opts?.sandboxed,
 			role: opts?.role,
 			accessory: opts?.accessory,
@@ -3217,6 +3522,7 @@ export class SessionManager {
 			projectId,
 			sandboxBranch: opts?.sandboxBranch,
 			sandboxBaseBranch: opts?.sandboxBaseBranch,
+			sandboxCwdOffset,
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
 			initialModel: opts?.initialModel,
@@ -3407,6 +3713,10 @@ export class SessionManager {
 	/** After compaction, refresh messages and state for all connected clients. */
 	async refreshAfterCompaction(session: SessionInfo): Promise<void> {
 		try {
+			// Send the authoritative cumulative cost before the compacted messages
+			// snapshot so clients never fall back to the reduced visible transcript.
+			this.broadcastSessionCost(session);
+
 			const msgs = await session.rpcClient.getMessages();
 			if (msgs.success) {
 				const raw: any = msgs.data;
@@ -3433,7 +3743,7 @@ export class SessionManager {
 			}
 			const st = await session.rpcClient.getState();
 			if (st.success) {
-				broadcast(session.clients, { type: "state", data: st.data });
+				broadcast(session.clients, { type: "state", data: this.withSessionCostInState(session.id, st.data) });
 			}
 		} catch (err) {
 			console.error(`[session-manager] Failed to refresh after compaction for ${session.id}:`, err);
@@ -3908,6 +4218,7 @@ export class SessionManager {
 				client.close(1000, "Session terminated");
 			}
 			session.clients.clear();
+			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 			extStore.remove(id);
 			cleanupSessionPrompt(id);
@@ -4043,8 +4354,8 @@ export class SessionManager {
 		}
 	}
 
-	/** Update session metadata fields (role, teamGoalId, worktreePath, accessory, teamLeadSessionId) and persist. */
-	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string }): boolean {
+	/** Update session metadata fields and persist. */
+	updateSessionMeta(id: string, updates: { role?: string; teamGoalId?: string; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; accessory?: string; nonInteractive?: boolean; teamLeadSessionId?: string; delegateOf?: string }): boolean {
 		const session = this.sessions.get(id);
 		if (!session) {
 			// Store-only session (dormant/delegate) — update store directly
@@ -4055,6 +4366,18 @@ export class SessionManager {
 		if (updates.role !== undefined) session.role = updates.role;
 		if (updates.teamGoalId !== undefined) session.teamGoalId = updates.teamGoalId;
 		if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
+		if (updates.repoPath !== undefined) session.repoPath = updates.repoPath;
+		if (updates.branch !== undefined) session.branch = updates.branch;
+		if (updates.repoWorktrees !== undefined) {
+			const repoPath = updates.repoPath ?? session.repoPath;
+			session.repoWorktrees = repoPath
+				? Object.entries(updates.repoWorktrees).map(([repo, worktreePath]) => ({
+					repo,
+					repoPath: repo === "." ? repoPath : path.join(repoPath, repo),
+					worktreePath,
+				}))
+				: undefined;
+		}
 		if (updates.accessory !== undefined) session.accessory = updates.accessory;
 		if (updates.nonInteractive !== undefined) session.nonInteractive = updates.nonInteractive;
 		if (updates.teamLeadSessionId !== undefined) session.teamLeadSessionId = updates.teamLeadSessionId;
@@ -4540,11 +4863,12 @@ export class SessionManager {
 			if (fs.existsSync(modelNameFile)) fs.unlinkSync(modelNameFile);
 		} catch { /* ignore */ }
 
-		// Clean up per-session proposal-drafts directory (fire-and-forget).
-		// Same pattern as eagerDeleteRemoteSessionBranch — never blocks; missing
-		// dir is harmless. See docs/design/editable-proposals.md §4.
-		fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", id), { recursive: true, force: true })
-			.catch(err => console.warn(`[session-manager] proposal-drafts cleanup failed for ${id}:`, err));
+		// NOTE: proposal-drafts cleanup is deferred to purgeOneSession (the
+		// 7-day purge mark). Both Path A (in-place resubmit) and Path B
+		// (continue assistant) of the reopen-archived-proposals design read
+		// these drafts off disk for archived sessions, so they must survive
+		// archive. See docs/design/editable-proposals.md §4 + the design doc
+		// `reopen-archived-proposals.md`.
 
 		// Broadcast session_archived event before closing clients
 		const archivedAt = Date.now();
@@ -4554,6 +4878,7 @@ export class SessionManager {
 			client.close(1000, "Session terminated");
 		}
 		session.clients.clear();
+		this._untrackConnectedSession(session);
 
 		// Resolve the store BEFORE removing from in-memory map, so
 		// resolveStoreForSession can look up the session's projectId.
@@ -4752,6 +5077,17 @@ export class SessionManager {
 			await sessionFileDelete(purgeCtx, ps.agentSessionFile, this.sandboxManager).catch(err => {
 				console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
 			});
+		}
+
+		// Delete per-session proposal-drafts directory. Deferred from archive
+		// (terminateSession) so that archived sessions retain their drafts long
+		// enough for the reopen-archived-proposals flows (Path A in-place
+		// resubmit + Path B continue-assistant). Best-effort — missing dir is
+		// harmless. See docs/design/editable-proposals.md §4.
+		try {
+			await fsp.rm(path.join(bobbitStateDir(), "proposal-drafts", ps.id), { recursive: true, force: true });
+		} catch (err) {
+			console.warn(`[session-manager] proposal-drafts purge failed for ${ps.id}:`, err);
 		}
 
 		// Delete session prompt file
@@ -5080,7 +5416,10 @@ export class SessionManager {
 						console.log(`[session-manager] Revived dormant session: "${session.title}" (${sessionId})`);
 						// restoreSession replaces the map entry — add client to the new one
 						const revived = this.sessions.get(sessionId);
-						if (revived) revived.clients.add(ws);
+						if (revived && (ws as any).readyState === 1) {
+							revived.clients.add(ws);
+							this._trackConnectedSession(revived);
+						}
 					})
 					.catch((err) => {
 						console.error(`[session-manager] Failed to revive session ${sessionId}:`, err);
@@ -5090,6 +5429,7 @@ export class SessionManager {
 		}
 
 		session.clients.add(ws);
+		this._trackConnectedSession(session);
 
 		// Note: tool_execution_update events from the heartbeat will flow to
 		// this client naturally via the broadcast in the event listener.
@@ -5104,6 +5444,7 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (session) {
 			session.clients.delete(ws);
+			this._trackConnectedSession(session);
 		}
 	}
 
@@ -5285,6 +5626,19 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * One-shot migration: heal sessions that lost their `staffId` association
+	 * before the staffId-persistence fix landed. Delegates to the standalone
+	 * `backfillStaffIds` helper in `staff-backfill.ts` so the algorithm can
+	 * be unit-tested without dragging in `SessionManager`'s dependency graph.
+	 *
+	 * See `staff-backfill.ts` for the full behavioural contract.
+	 */
+	backfillStaffIds(staffManager: import("./staff-backfill.js").BackfillStaffManager): number {
+		if (!this.projectContextManager) return 0;
+		return backfillStaffIdsImpl(this.projectContextManager, staffManager);
+	}
+
 	async shutdown(): Promise<void> {
 		if (this.purgeInterval) {
 			clearInterval(this.purgeInterval);
@@ -5324,6 +5678,7 @@ export class SessionManager {
 				client.close(1000, "Server shutting down");
 			}
 			session.clients.clear();
+			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 		}
 

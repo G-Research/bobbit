@@ -1,3 +1,5 @@
+import type { InboxEntry } from "../agent/inbox-store.js";
+
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 
@@ -29,6 +31,16 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	createdAt: number;
+}
+
+export interface SessionCostSnapshot {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalCost: number;
+	/** Derived on read by current servers; optional for older persisted/WS payloads. */
+	cacheHitRate?: number | null;
 }
 
 /** Client → Server messages over WebSocket */
@@ -91,13 +103,13 @@ export type ServerMessage =
 	| { type: "session_removed"; sessionId: string; projectId?: string; reason: "terminated" | "archived" | "purged" }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
-	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate: number | null } }
+	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }
-	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: string; exitCode: number | null; startTime: number } }
+	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: "running" | "exited"; exitCode: number | null; startTime: number; endTime: number | null } }
 	| { type: "bg_process_output"; processId: string; stream: "stdout" | "stderr"; text: string; ts: number }
-	| { type: "bg_process_exited"; processId: string; exitCode: number | null }
+	| { type: "bg_process_exited"; processId: string; exitCode: number | null; endTime: number | null }
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string; phase?: number }>; seq?: number }
 	| { type: "gate_verification_phase_started"; goalId: string; gateId: string; signalId: string; phase: number; stepIndices: number[]; seq?: number }
@@ -111,6 +123,9 @@ export type ServerMessage =
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
+	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; seq?: number; ts?: number }
 	| { type: "index:progress"; projectId: string; phase: "rebuild" | "incremental"; total: number; completed: number; backlog: number }

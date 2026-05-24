@@ -104,6 +104,20 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 // ── Model Assembly ─────────────────────────────────────────────────
 
+function shouldRaiseBuiltInMeta(modelId: string, explicitValue: number | undefined, inferredValue: number): boolean {
+	if (!explicitValue || inferredValue <= explicitValue) return false;
+	// Bobbit intentionally patches stale Claude Sonnet/Opus metadata upward (see
+	// writeContextWindowOverrides). Do not use generic inference to inflate newer
+	// OpenAI built-ins; pi-ai's provider-specific metadata is authoritative there.
+	return /claude-(?:opus|sonnet)/i.test(modelId);
+}
+
+function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: number): number {
+	const explicit = typeof explicitValue === "number" && explicitValue > 0 ? explicitValue : undefined;
+	if (shouldRaiseBuiltInMeta(modelId, explicit, inferredValue)) return inferredValue;
+	return explicit ?? inferredValue;
+}
+
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
@@ -138,8 +152,8 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 						provider: providerId as string,
 						api: m.api as string,
 						baseUrl: m.baseUrl,
-						contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
-						maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
+						contextWindow: builtInNumber(m.id, m.contextWindow, meta.contextWindow),
+						maxTokens: builtInNumber(m.id, m.maxTokens, meta.maxTokens),
 						reasoning: meta.reasoning || m.reasoning || false,
 						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
 						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],

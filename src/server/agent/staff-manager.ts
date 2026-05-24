@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
-import { StaffStore, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
+import { StaffStore, normalizeStaffAccessory, type PersistedStaff, type StaffState, type StaffTrigger } from "./staff-store.js";
 import type { SessionManager } from "./session-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { InboxManager } from "./inbox-manager.js";
 import { SYSTEM_PROJECT_ID } from "./project-registry.js";
-import { createWorktree, cleanupWorktree, resolveBaseRef } from "../skills/git.js";
+import type { Component } from "./project-config-store.js";
+import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, isGitRepo, getRepoRoot } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
+import { shouldCreateWorktree } from "./worktree-decision.js";
 
 const execFile = promisify(execFileCb);
 
@@ -15,12 +20,40 @@ function sanitiseBranchName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
 
+function offsetCwd(repoPath: string | undefined, cwd: string, worktreePath: string): string {
+	if (!repoPath) return worktreePath;
+	const relativeOffset = path.relative(repoPath, cwd);
+	if (!relativeOffset || relativeOffset === "." || relativeOffset.startsWith("..") || path.isAbsolute(relativeOffset)) {
+		return worktreePath;
+	}
+	return path.join(worktreePath, relativeOffset);
+}
+
+interface StaffWorktreePlan {
+	branchName?: string;
+	repoPath?: string;
+	worktreePath?: string;
+	repoWorktrees?: Record<string, string>;
+	sessionCwd: string;
+}
+
 export class StaffManager {
 	private pcm: ProjectContextManager;
+	private inboxManager: InboxManager | null = null;
 
 	constructor(pcm: ProjectContextManager) {
 		this.pcm = pcm;
 		this.logOrphansOnce();
+	}
+
+	/**
+	 * Late-bound inbox manager wiring — set from `server.ts` boot after both
+	 * `StaffManager` and `InboxManager` are constructed. Used solely by
+	 * `deleteStaff` to wipe the per-staff inbox file. The nudger never
+	 * touches `StaffManager.inboxManager`; it has its own direct binding.
+	 */
+	setInboxManager(inboxManager: InboxManager): void {
+		this.inboxManager = inboxManager;
 	}
 
 	/**
@@ -63,27 +96,54 @@ export class StaffManager {
 	 * search under the new project. Used by the orphan banner's "Assign to
 	 * project…" flow.
 	 *
-	 * Note: worktree path and branch are preserved as-is — those live on disk
-	 * under the original project's worktree root. Refreshing the worktree on
-	 * the next wake will rebase against whatever primary branch is canonical
-	 * for the new project.
+	 * Project changes intentionally drop runtime metadata from the previous
+	 * project. The next staff wake creates a fresh session rooted at the target
+	 * project instead of continuing from the old cwd/worktree.
 	 */
-	reassignProject(staffId: string, newProjectId: string): PersistedStaff | null {
+	async reassignProject(staffId: string, newProjectId: string, sessionManager?: SessionManager): Promise<PersistedStaff | null> {
 		const found = this.findStoreForStaff(staffId);
 		if (!found) return null;
+		const newCtx = this.pcm.getOrCreate(newProjectId);
+		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+		if (newCtx.project.hidden || newCtx.project.id === SYSTEM_PROJECT_ID) {
+			throw new Error("Cannot re-assign staff to a hidden or system project");
+		}
 		if (found.projectId === newProjectId && found.staff.projectId === newProjectId) {
 			return found.staff;
 		}
-		const newCtx = this.pcm.getOrCreate(newProjectId);
-		if (!newCtx) throw new Error(`Cannot re-assign staff: project "${newProjectId}" not found`);
+
+		const oldSessionId = found.staff.currentSessionId;
+		if (oldSessionId && sessionManager) {
+			try {
+				const terminated = await sessionManager.terminateSession(oldSessionId);
+				if (!terminated) sessionManager.storeArchive(oldSessionId);
+			} catch (err) {
+				console.warn(`[staff-manager] Failed to terminate old session ${oldSessionId} while re-assigning staff ${staffId}:`, err);
+				try { sessionManager.storeArchive(oldSessionId); } catch { /* best-effort */ }
+			}
+		}
 
 		// Pull from old search index, drop from old store.
 		const oldCtx = this.pcm.getOrCreate(found.projectId);
 		oldCtx?.searchIndex?.removeStaff(staffId);
 		found.store.remove(staffId);
 
-		// Re-home: clone with updated projectId and put into the new project's store.
-		const moved: PersistedStaff = { ...found.staff, projectId: newProjectId, updatedAt: Date.now() };
+		// Re-home: clone with updated projectId/cwd, but do not carry runtime
+		// metadata from the previous project's cwd/worktree/session.
+		const {
+			worktreePath: _worktreePath,
+			branch: _branch,
+			repoPath: _repoPath,
+			repoWorktrees: _repoWorktrees,
+			currentSessionId: _currentSessionId,
+			...rest
+		} = found.staff;
+		const moved: PersistedStaff = {
+			...rest,
+			cwd: newCtx.project.rootPath,
+			projectId: newProjectId,
+			updatedAt: Date.now(),
+		};
 		newCtx.staffStore.put(moved);
 		newCtx.searchIndex?.indexStaff(moved, newProjectId);
 		return moved;
@@ -103,13 +163,137 @@ export class StaffManager {
 		return null;
 	}
 
+	private async projectSupportsWorktree(projectId: string, cwd: string): Promise<{ supported: boolean; repoPath?: string; multiRepo: boolean; components: Component[] }> {
+		const ctx = this.pcm.getOrCreate(projectId);
+		if (!ctx) return { supported: false, multiRepo: false, components: [] };
+		const components = ctx.projectConfigStore.getComponents();
+		const multiRepo = ctx.projectConfigStore.isMultiRepo();
+		if (multiRepo) {
+			const repos = ctx.projectConfigStore.repoNames();
+			if (repos.length === 0) return { supported: false, multiRepo, components };
+			for (const repo of repos) {
+				const repoPath = path.join(ctx.project.rootPath, repo === "." ? "" : repo);
+				if (!await isGitRepo(repoPath)) {
+					return { supported: false, multiRepo, components };
+				}
+			}
+			return { supported: true, repoPath: ctx.project.rootPath, multiRepo, components };
+		}
+
+		try {
+			if (!await isGitRepo(cwd)) return { supported: false, multiRepo, components };
+			return { supported: true, repoPath: await getRepoRoot(cwd), multiRepo, components };
+		} catch {
+			return { supported: false, multiRepo, components };
+		}
+	}
+
+	private async provisionStaffWorktree(projectId: string, name: string, id: string, cwd: string, worktree?: boolean): Promise<StaffWorktreePlan> {
+		if (worktree === false) return { sessionCwd: cwd };
+
+		const support = await this.projectSupportsWorktree(projectId, cwd);
+		if (!shouldCreateWorktree({ worktree }, support.supported) || !support.repoPath) {
+			return { sessionCwd: cwd };
+		}
+
+		const ctx = this.pcm.getOrCreate(projectId);
+		if (!ctx) throw new Error(`Cannot create staff worktree: project "${projectId}" not found`);
+		const shortId = id.slice(0, 8);
+		const safeName = sanitiseBranchName(name) || "agent";
+		let branchName = "staff-" + safeName + "-" + shortId;
+		const configuredBaseRef = ctx.projectConfigStore.get("base_ref") || undefined;
+		const worktreeRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
+		let worktreePath: string;
+		let repoWorktrees: Record<string, string> | undefined;
+
+		if (support.multiRepo) {
+			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef });
+			worktreePath = set.container;
+			repoWorktrees = Object.fromEntries(set.worktrees.map(w => [w.repo, w.worktreePath]));
+		} else {
+			const worktreeResult = await createWorktree(support.repoPath, branchName, { configuredBaseRef, worktreeRoot });
+			worktreePath = worktreeResult.worktreePath;
+			branchName = worktreeResult.branchName;
+		}
+
+		if (support.components.length > 0) {
+			try {
+				await runComponentSetups({
+					components: support.components,
+					branchContainer: worktreePath,
+					primaryWorktreeRoot: support.repoPath,
+					exec: async (cmd, setupCwd, env) => {
+						await execShellCommand(cmd, { cwd: setupCwd, env, timeout: 120_000 });
+					},
+				});
+			} catch (err) {
+				console.warn(`[staff-manager] runComponentSetups failed while creating staff worktree for ${id} (non-fatal):`, err);
+			}
+		}
+
+		return {
+			branchName,
+			repoPath: support.repoPath,
+			worktreePath,
+			repoWorktrees,
+			sessionCwd: offsetCwd(support.repoPath, cwd, worktreePath),
+		};
+	}
+
+	private staffSessionCwd(staff: PersistedStaff, projectId: string): string {
+		if (!staff.worktreePath) return staff.cwd;
+		const ctx = this.pcm.getOrCreate(projectId);
+		const repoPath = staff.repoPath ?? ctx?.project.rootPath;
+		return offsetCwd(repoPath, staff.cwd, staff.worktreePath);
+	}
+
+	private staffWorktreeEntries(staff: PersistedStaff, projectId?: string): Array<{ repo: string; repoPath: string; worktreePath: string }> {
+		if (!staff.worktreePath) return [];
+		const ctx = projectId ? this.pcm.getOrCreate(projectId) : undefined;
+		const repoPath = staff.repoPath ?? ctx?.project.rootPath ?? staff.cwd;
+		if (staff.repoWorktrees && Object.keys(staff.repoWorktrees).length > 0) {
+			return Object.entries(staff.repoWorktrees).map(([repo, worktreePath]) => ({
+				repo,
+				repoPath: repo === "." ? repoPath : path.join(repoPath, repo),
+				worktreePath,
+			}));
+		}
+		return [{ repo: ".", repoPath, worktreePath: staff.worktreePath }];
+	}
+
+	private staffSessionWorktreeMeta(staff: PersistedStaff, projectId?: string): { worktreePath: string; branch?: string; repoPath?: string; repoWorktrees?: Record<string, string> } | undefined {
+		if (!staff.worktreePath) return undefined;
+		const ctx = projectId ? this.pcm.getOrCreate(projectId) : undefined;
+		const repoPath = staff.repoPath ?? ctx?.project.rootPath;
+		return {
+			worktreePath: staff.worktreePath,
+			...(staff.branch ? { branch: staff.branch } : {}),
+			...(repoPath ? { repoPath } : {}),
+			...(staff.repoWorktrees ? { repoWorktrees: staff.repoWorktrees } : {}),
+		};
+	}
+
+	private async cleanupStaffWorktree(staff: PersistedStaff, projectId?: string): Promise<void> {
+		const entries = this.staffWorktreeEntries(staff, projectId);
+		if (entries.length === 0) return;
+		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true)));
+		for (const result of results) {
+			if (result.status === "rejected") {
+				console.error(`[staff-manager] Failed to clean up one worktree for staff ${staff.id}:`, result.reason);
+			}
+		}
+		if (staff.repoWorktrees && staff.worktreePath) {
+			try { fs.rmSync(staff.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+	}
+
 	async createStaff(
 		name: string,
 		description: string,
 		systemPrompt: string,
 		cwd: string,
 		sessionManager: SessionManager,
-		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean },
+		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean; worktree?: boolean; accessory?: string },
 	): Promise<PersistedStaff> {
 		const now = Date.now();
 		const id = randomUUID();
@@ -129,11 +313,15 @@ export class StaffManager {
 			name,
 			description,
 			systemPrompt,
+			// Persist the selected project cwd. Worktree-backed staff launch at the
+			// matching offset inside their worktree, but this remains the anchor for
+			// project scoping and cleanup.
 			cwd,
 			state: "active",
 			triggers,
 			memory: "",
 			roleId: opts?.roleId,
+			accessory: normalizeStaffAccessory(opts?.accessory),
 			createdAt: now,
 			updatedAt: now,
 			projectId,
@@ -142,17 +330,14 @@ export class StaffManager {
 			// NEVER consulted anywhere in the staff path.
 			sandboxed: opts?.sandboxed ?? false,
 		};
-		// Create a worktree for this staff agent
-		const shortId = randomUUID().slice(0, 8);
-		const branchName = "staff-" + sanitiseBranchName(name) + "-" + shortId;
-		// Thread the project's configured `base_ref` so the staff worktree branches
-		// from the configured integration target and tracks it as upstream. See
-		// docs/design/base-ref.md.
-		const projectCtx = this.pcm.getOrCreate(projectId);
-		const configuredBaseRef = projectCtx?.projectConfigStore.get("base_ref") || undefined;
-		const worktreeResult = await createWorktree(cwd, branchName, { configuredBaseRef });
-		staff.worktreePath = worktreeResult.worktreePath;
-		staff.branch = worktreeResult.branchName;
+
+		const worktreePlan = await this.provisionStaffWorktree(projectId, name, id, cwd, opts?.worktree);
+		if (worktreePlan.worktreePath && worktreePlan.branchName) {
+			staff.worktreePath = worktreePlan.worktreePath;
+			staff.branch = worktreePlan.branchName;
+			if (worktreePlan.repoPath) staff.repoPath = worktreePlan.repoPath;
+			if (worktreePlan.repoWorktrees) staff.repoWorktrees = worktreePlan.repoWorktrees;
+		}
 
 		const store = this.getStore(projectId);
 		store.put(staff);
@@ -175,31 +360,45 @@ export class StaffManager {
 				const sm = sessionManager.getSandboxManager?.();
 				if (sm) await sm.ensureForProject(projectId);
 			}
-			const session = await sessionManager.createSession(worktreeResult.worktreePath, undefined, undefined, undefined, {
+			const session = await sessionManager.createSession(worktreePlan.sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
 				// Pass roleName so session-setup can apply role-keyed model/thinking-level
 				// overrides at spawn time. Without this, `plan.role ?? plan.roleName` falls
 				// through to undefined and the resolvers return defaults — staff roles with
 				// `model`/`thinkingLevel` overrides would be silently ignored.
 				roleName: staff.roleId,
+				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: id },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
+				// through opts → plan → persistOnce so it lands in PersistedSession.
+				// Without this, on respawn `restoreSession` reads `ps.staffId =
+				// undefined` → no `BOBBIT_STAFF_ID` env → inbox tools refuse to
+				// register (see `defaults/tools/inbox/extension.ts`).
+				staffId: id,
 				sandboxed: effectiveSandboxed,
-				sandboxBranch: effectiveSandboxed ? branchName : undefined,
+				sandboxBranch: effectiveSandboxed ? staff.branch : undefined,
 				projectId,
 			});
+			// Belt-and-braces in-memory sync. `createSession` already propagates
+			// `staffId` to the persisted record via the plan, but the live
+			// `SessionInfo` object is built inside `executePlan` and doesn't
+			// currently mirror the field back — keep this assignment until the
+			// next refactor wires it through `SessionInfo` directly.
 			session.staffId = id;
 			sessionManager.setTitle(session.id, staff.name);
-			sessionManager.updateSessionMeta(session.id, { worktreePath: worktreeResult.worktreePath });
+			const worktreeMeta = this.staffSessionWorktreeMeta(staff, projectId);
+			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
 			store.update(id, { currentSessionId: session.id });
 			staff.currentSessionId = session.id;
 		} catch (err) {
 			// Clean up the orphaned worktree on failure
 			try {
-				await cleanupWorktree(cwd, worktreeResult.worktreePath, branchName, true);
-				console.log(`[staff-manager] Cleaned up orphaned worktree after createStaff failure: ${worktreeResult.worktreePath}`);
+				await this.cleanupStaffWorktree(staff, projectId);
+				if (staff.worktreePath) console.log(`[staff-manager] Cleaned up orphaned worktree after createStaff failure: ${staff.worktreePath}`);
 			} catch (cleanupErr) {
-				console.error(`[staff-manager] Failed to clean up orphaned worktree ${worktreeResult.worktreePath}:`, cleanupErr);
+				console.error(`[staff-manager] Failed to clean up orphaned worktree ${staff.worktreePath}:`, cleanupErr);
 			}
 			store.remove(id);
 			searchIndex?.removeStaff(id);
@@ -236,7 +435,11 @@ export class StaffManager {
 			triggers?: StaffTrigger[];
 			memory?: string;
 			roleId?: string;
+			accessory?: string;
 			currentSessionId?: string;
+			contextPolicy?: "preserve" | "compact";
+			/** Updated by `InboxNudger.applyPolicyThenNudge`; no longer mutated by `StaffManager`. */
+			lastWakeAt?: number;
 		},
 	): boolean {
 		// Auto-assign UUIDs to triggers missing IDs
@@ -276,7 +479,7 @@ export class StaffManager {
 		// Clean up the worktree if it exists
 		if (staff.worktreePath) {
 			try {
-				await cleanupWorktree(staff.cwd, staff.worktreePath, staff.branch, true);
+				await this.cleanupStaffWorktree(staff, found.projectId);
 			} catch (err) {
 				console.error(`[staff-manager] Failed to clean up worktree for staff ${id}:`, err);
 			}
@@ -285,6 +488,14 @@ export class StaffManager {
 		store.remove(id);
 		const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
 		searchIndex?.removeStaff(id);
+
+		// Wipe the per-staff inbox file. No-op if the inbox manager isn't wired
+		// (test paths that construct StaffManager directly without server.ts).
+		try {
+			this.inboxManager?.removeAll(id);
+		} catch (err) {
+			console.error(`[staff-manager] inbox removeAll failed for staff ${id}:`, err);
+		}
 		return true;
 	}
 
@@ -317,40 +528,42 @@ export class StaffManager {
 	 */
 	private async refreshWorktree(staff: PersistedStaff, projectId: string): Promise<void> {
 		if (!staff.worktreePath) return;
+		// Sandboxed staff refresh inside the container; host-side worktree refresh is skipped.
+		if (staff.sandboxed) return;
 
-		// Skip refresh for sandboxed staff — their worktree lives inside the container
 		const ctx = this.pcm.getOrCreate(projectId);
-		if (ctx?.projectConfigStore.get("sandbox") === "docker") return;
-
-		const wt = staff.worktreePath;
-		try {
-			await execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
-		} catch (err) {
-			console.warn(`[staff-manager] git fetch failed in ${wt} (non-fatal):`, err);
-			return; // Can't rebase without fetch
-		}
-
-		try {
-			// Resolve the rebase target via the centralised `resolveBaseRef` helper.
-			// When the project has a configured `base_ref`, that's the integration
-			// target we rebase onto; otherwise we fall back to today's behaviour
-			// (`git symbolic-ref refs/remotes/origin/HEAD`). The helper returns the
-			// full ref including any `origin/` prefix, so we use it directly.
-			const configuredBaseRef = ctx?.projectConfigStore.get("base_ref") || undefined;
-			const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef);
-			if (!rebaseTarget || rebaseTarget === "HEAD" || rebaseTarget.startsWith("-")) {
-				console.warn(`[staff-manager] Could not resolve rebase target in ${wt} (got "${rebaseTarget}"), skipping rebase`);
-			} else {
-				// `resolveBaseRef` returns `origin/<branch>` for remote bases and the
-				// bare branch name for local bases. For staff rebase we want to track
-				// the remote tip when configured remotely; for local bases we rebase
-				// against the local branch directly.
-				await execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
+		const configuredBaseRef = ctx?.projectConfigStore.get("base_ref") || undefined;
+		const entries = this.staffWorktreeEntries(staff, projectId);
+		for (const entry of entries) {
+			const wt = entry.worktreePath;
+			try {
+				await execFile("git", ["fetch", "origin"], { cwd: wt, timeout: 60_000 });
+			} catch (err) {
+				console.warn(`[staff-manager] git fetch failed in ${wt} (non-fatal):`, err);
+				continue; // Can't rebase this repo without fetch
 			}
-		} catch (err) {
-			console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);
-			// Abort any in-progress rebase to leave worktree in a usable state
-			try { await execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
+
+			try {
+				// Resolve the rebase target via the centralised `resolveBaseRef` helper.
+				// When the project has a configured `base_ref`, that's the integration
+				// target we rebase onto; otherwise we fall back to today's behaviour
+				// (`git symbolic-ref refs/remotes/origin/HEAD`). The helper returns the
+				// full ref including any `origin/` prefix, so we use it directly.
+				const { ref: rebaseTarget } = await resolveBaseRef(wt, configuredBaseRef);
+				if (!rebaseTarget || rebaseTarget === "HEAD" || rebaseTarget.startsWith("-")) {
+					console.warn(`[staff-manager] Could not resolve rebase target in ${wt} (got "${rebaseTarget}"), skipping rebase`);
+				} else {
+					// `resolveBaseRef` returns `origin/<branch>` for remote bases and the
+					// bare branch name for local bases. For staff rebase we want to track
+					// the remote tip when configured remotely; for local bases we rebase
+					// against the local branch directly.
+					await execFile("git", ["rebase", rebaseTarget], { cwd: wt, timeout: 60_000 });
+				}
+			} catch (err) {
+				console.warn(`[staff-manager] git rebase failed in ${wt} (non-fatal):`, err);
+				// Abort any in-progress rebase to leave worktree in a usable state
+				try { await execFile("git", ["rebase", "--abort"], { cwd: wt }); } catch { /* ignore */ }
+			}
 		}
 
 		// Run per-component worktree setup commands (e.g. npm ci). The canonical
@@ -362,8 +575,8 @@ export class StaffManager {
 			try {
 				await runComponentSetups({
 					components,
-					branchContainer: wt,
-					primaryWorktreeRoot: staff.cwd,
+					branchContainer: staff.worktreePath,
+					primaryWorktreeRoot: staff.repoPath ?? ctx?.project.rootPath ?? staff.cwd,
 					exec: async (cmd, cwd, env) => {
 						await execShellCommand(cmd, { cwd, env, timeout: 120_000 });
 					},
@@ -375,65 +588,76 @@ export class StaffManager {
 	}
 
 	/**
-	 * Wake a staff agent: enqueue a prompt on its permanent session.
-	 * If the session doesn't exist yet (legacy migration), create one first.
-	 * If the session subprocess is terminated, restore it before enqueuing.
+	 * Ensure the staff agent has a live, ready-to-use session, returning its id.
+	 *
+	 * Three branches:
+	 *   1. **Legacy migration** — `currentSessionId` is missing. Create a fresh
+	 *      permanent session with the staff's system prompt + pinned memory.
+	 *   2. **Subprocess recovery** — the session exists but its agent CLI has
+	 *      exited (status `terminated`). Restore it via `ensureSessionAlive`;
+	 *      if that fails the session record itself is gone, clear
+	 *      `currentSessionId` and recurse into the legacy-migration branch.
+	 *   3. **Healthy** — session is live. Just refresh the worktree (rebase +
+	 *      deps) so the agent runs on the current primary branch.
+	 *
+	 * Sandbox init (`sandboxManager.ensureForProject`) and `refreshWorktree`
+	 * always run before returning so the session is ready to receive prompts.
+	 * Throws if the staff isn't `active`.
+	 *
+	 * Replaces the deleted public `wake()` method — the inbox nudger now
+	 * decides *when* to wake; this helper handles the *how*.
 	 */
-	async wake(
-		staffId: string,
-		prompt: string | undefined,
-		sessionManager: SessionManager,
-	): Promise<string> {
+	async ensureSessionForStaff(staffId: string, sessionManager: SessionManager): Promise<string> {
 		const found = this.findStoreForStaff(staffId);
 		if (!found) throw new Error("Staff agent not found");
 		const { store, staff } = found;
-		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot wake`);
+		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot ensure session`);
 
-		const wakePrompt = prompt || "You have been woken. Review your memory and carry out your mission.";
-
-		// Legacy migration: if no permanent session exists, create one
+		// Branch 1: legacy migration — no permanent session yet, create one
 		if (!staff.currentSessionId) {
 			let fullPrompt = staff.systemPrompt;
 			if (staff.memory) {
 				fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
 			}
-			const sessionCwd = staff.worktreePath ?? staff.cwd;
+			const sessionCwd = this.staffSessionCwd(staff, found.projectId);
 			const session = await sessionManager.createSession(sessionCwd, undefined, undefined, undefined, {
 				rolePrompt: fullPrompt,
-				// See companion call site in createStaff — roleName must flow so role-keyed
-				// model/thinking-level overrides apply at spawn.
 				roleName: staff.roleId,
+				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: staffId },
+				// Persisted so inbox tools survive respawn — see
+				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
+				// `createStaff` above.
+				staffId,
 				sandboxed: staff.sandboxed,
 				sandboxBranch: staff.sandboxed ? staff.branch : undefined,
+				projectId: found.projectId,
 			});
 			session.staffId = staffId;
 			sessionManager.setTitle(session.id, staff.name);
+			const worktreeMeta = this.staffSessionWorktreeMeta(staff, found.projectId);
+			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
-			store.update(staffId, { currentSessionId: session.id, lastWakeAt: Date.now() });
-
-			await sessionManager.enqueuePrompt(session.id, wakePrompt);
-			console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${session.id} (legacy migration)`);
+			store.update(staffId, { currentSessionId: session.id });
+			staff.currentSessionId = session.id;
+			console.log(`[staff-manager] Created permanent session for staff "${staff.name}" (${staffId}) → ${session.id} (legacy migration)`);
 			return session.id;
 		}
 
-		// Ensure the session subprocess is alive (restore if terminated)
+		// Branch 2: subprocess recovery
 		const session = sessionManager.getSession(staff.currentSessionId);
 		if (!session || session.status === "terminated") {
 			try {
 				await sessionManager.ensureSessionAlive(staff.currentSessionId);
 			} catch {
-				// Session was deleted — clear and recreate
 				console.log(`[staff-manager] Session ${staff.currentSessionId} unrecoverable, creating new one for "${staff.name}"`);
 				store.update(staffId, { currentSessionId: undefined as any });
 				staff.currentSessionId = undefined as any;
-				return this.wake(staffId, prompt, sessionManager);
+				return this.ensureSessionForStaff(staffId, sessionManager);
 			}
 		}
 
-		// Lazy per-project sandbox init before waking. Idempotent; no-op for
-		// non-sandboxed staff. Errors are per-project — waking staff in
-		// project A will not be blocked by a broken sandbox in project B.
+		// Branch 3: healthy — lazy per-project sandbox init + worktree refresh
 		if (staff.sandboxed) {
 			const sm = sessionManager.getSandboxManager?.();
 			if (sm) {
@@ -446,16 +670,9 @@ export class StaffManager {
 			}
 		}
 
-		// Refresh the worktree before waking (rebase + deps)
+		sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
 		await this.refreshWorktree(staff, found.projectId);
 
-		// Enqueue the wake prompt on the existing session
-		await sessionManager.enqueuePrompt(staff.currentSessionId, wakePrompt);
-
-		// Update last wake time
-		store.update(staffId, { lastWakeAt: Date.now() });
-
-		console.log(`[staff-manager] Woke staff "${staff.name}" (${staffId}) → session ${staff.currentSessionId}`);
 		return staff.currentSessionId;
 	}
 }

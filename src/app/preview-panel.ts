@@ -1,12 +1,377 @@
 import { state, renderApp, activeSessionId } from "./state.js";
+import {
+	CHAT_PANEL_TAB_ID,
+	INBOX_PANEL_TAB_ID,
+	LIVE_PREVIEW_PANEL_TAB_ID,
+	activePanelTabIdForSession,
+	isLivePreviewTab,
+	normalizePreviewContentHash,
+	panelTabsForSession,
+	previewContentHashFromTab,
+	previewTabAllowsLiveDedupe,
+	proposalPanelTabId,
+	reviewPanelTabId,
+	reviewTitleFromPanelTab,
+	setActivePanelTabIdForSession,
+	setPanelTabsForSession,
+	type LegacyPanelTab,
+	type PanelWorkspaceTab,
+} from "./panel-workspace.js";
 
 // WP-E: SSE subscription to per-session preview mount events.
 // The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
 // event whenever the agent rewrites the entry file or any sibling asset.
 // We bump `previewPanelMtime` to force the iframe to reload via `#mtime=<n>`.
 
+type PanelWorkspaceOptions = {
+	sessionId?: string;
+	select?: boolean;
+	setAssistantTab?: boolean;
+	clearCollapse?: boolean;
+	rev?: number;
+	fields?: Record<string, unknown>;
+};
+
+const PROPOSAL_LABELS: Record<string, string> = {
+	goal: "Goal Proposal",
+	project: "Project Proposal",
+	role: "Role Proposal",
+	tool: "Tool Proposal",
+	staff: "Staff Proposal",
+};
+
 let es: EventSource | null = null;
 let currentSid: string | null = null;
+
+function safeBaseName(path: string | undefined): string {
+	if (!path) return "";
+	const clean = path.split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "";
+	return clean.split("/").filter(Boolean).pop() || clean || "";
+}
+
+function panelSessionId(sessionId: string | undefined): string {
+	return sessionId || activeSessionId() || "";
+}
+
+function activeProposalRevForSession(type: string, sessionId: string): number | undefined {
+	const slot = (state as any).activeProposals?.[type];
+	if (!slot) return undefined;
+	if (sessionId && typeof slot.sessionId === "string" && slot.sessionId && slot.sessionId !== sessionId) return undefined;
+	const rev = slot.rev;
+	return typeof rev === "number" && Number.isFinite(rev) && rev > 0 ? Math.trunc(rev) : undefined;
+}
+
+function mutablePanelTabs(s: any, sessionId: string): PanelWorkspaceTab[] {
+	return panelTabsForSession(s, sessionId);
+}
+
+function upsertPanelTabState(s: any, sessionId: string, tab: PanelWorkspaceTab): void {
+	const tabs = mutablePanelTabs(s, sessionId);
+	const idx = tabs.findIndex(t => t?.id === tab.id);
+	if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab };
+	else tabs.push(tab);
+}
+
+function applyLegacySelection(s: any, tab: PanelWorkspaceTab, options: PanelWorkspaceOptions): void {
+	if (options.select === false) return;
+	const setAssistantTab = options.setAssistantTab !== false;
+	if (tab.kind === "chat") {
+		s.previewPanelTab = "chat";
+		if (setAssistantTab) s.assistantTab = "chat";
+		return;
+	}
+	if (tab.kind === "preview") {
+		s.isPreviewSession = true;
+		s.previewPanelActiveTab = "preview";
+		s.previewPanelTab = "preview";
+		if (s.assistantType && setAssistantTab) s.assistantTab = "preview";
+		return;
+	}
+	if (tab.kind === "proposal") {
+		const source = tab.source as Record<string, unknown>;
+		const proposalType = typeof source.proposalType === "string" ? source.proposalType : "goal";
+		s.assistantHasProposal = true;
+		s.previewPanelActiveTab = proposalType;
+		s.previewPanelTab = proposalType;
+		if (s.assistantType && setAssistantTab) s.assistantTab = "preview";
+		return;
+	}
+	if (tab.kind === "review") {
+		const title = reviewTitleFromPanelTab(tab);
+		s.reviewPanelOpen = true;
+		s.reviewActiveTab = title;
+		s.previewPanelActiveTab = "review";
+		s.previewPanelTab = "review";
+		if (s.assistantType && setAssistantTab) s.assistantTab = "preview";
+		return;
+	}
+	if (tab.kind === "inbox") {
+		s.previewPanelActiveTab = "inbox";
+		s.previewPanelTab = "inbox";
+	}
+}
+
+function clearCollapseKey(sessionId: string | undefined): void {
+	if (!sessionId) return;
+	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* ignore */ }
+}
+
+function emitPanelWorkspaceEvent(action: "select" | "close", detail: Record<string, unknown>): void {
+	try {
+		if (typeof window === "undefined" || typeof CustomEvent === "undefined") return;
+		const eventDetail = { action, ...detail };
+		window.dispatchEvent(new CustomEvent("bobbit-panel-workspace", { detail: eventDetail }));
+		window.dispatchEvent(new CustomEvent(`bobbit-panel-workspace:${action}`, { detail: eventDetail }));
+	} catch { /* ignore */ }
+}
+
+async function notifyOptionalPanelWorkspaceModule(action: "select" | "close", detail: Record<string, unknown>): Promise<void> {
+	try {
+		const spec = "./" + "panel-workspace.js";
+		const mod: any = await import(/* @vite-ignore */ spec);
+		const payload = { action, ...detail };
+		const fn = action === "close"
+			? mod.closePanelTab ?? mod.removePanelTab ?? mod.applyPanelWorkspaceSelection
+			: mod.selectPanelTab ?? mod.openPanelTab ?? mod.upsertPanelTab ?? mod.applyPanelWorkspaceSelection;
+		if (typeof fn === "function") await fn(payload);
+	} catch { /* optional integration point; absent until core workspace lands */ }
+}
+
+export function selectPanelWorkspaceTab(tab: PanelWorkspaceTab, options: PanelWorkspaceOptions = {}): void {
+	const s = state as any;
+	const sessionId = panelSessionId(options.sessionId);
+	upsertPanelTabState(s, sessionId, tab);
+	if (options.select !== false) {
+		setActivePanelTabIdForSession(s, sessionId, tab.id);
+	}
+	applyLegacySelection(s, tab, options);
+	if (options.clearCollapse !== false) clearCollapseKey(sessionId || undefined);
+	const detail = { tab, activeTabId: options.select === false ? activePanelTabIdForSession(s, sessionId) : tab.id, options };
+	emitPanelWorkspaceEvent("select", detail);
+	void notifyOptionalPanelWorkspaceModule("select", detail);
+}
+
+export function removePanelWorkspaceTabs(ids: string[], options: PanelWorkspaceOptions = {}): void {
+	const s = state as any;
+	const sessionId = panelSessionId(options.sessionId);
+	const idSet = new Set(ids);
+	const tabs = panelTabsForSession(s, sessionId);
+	const kept = tabs.filter((tab: PanelWorkspaceTab) => !idSet.has(tab.id));
+	setPanelTabsForSession(s, sessionId, kept);
+	if (s.panelWorkspace && typeof s.panelWorkspace === "object" && Array.isArray(s.panelWorkspace.tabs)) {
+		s.panelWorkspace.tabs = kept;
+	}
+	const detail = { tabIds: ids, options };
+	emitPanelWorkspaceEvent("close", detail);
+	void notifyOptionalPanelWorkspaceModule("close", detail);
+}
+
+export function selectHtmlPreviewTab(args: {
+	sessionId?: string;
+	entry?: string;
+	mtime?: number;
+	id?: string;
+	title?: string;
+	url?: string;
+	contentHash?: string;
+	source?: Record<string, unknown>;
+	state?: Record<string, unknown>;
+	dedupeWithLive?: boolean;
+	select?: boolean;
+	setAssistantTab?: boolean;
+}): void {
+	const sessionId = args.sessionId || activeSessionId() || "";
+	const entry = args.entry || state.previewPanelEntry || "index.html";
+	const title = args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`;
+	const id = args.id || LIVE_PREVIEW_PANEL_TAB_ID;
+	const contentHash = normalizePreviewContentHash(args.contentHash)
+		|| (id === LIVE_PREVIEW_PANEL_TAB_ID ? normalizePreviewContentHash((state as any).previewPanelContentHash) : "");
+	const source: Record<string, unknown> = {
+		type: "html-preview",
+		sessionId,
+		entry,
+		...args.source,
+	};
+	const tabState: Record<string, unknown> = {
+		...args.state,
+		entry,
+		mtime: args.mtime,
+		url: args.url,
+	};
+	if (contentHash) {
+		source.contentHash = contentHash;
+		tabState.contentHash = contentHash;
+	}
+	if (args.dedupeWithLive === false) {
+		source.dedupeWithLive = false;
+		tabState.dedupeWithLive = false;
+	}
+	const tab: PanelWorkspaceTab = {
+		id,
+		kind: "preview",
+		title,
+		label: title,
+		legacyTab: "preview",
+		source: source as PanelWorkspaceTab["source"],
+		state: tabState,
+	};
+	const s = state as any;
+	const existingTabs = panelTabsForSession(s, sessionId);
+	const liveTabForSameContent = (): PanelWorkspaceTab => ({
+		...tab,
+		id: LIVE_PREVIEW_PANEL_TAB_ID,
+		source: {
+			...source,
+			live: true,
+			origin: typeof source.origin === "string" ? source.origin : "preview-open-dedupe",
+		} as PanelWorkspaceTab["source"],
+		state: tabState,
+	});
+	const currentLiveMatches = !!contentHash
+		&& !isLivePreviewTab(tab)
+		&& args.dedupeWithLive !== false
+		&& normalizePreviewContentHash(s.previewPanelContentHash) === contentHash;
+	if (currentLiveMatches) {
+		const duplicateIds = existingTabs
+			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
+				&& candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID
+				&& previewContentHashFromTab(candidate) === contentHash
+				&& previewTabAllowsLiveDedupe(candidate))
+			.map((candidate: PanelWorkspaceTab) => candidate.id);
+		const activeId = activePanelTabIdForSession(s, sessionId);
+		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+		const liveTab = liveTabForSameContent();
+		const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
+		selectPanelWorkspaceTab(liveTab, {
+			sessionId,
+			select: shouldSelect,
+			setAssistantTab: args.setAssistantTab,
+		});
+		if (shouldSelect) s.previewPanelMountedTabId = liveTab.id;
+		return;
+	}
+	const duplicateTabs = contentHash
+		? existingTabs.filter((candidate: PanelWorkspaceTab) => {
+			if (candidate.kind !== "preview" || candidate.id === tab.id || previewContentHashFromTab(candidate) !== contentHash) return false;
+			if (isLivePreviewTab(tab)) return previewTabAllowsLiveDedupe(candidate);
+			return args.dedupeWithLive !== false || !isLivePreviewTab(candidate);
+		})
+		: [];
+	if (duplicateTabs.length > 0) {
+		if (isLivePreviewTab(tab)) {
+			const duplicateIds = duplicateTabs.map(candidate => candidate.id);
+			const activeId = activePanelTabIdForSession(s, sessionId);
+			if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+			const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
+			selectPanelWorkspaceTab(tab, {
+				sessionId,
+				select: shouldSelect,
+				setAssistantTab: args.setAssistantTab,
+			});
+			if (shouldSelect) s.previewPanelMountedTabId = tab.id;
+			return;
+		}
+		const canonical = duplicateTabs.find(isLivePreviewTab) ?? duplicateTabs[0];
+		const selectedTab = isLivePreviewTab(canonical) ? liveTabForSameContent() : canonical;
+		const duplicateIds = duplicateTabs.filter(candidate => candidate.id !== selectedTab.id).map(candidate => candidate.id);
+		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
+		selectPanelWorkspaceTab(selectedTab, {
+			sessionId,
+			select: args.select,
+			setAssistantTab: args.setAssistantTab,
+		});
+		if (args.select !== false) s.previewPanelMountedTabId = selectedTab.id;
+		return;
+	}
+	selectPanelWorkspaceTab(tab, {
+		sessionId,
+		select: args.select,
+		setAssistantTab: args.setAssistantTab,
+	});
+	if (args.select !== false) s.previewPanelMountedTabId = tab.id;
+}
+
+export function selectProposalWorkspaceTab(type: string, options: PanelWorkspaceOptions = {}): void {
+	const sessionId = panelSessionId(options.sessionId);
+	const requestedRev = typeof options.rev === "number" && Number.isFinite(options.rev) && options.rev > 0
+		? Math.trunc(options.rev)
+		: undefined;
+	const activeRev = requestedRev != null ? activeProposalRevForSession(type, sessionId) : undefined;
+	const rev = activeRev === requestedRev ? undefined : requestedRev;
+	const baseTitle = PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)} Proposal`;
+	selectPanelWorkspaceTab({
+		id: proposalPanelTabId(type, rev),
+		kind: "proposal",
+		title: rev ? `${baseTitle} rev ${rev}` : baseTitle,
+		label: rev ? `${baseTitle.replace(/ Proposal$/, "")} r${rev}` : (PROPOSAL_LABELS[type]?.replace(/ Proposal$/, "") || type),
+		legacyTab: type as LegacyPanelTab,
+		source: { type: "proposal", proposalType: type as any, sessionId, rev, historical: rev != null },
+		state: rev != null ? {
+			rev,
+			fields: options.fields,
+			historical: true,
+		} : {},
+	}, { ...options, sessionId });
+}
+
+export function selectReviewWorkspaceTab(title: string, options: PanelWorkspaceOptions = {}): void {
+	const sessionId = panelSessionId(options.sessionId);
+	selectPanelWorkspaceTab({
+		id: reviewPanelTabId(title),
+		kind: "review",
+		title: `Review: ${title}`,
+		label: `Review: ${title}`,
+		legacyTab: "review",
+		source: { type: "review", title, reviewTitle: title, sessionId },
+	}, { ...options, sessionId });
+}
+
+export function closeReviewWorkspaceTabs(titles?: string[], options: PanelWorkspaceOptions = {}): void {
+	const s = state as any;
+	const sessionId = panelSessionId(options.sessionId);
+	const existingTabs = panelTabsForSession(s, sessionId);
+	const ids = titles && titles.length > 0
+		? titles.map(reviewPanelTabId)
+		: existingTabs
+			.filter((tab: PanelWorkspaceTab) => tab?.kind === "review" || tab?.id?.startsWith("review:"))
+			.map((tab: PanelWorkspaceTab) => tab.id);
+	if (ids.length > 0) removePanelWorkspaceTabs(ids, options);
+}
+
+export function selectSensiblePanelWorkspaceTab(options: PanelWorkspaceOptions = {}): void {
+	const s = state as any;
+	const sessionId = options.sessionId || activeSessionId() || "";
+	if (s.reviewPanelOpen && s.reviewDocuments instanceof Map && s.reviewDocuments.size > 0) {
+		const title = s.reviewActiveTab || [...s.reviewDocuments.keys()][0];
+		if (title) {
+			selectReviewWorkspaceTab(title, { ...options, sessionId });
+			return;
+		}
+	}
+	if (s.isPreviewSession) {
+		selectHtmlPreviewTab({
+			sessionId,
+			entry: s.previewPanelEntry || "index.html",
+			mtime: s.previewPanelMtime,
+			contentHash: s.previewPanelContentHash,
+			id: LIVE_PREVIEW_PANEL_TAB_ID,
+			select: options.select,
+			setAssistantTab: options.setAssistantTab,
+		});
+		return;
+	}
+	for (const type of ["goal", "project", "role", "tool", "staff"]) {
+		if (s.activeProposals?.[type]) {
+			selectProposalWorkspaceTab(type, { ...options, sessionId });
+			return;
+		}
+	}
+	if (s.inboxPanelOpen || (Array.isArray(s.inboxEntries) && s.inboxEntries.length > 0)) {
+		selectPanelWorkspaceTab({ id: INBOX_PANEL_TAB_ID, kind: "inbox", title: "Inbox", label: "Inbox", legacyTab: "inbox", source: { type: "inbox", sessionId } }, { ...options, sessionId });
+		return;
+	}
+	selectPanelWorkspaceTab({ id: CHAT_PANEL_TAB_ID, kind: "chat", title: "Chat", label: "Chat", legacyTab: "chat", source: { type: "chat", sessionId } }, { ...options, sessionId, clearCollapse: false });
+}
 
 /** Start an SSE subscription to preview-events for the given session. */
 export function startPreviewSubscription(sessionId: string): void {
@@ -25,11 +390,29 @@ export function startPreviewSubscription(sessionId: string): void {
 			if (!r.ok) return;
 			if (currentSid !== sessionId) return; // session switched mid-flight
 			const data = await r.json();
+			let entry = "";
+			let mtime: number | undefined;
+			let contentHash = "";
 			if (typeof data?.entry === "string" && data.entry) {
+				entry = data.entry;
 				state.previewPanelEntry = data.entry;
 			}
 			if (typeof data?.mtime === "number") {
+				mtime = data.mtime;
 				state.previewPanelMtime = data.mtime;
+			}
+			contentHash = normalizePreviewContentHash(data?.contentHash);
+			(state as any).previewPanelContentHash = contentHash;
+			if (entry) {
+				selectHtmlPreviewTab({
+					sessionId,
+					entry,
+					mtime,
+					contentHash,
+					id: LIVE_PREVIEW_PANEL_TAB_ID,
+					source: { live: true, origin: "preview-bootstrap" },
+					select: state.previewPanelTab === "preview" || state.previewPanelActiveTab === "preview",
+				});
 			}
 			renderApp();
 		} catch { /* ignore bootstrap failures */ }
@@ -42,13 +425,30 @@ export function startPreviewSubscription(sessionId: string): void {
 		es.addEventListener("preview-changed", (ev: MessageEvent) => {
 			try {
 				const data = JSON.parse(ev.data);
+				let entry = state.previewPanelEntry;
+				let mtime = Date.now();
 				if (typeof data?.entry === "string" && data.entry) {
+					entry = data.entry;
 					state.previewPanelEntry = data.entry;
 				}
 				if (typeof data?.mtime === "number") {
+					mtime = data.mtime;
 					state.previewPanelMtime = data.mtime;
 				} else {
-					state.previewPanelMtime = Date.now();
+					state.previewPanelMtime = mtime;
+				}
+				const contentHash = normalizePreviewContentHash(data?.contentHash);
+				(state as any).previewPanelContentHash = contentHash;
+				if (entry) {
+					selectHtmlPreviewTab({
+						sessionId,
+						entry,
+						mtime,
+						contentHash,
+						id: LIVE_PREVIEW_PANEL_TAB_ID,
+						source: { live: true, origin: "preview-events" },
+						select: activeSessionId() === sessionId,
+					});
 				}
 				renderApp();
 			} catch {
@@ -88,4 +488,3 @@ export function startPreviewPolling(): void {
 export function stopPreviewPolling(): void {
 	stopPreviewSubscription();
 }
-

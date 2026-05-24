@@ -144,7 +144,7 @@ const frozenWorkflow = {
 				{
 					name: "Branch pushed to remote",
 					type: "command",
-					run: "git push origin {{branch}}",
+					run: "git push origin {{branch}}:refs/heads/{{branch}}",
 				},
 				{
 					name: "Master merged into branch",
