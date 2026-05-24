@@ -32,7 +32,39 @@ const SLEEP_CMD = process.platform === "win32"
 	: "sleep 60";
 
 test.describe("bash_bg wait — steer abort", () => {
-	test("abortAllWaits resolves long-poll wait with aborted:true, process keeps running", async ({ gateway }) => {
+	test("logs endpoint defaults to the last 15 lines", async ({ gateway }) => {
+		let sessionId: string | undefined;
+		try {
+			const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd() }),
+			});
+			expect(res.status).toBe(201);
+			({ id: sessionId } = await res.json());
+
+			const command = `node -e "for (let i = 1; i <= 20; i++) console.log('line-' + i); setTimeout(() => {}, 100)"`;
+			const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+				method: "POST",
+				body: JSON.stringify({ command, name: "log tail" }),
+			});
+			expect(bgRes.status).toBe(201);
+			const bg = await bgRes.json();
+
+			const waitRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/wait?timeout=5`);
+			expect(waitRes.status).toBe(200);
+
+			const logsRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}/logs`);
+			expect(logsRes.status).toBe(200);
+			const logs = await logsRes.json();
+			const expected = Array.from({ length: 15 }, (_, i) => `line-${i + 6}`);
+			expect(logs.log.map((entry: { text: string }) => entry.text)).toEqual(expected);
+			expect(logs.stdout).toEqual(expected);
+		} finally {
+			if (sessionId) await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
+		}
+	});
+
+	test("abortAllWaits resolves long-poll wait with aborted:true and leaves process running", async ({ gateway }) => {
 		// Create session
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
 			method: "POST",
