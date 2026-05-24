@@ -14,6 +14,13 @@ import { createAndConnectSession, connectToSession, startReattempt, terminateSes
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
 import { bobbitLoadingAnimation } from "../ui/components/BobbitLoadingAnimation.js";
+import { ensureGitStatusWidget } from "./lazy-widgets.js";
+
+// Module-init trigger — `goal-dashboard.ts` is itself a lazy route chunk,
+// so this runs when the user first navigates to a goal dashboard. The
+// widget chunk loads in parallel with the dashboard chunk; by the time
+// the first `<git-status-widget>` is rendered it's already upgraded.
+void ensureGitStatusWidget();
 
 // ============================================================================
 // TASK & COMMIT TYPES (mirrors server PersistedTask)

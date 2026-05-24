@@ -80,6 +80,7 @@
     "c8": "^11.0.0",
     "concurrently": "^9.2.1",
     "knip": "^6.1.0",
+    "rollup-plugin-visualizer": "^7.0.1",
     "shx": "^0.3.4",
     "typescript": "^5.7.3",
     "vite": "^7.1.6"

@@ -1,7 +1,7 @@
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { getAnnotations, getTotalAnnotationCount, composeReviewFeedback } from "./AnnotationStore.js";
-import "./ReviewDocument.js";
+import { ensureReviewComponents } from "../../../app/lazy-review.js";
 import "./review-pane.css";
 
 /**
@@ -29,6 +29,11 @@ export class ReviewPane extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    // Trigger the heavy review-document chunk on first mount; the
+    // <review-document> tag below stays unknown until the chunk lands
+    // and customElements upgrades it. Lit preserves the property
+    // bindings across upgrade.
+    void ensureReviewComponents();
     this._refreshCounts();
     window.addEventListener("annotation-cache-ready", this._boundCacheReady);
   }

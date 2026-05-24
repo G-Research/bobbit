@@ -270,4 +270,5 @@ The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted stat
 - **[REST API](rest-api.md)** — Full REST API reference
 - **[Security Model](security.md)** — Auth, TLS, and security details
 - **[Networking](networking.md)** — Bind addresses, TLS, deSEC, QR codes
+- **[Bundle profile workflow](perf/bundle-profile.md)** — Diagnose UI bundle-size regressions; budget guard at `tests/bundle-size.test.ts`
 - **[AGENTS.md](../AGENTS.md)** — Agent context: repo layout, key concepts, common tasks, debugging tips

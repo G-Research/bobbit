@@ -11,7 +11,12 @@ import { renderMessage } from "./message-renderer-registry.js";
 import "./ErrorMessage.js";
 import "./ToolGroup.js";
 import "./ToolPermissionCard.js";
-import "./PreCompactionHistory.js";
+// <bobbit-pre-compaction-history> is loaded on demand the first time a
+// compaction-summary card appears in the transcript. Most chat sessions
+// never compact, so keeping this 8 kB element out of entry saves cold
+// load. Lit upgrades the unknown tag once the chunk's customElement
+// landing fires.
+import { ensurePreCompactionHistory } from "../../app/lazy-widgets.js";
 import "./DeferredBlock.js";
 import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
 import {
@@ -166,6 +171,7 @@ export class MessageList extends LitElement {
 			// is component-local; no impact on collapsed-by-default UX.
 			const compactionId = getCompactionSidecarId(msg);
 			if (compactionId && this.sessionId) {
+				void ensurePreCompactionHistory();
 				items.push({
 					key: `precompact:${compactionId}`,
 					template: html`<bobbit-pre-compaction-history
