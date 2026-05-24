@@ -14,7 +14,11 @@ import { html, type TemplateResult } from "lit";
 import { HelpCircle } from "lucide";
 import { renderHeader, getToolState, type ToolHeaderState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
-import "../../components/AskUserChoicesWidget.js"; // auto-registers <ask-user-choices-widget>
+// `<ask-user-choices-widget>` is loaded lazily — the 21 kB widget
+// chunk only matters when the agent actually posts a question, and
+// the user is waiting for that round-trip anyway. Lit upgrades the
+// tag once the chunk lands; property bindings are preserved.
+import { ensureAskUserChoicesWidget } from "../../../app/lazy-widgets.js";
 import type { AskAnswer } from "../../components/AskUserChoicesWidget.js";
 
 /** Read the tool_result's content as a string. */
@@ -94,6 +98,8 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 		isStreaming?: boolean,
 		ctx?: ToolRenderContext,
 	): ToolRenderResult {
+		// Memoised — only the first render kicks off the dynamic import.
+		void ensureAskUserChoicesWidget();
 		const state = getToolState(result, isStreaming);
 
 		// Streaming — params not complete yet.

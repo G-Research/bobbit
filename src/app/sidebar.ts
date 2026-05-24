@@ -27,7 +27,7 @@ import {
 } from "./state.js";
 import { createAndConnectSession, connectToSession } from "./session-manager.js";
 import { cwdCombobox } from "./cwd-combobox.js";
-import { showGoalDialog, showProjectDialog } from "./dialogs.js";
+import { showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchProjects, saveProjectOrder } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";

@@ -9,7 +9,10 @@ export { ContinueSessionChooser } from "./components/ContinueSessionChooser.js";
 export { bobbitLoadingAnimation } from "./components/BobbitLoadingAnimation.js";
 export { BgProcessPill, type BgProcessInfo } from "./components/BgProcessPill.js";
 export { AttachmentTile } from "./components/AttachmentTile.js";
-export { AskUserChoicesWidget } from "./components/AskUserChoicesWidget.js";
+// Value re-export would force the 21 kB widget into every entry that
+// touches `ui/index.ts`. The widget is registered lazily by
+// `AskUserChoicesRenderer` via `app/lazy-widgets.ts`.
+export type { AskUserChoicesWidget } from "./components/AskUserChoicesWidget.js";
 export { ConsoleBlock } from "./components/ConsoleBlock.js";
 export { DiffBlock, isGitDiff } from "./components/DiffBlock.js";
 export { ErrorMessage } from "./components/ErrorMessage.js";
@@ -72,7 +75,10 @@ export { ThinkingBlock } from "./components/ThinkingBlock.js";
 // Type-only — `ApiKeyPromptDialog` transitively pulls the pi-ai model catalog
 // (via `ProviderKeyInput`). See the ProviderKeyInput re-export above.
 export type { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog.js";
-export { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
+// Value re-export would force the 14 kB overlay (and its drag/drop
+// dialog graph) into every entry that touches `ui/index.ts`. The
+// overlay loads on demand via `app/lazy-widgets.ts::loadAttachmentOverlay`.
+export type { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
 // Dialogs
 // Type-only — `ModelSelector` statically imports `modelsAreEqual` from
 // `@earendil-works/pi-ai`, which drags the 553 kB generated model catalog
@@ -130,10 +136,21 @@ export { CalculateRenderer } from "./tools/renderers/CalculateRenderer.js";
 // Tool renderers
 export { DefaultRenderer } from "./tools/renderers/DefaultRenderer.js";
 export { GetCurrentTimeRenderer } from "./tools/renderers/GetCurrentTimeRenderer.js";
-export { ReviewPane } from "./components/review/ReviewPane.js";
-export { ReviewDocument } from "./components/review/ReviewDocument.js";
-export { CommentableMarkdown } from "./components/CommentableMarkdown.js";
-export { AnnotationPopover } from "./components/review/AnnotationPopover.js";
+// Review-pane web components. Value re-exports here would force the
+// whole review-document chain (`@recogito/text-annotator`,
+// `@annotorious/core`, `rbush`, `marked`) into every entry that
+// touches `ui/index.ts` — even just for an unrelated `AppStorage`
+// import — because Rollup pessimistically retains side-effectful
+// re-exports. Type-only keeps the public type surface; consumers that
+// need to register the custom elements should `import` them directly
+// from `./components/review/...`. The cheap shells (`<review-pane>`,
+// `<commentable-markdown>`) are eagerly registered by `app/render.ts`;
+// the heavy `<review-document>` + `<annotation-popover>` chunk loads
+// on demand via `app/lazy-review.ts`.
+export type { ReviewPane } from "./components/review/ReviewPane.js";
+export type { ReviewDocument } from "./components/review/ReviewDocument.js";
+export type { CommentableMarkdown } from "./components/CommentableMarkdown.js";
+export type { AnnotationPopover } from "./components/review/AnnotationPopover.js";
 export { SearchBox } from "./components/SearchBox.js";
 export { SearchResults, type SearchResult } from "./components/SearchResults.js";
 export { VerificationOutputModal } from "./components/VerificationOutputModal.js";

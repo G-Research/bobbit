@@ -345,6 +345,30 @@ export default defineConfig({
 		// Emit `dist/ui/.vite/manifest.json` so the SW plugin can resolve hashed
 		// paths for route-chunk precache (see `bobbitSwVersion`).
 		manifest: true,
+		rollupOptions: {
+			output: {
+				/**
+				 * Pin large, slow-changing vendor deps into their own chunks so
+				 * (a) the entry chunk stays small and (b) returning users keep
+				 * cached vendor bundles across deploys when only app code
+				 * changes. Order matters: more specific paths first.
+				 *
+				 * Anything not matched here falls through to Vite's default
+				 * dependency-graph chunking (lazy provider chunks, dynamic
+				 * imports for pi-ai/qrcode/jszip/highlight.js, etc.).
+				 */
+				manualChunks: (id) => {
+					if (!id.includes("node_modules")) return;
+					if (id.includes("/@sinclair/typebox/")) return "vendor-typebox";
+					if (id.includes("/marked")) return "vendor-marked";
+					if (id.includes("/@mariozechner/mini-lit/")) return "vendor-mini-lit";
+					if (id.includes("/lucide")) return "vendor-lucide";
+					if (id.includes("/@recogito/") || id.includes("/@annotorious/") || id.includes("/rbush")) return "vendor-annotator";
+					if (id.includes("/lit-html/") || id.includes("/lit-element/") || id.includes("/@lit/") || /\/lit\//.test(id)) return "vendor-lit";
+					return undefined;
+				},
+			},
+		},
 	},
 	server: {
 		host,

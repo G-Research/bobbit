@@ -12,7 +12,7 @@
  */
 
 import { state } from "./state.js";
-import { showGoalDialog, showProjectDialog } from "./dialogs.js";
+import { showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import "../ui/components/ProjectPickerPopover.js";
 import type { ProjectPickerPopover } from "../ui/components/ProjectPickerPopover.js";
 

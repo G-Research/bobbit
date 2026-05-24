@@ -42,17 +42,23 @@ function isSessionArchived(sessionId: string | null | undefined): boolean {
 	if (!sessionId) return false;
 	return state.archivedSessions.some((s) => s.id === sessionId);
 }
-import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs.js";
+// Route every dialog open through the lazy wrappers so the ~66 kB
+// `dialogs.ts` chunk stays out of the entry bundle. Each wrapper
+// fires the same shared `import("./dialogs.js")` on first use; the
+// chunk is shared across all UI surfaces that open dialogs.
+import { openGatewayDialog, showQrCodeDialog, showRenameDialog, showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, isProjectExpanded, toggleProjectExpanded, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion } from "./sidebar.js";
 import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 // Register search web components
 import "../ui/components/SearchBox.js";
 import "../ui/components/SearchResults.js";
-// Register review pane web components
+// Register review pane web components. <review-pane> and
+// <commentable-markdown> are cheap shells; their connectedCallback
+// lazy-loads <review-document> + <annotation-popover> + the
+// @recogito/text-annotator chain. Keep this import static so the
+// shell elements upgrade synchronously on first render.
 import "../ui/components/review/ReviewPane.js";
-import "../ui/components/review/ReviewDocument.js";
-import "../ui/components/review/AnnotationPopover.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 

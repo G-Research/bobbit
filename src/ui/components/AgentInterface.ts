@@ -27,7 +27,12 @@ async function openImageModelSelector(...args: Parameters<typeof ImageModelSelec
 import type { MessageEditor } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
-import "./GitStatusWidget.js";
+// <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
+// keep its 52 kB chunk out of the entry bundle. AgentInterface's
+// connectedCallback fires the import; goal-dashboard mirrors the same
+// trigger. Lit upgrades the unknown `<git-status-widget>` tag once
+// the chunk lands; property bindings are preserved across upgrade.
+import { ensureGitStatusWidget } from "../../app/lazy-widgets.js";
 import "./BgProcessPill.js";
 import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
@@ -651,6 +656,9 @@ export class AgentInterface extends LitElement {
 
 	override async connectedCallback() {
 		super.connectedCallback();
+		// Fire-and-forget — pulls the git-status-widget chunk on first
+		// chat mount so it's ready by the time gitRepoKnown flips.
+		void ensureGitStatusWidget();
 
 		this.style.display = "flex";
 		this.style.flexDirection = "column";
