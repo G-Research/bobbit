@@ -123,10 +123,20 @@ async function waitForTopLevelTabCounts(
 }
 
 async function selectTopLevelTab(page: Page, label: RegExp, errorPrefix: string): Promise<string> {
+	try {
+		await expect.poll(async () => {
+			const tabs = await visiblePanelTabs(page);
+			return tabs.some((tab) => label.test(tab.label) || label.test(tab.title));
+		}, { timeout: 5_000, message: `${errorPrefix}: expected selectable tab ${label}` }).toBe(true);
+	} catch {
+		const tabs = await visiblePanelTabs(page);
+		throw new Error(`${errorPrefix}: expected selectable tab ${label}; visible tabs were: ${tabs.map((tab) => `${tab.label} [${tab.title}]`).join(", ") || "<none>"}`);
+	}
+
 	const tabs = await visiblePanelTabs(page);
 	const match = tabs.find((tab) => label.test(tab.label) || label.test(tab.title));
 	if (!match) {
-		throw new Error(`${errorPrefix}: expected selectable tab ${label}; visible tabs were: ${tabs.map((tab) => `${tab.label} [${tab.title}]`).join(", ") || "<none>"}`);
+		throw new Error(`${errorPrefix}: expected selectable tab ${label}; visible tabs changed before click; visible tabs were: ${tabs.map((tab) => `${tab.label} [${tab.title}]`).join(", ") || "<none>"}`);
 	}
 	const tab = page.locator(PANEL_TAB_SELECTOR).nth(match.index);
 	await tab.evaluate((el) => (el as HTMLElement).scrollIntoView({ block: "nearest", inline: "center" }));

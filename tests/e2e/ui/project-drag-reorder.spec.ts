@@ -205,19 +205,43 @@ async function expectSessionContentsCollapsed(page: Page, projects: ProjectFixtu
 	}
 }
 
-async function centerOf(locator: Locator): Promise<{ x: number; y: number }> {
-	await locator.scrollIntoViewIfNeeded();
-	const box = await locator.boundingBox();
-	if (!box) throw new Error("locator has no bounding box");
+async function expectHandleActionable(handle: Locator, message: string): Promise<void> {
+	await expect.poll(async () => {
+		try {
+			await handle.hover({ trial: true, timeout: 500 });
+			return true;
+		} catch {
+			return false;
+		}
+	}, { message, timeout: 5_000 }).toBe(true);
+}
+
+async function handleCenter(handle: Locator): Promise<{ x: number; y: number }> {
+	await handle.scrollIntoViewIfNeeded();
+	const box = await handle.boundingBox();
+	if (!box) throw new Error("project reorder handle has no bounding box");
 	return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 }
 
 async function startProjectDrag(page: Page, project: ProjectFixture): Promise<void> {
-	const start = await centerOf(projectHandle(page, project.id));
-	await page.mouse.move(start.x, start.y);
+	const header = projectHeader(page, project.id);
+	const handle = projectHandle(page, project.id);
+	await expect(header, `project header for ${project.name} should be visible before dragging`).toBeVisible({ timeout: 20_000 });
+	await header.hover();
+	await expectHandleShown(handle, `project reorder handle for ${project.name} should be shown before dragging`);
+	await expectHandleActionable(handle, `project reorder handle for ${project.name} should receive pointer events before dragging`);
+	// Keep pointerdown immediately after locator hover: Playwright chooses a hittable point inside the animated/clipped handle.
+	await handle.hover();
+	const start = await handleCenter(handle);
 	await page.mouse.down();
-	await page.mouse.move(start.x, start.y + 12, { steps: 4 });
-	await expect(reorderMode(page).first(), "dragging a handle should enter temporary project reorder mode").toBeAttached({ timeout: 5_000 });
+	for (const delta of [12, 24, 36]) {
+		await page.mouse.move(start.x, start.y + delta, { steps: 6 });
+		if ((await reorderMode(page).count()) > 0) break;
+	}
+	await expect.poll(async () => reorderMode(page).count(), {
+		message: "dragging a handle should enter temporary project reorder mode",
+		timeout: 10_000,
+	}).toBeGreaterThan(0);
 }
 
 async function dropProjectOn(page: Page, target: ProjectFixture, placement: "before" | "after"): Promise<void> {
