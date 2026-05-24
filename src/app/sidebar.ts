@@ -1225,7 +1225,7 @@ function renderProjectHeader(project: Project, expanded: boolean) {
 				renderApp();
 			}}>
 			<span class="text-muted-foreground shrink-0 select-none" style="width:12px;text-align:center;font-size: 1.1667em;">${expanded ? "▾" : "▸"}</span>
-			${renderProjectReorderHandle(project)}
+			<span class="project-reorder-slot">${renderProjectReorderHandle(project)}</span>
 			<span class="shrink-0" style="color:${color};">${icon(FolderOpen, "xs")}</span>
 			<span class="flex-1 text-muted-foreground uppercase tracking-wider font-medium" style="color:${color};font-size: 0.75em;">${project.name}</span>
 			${isProvisional ? html`<span class="text-muted-foreground italic shrink-0" style="font-size: 0.75em;">(setting up)</span>` : html`
@@ -1400,7 +1400,7 @@ export function renderSidebar() {
 					</button>
 				</div>
 			</div>
-			<div class="flex flex-col gap-1">
+			<div class="flex flex-col gap-0">
 				<search-box
 					.query=${state.searchQuery}
 					.showControls=${!!state.searchQuery}
@@ -1410,7 +1410,7 @@ export function renderSidebar() {
 				></search-box>
 				<search-status-dot></search-status-dot>
 			</div>
-			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 py-2 px-0.5" data-project-reorder-list>
+			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 pt-0 pb-2 px-0.5" data-project-reorder-list>
 				${renderOrphanedStaffBanner()}
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`

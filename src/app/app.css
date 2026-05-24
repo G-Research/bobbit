@@ -158,13 +158,35 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	position: relative;
 }
 
+.project-reorder-slot {
+	display: inline-flex;
+	align-items: center;
+	flex: 0 0 auto;
+	width: 0;
+	min-width: 0;
+	margin-right: -0.25rem; /* Cancel the extra flex gap while collapsed. */
+	overflow: hidden;
+	transition:
+		width 110ms cubic-bezier(0.2, 0, 0, 1),
+		min-width 110ms cubic-bezier(0.2, 0, 0, 1),
+		margin-right 110ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.project-header:hover .project-reorder-slot,
+.project-header:focus-within .project-reorder-slot,
+[data-project-reordering="true"] .project-reorder-slot {
+	width: 12px;
+	min-width: 12px;
+	margin-right: -0.125rem;
+}
+
 .project-reorder-handle {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 18px;
-	min-width: 18px;
-	height: 20px;
+	width: 12px;
+	min-width: 12px;
+	height: 18px;
 	padding: 0;
 	border-radius: 5px;
 	color: var(--muted-foreground, var(--color-muted-foreground));
