@@ -2,6 +2,9 @@
   "name": "bobbit",
   "version": "0.10.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "bin": {
     "bobbit": "dist/server/cli.js"
   },
@@ -59,6 +62,7 @@
     "jszip": "^3.10.1",
     "lit": "^3.3.1",
     "lucide": "^0.544.0",
+    "marked": "^18.0.4",
     "mkcert": "^3.2.0",
     "ollama": "^0.6.0",
     "pdfjs-dist": "5.4.394",
