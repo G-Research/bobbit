@@ -42,14 +42,26 @@ function previewTab(id: string, source: Record<string, unknown> = {}, state: Rec
 	};
 }
 
-function proposalTab(type = "goal"): PanelWorkspaceTab {
+const PROPOSAL_TEST_LABELS = {
+	goal: "Goal",
+	project: "Project",
+	role: "Role",
+	tool: "Tool",
+	staff: "Staff",
+} as const;
+
+type TestProposalType = keyof typeof PROPOSAL_TEST_LABELS;
+
+function proposalTab(type: TestProposalType = "goal", rev?: number): PanelWorkspaceTab {
+	const label = PROPOSAL_TEST_LABELS[type];
 	return {
-		id: `proposal:${type}`,
+		id: rev ? `proposal:${type}:rev:${rev}` : `proposal:${type}`,
 		kind: "proposal",
-		title: "Goal Proposal",
-		label: "Goal",
-		legacyTab: "goal",
-		source: { type: "proposal", proposalType: "goal" },
+		title: `${label} Proposal${rev ? ` rev ${rev}` : ""}`,
+		label: rev ? `${label} r${rev}` : label,
+		legacyTab: type,
+		source: { type: "proposal", proposalType: type, ...(rev ? { rev, historical: true } : {}) },
+		state: rev ? { rev, historical: true } : undefined,
 	};
 }
 
@@ -188,6 +200,7 @@ describe("panel workspace side-pane tab contract", () => {
 		const derived = [
 			inboxTab(),
 			previewTab(previewEntryTabId("a.html"), { entry: "a.html", contentHash: hashB, live: true }),
+			proposalTab(),
 			reviewTab("Review A"),
 		];
 
@@ -208,6 +221,31 @@ describe("panel workspace side-pane tab contract", () => {
 			[previewTab(previewEntryTabId("solo.html"), { entry: "solo.html" })],
 		);
 		assert.deepEqual(staleInbox.map((tab) => tab.id), [previewEntryTabId("solo.html")]);
+	});
+
+	it("drops stale current proposal and review tabs absent from derived tabs", () => {
+		const historicalPreview = previewTab(previewVersionedTabId("snap.html", 1), { entry: "snap.html", historical: true }, { version: 1, historical: true });
+		const currentPreview = previewTab(previewEntryTabId("current.html"), { entry: "current.html", live: true });
+		const state = {
+			panelTabsBySession: {
+				s1: [
+					currentPreview,
+					historicalPreview,
+					proposalTab("goal"),
+					proposalTab("tool"),
+					proposalTab("goal", 1),
+					reviewTab("Gone"),
+				],
+			},
+		};
+		const normalized = normalizeSidePanelTabs(state, "s1", [proposalTab("goal")]);
+
+		assert.deepEqual(normalized.map((tab) => tab.id), [
+			previewEntryTabId("current.html"),
+			previewVersionedTabId("snap.html", 1),
+			"proposal:goal",
+			"proposal:goal:rev:1",
+		]);
 	});
 
 	it("assigns preview versions per filename in chronological distinct-content order", () => {

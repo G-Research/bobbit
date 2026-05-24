@@ -602,6 +602,13 @@ function pinnedFirst(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
 	return [...pinned, ...unpinned];
 }
 
+function shouldDropStoredTabAbsentFromDerived(tab: PanelWorkspaceTab, derivedById: Map<string, PanelWorkspaceTab>): boolean {
+	if (derivedById.has(tab.id)) return false;
+	if (tab.kind === "proposal" && !isHistoricalProposalTab(tab)) return true;
+	if (tab.kind === "review") return true;
+	return false;
+}
+
 export function normalizeSidePanelTabs(stateLike: any, sessionId: string | null | undefined, derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
 	const sid = panelWorkspaceSessionKey(sessionId);
 	const derived = derivedTabs
@@ -617,6 +624,7 @@ export function normalizeSidePanelTabs(stateLike: any, sessionId: string | null 
 		const normalized = normalizeStoredPanelTab(rawTab);
 		if (!normalized || seen.has(normalized.id)) continue;
 		if (normalized.id === INBOX_PANEL_TAB_ID && !derivedHasInbox) continue;
+		if (shouldDropStoredTabAbsentFromDerived(normalized, derivedById)) continue;
 		seen.add(normalized.id);
 		merged.push(mergeDerivedMetadata(normalized, derivedById.get(normalized.id)));
 	}
