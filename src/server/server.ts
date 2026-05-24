@@ -7784,7 +7784,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (!goal.projectId) {
-			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 }, sessions: [] });
+			json({ aggregate: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null }, sessions: [] });
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
@@ -7833,7 +7833,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (!goal.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const sessionIds = sessionManager.getAllSessionIdsForGoal(goalId);
@@ -7852,17 +7852,17 @@ async function handleApiRoute(
 			return;
 		}
 		if (!task.assignedSessionId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const taskSessionLive = sessionManager.getSession(task.assignedSessionId);
 		const taskSession = taskSessionLive ?? sessionManager.getPersistedSession(task.assignedSessionId);
 		if (!taskSession?.projectId) {
-			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+			json({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 			return;
 		}
 		const cost = sessionManager.getCostTracker(taskSession.projectId).getSessionCost(task.assignedSessionId);
-		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0 });
+		json(cost ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalCost: 0, cacheHitRate: null });
 		return;
 	}
 

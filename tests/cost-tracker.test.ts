@@ -20,7 +20,7 @@ fs.mkdirSync(path.join(tmpDir, "state"), { recursive: true });
 const STORE_FILE = path.join(tmpDir, "state", "session-costs.json");
 
 // Dynamic import so BOBBIT_DIR is set before module-level constants are evaluated
-const { CostTracker } = await import("../src/server/agent/cost-tracker.ts");
+const { CostTracker, deriveCacheHitRate } = await import("../src/server/agent/cost-tracker.ts");
 
 const stateDir = path.join(tmpDir, "state");
 
@@ -259,6 +259,133 @@ describe("CostTracker", () => {
 		it("is a no-op for nonexistent session (no crash)", () => {
 			const tracker = new CostTracker(stateDir);
 			tracker.removeSession("nonexistent");
+		});
+	});
+
+	describe("cacheHitRate (derived)", () => {
+		it("deriveCacheHitRate returns null when denominator is 0", () => {
+			assert.equal(deriveCacheHitRate({ inputTokens: 0, cacheReadTokens: 0 }), null);
+		});
+
+		it("deriveCacheHitRate computes cacheRead / (cacheRead + input)", () => {
+			assert.equal(
+				deriveCacheHitRate({ inputTokens: 100, cacheReadTokens: 300 }),
+				0.75,
+			);
+		});
+
+		it("deriveCacheHitRate returns 1 when all input tokens are cache reads", () => {
+			assert.equal(
+				deriveCacheHitRate({ inputTokens: 0, cacheReadTokens: 300 }),
+				1,
+			);
+		});
+
+		it("deriveCacheHitRate ignores cacheWriteTokens (writes are not hits)", () => {
+			// cacheWriteTokens is not part of the formula. Same input/read with
+			// arbitrary write count must give same rate.
+			assert.equal(
+				deriveCacheHitRate({ inputTokens: 100, cacheReadTokens: 100 }),
+				0.5,
+			);
+		});
+
+		it("recordUsage returns cacheHitRate = null for a cold (all-zero) session", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", { cost: 0.001 });
+			assert.equal(result.cacheHitRate, null);
+		});
+
+		it("recordUsage returns derived cacheHitRate for non-zero counters", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {
+				inputTokens: 100,
+				cacheReadTokens: 300,
+				cost: 0.001,
+			});
+			assert.equal(result.cacheHitRate, 0.75);
+		});
+
+		it("recordUsage returns cacheHitRate = 1 for cache-read-only usage", () => {
+			const tracker = new CostTracker(stateDir);
+			const result = tracker.recordUsage("s1", {
+				inputTokens: 0,
+				cacheReadTokens: 300,
+				cost: 0.001,
+			});
+			assert.equal(result.cacheHitRate, 1);
+		});
+
+		it("cacheHitRate updates across repeated recordUsage calls", () => {
+			const tracker = new CostTracker(stateDir);
+			const first = tracker.recordUsage("s1", { inputTokens: 100, cacheReadTokens: 0 });
+			assert.equal(first.cacheHitRate, 0); // 0 / (0 + 100) = 0
+			const second = tracker.recordUsage("s1", { inputTokens: 0, cacheReadTokens: 300 });
+			// cumulative: input=100, cacheRead=300 → 300/400 = 0.75
+			assert.equal(second.cacheHitRate, 0.75);
+		});
+
+		it("getSessionCost returns derived cacheHitRate", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 200, cacheReadTokens: 600 });
+			const cost = tracker.getSessionCost("s1")!;
+			assert.equal(cost.cacheHitRate, 0.75);
+		});
+
+		it("getGoalCost derives cacheHitRate from aggregate raw counters", () => {
+			const tracker = new CostTracker(stateDir);
+			// s1: 100 input / 0 read; s2: 0 input / 300 read
+			// aggregate: 100 input / 300 read → 300 / (300 + 100) = 0.75
+			tracker.recordUsage("s1", { inputTokens: 100 });
+			tracker.recordUsage("s2", { cacheReadTokens: 300 });
+			const total = tracker.getGoalCost("goal-1", ["s1", "s2"]);
+			assert.equal(total.inputTokens, 100);
+			assert.equal(total.cacheReadTokens, 300);
+			assert.equal(total.cacheHitRate, 0.75);
+		});
+
+		it("getGoalCost returns cacheHitRate = null for empty aggregate", () => {
+			const tracker = new CostTracker(stateDir);
+			const total = tracker.getGoalCost("goal-1", []);
+			assert.equal(total.cacheHitRate, null);
+		});
+
+		it("getAllCosts returns snapshots carrying cacheHitRate", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 100, cacheReadTokens: 300 });
+			const all = tracker.getAllCosts();
+			const snap = all.get("s1")!;
+			assert.equal(snap.cacheHitRate, 0.75);
+		});
+
+		it("cacheHitRate is NOT persisted to disk", () => {
+			const tracker = new CostTracker(stateDir);
+			tracker.recordUsage("s1", { inputTokens: 100, cacheReadTokens: 300 });
+			const raw = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(raw["s1"].inputTokens, 100);
+			assert.equal(raw["s1"].cacheReadTokens, 300);
+			assert.equal(
+				"cacheHitRate" in raw["s1"],
+				false,
+				"cacheHitRate must be a derived field, not persisted",
+			);
+		});
+
+		it("loading an old JSON without cacheHitRate still derives it on read", () => {
+			// Simulate a pre-existing store file written by an older server build.
+			const legacy = {
+				"s1": {
+					inputTokens: 100,
+					outputTokens: 50,
+					cacheReadTokens: 300,
+					cacheWriteTokens: 5,
+					totalCost: 0.001,
+				},
+			};
+			fs.writeFileSync(STORE_FILE, JSON.stringify(legacy), "utf-8");
+			const tracker = new CostTracker(stateDir);
+			const cost = tracker.getSessionCost("s1")!;
+			assert.equal(cost.cacheHitRate, 0.75);
 		});
 	});
 
