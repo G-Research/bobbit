@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type StaffState = "active" | "paused" | "retired";
-export type TriggerType = "schedule" | "git" | "manual";
+export type TriggerType = "schedule" | "git" | "manual" | "goal_created" | "goal_archived";
 
 export interface TriggerConfig {
 	cron?: string;

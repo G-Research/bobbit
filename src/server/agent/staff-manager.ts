@@ -57,6 +57,34 @@ export class StaffManager {
 	}
 
 	/**
+	 * Validate a triggers array before persistence.
+	 *
+	 * - Goal lifecycle triggers (`goal_created`, `goal_archived`) MUST carry a
+	 *   non-empty trimmed `prompt`. The push-based dispatcher passes the prompt
+	 *   straight through to the inbox entry with no fallback, so an empty prompt
+	 *   would produce a useless wake.
+	 * - Other trigger types are unchecked here (existing behaviour: optional
+	 *   prompt with the engine synthesising one if missing).
+	 *
+	 * Throws a plain `Error` on failure so callers (REST routes) can surface
+	 * the message via `jsonError(400, err)`. Safe to call with `undefined`
+	 * (skipped) so PUT routes can pass `body.triggers` directly.
+	 */
+	validateTriggers(triggers: StaffTrigger[] | undefined): void {
+		if (!triggers) return;
+		if (!Array.isArray(triggers)) {
+			throw new Error("triggers must be an array");
+		}
+		for (const t of triggers) {
+			if (t && (t.type === "goal_created" || t.type === "goal_archived")) {
+				if (typeof t.prompt !== "string" || t.prompt.trim().length === 0) {
+					throw new Error(`Trigger of type ${t.type} requires a non-empty prompt`);
+				}
+			}
+		}
+	}
+
+	/**
 	 * Log any orphaned staff (missing projectId or persisted under the synthetic
 	 * system project) one time during construction. This surfaces legacy records
 	 * that won't render under any real project's Sessions bucket until the user
