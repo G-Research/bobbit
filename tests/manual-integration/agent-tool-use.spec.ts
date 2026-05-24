@@ -320,12 +320,20 @@ async function createFreshSession(gw: GW): Promise<string> {
  * fooled by a substitute tool whose body happens to mention the same
  * filename/sentinel, which is exactly the regression that motivated this
  * spec rewrite.
+ *
+ * Uses `textContent` (not `innerText`) so collapsed renderers (e.g. the
+ * bash card, which renders with `max-h-0 overflow-hidden` after the
+ * command finishes — see `src/ui/tools/renderers/BashRenderer.ts`) are
+ * still matched. `innerText` excludes hidden content but the header's
+ * `summarizeCommand` summary keeps it non-empty, so the `|| textContent`
+ * fallback never fires. We want content-based matching, not
+ * visibility-based — intent is "did this tool card carry this string".
  */
 async function countToolCardsByName(page: Page, name: string, ...substrings: string[]): Promise<number> {
 	return page.evaluate(({ name, substrings }: { name: string; substrings: string[] }) => {
 		const cards = Array.from(document.querySelectorAll<HTMLElement>(`div[data-tool-name="${name}"]`));
 		return cards.filter(c => {
-			const t = (c.innerText || c.textContent || "");
+			const t = c.textContent || "";
 			return substrings.every(s => t.includes(s));
 		}).length;
 	}, { name, substrings });
@@ -349,7 +357,8 @@ async function assertNoOtherToolCards(page: Page, exceptName: string, ...substri
 		return cards
 			.filter(c => c.getAttribute("data-tool-name") !== exceptName)
 			.filter(c => {
-				const t = (c.innerText || c.textContent || "");
+				// textContent (not innerText) — see countToolCardsByName for rationale.
+				const t = c.textContent || "";
 				return substrings.every(s => t.includes(s));
 			})
 			.map(c => c.getAttribute("data-tool-name") || "<unknown>");
@@ -569,19 +578,38 @@ test.describe.serial("Agent tool use", () => {
 		await page.fill("textarea", longPrompt);
 		await page.press("textarea", "Enter");
 
-		// Wait until the agent is actually streaming (it has called the tool
-		// and the bash process is running). The session starts in `idle`; the
-		// initial transition to `streaming` happens after the gateway picks up
-		// the message (typically ~1-3s). We need a streaming sample before we
-		// can interrupt — otherwise interruptAndSend's stop button never fires.
-		const streamDeadline = Date.now() + 60_000;
-		let sawStreaming = false;
-		while (Date.now() < streamDeadline) {
-			const s = await getSession(gw, id);
-			if (s.status === "streaming") { sawStreaming = true; break; }
+		// Wait until the bash tool card with our loop sentinel actually appears
+		// in the DOM. `streaming` status alone is not sufficient — the agent
+		// could be generating text without ever calling bash, which is the
+		// regression mode we want to detect HERE (loudly, before the pivot)
+		// rather than 90s later as an opaque "expected card, got 0".
+		const toolDeadline = Date.now() + 90_000;
+		let sawBashCard = false;
+		while (Date.now() < toolDeadline) {
+			const found = await page.evaluate((tag: string) => {
+				return Array.from(document.querySelectorAll<HTMLElement>('div[data-tool-name="bash"]'))
+					.some(c => (c.textContent || "").includes(tag));
+			}, loopTag);
+			if (found) { sawBashCard = true; break; }
 			await new Promise(r => setTimeout(r, 500));
 		}
-		expect(sawStreaming, "agent never reached streaming status within 60s — tool invocation likely broken").toBe(true);
+		if (!sawBashCard) {
+			// Diagnostic: dump current session status + every tool card so we
+			// can tell whether the agent (a) invoked nothing, (b) invoked the
+			// wrong tool, or (c) invoked bash with a modified command that
+			// stripped the loopTag.
+			const s = await getSession(gw, id);
+			const cards = await page.evaluate(() => {
+				return Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))
+					.map(c => ({
+						name: c.getAttribute("data-tool-name") || "?",
+						text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400),
+					}));
+			});
+			console.log(`[tooluse-4] pre-interrupt: status=${s.status} loopTag=${loopTag} cards=${cards.length}`);
+			for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
+		}
+		expect(sawBashCard, "agent never invoked bash with the loop sentinel within 90s — prompt-following or tool-activation broken").toBe(true);
 
 		// Pivot via the stop-and-resend flow.
 		await interruptAndSend(page, gw, id,
@@ -591,6 +619,23 @@ test.describe.serial("Agent tool use", () => {
 
 		// Positive: bash card carrying the loop sentinel.
 		const bashCardCount = await countToolCardsByName(page, "bash", loopTag);
+		if (bashCardCount === 0) {
+			// Diagnostic: dump every tool card on the page so we can see whether
+			// the agent invoked bash with a modified command, substituted a
+			// different tool, or never invoked anything at all.
+			const cards = await page.evaluate(() => {
+				const out: { name: string; text: string }[] = [];
+				for (const c of Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))) {
+					out.push({
+						name: c.getAttribute("data-tool-name") || "?",
+						text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400),
+					});
+				}
+				return out;
+			});
+			console.log(`[tooluse-4] loopTag=${loopTag} cards=${cards.length}`);
+			for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
+		}
 		expect(bashCardCount, "expected bash tool card with long-running loop sentinel").toBeGreaterThan(0);
 
 		// Negative: no other tool was substituted for the bash invocation

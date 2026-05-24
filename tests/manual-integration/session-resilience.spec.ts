@@ -164,11 +164,15 @@ function api(gw: GW, path: string, opts: RequestInit = {}) {
 
 async function pollIdle(gw: GW, id: string, ms = 120_000) {
 	const t0 = Date.now();
+	let lastStatus = "unknown";
+	let lastSnapshot: Record<string, unknown> | null = null;
 	while (Date.now() - t0 < ms) {
 		let res: Response;
 		try { res = await api(gw, `/api/sessions/${id}`); } catch { await new Promise(r => setTimeout(r, 1_000)); continue; }
-		if (res.status === 404) { await new Promise(r => setTimeout(r, 1_000)); continue; }
+		if (res.status === 404) { lastStatus = "404"; await new Promise(r => setTimeout(r, 1_000)); continue; }
 		const s = await res.json();
+		lastStatus = s.status;
+		lastSnapshot = s;
 		if (s.status === "idle") return s;
 		if (s.status === "archived") throw new Error(`Session ${id} archived`);
 		if (s.status === "error" || s.status === "terminated") {
@@ -177,7 +181,19 @@ async function pollIdle(gw: GW, id: string, ms = 120_000) {
 		}
 		await new Promise(r => setTimeout(r, 1_000));
 	}
-	throw new Error(`Session ${id} not idle in ${ms}ms`);
+	// Diagnostic: dump the last observed status + a compact session snapshot so
+	// post-restart hangs (e.g. agent stuck in `streaming` after a restored
+	// session receives its first prompt) leave an actionable trail in the log.
+	const diag = lastSnapshot ? {
+		status: lastSnapshot.status,
+		cwd: lastSnapshot.cwd,
+		branch: (lastSnapshot as any).branch,
+		restoreError: (lastSnapshot as any).restoreError,
+		archived: (lastSnapshot as any).archived,
+		lastActivity: (lastSnapshot as any).lastActivity,
+		agentSessionFile: (lastSnapshot as any).agentSessionFile,
+	} : null;
+	throw new Error(`Session ${id} not idle in ${ms}ms (last status: ${lastStatus}, snapshot: ${JSON.stringify(diag)})`);
 }
 
 async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sessions/${id}`)).json(); }
