@@ -1,10 +1,10 @@
 import { CopyButton } from "@mariozechner/mini-lit/dist/CopyButton.js";
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
-import hljs from "highlight.js";
 import { html } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { i18n } from "../../utils/i18n.js";
+import { ensureLanguage, escapeHtml, hljs } from "../highlight-core.js";
 import { ArtifactElement } from "./ArtifactElement.js";
 
 // Known code file extensions for highlighting
@@ -67,8 +67,28 @@ export class TextArtifact extends ArtifactElement {
 		this.requestUpdate();
 	}
 
+	/** Tracks languages we've already kicked off `ensureLanguage()` for so we
+	 *  re-render exactly once when the grammar chunk lands. */
+	private _grammarFetched = new Set<string>();
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this; // light DOM
+	}
+
+	/** Synchronously highlight if the grammar is loaded; otherwise kick off a
+	 *  dynamic-import for the grammar and return HTML-escaped plain text. The
+	 *  component re-renders once the grammar resolves. */
+	private highlightOrEscape(content: string, lang: string): string {
+		if (hljs.getLanguage(lang)) {
+			return hljs.highlight(content, { language: lang, ignoreIllegals: true }).value;
+		}
+		if (!this._grammarFetched.has(lang)) {
+			this._grammarFetched.add(lang);
+			void ensureLanguage(lang).then((ok) => {
+				if (ok) this.requestUpdate();
+			});
+		}
+		return escapeHtml(content);
 	}
 
 	private isCode(): boolean {
@@ -123,16 +143,14 @@ export class TextArtifact extends ArtifactElement {
 				<div class="flex-1 overflow-auto">
 					${
 						isCode
-							? html`
-								<pre class="m-0 p-4 text-xs"><code class="hljs language-${this.getLanguageFromExtension(
-									ext.toLowerCase(),
-								)}">${unsafeHTML(
-									hljs.highlight(this.content, {
-										language: this.getLanguageFromExtension(ext.toLowerCase()),
-										ignoreIllegals: true,
-									}).value,
-								)}</code></pre>
-							`
+							? (() => {
+									const lang = this.getLanguageFromExtension(ext.toLowerCase());
+									return html`
+									<pre class="m-0 p-4 text-xs"><code class="hljs language-${lang}">${unsafeHTML(
+										this.highlightOrEscape(this.content, lang),
+									)}</code></pre>
+								`;
+								})()
 							: html` <pre class="m-0 p-4 text-xs font-mono">${this.content}</pre> `
 					}
 				</div>
