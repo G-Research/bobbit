@@ -39,24 +39,62 @@ hljs.registerAliases(["html"], { languageName: "xml" });
 
 export { hljs };
 
-// Pre-declare the full grammar candidate set so Vite emits one tiny chunk per
-// language. The eager set above is already loaded — the rest are loaded on
-// demand by `ensureLanguage()`. We use `import.meta.glob` so the bundler can
-// statically discover every candidate; a bare-specifier template literal in
-// `import()` won't be analysed.
-// The package ships both `<lang>.js` (the real grammar) and `<lang>.js.js`
-// (a deprecation shim that emits `console.warn`). Match only the real ones.
-const grammarLoaders = import.meta.glob<{ default: LanguageFn }>([
-	"/node_modules/highlight.js/lib/languages/*.js",
-	"!/node_modules/highlight.js/lib/languages/*.js.js",
-]);
-
-/** Map grammar names (`"rust"`) to their loader. Built from the glob keys. */
-const grammarByName = new Map<string, () => Promise<{ default: LanguageFn }>>();
-for (const [path, loader] of Object.entries(grammarLoaders)) {
-	const name = path.split("/").pop()?.replace(/\.js$/, "");
-	if (name) grammarByName.set(name, loader);
-}
+// Lazy-load long-tail languages via an explicit static map. Each entry is a
+// fixed-specifier `import()` so Vite emits one tiny chunk per grammar (~1–4 kB
+// gzipped) and esbuild iife test-fixture bundles can statically resolve each
+// call. The list covers the common languages Bobbit users open as artifacts
+// beyond the eager set; anything outside this list falls back to escaped
+// plain text (callers handle the boolean return value).
+const LAZY_GRAMMARS: Record<string, () => Promise<{ default: LanguageFn }>> = {
+	c: () => import("highlight.js/lib/languages/c"),
+	cpp: () => import("highlight.js/lib/languages/cpp"),
+	csharp: () => import("highlight.js/lib/languages/csharp"),
+	diff: () => import("highlight.js/lib/languages/diff"),
+	django: () => import("highlight.js/lib/languages/django"),
+	dockerfile: () => import("highlight.js/lib/languages/dockerfile"),
+	elixir: () => import("highlight.js/lib/languages/elixir"),
+	elm: () => import("highlight.js/lib/languages/elm"),
+	erlang: () => import("highlight.js/lib/languages/erlang"),
+	fsharp: () => import("highlight.js/lib/languages/fsharp"),
+	go: () => import("highlight.js/lib/languages/go"),
+	gradle: () => import("highlight.js/lib/languages/gradle"),
+	graphql: () => import("highlight.js/lib/languages/graphql"),
+	groovy: () => import("highlight.js/lib/languages/groovy"),
+	haskell: () => import("highlight.js/lib/languages/haskell"),
+	ini: () => import("highlight.js/lib/languages/ini"),
+	java: () => import("highlight.js/lib/languages/java"),
+	kotlin: () => import("highlight.js/lib/languages/kotlin"),
+	latex: () => import("highlight.js/lib/languages/latex"),
+	less: () => import("highlight.js/lib/languages/less"),
+	lua: () => import("highlight.js/lib/languages/lua"),
+	makefile: () => import("highlight.js/lib/languages/makefile"),
+	nginx: () => import("highlight.js/lib/languages/nginx"),
+	objectivec: () => import("highlight.js/lib/languages/objectivec"),
+	ocaml: () => import("highlight.js/lib/languages/ocaml"),
+	perl: () => import("highlight.js/lib/languages/perl"),
+	php: () => import("highlight.js/lib/languages/php"),
+	plaintext: () => import("highlight.js/lib/languages/plaintext"),
+	powershell: () => import("highlight.js/lib/languages/powershell"),
+	prolog: () => import("highlight.js/lib/languages/prolog"),
+	properties: () => import("highlight.js/lib/languages/properties"),
+	protobuf: () => import("highlight.js/lib/languages/protobuf"),
+	puppet: () => import("highlight.js/lib/languages/puppet"),
+	r: () => import("highlight.js/lib/languages/r"),
+	ruby: () => import("highlight.js/lib/languages/ruby"),
+	rust: () => import("highlight.js/lib/languages/rust"),
+	scala: () => import("highlight.js/lib/languages/scala"),
+	scheme: () => import("highlight.js/lib/languages/scheme"),
+	scss: () => import("highlight.js/lib/languages/scss"),
+	smalltalk: () => import("highlight.js/lib/languages/smalltalk"),
+	swift: () => import("highlight.js/lib/languages/swift"),
+	tcl: () => import("highlight.js/lib/languages/tcl"),
+	toml: () => import("highlight.js/lib/languages/ini"), // toml ~ ini grammar
+	twig: () => import("highlight.js/lib/languages/twig"),
+	vala: () => import("highlight.js/lib/languages/vala"),
+	verilog: () => import("highlight.js/lib/languages/verilog"),
+	vbnet: () => import("highlight.js/lib/languages/vbnet"),
+	vbscript: () => import("highlight.js/lib/languages/vbscript"),
+};
 
 /** Pending dynamic-import promises so concurrent ensureLanguage() calls coalesce. */
 const pending = new Map<string, Promise<boolean>>();
@@ -76,7 +114,7 @@ export async function ensureLanguage(lang: string): Promise<boolean> {
 	if (!lang) return false;
 	if (hljs.getLanguage(lang)) return true;
 	if (failed.has(lang)) return false;
-	const loader = grammarByName.get(lang);
+	const loader = LAZY_GRAMMARS[lang.toLowerCase()];
 	if (!loader) {
 		failed.add(lang);
 		return false;
@@ -86,7 +124,7 @@ export async function ensureLanguage(lang: string): Promise<boolean> {
 		p = (async () => {
 			try {
 				const mod = await loader();
-				hljs.registerLanguage(lang, mod.default ?? (mod as unknown as LanguageFn));
+				hljs.registerLanguage(lang, mod.default);
 				return true;
 			} catch {
 				failed.add(lang);
