@@ -1,11 +1,13 @@
 import type { ProposalType } from "./proposal-registry.js";
 
-export type PanelWorkspaceKind = "chat" | "preview" | "proposal" | "review" | "inbox";
+export type PanelWorkspaceKind = "preview" | "proposal" | "review" | "inbox";
+export type LegacyPanelWorkspaceKind = PanelWorkspaceKind | "chat";
 export type LegacyPanelTab = "chat" | "preview" | "review" | "inbox" | ProposalType;
 
 export interface PanelWorkspaceTab {
 	id: string;
-	kind: PanelWorkspaceKind;
+	/** New side-pane tabs use PanelWorkspaceKind; "chat" is tolerated only for legacy migration callers. */
+	kind: LegacyPanelWorkspaceKind;
 	/** Stable, source-derived title for the tab artifact. */
 	title: string;
 	/** Short label retained for existing tab selectors and compact UI. */
@@ -39,9 +41,117 @@ export const LEGACY_LIVE_PREVIEW_PANEL_TAB_ID = "preview";
 export const INBOX_PANEL_TAB_ID = "inbox";
 export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
 
+const PROPOSAL_LABELS: Record<ProposalType, string> = {
+	goal: "Goal",
+	project: "Project",
+	role: "Role",
+	tool: "Tool",
+	staff: "Staff",
+};
+
+const PREVIEW_ENTRY_ID_RE = /^preview:entry:([^:]+)(?::v:(\d+))?$/;
+const PROPOSAL_ID_RE = /^proposal:([^:]+)(?::rev:(\d+))?$/;
+
+function isLegacyPreviewPanelTabId(id: string | null | undefined): boolean {
+	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || id === LIVE_PREVIEW_PANEL_TAB_ID;
+}
+
+function decodeTabComponent(value: string): string | undefined {
+	try { return decodeURIComponent(value); } catch { return undefined; }
+}
+
+function positiveInteger(value: string | number | undefined): number | undefined {
+	const n = typeof value === "number" ? value : typeof value === "string" && value ? Number(value) : NaN;
+	return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+export function previewEntryLabel(entry: string | undefined | null): string {
+	const clean = (entry || "inline.html").split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "inline.html";
+	return clean.split("/").filter(Boolean).pop() || clean || "inline.html";
+}
+
+export function previewEntryTabId(entry: string | undefined | null): string {
+	return `preview:entry:${encodeURIComponent(previewEntryLabel(entry))}`;
+}
+
+export function previewVersionedTabId(entry: string | undefined | null, version: number): string {
+	return `${previewEntryTabId(entry)}:v:${Math.max(1, Math.trunc(version))}`;
+}
+
+export function previewTabDisplayTitle(entry: string | undefined | null, version?: number, historical = false): string {
+	const label = previewEntryLabel(entry);
+	return historical && typeof version === "number" && Number.isFinite(version) && version > 0
+		? `${label} (v${Math.trunc(version)})`
+		: label;
+}
+
+export function previewTabEntryFromId(id: string | null | undefined): string | undefined {
+	if (!id) return undefined;
+	const match = PREVIEW_ENTRY_ID_RE.exec(id);
+	if (!match) return undefined;
+	const decoded = decodeTabComponent(match[1]);
+	return decoded ? previewEntryLabel(decoded) : undefined;
+}
+
+export function previewTabVersionFromId(id: string | null | undefined): number | undefined {
+	if (!id) return undefined;
+	const match = PREVIEW_ENTRY_ID_RE.exec(id);
+	return match ? positiveInteger(match[2]) : undefined;
+}
+
+function isPreviewPanelTabId(id: string): boolean {
+	const match = PREVIEW_ENTRY_ID_RE.exec(id);
+	if (!match) return false;
+	const entry = decodeTabComponent(match[1]);
+	if (!entry || !previewEntryLabel(entry)) return false;
+	return match[2] == null || positiveInteger(match[2]) != null;
+}
+
+function isCurrentPreviewEntryTabId(id: string | null | undefined): boolean {
+	return typeof id === "string" && isPreviewPanelTabId(id) && previewTabVersionFromId(id) == null;
+}
+
+function proposalTypeFromId(id: string): ProposalType | undefined {
+	const match = PROPOSAL_ID_RE.exec(id);
+	if (!match) return undefined;
+	const type = match[1] as ProposalType;
+	if (!Object.prototype.hasOwnProperty.call(PROPOSAL_LABELS, type)) return undefined;
+	if (match[2] != null && positiveInteger(match[2]) == null) return undefined;
+	return type;
+}
+
+function isReviewPanelTabId(id: string): boolean {
+	if (!id.startsWith("review:")) return false;
+	const encoded = id.slice("review:".length);
+	if (!encoded) return false;
+	const decoded = decodeTabComponent(encoded);
+	return typeof decoded === "string" && decoded.length > 0;
+}
+
+export function isSidePanelTabId(id: unknown): id is string {
+	if (typeof id !== "string" || !id) return false;
+	if (id === INBOX_PANEL_TAB_ID) return true;
+	if (isPreviewPanelTabId(id)) return true;
+	if (proposalTypeFromId(id)) return true;
+	return isReviewPanelTabId(id);
+}
+
+function panelTabKindFromId(id: string): PanelWorkspaceKind | undefined {
+	if (id === INBOX_PANEL_TAB_ID) return "inbox";
+	if (isPreviewPanelTabId(id)) return "preview";
+	if (proposalTypeFromId(id)) return "proposal";
+	if (isReviewPanelTabId(id)) return "review";
+	return undefined;
+}
+
+export function isPinnedPanelTab(tab: PanelWorkspaceTab | undefined | null): boolean {
+	return tab?.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox";
+}
+
 export function isLivePreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
 	if (!tab || tab.kind !== "preview") return false;
 	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) return true;
+	if (isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab)) return true;
 	const source = tab.source as Record<string, unknown> | undefined;
 	return source?.live === true || source?.origin === "preview-bootstrap" || source?.origin === "preview-events";
 }
@@ -71,40 +181,19 @@ export function previewTabAllowsLiveDedupe(tab: PanelWorkspaceTab | undefined | 
 	return source?.dedupeWithLive !== false && tabState?.dedupeWithLive !== false;
 }
 
-export function previewEntryLabel(entry: string | undefined | null): string {
-	const clean = (entry || "inline.html").split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "inline.html";
-	return clean.split("/").filter(Boolean).pop() || clean || "inline.html";
-}
-
-export function previewEntryTabId(entry: string | undefined | null): string {
-	return `preview:entry:${encodeURIComponent(previewEntryLabel(entry))}`;
-}
-
-export function previewVersionedTabId(entry: string | undefined | null, version: number): string {
-	return `${previewEntryTabId(entry)}:v:${Math.trunc(version)}`;
-}
-
 export function previewTabVersion(tab: PanelWorkspaceTab | undefined | null): number | undefined {
 	const stateRev = tab?.state?.version;
 	if (typeof stateRev === "number" && Number.isFinite(stateRev) && stateRev > 0) return Math.trunc(stateRev);
 	const source = tab?.source as Record<string, unknown> | undefined;
 	const sourceRev = source?.version;
 	if (typeof sourceRev === "number" && Number.isFinite(sourceRev) && sourceRev > 0) return Math.trunc(sourceRev);
-	const match = /:v:(\d+)$/.exec(tab?.id || "");
-	return match ? Number(match[1]) : undefined;
+	return previewTabVersionFromId(tab?.id);
 }
 
 export function isHistoricalPreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
 	if (!tab || tab.kind !== "preview") return false;
 	const source = tab.source as Record<string, unknown> | undefined;
-	return tab.state?.historical === true || source?.historical === true || tab.state?.dedupeWithLive === false || source?.dedupeWithLive === false || /:v:\d+$/.test(tab.id || "");
-}
-
-export function previewTabDisplayTitle(entry: string | undefined | null, version?: number, historical = false): string {
-	const label = previewEntryLabel(entry);
-	return historical && typeof version === "number" && Number.isFinite(version) && version > 0
-		? `${label} (v${Math.trunc(version)})`
-		: label;
+	return tab.state?.historical === true || source?.historical === true || tab.state?.dedupeWithLive === false || source?.dedupeWithLive === false || previewTabVersionFromId(tab.id) != null;
 }
 
 export interface PreviewVersionRecord {
@@ -125,6 +214,7 @@ function ensurePreviewVersionRecord(stateLike: any, sessionId: string, entry: st
 		bySession[sid][key] = { latestVersion: 0, hashToVersion: {} };
 	}
 	if (!bySession[sid][key].hashToVersion || typeof bySession[sid][key].hashToVersion !== "object") bySession[sid][key].hashToVersion = {};
+	if (!Number.isFinite(bySession[sid][key].latestVersion)) bySession[sid][key].latestVersion = 0;
 	return bySession[sid][key];
 }
 
@@ -157,17 +247,40 @@ export function registerPreviewVersion(stateLike: any, sessionId: string, entry:
 	return version;
 }
 
-function normalizePanelTabId(id: string): string {
-	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID ? LIVE_PREVIEW_PANEL_TAB_ID : id;
+export interface PreviewTabIdentity {
+	entry: string;
+	id: string;
+	title: string;
+	label: string;
+	version?: number;
+	historical: boolean;
+	contentHash: string;
 }
 
-const PROPOSAL_LABELS: Record<ProposalType, string> = {
-	goal: "Goal",
-	project: "Project",
-	role: "Role",
-	tool: "Tool",
-	staff: "Staff",
-};
+export function previewTabIdentityForContent(
+	stateLike: any,
+	sessionId: string,
+	entry: string | undefined | null,
+	contentHash: unknown,
+	options: { current?: boolean; historical?: boolean; version?: number } = {},
+): PreviewTabIdentity {
+	const normalizedEntry = previewEntryLabel(entry);
+	const hash = normalizePreviewContentHash(contentHash);
+	const version = registerPreviewVersion(stateLike, sessionId, normalizedEntry, hash, {
+		current: options.current === true,
+		version: options.version,
+	});
+	const latestHash = previewVersionRecordFor(stateLike, sessionId, normalizedEntry)?.latestContentHash || "";
+	const matchesCurrent = !!hash && !!latestHash && hash === latestHash;
+	const historical = options.historical === true
+		&& !matchesCurrent
+		&& typeof version === "number"
+		&& Number.isFinite(version)
+		&& version > 0;
+	const id = historical ? previewVersionedTabId(normalizedEntry, version!) : previewEntryTabId(normalizedEntry);
+	const title = previewTabDisplayTitle(normalizedEntry, version, historical);
+	return { entry: normalizedEntry, id, title, label: title, version, historical, contentHash: hash };
+}
 
 export function panelWorkspaceSessionKey(sessionId: string | null | undefined): string {
 	return sessionId || PANEL_WORKSPACE_NO_SESSION_KEY;
@@ -205,32 +318,67 @@ export function setPanelTabsForSession(stateLike: any, sessionId: string | null 
 	return tabs;
 }
 
-export function activePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined): string {
-	const sid = panelWorkspaceSessionKey(sessionId);
-	const activeBySession = stateLike?.panelWorkspaceActiveBySession;
-	if (activeBySession && typeof activeBySession === "object" && typeof activeBySession[sid] === "string") {
-		return normalizePanelTabId(activeBySession[sid]);
-	}
-	const tabs = stateLike?.panelTabsBySession?.[sid];
-	if (
-		activeMirrorSessionKey(stateLike) === sid &&
-		typeof stateLike?.activePanelTabId === "string" &&
-		Array.isArray(tabs) &&
-		tabs.some((tab: PanelWorkspaceTab) => tab?.id === stateLike.activePanelTabId)
-	) {
-		return stateLike.activePanelTabId;
-	}
-	return CHAT_PANEL_TAB_ID;
+function previewEntryFromTab(tab: PanelWorkspaceTab | undefined | null): string {
+	if (!tab) return previewEntryLabel(undefined);
+	const stateEntry = typeof tab.state?.entry === "string" ? tab.state.entry : "";
+	const source = tab.source as Record<string, unknown> | undefined;
+	const sourceEntry = typeof source?.entry === "string" ? source.entry : "";
+	return previewEntryLabel(stateEntry || sourceEntry || tab.title || tab.label || undefined);
 }
 
-export function setActivePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined, tabId: string): void {
-	const sid = panelWorkspaceSessionKey(sessionId);
+function currentPreviewTabIdForSession(stateLike: any, sid: string): string {
+	const tabs = Array.isArray(stateLike?.panelTabsBySession?.[sid])
+		? stateLike.panelTabsBySession[sid] as PanelWorkspaceTab[]
+		: [];
+	const current = tabs.find((tab) => tab?.kind === "preview" && isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab))
+		?? tabs.find((tab) => tab?.kind === "preview" && isLivePreviewTab(tab));
+	if (current) {
+		return isCurrentPreviewEntryTabId(current.id) ? current.id : previewEntryTabId(previewEntryFromTab(current));
+	}
+	if (activeMirrorSessionKey(stateLike) === sid && typeof stateLike?.previewPanelEntry === "string" && stateLike.previewPanelEntry) {
+		return previewEntryTabId(stateLike.previewPanelEntry);
+	}
+	return "";
+}
+
+function normalizeActivePanelTabId(stateLike: any, sid: string, tabId: unknown): string {
+	if (typeof tabId !== "string" || !tabId || tabId === CHAT_PANEL_TAB_ID) return "";
+	if (isLegacyPreviewPanelTabId(tabId)) return currentPreviewTabIdForSession(stateLike, sid);
+	return isSidePanelTabId(tabId) ? tabId : "";
+}
+
+function writeActivePanelTabId(stateLike: any, sid: string, tabId: string): void {
 	if (!stateLike.panelWorkspaceActiveBySession || typeof stateLike.panelWorkspaceActiveBySession !== "object" || Array.isArray(stateLike.panelWorkspaceActiveBySession)) {
 		stateLike.panelWorkspaceActiveBySession = {};
 	}
 	stateLike.panelWorkspaceActiveBySession[sid] = tabId;
 	if (activeMirrorSessionKey(stateLike) === sid) stateLike.activePanelTabId = tabId;
 	if (stateLike.panelWorkspace && typeof stateLike.panelWorkspace === "object") stateLike.panelWorkspace.activeTabId = tabId;
+}
+
+export function activeSidePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined): string {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const activeBySession = stateLike?.panelWorkspaceActiveBySession;
+	if (activeBySession && typeof activeBySession === "object" && typeof activeBySession[sid] === "string") {
+		const normalized = normalizeActivePanelTabId(stateLike, sid, activeBySession[sid]);
+		if (normalized !== activeBySession[sid]) writeActivePanelTabId(stateLike, sid, normalized);
+		return normalized;
+	}
+	if (activeMirrorSessionKey(stateLike) === sid && typeof stateLike?.activePanelTabId === "string") {
+		const normalized = normalizeActivePanelTabId(stateLike, sid, stateLike.activePanelTabId);
+		writeActivePanelTabId(stateLike, sid, normalized);
+		return normalized;
+	}
+	return "";
+}
+
+export function activePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined): string {
+	return activeSidePanelTabIdForSession(stateLike, sessionId);
+}
+
+export function setActivePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined, tabId: string): void {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	writeActivePanelTabId(stateLike, sid, normalizeActivePanelTabId(stateLike, sid, tabId));
 }
 
 export function proposalPanelTabId(type: ProposalType | string, rev?: number): string {
@@ -300,14 +448,18 @@ export interface BuildPanelWorkspaceTabsInput {
 }
 
 export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): PanelWorkspaceTab[] {
-	const tabs: PanelWorkspaceTab[] = [{
-		id: CHAT_PANEL_TAB_ID,
-		kind: "chat",
-		title: "Chat",
-		label: "Chat",
-		legacyTab: "chat",
-		source: { type: "chat", sessionId: input.sessionId },
-	}];
+	const tabs: PanelWorkspaceTab[] = [];
+
+	if (input.inboxPanelOpen) {
+		tabs.push({
+			id: INBOX_PANEL_TAB_ID,
+			kind: "inbox",
+			title: input.inboxHasPending ? "Inbox: pending items" : "Inbox",
+			label: "Inbox",
+			legacyTab: "inbox",
+			source: { type: "inbox", sessionId: input.sessionId },
+		});
+	}
 
 	if (input.isPreviewSession && input.previewEntry) {
 		const entry = previewEntryLabel(input.previewEntry);
@@ -356,32 +508,140 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 		}
 	}
 
-	if (input.inboxPanelOpen) {
-		tabs.push({
-			id: INBOX_PANEL_TAB_ID,
-			kind: "inbox",
-			title: input.inboxHasPending ? "Inbox: pending items" : "Inbox",
-			label: "Inbox",
-			legacyTab: "inbox",
-			source: { type: "inbox", sessionId: input.sessionId },
-		});
-	}
-
 	return tabs;
 }
 
+function proposalLabelForType(type: ProposalType): string {
+	return PROPOSAL_LABELS[type] || `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
+}
+
+function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspaceTab | null {
+	const kind = panelTabKindFromId(id);
+	if (!kind) return null;
+	if (kind === "preview") {
+		const entry = previewTabEntryFromId(id) || previewEntryFromTab(rawTab);
+		const version = previewTabVersionFromId(id);
+		const historical = version != null;
+		const title = previewTabDisplayTitle(entry, version, historical);
+		return {
+			...rawTab,
+			id,
+			kind: "preview",
+			title,
+			label: title,
+			legacyTab: "preview",
+			source: { ...(rawTab.source as Record<string, unknown>), type: (rawTab.source as Record<string, unknown>)?.type || "html-preview", entry } as PanelWorkspaceTab["source"],
+			state: { ...(rawTab.state || {}), entry, ...(historical ? { version, historical: true } : {}) },
+		};
+	}
+	if (kind === "proposal") {
+		const type = proposalTypeFromId(id)!;
+		const rev = positiveInteger(PROPOSAL_ID_RE.exec(id)?.[2]);
+		const label = proposalLabelForType(type);
+		return {
+			...rawTab,
+			id,
+			kind: "proposal",
+			title: rawTab.title || `${label} Proposal${rev ? ` rev ${rev}` : ""}`,
+			label: rawTab.label || (rev ? `${label} r${rev}` : label),
+			legacyTab: type,
+			source: { ...(rawTab.source as Record<string, unknown>), type: "proposal", proposalType: type, rev, historical: rev != null } as PanelWorkspaceTab["source"],
+			state: { ...(rawTab.state || {}), ...(rev != null ? { rev, historical: true } : {}) },
+		};
+	}
+	if (kind === "review") {
+		const encoded = id.slice("review:".length);
+		let title = encoded;
+		try { title = decodeURIComponent(encoded); } catch { /* keep encoded */ }
+		return {
+			...rawTab,
+			id,
+			kind: "review",
+			title: `Review: ${title}`,
+			label: `Review: ${title}`,
+			legacyTab: "review",
+			source: { ...(rawTab.source as Record<string, unknown>), type: "review", title, reviewTitle: title } as PanelWorkspaceTab["source"],
+		};
+	}
+	return {
+		...rawTab,
+		id: INBOX_PANEL_TAB_ID,
+		kind: "inbox",
+		title: rawTab.title || "Inbox",
+		label: rawTab.label || "Inbox",
+		legacyTab: "inbox",
+		source: { ...(rawTab.source as Record<string, unknown>), type: "inbox" } as PanelWorkspaceTab["source"],
+	};
+}
+
+function normalizeStoredPanelTab(rawTab: PanelWorkspaceTab | null | undefined): PanelWorkspaceTab | null {
+	if (!rawTab || typeof rawTab.id !== "string") return null;
+	if (rawTab.id === CHAT_PANEL_TAB_ID || rawTab.kind === "chat") return null;
+	if (isLegacyPreviewPanelTabId(rawTab.id)) {
+		const entry = previewEntryFromTab(rawTab);
+		return canonicalPanelTab(rawTab, previewEntryTabId(entry));
+	}
+	if (!isSidePanelTabId(rawTab.id)) return null;
+	return canonicalPanelTab(rawTab, rawTab.id);
+}
+
+function mergeDerivedMetadata(stored: PanelWorkspaceTab, derived: PanelWorkspaceTab | undefined): PanelWorkspaceTab {
+	if (!derived) return stored;
+	return {
+		...stored,
+		...derived,
+		source: { ...(stored.source as Record<string, unknown>), ...(derived.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
+		state: { ...(stored.state || {}), ...(derived.state || {}) },
+	};
+}
+
+function pinnedFirst(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
+	const pinned: PanelWorkspaceTab[] = [];
+	const unpinned: PanelWorkspaceTab[] = [];
+	for (const tab of tabs) (isPinnedPanelTab(tab) ? pinned : unpinned).push(tab);
+	return [...pinned, ...unpinned];
+}
+
+export function normalizeSidePanelTabs(stateLike: any, sessionId: string | null | undefined, derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const derived = derivedTabs
+		.map((tab) => normalizeStoredPanelTab(tab))
+		.filter((tab): tab is PanelWorkspaceTab => !!tab);
+	const derivedById = new Map(derived.map((tab) => [tab.id, tab]));
+	const derivedHasInbox = derivedById.has(INBOX_PANEL_TAB_ID);
+	const storedTabs = panelTabsForSession(stateLike, sid);
+	const seen = new Set<string>();
+	const merged: PanelWorkspaceTab[] = [];
+
+	for (const rawTab of storedTabs) {
+		const normalized = normalizeStoredPanelTab(rawTab);
+		if (!normalized || seen.has(normalized.id)) continue;
+		if (normalized.id === INBOX_PANEL_TAB_ID && !derivedHasInbox) continue;
+		seen.add(normalized.id);
+		merged.push(mergeDerivedMetadata(normalized, derivedById.get(normalized.id)));
+	}
+
+	for (const tab of derived) {
+		if (seen.has(tab.id)) continue;
+		seen.add(tab.id);
+		merged.push(tab);
+	}
+
+	return pinnedFirst(merged);
+}
+
 export function panelContentTabs(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
-	return tabs.filter((tab) => tab.kind !== "chat");
+	return tabs.filter((tab) => tab.kind !== "chat" && isSidePanelTabId(tab.id));
 }
 
 export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | undefined): PanelWorkspaceTab | undefined {
-	if (!id) return undefined;
-	id = normalizePanelTabId(id);
-	const exact = tabs.find((tab) => tab.id === id);
-	if (exact) return exact;
-	if (id === LIVE_PREVIEW_PANEL_TAB_ID) {
-		return tabs.find((tab) => isLivePreviewTab(tab)) ?? tabs.find((tab) => tab.kind === "preview");
+	if (!id || id === CHAT_PANEL_TAB_ID) return undefined;
+	if (isLegacyPreviewPanelTabId(id)) {
+		return tabs.find((tab) => tab.kind === "preview" && isCurrentPreviewEntryTabId(tab.id) && !isHistoricalPreviewTab(tab))
+			?? tabs.find((tab) => tab.kind === "preview" && isLivePreviewTab(tab) && !isHistoricalPreviewTab(tab));
 	}
+	const exact = tabs.find((tab) => tab.id === id && isSidePanelTabId(tab.id));
+	if (exact) return exact;
 	if (id.startsWith("review:")) {
 		const rawTitle = id.slice("review:".length);
 		let decodedTitle = rawTitle;
@@ -392,12 +652,42 @@ export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | unde
 }
 
 export function firstContentPanelTab(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab | undefined {
-	return tabs.find((tab) => tab.kind !== "chat");
+	return panelContentTabs(tabs)[0];
+}
+
+export function nextActivePanelTabId(tabs: PanelWorkspaceTab[], closedId: string | null | undefined): string {
+	const validTabs = panelContentTabs(tabs);
+	if (validTabs.length === 0) return "";
+	const index = validTabs.findIndex((tab) => tab.id === closedId);
+	if (index < 0) return validTabs[0]?.id || "";
+	return validTabs[index + 1]?.id || validTabs[index - 1]?.id || "";
+}
+
+export function reorderSidePanelTab(tabs: PanelWorkspaceTab[], fromId: string, beforeIdOrIndex?: string | number | null): PanelWorkspaceTab[] {
+	const ordered = pinnedFirst(panelContentTabs(tabs));
+	const fromIndex = ordered.findIndex((tab) => tab.id === fromId);
+	if (fromIndex < 0) return ordered;
+	const moving = ordered[fromIndex];
+	if (isPinnedPanelTab(moving)) return ordered;
+
+	const without = ordered.filter((_, index) => index !== fromIndex);
+	const pinnedCount = without.findIndex((tab) => !isPinnedPanelTab(tab));
+	const minIndex = pinnedCount < 0 ? without.length : pinnedCount;
+	let insertIndex = without.length;
+	if (typeof beforeIdOrIndex === "number" && Number.isFinite(beforeIdOrIndex)) {
+		insertIndex = Math.trunc(beforeIdOrIndex);
+	} else if (typeof beforeIdOrIndex === "string" && beforeIdOrIndex) {
+		const targetIndex = without.findIndex((tab) => tab.id === beforeIdOrIndex);
+		if (targetIndex >= 0) insertIndex = targetIndex;
+	}
+	insertIndex = Math.max(minIndex, Math.min(without.length, insertIndex));
+	without.splice(insertIndex, 0, moving);
+	return pinnedFirst(without);
 }
 
 export function panelTabIdFromLegacy(tab: LegacyPanelTab | string | null | undefined, reviewActiveTitle: string): string | null {
 	if (!tab) return null;
-	if (tab === "chat") return CHAT_PANEL_TAB_ID;
+	if (tab === "chat") return null;
 	if (tab === "preview") return LIVE_PREVIEW_PANEL_TAB_ID;
 	if (tab === "inbox") return INBOX_PANEL_TAB_ID;
 	if (tab === "review") return reviewActiveTitle ? reviewPanelTabId(reviewActiveTitle) : null;
