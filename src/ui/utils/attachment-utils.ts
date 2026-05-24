@@ -1,4 +1,3 @@
-import JSZip from "jszip";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { i18n } from "./i18n.js";
 
@@ -359,7 +358,8 @@ function extractTextFromElement(element: any): string {
 
 async function processPptx(arrayBuffer: ArrayBuffer, fileName: string): Promise<{ extractedText: string }> {
 	try {
-		// Load the PPTX file as a ZIP
+		// Load the PPTX file as a ZIP (lazy-load jszip to keep it out of the entry chunk)
+		const { default: JSZip } = await import("jszip");
 		const zip = await JSZip.loadAsync(arrayBuffer);
 
 		// PPTX slides are stored in ppt/slides/slide[n].xml
