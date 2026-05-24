@@ -38,8 +38,10 @@ When ready, call the \`propose_staff\` tool with these parameters:
 - **schedule**: Cron-based recurring trigger. Config: \`{ "cron": "0 9 * * *", "timezone": "America/New_York" }\`
 - **git**: Repository event trigger. Config: \`{ "event": "push", "branch": "master" }\`
 - **manual**: On-demand, user-invoked. Config: \`{}\`
+- **goal_created**: Fires when a new goal is created in any project. Config: \`{}\`. **Prompt is required.**
+- **goal_archived**: Fires when a goal is archived. Config: \`{}\`. **Prompt is required.**
 
-Each trigger can have an optional \`prompt\` field — the message sent to the agent when that trigger fires.
+Each trigger can have an optional \`prompt\` field — the message sent to the agent when that trigger fires — EXCEPT for \`goal_created\` and \`goal_archived\`, where \`prompt\` is mandatory (a non-empty string). The server returns 400 if a goal-* trigger is saved with an empty prompt.
 
 After proposing, wait for feedback. The user may ask you to revise — just call \`propose_staff\` again with the changes.
 
