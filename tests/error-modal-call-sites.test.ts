@@ -37,7 +37,7 @@ const REQUIRED_CALL_SITES: Site[] = [
 	{ file: "src/app/dialogs.ts", title: "Failed to create project assistant" },
 	{ file: "src/app/dialogs.ts", title: "Failed to archive .bobbit/", count: 2 },
 	{ file: "src/app/dialogs.ts", title: "Failed to register project" },
-	{ file: "src/app/render.ts", title: "Failed to create goal", count: 2 },
+	{ file: "src/app/proposal-panels.ts", title: "Failed to create goal", count: 2 },
 	{ file: "src/app/session-manager.ts", title: "Connection Failed" },
 ];
 
