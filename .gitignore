@@ -25,6 +25,7 @@ nul
 # (state/ also via .bobbit/.gitignore for redundancy).
 .bobbit/state/
 .bobbit/tmp/
+.bobbit/reports/
 .e2e-pi*
 .e2e-bobbit*
 .e2e-fullstack*
