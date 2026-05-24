@@ -48,6 +48,12 @@ export { hljs };
 const LAZY_GRAMMARS: Record<string, () => Promise<{ default: LanguageFn }>> = {
 	c: () => import("highlight.js/lib/languages/c"),
 	cpp: () => import("highlight.js/lib/languages/cpp"),
+	// `batch` is the value `getLanguageFromExtension` returns for .bat/.cmd,
+	// but highlight.js calls the grammar `dos` and exposes `bat`/`cmd` as
+	// aliases of it. Map both names to the `dos` grammar so .bat artifacts
+	// don't silently fall back to escaped plain text.
+	batch: () => import("highlight.js/lib/languages/dos"),
+	dos: () => import("highlight.js/lib/languages/dos"),
 	csharp: () => import("highlight.js/lib/languages/csharp"),
 	diff: () => import("highlight.js/lib/languages/diff"),
 	django: () => import("highlight.js/lib/languages/django"),

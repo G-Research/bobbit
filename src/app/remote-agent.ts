@@ -1,5 +1,4 @@
 import type { Model } from "@earendil-works/pi-ai";
-import { loadPiAi } from "./pi-ai-lazy.js";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 
 /**
@@ -29,17 +28,6 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 	maxTokens: 128000,
 };
 
-/**
- * Async equivalent of `getModel("anthropic", "claude-opus-4-6")`, used by
- * callers that need the live catalog entry. Triggers the pi-ai lazy chunk
- * fetch on first use. Returns the placeholder if the catalog lookup misses
- * (e.g. model renamed in a future pi-ai release).
- */
-export async function getDefaultModel(): Promise<Model<"anthropic-messages">> {
-	const { getModel } = await loadPiAi();
-	const m = getModel("anthropic", "claude-opus-4-6");
-	return (m ?? PLACEHOLDER_DEFAULT_MODEL) as Model<"anthropic-messages">;
-}
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";

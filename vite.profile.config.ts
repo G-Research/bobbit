@@ -15,8 +15,8 @@
  * profiling entry point referenced by the design doc and tests.
  */
 import { visualizer } from "rollup-plugin-visualizer";
-import { mergeConfig, type UserConfig } from "vite";
-import baseConfig from "./vite.config";
+import { defineConfig, mergeConfig, type ConfigEnv, type UserConfig } from "vite";
+import baseConfigFactory from "./vite.config";
 
 const profileConfig: UserConfig = {
 	build: {
@@ -43,5 +43,12 @@ const profileConfig: UserConfig = {
 	},
 };
 
-// `defineConfig` callable form preserves base plugins from vite.config.ts.
-export default mergeConfig(baseConfig as UserConfig, profileConfig);
+// `vite.config.ts` exports a function form (`defineConfig(({mode}) => ({...}))`)
+// so its `define` block can read the build mode. Vite's `mergeConfig` rejects
+// function configs with "Cannot merge config in form of callback", so we
+// resolve the base config against the current env first, then merge.
+export default defineConfig((env: ConfigEnv): UserConfig => {
+	const factory = baseConfigFactory as unknown as ((env: ConfigEnv) => UserConfig) | UserConfig;
+	const base: UserConfig = typeof factory === "function" ? factory(env) : factory;
+	return mergeConfig(base, profileConfig);
+});
