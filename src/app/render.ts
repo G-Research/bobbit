@@ -62,31 +62,29 @@ import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
-	activePanelTabIdForSession,
+	activeSidePanelTabIdForSession,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
 	findPanelTab,
-	firstContentPanelTab,
 	isHistoricalPreviewTab,
 	isHistoricalProposalTab,
-	isLivePreviewTab,
+	isPinnedPanelTab,
+	nextActivePanelTabId,
 	normalizePreviewContentHash,
+	normalizeSidePanelTabs,
 	panelContentTabs,
-	panelTabIdFromLegacy,
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
 	previewContentHashFromTab,
-	previewEntryLabel,
-	previewEntryTabId,
 	previewTabDisplayTitle,
 	previewTabVersion,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
+	reorderSidePanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
-	type LegacyPanelTab,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 
@@ -772,15 +770,11 @@ function clearProposalReviewState(sessionId: string | null | undefined, type: Pr
 function clampUnifiedTabsAfterProposalRemoved(type: ProposalType): void {
 	const tabs = unifiedPanelTabs();
 	const removedId = proposalPanelTabId(type);
-	const fallback = tabs.find((tab) => tab.kind === "preview")
-		?? firstContentPanelTab(tabs)
-		?? findPanelTab(tabs, CHAT_PANEL_TAB_ID);
-	const activeId = activePanelTabIdForSession(state, workspaceSessionId());
-	if (fallback && (activeId === removedId || !findPanelTab(tabs, activeId))) {
-		setUnifiedActiveTab(fallback);
-	}
-	if (state.previewPanelTab === type && fallback && activeId === removedId) {
-		setUnifiedActiveTab(fallback);
+	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+	if (activeId === removedId || !findPanelTab(tabs, activeId)) {
+		const fallback = tabs[0];
+		if (fallback) setUnifiedActiveTab(fallback);
+		else setActivePanelTabIdForSession(state, workspaceSessionId(), "");
 	}
 }
 
@@ -2718,6 +2712,14 @@ function goalProposalPanel() {
 
 type UnifiedPanelTab = PanelWorkspaceTab;
 type UnifiedContentTab = PanelWorkspaceTab;
+type MobilePaneTab = UnifiedPanelTab | {
+	id: "__mobile_chat_pane__";
+	kind: "chat";
+	title: "Chat";
+	label: "Chat";
+	legacyTab: "chat";
+	source: { type: "chat"; sessionId?: string };
+};
 
 function activeProposalTypes(): ProposalType[] {
 	const sid = activeSessionId();
@@ -2735,14 +2737,11 @@ function workspaceSessionId(): string {
 	return panelWorkspaceSessionKey(activeSessionId());
 }
 
-function previewWorkspaceKey(): string {
-	if (!state.isPreviewSession || !state.previewPanelEntry) return "";
-	const contentHash = normalizePreviewContentHash((state as any).previewPanelContentHash);
-	return `${state.previewPanelEntry}|${contentHash || state.previewPanelMtime || 0}`;
-}
-
 let mountedPreviewTabId = "";
 const previewRestoreInFlight = new Set<string>();
+let mobileSelectedPaneIndex = 0;
+let mobileSelectedSideTabId = "";
+let draggingPanelTabId = "";
 
 function recordValue(record: Record<string, unknown>, key: string): string {
 	const value = record[key];
@@ -2773,137 +2772,40 @@ function previewSessionIdFromTab(tab: PanelWorkspaceTab): string {
 	return match ? safeDecode(match[1]) : "";
 }
 
-function normalizeHistoricalPreviewTab(tab: PanelWorkspaceTab, sessionId: string): PanelWorkspaceTab | null {
-	if (!tab || tab.kind !== "preview") return null;
-	const tabSessionId = previewSessionIdFromTab(tab);
-	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
-	if (sessionId && !tabSessionId) return null;
-	const entry = previewEntryLabel(previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html");
-	const source = tab.source as Record<string, unknown>;
-	const version = previewTabVersion(tab);
-	const historical = isHistoricalPreviewTab(tab);
-	const title = previewTabDisplayTitle(entry, version, historical);
-	const normalizedId = historical && version != null ? `${previewEntryTabId(entry)}:v:${version}` : (tab.id || previewEntryTabId(entry));
-	return {
-		...tab,
-		id: normalizedId,
-		kind: "preview",
-		title,
-		label: title,
-		legacyTab: "preview",
-		source: {
-			...source,
-			type: typeof source.type === "string"
-				? (source.type as "preview" | "html-preview" | "preview_open")
-				: "preview_open",
-			sessionId: tabSessionId || sessionId,
-			entry,
-			historical,
-			...(version != null ? { version } : {}),
-		},
-		state: {
-			...(tab.state || {}),
-			entry,
-			historical,
-			...(version != null ? { version } : {}),
-		},
-	};
-}
-
-function panelTabSessionId(tab: PanelWorkspaceTab): string {
-	const source = tab.source as Record<string, unknown>;
-	const tabState = (tab.state || {}) as Record<string, unknown>;
-	return recordValue(source, "sessionId") || recordValue(tabState, "sessionId");
-}
-
-function normalizeHistoricalProposalTab(tab: PanelWorkspaceTab, sessionId: string): PanelWorkspaceTab | null {
-	if (!isHistoricalProposalTab(tab) || tab.source.type !== "proposal") return null;
-	const tabSessionId = panelTabSessionId(tab);
-	if (sessionId && tabSessionId && tabSessionId !== sessionId) return null;
-	if (sessionId && !tabSessionId) return null;
-	const rev = typeof tab.state?.rev === "number" ? tab.state.rev : tab.source.rev;
-	if (typeof rev !== "number" || !Number.isFinite(rev) || rev <= 0) return null;
-	const activeSlot = state.activeProposals[tab.source.proposalType];
-	const activeRev = activeSlot?.sessionId === sessionId && typeof activeSlot.rev === "number" && Number.isFinite(activeSlot.rev) && activeSlot.rev > 0
-		? Math.trunc(activeSlot.rev)
-		: undefined;
-	if (activeRev != null && Math.trunc(rev) >= activeRev) return null;
-	return {
-		...tab,
-		id: proposalPanelTabId(tab.source.proposalType, rev),
-		kind: "proposal",
-		title: tab.title || `${tab.label || tab.source.proposalType} Proposal rev ${rev}`,
-		label: tab.label || `${tab.source.proposalType} r${rev}`,
-		legacyTab: tab.source.proposalType,
-		source: {
-			...tab.source,
-			sessionId: tabSessionId || sessionId,
-			rev,
-			historical: true,
-		},
-		state: {
-			...(tab.state || {}),
-			rev,
-			historical: true,
-		},
-	};
-}
-
 function previewSourceTitle(tab: PanelWorkspaceTab): string {
 	if (tab.kind !== "preview") return tab.title || tab.label || "";
 	const entry = previewEntryFromTab(tab);
 	return previewTabDisplayTitle(entry || tab.title || tab.label || "inline.html", previewTabVersion(tab), isHistoricalPreviewTab(tab));
 }
 
-function disambiguateStoredPreviewTab(tab: PanelWorkspaceTab, _derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab {
-	return tab;
-}
-
-function mergeStoredPanelTabs(derivedTabs: PanelWorkspaceTab[]): PanelWorkspaceTab[] {
-	const sessionId = workspaceSessionId();
-	const storedTabs = panelTabsForSession(state, sessionId);
-	const derivedById = new Map(derivedTabs.map((tab) => [tab.id, tab]));
-	const seen = new Set<string>();
-	const merged: PanelWorkspaceTab[] = [];
-
-	const mergeDerivedMetadata = (stored: PanelWorkspaceTab): PanelWorkspaceTab => {
-		const derived = derivedById.get(stored.id);
-		if (!derived) return stored;
-		return {
-			...stored,
-			...derived,
-			source: { ...(stored.source as Record<string, unknown>), ...(derived.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
-			state: { ...(stored.state || {}), ...(derived.state || {}) },
-		};
-	};
-
-	for (const rawTab of storedTabs) {
-		let normalizedTab: PanelWorkspaceTab | null = null;
-		if (rawTab?.id === CHAT_PANEL_TAB_ID) {
-			normalizedTab = derivedById.get(CHAT_PANEL_TAB_ID) ?? rawTab;
-		} else if (rawTab?.kind === "preview") {
-			normalizedTab = normalizeHistoricalPreviewTab(rawTab, sessionId);
-		} else {
-			normalizedTab = normalizeHistoricalProposalTab(rawTab, sessionId) ?? derivedById.get(rawTab?.id || "") ?? null;
-		}
-		if (!normalizedTab || seen.has(normalizedTab.id)) continue;
-		const tab = disambiguateStoredPreviewTab(mergeDerivedMetadata(normalizedTab), derivedTabs);
-		seen.add(tab.id);
-		merged.push(tab);
-	}
-
-	for (const derivedTab of derivedTabs) {
-		if (seen.has(derivedTab.id)) continue;
-		seen.add(derivedTab.id);
-		if (derivedTab.id === CHAT_PANEL_TAB_ID) merged.unshift(derivedTab);
-		else merged.push(derivedTab);
-	}
-
-	return merged;
-}
-
 function currentMountedPreviewTabId(): string {
 	return typeof (state as any).previewPanelMountedTabId === "string" ? (state as any).previewPanelMountedTabId : mountedPreviewTabId;
+}
+
+type PreviewRestoreError = { message?: string; detail?: string; status?: number; retryable?: boolean };
+
+function previewRestoreError(tab: PanelWorkspaceTab | undefined | null): PreviewRestoreError | null {
+	const error = tab?.state?.restoreError;
+	return error && typeof error === "object" ? error as PreviewRestoreError : null;
+}
+
+function setPreviewTabRestoreError(sessionId: string, tabId: string, restoreError: PreviewRestoreError | null): PanelWorkspaceTab | undefined {
+	const tabs = panelTabsForSession(state, sessionId);
+	let updated: PanelWorkspaceTab | undefined;
+	const next = tabs.map((candidate) => {
+		if (candidate.id !== tabId) return candidate;
+		const nextState = { ...(candidate.state || {}) } as Record<string, unknown>;
+		if (restoreError) nextState.restoreError = restoreError;
+		else delete nextState.restoreError;
+		updated = { ...candidate, state: nextState };
+		return updated;
+	});
+	setPanelTabsForSession(state, sessionId, next);
+	return updated;
+}
+
+function clearPreviewTabRestoreError(sessionId: string, tabId: string): PanelWorkspaceTab | undefined {
+	return setPreviewTabRestoreError(sessionId, tabId, null);
 }
 
 function markPreviewTabMounted(tab: PanelWorkspaceTab): void {
@@ -2936,24 +2838,29 @@ function markPreviewTabLiveForSession(sessionId: string, tab: PanelWorkspaceTab)
 
 function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (tab.kind !== "preview") return;
-	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live")) {
+	const sessionId = activeSessionId() || previewSessionIdFromTab(tab);
+	if (!sessionId) return;
+	if (previewRestoreError(tab)) return;
+	const tabState = (tab.state || {}) as Record<string, unknown>;
+	const source = tab.source as Record<string, unknown>;
+	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
+	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
+
+	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live") || !isHistoricalPreviewTab(tab)) {
 		const liveEntry = previewEntryFromTab(tab);
 		const liveHash = previewContentHashFromTab(tab);
 		if (liveEntry) state.previewPanelEntry = liveEntry;
 		if (liveHash) (state as any).previewPanelContentHash = liveHash;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
+		clearPreviewTabRestoreError(sessionId, tab.id);
 		markPreviewTabMounted(tab);
 		return;
 	}
-	const sessionId = activeSessionId() || previewSessionIdFromTab(tab);
-	if (!sessionId) return;
-	const tabState = (tab.state || {}) as Record<string, unknown>;
-	const source = tab.source as Record<string, unknown>;
-	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
+
 	const snapshotKind = recordValue(tabState, "snapshotKind") || recordValue(source, "snapshotKind");
 	const snapshotHtml = recordValue(tabState, "snapshotHtml");
 	const snapshotFile = recordValue(tabState, "snapshotFile") || recordValue(source, "path");
-	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
-	const stateMtime = tabState.mtime;
+	const artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 	markPreviewTabLiveForSession(sessionId, tab);
 	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry) return;
 	archiveLivePreviewBeforeHistoricalRestore(sessionId, contentHash);
@@ -2962,7 +2869,9 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	if (previewRestoreInFlight.has(tab.id)) return;
 
 	let body: Record<string, unknown> | null = null;
-	if (snapshotKind === "inline" && snapshotHtml) {
+	if (artifactId) {
+		body = { artifactId };
+	} else if (snapshotKind === "inline" && snapshotHtml) {
 		body = { html: snapshotHtml };
 		if (entry && !entry.includes("/") && !entry.includes("\\")) body.entry = entry;
 	} else if (snapshotKind === "file" && snapshotFile) {
@@ -2970,10 +2879,16 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	}
 
 	if (!body) {
-		state.previewPanelEntry = entry;
-		state.previewPanelMtime = typeof stateMtime === "number" ? stateMtime : Date.now();
-		(state as any).previewPanelContentHash = contentHash;
-		markPreviewTabMounted(tab);
+		setPreviewTabRestoreError(sessionId, tab.id, {
+			message: "Preview artifact unavailable",
+			detail: "This preview tab has no immutable restore source.",
+			retryable: false,
+		});
+		try {
+			document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+				.forEach((iframe) => { iframe.src = "about:blank"; });
+		} catch { /* best-effort stale-content guard */ }
+		renderApp();
 		return;
 	}
 
@@ -2993,14 +2908,21 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 			});
 			if (!response.ok) throw new Error(`preview restore failed: ${response.status}`);
 			const data = await response.json().catch(() => ({} as any));
-			if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activePanelTabIdForSession(state, sessionId) !== tab.id) return;
+			if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activeSidePanelTabIdForSession(state, sessionId) !== tab.id) return;
 			state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : entry;
 			state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
 			(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || contentHash;
-			markPreviewTabMounted(tab);
+			const updatedTab = clearPreviewTabRestoreError(sessionId, tab.id) ?? tab;
+			markPreviewTabMounted(updatedTab);
 			renderApp();
 		} catch (err) {
 			console.error("[panel-workspace] preview tab restore failed", err);
+			setPreviewTabRestoreError(sessionId, tab.id, {
+				message: "Preview artifact unavailable",
+				detail: err instanceof Error ? err.message : String(err),
+				retryable: true,
+			});
+			renderApp();
 		} finally {
 			previewRestoreInFlight.delete(tab.id);
 		}
@@ -3008,16 +2930,14 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 }
 
 function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
+	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
 	setActivePanelTabIdForSession(state, sid, tab.id);
 	(state as any).previewPanelTab = tab.legacyTab;
-	state.assistantTab = tab.kind === "chat" ? "chat" : "preview";
-	if (tab.kind !== "chat") {
-		(state as any).previewPanelActiveTab = tab.legacyTab;
-	}
+	(state as any).previewPanelActiveTab = tab.kind === "preview" ? "preview" : tab.legacyTab;
+	if (state.assistantType) state.assistantTab = "preview";
 	if (tab.kind === "preview") {
 		state.isPreviewSession = true;
-		(state as any).previewPanelActiveTab = "preview";
 		restoreHistoricalPreviewTab(tab);
 	}
 	if (tab.kind === "review") {
@@ -3025,65 +2945,26 @@ function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	}
 }
 
-function legacyRequestedTab(tabs: PanelWorkspaceTab[]): PanelWorkspaceTab | undefined {
-	const mobileId = panelTabIdFromLegacy(state.previewPanelTab as LegacyPanelTab, state.reviewActiveTab);
-	if (state.previewPanelTab !== "chat") {
-		const mobileTab = findPanelTab(tabs, mobileId);
-		if (mobileTab) return mobileTab;
-	}
-
-	if (state.assistantType && state.assistantTab === "preview") {
-		const desktopId = panelTabIdFromLegacy(state.previewPanelActiveTab as LegacyPanelTab, state.reviewActiveTab);
-		const desktopTab = findPanelTab(tabs, desktopId);
-		if (desktopTab && desktopTab.kind !== "chat") return desktopTab;
-		const assistantType = currentAssistantProposalType();
-		const assistantTab = assistantType ? findPanelTab(tabs, proposalPanelTabId(assistantType)) : undefined;
-		return assistantTab ?? firstContentPanelTab(tabs);
-	}
-
-	if (isDesktop()) {
-		const desktopId = panelTabIdFromLegacy(state.previewPanelActiveTab as LegacyPanelTab, state.reviewActiveTab);
-		const desktopTab = findPanelTab(tabs, desktopId);
-		if (desktopTab && desktopTab.kind !== "chat") return desktopTab;
-	}
-
-	return undefined;
-}
-
 function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 	const sid = workspaceSessionId();
-	const storedId = activePanelTabIdForSession(state, sid);
+	const storedId = activeSidePanelTabIdForSession(state, sid);
 	const storedTab = findPanelTab(tabs, storedId);
-	const liveTab = tabs.find((tab) => isLivePreviewTab(tab));
-	const storedHistoricalPreview = isHistoricalPreviewTab(storedTab);
-	const storedHistoricalArtifact = storedHistoricalPreview || isHistoricalProposalTab(storedTab);
-	const previewKey = previewWorkspaceKey();
-	if (previewKey && state.panelWorkspacePreviewKeyBySession[sid] !== previewKey) {
-		state.panelWorkspacePreviewKeyBySession[sid] = previewKey;
-		const previewTab = liveTab ?? tabs.find((tab) => tab.kind === "preview" && previewEntryLabel(previewEntryFromTab(tab)) === previewEntryLabel(state.previewPanelEntry));
-		if (previewTab && !storedHistoricalArtifact) {
-			setUnifiedActiveTab(previewTab);
-			return;
-		}
-	}
-
-	const requestedTab = legacyRequestedTab(tabs);
-	if (requestedTab && !storedHistoricalArtifact && (!storedTab || storedTab.kind === "chat" || state.previewPanelTab !== "chat" || state.assistantTab === "preview")) {
-		setUnifiedActiveTab(requestedTab);
-		return;
-	}
 	if (storedTab) {
 		setUnifiedActiveTab(storedTab);
 		return;
 	}
-	const fallback = isDesktop() ? (firstContentPanelTab(tabs) ?? tabs[0]) : tabs[0];
-	if (fallback) setUnifiedActiveTab(fallback);
+	const fallback = tabs[0];
+	if (fallback) {
+		setUnifiedActiveTab(fallback);
+		return;
+	}
+	setActivePanelTabIdForSession(state, sid, "");
 }
 
 /** Ordered list of available unified panel tabs for the current session. */
 function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
-	const tabs = mergeStoredPanelTabs(buildPanelWorkspaceTabs({
+	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
 		previewEntry: state.previewPanelEntry,
@@ -3094,7 +2975,8 @@ function unifiedPanelTabs(): UnifiedPanelTab[] {
 		reviewPanelOpen: state.reviewPanelOpen,
 		inboxPanelOpen: state.inboxPanelOpen,
 		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
-	}));
+	});
+	const tabs = normalizeSidePanelTabs(state, sessionId, derivedTabs);
 	setPanelTabsForSession(state, sessionId, tabs);
 	ensureUnifiedActiveTab(tabs);
 	return tabs;
@@ -3106,6 +2988,10 @@ function unifiedPanelContentTabs(): UnifiedContentTab[] {
 
 function setUnifiedMobileTab(tab: UnifiedPanelTab): void {
 	setUnifiedActiveTab(tab);
+	const tabs = unifiedPanelTabs();
+	const idx = tabs.findIndex((candidate) => candidate.id === tab.id);
+	mobileSelectedPaneIndex = idx >= 0 ? idx + 1 : 0;
+	mobileSelectedSideTabId = idx >= 0 ? tab.id : mobileSelectedSideTabId;
 }
 
 function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
@@ -3117,15 +3003,48 @@ function hasUnifiedPanel(): boolean {
 	return unifiedPanelContentTabs().length > 0;
 }
 
-/** Index of activePanelTabId within unifiedPanelTabs(). Clamps to a valid tab. */
-function unifiedTabIndex(): number {
-	const tabs = unifiedPanelTabs();
-	const activeId = activePanelTabIdForSession(state, workspaceSessionId());
-	const idx = tabs.findIndex((tab) => tab.id === activeId);
-	if (idx >= 0) return idx;
-	const fallback = tabs[0];
-	if (fallback) setUnifiedActiveTab(fallback);
-	return 0;
+function mobileChatPaneTab(): MobilePaneTab {
+	return {
+		id: "__mobile_chat_pane__",
+		kind: "chat",
+		title: "Chat",
+		label: "Chat",
+		legacyTab: "chat",
+		source: { type: "chat", sessionId: workspaceSessionId() },
+	};
+}
+
+function unifiedMobilePanes(): MobilePaneTab[] {
+	return [mobileChatPaneTab(), ...unifiedPanelTabs()];
+}
+
+function unifiedMobilePaneIndex(): number {
+	const sideTabs = unifiedPanelTabs();
+	if (sideTabs.length === 0) {
+		mobileSelectedPaneIndex = 0;
+		return 0;
+	}
+	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+	if (activeId && activeId !== mobileSelectedSideTabId) {
+		const activeIndex = sideTabs.findIndex((tab) => tab.id === activeId);
+		if (activeIndex >= 0) {
+			mobileSelectedPaneIndex = activeIndex + 1;
+			mobileSelectedSideTabId = activeId;
+		}
+	}
+	if (mobileSelectedPaneIndex < 0 || mobileSelectedPaneIndex > sideTabs.length) mobileSelectedPaneIndex = activeId ? Math.max(1, sideTabs.findIndex((tab) => tab.id === activeId) + 1) : 0;
+	return mobileSelectedPaneIndex;
+}
+
+function setUnifiedMobilePaneByIndex(index: number): void {
+	const sideTabs = unifiedPanelTabs();
+	if (index <= 0) {
+		mobileSelectedPaneIndex = 0;
+		renderApp();
+		return;
+	}
+	const tab = sideTabs[index - 1];
+	if (tab) setUnifiedMobileTab(tab);
 }
 
 /** Compute slider translateX% for the given tab index and pane count. */
@@ -3145,15 +3064,15 @@ function setupPreviewSwipe(): void {
 	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
 		if (!hasUnifiedPanel()) return;
-		const tabs = unifiedPanelTabs();
-		const curIdx = unifiedTabIndex();
-		const activeTab = findPanelTab(tabs, state.activePanelTabId);
+		const panes = unifiedMobilePanes();
+		const curIdx = unifiedMobilePaneIndex();
+		const activeTab = panes[curIdx];
 		if (activeTab?.kind !== "preview") return;
 		const track = getTrack();
 		if (!track) return;
 
 		const paneW = track.parentElement!.clientWidth;
-		const count = tabs.length;
+		const count = panes.length;
 		const baseX = unifiedSlideX(curIdx, count);
 
 		if (e.data?.type === "preview-swipe-start") {
@@ -3170,9 +3089,8 @@ function setupPreviewSwipe(): void {
 			let newIdx = curIdx;
 			if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
 			else if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
-			setUnifiedMobileTab(tabs[newIdx]);
+			setUnifiedMobilePaneByIndex(newIdx);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
-			renderApp();
 		}
 	});
 
@@ -3195,9 +3113,9 @@ function setupPreviewSwipe(): void {
 		const dy = e.touches[0].clientY - startY;
 		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
 			decided = true;
-			const tabs = unifiedPanelTabs();
-			const curIdx = unifiedTabIndex();
-			if (dx < 0 && Math.abs(dx) > Math.abs(dy) && curIdx < tabs.length - 1) {
+			const panes = unifiedMobilePanes();
+			const curIdx = unifiedMobilePaneIndex();
+			if (dx < 0 && Math.abs(dx) > Math.abs(dy) && curIdx < panes.length - 1) {
 				captured = true;
 			} else if (dx > 0 && Math.abs(dx) > Math.abs(dy) && curIdx > 0) {
 				captured = true;
@@ -3210,9 +3128,9 @@ function setupPreviewSwipe(): void {
 		if (captured) {
 			const track = getTrack();
 			if (track) {
-				const tabs = unifiedPanelTabs();
-				const count = tabs.length;
-				const curIdx = unifiedTabIndex();
+				const panes = unifiedMobilePanes();
+				const count = panes.length;
+				const curIdx = unifiedMobilePaneIndex();
 				const baseX = unifiedSlideX(curIdx, count);
 				const dragPercent = (dx / track.parentElement!.clientWidth) * (100 / count);
 				const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
@@ -3227,20 +3145,53 @@ function setupPreviewSwipe(): void {
 		if (track) {
 			track.style.transition = "transform 0.3s ease-out";
 			const dx = e.changedTouches[0].clientX - startX;
-			const tabs = unifiedPanelTabs();
-			const count = tabs.length;
-			const curIdx = unifiedTabIndex();
+			const panes = unifiedMobilePanes();
+			const count = panes.length;
+			const curIdx = unifiedMobilePaneIndex();
 			const threshold = track.parentElement!.clientWidth * 0.2;
 			let newIdx = curIdx;
 			if (dx < -threshold && curIdx < count - 1) newIdx = curIdx + 1;
 			else if (dx > threshold && curIdx > 0) newIdx = curIdx - 1;
-			setUnifiedMobileTab(tabs[newIdx]);
+			setUnifiedMobilePaneByIndex(newIdx);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 		}
 		captured = false;
 		decided = false;
 		renderApp();
 	}, { passive: true });
+}
+
+function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): boolean {
+	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
+}
+
+function beginPanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
+	if (!isDesktop() || isPinnedPanelTab(tab) || event.pointerType === "touch" || event.button !== 0) return;
+	if ((event.target as HTMLElement | null)?.closest?.(".goal-tab-close")) return;
+	draggingPanelTabId = tab.id;
+	try { (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId); } catch { /* ignore */ }
+}
+
+function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
+	if (!draggingPanelTabId || !isDesktop() || event.pointerType === "touch" || draggingPanelTabId === tab.id) return;
+	const target = event.currentTarget as HTMLElement | null;
+	if (!target) return;
+	const sid = workspaceSessionId();
+	const tabs = unifiedPanelTabs();
+	const targetIndex = tabs.findIndex((candidate) => candidate.id === tab.id);
+	if (targetIndex < 0) return;
+	const rect = target.getBoundingClientRect();
+	const insertIndex = event.clientX < rect.left + rect.width / 2 ? targetIndex : targetIndex + 1;
+	const nextTabs = reorderSidePanelTab(tabs, draggingPanelTabId, insertIndex);
+	if (samePanelTabOrder(tabs, nextTabs)) return;
+	setPanelTabsForSession(state, sid, nextTabs);
+	renderApp();
+}
+
+function endPanelTabDrag(): void {
+	if (!draggingPanelTabId) return;
+	draggingPanelTabId = "";
+	renderApp();
 }
 
 // ============================================================================
@@ -3523,15 +3474,22 @@ export function doRenderApp(): void {
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
 		event?.preventDefault();
 		event?.stopPropagation();
-		if (tab.kind === "chat") return;
+		if ((tab as any).kind === "chat" || isPinnedPanelTab(tab)) return;
 		const sid = workspaceSessionId();
-		const wasActive = state.activePanelTabId === tab.id;
+		const activeId = activeSidePanelTabIdForSession(state, sid);
+		const wasActive = activeId === tab.id;
 		const tabsBefore = unifiedPanelTabs();
-		const nextCandidate = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind !== "chat")[0]
-			?? findPanelTab(tabsBefore, CHAT_PANEL_TAB_ID);
+		const nextId = nextActivePanelTabId(tabsBefore, tab.id);
+		const nextCandidate = nextId ? findPanelTab(tabsBefore, nextId) : undefined;
 
 		if (tab.kind === "proposal" && tab.source.type === "proposal" && !isHistoricalProposalTab(tab)) {
 			dismissTypedProposal(tab.source.proposalType);
+			setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
+			if (wasActive) {
+				if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+				else setActivePanelTabIdForSession(state, sid, "");
+			}
+			renderApp();
 			return;
 		}
 		if (tab.kind === "review") {
@@ -3540,27 +3498,30 @@ export function doRenderApp(): void {
 				clearAnnotations(activeSessionId() || "", title);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				state.reviewDocuments.delete(title);
-				if (state.reviewActiveTab === title) state.reviewActiveTab = [...state.reviewDocuments.keys()][0] || "";
+				if (state.reviewActiveTab === title) {
+					const nextReview = nextCandidate?.kind === "review" ? reviewTitleFromPanelTab(nextCandidate) : "";
+					state.reviewActiveTab = nextReview || [...state.reviewDocuments.keys()][0] || "";
+				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;
 			}
 		}
-		if (tab.kind === "inbox") {
-			state.inboxPanelOpen = false;
-		}
 		if (tab.kind === "preview") {
-			const closingEntry = previewEntryLabel(previewEntryFromTab(tab));
-			const closingHash = previewContentHashFromTab(tab);
-			if (closingEntry === previewEntryLabel(state.previewPanelEntry) && (!closingHash || closingHash === normalizePreviewContentHash((state as any).previewPanelContentHash))) {
+			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
+			if (remainingPreviewTabs.length === 0) {
 				state.isPreviewSession = false;
 				state.previewPanelEntry = "";
 				state.previewPanelMtime = 0;
 				(state as any).previewPanelContentHash = "";
 				(state as any).previewPanelMountedTabId = "";
+				mountedPreviewTabId = "";
 			}
 		}
 
 		setPanelTabsForSession(state, sid, panelTabsForSession(state, sid).filter((candidate) => candidate.id !== tab.id));
-		if (wasActive && nextCandidate) setUnifiedActiveTab(nextCandidate);
+		if (wasActive) {
+			if (nextCandidate) setUnifiedActiveTab(nextCandidate);
+			else setActivePanelTabIdForSession(state, sid, "");
+		}
 		renderApp();
 	};
 
@@ -3580,15 +3541,23 @@ export function doRenderApp(): void {
 		const sourceTitle = tab.kind === "preview" ? previewSourceTitle(tab) : "";
 		const tooltip = sourceTitle || label;
 		const dataTitle = sourceTitle || tab.title;
-		const closable = tab.kind !== "chat";
+		const closable = !isPinnedPanelTab(tab);
+		const draggable = isDesktop() && !isPinnedPanelTab(tab);
+		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 		return html`
 		<button
-			class="goal-tab-pill ${state.activePanelTabId === tab.id ? "goal-tab-pill--active" : ""}"
+			class="goal-tab-pill ${activeId === tab.id ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
 			title=${tooltip}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${dataTitle}
+			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
 			data-testid=${testId}
+			@pointerdown=${(event: PointerEvent) => beginPanelTabDrag(tab, event)}
+			@pointermove=${(event: PointerEvent) => updatePanelTabDrag(tab, event)}
+			@pointerenter=${(event: PointerEvent) => updatePanelTabDrag(tab, event)}
+			@pointerup=${() => endPanelTabDrag()}
+			@pointercancel=${() => endPanelTabDrag()}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
 		>
 			<span class="goal-tab-pill-label">${label}</span>
@@ -3626,6 +3595,29 @@ export function doRenderApp(): void {
 		const next = !isPreviewCollapsed();
 		localStorage.setItem(previewCollapseKey(), String(next));
 		renderApp();
+	};
+
+	const previewRestoreErrorContent = (tab: UnifiedContentTab) => {
+		const restoreError = previewRestoreError(tab);
+		if (!restoreError) return "";
+		const retry = () => {
+			const sid = activeSessionId() || previewSessionIdFromTab(tab);
+			const nextTab = sid ? clearPreviewTabRestoreError(sid, tab.id) ?? tab : tab;
+			restoreHistoricalPreviewTab(nextTab);
+			renderApp();
+		};
+		return html`
+			<div class="preview-restore-error flex-1 min-h-0 flex items-center justify-center p-6" data-testid="preview-restore-error" data-panel-tab-id=${tab.id}>
+				<div class="preview-restore-error-card">
+					<div class="preview-restore-error-title">Preview artifact unavailable</div>
+					<div class="preview-restore-error-body">${restoreError.detail || restoreError.message || "This preview could not be restored."}</div>
+					<div class="preview-restore-error-actions">
+						${restoreError.retryable !== false ? html`<button class="preview-restore-error-button" @click=${retry}>Retry</button>` : ""}
+						<button class="preview-restore-error-button" @click=${(event: Event) => closeUnifiedPanelTab(tab, event)}>Close tab</button>
+					</div>
+				</div>
+			</div>
+		`;
 	};
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
@@ -3689,17 +3681,21 @@ export function doRenderApp(): void {
 					}
 				}}
 			@review-close-tab=${(e: CustomEvent) => {
-					const sid = activeSessionId() || "";
 					const title = e.detail.title as string;
-					clearAnnotations(sid, title);
-					state.reviewDocuments = new Map(state.reviewDocuments);
-					state.reviewDocuments.delete(title);
-					if (state.reviewActiveTab === title) {
-						const keys = [...state.reviewDocuments.keys()];
-						state.reviewActiveTab = keys[0] || "";
+					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
+					if (tab) closeUnifiedPanelTab(tab, e);
+					else {
+						const sid = activeSessionId() || "";
+						clearAnnotations(sid, title);
+						state.reviewDocuments = new Map(state.reviewDocuments);
+						state.reviewDocuments.delete(title);
+						if (state.reviewActiveTab === title) {
+							const keys = [...state.reviewDocuments.keys()];
+							state.reviewActiveTab = keys[0] || "";
+						}
+						state.reviewPanelOpen = state.reviewDocuments.size > 0;
+						renderApp();
 					}
-					state.reviewPanelOpen = state.reviewDocuments.size > 0;
-					renderApp();
 				}}
 				@review-dismiss=${() => {
 					const sid = activeSessionId() || "";
@@ -3760,7 +3756,7 @@ export function doRenderApp(): void {
 	};
 
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
-		if (tab.kind === "preview" && state.isPreviewSession) return htmlPreviewContent();
+		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
 			const reviewTitle = reviewTitleFromPanelTab(tab);
 			if (reviewTitle && state.reviewActiveTab !== reviewTitle) {
@@ -3784,10 +3780,12 @@ export function doRenderApp(): void {
 		const contentTabs = unifiedPanelContentTabs();
 		if (contentTabs.length === 0) return "";
 
-		let activeTab = contentTabs.find((tab) => tab.id === state.activePanelTabId) ?? contentTabs[0];
-		if (state.activePanelTabId !== activeTab.id) {
+		let activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		let activeTab = contentTabs.find((tab) => tab.id === activeId) ?? contentTabs[0];
+		if (activeId !== activeTab.id) {
 			setUnifiedDesktopTab(activeTab);
-			activeTab = contentTabs.find((tab) => tab.id === state.activePanelTabId) ?? activeTab;
+			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
 		const showPreviewTab = contentTabs.some((tab) => tab.kind === "preview");
 
@@ -3823,7 +3821,7 @@ export function doRenderApp(): void {
 		</button>
 	`;
 	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: UnifiedPanelTab) => {
+	const mobilePaneContent = (tab: MobilePaneTab) => {
 		if (tab.kind === "chat") return state.chatPanel;
 		const content = unifiedPanelContent(tab);
 		return html`<div class="goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
@@ -3902,9 +3900,9 @@ export function doRenderApp(): void {
 					</div>
 				`;
 			}
-			const tabs = unifiedPanelTabs();
-			const count = tabs.length;
-			const curIdx = unifiedTabIndex();
+			const panes = unifiedMobilePanes();
+			const count = panes.length;
+			const curIdx = unifiedMobilePaneIndex();
 			const slideX = unifiedSlideX(curIdx, count);
 			const trackW = count * 100;
 			const paneW = 100 / count;
@@ -3912,7 +3910,7 @@ export function doRenderApp(): void {
 				${reconnectBanner()}
 				<div class="preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
 					<div class="preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						${tabs.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
+						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
 					</div>
 				</div>
 			`;
