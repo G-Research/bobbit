@@ -1,4 +1,6 @@
 import { exec, execFile as execFileCb } from "node:child_process";
+import { AgentMemoryManager } from "./agentmemory/agentmemory-manager.js";
+import { AgentMemorySecretStore } from "./agentmemory/agentmemory-secret-store.js";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -681,6 +683,17 @@ export function createGateway(config: GatewayConfig) {
 	const prStatusStore = new PrStatusStore(stateDir);
 	const preferencesStore = new PreferencesStore(stateDir);
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir);
+	// AgentMemory (experimental, default-off). Wiring is unconditional so the
+	// /api/agentmemory/* routes and status broadcasts are always available,
+	// but the manager itself short-circuits when `agentMemoryEnabled !== true`.
+	const agentMemorySecretStore = new AgentMemorySecretStore(stateDir);
+	let agentMemoryBroadcast: ((s: unknown) => void) | null = null;
+	const agentMemoryManager = new AgentMemoryManager({
+		stateDir,
+		preferences: preferencesStore,
+		secrets: agentMemorySecretStore,
+		onStatusChanged: (s) => { try { agentMemoryBroadcast?.(s); } catch { /* ignore */ } },
+	});
 	const projectConfigStore = new ProjectConfigStore(configDir);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -1049,6 +1062,8 @@ export function createGateway(config: GatewayConfig) {
 			}
 		}
 	}
+	// Late-bind AgentMemory status broadcast now that broadcastToAll exists.
+	agentMemoryBroadcast = (s) => broadcastToAll({ type: "agent_memory_status", status: s });
 	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
 	 * belongs to the given project. Clients with no session association (e.g.
@@ -4678,6 +4693,12 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 		for (const [key, value] of Object.entries(body)) {
+			// AgentMemory bearer secret never lives in preferences — route via
+			// PUT /api/agentmemory/secret only.
+			if (key === "agentMemoryBearerToken") {
+				json({ error: "Use PUT /api/agentmemory/secret to set the AgentMemory bearer token" }, 400);
+				return;
+			}
 			if (value === null || value === undefined) {
 				preferencesStore.remove(key);
 			} else {
@@ -4686,6 +4707,116 @@ async function handleApiRoute(
 		}
 		json({ ok: true });
 		broadcastPreferencesChanged();
+		return;
+	}
+
+	// ── AgentMemory (experimental, default-off) ──
+	// All endpoints are auth-gated by the surrounding handleApiRoute frame.
+	// Secrets are NEVER returned. When `agentMemoryEnabled !== true`, search
+	// returns DISABLED and managed start refuses.
+	if (url.pathname === "/api/agentmemory/status" && req.method === "GET") {
+		json(agentMemoryManager.getStatus());
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/status" && req.method === "POST") {
+		// Force a fresh health check.
+		const s = await agentMemoryManager.checkHealth(true);
+		json(s);
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/settings" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const result = agentMemoryManager.updateSettings(body as Record<string, unknown>);
+		if (result.errors.length > 0) {
+			json({ error: result.errors.join("; "), errors: result.errors }, 400);
+			return;
+		}
+		broadcastPreferencesChanged();
+		json({ ok: true, warnings: result.warnings, status: agentMemoryManager.getStatus() });
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/secret" && req.method === "PUT") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+		const raw = (body as { secret?: unknown; token?: unknown }).secret
+			?? (body as { token?: unknown }).token;
+		if (raw !== null && raw !== undefined && typeof raw !== "string") {
+			json({ error: "secret must be a string" }, 400);
+			return;
+		}
+		agentMemoryManager.setSecret((raw as string | null | undefined) ?? null);
+		json({ ok: true, hasSecret: agentMemoryManager.hasSecret() });
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/secret" && req.method === "DELETE") {
+		agentMemoryManager.setSecret(null);
+		json({ ok: true, hasSecret: false });
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/test" && req.method === "POST") {
+		const body = await readBody(req).catch(() => null);
+		const query = body && typeof body === "object" && typeof (body as { query?: unknown }).query === "string"
+			? (body as { query: string }).query : undefined;
+		const result = await agentMemoryManager.test(query ? { query } : undefined);
+		json({
+			health: {
+				ok: result.health.ok,
+				status: result.health.status,
+				error: result.health.ok ? undefined : result.health.error,
+				code: result.health.ok ? undefined : result.health.code,
+			},
+			search: result.search ? {
+				ok: result.search.ok,
+				status: result.search.status,
+				error: result.search.ok ? undefined : result.search.error,
+			} : undefined,
+			status: agentMemoryManager.getStatus(),
+		});
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/start" && req.method === "POST") {
+		try {
+			const proc = agentMemoryManager.startManaged();
+			json({ ok: true, process: proc });
+		} catch (err) {
+			const code = (err as { code?: string }).code;
+			const status = code === "DISABLED" ? 403 : code === "WRONG_MODE" ? 409 : code === "DOCKER_BLOCKED" ? 400 : 500;
+			json({ error: (err as Error).message, code }, status);
+		}
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/stop" && req.method === "POST") {
+		const proc = await agentMemoryManager.stopManaged();
+		json({ ok: true, process: proc });
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/log" && req.method === "GET") {
+		json({ log: agentMemoryManager.tailManagedLog() });
+		return;
+	}
+	if (url.pathname === "/api/agentmemory/search" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || typeof (body as { query?: unknown }).query !== "string") {
+			json({ error: "Missing query" }, 400);
+			return;
+		}
+		const b = body as { query: string; limit?: number; scope?: string; projectKey?: string; tokenBudget?: number };
+		const limit = typeof b.limit === "number" && b.limit > 0 ? Math.min(50, Math.trunc(b.limit)) : 10;
+		const scope = b.scope === "project" || b.scope === "global" || b.scope === "project+global" ? b.scope : "project+global";
+		const res = await agentMemoryManager.search({
+			query: b.query,
+			limit,
+			scope,
+			projectKey: typeof b.projectKey === "string" ? b.projectKey : undefined,
+			tokenBudget: typeof b.tokenBudget === "number" ? b.tokenBudget : undefined,
+		});
+		if (!res.ok) {
+			const status = res.code === "DISABLED" ? 403 : res.code === "UNAUTHORIZED" ? 401 : 502;
+			json({ error: res.error, code: res.code }, status);
+			return;
+		}
+		json({ ok: true, items: res.data.items });
 		return;
 	}
 
