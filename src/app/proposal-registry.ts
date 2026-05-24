@@ -10,7 +10,7 @@
  * unused for Slice E and reserved for future work.
  */
 
-import { panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession, type PanelWorkspaceTab } from "./panel-workspace.js";
+import { activePanelTabIdForSession, panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession, setPanelTabsForSession, type PanelWorkspaceTab } from "./panel-workspace.js";
 
 // NOTE: We do NOT import `./state.js` at module load — state.ts touches
 // `localStorage` at module init which would break node-only unit tests of
@@ -21,6 +21,28 @@ import { panelTabsForSession, proposalPanelTabId, setActivePanelTabIdForSession,
 export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
 
 export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff"];
+
+function assistantProposalTypeFromState(stateLike: any): ProposalType | null {
+	const raw = typeof stateLike?.assistantType === "string" ? stateLike.assistantType : "";
+	if (raw === "project-scaffolding") return "project";
+	return isProposalType(raw) ? raw : null;
+}
+
+export function hasCurrentProposalSlotForSession(stateLike: any, type: string, sessionId: string): type is ProposalType {
+	if (!isProposalType(type)) return false;
+	const slot = stateLike?.activeProposals?.[type];
+	if (slot) {
+		const slotSessionId = typeof slot.sessionId === "string" ? slot.sessionId : "";
+		return !sessionId || !slotSessionId || slotSessionId === sessionId;
+	}
+
+	// Legacy assistant surfaces may have form-mirror proposal state before the
+	// typed slot table is populated. Do not use this fallback once other typed
+	// slots exist, or a delayed async upsert can resurrect a dismissed tab.
+	const activeProposals = stateLike?.activeProposals;
+	const hasTypedSlots = !!activeProposals && typeof activeProposals === "object" && Object.keys(activeProposals).length > 0;
+	return !hasTypedSlots && stateLike?.assistantHasProposal === true && assistantProposalTypeFromState(stateLike) === type;
+}
 
 export interface ProposalSlot {
 	sessionId: string;
@@ -126,8 +148,22 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 	staff: "Staff Proposal",
 };
 
-function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+function dropCurrentProposalWorkspaceTab(s: any, type: ProposalType, sessionId: string): void {
+	const id = proposalPanelTabId(type);
+	const tabs = panelTabsForSession(s, sessionId);
+	if (!tabs.some((tab: any) => tab?.id === id)) return;
+	setPanelTabsForSession(s, sessionId, tabs.filter((tab: any) => tab?.id !== id));
+	if (activePanelTabIdForSession(s, sessionId) === id) {
+		setActivePanelTabIdForSession(s, sessionId, "");
+	}
+}
+
+function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): boolean {
 	const s = getState();
+	if (!hasCurrentProposalSlotForSession(s, type, sessionId)) {
+		dropCurrentProposalWorkspaceTab(s, type, sessionId);
+		return false;
+	}
 	const tab: PanelWorkspaceTab = {
 		id: proposalPanelTabId(type),
 		kind: "proposal",
@@ -146,10 +182,11 @@ function upsertProposalWorkspaceTab(type: ProposalType, sessionId: string): void
 			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
 		}
 	} catch { /* ignore */ }
+	return true;
 }
 
 function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): void {
-	upsertProposalWorkspaceTab(type, sessionId);
+	if (!upsertProposalWorkspaceTab(type, sessionId)) return;
 	void import("./preview-panel.js")
 		.then((mod: any) => mod.selectProposalWorkspaceTab?.(type, { sessionId, select: true, setAssistantTab }))
 		.catch(() => { /* optional browser-only integration */ });
