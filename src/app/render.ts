@@ -3679,17 +3679,13 @@ export function doRenderApp(): void {
 			@pointerup=${() => endPanelTabDrag()}
 			@pointercancel=${() => endPanelTabDrag()}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-		>
-			<span class="goal-tab-pill-label">${label}</span>
-			${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
-			${closable ? html`<span
+		><span class="goal-tab-pill-label">${label}</span>${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
 				class="goal-tab-close"
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
-			>${icon(X, "xs")}</span>` : ""}
-		</button>
+			>${icon(X, "xs")}</span>` : ""}</button>
 	`;
 	};
 
