@@ -1731,13 +1731,32 @@ export class AgentInterface extends LitElement {
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
-						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
+						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
 							     follows the actual rendered shape per-element, so wrapping or
 							     differently-sized children (git-status-widget vs bash_bg pills)
 							     stay aligned on every viewport — unlike the previous parallel
 							     glow-placeholder layer which mismatched on mobile. -->
-							<div data-pill-content class="flex items-center gap-1.5 flex-wrap justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
+<!-- Wrap policy is viewport-dependent:
+							       Wide (>=640px host): flex-nowrap. The fit algorithm in
+							       _measurePillOverflow truncates pills into the "more" popover
+							       so the strip should never need to wrap. On the very first
+							       render after bgProcesses populates, _visiblePillCount is
+							       Infinity until rAF fires the measure — every pill is in the
+							       DOM for one frame. Without flex-nowrap they'd briefly spill
+							       onto a second row and the user would see a 2-line flash.
+							       With flex-nowrap they overflow horizontally (off the left
+							       edge of the strip's max-width box) for that frame instead,
+							       which is far less visible.
+							       Narrow (<640px, portrait/mobile): flex-wrap. On phones the
+							       "force everything into one row" trade-off hurts — vertical
+							       space is the cheap dimension, and pushing all pills into
+							       "more" hides info the user wants at a glance. Allow a second
+							       row instead.
+							     We deliberately do NOT add overflow:hidden on the strip — that
+							     would clip the in-tree "more" popover (absolute bottom-full
+							     inside the .relative wrapper inside the strip). -->
+							<div data-pill-content class="flex items-center gap-1.5 ${this._isNarrow ? 'flex-wrap' : 'flex-nowrap'} justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
 							${this._renderPillStrip()}
 							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
@@ -2038,10 +2057,10 @@ export class AgentInterface extends LitElement {
 				}
 			</style>
 			${hidden.length > 0 ? html`
-				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px">
-					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight" data-more-btn style="height:var(--pill-h, auto)">
+				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px;flex-shrink:0">
+					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight whitespace-nowrap" data-more-btn style="height:var(--pill-h, auto)">
 						<button
-							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full"
+							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full whitespace-nowrap"
 							@click=${this._toggleMore}
 							aria-expanded=${this._moreExpanded}
 							aria-haspopup="true"
@@ -2200,10 +2219,22 @@ export class AgentInterface extends LitElement {
 
 		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
 
-		// Match the strip's CSS `max-width: calc(100% - 1rem)` (8px margin
-		// on each side) so the strip's right edge lines up with the prompt.
+		// Total horizontal budget for pills + "more" + git-widget. Two modes:
+		//   Wide (>=640px host): strip CSS uses `max-width: calc(100% - 8rem)`.
+		//     Pill row is one line; algorithm packs content into
+		//     `parent.clientWidth - 128 - 2`. The 7.5rem left reserve (120px)
+		//     keeps the leftmost pill clear of the bobbit sprite that bleeds
+		//     down from the message area.
+		//   Narrow (<640px, portrait/mobile): strip CSS uses `max-width: 75%`.
+		//     Pills wrap onto up to TWO rows (content layer is `flex-wrap`),
+		//     so the algorithm budget is `2 * (parent.clientWidth * 0.75)`.
+		//     Content beyond that overflows into the "more" popover —
+		//     enforces a hard 2-row ceiling per the explicit user request.
+		//     The 25% on the left stays clear for the bobbit sprite.
 		// Extra 2px is a safety margin for rounding/drop-shadow.
-		let maxWidth = parentContainer.clientWidth - 16 - 2;
+		let maxWidth = this._isNarrow
+			? parentContainer.clientWidth * 0.75 * 2 - 2
+			: parentContainer.clientWidth - 128 - 2;
 
 		// Subtract git-status-widget width from available space.
 		const gitWidget = contentLayer.querySelector('git-status-widget') as HTMLElement;
@@ -2214,14 +2245,22 @@ export class AgentInterface extends LitElement {
 
 		// Refresh the per-id width cache from every bg-process-pill currently
 		// in the DOM — covers both the visible strip and the expanded popover.
-		// We measure the wrapper element (the <div> immediately around the
-		// pill) since that's what the flex layout actually places.
+		//
+		// We measure the bg-process-pill custom element's own offsetWidth
+		// (NOT its parent's). In the visible strip the wrapper <div> is one
+		// per pill so parent-width happens to equal pill-width; but in the
+		// "more" popover every hidden pill shares the same parent (the
+		// `.pill-more-popover` flex-column container), so parent.offsetWidth
+		// would be the popover's own width — dramatically larger than any
+		// real pill — and writing that to the cache prevents promotion back
+		// into the strip when space frees up. The pill's render() roots in
+		// `<span class="inline-flex …">` so the custom element's own
+		// offsetWidth is the actual rendered width in both contexts.
 		const allPillEls = pillStrip.querySelectorAll('bg-process-pill');
 		for (const pillEl of allPillEls) {
 			const id = pillEl.getAttribute('data-id');
 			if (!id) continue;
-			const wrapper = (pillEl.parentElement as HTMLElement | null) ?? null;
-			const measured = wrapper ? wrapper.offsetWidth : 0;
+			const measured = (pillEl as HTMLElement).offsetWidth;
 			if (measured > 0) {
 				this._pillWidths.set(id, measured);
 			}
