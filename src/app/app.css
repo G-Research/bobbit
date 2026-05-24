@@ -487,14 +487,17 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * GOAL ASSISTANT — split-screen preview panel & mobile tabs
  * ============================================================================ */
 
-/* Chat and preview panels each take 50% on desktop */
+/* Chat and preview panels each take 50% on desktop. Scope this to the
+ * top-level split row only: proposal renderers can nest their own
+ * .goal-preview-panel inside the right workspace, and those must fill the
+ * workspace rather than inheriting a second 50% constraint. */
 @media (min-width: 768px) {
-	.goal-chat-panel {
+	.goal-split-layout > .goal-chat-panel {
 		flex: 0 0 50%;
 		max-width: 50%;
 		overflow: hidden;
 	}
-	.goal-preview-panel {
+	.goal-split-layout > .goal-preview-panel {
 		flex: 0 0 50%;
 		max-width: 50%;
 		overflow: hidden;
@@ -537,8 +540,8 @@ details.wf-proposal-workflow .wf-proposal-gates {
 .goal-tab-pill {
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
-	padding: 4px 14px;
+	gap: 5px;
+	padding: 4px 8px 4px 14px;
 	font-size: 13px;
 	font-weight: 500;
 	border-radius: 9999px;
@@ -548,6 +551,33 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	cursor: pointer;
 	transition: all 150ms ease;
 	line-height: 1.4;
+}
+
+.goal-tab-pill-label {
+	min-width: 0;
+	max-width: 14rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.goal-tab-close {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	margin-right: -3px;
+	border-radius: 9999px;
+	color: currentColor;
+	opacity: 0.68;
+	cursor: pointer;
+	transition: background 120ms ease, opacity 120ms ease;
+}
+
+.goal-tab-close:hover {
+	background: color-mix(in oklch, currentColor 14%, transparent);
+	opacity: 1;
 }
 
 .goal-tab-pill:hover {

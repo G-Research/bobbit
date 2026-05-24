@@ -5,6 +5,7 @@ import {
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	panelWorkspaceSessionKey,
+	registerPreviewVersion,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
@@ -172,8 +173,10 @@ function addFixtureStyle(): void {
 		.p-5 { padding: 1.25rem; }
 		.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.goal-tab-bar { background: var(--background); overflow-x: auto; }
-		.goal-tab-pill { display: inline-flex; align-items: center; gap: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: var(--background); padding: 0.25rem 0.6rem; white-space: nowrap; max-width: 18rem; }
+		.goal-tab-pill { display: inline-flex; align-items: center; gap: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: var(--background); padding: 0.25rem 0.5rem 0.25rem 0.6rem; white-space: nowrap; max-width: 18rem; }
 		.goal-tab-pill--active { background: var(--primary); color: #fff; }
+		.goal-tab-pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.goal-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 1rem; height: 1rem; border-radius: 999px; }
 		.goal-tab-dot { display: inline-block; width: 0.5em; height: 0.5em; border-radius: 999px; background: currentColor; }
 		.goal-preview-panel { min-height: 280px; }
 		.goal-chat-panel { min-width: 300px; }
@@ -191,6 +194,7 @@ function persistFixture(): void {
 			workspaces,
 			panelTabsBySession: state.panelTabsBySession,
 			panelWorkspaceActiveBySession: state.panelWorkspaceActiveBySession,
+			previewVersionsBySession: (state as any).previewVersionsBySession,
 			knownPreviews,
 		}));
 	} catch {
@@ -280,6 +284,7 @@ function resetState(options: { clearPersisted?: boolean; selectedSessionId?: str
 		activePanelTabId: CHAT_PANEL_TAB_ID,
 		panelWorkspaceActiveBySession: {},
 		panelWorkspacePreviewKeyBySession: {},
+		previewVersionsBySession: {},
 		previewPanelTab: "chat",
 		previewPanelActiveTab: "preview",
 		defaultCwd: PROJECT_ROOT,
@@ -308,6 +313,9 @@ function rehydrateState(): void {
 	}
 	if (saved?.panelWorkspaceActiveBySession && typeof saved.panelWorkspaceActiveBySession === "object") {
 		state.panelWorkspaceActiveBySession = saved.panelWorkspaceActiveBySession;
+	}
+	if (saved?.previewVersionsBySession && typeof saved.previewVersionsBySession === "object") {
+		(state as any).previewVersionsBySession = saved.previewVersionsBySession;
 	}
 	applyWorkspace(currentSessionId());
 }
@@ -353,6 +361,7 @@ function setLivePreview(preview: LivePreviewInput): void {
 		html: previewHtmlForBodyText(preview.bodyText || preview.entry),
 		contentHash: preview.contentHash,
 	});
+	registerPreviewVersion(state, currentSessionId(), preview.entry, preview.contentHash, { current: true });
 	applyWorkspace(currentSessionId());
 	setActivePanelTabIdForSession(state, currentSessionId(), LIVE_PREVIEW_PANEL_TAB_ID);
 	renderNow();
@@ -361,7 +370,8 @@ function setLivePreview(preview: LivePreviewInput): void {
 function makeHistoricalPreviewTab(sessionId: string, preview: HistoricalPreviewInput): PanelWorkspaceTab {
 	const htmlText = previewHtmlForBodyText(preview.bodyText);
 	knownPreviews.push({ sessionId, entry: preview.entry, html: htmlText, contentHash: preview.contentHash });
-	const title = preview.title || `Preview: ${preview.entry}`;
+	const version = registerPreviewVersion(state, sessionId, preview.entry, preview.contentHash, { current: false });
+	const title = preview.title || (version ? `${preview.entry} (v${version})` : preview.entry);
 	return {
 		id: `preview:tool:${preview.toolId}:1`,
 		kind: "preview",
@@ -377,6 +387,8 @@ function makeHistoricalPreviewTab(sessionId: string, preview: HistoricalPreviewI
 			contentHash: preview.contentHash,
 			snapshotKind: "inline",
 			dedupeWithLive: false,
+			historical: true,
+			...(version != null ? { version } : {}),
 		},
 		state: {
 			sessionId,
@@ -385,6 +397,8 @@ function makeHistoricalPreviewTab(sessionId: string, preview: HistoricalPreviewI
 			snapshotKind: "inline",
 			snapshotHtml: htmlText,
 			dedupeWithLive: false,
+			historical: true,
+			...(version != null ? { version } : {}),
 		},
 	};
 }

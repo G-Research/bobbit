@@ -131,7 +131,7 @@ function previewTabTitle(params: PreviewOpenParams | undefined, parsed: ParsedSn
 		|| (parsed.kind === "file" ? parsed.path : undefined)
 		|| (parsed.kind === "preview" ? parsed.entry || parsed.path : undefined)
 		|| entry;
-	return `Preview: ${baseName(sourcePath) || "inline.html"}`;
+	return baseName(sourcePath) || "inline.html";
 }
 
 function previewTabId(toolUseId: string | undefined, blockIndex: number, parsed: ParsedSnapshot, entry: string | undefined, params: PreviewOpenParams | undefined): string {
@@ -197,95 +197,6 @@ function previewTabSource(
 	return source;
 }
 
-function tabContentHash(tab: any): string | undefined {
-	return normalizeContentHash(tab?.state?.contentHash) || normalizeContentHash(tab?.source?.contentHash);
-}
-
-const restorableLivePreviewCache = new Map<string, { contentHash: string; tab: any }>();
-
-function previewTabCanRestore(tab: any): boolean {
-	const state = tab?.state && typeof tab.state === "object" ? tab.state : {};
-	const source = tab?.source && typeof tab.source === "object" ? tab.source : {};
-	const snapshotKind = typeof state.snapshotKind === "string" ? state.snapshotKind : source.snapshotKind;
-	return (snapshotKind === "inline" && typeof state.snapshotHtml === "string")
-		|| (snapshotKind === "file" && (typeof state.snapshotFile === "string" || typeof source.path === "string"));
-}
-
-function rememberRestorableLivePreview(sessionId: string, contentHash: string | undefined, tab: any): void {
-	const hash = normalizeContentHash(contentHash);
-	if (!sessionId || !hash || !previewTabCanRestore(tab)) return;
-	restorableLivePreviewCache.set(sessionId, {
-		contentHash: hash,
-		tab: {
-			...tab,
-			source: { ...(tab.source || {}), sessionId, contentHash: hash },
-			state: { ...(tab.state || {}), sessionId, contentHash: hash },
-		},
-	});
-}
-
-function archiveCachedLivePreview(appState: any, sessionId: string, liveContentHash: string | undefined, nextContentHash: string | undefined): void {
-	const liveHash = normalizeContentHash(liveContentHash);
-	const nextHash = normalizeContentHash(nextContentHash);
-	if (!nextHash) return;
-	const cached = restorableLivePreviewCache.get(sessionId);
-	const cachedHash = normalizeContentHash(cached?.contentHash);
-	if (!cached || !cachedHash || cachedHash === nextHash) return;
-	// A delayed bootstrap/SSE frame can re-derive live as `nextHash` before a
-	// tool-card click archives the previously opened restorable preview. Keep the
-	// cache only when it represents either the current live content or the content
-	// immediately displaced by an already-live next snapshot.
-	if (liveHash && liveHash !== cachedHash && liveHash !== nextHash) return;
-	const tabs = appState?.panelTabsBySession?.[sessionId];
-	if (!Array.isArray(tabs)) return;
-	if (tabs.some((tab: any) => tab?.kind === "preview" && tabContentHash(tab) === cachedHash && tab.id !== "preview:live" && tab.id !== "preview")) return;
-	const title = typeof cached.tab.title === "string" && cached.tab.title ? cached.tab.title : "Preview: inline.html";
-	tabs.push({
-		...cached.tab,
-		label: /\s\(snapshot\)$/.test(cached.tab.label || "") ? cached.tab.label : `${cached.tab.label || title} (snapshot)`,
-		source: { ...(cached.tab.source || {}), sessionId, contentHash: cachedHash, dedupeWithLive: false },
-		state: { ...(cached.tab.state || {}), sessionId, contentHash: cachedHash, dedupeWithLive: false },
-	});
-}
-
-function archiveCurrentLivePreview(appState: any, sessionId: string, nextContentHash: string | undefined): void {
-	const nextHash = normalizeContentHash(nextContentHash);
-	if (!nextHash) return;
-	const tabs = appState?.panelTabsBySession?.[sessionId];
-	if (!Array.isArray(tabs)) return;
-	const live = tabs.find((tab: any) => tab?.kind === "preview" && (tab.id === "preview:live" || tab.id === "preview"));
-	const liveHash = tabContentHash(live);
-	if (!live || !liveHash || liveHash === nextHash) return;
-	if (tabs.some((tab: any) => tab?.kind === "preview" && tab.id !== live.id && tabContentHash(tab) === liveHash)) return;
-	const state = live.state && typeof live.state === "object" ? live.state : {};
-	const source = live.source && typeof live.source === "object" ? live.source : {};
-	const snapshotKind = typeof state.snapshotKind === "string" ? state.snapshotKind : source.snapshotKind;
-	const canRestore = (snapshotKind === "inline" && typeof state.snapshotHtml === "string")
-		|| (snapshotKind === "file" && (typeof state.snapshotFile === "string" || typeof source.path === "string"));
-	if (!canRestore) return;
-	const { live: _live, origin: _origin, ...archivedSource } = source;
-	void _live;
-	void _origin;
-	const title = typeof live.title === "string" && live.title ? live.title : "Preview: inline.html";
-	tabs.push({
-		...live,
-		id: `preview:snapshot:${hashString(liveHash)}`,
-		title,
-		label: /\s\(snapshot\)$/.test(live.label || "") ? live.label : `${live.label || title} (snapshot)`,
-		source: {
-			...archivedSource,
-			type: typeof archivedSource.type === "string" ? archivedSource.type : "preview_open",
-			contentHash: liveHash,
-			dedupeWithLive: false,
-		},
-		state: {
-			...state,
-			contentHash: liveHash,
-			dedupeWithLive: false,
-		},
-	});
-}
-
 function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined, params: PreviewOpenParams | undefined): Record<string, unknown> {
 	const restorable = restorableSnapshot(parsed, params);
 	const contentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
@@ -306,6 +217,70 @@ function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtim
 	return state;
 }
 
+function entryFromSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | undefined, fallback?: string): string {
+	if (fallback) return fallback;
+	if (parsed.kind === "preview") {
+		if (parsed.entry) return parsed.entry;
+		const m = /^\/preview\/[^/]+\/(.+)$/.exec(parsed.url);
+		if (m) return decodeURIComponent(m[1]);
+	}
+	if (typeof params?.file === "string" && params.file) return baseName(params.file);
+	if (parsed.kind === "file") return baseName(parsed.path);
+	return "inline.html";
+}
+
+const registeredPreviewSnapshotKeys = new Set<string>();
+
+function rememberPreviewSnapshotFromRender(
+	params: PreviewOpenParams | undefined,
+	result: ToolResultMessage<any> | undefined,
+	isStreaming: boolean | undefined,
+	ctx: ToolRenderContext | undefined,
+): void {
+	if (isStreaming || !result || result.isError || !ctx?.sessionId) return;
+	const snap = findSnapshotBlock(result);
+	if (!snap || snap.block._truncated) return;
+	const parsed = parseSnapshotText(snap.block.text);
+	if (!parsed || parsed.kind !== "preview" || !parsed.contentHash) return;
+	const entry = entryFromSnapshot(parsed, params);
+	const key = `${ctx.sessionId}:${ctx.toolUseId || ""}:${snap.index}:${entry}:${parsed.contentHash}`;
+	if (registeredPreviewSnapshotKeys.has(key)) return;
+	registeredPreviewSnapshotKeys.add(key);
+	queueMicrotask(async () => {
+		try {
+			const [{ state: appState, renderApp }, workspace, previewPanel] = await Promise.all([
+				import("../../../app/state.js"),
+				import("../../../app/panel-workspace.js"),
+				import("../../../app/preview-panel.js"),
+			]);
+			const version = workspace.registerPreviewVersion(appState, ctx.sessionId!, entry, parsed.contentHash, { current: false });
+			const liveHash = normalizeContentHash((appState as any).previewPanelContentHash);
+			const liveEntry = workspace.previewEntryLabel((appState as any).previewPanelEntry || "inline.html");
+			if (liveHash !== parsed.contentHash || liveEntry !== workspace.previewEntryLabel(entry)) return;
+			const tabSource = previewTabSource(params, parsed, entry, ctx.toolUseId, snap.index);
+			const tabState = previewTabState(parsed, entry, (appState as any).previewPanelMtime || Date.now(), parsed.url, params);
+			if (version != null) {
+				tabSource.version = version;
+				tabState.version = version;
+			}
+			previewPanel.selectHtmlPreviewTab({
+				sessionId: ctx.sessionId,
+				entry,
+				mtime: (appState as any).previewPanelMtime || Date.now(),
+				contentHash: parsed.contentHash,
+				url: parsed.url,
+				source: tabSource,
+				state: tabState,
+				select: false,
+				setAssistantTab: false,
+			});
+			renderApp();
+		} catch {
+			/* best-effort metadata enrichment */
+		}
+	});
+}
+
 export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any> {
 	render(
 		params: PreviewOpenParams | undefined,
@@ -320,6 +295,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 		// Resolve the button disabled/tooltip state.
 		const snap = findSnapshotBlock(result);
+		rememberPreviewSnapshotFromRender(params, result, isStreaming, ctx);
 		const isResultError = !!result?.isError;
 		const isComplete = !!result && !isStreaming;
 
@@ -376,10 +352,8 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
 				let liveContentHashBeforeOpen: string | undefined;
-				let appStateBeforeOpen: any;
 				try {
 					const { state: appState } = await import("../../../app/state.js");
-					appStateBeforeOpen = appState;
 					liveContentHashBeforeOpen = normalizeContentHash((appState as any).previewPanelContentHash);
 				} catch { /* optional state probe */ }
 
@@ -407,10 +381,6 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				let contentHashFromPost: string | undefined;
 				const liveAlreadyHasSnapshot = !!snapshotContentHash && liveContentHashBeforeOpen === snapshotContentHash;
 				const postBody = liveAlreadyHasSnapshot ? null : mountBodyForSnapshot(parsed, params);
-				if (snapshotContentHash && appStateBeforeOpen) {
-					if (postBody && !liveAlreadyHasSnapshot) archiveCurrentLivePreview(appStateBeforeOpen, sessionId, snapshotContentHash);
-					archiveCachedLivePreview(appStateBeforeOpen, sessionId, liveContentHashBeforeOpen, snapshotContentHash);
-				}
 				if (postBody) {
 					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
 						method: "POST",
@@ -438,8 +408,9 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				//    force the iframe to reload (its src includes `#mtime=<n>`
 				//    as a cache buster) and set the entry from the snapshot URL.
 				try {
-					const [{ state: appState, renderApp }, { selectHtmlPreviewTab }] = await Promise.all([
+					const [{ state: appState, renderApp }, workspace, { selectHtmlPreviewTab }] = await Promise.all([
 						import("../../../app/state.js"),
+						import("../../../app/panel-workspace.js"),
 						import("../../../app/preview-panel.js"),
 					]);
 					let entry = entryFromPost;
@@ -448,20 +419,15 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						if (!entry && typeof parsed.url === "string") {
 							// parsed.url is `/preview/<sid>/<entry>` — extract <entry>.
 							const m = /^\/preview\/[^/]+\/(.+)$/.exec(parsed.url);
-							if (m) entry = m[1];
+							if (m) entry = decodeURIComponent(m[1]);
 						}
 					}
 					const mtime = mtimeFromPost ?? Date.now();
 					const mountedContentHash = contentHashFromPost || snapshotContentHash;
-					// v3 snapshot blocks may omit contentHash to stay under the marker cap.
-					// In that case, the remount response is the first usable content identity
-					// for collapsing the historical v3 card into the refreshed live preview.
-					const remountProducedV3LiveContent = !!postBody
-						&& parsed.kind === "preview"
-						&& !!contentHashFromPost
-						&& (!snapshotContentHash || contentHashFromPost === snapshotContentHash);
-					const liveHasSnapshotAfterOpen = liveAlreadyHasSnapshot || remountProducedV3LiveContent;
-					archiveCurrentLivePreview(appState, sessionId, mountedContentHash);
+					// Older transcript cards should open as versioned tabs. Only keep the
+					// current filename tab when the live mount already has the same snapshot.
+					const shouldKeepCurrentPreviewTab = liveAlreadyHasSnapshot;
+					const version = workspace.registerPreviewVersion(appState, sessionId, entry || "inline.html", mountedContentHash, { current: shouldKeepCurrentPreviewTab });
 					if (entry) (appState as any).previewPanelEntry = entry;
 					(appState as any).previewPanelMtime = mtime;
 					(appState as any).previewPanelContentHash = mountedContentHash || "";
@@ -474,6 +440,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						tabSource.contentHash = mountedContentHash;
 						tabState.contentHash = mountedContentHash;
 					}
+					if (version != null) {
+						tabSource.version = version;
+						tabState.version = version;
+					}
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,
@@ -484,24 +454,11 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						url: parsed.kind === "preview" ? parsed.url : undefined,
 						source: tabSource,
 						state: tabState,
-						// Collapse only v3 history into live, and only when content identity proves
-						// the historical artifact and current live mount are identical. Legacy
-						// v1/v2 snapshots predate content hashes and must remain distinct even
-						// when a remount response returns a hash for the newly written live mount.
-						dedupeWithLive: parsed.kind === "preview" && liveHasSnapshotAfterOpen,
+						historical: !shouldKeepCurrentPreviewTab,
+						version,
+						dedupeWithLive: shouldKeepCurrentPreviewTab,
 						select: true,
 					});
-					if (liveHasSnapshotAfterOpen) {
-						rememberRestorableLivePreview(sessionId, mountedContentHash, {
-							id: tabId,
-							kind: "preview",
-							title: tabTitle,
-							label: tabTitle,
-							legacyTab: "preview",
-							source: tabSource,
-							state: tabState,
-						});
-					}
 					renderApp();
 				} catch {
 					/* state import failure shouldn't block the success animation */

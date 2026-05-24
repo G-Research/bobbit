@@ -16,7 +16,7 @@ import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
 const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
 const PREVIEW_OPEN_BUTTON_SELECTOR = '[data-testid="preview-open-button"]';
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
-const PREVIEW_TAB_RE = /^(HTML )?Preview(:|$)/i;
+const PREVIEW_TAB_RE = /\.html(?:\s*\(v\d+\))?$/i;
 const CHAT_TAB_RE = /^Chat$/i;
 
 function previewHtmlForBodyText(bodyText: string): string {
@@ -42,6 +42,13 @@ async function openGoalAssistantProposal(page: Page): Promise<string> {
 
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
 	await sendMessage(page, "Please create a GOAL_PROPOSAL for dynamic chat tabs testing");
+	// The layout regression only appears when the assistant-style goal proposal
+	// panel is nested inside the unified side-panel workspace.
+	await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		if (state) state.assistantType = "goal";
+		(window as any).__bobbitRenderApp?.();
+	});
 	await expectGoalProposalPanel(page, "goal proposal panel should be visible before opening an HTML preview");
 	return sessionId;
 }
@@ -80,6 +87,99 @@ async function expectGoalProposalPanel(page: Page, message: string): Promise<voi
 	const titleInput = page.locator(".goal-preview-panel input[placeholder='Goal title']").first();
 	await expect(titleInput, message).toBeVisible({ timeout: 15_000 });
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+	await expect.poll(async () => page.evaluate(() => {
+		if (window.innerWidth < 768) return { ok: true, reason: "mobile" };
+		const panel = document.querySelector<HTMLElement>('[data-panel="goal-proposal"]');
+		const workspace = document.querySelector<HTMLElement>('[data-panel-workspace="content"]');
+		if (!panel || !workspace) return { ok: false, reason: "missing", hasPanel: !!panel, hasWorkspace: !!workspace };
+		const panelRect = panel.getBoundingClientRect();
+		const workspaceRect = workspace.getBoundingClientRect();
+		return {
+			ok: panelRect.width >= workspaceRect.width * 0.9
+				&& panelRect.height >= workspaceRect.height * 0.75,
+			panelWidth: Math.round(panelRect.width),
+			panelHeight: Math.round(panelRect.height),
+			workspaceWidth: Math.round(workspaceRect.width),
+			workspaceHeight: Math.round(workspaceRect.height),
+		};
+	}), { timeout: 5_000, message: `${message}: desktop goal proposal should fill the side-panel workspace` }).toMatchObject({ ok: true });
+}
+
+async function mountPreviewFileViaApi(page: Page, sessionId: string, filePath: string): Promise<void> {
+	const baseUrl = new URL(page.url()).origin;
+	const mountResp = await page.evaluate(async ({ baseUrl, sessionId, filePath }) => {
+		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
+			method: "POST",
+			credentials: "include",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ file: filePath }),
+		});
+		return { status: r.status, text: await r.text() };
+	}, { baseUrl, sessionId, filePath });
+	expect(mountResp.status, `preview file mount should succeed: ${mountResp.text}`).toBe(200);
+}
+
+async function mountPreviewHtmlViaApi(page: Page, sessionId: string, entry: string, bodyText: string): Promise<void> {
+	const baseUrl = new URL(page.url()).origin;
+	const mountResp = await page.evaluate(async ({ baseUrl, sessionId, entry, bodyText }) => {
+		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
+			method: "POST",
+			credentials: "include",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ entry, html: `<!DOCTYPE html><html><body><h1>${bodyText}</h1></body></html>` }),
+		});
+		return { status: r.status, text: await r.text() };
+	}, { baseUrl, sessionId, entry, bodyText });
+	expect(mountResp.status, `preview HTML mount for ${entry} should succeed: ${mountResp.text}`).toBe(200);
+	const mounted = JSON.parse(mountResp.text) as { entry?: string; mtime?: number; contentHash?: string };
+	await page.evaluate(({ sessionId, entry, mtime, contentHash }) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		if (!state) return;
+		const label = entry.split(/[?#]/, 1)[0].replace(/\\/g, "/").split("/").filter(Boolean).pop() || "inline.html";
+		const tabId = `preview:entry:${encodeURIComponent(label)}`;
+		state.isPreviewSession = true;
+		state.previewPanelEntry = label;
+		state.previewPanelMtime = typeof mtime === "number" ? mtime : Date.now();
+		state.previewPanelContentHash = contentHash || "";
+		state.panelTabsBySession ||= {};
+		const tabs = Array.isArray(state.panelTabsBySession[sessionId]) ? state.panelTabsBySession[sessionId] : [{
+			id: "chat",
+			kind: "chat",
+			title: "Chat",
+			label: "Chat",
+			legacyTab: "chat",
+			source: { type: "chat", sessionId },
+		}];
+		for (let i = 0; i < tabs.length; i++) {
+			if (tabs[i]?.kind !== "preview") continue;
+			tabs[i] = { ...tabs[i], source: { ...(tabs[i].source || {}), live: false } };
+		}
+		const tab = {
+			id: tabId,
+			kind: "preview",
+			title: label,
+			label,
+			legacyTab: "preview",
+			source: { type: "preview", entry: label, sessionId, live: true, contentHash },
+			state: { entry: label, contentHash, historical: false },
+		};
+		const idx = tabs.findIndex((candidate: any) => candidate?.id === tabId);
+		if (idx >= 0) tabs[idx] = { ...tabs[idx], ...tab, source: { ...(tabs[idx].source || {}), ...tab.source }, state: { ...(tabs[idx].state || {}), ...tab.state } };
+		else tabs.push(tab);
+		state.panelTabsBySession[sessionId] = tabs;
+		state.panelTabs = tabs;
+		state.panelWorkspaceActiveBySession ||= {};
+		state.panelWorkspaceActiveBySession[sessionId] = tabId;
+		state.activePanelTabId = tabId;
+		state.previewPanelTab = "preview";
+		state.previewPanelActiveTab = "preview";
+		state.assistantTab = "preview";
+		(window as any).__bobbitRenderApp?.();
+	}, { sessionId, entry: mounted.entry || entry, mtime: mounted.mtime, contentHash: mounted.contentHash || "" });
+	await expect.poll(
+		async () => page.evaluate(() => (window as any).bobbitState?.previewPanelEntry || ""),
+		{ timeout: 10_000, message: `preview mount should select ${entry}` },
+	).toBe(entry);
 }
 
 async function openHtmlPreviewViaPreviewOpenFlow(
@@ -113,27 +213,7 @@ async function openHtmlPreviewViaPreviewOpenFlow(
 		{ timeout: 10_000, message: "preview_open flow should mark the assistant session as a preview session" },
 	).toBe(true);
 
-	const mountResp = await page.evaluate(async ({ baseUrl, sessionId, entry, bodyText }) => {
-		const r = await fetch(`${baseUrl}/api/preview/mount?sessionId=${sessionId}`, {
-			method: "POST",
-			credentials: "include",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				entry,
-				html: `<!DOCTYPE html><html><body><h1>${bodyText}</h1></body></html>`,
-			}),
-		});
-		return { status: r.status, text: await r.text() };
-	}, { baseUrl, sessionId, entry, bodyText });
-	expect(mountResp.status, `preview mount should succeed: ${mountResp.text}`).toBe(200);
-
-	await expect.poll(
-		async () => page.evaluate(() => {
-			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState ?? {};
-			return s.previewPanelEntry || "";
-		}),
-		{ timeout: 10_000, message: "preview_open flow should populate the preview panel entry" },
-	).toBe(entry);
+	await mountPreviewHtmlViaApi(page, sessionId, entry, bodyText);
 
 	return bodyText;
 }
@@ -207,6 +287,19 @@ async function clickTopLevelTabByIndex(page: Page, index: number, errorPrefix: s
 	await tab.evaluate((el) => (el as HTMLElement).scrollIntoView({ block: "nearest", inline: "center" }));
 	await expect(tab, `${errorPrefix}: preview tab at index ${index} should be visible before click`).toBeVisible({ timeout: 5_000 });
 	await tab.click();
+}
+
+async function clickTopLevelTabById(page: Page, id: string, errorPrefix: string): Promise<void> {
+	const tabs = await visiblePanelTabs(page);
+	const match = tabs.find((tab) => tab.id === id);
+	if (!match) {
+		throw new Error(`${errorPrefix}: expected selectable top-level tab id ${id}; visible tabs were: ${JSON.stringify(tabs)}`);
+	}
+	await clickTopLevelTabByIndex(page, match.index, errorPrefix);
+}
+
+async function visiblePreviewTabIds(page: Page): Promise<string[]> {
+	return (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").map((tab) => tab.id);
 }
 
 async function matchingTabIndexes(page: Page, label: RegExp): Promise<number[]> {
@@ -336,25 +429,25 @@ async function expectOnlyLivePreviewTab(page: Page, errorPrefix: string): Promis
 		.map((tab) => tab.id)
 		.sort(), {
 		timeout: 10_000,
-		message: `${errorPrefix}: matching historical preview should collapse to the single live preview tab`,
-	}).toEqual(["preview:live"]);
+		message: `${errorPrefix}: matching historical preview should collapse to the single current filename preview tab`,
+	}).toEqual(["preview:entry:inline.html"]);
 	await expect.poll(
 		() => page.evaluate(() => (window as any).bobbitState?.activePanelTabId ?? ""),
-		{ timeout: 5_000, message: `${errorPrefix}: collapsed preview should select the live preview tab` },
-	).toBe("preview:live");
+		{ timeout: 5_000, message: `${errorPrefix}: collapsed preview should select the current filename preview tab` },
+	).toBe("preview:entry:inline.html");
 }
 
 async function expectLegacyPreviewTabsRemainSeparate(page: Page, expectedTexts: string[], errorPrefix: string): Promise<void> {
 	await expect.poll(async () => (await visiblePanelTabs(page))
-		.filter((tab) => tab.kind === "preview" && tab.id !== "preview:live").length, {
+		.filter((tab) => tab.kind === "preview").length, {
 		timeout: 10_000,
-		message: `${errorPrefix}: legacy preview snapshots should remain historical tabs, not collapse into only preview:live`,
+		message: `${errorPrefix}: legacy preview snapshots should remain available as one tab per filename`,
 	}).toBeGreaterThanOrEqual(expectedTexts.length);
 	const previewTabs = (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview");
 	expect(
 		previewTabs.map((tab) => tab.id),
 		`${errorPrefix}: legacy preview tabs collapsed incorrectly; tabs=${JSON.stringify(previewTabs)}`,
-	).not.toEqual(["preview:live"]);
+	).not.toEqual(["preview:entry:inline.html"]);
 	const previewTabTexts = await collectAllPreviewTabTexts(page, errorPrefix);
 	for (const expectedText of expectedTexts) {
 		expect(
@@ -383,17 +476,19 @@ async function openLegacyPreviewToolCardAndExpectMountHash(page: Page, ordinal: 
 }
 
 async function collectAllPreviewTabTexts(page: Page, errorPrefix: string): Promise<string[]> {
-	const previewTabIndexes = await matchingTabIndexes(page, PREVIEW_TAB_RE);
-	if (previewTabIndexes.length === 0) {
+	const previewTabIds = (await visiblePanelTabs(page))
+		.filter((tab) => tab.kind === "preview" && PREVIEW_TAB_RE.test(tab.label))
+		.map((tab) => tab.id);
+	if (previewTabIds.length === 0) {
 		const labels = await visiblePanelTabLabels(page);
 		throw new Error(`${errorPrefix}: expected at least one preview tab; visible tabs were: ${labels.join(", ") || "<none>"}`);
 	}
 	const texts: string[] = [];
-	for (const index of previewTabIndexes) {
-		await clickTopLevelTabByIndex(page, index, errorPrefix);
+	for (const id of previewTabIds) {
+		await clickTopLevelTabById(page, id, errorPrefix);
 		await expect.poll(() => rawPreviewBodyText(page), {
 			timeout: 10_000,
-			message: `${errorPrefix}: preview tab ${index} should render non-empty iframe content`,
+			message: `${errorPrefix}: preview tab ${id} should render non-empty iframe content`,
 		}).not.toBe("");
 		texts.push(await rawPreviewBodyText(page));
 	}
@@ -419,6 +514,69 @@ test.describe("Dynamic chat tabs", () => {
 		await expectPreviewContains(page, previewText, "DYNAMIC_CHAT_TABS_BUG");
 
 		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_BUG: Goal proposal tab should remain accessible after viewing the HTML preview");
+	});
+
+	test("current HTML previews use one filename tab each and expose dismiss controls", async ({ page }, testInfo) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		await openHtmlPreviewViaPreviewOpenFlow(page, sessionId, { entry: "inline.html", bodyText: "Inline Current Preview" });
+
+		const dir = testInfo.outputPath("current-preview-tabs");
+		await mkdir(dir, { recursive: true });
+		const one = `${dir}/1.html`;
+		const two = `${dir}/2.html`;
+		await writeFile(one, previewHtmlForBodyText("Current Preview File One"), "utf8");
+		await writeFile(two, previewHtmlForBodyText("Current Preview File Two"), "utf8");
+		await mountPreviewFileViaApi(page, sessionId, one);
+		await mountPreviewFileViaApi(page, sessionId, two);
+
+		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").map((tab) => tab.label).sort(), {
+			timeout: 10_000,
+			message: "PREVIEW_FILENAME_TABS_BUG: inline.html, 1.html, and 2.html should each have exactly one current tab",
+		}).toEqual(["1.html", "2.html", "inline.html"]);
+		await expect(page.locator('button.goal-tab-pill[data-panel-tab-kind="preview"] .goal-tab-close')).toHaveCount(3);
+
+		await page.locator('button.goal-tab-pill[data-panel-tab-title="1.html"] .goal-tab-close').click();
+		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "preview").map((tab) => tab.label).sort(), {
+			timeout: 5_000,
+			message: "PREVIEW_FILENAME_TABS_BUG: dismissing a preview tab should remove only that filename tab",
+		}).toEqual(["2.html", "inline.html"]);
+	});
+
+	test("multiple current HTML preview tabs keep order and select the matching file", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.setViewportSize({ width: 1280, height: 800 });
+
+		await openApp(page);
+		const sessionId = await createRegularSessionViaApi(page);
+		const previews = [
+			{ entry: "1.html", text: "Chrome Tab Preview One" },
+			{ entry: "2.html", text: "Chrome Tab Preview Two" },
+			{ entry: "3.html", text: "Chrome Tab Preview Three" },
+			{ entry: "4.html", text: "Chrome Tab Preview Four" },
+		];
+		for (const preview of previews) {
+			await mountPreviewHtmlViaApi(page, sessionId, preview.entry, preview.text);
+		}
+
+		const expectedIds = previews.map((preview) => `preview:entry:${preview.entry}`);
+		await expect.poll(() => visiblePreviewTabIds(page), {
+			timeout: 10_000,
+			message: "PREVIEW_CHROME_TAB_ORDER_BUG: preview tabs should appear once in creation order",
+		}).toEqual(expectedIds);
+
+		for (const preview of [previews[0], previews[2], previews[1], previews[3], previews[0]]) {
+			await clickTopLevelTabById(page, `preview:entry:${preview.entry}`, `PREVIEW_CHROME_TAB_ORDER_BUG: select ${preview.entry}`);
+			await expectPreviewContains(page, preview.text, `PREVIEW_CHROME_TAB_ORDER_BUG: ${preview.entry}`);
+			await expect(page.locator(".goal-preview-panel iframe").first(), `PREVIEW_CHROME_TAB_ORDER_BUG: iframe should point at ${preview.entry}`).toHaveAttribute("src", new RegExp(`/preview/.*/${preview.entry.replace(".", "\\.")}`));
+			await expect.poll(() => visiblePreviewTabIds(page), {
+				timeout: 5_000,
+				message: `PREVIEW_CHROME_TAB_ORDER_BUG: selecting ${preview.entry} should not reorder tabs`,
+			}).toEqual(expectedIds);
+		}
 	});
 
 	test("legacy v1 and v2 preview_open snapshots remain distinct across reload", async ({ page, gateway }, testInfo) => {

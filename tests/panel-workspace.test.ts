@@ -8,6 +8,7 @@ import {
 	findPanelTab,
 	isLivePreviewTab,
 	previewContentHashFromTab,
+	previewEntryTabId,
 	previewTabsHaveSameContent,
 	type PanelWorkspaceTab,
 } from "../src/app/panel-workspace.ts";
@@ -16,8 +17,8 @@ function previewTab(id: string, source: Record<string, unknown> = {}): PanelWork
 	return {
 		id,
 		kind: "preview",
-		title: "Preview: inline.html",
-		label: "Preview: inline.html",
+		title: "inline.html",
+		label: "inline.html",
 		legacyTab: "preview",
 		source: { type: "html-preview", entry: "inline.html", ...source } as any,
 	};
@@ -37,7 +38,7 @@ describe("panel workspace preview tab compatibility", () => {
 			inboxHasPending: false,
 		});
 
-		assert.equal(findPanelTab(tabs, "preview")?.id, LIVE_PREVIEW_PANEL_TAB_ID);
+		assert.equal(findPanelTab(tabs, "preview")?.id, previewEntryTabId("inline.html"));
 	});
 
 	it("normalizes persisted active legacy preview selections", () => {

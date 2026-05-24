@@ -93,7 +93,7 @@ function proposalPanel(page: Page, expected: ProposalExpectation) {
 }
 
 function reviewPanelTab(page: Page, title: string) {
-	return page.locator(".goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review']", { hasText: new RegExp(`^Review:\\s*${title}$`) });
+	return page.locator(`.goal-preview-panel button.goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-title="Review: ${title}"]`);
 }
 
 test.describe("Proposal/review lightweight fixture", () => {

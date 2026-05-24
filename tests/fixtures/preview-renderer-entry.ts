@@ -70,29 +70,32 @@ void renderTool;
 };
 (window as any).__setPreviewWorkspace = async (sessionId: string, hash: string) => {
 	const { state } = await import("../../src/app/state.js");
+	const { previewEntryTabId, registerPreviewVersion } = await import("../../src/app/panel-workspace.js");
+	const tabId = previewEntryTabId("inline.html");
+	registerPreviewVersion(state, sessionId, "inline.html", hash, { current: true });
 	(state as any).previewPanelEntry = "inline.html";
 	(state as any).previewPanelMtime = 123;
 	(state as any).previewPanelContentHash = hash;
 	(state as any).isPreviewSession = true;
 	(state as any).panelTabsBySession = {
 		[sessionId]: [{
-			id: "preview:live",
+			id: tabId,
 			kind: "preview",
-			title: "Preview: inline.html",
-			label: "Preview: inline.html",
+			title: "inline.html",
+			label: "inline.html",
 			legacyTab: "preview",
-			source: { type: "preview", entry: "inline.html", sessionId, live: true, contentHash: hash },
-			state: { entry: "inline.html", contentHash: hash },
+			source: { type: "preview", entry: "inline.html", sessionId, live: true, contentHash: hash, version: 1 },
+			state: { entry: "inline.html", contentHash: hash, version: 1 },
 		}],
 	};
 	(state as any).panelTabs = (state as any).panelTabsBySession[sessionId];
-	(state as any).panelWorkspaceActiveBySession = { [sessionId]: "preview:live" };
-	(state as any).activePanelTabId = "preview:live";
+	(state as any).panelWorkspaceActiveBySession = { [sessionId]: tabId };
+	(state as any).activePanelTabId = tabId;
 };
 (window as any).__setLivePreviewHash = (sessionId: string, hash: string) => {
 	(appState as any).previewPanelContentHash = hash;
 	const tabs = (appState as any).panelTabsBySession?.[sessionId];
-	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.source?.live === true || tab?.id === "preview:live" || tab?.id === "preview") : undefined;
 	if (live) {
 		live.source = { ...(live.source || {}), contentHash: hash };
 		live.state = { ...(live.state || {}), contentHash: hash };
@@ -100,7 +103,7 @@ void renderTool;
 };
 (window as any).__markLivePreviewRestorable = (sessionId: string, html: string) => {
 	const tabs = (appState as any).panelTabsBySession?.[sessionId];
-	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.source?.live === true || tab?.id === "preview:live" || tab?.id === "preview") : undefined;
 	if (live) {
 		live.source = { ...(live.source || {}), snapshotKind: "inline" };
 		live.state = { ...(live.state || {}), snapshotKind: "inline", snapshotHtml: html };
@@ -108,7 +111,7 @@ void renderTool;
 };
 (window as any).__clearLivePreviewRestorable = (sessionId: string) => {
 	const tabs = (appState as any).panelTabsBySession?.[sessionId];
-	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.id === "preview:live" || tab?.id === "preview") : undefined;
+	const live = Array.isArray(tabs) ? tabs.find((tab: any) => tab?.source?.live === true || tab?.id === "preview:live" || tab?.id === "preview") : undefined;
 	if (live) {
 		const { snapshotKind: _sourceKind, ...source } = live.source || {};
 		const { snapshotKind: _stateKind, snapshotHtml: _html, snapshotFile: _file, ...state } = live.state || {};

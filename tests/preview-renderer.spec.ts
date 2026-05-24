@@ -24,6 +24,7 @@ const MARKER_V3 = "__preview_snapshot_v3__\n";
 const SESSION_ID = "11111111-1111-1111-1111-111111111111";
 const HASH = "b".repeat(64);
 const TOOL_USE_ID = "tool-1";
+const INLINE_TAB_ID = "preview:entry:inline.html";
 
 function makeResultWithSnapshot(html: string) {
 	return {
@@ -210,11 +211,10 @@ test.describe("PreviewOpenRenderer", () => {
 
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:tool:tool-1:1"]);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
 		expect(tabs[0].state.contentHash).toBe(HASH);
-		expect(tabs[0].source.dedupeWithLive).toBe(false);
-		expect(tabs[0].state.dedupeWithLive).toBe(false);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
+		expect(tabs[0].label).toBe("inline.html");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 	});
 
 	test("click with truncated snapshot: GET tool-content then PATCH then POST", async ({ page }) => {
@@ -289,14 +289,13 @@ test.describe("PreviewOpenRenderer", () => {
 
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:tool:tool-1:1"]);
+		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:entry:report.html"]);
 		expect(tabs[0].state.contentHash).toBe(HASH);
-		expect(tabs[0].source.dedupeWithLive).toBe(false);
-		expect(tabs[0].state.dedupeWithLive).toBe(false);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
+		expect(tabs[0].label).toBe("report.html");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:report.html");
 	});
 
-	test("legacy v1/v2 markers: matching remount hash remains a historical tab", async ({ page }) => {
+	test("legacy v1/v2 markers: matching remount hash reuses the filename tab", async ({ page }) => {
 		await gotoAndWait(page);
 		const filePath = "/abs/path/to/report.html";
 		const cases = [
@@ -326,12 +325,10 @@ test.describe("PreviewOpenRenderer", () => {
 			expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
 			const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 			const tabs = previewState.panelTabsBySession[SESSION_ID];
-			expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live", "preview:tool:tool-1:1"]);
+			expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
 			expect(tabs[0].state.contentHash).toBe(HASH);
-			expect(tabs[1].state.contentHash).toBe(HASH);
-			expect(tabs[1].source.dedupeWithLive).toBe(false);
-			expect(tabs[1].state.dedupeWithLive).toBe(false);
-			expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
+			expect(tabs[0].label).toBe("inline.html");
+			expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 		}
 	});
 
@@ -361,8 +358,8 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.some((call: any) => call.method === "POST" && String(call.url).includes("/api/preview/mount"))).toBe(false);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 		expect(previewState.previewPanelContentHash).toBe(HASH);
 	});
 
@@ -389,9 +386,9 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
 		expect(tabs[0].state.contentHash).toBe(HASH);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 	});
 
 	test("v3 marker: no marker hash collapses to live after remount returns content hash", async ({ page }) => {
@@ -419,13 +416,13 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live"]);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
 		expect(tabs[0].state.contentHash).toBe(HASH);
 		expect(previewState.previewPanelContentHash).toBe(HASH);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
 	});
 
-	test("v3 marker: remount archives previous restorable live preview before SSE collapse", async ({ page }) => {
+	test("v3 marker: remount replaces the current filename tab without auto-archiving", async ({ page }) => {
 		await gotoAndWait(page);
 		const oldHash = "e".repeat(64);
 		const oldHtml = "<p>old live</p>";
@@ -449,18 +446,15 @@ test.describe("PreviewOpenRenderer", () => {
 
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs).toHaveLength(2);
-		const live = tabs.find((tab: any) => tab.id === "preview:live");
-		const archived = tabs.find((tab: any) => tab.id !== "preview:live");
-		expect(live.state.contentHash).toBe(HASH);
-		expect(archived.state.contentHash).toBe(oldHash);
-		expect(archived.state.snapshotHtml).toBe(oldHtml);
-		expect(archived.source.dedupeWithLive).toBe(false);
-		expect(archived.state.dedupeWithLive).toBe(false);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:live");
+		expect(tabs).toHaveLength(1);
+		expect(tabs[0].id).toBe(INLINE_TAB_ID);
+		expect(tabs[0].state.contentHash).toBe(HASH);
+		expect(tabs[0].state.snapshotHtml).toBe("<p>new</p>");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe(INLINE_TAB_ID);
+		void oldHtml;
 	});
 
-	test("v3 marker: remount archives cached live preview when SSE dropped restore params", async ({ page }) => {
+	test("v3 marker: remount keeps one current filename tab when SSE dropped restore params", async ({ page }) => {
 		await gotoAndWait(page);
 		const initialHash = "1".repeat(64);
 		const firstHash = "a".repeat(64);
@@ -510,17 +504,13 @@ test.describe("PreviewOpenRenderer", () => {
 
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:live", "preview:tool:tool-a:1"].sort());
-		expect(tabs.find((tab: any) => tab.id === "preview:live").state.contentHash).toBe(secondHash);
-		const archived = tabs.find((tab: any) => tab.id === "preview:tool:tool-a:1");
-		expect(archived.state.contentHash).toBe(firstHash);
-		expect(archived.source.sessionId).toBe(SESSION_ID);
-		expect(archived.state.sessionId).toBe(SESSION_ID);
-		expect(archived.source.dedupeWithLive).toBe(false);
-		expect(archived.state.dedupeWithLive).toBe(false);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].state.contentHash).toBe(secondHash);
+		expect(tabs[0].source.sessionId).toBe(SESSION_ID);
+		void firstHash;
 	});
 
-	test("v3 marker: matching live preview caches restorable params for a later different snapshot", async ({ page }) => {
+	test("v3 marker: matching live preview updates restore params for a later different snapshot", async ({ page }) => {
 		await gotoAndWait(page);
 		const firstHash = "a".repeat(64);
 		const secondHash = "b".repeat(64);
@@ -572,16 +562,13 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH", "POST"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:live", "preview:tool:tool-a:1"].sort());
-		expect(tabs.find((tab: any) => tab.id === "preview:live").state.contentHash).toBe(secondHash);
-		const archived = tabs.find((tab: any) => tab.id === "preview:tool:tool-a:1");
-		expect(archived.state.contentHash).toBe(firstHash);
-		expect(archived.state.snapshotHtml).toBe("<p>first</p>");
-		expect(archived.source.dedupeWithLive).toBe(false);
-		expect(archived.state.dedupeWithLive).toBe(false);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].state.contentHash).toBe(secondHash);
+		expect(tabs[0].state.snapshotHtml).toBe("<p>second</p>");
+		void firstHash;
 	});
 
-	test("v3 marker: archives cached preview when delayed live state already matches the next snapshot", async ({ page }) => {
+	test("v3 marker: delayed live state still keeps one current filename tab", async ({ page }) => {
 		await gotoAndWait(page);
 		const initialHash = "1".repeat(64);
 		const firstHash = "a".repeat(64);
@@ -634,15 +621,12 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id).sort()).toEqual(["preview:live", "preview:tool:tool-a:1"].sort());
-		expect(tabs.find((tab: any) => tab.id === "preview:live").state.contentHash).toBe(secondHash);
-		const archived = tabs.find((tab: any) => tab.id === "preview:tool:tool-a:1");
-		expect(archived.state.contentHash).toBe(firstHash);
-		expect(archived.source.dedupeWithLive).toBe(false);
-		expect(archived.state.dedupeWithLive).toBe(false);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID]);
+		expect(tabs[0].state.contentHash).toBe(secondHash);
+		void firstHash;
 	});
 
-	test("v3 marker: different snapshot with no restorable params remains a historical tab", async ({ page }) => {
+	test("v3 marker: different snapshot with no restorable params opens its filename tab", async ({ page }) => {
 		await gotoAndWait(page);
 		const oldHash = "d".repeat(64);
 		await page.evaluate(async ([oldHash, sessionId, result]) => {
@@ -667,10 +651,11 @@ test.describe("PreviewOpenRenderer", () => {
 		expect(calls.map((call: any) => call.method)).toEqual(["PATCH"]);
 		const previewState = await page.evaluate(async () => (window as any).__getPreviewState());
 		const tabs = previewState.panelTabsBySession[SESSION_ID];
-		expect(tabs.map((tab: any) => tab.id)).toEqual(["preview:live", "preview:tool:tool-1:1"]);
+		expect(tabs.map((tab: any) => tab.id)).toEqual([INLINE_TAB_ID, "preview:entry:snapshot-only.html"]);
 		expect(tabs[0].state.contentHash).toBe(oldHash);
 		expect(tabs[1].state.contentHash).toBe(HASH);
-		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:tool:tool-1:1");
+		expect(tabs[1].label).toBe("snapshot-only.html");
+		expect(previewState.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:snapshot-only.html");
 	});
 
 	test("v2 marker: server 404 → button shows 'File no longer available' and stays disabled", async ({ page }) => {

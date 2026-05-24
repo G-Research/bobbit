@@ -71,6 +71,92 @@ export function previewTabAllowsLiveDedupe(tab: PanelWorkspaceTab | undefined | 
 	return source?.dedupeWithLive !== false && tabState?.dedupeWithLive !== false;
 }
 
+export function previewEntryLabel(entry: string | undefined | null): string {
+	const clean = (entry || "inline.html").split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "inline.html";
+	return clean.split("/").filter(Boolean).pop() || clean || "inline.html";
+}
+
+export function previewEntryTabId(entry: string | undefined | null): string {
+	return `preview:entry:${encodeURIComponent(previewEntryLabel(entry))}`;
+}
+
+export function previewVersionedTabId(entry: string | undefined | null, version: number): string {
+	return `${previewEntryTabId(entry)}:v:${Math.trunc(version)}`;
+}
+
+export function previewTabVersion(tab: PanelWorkspaceTab | undefined | null): number | undefined {
+	const stateRev = tab?.state?.version;
+	if (typeof stateRev === "number" && Number.isFinite(stateRev) && stateRev > 0) return Math.trunc(stateRev);
+	const source = tab?.source as Record<string, unknown> | undefined;
+	const sourceRev = source?.version;
+	if (typeof sourceRev === "number" && Number.isFinite(sourceRev) && sourceRev > 0) return Math.trunc(sourceRev);
+	const match = /:v:(\d+)$/.exec(tab?.id || "");
+	return match ? Number(match[1]) : undefined;
+}
+
+export function isHistoricalPreviewTab(tab: PanelWorkspaceTab | undefined | null): boolean {
+	if (!tab || tab.kind !== "preview") return false;
+	const source = tab.source as Record<string, unknown> | undefined;
+	return tab.state?.historical === true || source?.historical === true || tab.state?.dedupeWithLive === false || source?.dedupeWithLive === false || /:v:\d+$/.test(tab.id || "");
+}
+
+export function previewTabDisplayTitle(entry: string | undefined | null, version?: number, historical = false): string {
+	const label = previewEntryLabel(entry);
+	return historical && typeof version === "number" && Number.isFinite(version) && version > 0
+		? `${label} (v${Math.trunc(version)})`
+		: label;
+}
+
+export interface PreviewVersionRecord {
+	latestVersion: number;
+	latestContentHash?: string;
+	hashToVersion: Record<string, number>;
+}
+
+function ensurePreviewVersionRecord(stateLike: any, sessionId: string, entry: string): PreviewVersionRecord {
+	if (!stateLike.previewVersionsBySession || typeof stateLike.previewVersionsBySession !== "object" || Array.isArray(stateLike.previewVersionsBySession)) {
+		stateLike.previewVersionsBySession = {};
+	}
+	const bySession = stateLike.previewVersionsBySession as Record<string, Record<string, PreviewVersionRecord>>;
+	const sid = panelWorkspaceSessionKey(sessionId);
+	if (!bySession[sid] || typeof bySession[sid] !== "object" || Array.isArray(bySession[sid])) bySession[sid] = {};
+	const key = previewEntryLabel(entry);
+	if (!bySession[sid][key] || typeof bySession[sid][key] !== "object") {
+		bySession[sid][key] = { latestVersion: 0, hashToVersion: {} };
+	}
+	if (!bySession[sid][key].hashToVersion || typeof bySession[sid][key].hashToVersion !== "object") bySession[sid][key].hashToVersion = {};
+	return bySession[sid][key];
+}
+
+export function previewVersionRecordFor(stateLike: any, sessionId: string, entry: string | undefined | null): PreviewVersionRecord | undefined {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const key = previewEntryLabel(entry);
+	const record = stateLike?.previewVersionsBySession?.[sid]?.[key];
+	if (!record || typeof record !== "object") return undefined;
+	return record as PreviewVersionRecord;
+}
+
+export function registerPreviewVersion(stateLike: any, sessionId: string, entry: string | undefined | null, contentHash: unknown, options: { current?: boolean; version?: number } = {}): number | undefined {
+	const hash = normalizePreviewContentHash(contentHash);
+	const record = ensurePreviewVersionRecord(stateLike, sessionId, previewEntryLabel(entry));
+	const explicit = typeof options.version === "number" && Number.isFinite(options.version) && options.version > 0
+		? Math.trunc(options.version)
+		: undefined;
+	if (hash && explicit != null) record.hashToVersion[hash] = explicit;
+	let version = hash ? record.hashToVersion[hash] : undefined;
+	if (version == null && explicit != null) version = explicit;
+	if (version == null && hash) {
+		version = Math.max(1, record.latestVersion + 1);
+		record.hashToVersion[hash] = version;
+	}
+	if (version != null && version > record.latestVersion) record.latestVersion = version;
+	if (options.current && hash && version != null) {
+		record.latestContentHash = hash;
+		if (version > record.latestVersion) record.latestVersion = version;
+	}
+	return version;
+}
+
 function normalizePanelTabId(id: string): string {
 	return id === LEGACY_LIVE_PREVIEW_PANEL_TAB_ID ? LIVE_PREVIEW_PANEL_TAB_ID : id;
 }
@@ -223,20 +309,20 @@ export function buildPanelWorkspaceTabs(input: BuildPanelWorkspaceTabsInput): Pa
 		source: { type: "chat", sessionId: input.sessionId },
 	}];
 
-	if (input.isPreviewSession) {
-		const entry = input.previewEntry || "inline.html";
-		const title = `Preview: ${entry}`;
+	if (input.isPreviewSession && input.previewEntry) {
+		const entry = previewEntryLabel(input.previewEntry);
+		const title = previewTabDisplayTitle(entry);
 		const contentHash = normalizePreviewContentHash(input.previewContentHash);
 		tabs.push({
-			id: LIVE_PREVIEW_PANEL_TAB_ID,
+			id: previewEntryTabId(entry),
 			kind: "preview",
 			title,
 			label: title,
 			legacyTab: "preview",
 			source: contentHash
-				? { type: "preview", entry, sessionId: input.sessionId, contentHash }
-				: { type: "preview", entry, sessionId: input.sessionId },
-			state: contentHash ? { contentHash } : undefined,
+				? { type: "preview", entry, sessionId: input.sessionId, contentHash, live: true }
+				: { type: "preview", entry, sessionId: input.sessionId, live: true },
+			state: contentHash ? { contentHash, entry, historical: false } : { entry, historical: false },
 		});
 	}
 
@@ -293,6 +379,9 @@ export function findPanelTab(tabs: PanelWorkspaceTab[], id: string | null | unde
 	id = normalizePanelTabId(id);
 	const exact = tabs.find((tab) => tab.id === id);
 	if (exact) return exact;
+	if (id === LIVE_PREVIEW_PANEL_TAB_ID) {
+		return tabs.find((tab) => isLivePreviewTab(tab)) ?? tabs.find((tab) => tab.kind === "preview");
+	}
 	if (id.startsWith("review:")) {
 		const rawTitle = id.slice("review:".length);
 		let decodedTitle = rawTitle;

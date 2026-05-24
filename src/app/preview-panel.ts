@@ -4,11 +4,15 @@ import {
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
-	isLivePreviewTab,
+	isHistoricalPreviewTab,
+	registerPreviewVersion,
+	previewEntryLabel,
+	previewEntryTabId,
+	previewTabDisplayTitle,
+	previewVersionedTabId,
 	normalizePreviewContentHash,
 	panelTabsForSession,
 	previewContentHashFromTab,
-	previewTabAllowsLiveDedupe,
 	proposalPanelTabId,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
@@ -42,12 +46,6 @@ const PROPOSAL_LABELS: Record<string, string> = {
 
 let es: EventSource | null = null;
 let currentSid: string | null = null;
-
-function safeBaseName(path: string | undefined): string {
-	if (!path) return "";
-	const clean = path.split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "";
-	return clean.split("/").filter(Boolean).pop() || clean || "";
-}
 
 function panelSessionId(sessionId: string | undefined): string {
 	return sessionId || activeSessionId() || "";
@@ -177,15 +175,34 @@ export function selectHtmlPreviewTab(args: {
 	source?: Record<string, unknown>;
 	state?: Record<string, unknown>;
 	dedupeWithLive?: boolean;
+	historical?: boolean;
+	version?: number;
 	select?: boolean;
 	setAssistantTab?: boolean;
 }): void {
 	const sessionId = args.sessionId || activeSessionId() || "";
-	const entry = args.entry || state.previewPanelEntry || "index.html";
-	const title = args.title || `Preview: ${safeBaseName(entry) || "inline.html"}`;
-	const id = args.id || LIVE_PREVIEW_PANEL_TAB_ID;
+	const entry = previewEntryLabel(args.entry || state.previewPanelEntry || "inline.html");
+	const s = state as any;
+	const explicitVersion = typeof args.version === "number" && Number.isFinite(args.version) && args.version > 0
+		? Math.trunc(args.version)
+		: typeof args.state?.version === "number" && Number.isFinite(args.state.version) && args.state.version > 0
+		? Math.trunc(args.state.version)
+		: typeof args.source?.version === "number" && Number.isFinite(args.source.version) && args.source.version > 0
+		? Math.trunc(args.source.version)
+		: undefined;
+	const requestedHistorical = args.historical === true || args.source?.historical === true || args.state?.historical === true || args.dedupeWithLive === false;
 	const contentHash = normalizePreviewContentHash(args.contentHash)
-		|| (id === LIVE_PREVIEW_PANEL_TAB_ID ? normalizePreviewContentHash((state as any).previewPanelContentHash) : "");
+		|| (normalizePreviewContentHash(args.state?.contentHash) || normalizePreviewContentHash(args.source?.contentHash))
+		|| (!requestedHistorical ? normalizePreviewContentHash(s.previewPanelContentHash) : "");
+	const version = registerPreviewVersion(s, sessionId, entry, contentHash, { current: !requestedHistorical, version: explicitVersion });
+	const isVersionedHistorical = requestedHistorical
+		&& typeof version === "number"
+		&& Number.isFinite(version)
+		&& version > 0;
+	const id = isVersionedHistorical
+		? previewVersionedTabId(entry, version)
+		: previewEntryTabId(entry);
+	const title = previewTabDisplayTitle(entry, version, isVersionedHistorical);
 	const source: Record<string, unknown> = {
 		type: "html-preview",
 		sessionId,
@@ -202,9 +219,19 @@ export function selectHtmlPreviewTab(args: {
 		source.contentHash = contentHash;
 		tabState.contentHash = contentHash;
 	}
-	if (args.dedupeWithLive === false) {
+	if (version != null) {
+		source.version = version;
+		tabState.version = version;
+	}
+	if (isVersionedHistorical) {
+		source.historical = true;
+		tabState.historical = true;
 		source.dedupeWithLive = false;
 		tabState.dedupeWithLive = false;
+	} else {
+		source.historical = false;
+		tabState.historical = false;
+		if (args.select !== false) source.live = true;
 	}
 	const tab: PanelWorkspaceTab = {
 		id,
@@ -215,73 +242,39 @@ export function selectHtmlPreviewTab(args: {
 		source: source as PanelWorkspaceTab["source"],
 		state: tabState,
 	};
-	const s = state as any;
 	const existingTabs = panelTabsForSession(s, sessionId);
-	const liveTabForSameContent = (): PanelWorkspaceTab => ({
-		...tab,
-		id: LIVE_PREVIEW_PANEL_TAB_ID,
-		source: {
-			...source,
-			live: true,
-			origin: typeof source.origin === "string" ? source.origin : "preview-open-dedupe",
-		} as PanelWorkspaceTab["source"],
-		state: tabState,
-	});
-	const currentLiveMatches = !!contentHash
-		&& !isLivePreviewTab(tab)
-		&& args.dedupeWithLive !== false
-		&& normalizePreviewContentHash(s.previewPanelContentHash) === contentHash;
-	if (currentLiveMatches) {
-		const duplicateIds = existingTabs
-			.filter((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
-				&& candidate.id !== LIVE_PREVIEW_PANEL_TAB_ID
-				&& previewContentHashFromTab(candidate) === contentHash
-				&& previewTabAllowsLiveDedupe(candidate))
-			.map((candidate: PanelWorkspaceTab) => candidate.id);
-		const activeId = activePanelTabIdForSession(s, sessionId);
-		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
-		const liveTab = liveTabForSameContent();
-		const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
-		selectPanelWorkspaceTab(liveTab, {
-			sessionId,
-			select: shouldSelect,
-			setAssistantTab: args.setAssistantTab,
-		});
-		if (shouldSelect) s.previewPanelMountedTabId = liveTab.id;
-		return;
-	}
-	const duplicateTabs = contentHash
-		? existingTabs.filter((candidate: PanelWorkspaceTab) => {
-			if (candidate.kind !== "preview" || candidate.id === tab.id || previewContentHashFromTab(candidate) !== contentHash) return false;
-			if (isLivePreviewTab(tab)) return previewTabAllowsLiveDedupe(candidate);
-			return args.dedupeWithLive !== false || !isLivePreviewTab(candidate);
-		})
-		: [];
-	if (duplicateTabs.length > 0) {
-		if (isLivePreviewTab(tab)) {
-			const duplicateIds = duplicateTabs.map(candidate => candidate.id);
-			const activeId = activePanelTabIdForSession(s, sessionId);
-			if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
-			const shouldSelect = args.select !== false || duplicateIds.includes(activeId);
-			selectPanelWorkspaceTab(tab, {
+	const entryForTab = (candidate: PanelWorkspaceTab): string => {
+		const candidateSource = candidate.source as Record<string, unknown>;
+		const candidateState = (candidate.state || {}) as Record<string, unknown>;
+		const raw = typeof candidateState.entry === "string" ? candidateState.entry : typeof candidateSource.entry === "string" ? candidateSource.entry : "inline.html";
+		return previewEntryLabel(raw);
+	};
+	if (isVersionedHistorical && contentHash && args.dedupeWithLive !== false) {
+		const currentForSameVersion = existingTabs.find((candidate: PanelWorkspaceTab) => candidate.kind === "preview"
+			&& !isHistoricalPreviewTab(candidate)
+			&& entryForTab(candidate) === entry
+			&& previewContentHashFromTab(candidate) === contentHash);
+		if (currentForSameVersion) {
+			selectPanelWorkspaceTab(currentForSameVersion, {
 				sessionId,
-				select: shouldSelect,
+				select: args.select,
 				setAssistantTab: args.setAssistantTab,
 			});
-			if (shouldSelect) s.previewPanelMountedTabId = tab.id;
+			if (args.select !== false) s.previewPanelMountedTabId = currentForSameVersion.id;
 			return;
 		}
-		const canonical = duplicateTabs.find(isLivePreviewTab) ?? duplicateTabs[0];
-		const selectedTab = isLivePreviewTab(canonical) ? liveTabForSameContent() : canonical;
-		const duplicateIds = duplicateTabs.filter(candidate => candidate.id !== selectedTab.id).map(candidate => candidate.id);
-		if (duplicateIds.length > 0) removePanelWorkspaceTabs(duplicateIds, { sessionId, select: false, clearCollapse: false });
-		selectPanelWorkspaceTab(selectedTab, {
-			sessionId,
-			select: args.select,
-			setAssistantTab: args.setAssistantTab,
-		});
-		if (args.select !== false) s.previewPanelMountedTabId = selectedTab.id;
-		return;
+	}
+	if (!isVersionedHistorical && args.select !== false) {
+		for (let i = 0; i < existingTabs.length; i++) {
+			const candidate = existingTabs[i];
+			if (candidate.kind !== "preview" || candidate.id === tab.id) continue;
+			const candidateSource = { ...candidate.source as Record<string, unknown> };
+			if (candidateSource.live === true) {
+				delete candidateSource.live;
+				existingTabs[i] = { ...candidate, source: candidateSource as PanelWorkspaceTab["source"] };
+			}
+		}
+		setPanelTabsForSession(s, sessionId, existingTabs);
 	}
 	selectPanelWorkspaceTab(tab, {
 		sessionId,

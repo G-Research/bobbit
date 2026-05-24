@@ -18,7 +18,7 @@ const ANNOTATION_STORE_SRC = path.resolve("src/ui/components/review/AnnotationSt
 
 const PANEL_TAB_SELECTOR = "button.goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
-const PREVIEW_TAB_RE = /^(HTML )?Preview(:|$)/i;
+const PREVIEW_TAB_RE = /\.html(?:\s*\(v\d+\))?$/i;
 const REVIEW_DOCS = [
 	{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
 	{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
@@ -211,7 +211,7 @@ async function mobileTabBarDiagnostics(page: Page): Promise<{ labels: string[]; 
 		const bars = [...document.querySelectorAll(".goal-tab-bar")].map((bar) => {
 			const labels = [...bar.querySelectorAll("button.goal-tab-pill")].map((button) => normalize(button.getAttribute("title") || button.textContent));
 			const hasGoal = labels.some((label) => /^Goal( Proposal)?$/i.test(label));
-			const hasPreview = labels.some((label) => /^(HTML )?Preview(:|$)/i.test(label));
+			const hasPreview = labels.some((label) => /\.html(?:\s*\(v\d+\))?$/i.test(label));
 			const reviewCount = labels.filter((label) => /^(Review:\s*)?Document [ABC]$/i.test(label)).length;
 			return {
 				labels,
@@ -278,12 +278,12 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 			"DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG",
 		);
 
-		await selectTopLevelTabByTitle(page, /Preview:\s*multipreview-a\.html/i, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		await clickTopLevelTabById(page, "preview:entry:multipreview-a.html:v:1", "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
 		await expectPreviewEntry(page, "multipreview-a.html", hashOf("a"), "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: first preview");
-		await selectTopLevelTabByTitle(page, /Preview:\s*multipreview-b\.html/i, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
+		await clickTopLevelTabById(page, "preview:entry:multipreview-b.html:v:1", "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
 		await expectPreviewEntry(page, "multipreview-b.html", hashOf("b"), "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: second preview");
 		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG");
-		await selectTopLevelTabByTitle(page, /Preview:\s*multipreview-a\.html/i, "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopen first");
+		await clickTopLevelTabById(page, "preview:entry:multipreview-a.html:v:1", "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopen first");
 		await expectPreviewEntry(page, "multipreview-a.html", hashOf("a"), "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopened first preview");
 	});
 
@@ -360,16 +360,16 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 		]);
 		await waitForTopLevelTabCounts(page, [{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }], "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: previews mounted");
 
-		await clickTopLevelTabById(page, "preview:tool:v3-different-a:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: first open");
+		await clickTopLevelTabById(page, "preview:entry:inline.html:v:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: first open");
 		await expectPreviewEntry(page, "inline.html", hashOf("e"), "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview A");
-		await clickTopLevelTabById(page, "preview:tool:v3-different-b:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview B");
+		await clickTopLevelTabById(page, "preview:entry:inline.html:v:2", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview B");
 		await expectPreviewEntry(page, "inline.html", hashOf("f"), "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: preview B");
 
 		await reloadAndRehydrateFixture(page);
 		await waitForTopLevelTabCounts(page, [{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }], "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: after reload");
-		await clickTopLevelTabById(page, "preview:tool:v3-different-a:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview A");
+		await clickTopLevelTabById(page, "preview:entry:inline.html:v:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview A");
 		await expectPreviewEntry(page, "inline.html", hashOf("e"), "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview A");
-		await clickTopLevelTabById(page, "preview:tool:v3-different-b:1", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview B");
+		await clickTopLevelTabById(page, "preview:entry:inline.html:v:2", "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview B");
 		await expectPreviewEntry(page, "inline.html", hashOf("f"), "DYNAMIC_CHAT_TABS_V3_DIFFERENT_HASH_BUG: reloaded preview B");
 	});
 
@@ -386,16 +386,16 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 		const presentations = await visiblePreviewTabPresentations(page);
 		const labels = presentations.map((tab) => tab.text || tab.tooltip || tab.dataTitle);
 		expect(labels).toEqual(expect.arrayContaining([
-			"Preview: inline.html",
-			"Preview: v3-a.html",
-			"Preview: v3-b.html",
-			"Preview: inline.html (snapshot)",
+			"inline.html",
+			"v3-a.html (v1)",
+			"v3-b.html (v1)",
+			"inline.html (v2)",
 		]));
 		expect(new Set(labels).size, `DYNAMIC_CHAT_TABS_PREVIEW_DUPLICATE_LABEL_BUG: duplicate preview labels: ${JSON.stringify(presentations)}`).toBe(labels.length);
 
-		await selectTopLevelTabByTitle(page, /Preview:\s*v3-a\.html/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
+		await selectTopLevelTabByTitle(page, /^v3-a\.html(?:\s*\(v\d+\))?$/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
 		await expectPreviewEntry(page, "v3-a.html", hashOf("2"), "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: preview A");
-		await selectTopLevelTabByTitle(page, /Preview:\s*v3-b\.html/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
+		await selectTopLevelTabByTitle(page, /^v3-b\.html(?:\s*\(v\d+\))?$/i, "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG");
 		await expectPreviewEntry(page, "v3-b.html", hashOf("3"), "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: preview B");
 	});
 

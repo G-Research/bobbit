@@ -330,6 +330,7 @@ export const state = {
 	activePanelTabId: "chat",
 	panelWorkspaceActiveBySession: {} as Record<string, string>,
 	panelWorkspacePreviewKeyBySession: {} as Record<string, string>,
+	previewVersionsBySession: {} as Record<string, Record<string, { latestVersion: number; latestContentHash?: string; hashToVersion: Record<string, number> }>>,
 
 	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
