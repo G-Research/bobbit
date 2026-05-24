@@ -1,5 +1,5 @@
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai";
+import { loadPiAi } from "../../app/pi-ai-lazy.js";
 
 /**
  * Centralized proxy decision logic.
@@ -123,6 +123,8 @@ export function createStreamFn(getProxyUrl: () => Promise<string | undefined>) {
 	return async (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
 		const apiKey = options?.apiKey;
 		const proxyUrl = await getProxyUrl();
+
+		const { streamSimple } = await loadPiAi();
 
 		if (!apiKey || !proxyUrl) {
 			return streamSimple(model, context, options);
