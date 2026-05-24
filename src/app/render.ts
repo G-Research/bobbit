@@ -78,6 +78,7 @@ import {
 	previewContentHashFromTab,
 	previewTabDisplayTitle,
 	previewTabVersion,
+	previewVersionRecordFor,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
 	reorderSidePanelTab,
@@ -2858,11 +2859,60 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		const alreadyMounted = currentMountedPreviewTabId() === tab.id
 			&& !!liveEntry
 			&& state.previewPanelEntry === liveEntry;
-		if (!alreadyMounted) {
-			if (liveEntry) state.previewPanelEntry = liveEntry;
-			if (liveHash) (state as any).previewPanelContentHash = liveHash;
-			state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
+		if (alreadyMounted) {
+			clearPreviewTabRestoreError(sessionId, tab.id);
+			markPreviewTabMounted(tab);
+			return;
 		}
+		const liveMountHash = normalizePreviewContentHash((state as any).previewPanelContentHash);
+		const tabArtifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+		// If the live server mount currently holds bytes for a DIFFERENT version
+		// than this current/filename tab represents (e.g. user just viewed a
+		// historical tab which rehydrated older bytes into the live mount), we
+		// must re-mount this tab's own artifact so the iframe shows the correct
+		// content. Otherwise just refresh state metadata.
+		if (liveHash && liveMountHash && liveHash !== liveMountHash && tabArtifactId && !previewRestoreInFlight.has(tab.id)) {
+			state.isPreviewSession = true;
+			state.previewPanelEntry = "";
+			state.previewPanelMtime = 0;
+			(state as any).previewPanelContentHash = liveHash;
+			try {
+				document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
+					.forEach((iframe) => { iframe.src = "about:blank"; });
+			} catch { /* best-effort stale-content guard while the remount POST is in flight */ }
+			previewRestoreInFlight.add(tab.id);
+			void (async () => {
+				try {
+					const response = await gatewayFetch(
+						`/api/preview/artifacts/${encodeURIComponent(tabArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`,
+						{ method: "POST", body: JSON.stringify({ artifactId: tabArtifactId }) },
+					);
+					if (!response.ok) throw new Error(`preview restore failed: ${response.status}`);
+					const data = await response.json().catch(() => ({} as any));
+					if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activeSidePanelTabIdForSession(state, sessionId) !== tab.id) return;
+					state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : (liveEntry || state.previewPanelEntry || "inline.html");
+					state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
+					(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || liveHash;
+					clearPreviewTabRestoreError(sessionId, tab.id);
+					markPreviewTabMounted(tab);
+					renderApp();
+				} catch (err) {
+					console.error("[panel-workspace] current preview tab restore failed", err);
+					setPreviewTabRestoreError(sessionId, tab.id, {
+						message: "Preview artifact unavailable",
+						detail: err instanceof Error ? err.message : String(err),
+						retryable: true,
+					});
+					renderApp();
+				} finally {
+					previewRestoreInFlight.delete(tab.id);
+				}
+			})();
+			return;
+		}
+		if (liveEntry) state.previewPanelEntry = liveEntry;
+		if (liveHash) (state as any).previewPanelContentHash = liveHash;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : (state.previewPanelMtime || Date.now());
 		clearPreviewTabRestoreError(sessionId, tab.id);
 		markPreviewTabMounted(tab);
 		return;
@@ -2981,7 +3031,13 @@ function unifiedPanelTabs(): UnifiedPanelTab[] {
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
 		previewEntry: state.previewPanelEntry,
-		previewContentHash: (state as any).previewPanelContentHash,
+		// Use the registry's latest registered contentHash as the source of truth
+		// for the current/filename tab. The transient `state.previewPanelContentHash`
+		// may briefly hold older bytes while a historical artifact is mounted, and
+		// using it here would clobber the stored filename tab's v2 metadata when
+		// `mergeDerivedMetadata` merges the derived tab over it.
+		previewContentHash: (state.previewPanelEntry ? previewVersionRecordFor(state, sessionId, state.previewPanelEntry)?.latestContentHash : undefined)
+			|| (state as any).previewPanelContentHash,
 		activeProposalTypes: activeProposalTypes(),
 		assistantProposalType: currentAssistantProposalType(),
 		reviewTitles: [...state.reviewDocuments.keys()],
@@ -3178,16 +3234,45 @@ function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): bool
 	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
 }
 
+function handlePanelTabDragMove(event: PointerEvent): void {
+	if (!draggingPanelTabId || event.pointerType === "touch") return;
+	// We deliberately avoid setPointerCapture in beginPanelTabDrag because the
+	// capture prevents `pointermove`/`pointerenter` from firing on sibling tab
+	// pills, which breaks drag-over detection. Use the actual cursor position
+	// + elementFromPoint to find the hovered tab.
+	const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+	if (!el) return;
+	const pill = el.closest(".goal-tab-pill") as HTMLElement | null;
+	if (!pill) return;
+	const targetId = pill.getAttribute("data-panel-tab-id") || "";
+	if (!targetId || targetId === draggingPanelTabId) return;
+	const sid = workspaceSessionId();
+	const tabs = unifiedPanelTabs();
+	const targetIndex = tabs.findIndex((candidate) => candidate.id === targetId);
+	if (targetIndex < 0) return;
+	const rect = pill.getBoundingClientRect();
+	const insertIndex = event.clientX < rect.left + rect.width / 2 ? targetIndex : targetIndex + 1;
+	const nextTabs = reorderSidePanelTab(tabs, draggingPanelTabId, insertIndex);
+	if (samePanelTabOrder(tabs, nextTabs)) return;
+	setPanelTabsForSession(state, sid, nextTabs);
+	renderApp();
+}
+
 function beginPanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
 	if (!isDesktop() || isPinnedPanelTab(tab) || event.pointerType === "touch" || event.button !== 0) return;
 	if ((event.target as HTMLElement | null)?.closest?.(".goal-tab-close")) return;
 	draggingPanelTabId = tab.id;
-	try { (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId); } catch { /* ignore */ }
+	window.addEventListener("pointermove", handlePanelTabDragMove);
 	window.addEventListener("pointerup", endPanelTabDrag, { once: true });
 	window.addEventListener("pointercancel", endPanelTabDrag, { once: true });
 }
 
 function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
+	// Tab-pill-local pointer event handler (kept as a back-compat fallback so
+	// hover-driven reorders still work when the cursor is precisely over a
+	// sibling pill). The window-level `handlePanelTabDragMove` listener attached
+	// in `beginPanelTabDrag` is the primary path — it covers the gap between
+	// pills and the case where the cursor moves faster than per-element events.
 	if (!draggingPanelTabId || !isDesktop() || event.pointerType === "touch" || draggingPanelTabId === tab.id) return;
 	const target = event.currentTarget as HTMLElement | null;
 	if (!target) return;
@@ -3206,6 +3291,7 @@ function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
 function endPanelTabDrag(): void {
 	if (!draggingPanelTabId) return;
 	draggingPanelTabId = "";
+	window.removeEventListener("pointermove", handlePanelTabDragMove);
 	renderApp();
 }
 
@@ -3529,6 +3615,25 @@ export function doRenderApp(): void {
 				(state as any).previewPanelContentHash = "";
 				(state as any).previewPanelMountedTabId = "";
 				mountedPreviewTabId = "";
+			} else {
+				// `buildPanelWorkspaceTabs` derives a current preview tab from
+				// `state.previewPanelEntry`. If we just closed the tab for that
+				// entry, point `previewPanelEntry` at a remaining preview so the
+				// builder doesn't re-emit the closed tab on the next render. The
+				// closed tab might be the historical version of an entry whose
+				// current/filename tab still exists — preserve that case.
+				const closedEntry = previewEntryFromTab(tab);
+				const remainingEntryStillPresent = remainingPreviewTabs.some((candidate) => previewEntryFromTab(candidate) === closedEntry);
+				if (!remainingEntryStillPresent && state.previewPanelEntry && previewEntryFromTab(tab) === state.previewPanelEntry) {
+					const fallback = remainingPreviewTabs.find((candidate) => !!previewEntryFromTab(candidate));
+					const fallbackEntry = fallback ? previewEntryFromTab(fallback) : "";
+					const fallbackHash = fallback ? previewContentHashFromTab(fallback) : "";
+					state.previewPanelEntry = fallbackEntry || "";
+					(state as any).previewPanelContentHash = fallbackHash || "";
+					state.previewPanelMtime = fallback && typeof (fallback.state as any)?.mtime === "number"
+						? (fallback.state as any).mtime
+						: state.previewPanelMtime;
+				}
 			}
 		}
 

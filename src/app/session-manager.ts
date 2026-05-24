@@ -1560,8 +1560,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (type === "project") {
 				delete state.projectProposalAcceptedBySessionId[sessionId];
 			}
+			const isMatchingAssistant = isAssistantProposalType(type);
 			if (isFirstEmit) {
-				const isMatchingAssistant = isAssistantProposalType(type);
 				plugin.onFirstEmit(slot, {
 					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
@@ -1569,6 +1569,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				if (state.assistantType && !isMatchingAssistant && !isDesktop()) {
 					state.assistantTab = "preview";
 				}
+			} else {
+				// Side-panel tab contract: "Agent-driven events may create/update a
+				// tab and make it active." When a proposal is updated (not just
+				// created), re-focus its existing side-pane tab in place. The id
+				// upsert merges into the existing tab row without reordering, so
+				// preview/review tabs keep their visible positions.
+				revealProposalPanel(type, { sessionId }, {
+					isAssistant: isMatchingAssistant,
+					isMobile: !isDesktop(),
+				});
 			}
 			renderApp();
 		};

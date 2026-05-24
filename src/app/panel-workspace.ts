@@ -241,8 +241,13 @@ export function registerPreviewVersion(stateLike: any, sessionId: string, entry:
 	}
 	if (version != null && version > record.latestVersion) record.latestVersion = version;
 	if (options.current && hash && version != null) {
-		record.latestContentHash = hash;
-		if (version > record.latestVersion) record.latestVersion = version;
+		// `latestContentHash` tracks the highest registered version. Rehydrating an
+		// older artifact (e.g. opening a historical preview tab triggers SSE for
+		// the older hash) must NOT downgrade `latestContentHash` from v2 → v1.
+		if (version >= record.latestVersion) {
+			record.latestContentHash = hash;
+			if (version > record.latestVersion) record.latestVersion = version;
+		}
 	}
 	return version;
 }

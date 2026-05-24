@@ -9,6 +9,7 @@ import {
 	previewEntryLabel,
 	previewEntryTabId,
 	previewTabIdentityForContent,
+	previewVersionRecordFor,
 	normalizePreviewContentHash,
 	panelTabsForSession,
 	previewContentHashFromTab,
@@ -204,11 +205,40 @@ export function selectHtmlPreviewTab(args: {
 		&& candidate.id === previewEntryTabId(entry)
 		&& !isHistoricalPreviewTab(candidate)
 		&& entryForTab(candidate) === entry);
+	// When the caller explicitly opts out of live dedupe (e.g. PreviewRenderer
+	// opening an older artifact whose hash already matches the SSE-updated
+	// current tab), respect that intent and force the versioned tab path. The
+	// PreviewRenderer already decided collapse-vs-historical before getting
+	// here based on the pre-restore current tab hash.
 	const collapseToCurrent = requestedHistorical
+		&& args.dedupeWithLive !== false
 		&& !!contentHash
 		&& !!currentFilenameTab
 		&& previewContentHashFromTab(currentFilenameTab) === contentHash;
 	const shouldUseHistorical = requestedHistorical && !collapseToCurrent;
+
+	// Detect a live SSE event that's rehydrating an older registered version
+	// (e.g. the server just restored a historical artifact into the live mount
+	// and broadcast the older content hash). The current filename tab still
+	// represents the LATEST fresh write — don't overwrite its metadata with
+	// older bytes, and don't change the active tab id (the user may be viewing
+	// the historical tab they just opened).
+	const isLiveEvent = (args.source as Record<string, unknown> | undefined)?.live === true
+		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-events"
+		|| (args.source as Record<string, unknown> | undefined)?.origin === "preview-bootstrap";
+	if (isLiveEvent && !requestedHistorical && contentHash && currentFilenameTab) {
+		const record = previewVersionRecordFor(s, sessionId, entry);
+		const latestVersion = record?.latestVersion ?? 0;
+		const hashVersion = record?.hashToVersion?.[contentHash];
+		if (latestVersion > 0 && typeof hashVersion === "number" && hashVersion > 0 && hashVersion < latestVersion) {
+			// Older version rehydration via live mount — keep the current tab's
+			// metadata, its label, and the active selection intact. The live mount
+			// state (s.previewPanelContentHash etc) is updated by the caller and
+			// drives the iframe; this filename tab will trigger a re-restore via
+			// `restoreHistoricalPreviewTab` next time it's selected.
+			return;
+		}
+	}
 	const identity = previewTabIdentityForContent(s, sessionId, entry, contentHash, {
 		current: !shouldUseHistorical,
 		historical: shouldUseHistorical,
