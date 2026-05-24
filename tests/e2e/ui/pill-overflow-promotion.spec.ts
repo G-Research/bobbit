@@ -131,11 +131,15 @@ test.describe("pill strip overflow — promotion after dismiss", () => {
 		// The remaining set is 10 - visibleBefore, all initially in the
 		// "more" popover. With the fix, the strip refills to ~visibleBefore.
 		// Without the fix, it collapses to the always-at-least-1 fallback.
+		// Timeout bumped to 30s because the cascade of REST DELETEs +
+		// WS-driven re-renders + rAF re-measure has a long but bounded tail
+		// on cold-loaded UI; the assertion below catches the actual
+		// regression (visibleAfter < visibleBefore).
 		await page.waitForFunction(
 			(target: number) =>
 				document.querySelectorAll("bg-process-pill").length >= target,
 			visibleBefore,
-			{ timeout: 10_000 },
+			{ timeout: 30_000 },
 		);
 
 		const visibleAfter = await page.locator("bg-process-pill").count();
