@@ -2,8 +2,11 @@ import { icon } from "@mariozechner/mini-lit";
 import { html } from "lit";
 import { Bot, ChevronDown, FolderOpen, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
-import "../ui/components/SearchBox.js";
-import "../ui/components/SearchResults.js";
+// Lazy-load via the shared widgets registrar; see render.ts for
+// rationale. Both modules ship in one shared chunk fetched in parallel
+// with entry.
+import { ensureSearchBox } from "./lazy-widgets.js";
+void ensureSearchBox();
 import "./components/search-status-dot.js";
 import {
 	state,

@@ -4,37 +4,59 @@ export type { Agent, AgentMessage, AgentState, ThinkingLevel } from "@earendil-w
 export type { Model } from "@earendil-works/pi-ai";
 export { ChatPanel } from "./ChatPanel.js";
 // Components
-export { AgentInterface } from "./components/AgentInterface.js";
-export { ContinueSessionChooser } from "./components/ContinueSessionChooser.js";
+//
+// All custom-element re-exports below are type-only — a value re-export
+// would force Rollup to retain the file's side-effectful `customElement`
+// registration in every entry chunk that imports anything from
+// `ui/index.ts` (even unrelated symbols like `AppStorage`). The actual
+// `customElements.define(...)` calls happen via static side-effect
+// imports inside the components themselves (ChatPanel → AgentInterface
+// → BgProcessPill / MessageEditor / MessageList / …), so the elements
+// are still registered on cold start. Type-only keeps the public
+// library API surface (`new AgentInterface()`, `instanceof X`) for
+// external consumers without dragging the value graph into entry.
+export type { AgentInterface } from "./components/AgentInterface.js";
+export type { ContinueSessionChooser } from "./components/ContinueSessionChooser.js";
 export { bobbitLoadingAnimation } from "./components/BobbitLoadingAnimation.js";
-export { BgProcessPill, type BgProcessInfo } from "./components/BgProcessPill.js";
-export { AttachmentTile } from "./components/AttachmentTile.js";
+export type { BgProcessPill, BgProcessInfo } from "./components/BgProcessPill.js";
+export type { AttachmentTile } from "./components/AttachmentTile.js";
 // Value re-export would force the 21 kB widget into every entry that
 // touches `ui/index.ts`. The widget is registered lazily by
 // `AskUserChoicesRenderer` via `app/lazy-widgets.ts`.
 export type { AskUserChoicesWidget } from "./components/AskUserChoicesWidget.js";
-export { ConsoleBlock } from "./components/ConsoleBlock.js";
-export { DiffBlock, isGitDiff } from "./components/DiffBlock.js";
-export { ErrorMessage } from "./components/ErrorMessage.js";
-export { ErrorDetails } from "./components/ErrorDetails.js";
-export { CustomProviderCard } from "./components/CustomProviderCard.js";
-export { ExpandableSection } from "./components/ExpandableSection.js";
-export { SkillChip, type SkillChipData } from "./components/SkillChip.js";
-export { Input } from "./components/Input.js";
-export { MessageEditor } from "./components/MessageEditor.js";
-export { MessageList } from "./components/MessageList.js";
+export type { ConsoleBlock } from "./components/ConsoleBlock.js";
+// `isGitDiff` is a pure function (used by BashRenderer in entry); the
+// class re-export is type-only to keep the customElement registration
+// side effect out of entry. BashRenderer's value import still evaluates
+// the module and registers `<diff-block>` for inline diff rendering.
+export { isGitDiff } from "./components/DiffBlock.js";
+export type { DiffBlock } from "./components/DiffBlock.js";
+export type { ErrorMessage } from "./components/ErrorMessage.js";
+export type { ErrorDetails } from "./components/ErrorDetails.js";
+export type { CustomProviderCard } from "./components/CustomProviderCard.js";
+export type { ExpandableSection } from "./components/ExpandableSection.js";
+export type { SkillChip, SkillChipData } from "./components/SkillChip.js";
+export type { Input } from "./components/Input.js";
+export type { MessageEditor } from "./components/MessageEditor.js";
+export type { MessageList } from "./components/MessageList.js";
 // Message components
+// Class re-exports are type-only (registration happens via
+// AgentInterface's static side-effect import of `./Messages.js`).
+// Function exports stay as values — `defaultConvertToLlm` and the
+// `is*` type guards are value-imported by `app/custom-messages.ts`.
 export type { ArtifactMessage, UserMessageWithAttachments } from "./components/Messages.js";
-export {
+export type {
 	AbortedMessage,
 	AssistantMessage,
+	ToolMessage,
+	ToolMessageDebugView,
+	UserMessage,
+} from "./components/Messages.js";
+export {
 	convertAttachments,
 	defaultConvertToLlm,
 	isArtifactMessage,
 	isUserMessageWithAttachments,
-	ToolMessage,
-	ToolMessageDebugView,
-	UserMessage,
 } from "./components/Messages.js";
 // Message renderer registry
 export {
@@ -44,7 +66,11 @@ export {
 	registerMessageRenderer,
 	renderMessage,
 } from "./components/message-renderer-registry.js";
-export { ProjectPickerPopover, type ProjectPickerItem } from "./components/ProjectPickerPopover.js";
+// Type-only — value re-export drags the 8 kB popover (and its tag
+// registration) into every entry that touches `ui/index.ts`. Consumers
+// open the popover via `app/goal-entry.ts::showProjectPickerPopover`,
+// which now lazy-imports the component on click.
+export type { ProjectPickerPopover, ProjectPickerItem } from "./components/ProjectPickerPopover.js";
 // ProviderKeyInput statically imports value symbols from `@earendil-works/pi-ai`
 // (`complete`, `getModel`), which would drag the 553 kB generated model catalog
 // into the entry chunk via this re-export. Consumers that need to register the
@@ -53,13 +79,19 @@ export { ProjectPickerPopover, type ProjectPickerItem } from "./components/Proje
 // Type-only re-export keeps the public type surface; tsc erases it.
 // See `src/app/pi-ai-lazy.ts` and `docs/design/shrink-initial-bundle.md`.
 export type { ProviderKeyInput } from "./components/ProviderKeyInput.js";
-export {
-	type SandboxFile,
+// Type-only — a value re-export forces the 15 kB SandboxedIframe (and
+// its customElement registration side effects) into every entry that
+// touches `ui/index.ts`. Consumers that actually need to register the
+// element should `import "./components/SandboxedIframe.js"` directly
+// (currently `ui/tools/artifacts/HtmlArtifact.ts` and
+// `ui/tools/javascript-repl.ts`, both already in their own lazy chunks).
+export type {
+	SandboxFile,
 	SandboxIframe,
-	type SandboxResult,
-	type SandboxUrlProvider,
+	SandboxResult,
+	SandboxUrlProvider,
 } from "./components/SandboxedIframe.js";
-export { StreamingMessageContainer } from "./components/StreamingMessageContainer.js";
+export type { StreamingMessageContainer } from "./components/StreamingMessageContainer.js";
 // Sandbox Runtime Providers
 export { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider.js";
 export { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider.js";
@@ -71,7 +103,7 @@ export {
 export { RuntimeMessageBridge } from "./components/sandbox/RuntimeMessageBridge.js";
 export { RUNTIME_MESSAGE_ROUTER } from "./components/sandbox/RuntimeMessageRouter.js";
 export type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
-export { ThinkingBlock } from "./components/ThinkingBlock.js";
+export type { ThinkingBlock } from "./components/ThinkingBlock.js";
 // Type-only — `ApiKeyPromptDialog` transitively pulls the pi-ai model catalog
 // (via `ProviderKeyInput`). See the ProviderKeyInput re-export above.
 export type { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog.js";
@@ -85,10 +117,10 @@ export type { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
 // into whichever chunk reaches it. Consumers that need to open the dialog
 // import directly from `./dialogs/ModelSelector.js`.
 export type { ModelSelector } from "./dialogs/ModelSelector.js";
-export { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog.js";
+export type { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog.js";
 // Type-only — `ProvidersModelsTab` value-imports `getProviders` from pi-ai.
 export type { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab.js";
-export { SessionListDialog } from "./dialogs/SessionListDialog.js";
+export type { SessionListDialog } from "./dialogs/SessionListDialog.js";
 // Type-only — `SettingsDialog` value-imports `getProviders` from pi-ai.
 export type { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog.js";
 // Prompts
@@ -151,9 +183,15 @@ export type { ReviewPane } from "./components/review/ReviewPane.js";
 export type { ReviewDocument } from "./components/review/ReviewDocument.js";
 export type { CommentableMarkdown } from "./components/CommentableMarkdown.js";
 export type { AnnotationPopover } from "./components/review/AnnotationPopover.js";
-export { SearchBox } from "./components/SearchBox.js";
-export { SearchResults, type SearchResult } from "./components/SearchResults.js";
-export { VerificationOutputModal } from "./components/VerificationOutputModal.js";
+// Type-only — see comment block above on review/widget re-exports. Both
+// elements are registered lazily on first render via
+// `app/lazy-widgets.ts::ensureSearchBox`. Consumers wanting to mount
+// the elements register them via that helper or by importing the file
+// directly.
+export type { SearchBox } from "./components/SearchBox.js";
+export type { SearchResults } from "./components/SearchResults.js";
+export type { SearchResult } from "./components/SearchResults.js";
+export type { VerificationOutputModal } from "./components/VerificationOutputModal.js";
 export type { ToolRenderer, ToolRenderResult } from "./tools/types.js";
 export type { Attachment } from "./utils/attachment-utils.js";
 // Utils
