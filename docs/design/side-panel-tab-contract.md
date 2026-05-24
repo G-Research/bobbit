@@ -1,7 +1,6 @@
 # Side-Panel Tab Contract
 
-Status: implemented on `goal/side-panel-18bdd8c2`. Pinned by
-[`tests/e2e/ui/side-panel-tabs.spec.ts`](../../tests/e2e/ui/side-panel-tabs.spec.ts).
+Pinned by [`tests/e2e/ui/side-panel-tabs.spec.ts`](../../tests/e2e/ui/side-panel-tabs.spec.ts).
 Companion to [`preview-architecture.md`](../preview-architecture.md) (v3 mount,
 SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-widgets.md)
 (historical preview tab UX).
