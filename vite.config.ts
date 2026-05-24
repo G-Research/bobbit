@@ -330,8 +330,15 @@ function dynamicGatewayProxy(): Plugin {
 	};
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
 	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
+	// Expose a dev-mode boolean via globalThis so code that needs to gate
+	// dev-only behaviour can read `(globalThis as any).__BOBBIT_DEV__` without
+	// touching `import.meta.env` — important for test fixtures that bundle
+	// via esbuild iife (which doesn't support `import.meta`).
+	define: {
+		"globalThis.__BOBBIT_DEV__": JSON.stringify(mode !== "production"),
+	},
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)
@@ -404,4 +411,4 @@ export default defineConfig({
 			}
 			: {}),
 	},
-});
+}));
