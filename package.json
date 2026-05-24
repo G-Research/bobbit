@@ -2,6 +2,9 @@
   "name": "bobbit",
   "version": "0.10.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "bin": {
     "bobbit": "dist/server/cli.js"
   },
@@ -48,9 +51,9 @@
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
     "@mariozechner/mini-lit": "^0.2.0",
-    "@earendil-works/pi-agent-core": "^0.74.0",
-    "@earendil-works/pi-ai": "^0.74.0",
-    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-agent-core": "0.75.5",
+    "@earendil-works/pi-ai": "0.75.5",
+    "@earendil-works/pi-coding-agent": "0.75.5",
     "@recogito/text-annotator": "^3.4.9",
     "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",
@@ -59,6 +62,7 @@
     "jszip": "^3.10.1",
     "lit": "^3.3.1",
     "lucide": "^0.544.0",
+    "marked": "^18.0.4",
     "mkcert": "^3.2.0",
     "ollama": "^0.6.0",
     "pdfjs-dist": "5.4.394",
