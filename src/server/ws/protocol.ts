@@ -39,6 +39,8 @@ export interface SessionCostSnapshot {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	totalCost: number;
+	/** Derived on read by current servers; optional for older persisted/WS payloads. */
+	cacheHitRate?: number | null;
 }
 
 /** Client → Server messages over WebSocket */

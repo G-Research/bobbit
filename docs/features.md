@@ -62,9 +62,12 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 
 - Tracks input tokens, output tokens, cache read/write tokens, and total cost.
 - Persists cumulative session totals through `CostTracker`; this is the authoritative display source when present.
-- Hydrates clients via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
-- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost`.
+- Derives a **`cacheHitRate`** (`cacheReadTokens / (cacheReadTokens + inputTokens)`) on every read — not stored on disk. `null` for cold sessions or providers that don't report cache counters; rendered as `—` in the UI.
+- Hydrates dashboard cost summaries via `cost_update` WebSocket events and `state.serverCost`, including reconnect and post-compaction refresh paths.
+- `CostPopover` fetches `/cost/breakdown` when opened and shows the **Cache hit** row from that response; it is not directly live-updated by `cost_update` frames.
+- Query via `GET /api/sessions/:id/cost`, `GET /api/goals/:id/cost`, or `GET /api/tasks/:id/cost` — all responses include `cacheHitRate: number | null`.
 
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
 
 ## Prompt Queue

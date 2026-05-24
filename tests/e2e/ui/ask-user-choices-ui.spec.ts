@@ -228,4 +228,62 @@ test.describe("ask_user_choices widget (full-stack UI)", () => {
 		await expect(page.locator("[role=\"tab\"]")).toHaveCount(2); // two tabs on the live widget
 		await expect(page.locator(".ask-submit")).toHaveCount(1); // exactly one Submit button
 	});
+
+	test("keyboard-only multi-question submission", async ({ page }) => {
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await sendMessage(page, "please use ask_user_choices");
+
+		const widget = page.locator("ask-user-choices-widget").first();
+		await expect(widget).toBeVisible({ timeout: 20_000 });
+
+		// Tab strip uses lettered tab_label.
+		const letters = widget.locator('[role="tab"] .ask-tab-letter');
+		await expect(letters.first()).toHaveText("A.");
+		await expect(letters.nth(1)).toHaveText("B.");
+
+		// Wait for streaming to complete before keyboard interaction. Two interacting
+		// races affected this section:
+		//   1. `focus(tab)` + `keyboard.press("1")` is non-atomic — focus can shift
+		//      between the calls when agent WS events trigger re-renders. Fixed by
+		//      using `locator.press()`, which atomically focuses + dispatches.
+		//   2. The widget's auto-advance is a 250ms setTimeout scheduled on the widget
+		//      *instance*. While the agent is still emitting message_update /
+		//      tool_result events, streaming state updates can replace the widget's
+		//      DOM element, detaching the timer's `this` reference and silently
+		//      dropping the advance. In real usage the user can't press a key faster
+		//      than streaming completes; only the test was beating the stream.
+		await page.waitForFunction(
+			() => (window as any).__bobbitState?.remoteAgent?.state?.isStreaming === false,
+			{ timeout: 15_000 },
+		);
+
+		// Press '1' on the first tab → picks option 1 on Q1 ("red") and auto-advances to Q2.
+		await widget.locator('[role="tab"][data-tab-index="0"]').press("1");
+		// Confirm the keystroke landed on the widget (radio recorded), then
+		// that auto-advance flipped the active tab.
+		await expect(widget.locator('input[type="radio"][value="red"]')).toBeChecked({ timeout: 5_000 });
+		await expect(widget.locator('[role="tab"][data-tab-index="1"]'))
+			.toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
+
+		// Press '2' on the new active tab → picks option 2 on Q2 ("medium").
+		// Last tab → no advance.
+		await widget.locator('[role="tab"][data-tab-index="1"]').press("2");
+		await expect(widget.locator('input[type="radio"][value="medium"]')).toBeChecked();
+
+		// Primary button should now be Submit (last tab) and enabled.
+		const submit = widget.locator(".ask-submit");
+		await expect(submit).toHaveText("Submit");
+		await expect(submit).toBeEnabled();
+
+		// Press Enter on the Submit button → submits (atomic focus + press).
+		await submit.press("Enter");
+		await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 10_000 });
+		await expect(widget.locator('input[type="radio"]').first()).toBeDisabled();
+
+		// Confirm Q1 "red" survived as the recorded answer.
+		await widget.locator('[role="tab"][data-tab-index="0"]').click();
+		await expect(widget.locator('input[type="radio"][value="red"]')).toBeChecked();
+	});
 });

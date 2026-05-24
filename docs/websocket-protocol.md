@@ -62,7 +62,7 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `client_left` | `clientId` | A client disconnected |
 | `error` | `message`, `code` | Error message |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. Current servers include `cost.cacheHitRate`; see [Cost update shape](#cost-update-shape). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
@@ -99,11 +99,31 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 
 ### Session cost hydration
 
-`cost_update.cost` has the same shape as `state.serverCost`: cumulative input/output/cache token totals plus `totalCost`. The payload is read from persisted `CostTracker` data and is not a delta; clients should replace their cached cost snapshot, not add it locally.
+`cost_update.cost` has the same shape as `state.serverCost`: cumulative input/output/cache token totals plus `totalCost`, with `cacheHitRate` included by current servers. The payload is read from persisted `CostTracker` data and is not a delta; clients should replace their cached cost snapshot, not add it locally.
 
 When persisted cost exists, the server hydrates it on active attach/reconnect, `get_state`, `get_messages`, resume/replay fallback, archived attach/state/messages, and `refreshAfterCompaction()`. `refreshAfterCompaction()` sends `cost_update` before the compacted `messages` snapshot so the UI keeps showing cumulative spend instead of recalculating from the reduced visible transcript.
 
 See [session-cost.md](session-cost.md) for the source-of-truth and no-double-counting rules.
+
+### Cost update shape
+
+The `cost` field of a `cost_update` message:
+
+```json
+{
+  "inputTokens": 12500,
+  "outputTokens": 340,
+  "cacheReadTokens": 87000,
+  "cacheWriteTokens": 3200,
+  "totalCost": 0.004712,
+  "cacheHitRate": 0.874
+}
+```
+
+- `cacheHitRate?: number | null` — derived ratio `cacheReadTokens / (cacheReadTokens + inputTokens)`. `null` when the denominator is 0 (cold session, or provider that does not report cache counters). Optional for mixed-version compatibility with older payloads.
+- Older clients that do not recognise `cacheHitRate` silently ignore it.
+
+See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details and null semantics.
 
 ### Streaming resume
 

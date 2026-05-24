@@ -464,7 +464,7 @@ export class RemoteAgent {
 			status: "idle" as ClientSessionStatus,
 			isCompacting: false,
 			archivedAt: null as number | null,
-			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } | null,
+			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
 			streamingMessage: null as any,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
