@@ -1690,7 +1690,7 @@
       const hasConflicts = this.prState === "OPEN" && this.prMergeable === "CONFLICTING";
       if (hasConflicts) title += " \u2014 has conflicts";
       const pulseClass = hasConflicts ? " pr-conflict-pulse" : "";
-      return b2`<span class="${colorClass}${pulseClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:10px">⦿</span>${this.prNumber != null ? b2`<span style="font-size:10px">#${this.prNumber}</span>` : A}</span>`;
+      return b2`<span class="${colorClass}${pulseClass} shrink-0" style="display:inline-flex;align-items:center;gap:1px" title=${title}><span style="font-size:11px">⦿</span>${this.prNumber != null ? b2`<span style="font-size:11px">#${this.prNumber}</span>` : A}</span>`;
     }
     /** Review decision badge for inside the PR section */
     _renderReviewBadge() {
@@ -1702,7 +1702,7 @@
       };
       const c5 = cfg[this.reviewDecision];
       if (!c5) return A;
-      return b2`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${c5.color};background:${c5.bg}">${c5.label}</span>`;
+      return b2`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:${c5.color};background:${c5.bg}">${c5.label}</span>`;
     }
     /** PR section for the expanded dropdown */
     _renderPrSection() {
@@ -1715,20 +1715,20 @@
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                     ${this.prUrl ? b2`
                         <a href=${this.prUrl} target="_blank" rel="noopener"
-                           class="text-blue-600 dark:text-blue-400 hover:underline" style="font-size:12px">
+                           class="text-blue-600 dark:text-blue-400 hover:underline" style="font-size:13px">
                             #${this.prNumber} ${this.prTitle}
                         </a>
-                    ` : b2`<span style="font-size:12px">#${this.prNumber} ${this.prTitle}</span>`}
-                    <span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:${badgeColor};background:${badgeBg}">
+                    ` : b2`<span style="font-size:13px">#${this.prNumber} ${this.prTitle}</span>`}
+                    <span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:${badgeColor};background:${badgeBg}">
                         ${this.prState}
                     </span>
                     ${this._renderReviewBadge()}
-                    ${this.prState === "OPEN" && this.prMergeable === "CONFLICTING" ? b2`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;color:oklch(0.62 0.14 25);background:oklch(0.62 0.14 25 / 0.12)">Has conflicts</span>` : A}
+                    ${this.prState === "OPEN" && this.prMergeable === "CONFLICTING" ? b2`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:oklch(0.62 0.14 25);background:oklch(0.62 0.14 25 / 0.12)">Has conflicts</span>` : A}
                 </div>
                 ${this.prState === "OPEN" ? b2`
                     <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
                         <select
-                            style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--foreground)"
+                            style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--foreground)"
                             .value=${this.mergeMethod}
                             @change=${(e8) => {
         this.mergeMethod = e8.target.value;
@@ -1739,39 +1739,39 @@
                             <option value="squash">Squash</option>
                             <option value="rebase">Rebase</option>
                         </select>
-                        ${this.merging ? b2`<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted-foreground)"><span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>Merging\u2026</span>` : b2`
+                        ${this.merging ? b2`<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted-foreground)"><span style="display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--foreground);border-radius:50%;animation:git-spin 0.6s linear infinite"></span>Merging\u2026</span>` : b2`
                         <button
-                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
+                            style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
                             ?disabled=${this.prMergeable !== "MERGEABLE"}
                             @click=${() => this._handleMerge()}
                         >
                             Merge PR
                         </button>
                         ${this.viewerIsAdmin ? b2`<button
-                            style="font-size:11px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
+                            style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
                             @click=${() => this._handleForceMerge()}
                             title="Merge with --admin to bypass branch protection rules"
                         >
                             Force Merge
                         </button>` : A}
-                        ${this.prMergeable !== "MERGEABLE" && !this.viewerIsAdmin ? b2`<span style="font-size:10px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : A}
+                        ${this.prMergeable !== "MERGEABLE" && !this.viewerIsAdmin ? b2`<span style="font-size:11px;color:var(--destructive)">${this.prMergeable === "CONFLICTING" ? "Has conflicts" : "Not mergeable"}</span>` : A}
                         `}
                     </div>
-                    ${this.mergeError ? b2`<div style="font-size:11px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : A}
+                    ${this.mergeError ? b2`<div style="font-size:12px;color:var(--destructive);margin-top:4px">${this.mergeError}</div>` : A}
                 ` : A}
             </div>
         `;
     }
     _renderMergePrimaryButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.mergingPrimary}
             @click=${(e8) => {
         e8.stopPropagation();
         this._handleMergePrimary();
       }}
             title="Rebase this branch on top of ${this.primaryRef}"
-        >${this.mergingPrimary ? "Rebasing\u2026" : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : A}`;
+        >${this.mergingPrimary ? "Rebasing\u2026" : `Rebase on ${this.primaryBranch}`}</button>${this.mergePrimaryError ? b2`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.mergePrimaryError}</span>` : A}`;
     }
     _handleMergePrimary() {
       this.mergingPrimary = true;
@@ -1787,7 +1787,7 @@
     }
     _renderAskCommitButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500"
             @click=${(e8) => {
         e8.stopPropagation();
         this.dispatchEvent(new CustomEvent("ask-agent-commit", { bubbles: true, composed: true }));
@@ -1796,7 +1796,7 @@
     }
     _renderAskPrButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             @click=${(e8) => {
         e8.stopPropagation();
         this.dispatchEvent(new CustomEvent("ask-agent-pr", { bubbles: true, composed: true }));
@@ -1805,14 +1805,14 @@
     }
     _renderSquashPushButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.squashPushing}
             @click=${(e8) => {
         e8.stopPropagation();
         this._handleSquashPush();
       }}
             title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
-        >${this.squashPushing ? "Pushing\u2026" : "Squash push"}</button>${this.squashPushError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : A}`;
+        >${this.squashPushing ? "Pushing\u2026" : "Squash push"}</button>${this.squashPushError ? b2`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.squashPushError}</span>` : A}`;
     }
     _handleSquashPush() {
       this.squashPushing = true;
@@ -1828,10 +1828,10 @@
     }
     _renderPullButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.pulling}
             @click=${() => this._handlePull()}
-        >${this.pulling ? "Pulling\u2026" : "Pull"}</button>${this.pullError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : A}`;
+        >${this.pulling ? "Pulling\u2026" : "Pull"}</button>${this.pullError ? b2`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : A}`;
     }
     _handlePull() {
       this.pulling = true;
@@ -1848,10 +1848,10 @@
     }
     _renderPushButton() {
       return b2`<button
-            style="font-size:11px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
             ?disabled=${this.pushing}
             @click=${() => this._handlePush()}
-        >${this.pushing ? "Pushing\u2026" : "Push"}</button>${this.pushError ? b2`<span style="font-size:10px;color:var(--destructive);margin-left:4px">${this.pushError}</span>` : A}`;
+        >${this.pushing ? "Pushing\u2026" : "Push"}</button>${this.pushError ? b2`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pushError}</span>` : A}`;
     }
     _handlePush() {
       this.pushing = true;
@@ -2034,10 +2034,10 @@
         body = b2`<div class="flex flex-col">
                 ${this._commits.map((c5) => b2`
                     <div class="flex items-start gap-3 px-4 py-3 border-b border-border last:border-b-0 hover:bg-muted/30" style="min-width:0">
-                        <span class="font-mono text-[11px] text-muted-foreground shrink-0 pt-0.5" title=${c5.sha}>${c5.shortSha}</span>
+                        <span class="font-mono text-[12px] text-muted-foreground shrink-0 pt-0.5" title=${c5.sha}>${c5.shortSha}</span>
                         <div class="flex-1 min-w-0">
                             <div class="text-sm text-foreground break-words">${c5.message}</div>
-                            <div class="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground">
+                            <div class="flex items-center gap-3 mt-1 text-[12px] text-muted-foreground">
                                 <span>${c5.author}</span>
                                 <span>${this._relativeTime(c5.timestamp)}</span>
                                 ${c5.filesChanged > 0 ? b2`<span class="flex items-center gap-1.5">
@@ -2106,7 +2106,7 @@
       const headerText = totalDirty > 0 ? `${totalDirty} changed across ${dirtyRepoCount || entries.length} repo${(dirtyRepoCount || entries.length) === 1 ? "" : "s"}` : `${entries.length} repos clean`;
       return b2`
             <div class="border-t border-border pt-2 mt-2 flex flex-col gap-1.5" data-testid="multi-repo-sections">
-                <div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium flex items-center justify-between" data-testid="multi-repo-header">
+                <div class="text-[12px] text-muted-foreground uppercase tracking-wider font-medium flex items-center justify-between" data-testid="multi-repo-header">
                     <span>Repos</span>
                     <span class="text-muted-foreground normal-case tracking-normal" data-testid="multi-repo-aggregate">${headerText}</span>
                 </div>
@@ -2114,26 +2114,26 @@
         const files = this._repoFiles(info);
         const isClean = files.length === 0 && info.clean !== false;
         const counts = [];
-        if (files.length > 0) counts.push(b2`<span class="text-amber-600 dark:text-amber-400 text-[10px] font-medium" data-testid="repo-dirty-count">~${files.length}</span>`);
+        if (files.length > 0) counts.push(b2`<span class="text-amber-600 dark:text-amber-400 text-[11px] font-medium" data-testid="repo-dirty-count">~${files.length}</span>`);
         if (typeof info.aheadOfPrimary === "number" && info.aheadOfPrimary > 0)
-          counts.push(b2`<span class="text-blue-600 dark:text-blue-400 text-[10px] font-medium">↑${info.aheadOfPrimary}</span>`);
+          counts.push(b2`<span class="text-blue-600 dark:text-blue-400 text-[11px] font-medium">↑${info.aheadOfPrimary}</span>`);
         if (typeof info.behindPrimary === "number" && info.behindPrimary > 0)
-          counts.push(b2`<span class="text-red-600 dark:text-red-400 text-[10px] font-medium">↓${info.behindPrimary}</span>`);
-        if (counts.length === 0) counts.push(b2`<span class="text-green-600 dark:text-green-400 text-[10px] font-medium" data-testid="repo-clean">clean</span>`);
+          counts.push(b2`<span class="text-red-600 dark:text-red-400 text-[11px] font-medium">↓${info.behindPrimary}</span>`);
+        if (counts.length === 0) counts.push(b2`<span class="text-green-600 dark:text-green-400 text-[11px] font-medium" data-testid="repo-clean">clean</span>`);
         return b2`
                         <details class="border border-border rounded-md" data-testid="multi-repo-entry" data-repo-name=${repoName} ?open=${!isClean}>
-                            <summary class="text-xs font-medium text-foreground cursor-pointer py-1 px-2 flex items-center gap-2">
-                                <code class="text-[11px] font-mono" data-testid="repo-name">${repoName === "." ? "(root)" : repoName}</code>
+                            <summary class="text-[13px] font-medium text-foreground cursor-pointer py-1 px-2 flex items-center gap-2">
+                                <code class="text-[12px] font-mono" data-testid="repo-name">${repoName === "." ? "(root)" : repoName}</code>
                                 <span class="flex items-center gap-1.5 ml-auto" data-testid="repo-counts">${counts}</span>
                             </summary>
                             ${files.length > 0 ? b2`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
                                     ${files.map((f4) => b2`
                                         <div class="flex items-center gap-2 py-0.5 min-w-0">
-                                            <span class="${this._statusColor(f4.status)} font-mono w-[60px] shrink-0 text-right text-[10px]" title=${this._statusLabel(f4.status)}>${this._statusLabel(f4.status)}</span>
-                                            <span class="text-foreground truncate text-[11px]" title=${f4.file}>${f4.file}</span>
+                                            <span class="${this._statusColor(f4.status)} font-mono w-[60px] shrink-0 text-right text-[11px]" title=${this._statusLabel(f4.status)}>${this._statusLabel(f4.status)}</span>
+                                            <span class="text-foreground truncate text-[12px]" title=${f4.file}>${f4.file}</span>
                                         </div>
                                     `)}
-                                </div>` : b2`<div class="text-[11px] text-muted-foreground italic px-2 pb-2" data-testid="repo-empty">Working tree clean</div>`}
+                                </div>` : b2`<div class="text-[12px] text-muted-foreground italic px-2 pb-2" data-testid="repo-empty">Working tree clean</div>`}
                         </details>
                     `;
       })}
@@ -2147,7 +2147,7 @@
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
                 <span class="break-all">${this.branch}</span>
-                ${multiRepoSections ? b2`<span class="ml-auto text-[10px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos).length} repos</span>` : ""}
+                ${multiRepoSections ? b2`<span class="ml-auto text-[11px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos).length} repos</span>` : ""}
             </div>
 
             <div class="flex flex-col gap-1 mb-2">
@@ -2196,7 +2196,7 @@
       if (this.loading && !this.branch) {
         return b2`
                 <button
-                    class="git-status-pill skeleton inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground text-[11px] leading-tight"
+                    class="git-status-pill skeleton inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground text-[12px] leading-tight"
                     style="max-width:100%; height:var(--pill-h, auto); min-width:110px"
                     aria-busy="true"
                     disabled
@@ -2222,7 +2222,7 @@
       const refreshDot = this.loading ? b2`<span class="git-refresh-dot" aria-label="Refreshing" title="Refreshing git status\u2026"></span>` : this.partial ? b2`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>` : A;
       return b2`
             <button
-                class="git-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[11px] leading-tight ${this.loading ? "loading" : ""} ${this.partial ? "partial" : ""}"
+                class="git-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[12px] leading-tight ${this.loading ? "loading" : ""} ${this.partial ? "partial" : ""}"
                 style="max-width:100%; height:var(--pill-h, auto)"
                 data-state=${stateAttr}
                 @click=${this._toggle}
@@ -2324,7 +2324,7 @@
           }
           this._dropdownEl = document.createElement("div");
           this._dropdownEl.id = "git-status-dropdown";
-          this._dropdownEl.className = "fixed z-[9999] bg-card border border-border rounded-lg shadow-lg p-3 text-xs";
+          this._dropdownEl.className = "fixed z-[9999] bg-card border border-border rounded-lg shadow-lg p-3 text-[13px]";
           this._dropdownEl.style.maxWidth = "min(420px, calc(100vw - 1rem))";
           document.body.appendChild(this._dropdownEl);
           D(this._renderDropdownContent(), this._dropdownEl);

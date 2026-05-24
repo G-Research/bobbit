@@ -357,6 +357,16 @@ export class AgentInterface extends LitElement {
 	private _moreExpanded = false;
 	/** ResizeObserver for the pill container overflow check */
 	private _pillResizeObserver?: ResizeObserver;
+	/**
+	 * Last measured offsetWidth per pill id. We cache because hidden pills
+	 * (inside the "more" popover) aren't in the strip's flex flow and would
+	 * otherwise be invisible to the fit algorithm — preventing pills from
+	 * being promoted back when space frees up (e.g. after a pill is dismissed,
+	 * after a resize, or after the git-status-widget shrinks).
+	 */
+	private _pillWidths: Map<string, number> = new Map();
+	/** Coalesce multiple re-measure requests into one rAF. */
+	private _measureScheduled = false;
 	/** ID of a pill currently animating out */
 	private _dismissingId: string | null = null;
 	/** IDs of pills promoted from hidden to visible (animate in) */
@@ -1721,7 +1731,7 @@ export class AgentInterface extends LitElement {
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
-						<div data-pill-strip class="absolute right-2 bottom-full mb-1.5 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
+						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:calc(100% - 1rem); --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
 							     follows the actual rendered shape per-element, so wrapping or
 							     differently-sized children (git-status-widget vs bash_bg pills)
@@ -2029,7 +2039,7 @@ export class AgentInterface extends LitElement {
 			</style>
 			${hidden.length > 0 ? html`
 				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px">
-					<span class="inline-flex items-center rounded-full bg-card border border-border text-[11px] leading-tight" data-more-btn style="height:var(--pill-h, auto)">
+					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight" data-more-btn style="height:var(--pill-h, auto)">
 						<button
 							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full"
 							@click=${this._toggleMore}
@@ -2166,52 +2176,82 @@ export class AgentInterface extends LitElement {
 
 	/**
 	 * Measure pill container vs parent and compute how many pills fit.
+	 *
+	 * Bugs this guards against:
+	 * 1. Stale-cached widths: pills hidden inside the "more" popover aren't
+	 *    in the strip's flex flow. We cache last-measured widths so the
+	 *    algorithm can grow the visible count back when space opens up
+	 *    (resize, pill dismissal, git-widget shrinking) — not just shrink it.
+	 * 2. Available-width underestimate: the strip's actual CSS constraint is
+	 *    `max-width: calc(100% - 1rem)`, not 75% of the parent.
+	 * 3. Child re-layout races: when the bg-process-pill custom element
+	 *    hasn't finished its own render cycle, its wrapper offsetWidth can be
+	 *    near zero. We refuse to commit cache entries for zero-width pills.
 	 */
 	private _measurePillOverflow() {
 		const parentContainer = this.querySelector('[data-input-container]') as HTMLElement;
 		if (!parentContainer) return;
-		let maxWidth = parentContainer.clientWidth * 0.75;
 
 		const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
 		if (!pillStrip) return;
 
-		// The content layer is the second child (z-index:1) inside the pill strip
 		const contentLayer = pillStrip.querySelector('[data-pill-content]') as HTMLElement;
 		if (!contentLayer) return;
 
 		const gap = 6; // gap-1.5 = 0.375rem ≈ 6px
 
-		// Subtract git-status-widget width from available space
+		// Match the strip's CSS `max-width: calc(100% - 1rem)` (8px margin
+		// on each side) so the strip's right edge lines up with the prompt.
+		// Extra 2px is a safety margin for rounding/drop-shadow.
+		let maxWidth = parentContainer.clientWidth - 16 - 2;
+
+		// Subtract git-status-widget width from available space.
 		const gitWidget = contentLayer.querySelector('git-status-widget') as HTMLElement;
 		if (gitWidget) {
-			maxWidth -= gitWidget.offsetWidth + gap;
+			const gw = gitWidget.offsetWidth;
+			if (gw > 0) maxWidth -= gw + gap;
 		}
 
-		const pillWidths: number[] = [];
-
-		// Collect widths of visible pill wrappers — each visible pill is in a <div> wrapper
-		// The "more" button is in a <div class="relative">, skip it.
-		// git-status-widget is a direct child, skip it too.
-		for (const child of contentLayer.children) {
-			const el = child as HTMLElement;
-			if (el.querySelector('bg-process-pill') && !el.querySelector('.pill-more-popover')) {
-				pillWidths.push(el.offsetWidth);
+		// Refresh the per-id width cache from every bg-process-pill currently
+		// in the DOM — covers both the visible strip and the expanded popover.
+		// We measure the wrapper element (the <div> immediately around the
+		// pill) since that's what the flex layout actually places.
+		const allPillEls = pillStrip.querySelectorAll('bg-process-pill');
+		for (const pillEl of allPillEls) {
+			const id = pillEl.getAttribute('data-id');
+			if (!id) continue;
+			const wrapper = (pillEl.parentElement as HTMLElement | null) ?? null;
+			const measured = wrapper ? wrapper.offsetWidth : 0;
+			if (measured > 0) {
+				this._pillWidths.set(id, measured);
 			}
 		}
 
-		if (pillWidths.length === 0) {
+		// Drop cache entries for pills no longer in bgProcesses.
+		const sorted = this._getSortedProcesses();
+		const liveIds = new Set(sorted.map((p) => p.id));
+		for (const id of Array.from(this._pillWidths.keys())) {
+			if (!liveIds.has(id)) this._pillWidths.delete(id);
+		}
+
+		if (sorted.length === 0) {
 			this._visiblePillCount = Infinity;
 			return;
 		}
 
-		// The "more" button itself takes ~60px when shown
+		// Default estimate for never-measured pills (e.g. just appeared
+		// before their first paint). The next measure pass will replace it.
+		const DEFAULT_PILL_WIDTH = 100;
+		const widths = sorted.map((p) => this._pillWidths.get(p.id) ?? DEFAULT_PILL_WIDTH);
+
+		// "more" button is ~60px when shown.
 		const moreBtnWidth = 60;
 
-		// Count from right (newest) how many pills fit
+		// Count from right (newest) how many pills fit.
 		let fitCount = 0;
 		let usedWidth = 0;
-		for (let i = pillWidths.length - 1; i >= 0; i--) {
-			const needed = pillWidths[i] + (fitCount > 0 ? gap : 0);
+		for (let i = widths.length - 1; i >= 0; i--) {
+			const needed = widths[i] + (fitCount > 0 ? gap : 0);
 			const wouldNeedMore = i > 0; // still have pills to hide
 			const reserveForMore = wouldNeedMore ? moreBtnWidth + gap : 0;
 			if (usedWidth + needed + reserveForMore <= maxWidth) {
@@ -2222,7 +2262,7 @@ export class AgentInterface extends LitElement {
 			}
 		}
 
-		// At least 1 pill must be visible
+		// At least 1 pill must be visible.
 		const newCount = Math.max(1, fitCount);
 		if (newCount !== this._visiblePillCount) {
 			this._visiblePillCount = newCount;
@@ -2232,6 +2272,19 @@ export class AgentInterface extends LitElement {
 		if (!this._pillsInitialized) {
 			this._pillsInitialized = true;
 		}
+	}
+
+	/**
+	 * Schedule a re-measure on the next animation frame, coalescing
+	 * multiple calls within the same tick into one.
+	 */
+	private _scheduleMeasurePillOverflow() {
+		if (this._measureScheduled) return;
+		this._measureScheduled = true;
+		requestAnimationFrame(() => {
+			this._measureScheduled = false;
+			this._measurePillOverflow();
+		});
 	}
 
 	override updated(changedProperties: Map<string, any>) {
@@ -2249,15 +2302,23 @@ export class AgentInterface extends LitElement {
 			const pillStrip = this.querySelector('[data-pill-strip]') as HTMLElement;
 			if (pillStrip && !this._pillResizeObserver) {
 				this._pillResizeObserver = new ResizeObserver(() => {
-					this._measurePillOverflow();
+					this._scheduleMeasurePillOverflow();
 				});
-				// Observe the input container for size changes
+				// Observe the input container for size changes (host width changes,
+				// virtual keyboard, side panel toggles).
 				const parent = this.querySelector('[data-input-container]') as HTMLElement;
 				if (parent) this._pillResizeObserver.observe(parent);
+				// Also observe the content layer — picks up child re-layouts the
+				// parent observer misses (git-status-widget badges appearing,
+				// bg-process-pill children doing their first paint, font changes).
+				const contentLayer = pillStrip.querySelector('[data-pill-content]') as HTMLElement | null;
+				if (contentLayer) this._pillResizeObserver.observe(contentLayer);
+				const gitWidget = pillStrip.querySelector('git-status-widget') as HTMLElement | null;
+				if (gitWidget) this._pillResizeObserver.observe(gitWidget);
 			}
-			// Measure after renders that change pill count
-			if (changedProperties.has('bgProcesses')) {
-				requestAnimationFrame(() => this._measurePillOverflow());
+			// Measure after renders that change pill count or visible set.
+			if (changedProperties.has('bgProcesses') || changedProperties.has('_moreExpanded')) {
+				this._scheduleMeasurePillOverflow();
 			}
 
 
@@ -2266,6 +2327,7 @@ export class AgentInterface extends LitElement {
 			this._visiblePillCount = Infinity;
 			this._moreExpanded = false;
 			this._pillsInitialized = false;
+			this._pillWidths.clear();
 			if (this._pillResizeObserver) {
 				this._pillResizeObserver.disconnect();
 				this._pillResizeObserver = undefined;
