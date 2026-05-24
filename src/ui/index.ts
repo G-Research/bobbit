@@ -42,7 +42,14 @@ export {
 	renderMessage,
 } from "./components/message-renderer-registry.js";
 export { ProjectPickerPopover, type ProjectPickerItem } from "./components/ProjectPickerPopover.js";
-export { ProviderKeyInput } from "./components/ProviderKeyInput.js";
+// ProviderKeyInput statically imports value symbols from `@earendil-works/pi-ai`
+// (`complete`, `getModel`), which would drag the 553 kB generated model catalog
+// into the entry chunk via this re-export. Consumers that need to register the
+// custom element should `import "./components/ProviderKeyInput.js"` directly
+// (settings-page already does, via ApiKeyPromptDialog / SettingsDialog).
+// Type-only re-export keeps the public type surface; tsc erases it.
+// See `src/app/pi-ai-lazy.ts` and `docs/design/shrink-initial-bundle.md`.
+export type { ProviderKeyInput } from "./components/ProviderKeyInput.js";
 export {
 	type SandboxFile,
 	SandboxIframe,
@@ -62,14 +69,22 @@ export { RuntimeMessageBridge } from "./components/sandbox/RuntimeMessageBridge.
 export { RUNTIME_MESSAGE_ROUTER } from "./components/sandbox/RuntimeMessageRouter.js";
 export type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
 export { ThinkingBlock } from "./components/ThinkingBlock.js";
-export { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog.js";
+// Type-only — `ApiKeyPromptDialog` transitively pulls the pi-ai model catalog
+// (via `ProviderKeyInput`). See the ProviderKeyInput re-export above.
+export type { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog.js";
 export { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
 // Dialogs
-export { ModelSelector } from "./dialogs/ModelSelector.js";
+// Type-only — `ModelSelector` statically imports `modelsAreEqual` from
+// `@earendil-works/pi-ai`, which drags the 553 kB generated model catalog
+// into whichever chunk reaches it. Consumers that need to open the dialog
+// import directly from `./dialogs/ModelSelector.js`.
+export type { ModelSelector } from "./dialogs/ModelSelector.js";
 export { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog.js";
-export { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab.js";
+// Type-only — `ProvidersModelsTab` value-imports `getProviders` from pi-ai.
+export type { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab.js";
 export { SessionListDialog } from "./dialogs/SessionListDialog.js";
-export { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog.js";
+// Type-only — `SettingsDialog` value-imports `getProviders` from pi-ai.
+export type { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog.js";
 // Prompts
 export {
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RO,

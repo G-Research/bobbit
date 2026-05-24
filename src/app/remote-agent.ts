@@ -1,5 +1,46 @@
-import { getModel } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
+import { loadPiAi } from "./pi-ai-lazy.js";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
+
+/**
+ * Placeholder model used as the initial value of `_state.model` before the
+ * real model arrives via WS hydration (`set_model` event). Hard-coded to
+ * avoid statically importing `getModel` from `@earendil-works/pi-ai`, which
+ * would pull the 553 kB generated model catalog into the entry chunk.
+ *
+ * Mirrors `getModel("anthropic", "claude-opus-4-6")` with `contextWindow: 0`
+ * (the previous initial state). The hydrated model from the server replaces
+ * this within a few ms of WS connect — only `contextWindow` and `provider`
+ * are read from the placeholder, both defensively.
+ *
+ * See `docs/design/shrink-initial-bundle.md` (Task A) and `pi-ai-lazy.ts`.
+ */
+const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
+	id: "claude-opus-4-6",
+	name: "Claude Opus 4.6",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	thinkingLevelMap: { xhigh: "max" },
+	input: ["text", "image"],
+	cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+	contextWindow: 0,
+	maxTokens: 128000,
+	compat: { forceAdaptiveThinking: true },
+};
+
+/**
+ * Async equivalent of `getModel("anthropic", "claude-opus-4-6")`, used by
+ * callers that need the live catalog entry. Triggers the pi-ai lazy chunk
+ * fetch on first use. Returns the placeholder if the catalog lookup misses
+ * (e.g. model renamed in a future pi-ai release).
+ */
+export async function getDefaultModel(): Promise<Model<"anthropic-messages">> {
+	const { getModel } = await loadPiAi();
+	const m = getModel("anthropic", "claude-opus-4-6");
+	return (m ?? PLACEHOLDER_DEFAULT_MODEL) as Model<"anthropic-messages">;
+}
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
@@ -456,7 +497,7 @@ export class RemoteAgent {
 	constructor() {
 		this._state = {
 			systemPrompt: "",
-			model: { ...getModel("anthropic", "claude-opus-4-6"), contextWindow: 0 },
+			model: { ...PLACEHOLDER_DEFAULT_MODEL, contextWindow: 0 },
 			thinkingLevel: "medium",
 			imageGenerationModel: null as any,
 			tools: [],

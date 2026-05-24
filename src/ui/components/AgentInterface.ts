@@ -3,12 +3,27 @@ import { isAskResponseEnvelope } from "../../shared/ask-envelope.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
-import { streamSimple, type ToolResultMessage, type Usage } from "@earendil-works/pi-ai";
+import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
-import { ModelSelector } from "../dialogs/ModelSelector.js";
-import { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
+import type { ModelSelector } from "../dialogs/ModelSelector.js";
+import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
+
+// `ModelSelector` statically imports `modelsAreEqual` from `@earendil-works/pi-ai`,
+// which has a top-level side effect that materialises the 553 kB generated
+// model catalog. Static-importing it from this eagerly-loaded component would
+// drag the catalog into the entry chunk — see `src/app/pi-ai-lazy.ts` and
+// `docs/design/shrink-initial-bundle.md` (Task A). Lazy-load both dialogs at
+// click time instead. Type-only imports above are erased by `tsc`.
+async function openModelSelector(...args: Parameters<typeof ModelSelector.open>): Promise<void> {
+	const mod = await import("../dialogs/ModelSelector.js");
+	mod.ModelSelector.open(...args);
+}
+async function openImageModelSelector(...args: Parameters<typeof ImageModelSelector.open>): Promise<void> {
+	const mod = await import("../dialogs/ImageModelSelector.js");
+	mod.ImageModelSelector.open(...args);
+}
 import type { MessageEditor } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
@@ -837,12 +852,19 @@ export class AgentInterface extends LitElement {
 		// phase `load` handler, both of which call `_scrollToBottomNow`.
 		this.updateComplete.then(() => this._pinIfSticking());
 
-		// Set default streamFn with proxy support if not already set
-		if (this.session.streamFn === streamSimple) {
-			this.session.streamFn = createStreamFn(async () => {
+		// Set default streamFn with proxy support if not already set.
+		// We can't identity-compare against pi-ai's `streamSimple` without
+		// statically importing it (which pulls the 553 kB model catalog into
+		// the entry chunk — see src/app/pi-ai-lazy.ts). Instead, mark our
+		// wrapper with `__isDefault` at construction and re-check the flag
+		// on subsequent renders to avoid re-wrapping.
+		if (!(this.session.streamFn as { __isDefault?: boolean } | undefined)?.__isDefault) {
+			const wrapped = createStreamFn(async () => {
 				const enabled = await getAppStorage().settings.get<boolean>("proxy.enabled");
 				return enabled ? (await getAppStorage().settings.get<string>("proxy.url")) || undefined : undefined;
 			});
+			(wrapped as { __isDefault?: boolean }).__isDefault = true;
+			this.session.streamFn = wrapped;
 		}
 
 		// Set default getApiKey if not already set
@@ -1523,7 +1545,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ModelSelector.open(state.model, (m) => {
+					void openModelSelector(state.model, (m) => {
 						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
 						else session.state.model = m;
 						// After model change, clamp the current thinking level to one
@@ -1555,7 +1577,7 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					ImageModelSelector.open(imageModel, (m) => {
+					void openImageModelSelector(imageModel, (m) => {
 						if (typeof (session as any).setImageGenerationModel === "function") {
 							(session as any).setImageGenerationModel(m);
 						} else {
@@ -1874,7 +1896,7 @@ export class AgentInterface extends LitElement {
 								}
 							}}
 							.onModelSelect=${() => {
-								ModelSelector.open(state.model, (model) => {
+								void openModelSelector(state.model, (model) => {
 								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
 								else session.state.model = model;
 								// Clamp thinking-level against the newly selected model.

@@ -1,7 +1,27 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import type { Agent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { StringEnum, type Static, type ToolCall, Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import type { Static, ToolCall } from "@earendil-works/pi-ai";
+
+/**
+ * Local copy of pi-ai's `StringEnum` helper. Importing it from
+ * `@earendil-works/pi-ai` would drag the side-effectful index in (which
+ * materialises the 553 kB generated model catalog into the entry chunk).
+ * `Type` itself comes from `typebox` directly for the same reason.
+ * See `src/app/pi-ai-lazy.ts` and `docs/design/shrink-initial-bundle.md`.
+ */
+function StringEnum<T extends readonly string[]>(
+	values: T,
+	options?: { description?: string; default?: T[number] },
+) {
+	return Type.Unsafe<T[number]>({
+		type: "string",
+		enum: values as unknown as string[],
+		...(options?.description && { description: options.description }),
+		...(options?.default && { default: options.default }),
+	});
+}
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
