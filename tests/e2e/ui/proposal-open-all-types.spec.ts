@@ -151,10 +151,6 @@ function proposalTab(page: Page, proposal: ProposalCase): Locator {
 	return page.locator(`button.goal-tab-pill[title="${proposal.label}"]`).first();
 }
 
-function chatTab(page: Page): Locator {
-	return page.locator('button.goal-tab-pill[title="Chat"]').first();
-}
-
 function proposalPane(page: Page, proposal: ProposalCase): Locator {
 	if (proposal.type === "goal") {
 		return page
@@ -195,14 +191,7 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 	await page.setViewportSize({ width: 390, height: 800 });
 	await expectProposalTabAndPane(page, proposal);
 
-	const firstTab = page.locator(".goal-tab-bar button.goal-tab-pill").first();
-	await expect(firstTab, "Chat tab should be first on the mobile unified panel").toHaveAttribute("title", "Chat", { timeout: 5_000 });
-	const chat = chatTab(page);
-	await expect(chat).toBeVisible({ timeout: 5_000 });
-	await chat.click();
-	await expect(chat).toHaveClass(/goal-tab-pill--active/);
-	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 5_000 });
-
+	await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
 	await proposalTab(page, proposal).click();
 	await expect(proposalTab(page, proposal)).toHaveClass(/goal-tab-pill--active/);
 	await expect(proposalPane(page, proposal)).toBeVisible({ timeout: 5_000 });
@@ -210,6 +199,7 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 }
 
 async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, sessionId: string): Promise<void> {
+	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.reload();
 	await page.waitForFunction(
 		(sid) => {
@@ -221,8 +211,7 @@ async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, session
 	);
 	await waitForProposalSlot(page, proposal.type);
 
-	await expect(chatTab(page)).toBeVisible({ timeout: 5_000 });
-	await chatTab(page).click();
+	await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
 	const openButton = await expectProposalToolCard(page, proposal);
 	await openButton.scrollIntoViewIfNeeded();
 	await openButton.click();

@@ -202,11 +202,9 @@ test.describe("Proposal/review lightweight fixture", () => {
 
 		await page.setViewportSize({ width: 390, height: 800 });
 		await page.evaluate(() => (window as any).__setAllProposalFixtures());
-		await expect(page.locator('button.goal-tab-pill[title="Chat"]').first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('button.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 10_000 });
 		await proposalTab(page, "Staff").click();
 		await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 10_000 });
-		await page.locator('button.goal-tab-pill[title="Chat"]').first().click();
-		await expect(page.locator("[data-testid='fixture-chat'] textarea")).toBeVisible({ timeout: 10_000 });
 	});
 
 	test("review panel tabs render, switch, close, and keep submit disabled without annotations", async ({ page }) => {

@@ -3172,6 +3172,8 @@ function beginPanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
 	if ((event.target as HTMLElement | null)?.closest?.(".goal-tab-close")) return;
 	draggingPanelTabId = tab.id;
 	try { (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId); } catch { /* ignore */ }
+	window.addEventListener("pointerup", endPanelTabDrag, { once: true });
+	window.addEventListener("pointercancel", endPanelTabDrag, { once: true });
 }
 
 function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
