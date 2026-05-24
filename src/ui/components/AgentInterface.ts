@@ -2076,7 +2076,7 @@ export class AgentInterface extends LitElement {
 						><svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:block${this._moreExpanded ? ';transform:rotate(180deg)' : ''}"><path d="M1.5 5.5L4 3L6.5 5.5"/></svg></button>
 					</span>
 					${this._moreExpanded ? html`
-						<div class="absolute bottom-full z-50 flex flex-col gap-1 pill-more-popover" style="left:-8px; min-width:max-content; padding:14px; margin:-8px; margin-bottom:-7px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); --m:linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent); -webkit-mask-image:var(--m); mask-image:var(--m); -webkit-mask-composite:destination-in; mask-composite:intersect">
+						<div class="absolute bottom-full z-50 flex flex-col items-start gap-1 pill-more-popover" style="left:-8px; min-width:max-content; padding:14px; margin:-8px; margin-bottom:-7px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); --m:linear-gradient(to right, transparent, black 14px, black calc(100% - 14px), transparent), linear-gradient(to bottom, transparent, black 14px, black calc(100% - 14px), transparent); -webkit-mask-image:var(--m); mask-image:var(--m); -webkit-mask-composite:destination-in; mask-composite:intersect">
 							${hidden.map((p) => html`
 								<bg-process-pill
 									data-id="${p.id}"
@@ -2227,13 +2227,19 @@ export class AgentInterface extends LitElement {
 		//     down from the message area.
 		//   Narrow (<640px, portrait/mobile): strip CSS uses `max-width: 75%`.
 		//     Pills wrap onto up to TWO rows (content layer is `flex-wrap`),
-		//     so the algorithm budget is `2 * (parent.clientWidth * 0.75)`.
-		//     Content beyond that overflows into the "more" popover —
-		//     enforces a hard 2-row ceiling per the explicit user request.
-		//     The 25% on the left stays clear for the bobbit sprite.
+		//     so the algorithm budget is `1.85 * (parent.clientWidth * 0.75)`.
+		//     The 1.85 factor (not 2.0) carries a worst-case-slack margin:
+		//     flex-wrap wraps whole items, so when items don't pack tight
+		//     each row leaves a little unused width. A flat * 2 budget can
+		//     authorise content that overflows to a third row on cusp cases
+		//     where item widths differ — e.g. three items at 60 %, 60 %, 60 %
+		//     of the row each: total 180 % ≤ 2 * 100 % but only 1 item fits
+		//     per row, so 3 rows render. 1.85 buys back ~15 % of slack
+		//     headroom; content beyond that goes into "more" as intended.
+		//     The 25 % on the left stays clear for the bobbit sprite.
 		// Extra 2px is a safety margin for rounding/drop-shadow.
 		let maxWidth = this._isNarrow
-			? parentContainer.clientWidth * 0.75 * 2 - 2
+			? parentContainer.clientWidth * 0.75 * 1.85 - 2
 			: parentContainer.clientWidth - 128 - 2;
 
 		// Subtract git-status-widget width from available space.
@@ -2253,9 +2259,17 @@ export class AgentInterface extends LitElement {
 		// `.pill-more-popover` flex-column container), so parent.offsetWidth
 		// would be the popover's own width — dramatically larger than any
 		// real pill — and writing that to the cache prevents promotion back
-		// into the strip when space frees up. The pill's render() roots in
-		// `<span class="inline-flex …">` so the custom element's own
-		// offsetWidth is the actual rendered width in both contexts.
+		// into the strip when space frees up.
+		// Two further subtleties:
+		//   1. The popover container itself uses `items-start` (flex
+		//      align-items:flex-start), so individual `inline-flex` pill
+		//      hosts inside it are NOT stretched to the popover's content-
+		//      box width — each pill keeps its intrinsic width. Without that
+		//      class the default `align-items:stretch` would size every
+		//      popover pill to max(intrinsic widths), inflating the cache.
+		//   2. The pill's render() roots in `<span class="inline-flex …">`
+		//      so the custom element's own `offsetWidth` reflects that span's
+		//      rendered width in both contexts.
 		const allPillEls = pillStrip.querySelectorAll('bg-process-pill');
 		for (const pillEl of allPillEls) {
 			const id = pillEl.getAttribute('data-id');
