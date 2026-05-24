@@ -27,7 +27,6 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 	cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
 	contextWindow: 0,
 	maxTokens: 128000,
-	compat: { forceAdaptiveThinking: true },
 };
 
 /**
