@@ -10,7 +10,7 @@
  *      a local file and returns.)
  *   2. PATCH /api/sessions/:id { preview: true }.
  *   3. POST /api/preview/mount?sessionId=<sid> with one of {html} or
- *      {file: absolutePath}. Returns {url, path, entry, mtime, contentHash}.
+ *      {file: absolutePath}. Returns {url, path, entry, mtime, contentHash, artifactId}.
  *   4. Stamp v3 marker into the tool result.
  */
 
@@ -162,6 +162,7 @@ const extension: ExtensionFactory = (pi) => {
 					entry?: string;
 					mtime?: number;
 					contentHash?: string;
+					artifactId?: string;
 				};
 				if (typeof mountResult.url !== "string" || mountResult.url.length === 0 ||
 					typeof mountResult.path !== "string" || mountResult.path.length === 0) {
@@ -186,7 +187,13 @@ const extension: ExtensionFactory = (pi) => {
 				return {
 					content: [
 						{ type: "text", text: "Preview panel is open and will auto-update." },
-						{ type: "text", text: buildPreviewSnapshotV3Block(mountResult.url, snapshotPath, mountResult.contentHash) },
+						{
+							type: "text",
+							text: buildPreviewSnapshotV3Block(mountResult.url, snapshotPath, mountResult.contentHash, {
+								artifactId: mountResult.artifactId,
+								entry: mountResult.entry,
+							}),
+						},
 					],
 				};
 			} catch (err: any) {

@@ -52,7 +52,7 @@ async function mintCookie(): Promise<string> {
 }
 
 test.describe("POST /api/preview/mount (v3)", () => {
-	test("html body → 200 with {url, path, entry, mtime, contentHash}", async () => {
+	test("html body → 200 with {url, path, entry, mtime, contentHash, artifactId}", async () => {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			body: JSON.stringify({ html: "<h1>x</h1>" }),
@@ -67,9 +67,71 @@ test.describe("POST /api/preview/mount (v3)", () => {
 		expect(typeof body.mtime).toBe("number");
 		expect(body.mtime).toBeGreaterThan(0);
 		expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(body.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
 	});
 
-	test("missing both html and file → 400", async () => {
+	test("artifactId restore rehydrates immutable mounted bytes and rejects wrong sessions", async () => {
+		const restoreSessionId = await createSession();
+		const otherSessionId = await createSession();
+		try {
+			const v1Resp = await apiFetch(`/api/preview/mount?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>artifact-v1</body>", entry: "artifact.html" }),
+			});
+			expect(v1Resp.status).toBe(200);
+			const v1 = await v1Resp.json();
+			expect(v1.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
+
+			const v2Resp = await apiFetch(`/api/preview/mount?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>current-v2</body>", entry: "artifact.html" }),
+			});
+			expect(v2Resp.status).toBe(200);
+			const v2 = await v2Resp.json();
+			expect(v2.contentHash).not.toBe(v1.contentHash);
+
+			const otherMount = await apiFetch(`/api/preview/mount?sessionId=${otherSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ html: "<!doctype html><body>other-stable</body>", entry: "artifact.html" }),
+			});
+			expect(otherMount.status).toBe(200);
+			const otherBefore = await otherMount.json();
+
+			const wrongSessionRestore = await apiFetch(`/api/preview/artifacts/${encodeURIComponent(v1.artifactId)}/restore?sessionId=${otherSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ artifactId: v1.artifactId }),
+			});
+			expect(wrongSessionRestore.status).toBe(404);
+			const otherAfterResp = await apiFetch(`/api/preview/mount?sessionId=${otherSessionId}`);
+			expect(otherAfterResp.status).toBe(200);
+			const otherAfter = await otherAfterResp.json();
+			expect(otherAfter.contentHash).toBe(otherBefore.contentHash);
+
+			const restoreResp = await apiFetch(`/api/preview/artifacts/${encodeURIComponent(v1.artifactId)}/restore?sessionId=${restoreSessionId}`, {
+				method: "POST",
+				body: JSON.stringify({ artifactId: v1.artifactId }),
+			});
+			expect(restoreResp.status).toBe(200);
+			const restored = await restoreResp.json();
+			expect(restored.artifactId).toBe(v1.artifactId);
+			expect(restored.contentHash).toBe(v1.contentHash);
+			expect(restored.entry).toBe("artifact.html");
+
+			const cookie = await mintCookie();
+			const contentResp = await fetch(`${base()}/preview/${restoreSessionId}/artifact.html`, {
+				headers: { Cookie: cookie },
+			});
+			expect(contentResp.status).toBe(200);
+			const html = await contentResp.text();
+			expect(html).toContain("artifact-v1");
+			expect(html).not.toContain("current-v2");
+		} finally {
+			await deleteSession(restoreSessionId).catch(() => {});
+			await deleteSession(otherSessionId).catch(() => {});
+		}
+	});
+
+	test("missing html, file, and artifactId → 400", async () => {
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			body: JSON.stringify({}),
@@ -251,6 +313,7 @@ test.describe("GET /api/preview/mount (v3)", () => {
 			expect(typeof body.mtime).toBe("number");
 			expect(body.mtime).toBeGreaterThan(0);
 			expect(body.contentHash).toMatch(/^[a-f0-9]{64}$/);
+			expect(body.artifactId).toMatch(/^[A-Za-z0-9_-]{6,64}$/);
 		} finally {
 			await deleteSession(currentSessionId).catch(() => {});
 		}
