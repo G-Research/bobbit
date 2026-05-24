@@ -253,7 +253,8 @@ function selectPreviewRestoreErrorTab(args: {
 	const { appState, workspace, previewPanel, sessionId, entry, parsed, params, ctx, blockIndex, contentHash, status, message } = args;
 	const artifactId = parsed.kind === "preview" ? parsed.artifactId : undefined;
 	const error = restoreErrorPayload(message, status, artifactId);
-	const version = workspace.registerPreviewVersion(appState, sessionId, entry, contentHash, { current: false });
+	const identity = workspace.previewTabIdentityForContent(appState, sessionId, entry, contentHash, { historical: true });
+	const version = identity.version;
 	const source = previewTabSource(params, parsed, entry, ctx?.toolUseId, blockIndex);
 	const tabState = previewTabState(parsed, entry, Date.now(), parsed.kind === "preview" ? parsed.url : undefined, params);
 	source.restoreError = error;
@@ -310,10 +311,11 @@ function rememberPreviewSnapshotFromRender(
 				import("../../../app/panel-workspace.js"),
 				import("../../../app/preview-panel.js"),
 			]);
-			const version = workspace.registerPreviewVersion(appState, ctx.sessionId!, entry, parsed.contentHash, { current: false });
 			const liveHash = normalizeContentHash((appState as any).previewPanelContentHash);
 			const liveEntry = workspace.previewEntryLabel((appState as any).previewPanelEntry || "inline.html");
 			if (liveHash !== parsed.contentHash || liveEntry !== workspace.previewEntryLabel(entry)) return;
+			const identity = workspace.previewTabIdentityForContent(appState, ctx.sessionId!, entry, parsed.contentHash, { current: true });
+			const version = identity.version;
 			const tabSource = previewTabSource(params, parsed, entry, ctx.toolUseId, snap.index);
 			const tabState = previewTabState(parsed, entry, (appState as any).previewPanelMtime || Date.now(), parsed.url, params);
 			if (version != null) {
@@ -506,7 +508,11 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				const mountedContentHash = contentHashFromPost || snapshotContentHash;
 				const currentHashForEntry = currentHashBeforeOpen || currentPreviewHashForEntry(workspace, appState, sessionId, entry);
 				const shouldKeepCurrentPreviewTab = !currentHashForEntry || (!!mountedContentHash && currentHashForEntry === mountedContentHash);
-				const version = workspace.registerPreviewVersion(appState, sessionId, entry, mountedContentHash, { current: shouldKeepCurrentPreviewTab });
+				const identity = workspace.previewTabIdentityForContent(appState, sessionId, entry, mountedContentHash, {
+					current: shouldKeepCurrentPreviewTab,
+					historical: !shouldKeepCurrentPreviewTab,
+				});
+				const version = identity.version;
 				appState.previewPanelEntry = entry;
 				appState.previewPanelMtime = mtime;
 				appState.previewPanelContentHash = mountedContentHash || "";

@@ -5,11 +5,9 @@ import {
 	LIVE_PREVIEW_PANEL_TAB_ID,
 	activePanelTabIdForSession,
 	isHistoricalPreviewTab,
-	registerPreviewVersion,
 	previewEntryLabel,
 	previewEntryTabId,
-	previewTabDisplayTitle,
-	previewVersionedTabId,
+	previewTabIdentityForContent,
 	normalizePreviewContentHash,
 	panelTabsForSession,
 	previewContentHashFromTab,
@@ -210,15 +208,15 @@ export function selectHtmlPreviewTab(args: {
 		&& !!currentFilenameTab
 		&& previewContentHashFromTab(currentFilenameTab) === contentHash;
 	const shouldUseHistorical = requestedHistorical && !collapseToCurrent;
-	const version = registerPreviewVersion(s, sessionId, entry, contentHash, { current: !shouldUseHistorical, version: explicitVersion });
-	const isVersionedHistorical = shouldUseHistorical
-		&& typeof version === "number"
-		&& Number.isFinite(version)
-		&& version > 0;
-	const id = isVersionedHistorical
-		? previewVersionedTabId(entry, version)
-		: previewEntryTabId(entry);
-	const title = previewTabDisplayTitle(entry, version, isVersionedHistorical);
+	const identity = previewTabIdentityForContent(s, sessionId, entry, contentHash, {
+		current: !shouldUseHistorical,
+		historical: shouldUseHistorical,
+		version: explicitVersion,
+	});
+	const version = identity.version;
+	const isVersionedHistorical = identity.historical;
+	const id = identity.id;
+	const title = identity.title;
 	const source: Record<string, unknown> = {
 		type: "html-preview",
 		sessionId,
