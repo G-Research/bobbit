@@ -2743,6 +2743,13 @@ const previewRestoreInFlight = new Set<string>();
 let mobileSelectedPaneIndex = 0;
 let mobileSelectedSideTabId = "";
 let draggingPanelTabId = "";
+// Snapshot of side-pane tab order captured at the START of a pointer drag.
+// All reorder math during the drag is computed against this stable list so
+// that mid-drag mutations don't cascade (which would otherwise let a fast
+// pointer sweep undo a correct reorder when the cursor crosses the dragging
+// tab's new position before the DOM has re-rendered). On pointerup over a
+// pinned tab we also use this snapshot to revert incidental hover swaps.
+let draggingPanelOriginalTabs: PanelWorkspaceTab[] | null = null;
 
 function recordValue(record: Record<string, unknown>, key: string): string {
 	const value = record[key];
@@ -3234,6 +3241,40 @@ function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): bool
 	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
 }
 
+function applyPanelDragReorderFromPill(pill: HTMLElement, clientX: number): void {
+	if (!draggingPanelTabId || !draggingPanelOriginalTabs) return;
+	const targetId = pill.getAttribute("data-panel-tab-id") || "";
+	if (!targetId || targetId === draggingPanelTabId) return;
+	const sid = workspaceSessionId();
+	const original = draggingPanelOriginalTabs;
+	const targetTab = original.find((candidate) => candidate.id === targetId);
+	const currentTabs = panelTabsForSession(state, sid);
+	// Hovering a pinned tab is an explicit "drop before pinned" intent, which
+	// is forbidden. Revert any incidental in-progress reorders so the user sees
+	// the original order while parked over the pinned slot.
+	if (targetTab && isPinnedPanelTab(targetTab)) {
+		if (!samePanelTabOrder(currentTabs, original)) {
+			setPanelTabsForSession(state, sid, [...original]);
+			renderApp();
+		}
+		return;
+	}
+	const origTargetIndex = original.findIndex((candidate) => candidate.id === targetId);
+	if (origTargetIndex < 0) return;
+	// Convert target's index from `original` space to `without-dragging` space
+	// (reorderSidePanelTab interprets the index against the post-remove array).
+	const origSourceIndex = original.findIndex((candidate) => candidate.id === draggingPanelTabId);
+	const targetIndexInWithout = origSourceIndex >= 0 && origTargetIndex > origSourceIndex
+		? origTargetIndex - 1
+		: origTargetIndex;
+	const rect = pill.getBoundingClientRect();
+	const insertIndex = clientX < rect.left + rect.width / 2 ? targetIndexInWithout : targetIndexInWithout + 1;
+	const nextTabs = reorderSidePanelTab(original, draggingPanelTabId, insertIndex);
+	if (samePanelTabOrder(currentTabs, nextTabs)) return;
+	setPanelTabsForSession(state, sid, nextTabs);
+	renderApp();
+}
+
 function handlePanelTabDragMove(event: PointerEvent): void {
 	if (!draggingPanelTabId || event.pointerType === "touch") return;
 	// We deliberately avoid setPointerCapture in beginPanelTabDrag because the
@@ -3244,24 +3285,19 @@ function handlePanelTabDragMove(event: PointerEvent): void {
 	if (!el) return;
 	const pill = el.closest(".goal-tab-pill") as HTMLElement | null;
 	if (!pill) return;
-	const targetId = pill.getAttribute("data-panel-tab-id") || "";
-	if (!targetId || targetId === draggingPanelTabId) return;
-	const sid = workspaceSessionId();
-	const tabs = unifiedPanelTabs();
-	const targetIndex = tabs.findIndex((candidate) => candidate.id === targetId);
-	if (targetIndex < 0) return;
-	const rect = pill.getBoundingClientRect();
-	const insertIndex = event.clientX < rect.left + rect.width / 2 ? targetIndex : targetIndex + 1;
-	const nextTabs = reorderSidePanelTab(tabs, draggingPanelTabId, insertIndex);
-	if (samePanelTabOrder(tabs, nextTabs)) return;
-	setPanelTabsForSession(state, sid, nextTabs);
-	renderApp();
+	applyPanelDragReorderFromPill(pill, event.clientX);
 }
 
 function beginPanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
 	if (!isDesktop() || isPinnedPanelTab(tab) || event.pointerType === "touch" || event.button !== 0) return;
 	if ((event.target as HTMLElement | null)?.closest?.(".goal-tab-close")) return;
 	draggingPanelTabId = tab.id;
+	// Snapshot the side-pane tab order at drag start; all reorder math during
+	// the drag is computed against this stable list, not the live (mutated)
+	// tabs array. This prevents fast pointer sweeps from cascading and undoing
+	// a correct mid-drag reorder when the cursor crosses the dragging tab's
+	// new DOM position before lit-html has had a chance to re-render.
+	draggingPanelOriginalTabs = [...panelTabsForSession(state, workspaceSessionId())];
 	window.addEventListener("pointermove", handlePanelTabDragMove);
 	window.addEventListener("pointerup", endPanelTabDrag, { once: true });
 	window.addEventListener("pointercancel", endPanelTabDrag, { once: true });
@@ -3276,21 +3312,13 @@ function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
 	if (!draggingPanelTabId || !isDesktop() || event.pointerType === "touch" || draggingPanelTabId === tab.id) return;
 	const target = event.currentTarget as HTMLElement | null;
 	if (!target) return;
-	const sid = workspaceSessionId();
-	const tabs = unifiedPanelTabs();
-	const targetIndex = tabs.findIndex((candidate) => candidate.id === tab.id);
-	if (targetIndex < 0) return;
-	const rect = target.getBoundingClientRect();
-	const insertIndex = event.clientX < rect.left + rect.width / 2 ? targetIndex : targetIndex + 1;
-	const nextTabs = reorderSidePanelTab(tabs, draggingPanelTabId, insertIndex);
-	if (samePanelTabOrder(tabs, nextTabs)) return;
-	setPanelTabsForSession(state, sid, nextTabs);
-	renderApp();
+	applyPanelDragReorderFromPill(target, event.clientX);
 }
 
 function endPanelTabDrag(): void {
 	if (!draggingPanelTabId) return;
 	draggingPanelTabId = "";
+	draggingPanelOriginalTabs = null;
 	window.removeEventListener("pointermove", handlePanelTabDragMove);
 	renderApp();
 }

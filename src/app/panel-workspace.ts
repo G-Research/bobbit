@@ -40,6 +40,45 @@ export const LIVE_PREVIEW_PANEL_TAB_ID = "preview:live";
 export const LEGACY_LIVE_PREVIEW_PANEL_TAB_ID = "preview";
 export const INBOX_PANEL_TAB_ID = "inbox";
 export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
+const PANEL_TABS_STORAGE_KEY = "bobbit-panel-tabs-by-session";
+const PANEL_ACTIVE_STORAGE_KEY = "bobbit-panel-active-by-session";
+const PANEL_VERSIONS_STORAGE_KEY = "bobbit-preview-versions-by-session";
+
+function hasLocalStorage(): boolean {
+	try { return typeof localStorage !== "undefined"; } catch { return false; }
+}
+
+function safeReadObject(key: string): Record<string, unknown> | undefined {
+	if (!hasLocalStorage()) return undefined;
+	try {
+		const raw = localStorage.getItem(key);
+		if (!raw) return undefined;
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+	} catch { return undefined; }
+}
+
+function safeWriteObject(key: string, value: unknown): void {
+	if (!hasLocalStorage()) return;
+	try { localStorage.setItem(key, JSON.stringify(value || {})); } catch { /* quota/SSR */ }
+}
+
+export function loadPersistedPanelWorkspace(stateLike: any): void {
+	if (!stateLike || typeof stateLike !== "object") return;
+	const tabs = safeReadObject(PANEL_TABS_STORAGE_KEY);
+	if (tabs) stateLike.panelTabsBySession = tabs as Record<string, PanelWorkspaceTab[]>;
+	const active = safeReadObject(PANEL_ACTIVE_STORAGE_KEY);
+	if (active) stateLike.panelWorkspaceActiveBySession = active as Record<string, string>;
+	const versions = safeReadObject(PANEL_VERSIONS_STORAGE_KEY);
+	if (versions) stateLike.previewVersionsBySession = versions as Record<string, Record<string, PreviewVersionRecord>>;
+}
+
+function persistPanelWorkspace(stateLike: any): void {
+	if (!stateLike || typeof stateLike !== "object") return;
+	safeWriteObject(PANEL_TABS_STORAGE_KEY, stateLike.panelTabsBySession);
+	safeWriteObject(PANEL_ACTIVE_STORAGE_KEY, stateLike.panelWorkspaceActiveBySession);
+	safeWriteObject(PANEL_VERSIONS_STORAGE_KEY, stateLike.previewVersionsBySession);
+}
 
 const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	goal: "Goal",
@@ -320,6 +359,7 @@ export function setPanelTabsForSession(stateLike: any, sessionId: string | null 
 	const bySession = ensurePanelTabsBySession(stateLike);
 	bySession[sid] = tabs;
 	if (activeMirrorSessionKey(stateLike) === sid) stateLike.panelTabs = tabs;
+	persistPanelWorkspace(stateLike);
 	return tabs;
 }
 
@@ -359,6 +399,7 @@ function writeActivePanelTabId(stateLike: any, sid: string, tabId: string): void
 	stateLike.panelWorkspaceActiveBySession[sid] = tabId;
 	if (activeMirrorSessionKey(stateLike) === sid) stateLike.activePanelTabId = tabId;
 	if (stateLike.panelWorkspace && typeof stateLike.panelWorkspace === "object") stateLike.panelWorkspace.activeTabId = tabId;
+	persistPanelWorkspace(stateLike);
 }
 
 export function activeSidePanelTabIdForSession(stateLike: any, sessionId: string | null | undefined): string {

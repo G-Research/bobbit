@@ -980,8 +980,17 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			|| state.archivedSessions.find(s => s.id === sessionId);
 		applyProjectPalette(sessionForPalette?.projectId);
 
-		// Reset session-scoped global state so it doesn't bleed from the previous session
-		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		// Reset session-scoped global state so it doesn't bleed from the previous session.
+		// If the session was just created server-side (e.g. via a back-channel API
+		// call) the WS-driven `state.gatewaySessions` cache may not include it yet.
+		// Refresh once so downstream lookups (staffId for inbox bootstrap, preview
+		// flag, projectId for palette) see the live record instead of falling back
+		// to defaults that would silently disable Inbox/preview features.
+		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		if (!sessionData) {
+			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		}
 		state.assistantType = sessionData?.assistantType
 			|| (sessionData?.goalAssistant ? "goal"
 			: sessionData?.roleAssistant ? "role"
@@ -1683,8 +1692,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.appView = "authenticated";
 		markSessionVisited(sessionId);
 
-		// Detect assistant type from cached session data (no network needed).
-		const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		// Detect assistant type from cached session data. The cache may lag the
+		// gateway when a session was just created via a back-channel API call;
+		// refresh on miss so the staffId-driven inbox bootstrap fires correctly.
+		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		if (!sessionData) {
+			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
+		}
 		state.assistantType = options?.assistantType
 			|| sessionData?.assistantType
 			|| (options?.isGoalAssistant || sessionData?.goalAssistant ? "goal"
