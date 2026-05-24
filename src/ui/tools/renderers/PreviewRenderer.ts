@@ -128,10 +128,19 @@ function baseName(path: string | undefined): string {
 	return clean.split("/").filter(Boolean).pop() || clean || "";
 }
 
-function restorableSnapshot(parsed: ParsedSnapshot, _params: PreviewOpenParams | undefined): ParsedSnapshot {
-	// v3 preview markers are artifact-backed. Do not fall back to source paths for
-	// historical restores: if the artifact is unavailable, the tab must show an
-	// error instead of aliasing to the current source file.
+function legacyPreviewParamsSnapshot(params: PreviewOpenParams | undefined): ParsedSnapshot | null {
+	// Legacy v3 markers predate artifact ids. For those markers only, best-effort
+	// restore from the original tool params when they are still available.
+	if (typeof params?.html === "string") return { kind: "inline", html: params.html };
+	if (typeof params?.file === "string" && params.file) return { kind: "file", path: params.file };
+	return null;
+}
+
+function restorableSnapshot(parsed: ParsedSnapshot, params: PreviewOpenParams | undefined): ParsedSnapshot {
+	// New v3 preview markers are artifact-backed. Do not fall back to source paths
+	// when an artifact id is present: if artifact restore fails, the tab must show
+	// an error instead of aliasing to the current source file.
+	if (parsed.kind === "preview" && !parsed.artifactId) return legacyPreviewParamsSnapshot(params) ?? parsed;
 	return parsed;
 }
 
@@ -444,63 +453,67 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				if (!patchResp.ok) throw new Error(`PATCH failed: ${patchResp.status}`);
 
 				// 4. Restore the exact snapshot into the single live mount when needed.
-				// v3 markers restore by artifact id only. Legacy v1/v2 markers may still
-				// re-stamp inline/file content through the mount endpoint.
+				// v3 markers with artifact ids restore by artifact only. Legacy v3 markers
+				// without artifact ids may best-effort re-stamp original inline/file params,
+				// and v1/v2 markers keep their existing mount-endpoint fallback.
 				let mtimeFromPost: number | undefined;
 				let contentHashFromPost: string | undefined;
 				let urlFromPost: string | undefined;
-				if (parsed.kind === "preview") {
-					if (!snapshotMatchesCurrent) {
-						if (!snapshotArtifactId) {
-							selectRestoreError(undefined, "Preview artifact unavailable");
-							throw new Error("Preview artifact unavailable: missing artifact id");
+				const postMountSnapshot = async (postBody: Record<string, unknown>) => {
+					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
+						method: "POST",
+						body: JSON.stringify(postBody),
+					});
+					if (!postResp.ok) {
+						if ("file" in postBody && (postResp.status === 400 || postResp.status === 404)) {
+							btn.textContent = "File no longer available";
+							btn.disabled = true;
+							return false;
 						}
-						const restoreResp = await gatewayFetch(`/api/preview/artifacts/${encodeURIComponent(snapshotArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`, {
-							method: "POST",
-							body: JSON.stringify({ artifactId: snapshotArtifactId }),
-						});
-						if (!restoreResp.ok) {
-							selectRestoreError(restoreResp.status, "Preview artifact unavailable");
-							throw new Error(`Preview artifact restore failed: ${restoreResp.status}`);
-						}
-						const data = await restoreResp.json().catch(() => ({} as any));
+						throw new Error(`POST failed: ${postResp.status}`);
+					}
+					try {
+						const data = await postResp.json();
 						if (typeof data?.entry === "string" && data.entry) entry = data.entry;
 						if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
 						if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
-						const restoredHash = normalizeContentHash(data?.contentHash);
-						if (snapshotContentHash && !restoredHash) {
-							selectRestoreError(502, "Preview artifact unavailable");
-							throw new Error("Preview artifact restore returned no valid content hash");
-						}
-						if (snapshotContentHash && restoredHash !== snapshotContentHash) {
-							selectRestoreError(409, "Preview artifact unavailable");
-							throw new Error("Preview artifact content hash mismatch");
-						}
-						contentHashFromPost = restoredHash || snapshotContentHash;
-					}
-				} else {
-					const postBody = mountBodyForSnapshot(parsed, params);
-					if (postBody) {
-						const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
-							method: "POST",
-							body: JSON.stringify(postBody),
-						});
-						if (!postResp.ok) {
-							if ("file" in postBody && (postResp.status === 400 || postResp.status === 404)) {
-								btn.textContent = "File no longer available";
-								btn.disabled = true;
-								return;
+						contentHashFromPost = normalizeContentHash(data?.contentHash);
+					} catch { /* ignore — body parse is best-effort */ }
+					return true;
+				};
+				if (parsed.kind === "preview") {
+					if (!snapshotMatchesCurrent) {
+						if (snapshotArtifactId) {
+							const restoreResp = await gatewayFetch(`/api/preview/artifacts/${encodeURIComponent(snapshotArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`, {
+								method: "POST",
+								body: JSON.stringify({ artifactId: snapshotArtifactId }),
+							});
+							if (!restoreResp.ok) {
+								selectRestoreError(restoreResp.status, "Preview artifact unavailable");
+								throw new Error(`Preview artifact restore failed: ${restoreResp.status}`);
 							}
-							throw new Error(`POST failed: ${postResp.status}`);
-						}
-						try {
-							const data = await postResp.json();
+							const data = await restoreResp.json().catch(() => ({} as any));
 							if (typeof data?.entry === "string" && data.entry) entry = data.entry;
 							if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
 							if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
-							contentHashFromPost = normalizeContentHash(data?.contentHash);
-						} catch { /* ignore — body parse is best-effort */ }
+							const restoredHash = normalizeContentHash(data?.contentHash);
+							if (snapshotContentHash && !restoredHash) {
+								selectRestoreError(502, "Preview artifact unavailable");
+								throw new Error("Preview artifact restore returned no valid content hash");
+							}
+							if (snapshotContentHash && restoredHash !== snapshotContentHash) {
+								selectRestoreError(409, "Preview artifact unavailable");
+								throw new Error("Preview artifact content hash mismatch");
+							}
+							contentHashFromPost = restoredHash || snapshotContentHash;
+						} else {
+							const postBody = mountBodyForSnapshot(parsed, params);
+							if (postBody && !(await postMountSnapshot(postBody))) return;
+						}
 					}
+				} else {
+					const postBody = mountBodyForSnapshot(parsed, params);
+					if (postBody && !(await postMountSnapshot(postBody))) return;
 				}
 
 				// 5. Imperatively refresh the preview side-panel client-side.
