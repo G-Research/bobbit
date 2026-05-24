@@ -44,16 +44,16 @@
   "optionalDependencies": {
     "@bobbit/binaries-darwin-arm64": "0.9.0",
     "@bobbit/binaries-darwin-x64": "0.9.0",
-    "@bobbit/binaries-linux-x64": "0.9.0",
     "@bobbit/binaries-linux-arm64": "0.9.0",
+    "@bobbit/binaries-linux-x64": "0.9.0",
     "@bobbit/binaries-win32-x64": "0.9.0"
   },
   "dependencies": {
-    "@lmstudio/sdk": "^1.5.0",
-    "@mariozechner/mini-lit": "^0.2.0",
     "@earendil-works/pi-agent-core": "0.75.5",
     "@earendil-works/pi-ai": "0.75.5",
     "@earendil-works/pi-coding-agent": "0.75.5",
+    "@lmstudio/sdk": "^1.5.0",
+    "@mariozechner/mini-lit": "^0.2.0",
     "@recogito/text-annotator": "^3.4.9",
     "@sinclair/typebox": "^0.34.41",
     "acme-client": "^5.4.0",
@@ -67,6 +67,7 @@
     "ollama": "^0.6.0",
     "pdfjs-dist": "5.4.394",
     "qrcode": "^1.5.4",
+    "sortablejs": "^1.15.7",
     "ws": "^8.18.0",
     "yaml": "^2.8.2"
   },
@@ -74,6 +75,7 @@
     "@playwright/test": "^1.58.2",
     "@tailwindcss/vite": "^4.1.17",
     "@types/node": "^22.0.0",
+    "@types/sortablejs": "^1.15.9",
     "@types/ws": "^8.5.14",
     "c8": "^11.0.0",
     "concurrently": "^9.2.1",

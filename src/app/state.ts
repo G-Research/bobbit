@@ -321,6 +321,11 @@ export const state = {
 	previewPanelEntry: "" as string,
 	// SHA-256 identity for the currently mounted preview content tree.
 	previewPanelContentHash: "" as string,
+	// When the active preview tab is a historical artifact, the iframe is served
+	// directly from `/preview/<sid>/_artifact/<artifactId>/...` without needing
+	// a server-side mount/restore round-trip. Empty string means the live mount
+	// slot is being used.
+	previewPanelArtifactId: "" as string,
 	previewPanelFullscreen: false,
 
 	// Dynamic per-session side-panel workspace. panelTabs / activePanelTabId are
@@ -540,18 +545,38 @@ export function resetArchivedExpandState(): void {
 
 let _renderApp: () => void = () => {};
 let _renderScheduled = false;
+let _renderSuppressed = false;
+let _renderPendingWhileSuppressed = false;
 
 export function setRenderApp(fn: () => void): void {
 	_renderApp = fn;
 }
 
 export function renderApp(): void {
+	if (_renderSuppressed) {
+		// While suppression is active (e.g. SortableJS is mid-drag and owns the
+		// DOM), buffer the request. On resume we flush exactly one render.
+		_renderPendingWhileSuppressed = true;
+		return;
+	}
 	if (_renderScheduled) return;
 	_renderScheduled = true;
 	requestAnimationFrame(() => {
 		_renderScheduled = false;
 		_renderApp();
 	});
+}
+
+/** Suspend renderApp() while an external system (e.g. SortableJS) owns the
+ *  DOM during a drag. Any renderApp() calls during the suspension are
+ *  collapsed into a single render that runs immediately when resumed. */
+export function setRenderSuppressed(suppressed: boolean): void {
+	if (_renderSuppressed === suppressed) return;
+	_renderSuppressed = suppressed;
+	if (!suppressed && _renderPendingWhileSuppressed) {
+		_renderPendingWhileSuppressed = false;
+		renderApp();
+	}
 }
 
 // ============================================================================

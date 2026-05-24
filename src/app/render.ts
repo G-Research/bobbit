@@ -6,7 +6,9 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, render } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 import { ref, createRef } from "lit/directives/ref.js";
+import Sortable from "sortablejs";
 import { reconcileFollowTail } from "./follow-tail.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, Check, Copy, ExternalLink, Eye, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, UserCheck, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
@@ -21,6 +23,7 @@ import {
 
 	getSidebarData,
 	isProposalStreaming,
+	setRenderSuppressed,
 } from "./state.js";
 import { createGoal, createRole, gatewayFetch, refreshSessions, fetchSandboxStatus } from "./api.js";
 import { errorDetails } from "./error-helpers.js";
@@ -81,7 +84,6 @@ import {
 	previewVersionRecordFor,
 	proposalPanelTabId,
 	proposalRevisionFromPanelTab,
-	reorderSidePanelTab,
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
@@ -2763,14 +2765,44 @@ let mountedPreviewTabId = "";
 const previewRestoreInFlight = new Set<string>();
 let mobileSelectedPaneIndex = 0;
 let mobileSelectedSideTabId = "";
+// SortableJS instance attached to the unified tab bar inner container. We
+// recreate it whenever the container DOM node changes (which happens when the
+// workspace switches sessions). During a drag, renderApp is suppressed so
+// lit-html doesn't fight Sortable's DOM mutations; on drop we read the new
+// DOM order and commit it back to state.
+let panelSortable: Sortable | null = null;
+let panelSortableContainer: HTMLElement | null = null;
 let draggingPanelTabId = "";
-// Snapshot of side-pane tab order captured at the START of a pointer drag.
-// All reorder math during the drag is computed against this stable list so
-// that mid-drag mutations don't cascade (which would otherwise let a fast
-// pointer sweep undo a correct reorder when the cursor crosses the dragging
-// tab's new position before the DOM has re-rendered). On pointerup over a
-// pinned tab we also use this snapshot to revert incidental hover swaps.
-let draggingPanelOriginalTabs: PanelWorkspaceTab[] | null = null;
+// rAF handle for the Y-axis lock loop that keeps the dragged clone glued to
+// its original vertical position (Chrome-style tab drag).
+let panelDragLockRaf = 0;
+
+// Chrome-style axis lock: while the user drags a tab, SortableJS positions the
+// floating clone (Sortable.ghost) via `transform: matrix(a,b,c,d,e,f)` where
+// `e` is translateX and `f` is translateY. We run a requestAnimationFrame loop
+// that, each frame, zeroes out `f` so the clone only ever slides horizontally
+// regardless of how the cursor moves vertically. Sortable.ghost is the static
+// property SortableJS exposes for the active drag clone.
+function startPanelDragYLock(): void {
+	cancelAnimationFrame(panelDragLockRaf);
+	const tick = () => {
+		const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+		if (ghost && ghost.style.transform) {
+			const t = ghost.style.transform;
+			const m = /matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/.exec(t);
+			if (m && m[6] !== "0") {
+				ghost.style.transform = `matrix(${m[1]},${m[2]},${m[3]},${m[4]},${m[5]},0)`;
+			}
+		}
+		panelDragLockRaf = requestAnimationFrame(tick);
+	};
+	panelDragLockRaf = requestAnimationFrame(tick);
+}
+
+function stopPanelDragYLock(): void {
+	cancelAnimationFrame(panelDragLockRaf);
+	panelDragLockRaf = 0;
+}
 
 function recordValue(record: Record<string, unknown>, key: string): string {
 	const value = record[key];
@@ -2874,10 +2906,38 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	const source = tab.source as Record<string, unknown>;
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
+	const tabArtifactIdEarly = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 
-	if (tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live") || !isHistoricalPreviewTab(tab)) {
+	// Fast path: any preview tab that has a persisted artifact is served
+	// directly from `/preview/<sid>/_artifact/<artifactId>/...`. This bypasses
+	// the single-slot live mount entirely so switching between artifact-backed
+	// preview tabs is instant (no POST restore round-trip, no iframe blanking).
+	// We skip this only for the canonical live tab id, which intentionally
+	// follows the live mount slot's changing bytes.
+	const isLiveTab = tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live");
+	if (!isLiveTab && tabArtifactIdEarly) {
+		if (state.previewPanelEntry === entry && state.previewPanelArtifactId === tabArtifactIdEarly && currentMountedPreviewTabId() === tab.id) {
+			clearPreviewTabRestoreError(sessionId, tab.id);
+			markPreviewTabMounted(tab);
+			return;
+		}
+		state.isPreviewSession = true;
+		state.previewPanelEntry = entry;
+		state.previewPanelArtifactId = tabArtifactIdEarly;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : Date.now();
+		(state as any).previewPanelContentHash = contentHash;
+		clearPreviewTabRestoreError(sessionId, tab.id);
+		markPreviewTabMounted(tab);
+		renderApp();
+		return;
+	}
+
+	if (isLiveTab || !isHistoricalPreviewTab(tab)) {
 		const liveEntry = previewEntryFromTab(tab);
 		const liveHash = previewContentHashFromTab(tab);
+		// Coming back to the live tab from an artifact-served tab — clear the
+		// artifact id so the iframe URL falls back to the live mount slot.
+		state.previewPanelArtifactId = "";
 		// IMPORTANT: setUnifiedActiveTab runs on every render via ensureUnifiedActiveTab,
 		// which calls this function. If this tab is already the mounted live preview and
 		// state.previewPanelEntry already matches, skip the state.previewPanelMtime/Entry/
@@ -2951,7 +3011,23 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	const snapshotFile = recordValue(tabState, "snapshotFile") || recordValue(source, "path");
 	const artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 	markPreviewTabLiveForSession(sessionId, tab);
-	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry) return;
+	if (currentMountedPreviewTabId() === tab.id && state.previewPanelEntry === entry && state.previewPanelArtifactId === (artifactId || "")) return;
+
+	// Fast path: artifact-backed tabs are served directly from
+	// `/preview/<sid>/_artifact/<artifactId>/...` so there's no mount/restore
+	// round-trip. Just point the iframe at the artifact URL and we're done.
+	if (artifactId) {
+		state.isPreviewSession = true;
+		state.previewPanelEntry = entry;
+		state.previewPanelArtifactId = artifactId;
+		state.previewPanelMtime = typeof tabState.mtime === "number" ? tabState.mtime : Date.now();
+		(state as any).previewPanelContentHash = contentHash;
+		clearPreviewTabRestoreError(sessionId, tab.id);
+		markPreviewTabMounted(tab);
+		renderApp();
+		return;
+	}
+
 	archiveLivePreviewBeforeHistoricalRestore(sessionId, contentHash);
 
 	state.isPreviewSession = true;
@@ -2985,6 +3061,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 
 	state.previewPanelEntry = "";
 	state.previewPanelMtime = 0;
+	state.previewPanelArtifactId = "";
 	(state as any).previewPanelContentHash = contentHash;
 	try {
 		document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")
@@ -3002,6 +3079,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 			if (state.selectedSessionId !== sessionId || activeSessionId() !== sessionId || activeSidePanelTabIdForSession(state, sessionId) !== tab.id) return;
 			state.previewPanelEntry = typeof data?.entry === "string" && data.entry ? data.entry : entry;
 			state.previewPanelMtime = typeof data?.mtime === "number" ? data.mtime : Date.now();
+			state.previewPanelArtifactId = "";
 			(state as any).previewPanelContentHash = normalizePreviewContentHash(data?.contentHash) || contentHash;
 			const updatedTab = clearPreviewTabRestoreError(sessionId, tab.id) ?? tab;
 			markPreviewTabMounted(updatedTab);
@@ -3262,87 +3340,99 @@ function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): bool
 	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
 }
 
-function applyPanelDragReorderFromPill(pill: HTMLElement, clientX: number): void {
-	if (!draggingPanelTabId || !draggingPanelOriginalTabs) return;
-	const targetId = pill.getAttribute("data-panel-tab-id") || "";
-	if (!targetId || targetId === draggingPanelTabId) return;
-	const sid = workspaceSessionId();
-	const original = draggingPanelOriginalTabs;
-	const targetTab = original.find((candidate) => candidate.id === targetId);
-	const currentTabs = panelTabsForSession(state, sid);
-	// Hovering a pinned tab is an explicit "drop before pinned" intent, which
-	// is forbidden. Revert any incidental in-progress reorders so the user sees
-	// the original order while parked over the pinned slot.
-	if (targetTab && isPinnedPanelTab(targetTab)) {
-		if (!samePanelTabOrder(currentTabs, original)) {
-			setPanelTabsForSession(state, sid, [...original]);
-			renderApp();
+// Attach a SortableJS instance to the unified tab bar's inner container. Idempotent:
+// if the container DOM node is the same as last time, we keep the existing instance.
+// If the container was replaced (e.g. workspace switched sessions), we destroy the
+// old instance and rebuild.
+//
+// SortableJS handles all the hard parts of Chrome-style tab dragging — dragged item
+// follows cursor 1:1, siblings slide via CSS, midpoint hysteresis to prevent flicker,
+// touch and accessibility support, edge cases like fast sweeps. We integrate by:
+//   - filter: pinned tabs can't be picked up
+//   - onMove: forbid drops in front of pinned tabs (returns false to cancel)
+//   - onStart: suppress lit-html renders so Sortable owns the DOM during the drag
+//   - onEnd: read the new DOM order, commit to state, resume renders
+function ensurePanelSortable(container: HTMLElement | null): void {
+	if (!container) {
+		if (panelSortable) {
+			panelSortable.destroy();
+			panelSortable = null;
+			panelSortableContainer = null;
 		}
 		return;
 	}
-	const origTargetIndex = original.findIndex((candidate) => candidate.id === targetId);
-	if (origTargetIndex < 0) return;
-	// Convert target's index from `original` space to `without-dragging` space
-	// (reorderSidePanelTab interprets the index against the post-remove array).
-	const origSourceIndex = original.findIndex((candidate) => candidate.id === draggingPanelTabId);
-	const targetIndexInWithout = origSourceIndex >= 0 && origTargetIndex > origSourceIndex
-		? origTargetIndex - 1
-		: origTargetIndex;
-	const rect = pill.getBoundingClientRect();
-	const insertIndex = clientX < rect.left + rect.width / 2 ? targetIndexInWithout : targetIndexInWithout + 1;
-	const nextTabs = reorderSidePanelTab(original, draggingPanelTabId, insertIndex);
-	if (samePanelTabOrder(currentTabs, nextTabs)) return;
-	setPanelTabsForSession(state, sid, nextTabs);
-	renderApp();
+	if (panelSortableContainer === container && panelSortable) return;
+	if (panelSortable) {
+		panelSortable.destroy();
+		panelSortable = null;
+	}
+	panelSortableContainer = container;
+
+	panelSortable = Sortable.create(container, {
+		animation: 180,
+		easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+		draggable: ".goal-tab-pill",
+		filter: ".goal-tab-pill--pinned, .goal-tab-close",
+		preventOnFilter: false,
+		ghostClass: "goal-tab-pill--ghost",
+		chosenClass: "goal-tab-pill--chosen",
+		dragClass: "goal-tab-pill--drag",
+		forceFallback: true,
+		fallbackTolerance: 4,
+		delay: 0,
+		onMove: (evt) => {
+			// Forbid dropping in front of (or onto) a pinned tab. Returning false
+			// cancels the move; SortableJS keeps trying as the cursor moves.
+			const related = evt.related as HTMLElement | null;
+			if (!related) return true;
+			if (related.classList.contains("goal-tab-pill--pinned")) return false;
+			return true;
+		},
+		onStart: (evt) => {
+			draggingPanelTabId = (evt.item as HTMLElement).getAttribute("data-panel-tab-id") || "";
+			document.documentElement.classList.add("dragging-panel-tab");
+			setRenderSuppressed(true);
+			startPanelDragYLock();
+			// Tag the floating clone so CSS can override SortableJS's inline
+			// opacity: 0.8 (we want it to look like a real tab, not a ghost),
+			// while the source tab (.goal-tab-pill--ghost) becomes invisible —
+			// the user should perceive the tab itself moving, not a clone.
+			const ghost = (Sortable as unknown as { ghost: HTMLElement | null }).ghost;
+			if (ghost) ghost.classList.add("goal-tab-pill--floating");
+		},
+		onEnd: (evt) => {
+			draggingPanelTabId = "";
+			document.documentElement.classList.remove("dragging-panel-tab");
+			stopPanelDragYLock();
+			try {
+				const host = evt.from as HTMLElement;
+				// Read the new tab id order directly off the DOM children.
+				const newIds = Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))
+					.map((el) => el.getAttribute("data-panel-tab-id") || "")
+					.filter((id) => id.length > 0);
+				const sid = workspaceSessionId();
+				const currentTabs = panelTabsForSession(state, sid);
+				const byId = new Map(currentTabs.map((tab) => [tab.id, tab]));
+				const reordered: PanelWorkspaceTab[] = [];
+				for (const id of newIds) {
+					const tab = byId.get(id);
+					if (tab) reordered.push(tab);
+				}
+				// Append any tabs that weren't in the DOM order (defensive).
+				for (const tab of currentTabs) {
+					if (!newIds.includes(tab.id)) reordered.push(tab);
+				}
+				if (!samePanelTabOrder(currentTabs, reordered)) {
+					setPanelTabsForSession(state, sid, reordered);
+				}
+			} finally {
+				setRenderSuppressed(false);
+			}
+		},
+	});
 }
 
-function handlePanelTabDragMove(event: PointerEvent): void {
-	if (!draggingPanelTabId || event.pointerType === "touch") return;
-	// We deliberately avoid setPointerCapture in beginPanelTabDrag because the
-	// capture prevents `pointermove`/`pointerenter` from firing on sibling tab
-	// pills, which breaks drag-over detection. Use the actual cursor position
-	// + elementFromPoint to find the hovered tab.
-	const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-	if (!el) return;
-	const pill = el.closest(".goal-tab-pill") as HTMLElement | null;
-	if (!pill) return;
-	applyPanelDragReorderFromPill(pill, event.clientX);
-}
 
-function beginPanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
-	if (!isDesktop() || isPinnedPanelTab(tab) || event.pointerType === "touch" || event.button !== 0) return;
-	if ((event.target as HTMLElement | null)?.closest?.(".goal-tab-close")) return;
-	draggingPanelTabId = tab.id;
-	// Snapshot the side-pane tab order at drag start; all reorder math during
-	// the drag is computed against this stable list, not the live (mutated)
-	// tabs array. This prevents fast pointer sweeps from cascading and undoing
-	// a correct mid-drag reorder when the cursor crosses the dragging tab's
-	// new DOM position before lit-html has had a chance to re-render.
-	draggingPanelOriginalTabs = [...panelTabsForSession(state, workspaceSessionId())];
-	window.addEventListener("pointermove", handlePanelTabDragMove);
-	window.addEventListener("pointerup", endPanelTabDrag, { once: true });
-	window.addEventListener("pointercancel", endPanelTabDrag, { once: true });
-}
-
-function updatePanelTabDrag(tab: PanelWorkspaceTab, event: PointerEvent): void {
-	// Tab-pill-local pointer event handler (kept as a back-compat fallback so
-	// hover-driven reorders still work when the cursor is precisely over a
-	// sibling pill). The window-level `handlePanelTabDragMove` listener attached
-	// in `beginPanelTabDrag` is the primary path — it covers the gap between
-	// pills and the case where the cursor moves faster than per-element events.
-	if (!draggingPanelTabId || !isDesktop() || event.pointerType === "touch" || draggingPanelTabId === tab.id) return;
-	const target = event.currentTarget as HTMLElement | null;
-	if (!target) return;
-	applyPanelDragReorderFromPill(target, event.clientX);
-}
-
-function endPanelTabDrag(): void {
-	if (!draggingPanelTabId) return;
-	draggingPanelTabId = "";
-	draggingPanelOriginalTabs = null;
-	window.removeEventListener("pointermove", handlePanelTabDragMove);
-	renderApp();
-}
 
 // ============================================================================
 // RENDER APP
@@ -3713,28 +3803,30 @@ export function doRenderApp(): void {
 		const closable = !isPinnedPanelTab(tab);
 		const draggable = isDesktop() && !isPinnedPanelTab(tab);
 		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		// On mobile, when the slider is on the chat pane (index 0) no panel tab
+		// should be highlighted — the pinned chat pill owns the active state.
+		const mobileChatActive = !isDesktop() && mobileSelectedPaneIndex === 0;
+		const tabIsActive = !mobileChatActive && activeId === tab.id;
 		return html`
-		<button
-			class="goal-tab-pill ${activeId === tab.id ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
+		<div
+			role="button"
+			tabindex="0"
+			class="goal-tab-pill ${tabIsActive ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
 			title=${tooltip}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
 			data-testid=${testId}
-			@pointerdown=${(event: PointerEvent) => beginPanelTabDrag(tab, event)}
-			@pointermove=${(event: PointerEvent) => updatePanelTabDrag(tab, event)}
-			@pointerenter=${(event: PointerEvent) => updatePanelTabDrag(tab, event)}
-			@pointerup=${() => endPanelTabDrag()}
-			@pointercancel=${() => endPanelTabDrag()}
 			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
+			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
 		><span class="goal-tab-pill-label">${label}</span>${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
 				class="goal-tab-close"
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
-			>${icon(X, "xs")}</span>` : ""}</button>
+			>${icon(X, "xs")}</span>` : ""}</div>
 	`;
 	};
 
@@ -3743,12 +3835,44 @@ export function doRenderApp(): void {
 		tab.kind === "inbox" ? "inbox-tab-pill" : "",
 	);
 
+	const mobileChatTabPill = () => {
+		const isChatActive = mobileSelectedPaneIndex === 0;
+		return html`
+			<div
+				role="button"
+				tabindex="0"
+				class="goal-tab-pill goal-tab-pill--pinned ${isChatActive ? "goal-tab-pill--active" : ""}"
+				title="Chat"
+				data-panel-tab-id="__mobile_chat_pane__"
+				data-panel-tab-kind="chat"
+				data-panel-tab-pinned="true"
+				@click=${() => { setUnifiedMobilePaneByIndex(0); }}
+				@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobilePaneByIndex(0); } }}
+			><span class="goal-tab-pill-label">Chat</span></div>
+		`;
+	};
+
 	const unifiedTabBar = () => {
 		if (!hasUnifiedPanel()) return "";
+		// Refresh mobileSelectedPaneIndex BEFORE rendering the tab bar so both
+		// the chat pill and the panel pills see the same value. Otherwise on
+		// first load the bar renders with paneIndex=0 (chat highlighted) while
+		// the slider then advances to the active panel tab — leaving both
+		// visually highlighted until the next render.
+		void unifiedMobilePaneIndex();
+		// Mirror the desktop tab strip: muted background, tabs flush at the
+		// bottom via items-end + pt-1 (no bottom padding), no border-b. The
+		// active tab's background matches the content panel below so the two
+		// merge seamlessly (Chrome-style), with the curve pseudo-elements
+		// providing the outward flare at the bottom corners.
 		return html`
-			<div class="goal-tab-bar shrink-0 border-b border-border bg-background overflow-x-auto" style="scrollbar-width:thin;">
-				<div class="flex items-center gap-1 px-3 py-2 min-w-max">
-					${unifiedPanelTabs().map((tab) => unifiedMobileTabButton(tab))}
+			<div class="goal-tab-bar goal-tab-bar--mobile shrink-0 overflow-x-auto" style="scrollbar-width:thin; background: var(--muted, var(--color-muted));">
+				<div
+					class="flex items-end gap-1 px-3 pt-1 min-w-max"
+					data-panel-tab-bar="true"
+				>
+					${mobileChatTabPill()}
+					${repeat(unifiedPanelTabs(), (tab) => tab.id, (tab) => unifiedMobileTabButton(tab))}
 				</div>
 			</div>
 		`;
@@ -3794,8 +3918,27 @@ export function doRenderApp(): void {
 	// which forces the iframe to reload via the `#mtime=<n>` hash.
 	const htmlPreviewContent = () => {
 		const sid = activeSessionId() || "";
-		const entry = state.previewPanelEntry || "inline.html";
 		const v = state.previewPanelMtime || 0;
+		// Derive artifactId and entry from the active panel tab rather than
+		// mirroring them in global state. Many code paths (SSE preview-changed,
+		// bootstrap fetch, PreviewRenderer, session-manager) update
+		// `previewPanelEntry` without knowing about artifactId; reading directly
+		// from the active tab keeps entry+artifactId always paired.
+		const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+		const panelTabs = unifiedPanelContentTabs();
+		const activeTab = panelTabs.find((t) => t.id === activeId);
+		let artifactId = "";
+		let entry = state.previewPanelEntry || "inline.html";
+		if (activeTab && activeTab.kind === "preview") {
+			const tabState = (activeTab.state || {}) as Record<string, unknown>;
+			const source = activeTab.source as Record<string, unknown>;
+			const isLiveTab = activeTab.id === LIVE_PREVIEW_PANEL_TAB_ID || activeTab.id.startsWith("preview:live");
+			if (!isLiveTab) {
+				artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+				const tabEntry = previewEntryFromTab(activeTab);
+				if (tabEntry) entry = tabEntry;
+			}
+		}
 		if (!sid || !state.previewPanelEntry) {
 			// Empty-state until the first SSE `preview-changed` event lands.
 			return html`
@@ -3804,13 +3947,20 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
+		// When the active tab is backed by a persisted artifact, serve directly
+		// from `/preview/<sid>/_artifact/<artifactId>/<entry>` — each artifact's
+		// bytes live at a stable URL, so switching tabs requires no mount POST
+		// (just an iframe src change, which the browser caches across switches).
+		const src = artifactId
+			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}?mtime=${v}`
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`;
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts allow-same-origin"
-					src=${`/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`}
+					src=${src}
 				></iframe>
 			</div>
 		`;
@@ -3956,14 +4106,18 @@ export function doRenderApp(): void {
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
-				<!-- Tab header -->
-				<div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0 min-w-0">
-					<div class="flex-1 min-w-0 overflow-x-auto" style="scrollbar-width:thin;">
-						<div class="flex items-center gap-1 min-w-max">
-							${contentTabs.map((tab) => unifiedDesktopTabButton(tab))}
+				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
+				     Tabs sit flush at the strip's bottom via items-end + no pb.
+				     The active tab's background matches the panel so it visually
+				     bridges the color boundary (curve pseudo-elements in CSS do
+				     the outward-curve flourish at the bottom corners). */ -->
+				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
+					<div class="flex-1 min-w-0">
+						<div class="flex items-end gap-1" data-panel-tab-bar="true">
+							${repeat(contentTabs, (tab) => tab.id, (tab) => unifiedDesktopTabButton(tab))}
 						</div>
 					</div>
-					<div class="flex items-center gap-0.5 shrink-0 pl-2">
+					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
 						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
 						${showPreviewTab ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
@@ -4150,8 +4304,8 @@ export function doRenderApp(): void {
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
 				<div id="app-header"
-					class="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-sm border-b border-border flex flex-col header-shadow">
-					<div class="flex items-center justify-between">
+					class="fixed top-0 left-0 right-0 z-50 bg-background flex flex-col">
+					<div class="flex items-center justify-between border-b border-border">
 						${headerLeft()}
 						${headerRight()}
 					</div>
@@ -4180,4 +4334,12 @@ export function doRenderApp(): void {
 			</div>
 		`, app);
 	}
+
+	// Attach SortableJS to the panel tab bar (if present). We look up the
+	// element after each render rather than relying on lit's ref directive
+	// (which proved unreliable with the no-name attribute placement on a
+	// multi-line tag). ensurePanelSortable is idempotent — it no-ops if the
+	// container is unchanged.
+	const tabBar = document.querySelector<HTMLElement>("[data-panel-tab-bar]");
+	ensurePanelSortable(tabBar);
 }
