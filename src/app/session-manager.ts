@@ -23,7 +23,8 @@ import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog }
 import { teardownMobileScrollTracking } from "./mobile-header.js";
 import { storage } from "./storage.js";
 import { markSessionVisited } from "./render-helpers.js";
-import { setSelectedWorkflowId, showHeaderToast, showProposalToast, resetProposalAnnCount } from "./render.js";
+import { showHeaderToast } from "./render.js";
+import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
@@ -2431,7 +2432,7 @@ export function backToSessions(): void {
 	delete state.activeProposals.project;
 	void (async () => {
 		try {
-			const { resetProjectProposalPanel } = await import("./render.js");
+			const { resetProjectProposalPanel } = await import("./proposal-panels-lazy.js");
 			resetProjectProposalPanel();
 		} catch { /* ignore */ }
 	})();
