@@ -981,6 +981,14 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
   3. In the failing scenario, inspect the rendered tool cards: every wrapper carries `data-tool-name="<name>"`. If the named tool's card is missing while a file-tool card with the same sentinel text is present, that is the substitution signature.
 - **If the symptom returns after another pi bump**: adapt Bobbit's activation contract to whatever the new pi line expects — do **not** relax either canary. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers).
 
+## `OAuthLoginCallbacks` missing `onDeviceCode` / `onSelect` after pi upgrade
+
+- **Symptom**: after bumping `@earendil-works/pi-ai` to `0.75.x`, `npm run check` fails with `TS2345` at `src/server/auth/oauth.ts` saying the object literal passed to `oauthProvider.login(...)` is missing properties `onDeviceCode` and `onSelect` from `OAuthLoginCallbacks`.
+- **Root cause**: pi-ai 0.75 made the OAuth Device Authorization Grant (`onDeviceCode`) and host-side selection prompt (`onSelect`) callbacks **required** on the login bag. Only `src/server/auth/oauth.ts::oauthStartExternal()` exercises this surface — Anthropic uses Bobbit's own PKCE flow and is unaffected.
+- **Rule**: wire `onDeviceCode` into the existing `started`-promise path via a single-shot resolver (whichever of `onAuth` / `onDeviceCode` fires first wins); wire `onSelect` to auto-pick a single option and throw a Bobbit-specific "OAuth provider requested a selection Bobbit does not support yet" error for multi-option prompts so the flow fails loudly rather than hanging on a missing UI.
+- **Reference**: [docs/design/pi-0.75-upgrade.md](design/pi-0.75-upgrade.md) — full contract + rationale.
+- **Pinning test**: `tests/oauth-external-callbacks.test.ts` covers single-shot device-code resolution, single-option auto-select, and multi-option rejection. Extend it rather than adding prose if a future pi-ai release reshapes the callbacks again.
+
 ## 60+ TSchema errors / typebox flavor mismatch after pi upgrade
 
 - **Symptom**: after bumping `@earendil-works/pi-ai` (or any `@earendil-works/pi-*` package that re-exports schema helpers), `npm run check` floods with structurally-incompatible-type errors against `TSchema`, `TObject`, `TProperties`, `Static<...>`, etc. Errors typically point at a file that mixes `Type.Object(...)` / `Static<typeof X>` with a pi-ai-returning helper like `StringEnum` or a tool whose `parameters` schema is consumed by pi-ai.
