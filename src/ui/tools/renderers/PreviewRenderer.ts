@@ -424,9 +424,11 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					}
 					const mtime = mtimeFromPost ?? Date.now();
 					const mountedContentHash = contentHashFromPost || snapshotContentHash;
-					// Older transcript cards should open as versioned tabs. Only keep the
-					// current filename tab when the live mount already has the same snapshot.
-					const shouldKeepCurrentPreviewTab = liveAlreadyHasSnapshot;
+					// Explicit Open clicks refresh the current filename tab. Historical
+					// versioned tabs are created during transcript/workspace hydration; the
+					// button should not fork a second tab for the same filename.
+					const shouldKeepCurrentPreviewTab = true;
+					void liveAlreadyHasSnapshot;
 					const version = workspace.registerPreviewVersion(appState, sessionId, entry || "inline.html", mountedContentHash, { current: shouldKeepCurrentPreviewTab });
 					if (entry) (appState as any).previewPanelEntry = entry;
 					(appState as any).previewPanelMtime = mtime;
