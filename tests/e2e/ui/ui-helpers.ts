@@ -21,6 +21,15 @@ export async function openApp(page: Page): Promise<void> {
 	await expect(
 		page.locator("button").filter({ hasText: "Settings" }).first(),
 	).toBeVisible({ timeout: 20_000 });
+	// Wait for the global keydown listener (shortcut-registry.startListening)
+	// to attach. Without this, tests that fire Ctrl+K / Ctrl+[ immediately
+	// after openApp race the listener and drop the keystroke.
+	await expect
+		.poll(
+			() => page.evaluate(() => document.body.dataset.shortcutsReady === "1"),
+			{ timeout: 15_000 },
+		)
+		.toBe(true);
 }
 
 /**

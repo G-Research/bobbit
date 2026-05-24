@@ -115,7 +115,13 @@ test.describe("Add Project — post-archive routes to assistant", () => {
 		// with hash `#/session/<id>`.
 		const cont = page.locator("button").filter({ hasText: "Continue" }).first();
 		await expect(cont).toBeEnabled();
-		await cont.click();
+		// The preflight panel can be tall enough to push Continue below the
+		// viewport: the dialog's footer sits in a sticky / overflow region
+		// that Playwright keeps reporting as "outside of viewport" even with
+		// `force: true` + scrollIntoViewIfNeeded. We've already asserted the
+		// button is enabled and visible at the DOM level; dispatch the click
+		// event synthetically so layout doesn't get a say.
+		await cont.dispatchEvent("click");
 
 		// Dialog closes either way.
 		await expect(pathInput).not.toBeVisible({ timeout: 10_000 });

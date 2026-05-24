@@ -357,7 +357,101 @@ export class TeamManager {
 				agent.unsubscribeEvent = unsubscribe;
 			}
 		}
+
+		// Boot-resume idle team-leads with outstanding work. The stuck-sweep
+		// would catch these after STUCK_QUIET_THRESHOLD_MS but that leaves a
+		// gap where a freshly-restored team-lead sits idle on a failed gate /
+		// open task with no progress signal. Fire a one-shot wake-up
+		// immediately for teams whose state implies concrete pending work.
+		//
+		// Fire-and-observed: keep this method synchronous so server boot
+		// proceeds even if a prompt RPC takes the full timeout to reject.
+		// Per-team failures are caught inside the helper; this top-level
+		// catch is a defensive net for any unexpected throw.
+		this._bootResumeIdleTeamLeads().catch((err) => {
+			console.error("[team-manager] Boot-resume unexpected failure:", err);
+		});
+
 		console.log(`[team-manager] Re-subscribed to events for ${this.teams.size} team(s)`);
+	}
+
+	/**
+	 * Detect teams whose lead is idle on boot AND that have concrete
+	 * outstanding work (a failed gate or an open task). Send a one-shot
+	 * boot-resume nudge so the operator doesn't have to wait for the
+	 * stuck-sweep tick before progress resumes after a gateway restart.
+	 *
+	 * Each enqueuePrompt is awaited inside its own try/catch so an RPC
+	 * timeout ("Command timed out: prompt") on one team-lead does not
+	 * abort boot-resume for other teams and does not surface as an
+	 * unhandled rejection. On failure, nudgePending is NOT set, so the
+	 * normal idle/stuck-sweep can retry later.
+	 */
+	private async _bootResumeIdleTeamLeads(): Promise<void> {
+		let resumed = 0;
+		for (const [goalId, entry] of this.teams) {
+			if (!entry.teamLeadSessionId) continue;
+			const session = this.sessionManager.getSession(entry.teamLeadSessionId);
+			if (!session || session.status !== "idle") continue;
+			if (this.shouldSkipNudge(goalId)) continue;
+			const summary = this._outstandingWorkSummary(goalId);
+			if (!summary) continue;
+
+			const teamLeadSessionId = entry.teamLeadSessionId;
+			const msg =
+				`[BOOT-RESUME] The gateway restarted; you were idle with outstanding work.\n` +
+				`${summary}\n\n` +
+				"Check `task_list` and `gate_list` to confirm, then resume — fix any\n" +
+				"failed gate, assign or complete open tasks, or call `team_complete`\n" +
+				"if everything is genuinely done.";
+
+			// Mark pending BEFORE dispatch so concurrent idle-nudge timers
+			// don't double-fire while this prompt is in-flight, but CLEAR it
+			// on failure so a later tick can retry. (On success we leave it
+			// set — the team-lead's next reply will clear it normally.)
+			this.nudgePending.set(goalId, true);
+			try {
+				await this.sessionManager.enqueuePrompt(teamLeadSessionId, msg, { isSteered: true });
+				resumed++;
+				console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
+			} catch (err) {
+				this.nudgePending.delete(goalId);
+				const msgStr = err instanceof Error ? err.message : String(err);
+				console.error(
+					`[team-manager] Boot-resume enqueuePrompt failed for goal=${goalId} session=${teamLeadSessionId}: ${msgStr}`,
+				);
+				// continue with remaining teams
+			}
+		}
+		if (resumed > 0) {
+			console.log(`[team-manager] Boot-resume nudged ${resumed} idle team-lead(s) with outstanding work.`);
+		}
+	}
+
+	/**
+	 * Return a one-line description of a goal's concrete outstanding work,
+	 * or null if there is none. "Outstanding" = failed gate OR open task
+	 * (state in todo/in-progress). Passed gates and complete tasks don't
+	 * count; this is about "the team-lead has a concrete next action".
+	 */
+	private _outstandingWorkSummary(goalId: string): string | null {
+		const ctx = this.config.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx) return null;
+		let failedGates = 0;
+		try {
+			const gateStates = ctx.gateStore.getGatesForGoal(goalId);
+			failedGates = gateStates.filter((g) => g.status === "failed").length;
+		} catch { /* gate store may be unavailable for a freshly-recovered goal */ }
+		let openTasks = 0;
+		try {
+			const tasks = ctx.taskStore.getByGoalId(goalId);
+			openTasks = tasks.filter((t) => t.state === "todo" || t.state === "in-progress").length;
+		} catch { /* task store may be unavailable */ }
+		if (failedGates === 0 && openTasks === 0) return null;
+		const parts: string[] = [];
+		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
+		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
+		return parts.join(", ");
 	}
 
 	/**

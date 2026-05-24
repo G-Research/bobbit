@@ -870,6 +870,21 @@ If you still see this on an old build, upgrade — or check `.bobbit/config/tool
 
 `GET /api/mcp-servers` returns the structured list (`{name,status,toolCount,tools[]}`). `src/app/tool-manager-page.ts::renderMcpSection()` filters them out of normal group rendering and shows one row per server in a dedicated MCP section. Empty section means `getMcpManager()` returned no configs — check the `discoverServers()` cascade in `src/server/mcp/mcp-manager.ts`.
 
+## Boot-resume `Command timed out: prompt` unhandled rejection
+
+Symptom: on server start, logs show `[gateway] Unhandled rejection: Error: Command timed out: prompt` shortly after `[team-manager] Re-subscribed to events for N team(s)`. Boot/sweeper progress appears wedged.
+
+Cause: `TeamManager._bootResumeIdleTeamLeads()` detects restored idle team-leads with outstanding work and immediately dispatches a `BOOT-RESUME` nudge via `SessionManager.enqueuePrompt()`. On cold boot the restored agent subprocess may not yet be responsive; the RPC `prompt` command times out after 30 s and the resulting rejection was previously unhandled because the call was not awaited and had no `.catch()`.
+
+Fix: `_bootResumeIdleTeamLeads()` is now `async` and wraps each `enqueuePrompt` in its own `try/catch`. On failure it clears `nudgePending` for that goal (so the normal idle/stuck-sweep can retry) and logs `[team-manager] Boot-resume enqueuePrompt failed for goal=… session=… : <error>`. `resubscribeTeamEvents()` calls the method as fire-and-observed (`.catch(...)`) so server boot always continues regardless of RPC outcome.
+
+Diagnose:
+1. Confirm the logged error names `goal=` and `session=` — those fields identify which team-lead failed and whether it is still orphaned.
+2. The affected team's `nudgePending` should be `false` (absent) after failure; re-boot or wait for the stuck-sweep tick (~60 s) to retry.
+3. A healthy team-lead transitions to `streaming` on receipt; if it stays `idle` after the boot-resume window, check whether the subprocess is alive (`session.status` in the REST API) and whether the `consecutiveErrorTurns` cap has been hit.
+
+Key files: `src/server/agent/team-manager.ts` (`_bootResumeIdleTeamLeads`, `resubscribeTeamEvents`). Regression test: `tests/team-manager-boot-resume-idle.test.ts`.
+
 ## Auto-nudge flooding
 
 Symptom: team-lead receives many `team_agent_finished` steers in quick succession. Cause: missing dedup. The `nudgePending` guard in `TeamManager` coalesces concurrent nudges into one delivery; if a regression removes it, a flood returns. Reviewer / QA sub-sessions are additionally filtered by `kind: "reviewer"` in `resubscribeTeamEvents()` and `notifyTeamLead()` — they must never nudge the team lead.

@@ -198,9 +198,15 @@ export function isBrowserReserved(binding: KeyBinding): boolean {
 // ============================================================================
 
 function matchesBinding(e: KeyboardEvent, b: KeyBinding): boolean {
-	const modMatch = b.ctrlOrMeta
-		? (isMac ? e.metaKey : e.ctrlKey)
-		: !(isMac ? e.metaKey : e.ctrlKey);
+	// Accept either Ctrl or Meta for `ctrlOrMeta` regardless of platform.
+	// The convention is Cmd on Mac / Ctrl on Win+Linux (reflected in
+	// `formatBinding` for display), but matching is permissive so:
+	//   - cross-platform E2E tests using `keyboard.press("Control+k")` work
+	//     on macOS Chromium where they only set ctrlKey;
+	//   - users with external keyboards / remote sessions aren't surprised
+	//     when the "wrong" modifier still triggers the shortcut.
+	const ctrlOrMetaPressed = e.ctrlKey || e.metaKey;
+	const modMatch = b.ctrlOrMeta ? ctrlOrMetaPressed : !ctrlOrMetaPressed;
 	return (
 		modMatch &&
 		e.shiftKey === b.shift &&
