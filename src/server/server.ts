@@ -119,6 +119,7 @@ const askSubmittedToolUseIds = new Set<string>();
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
+import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
 import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
@@ -839,6 +840,13 @@ export function createGateway(config: GatewayConfig) {
 	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager);
 	triggerEngine.start();
 	inboxNudger.start();
+
+	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
+	// Distinct from `TriggerEngine` (which polls schedule/git) — fired
+	// synchronously from `GoalStore.put` / `GoalStore.archive` via callbacks
+	// wired on every ProjectContext (existing + lazily created).
+	const goalTriggerDispatcher = new GoalTriggerDispatcher(staffManager, inboxManager);
+	projectContextManager.setGoalTriggerDispatcher(goalTriggerDispatcher);
 	// Placeholder task store for TeamManager construction. Real goal/task operations
 	// route through the per-project context (see TeamManager.getTasksForSession). The
 	// first registered project's store is used when available, otherwise a server-
@@ -8532,6 +8540,14 @@ async function handleApiRoute(
 			json({ error: "Missing systemPrompt" }, 400);
 			return;
 		}
+		// Validate goal-* triggers carry a non-empty prompt (push-based
+		// dispatcher has no fallback; the prompt is mandatory).
+		try {
+			staffManager.validateTriggers(body.triggers);
+		} catch (err: any) {
+			jsonError(400, err);
+			return;
+		}
 		const explicitCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
 			? body.cwd.trim()
 			: undefined;
@@ -8618,6 +8634,17 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const body = await readBody(req);
 			if (!body) { json({ error: "Missing body" }, 400); return; }
+			// Validate goal-* triggers carry a non-empty prompt before any other
+			// work (mirrors POST /api/staff). Only applies when the caller is
+			// updating triggers — PUTs that omit the field are unchanged.
+			if (Object.prototype.hasOwnProperty.call(body, "triggers")) {
+				try {
+					staffManager.validateTriggers(body.triggers);
+				} catch (err: any) {
+					jsonError(400, err);
+					return;
+				}
+			}
 
 			let cwdUpdate: string | undefined;
 			if (Object.prototype.hasOwnProperty.call(body, "cwd")) {

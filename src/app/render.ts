@@ -1748,10 +1748,26 @@ function renderTriggersEditor() {
 	return html`<div class="flex flex-col gap-2">${triggers.map((t, i) => renderTriggerCard(t, i))}</div>`;
 }
 
+function hasInvalidGoalTriggersForPreview(): boolean {
+	const triggers = parseTriggers(state.staffPreviewTriggers);
+	return triggers.some((t) =>
+		(t.type === "goal_created" || t.type === "goal_archived") &&
+		(t.prompt || "").trim().length === 0,
+	);
+}
+
 function renderTriggerCard(trigger: TriggerDef, index: number) {
-	const typeLabel: Record<string, string> = { schedule: "⏰ Schedule", git: "🔀 Git", manual: "👆 Manual" };
-	const typeOptions = ["schedule", "git", "manual"];
+	const typeLabel: Record<string, string> = {
+		schedule: "⏰ Schedule",
+		git: "🔀 Git",
+		manual: "👆 Manual",
+		goal_created: "\uD83C\uDFAF Goal created",
+		goal_archived: "\uD83D\uDDC4 Goal archived",
+	};
+	const typeOptions = ["schedule", "git", "manual", "goal_created", "goal_archived"];
 	const inputClass = "w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring";
+	const isGoalTrigger = trigger.type === "goal_created" || trigger.type === "goal_archived";
+	const goalPromptMissing = isGoalTrigger && (trigger.prompt || "").trim().length === 0;
 
 	const onTypeChange = (e: Event) => {
 		const newType = (e.target as HTMLSelectElement).value;
@@ -1828,14 +1844,16 @@ function renderTriggerCard(trigger: TriggerDef, index: number) {
 			` : ""}
 
 			<div style="margin-top:${trigger.type === "manual" ? "0" : "0"}">
-				<label class="text-[10px] text-muted-foreground" style="display:block; margin-bottom:2px">Wake prompt (optional)</label>
+				<label class="text-[10px] ${goalPromptMissing ? "text-destructive" : "text-muted-foreground"}" style="display:block; margin-bottom:2px">${isGoalTrigger ? "Wake prompt (required)" : "Wake prompt (optional)"}</label>
 				<textarea
-					class="w-full p-2 text-xs rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+					class="w-full p-2 text-xs rounded-md border ${goalPromptMissing ? "border-destructive" : "border-border"} bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
 					rows="2"
+					data-testid="trigger-prompt-${index}"
 					placeholder="Message sent to the agent when this trigger fires"
 					.value=${trigger.prompt || ""}
 					@input=${(e: Event) => updateTrigger(index, (t) => { t.prompt = (e.target as HTMLTextAreaElement).value; })}
 				></textarea>
+				${goalPromptMissing ? html`<div class="text-[10px] text-destructive" style="margin-top:2px" data-testid="trigger-prompt-error-${index}">Goal triggers require a non-empty wake prompt.</div>` : ""}
 			</div>
 		</div>
 	`;
@@ -1947,6 +1965,9 @@ function staffPreviewPanel() {
 	const handleCreateStaff = async () => {
 		const trimmedName = state.staffPreviewName.trim();
 		if (!trimmedName) return;
+		// Block create if any goal-* trigger lacks a prompt. The submit button is
+		// also disabled in this state; this is a belt-and-braces guard.
+		if (hasInvalidGoalTriggersForPreview()) return;
 		const proposalSessionId = staffPreviewSessionId();
 		const isStaffAssistant = state.assistantType === "staff";
 
@@ -2168,7 +2189,7 @@ function staffPreviewPanel() {
 				<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: handleCreateStaff,
-					disabled: !state.staffPreviewName.trim() || streaming,
+					disabled: !state.staffPreviewName.trim() || streaming || hasInvalidGoalTriggersForPreview(),
 					children: html`<span class="inline-flex items-center gap-1.5">${icon(UserCheck, "sm")} Create Staff</span>`,
 				})}</span>
 			</div>

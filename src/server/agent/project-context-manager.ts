@@ -1,5 +1,6 @@
 import { ProjectContext } from "./project-context.js";
 import { ProjectRegistry } from "./project-registry.js";
+import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
@@ -23,6 +24,13 @@ export class ProjectContextManager {
   private registry: ProjectRegistry;
   private sessionResolver: SessionResolver | null = null;
   private _sessionResolverWarned = false;
+  /**
+   * Shared dispatcher for `goal_created` / `goal_archived` staff triggers.
+   * Wired post-boot by `server.ts` once the staff/inbox managers exist.
+   * Stored here so every existing AND every future-lazy-created
+   * ProjectContext gets the same dispatcher reference.
+   */
+  private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
 
   constructor(registry: ProjectRegistry) {
     this.registry = registry;
@@ -55,8 +63,24 @@ export class ProjectContextManager {
 
     ctx = new ProjectContext(project);
     ctx.open();
+    // Propagate any post-boot dispatcher wiring to lazily-created contexts.
+    if (this.goalTriggerDispatcher) {
+      ctx.setGoalTriggerDispatcher(this.goalTriggerDispatcher);
+    }
     this.contexts.set(projectId, ctx);
     return ctx;
+  }
+
+  /**
+   * Late-bound: register the shared `GoalTriggerDispatcher` and wire it into
+   * every existing context. Subsequent `getOrCreate` calls will pick up the
+   * dispatcher automatically. Safe to call before or after `initAll()`.
+   */
+  setGoalTriggerDispatcher(dispatcher: GoalTriggerDispatcher | null): void {
+    this.goalTriggerDispatcher = dispatcher;
+    for (const ctx of this.contexts.values()) {
+      ctx.setGoalTriggerDispatcher(dispatcher);
+    }
   }
 
   /** Get the underlying project registry. */
