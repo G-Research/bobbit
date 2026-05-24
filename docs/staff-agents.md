@@ -10,7 +10,7 @@ This page covers the user-facing model. For the sidebar/UI placement see [intern
 
 - **Creation.** The user opens a staff creation assistant from a project (sidebar "+ New staff" or the project header). Accepting the assistant's `propose_staff` payload persists a `PersistedStaff` record under that project. Git-backed projects create a staff worktree by default; non-git projects and explicit worktree opt-out run from the project directory.
 - **Wake / sleep.** Each interaction wakes the staff into its permanent session. Worktree-backed, non-sandboxed staff rebase onto the primary branch and re-run per-component `worktree_setup_command` hooks on wake — see [internals.md — Staff agent worktrees](internals.md#staff-agent-worktrees).
-- **Editing.** The staff edit page (`#/staff/<id>`) can change name, description, system prompt, triggers, cwd, role, colour, accessory, and memory. Cwd changes must stay inside the staff's owning project.
+- **Editing.** The staff edit page (`#/staff/<id>`) can change name, description, system prompt, triggers, cwd, role, colour, accessory, and memory. Cwd changes must stay inside the staff's owning project. For the trigger-type reference (including the push-based `goal_created` / `goal_archived` types and their required-prompt rule) see [staff-triggers.md](staff-triggers.md).
 - **Reassignment.** The orphan banner can re-home a legacy/orphaned staff record to a project. Reassignment resets cwd to the target project root and drops old session/worktree metadata so old-project paths cannot be reused.
 - **Deletion.** Removing the staff also terminates its current session and cleans up the staff branch when one exists.
 
