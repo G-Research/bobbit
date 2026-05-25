@@ -1907,6 +1907,53 @@ let _proposalInitializedFrom: string | null = null;
 // `state.activeProposals[type]`, so the live current-proposal slot is never
 // clobbered when the user views an older snapshot.
 let _proposalOverride: { type: ProposalType; fields: Record<string, unknown>; rev: number } | null = null;
+// Tracks the raw source `fields` reference that the current `_proposalOverride`
+// was derived from, so the identity short-circuit in `proposalPanelContent`
+// still works when we project legacy top-level commands into a synthetic
+// `components` array for historical project-proposal snapshots.
+let _proposalOverrideSource: Record<string, unknown> | null = null;
+
+/**
+ * Project legacy top-level command keys (`build_command`, `test_command`, …) on
+ * a historical project-proposal snapshot into a synthetic `components[0]` so the
+ * editable project panel can surface them. Mirrors the server-side
+ * `LEGACY_KEY_MAP` fold in `src/server/server.ts` that runs for live proposals.
+ *
+ * Returns the input unchanged when `components` is already present and
+ * non-empty, or when no legacy keys are set. Never mutates `fields`.
+ */
+function projectLegacyToComponents(fields: Record<string, unknown>): Record<string, unknown> {
+	const existingComponents = fields.components;
+	if (Array.isArray(existingComponents) && existingComponents.length > 0) return fields;
+
+	const LEGACY_KEY_MAP: Record<string, string> = {
+		build_command: "build",
+		test_command: "test",
+		typecheck_command: "check",
+		test_unit_command: "unit",
+		test_e2e_command: "e2e",
+	};
+	const cmds: Record<string, string> = {};
+	for (const [legacyKey, newKey] of Object.entries(LEGACY_KEY_MAP)) {
+		const v = fields[legacyKey];
+		if (typeof v === "string" && v.trim().length > 0) cmds[newKey] = v.trim();
+	}
+	const setupHook = fields.worktree_setup_command;
+	const hasAnyLegacy = Object.keys(cmds).length > 0
+		|| (typeof setupHook === "string" && setupHook.trim().length > 0);
+	if (!hasAnyLegacy) return fields;
+
+	const name = (typeof fields.name === "string" && fields.name.trim()) || "default";
+	const component: Record<string, unknown> = {
+		name,
+		repo: ".",
+		commands: cmds,
+	};
+	if (typeof setupHook === "string" && setupHook.trim()) {
+		component.worktree_setup_command = setupHook.trim();
+	}
+	return { ...fields, components: [component] };
+}
 
 /** Sync module-level form state from the active goal proposal when it changes. */
 function syncProposalFormState(): void {
@@ -2118,8 +2165,10 @@ export function proposalPanelContent(
 		// current-proposal slot. Switching back to the current tab clears
 		// the override and the live slot's content is restored verbatim.
 		const rev = proposalRevisionFromPanelTab(tab) || 1;
-		if (!_proposalOverride || _proposalOverride.type !== type || _proposalOverride.fields !== fields || _proposalOverride.rev !== rev) {
-			_proposalOverride = { type, fields, rev };
+		if (!_proposalOverride || _proposalOverride.type !== type || _proposalOverrideSource !== fields || _proposalOverride.rev !== rev) {
+			const projected = type === "project" ? projectLegacyToComponents(fields) : fields;
+			_proposalOverride = { type, fields: projected, rev };
+			_proposalOverrideSource = fields;
 			_proposalInitializedFrom = null;
 		}
 		return proposalPanelForWorkspaceType(type, currentAssistantProposalType);
@@ -2128,6 +2177,7 @@ export function proposalPanelContent(
 		// Returning to the current tab: drop the override and force a
 		// re-hydration of the form from the live activeProposals slot.
 		_proposalOverride = null;
+		_proposalOverrideSource = null;
 		_proposalInitializedFrom = null;
 	}
 	return proposalPanelForWorkspaceType(type, currentAssistantProposalType);
