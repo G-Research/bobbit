@@ -291,7 +291,7 @@ test.describe("Proposal revision snapshots", () => {
 	//   122f76fc Editable historical proposal tabs + render-time override
 	//   dac36684 Update tests + docs for Chrome-style tab system
 	// Restore to `test(...)` once those bugs are fixed on master.
-	test.fixme("propose + edit + open-old card opens a historical tab while the latest draft stays live", async ({ page }) => {
+	test("propose + edit + open-old card opens a historical tab while the latest draft stays live", async ({ page }) => {
 		const projectId = await getDefaultProjectId();
 		await apiFetch(`/api/projects/${projectId}/config`, {
 			method: "PUT",
