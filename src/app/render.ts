@@ -62,13 +62,13 @@ import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getP
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
-	LIVE_PREVIEW_PANEL_TAB_ID,
 	activeSidePanelTabIdForSession,
 	assistantProposalType,
 	buildPanelWorkspaceTabs,
 	findPanelTab,
 	isHistoricalPreviewTab,
 	isHistoricalProposalTab,
+	isLivePreviewTab,
 	isPinnedPanelTab,
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
@@ -617,6 +617,18 @@ let mobileSelectedSideTabId = "";
 let panelSortable: Sortable | null = null;
 let panelSortableContainer: HTMLElement | null = null;
 let draggingPanelTabId = "";
+// When true, the current drag at any point tried to land on/before a pinned
+// tab. SortableJS's onMove returns false for that single candidate target, but
+// earlier non-pinned candidates in the same drag may have already swapped the
+// DOM. To honour the pinned invariant strictly, we cancel the entire drag on
+// drop and let lit-html restore the canonical order from state.
+let panelSortablePinnedBlocked = false;
+// Initial DOM order of tab ids captured at onStart. When a drag is cancelled
+// (e.g. pinned-blocked at any point), we restore this order manually because
+// SortableJS's DOM mutations during the drag have already diverged from state,
+// and lit-html's `repeat` reconciliation does not always restore element
+// positions after external DOM moves.
+let panelSortableStartIds: string[] = [];
 // rAF handle for the Y-axis lock loop that keeps the dragged clone glued to
 // its original vertical position (Chrome-style tab drag).
 let panelDragLockRaf = 0;
@@ -758,7 +770,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	// preview tabs is instant (no POST restore round-trip, no iframe blanking).
 	// We skip this only for the canonical live tab id, which intentionally
 	// follows the live mount slot's changing bytes.
-	const isLiveTab = tab.id === LIVE_PREVIEW_PANEL_TAB_ID || tab.id.startsWith("preview:live");
+	const isLiveTab = isLivePreviewTab(tab);
 	if (!isLiveTab && tabArtifactIdEarly) {
 		if (state.previewPanelEntry === entry && state.previewPanelArtifactId === tabArtifactIdEarly && currentMountedPreviewTabId() === tab.id) {
 			clearPreviewTabRestoreError(sessionId, tab.id);
@@ -1184,6 +1196,24 @@ function samePanelTabOrder(a: PanelWorkspaceTab[], b: PanelWorkspaceTab[]): bool
 	return a.length === b.length && a.every((tab, index) => tab.id === b[index]?.id);
 }
 
+// Restore the DOM order of `.goal-tab-pill` children inside `host` to match
+// `expectedIds`. Used to revert SortableJS's drag DOM mutations when the
+// drop is rejected (e.g. pinned-blocked). Appending an already-attached node
+// moves it without re-creating it, so this is cheap and leaves event listeners
+// intact. Any pills not in `expectedIds` keep their relative tail position.
+function revertPanelTabDomOrder(host: HTMLElement, expectedIds: string[]): void {
+	if (!host || expectedIds.length === 0) return;
+	const pillsById = new Map<string, HTMLElement>();
+	for (const pill of Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))) {
+		const id = pill.getAttribute("data-panel-tab-id") || "";
+		if (id) pillsById.set(id, pill);
+	}
+	for (const id of expectedIds) {
+		const pill = pillsById.get(id);
+		if (pill) host.appendChild(pill);
+	}
+}
+
 // Attach a SortableJS instance to the unified tab bar's inner container. Idempotent:
 // if the container DOM node is the same as last time, we keep the existing instance.
 // If the container was replaced (e.g. workspace switched sessions), we destroy the
@@ -1226,14 +1256,27 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 		delay: 0,
 		onMove: (evt) => {
 			// Forbid dropping in front of (or onto) a pinned tab. Returning false
-			// cancels the move; SortableJS keeps trying as the cursor moves.
-			const related = evt.related as HTMLElement | null;
+			// cancels this candidate move; SortableJS keeps trying as the cursor
+			// moves. We also remember that the user *attempted* a pinned-blocked
+			// move so onEnd can cancel the whole drag — otherwise an earlier
+			// non-pinned swap during the same drag would silently commit.
+			const relatedRaw = evt.related as HTMLElement | null;
+			const related = relatedRaw?.closest(".goal-tab-pill") as HTMLElement | null;
 			if (!related) return true;
-			if (related.classList.contains("goal-tab-pill--pinned")) return false;
+			if (related.classList.contains("goal-tab-pill--pinned")) {
+				panelSortablePinnedBlocked = true;
+				return false;
+			}
 			return true;
 		},
 		onStart: (evt) => {
 			draggingPanelTabId = (evt.item as HTMLElement).getAttribute("data-panel-tab-id") || "";
+			panelSortablePinnedBlocked = false;
+			panelSortableStartIds = Array.from(
+				(evt.from as HTMLElement).querySelectorAll<HTMLElement>(".goal-tab-pill"),
+			)
+				.map((el) => el.getAttribute("data-panel-tab-id") || "")
+				.filter((id) => id.length > 0);
 			document.documentElement.classList.add("dragging-panel-tab");
 			setRenderSuppressed(true);
 			startPanelDragYLock();
@@ -1248,14 +1291,31 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 			draggingPanelTabId = "";
 			document.documentElement.classList.remove("dragging-panel-tab");
 			stopPanelDragYLock();
+			const pinnedBlocked = panelSortablePinnedBlocked;
+			const startIds = panelSortableStartIds;
+			panelSortablePinnedBlocked = false;
+			panelSortableStartIds = [];
 			try {
 				const host = evt.from as HTMLElement;
+				const sid = workspaceSessionId();
+				const currentTabs = panelTabsForSession(state, sid);
+
+				// If the drag attempted a pinned-blocked move at any point,
+				// cancel the entire drag — otherwise an earlier non-pinned swap
+				// during the same drag would silently commit and the user would
+				// see tabs reorder despite SortableJS rejecting the final drop.
+				// Manually restore the DOM order from the snapshot captured at
+				// onStart: lit-html's `repeat` does not always reconcile element
+				// positions back to canonical when SortableJS has shuffled them.
+				if (pinnedBlocked) {
+					revertPanelTabDomOrder(host, startIds);
+					return;
+				}
+
 				// Read the new tab id order directly off the DOM children.
 				const newIds = Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))
 					.map((el) => el.getAttribute("data-panel-tab-id") || "")
 					.filter((id) => id.length > 0);
-				const sid = workspaceSessionId();
-				const currentTabs = panelTabsForSession(state, sid);
 				const byId = new Map(currentTabs.map((tab) => [tab.id, tab]));
 				const reordered: PanelWorkspaceTab[] = [];
 				for (const id of newIds) {
@@ -1266,11 +1326,40 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 				for (const tab of currentTabs) {
 					if (!newIds.includes(tab.id)) reordered.push(tab);
 				}
+
+				// Defense-in-depth: refuse to commit a reordering that places any
+				// non-pinned tab before any pinned tab. onMove should already have
+				// flagged such an attempt via panelSortablePinnedBlocked, but if a
+				// future change to SortableJS or our predicate misses an edge
+				// case, this guard ensures the pinned invariant still holds.
+				let seenNonPinned = false;
+				let pinnedAfterNonPinned = false;
+				for (const tab of reordered) {
+					if (isPinnedPanelTab(tab)) {
+						if (seenNonPinned) {
+							pinnedAfterNonPinned = true;
+							break;
+						}
+					} else {
+						seenNonPinned = true;
+					}
+				}
+				if (pinnedAfterNonPinned) {
+					revertPanelTabDomOrder(host, startIds);
+					return;
+				}
+
 				if (!samePanelTabOrder(currentTabs, reordered)) {
 					setPanelTabsForSession(state, sid, reordered);
 				}
 			} finally {
 				setRenderSuppressed(false);
+				// Always trigger a render: when we took an early `return` above
+				// (pinned-blocked or invariant-violation revert), state was not
+				// mutated and lit-html will restore the canonical DOM order.
+				// When we committed setPanelTabsForSession, it already triggers a
+				// render — an extra one here is harmless.
+				renderApp();
 			}
 		},
 	});
@@ -1776,7 +1865,7 @@ export function doRenderApp(): void {
 		if (activeTab && activeTab.kind === "preview") {
 			const tabState = (activeTab.state || {}) as Record<string, unknown>;
 			const source = activeTab.source as Record<string, unknown>;
-			const isLiveTab = activeTab.id === LIVE_PREVIEW_PANEL_TAB_ID || activeTab.id.startsWith("preview:live");
+			const isLiveTab = isLivePreviewTab(activeTab);
 			if (!isLiveTab) {
 				artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 				const tabEntry = previewEntryFromTab(activeTab);
