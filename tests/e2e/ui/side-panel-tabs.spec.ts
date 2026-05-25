@@ -601,7 +601,7 @@ test.describe("Side-panel tab contract", () => {
 	//   122f76fc Editable historical proposal tabs + render-time override
 	//   dac36684 Update tests + docs for Chrome-style tab system
 	// Restore to `test(...)` once those bugs are fixed on master.
-	test.fixme("6. Desktop drag reorder persists and cannot move tabs before pinned Inbox", async ({ page }) => {
+	test("6. Desktop drag reorder persists and cannot move tabs before pinned Inbox", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);
 		const sessionId = await createRegularSessionViaApi(page);

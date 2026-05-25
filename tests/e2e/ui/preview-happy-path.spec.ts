@@ -29,7 +29,7 @@ test.describe("Preview panel iframe URL (WP-E)", () => {
 	//   122f76fc Editable historical proposal tabs + render-time override
 	//   dac36684 Update tests + docs for Chrome-style tab system
 	// Restore to `test(...)` once those bugs are fixed on master.
-	test.fixme("iframe src is /preview/<sid>/<entry>?mtime=<n>", async ({ page }) => {
+	test("iframe src is /preview/<sid>/<entry>?mtime=<n>", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
 
