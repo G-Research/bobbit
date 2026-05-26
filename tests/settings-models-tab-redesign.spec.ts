@@ -3,6 +3,23 @@ import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
 
+async function renameWithRetry(src: string, dest: string): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	let lastErr: unknown;
+	while (Date.now() < deadline) {
+		try {
+			fs.renameSync(src, dest);
+			return;
+		} catch (err) {
+			lastErr = err;
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw err;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+	throw lastErr;
+}
+
 const FIXTURE = path.resolve("tests/fixtures/settings-models-tab.html");
 const BUNDLE = path.resolve("tests/fixtures/settings-models-tab-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/settings-models-tab-entry.ts");
@@ -44,8 +61,12 @@ test.beforeAll(async () => {
 				define: { "import.meta.url": '"http://localhost/"' },
 				loader: { ".ts": "ts" },
 			});
-			fs.renameSync(tmpOut, BUNDLE);
-			if (fs.existsSync(tmpCss)) fs.renameSync(tmpCss, finalCss);
+			// Windows: rename over a destination another worker has currently
+			// loaded via page.goto raises EPERM. Retry briefly — the loading
+			// worker releases the handle within a few hundred ms once its page
+			// has parsed the bundle.
+			await renameWithRetry(tmpOut, BUNDLE);
+			if (fs.existsSync(tmpCss)) await renameWithRetry(tmpCss, finalCss);
 		} finally {
 			try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 		}
