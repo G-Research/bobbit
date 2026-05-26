@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { ArrowDown, Brain, Image as ImageIcon, Sparkles } from "lucide";
+import { ArrowDown, ArrowUp, Brain, Image as ImageIcon, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -352,6 +352,13 @@ export class AgentInterface extends LitElement {
 	 * touchpoint. NEVER mutates intent flags. */
 	private _showJumpToBottom = false;
 
+	/** Jump-to-last-prompt button visibility. True iff there is at least one
+	 * <user-message> in the transcript AND the bottom edge of the last one is
+	 * above the top edge of the scroll viewport. Recomputed in the same
+	 * deferred-scroll handler that drives `_showJumpToBottom`, plus on
+	 * resize and on transcript-mutating events. */
+	private _showJumpToLastPrompt = false;
+
 	// --- Legacy backward-compat shims ---
 	// Several E2E tests directly poke `ai._stickToBottom = true` and push
 	// into `ai._programmaticEchoes` as part of test setup. These keep the
@@ -554,8 +561,25 @@ export class AgentInterface extends LitElement {
 			}
 			return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 		}
-		// Spring animation path. Used only by the explicit jump-to-bottom
-		// click — gives the user a smooth-feel landing instead of a hard jump.
+		// Spring animation path — re-read the goalpost each tick so RO
+		// growth during animation can drag the target along (jump-to-bottom
+		// keeps chasing the new bottom if the transcript is still growing).
+		return this._springScrollTo(() => this._targetScrollTop());
+	}
+
+	/** Shared spring scroll animation. Used by the explicit jump-to-bottom
+	 * click (re-reading `_targetScrollTop()` each tick to chase RO growth)
+	 * and by jump-to-last-prompt (fixed target — pre-computed scrollTop for
+	 * the last <user-message>). Same damping/stiffness/mass constants for
+	 * both so the feel is identical.
+	 *
+	 * `targetGetter` can be a number (fixed target) or a function (re-read
+	 * each tick).
+	 */
+	private _springScrollTo(targetGetter: number | (() => number)): Promise<void> {
+		if (!this._scrollContainer) return Promise.resolve();
+		const el = this._scrollContainer;
+		const readTarget = typeof targetGetter === "function" ? targetGetter : () => targetGetter;
 		const DAMPING = 0.7;
 		const STIFFNESS = 0.05;
 		const MASS = 1.25;
@@ -566,9 +590,7 @@ export class AgentInterface extends LitElement {
 					return;
 				}
 				const anim = this._animation;
-				// Re-read target each tick — RO growth during animation can
-				// move the goalpost.
-				anim.target = this._targetScrollTop();
+				anim.target = readTarget();
 				const diff = anim.target - anim.current;
 				anim.velocity = (DAMPING * anim.velocity + STIFFNESS * diff) / MASS;
 				anim.current += anim.velocity;
@@ -583,7 +605,7 @@ export class AgentInterface extends LitElement {
 			};
 			this._animation = {
 				current: el.scrollTop,
-				target,
+				target: readTarget(),
 				velocity: 0,
 				rafId: requestAnimationFrame(step),
 				resolve,
@@ -619,6 +641,35 @@ export class AgentInterface extends LitElement {
 			this._showJumpToBottom = next;
 			this.requestUpdate();
 		}
+		// Sibling button uses entirely different geometry (last <user-message>
+		// rect vs distance-from-bottom) — chained here so every existing
+		// touchpoint that recomputes jump-to-bottom also recomputes
+		// jump-to-last-prompt with zero risk of missing a site.
+		this._refreshJumpToLastPromptButton();
+	}
+
+	/** Recompute jump-to-last-prompt visibility. Visible iff at least one
+	 * <user-message> exists AND the bottom edge of the LAST one is above the
+	 * top edge of the scroll viewport. Mirrors `_refreshJumpButton()`'s
+	 * "delta+requestUpdate only on transition" pattern to avoid render
+	 * thrash on every scroll tick. */
+	private _refreshJumpToLastPromptButton() {
+		if (!this._scrollContainer) return;
+		const container = this._scrollContainer;
+		const userMessages = container.querySelectorAll("user-message");
+		let next = false;
+		if (userMessages.length > 0) {
+			const last = userMessages[userMessages.length - 1] as HTMLElement;
+			const containerRect = container.getBoundingClientRect();
+			const lastRect = last.getBoundingClientRect();
+			// "Bottom edge above viewport top" — last user message fully
+			// scrolled off the top. 1px epsilon avoids sub-pixel flicker.
+			next = lastRect.bottom < containerRect.top - 1;
+		}
+		if (next !== this._showJumpToLastPrompt) {
+			this._showJumpToLastPrompt = next;
+			this.requestUpdate();
+		}
 	}
 
 	/**
@@ -630,7 +681,14 @@ export class AgentInterface extends LitElement {
 	 */
 	private _updateAndPin() {
 		this.requestUpdate();
-		this.updateComplete.then(() => this._pinIfSticking());
+		this.updateComplete.then(() => {
+			this._pinIfSticking();
+			// Transcript mutated — re-evaluate jump-to-last-prompt geometry
+			// after Lit commits. This is what makes "sending a new prompt
+			// hides the button" work: the new <user-message> is now the
+			// last one and lives at the bottom of the transcript.
+			this._refreshJumpToLastPromptButton();
+		});
 	}
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -859,6 +917,10 @@ export class AgentInterface extends LitElement {
 		this._cancelAnimation();
 		if (this._showJumpToBottom) {
 			this._showJumpToBottom = false;
+			this.requestUpdate();
+		}
+		if (this._showJumpToLastPrompt) {
+			this._showJumpToLastPrompt = false;
 			this.requestUpdate();
 		}
 		// Single re-pin path on session navigate: instant scrollTo bottom
@@ -1197,6 +1259,37 @@ export class AgentInterface extends LitElement {
 		this._refreshJumpButton();
 		this._scrollToBottomNow({ animate: true });
 	};
+
+	/** Jump-to-last-prompt click handler. Spring-animates the scroll up so
+	 * the last <user-message> lands near the top of the viewport with a
+	 * small breathing margin. Does NOT mutate `_isAtBottom` /
+	 * `_escapedFromLock` — the click is treated as a programmatic scroll,
+	 * not a user-intent change (matches jump-to-bottom's contract). */
+	private _handleJumpToLastPromptClick = (): void => {
+		void this._scrollLastUserMessageIntoView();
+	};
+
+	private async _scrollLastUserMessageIntoView(): Promise<void> {
+		if (!this._scrollContainer) return;
+		const container = this._scrollContainer;
+		const userMessages = container.querySelectorAll("user-message");
+		if (userMessages.length === 0) return;
+		const last = userMessages[userMessages.length - 1] as HTMLElement;
+		const containerRect = container.getBoundingClientRect();
+		const lastRect = last.getBoundingClientRect();
+		const TOP_MARGIN = 16; // matches the button's top offset
+		const targetScrollTop = Math.max(
+			0,
+			Math.round(container.scrollTop + (lastRect.top - containerRect.top) - TOP_MARGIN),
+		);
+		// Echo-latch: classify the resulting scroll event as programmatic so
+		// the deferred handler doesn't flip `_escapedFromLock = true` (which
+		// would be wrong — jump-to-bottom doesn't escape either).
+		this._ignoreScrollToTop = targetScrollTop;
+		await this._springScrollTo(targetScrollTop);
+		// After the spring lands, the last prompt is visible — hide button.
+		this._refreshJumpToLastPromptButton();
+	}
 
 	public async sendMessage(input: string, attachments?: Attachment[]) {
 		if (!input.trim() && (!attachments || attachments.length === 0)) return;
@@ -1762,6 +1855,7 @@ export class AgentInterface extends LitElement {
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
+					${this._renderJumpToLastPrompt()}
 					${this._renderJumpToBottom()}
 				</div>
 
@@ -1946,6 +2040,29 @@ export class AgentInterface extends LitElement {
 	// (rounded-full, border-input, bg-background, shadow-sm). Centred above
 	// the composer with the label always visible — previously sat bottom-right
 	// where it was hidden by the git-status widget / pill strip on mobile.
+	// Jump-to-last-prompt floating button. Mirror of jump-to-bottom, anchored
+	// to the TOP-CENTRE of the messages region. Visible iff the last
+	// <user-message> has scrolled fully above the viewport top. Click springs
+	// the viewport up so the prompt lands ~16px below the container top.
+	private _renderJumpToLastPrompt() {
+		const show = this._showJumpToLastPrompt;
+		const topPx = 16; // matches baseOffsetPx of jump-to-bottom
+		return html`
+			<button
+				type="button"
+				data-testid="jump-to-last-prompt"
+				aria-label="Jump to last prompt"
+				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
+				style="top:${topPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
+				tabindex="${show ? "0" : "-1"}"
+				@click=${this._handleJumpToLastPromptClick}
+			>
+				${icon(ArrowUp, "sm")}
+				<span>Jump to last prompt</span>
+			</button>
+		`;
+	}
+
 	private _renderJumpToBottom() {
 		const show = this._showJumpToBottom;
 		// Base offset matches the pill strip's bottom-edge gap (1rem). When the
