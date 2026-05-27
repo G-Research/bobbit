@@ -56,9 +56,7 @@ Primary branch is **`master`** (not `main`). Never create a `main` branch.
 
 **Always edit files in your session worktree, never in the primary worktree.** For infra files: edit here → commit → push → pull from primary. Pushing to remote `master` does NOT update the dev server — `cd <primary-worktree> && git pull origin master`.
 
-**Never `git stash` in a session worktree** — the stash stack is shared across all worktrees of one repo, so another agent's `stash pop` can grab your WIP. Commit a throwaway instead. [docs/dev-workflow.md — Worktree-stash hazard](docs/dev-workflow.md#worktree-stash-hazard--never-git-stash-inside-a-session-worktree).
-
-See [docs/dev-workflow.md](docs/dev-workflow.md) for the full worktree story.
+See [docs/dev-workflow.md](docs/dev-workflow.md) for the full worktree story — including the worktree-stash hazard (never `git stash` in a session worktree).
 
 ## Maintaining this file
 

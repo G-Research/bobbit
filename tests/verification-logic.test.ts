@@ -688,6 +688,30 @@ describe("buildStepCache", () => {
 		const cache = buildStepCache(sigs, "sig-1", "abc");
 		assert.equal(cache.get("test")!.output, "first");
 	});
+
+	// Pin the human-signoff exclusion (Bug-1 defense-in-depth fix in the
+	// "Re-attempt: Sign-Off Gates" goal). A prior approval is not consent
+	// for a re-signal — humans must re-confirm. Without this filter, a
+	// single approval at SHA X would silently satisfy every subsequent
+	// re-signal at the same SHA.
+	it("excludes human-signoff steps even when passed at the same commit SHA", () => {
+		const sigs = [
+			signal("sig-0", "abc", {
+				status: "passed",
+				steps: [
+					// A real previously-passed command step — must still be cached,
+					// proving the filter is selective and not a blanket short-circuit.
+					{ name: "build", type: "command", passed: true, output: "ok", duration_ms: 100 } as any,
+					// A previously-approved human-signoff step — must NOT be cached.
+					{ name: "approve-design", type: "human-signoff", passed: true, output: "Approved", duration_ms: 1 } as any,
+				],
+			}),
+		];
+		const cache = buildStepCache(sigs, "sig-1", "abc");
+		assert.equal(cache.size, 1, "only the command step should be cached");
+		assert.ok(cache.has("build"), "command step must still be reused");
+		assert.ok(!cache.has("approve-design"), "human-signoff step must NOT be reused");
+	});
 });
 
 // ===================================================================

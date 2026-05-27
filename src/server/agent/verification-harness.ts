@@ -2205,23 +2205,19 @@ export class VerificationHarness {
 							// human-signoff — park on a deferred resolver until the user
 							// POSTs /signoff with a decision. No subprocess, no session.
 							//
-							// Bypass logic: BOBBIT_HUMAN_SIGNOFF_SKIP wins when set ("1" =>
-							// skip, "0" => force park). When unset, fall back to honouring
-							// BOBBIT_LLM_REVIEW_SKIP so the global E2E harness's blanket
-							// skip doesn't leave human-signoff steps parked forever. The
-							// human-signoff E2E spec sets BOBBIT_HUMAN_SIGNOFF_SKIP="0" to
-							// defeat the fallback and exercise the real parking path.
-							const hsExplicit = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
-							const skipHumanSignoff = hsExplicit === "1"
-								? true
-								: hsExplicit === "0"
-									? false
-									: !!process.env.BOBBIT_LLM_REVIEW_SKIP;
+							// Bypass logic: ONLY `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a
+							// human-signoff step. There is intentionally NO fallback to
+							// BOBBIT_LLM_REVIEW_SKIP — a "human" gate must not share a
+							// bypass with `agent-qa` / `llm-review`, otherwise the global
+							// E2E harness (which sets BOBBIT_LLM_REVIEW_SKIP=1) would
+							// silently auto-approve every human gate. Removing the
+							// fallback was the Bug-1 defense-in-depth fix in the
+							// "Re-attempt: Sign-Off Gates" goal.
+							//
+							// Both `BOBBIT_HUMAN_SIGNOFF_SKIP` unset and `=0` park.
+							const skipHumanSignoff = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP === "1";
 							if (skipHumanSignoff) {
-								const reason = hsExplicit === "1"
-									? "BOBBIT_HUMAN_SIGNOFF_SKIP=1"
-									: "BOBBIT_LLM_REVIEW_SKIP is set";
-								result = { passed: true, output: `Human sign-off skipped (${reason}).` };
+								result = { passed: true, output: "Human sign-off skipped (BOBBIT_HUMAN_SIGNOFF_SKIP=1)." };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
 								const label = step.label || step.name;

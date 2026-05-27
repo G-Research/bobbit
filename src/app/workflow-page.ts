@@ -4,7 +4,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, nothing, type TemplateResult } from "lit";
-import { ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Sparkles, Terminal, TestTube, Trash2 } from "lucide";
+import { AlertCircle, ArrowLeft, GripVertical, MessageSquare, Pencil, Plus, Sparkles, Terminal, TestTube, Trash2, UserCheck } from "lucide";
 import {
 	createWorkflow,
 	updateWorkflow,
@@ -57,6 +57,86 @@ let vstepDropTarget: { phase: number; position: number } | null = null;
 
 // Empty phases tracking (gateIdx → set of empty phase numbers)
 let emptyPhases: Map<number, Set<number>> = new Map();
+
+// Project components cache (for the `component` step-field dropdown).
+let projectComponentNames: string[] = [];
+
+// Draft metadata rows per gate (ordered list of [key, value] pairs). Mirrors
+// `gate.metadata` for editing but keeps blank rows visible. Synced into
+// `gate.metadata` on every keystroke (stripping blank keys) so save is
+// consistent with the rendered state.
+let metadataDrafts: Map<number, Array<[string, string]>> = new Map();
+
+/** Initialise draft rows from existing gate.metadata records. */
+function seedMetadataDrafts(gates: WorkflowGate[]): void {
+	metadataDrafts = new Map();
+	gates.forEach((g, i) => {
+		if (g.metadata) {
+			metadataDrafts.set(i, Object.entries(g.metadata).map(([k, v]) => [k, v]));
+		}
+	});
+}
+
+// Top-level save-attempted state — used to surface inline validation errors.
+let saveAttempted = false;
+let saveBlockedReason: string | null = null;
+
+// ============================================================================
+// VALIDATION
+// ============================================================================
+
+/**
+ * Validate a single VerifyStep. Returns a per-field error map (or empty object
+ * when valid). Empty values are treated as missing.
+ */
+export function validateStep(step: VerifyStep): Record<string, string> {
+	const errs: Record<string, string> = {};
+	if (!step.name || !step.name.trim()) errs.name = "Name is required.";
+	if (step.type === "human-signoff") {
+		if (!step.label || !step.label.trim()) errs.label = "Card title is required.";
+		if (!step.prompt || !step.prompt.trim()) errs.prompt = "Prompt is required.";
+	} else if (step.type === "llm-review" || step.type === "agent-qa") {
+		if (!step.prompt || !step.prompt.trim()) errs.prompt = "Prompt is required.";
+	} else if (step.type === "command") {
+		const hasRun = !!(step.run && step.run.trim());
+		const hasCmd = !!(step.command && step.command.trim());
+		if (!hasRun && !hasCmd) errs.run = "Either a free-form `run` or a named `command` is required.";
+		if (hasRun && hasCmd) errs.command = "Specify exactly one of `run` or `command`, not both.";
+		if (hasCmd && !(step.component && step.component.trim())) errs.component = "Component is required for named commands.";
+	}
+	return errs;
+}
+
+/** Collect every validation error across all steps in editGates. */
+function collectValidationErrors(gates: WorkflowGate[]): { gateIdx: number; stepIdx: number; errors: Record<string, string> }[] {
+	const out: { gateIdx: number; stepIdx: number; errors: Record<string, string> }[] = [];
+	gates.forEach((g, gi) => {
+		(g.verify || []).forEach((s, si) => {
+			const e = validateStep(s);
+			if (Object.keys(e).length > 0) out.push({ gateIdx: gi, stepIdx: si, errors: e });
+		});
+	});
+	return out;
+}
+
+async function loadProjectComponentsForEditor(): Promise<void> {
+	projectComponentNames = [];
+	const projectId = getConfigProjectId();
+	if (!projectId) return;
+	try {
+		const res = await gatewayFetch(`/api/projects/${encodeURIComponent(projectId)}/structured`);
+		if (!res.ok) return;
+		const data = await res.json().catch(() => null);
+		const comps = data && Array.isArray(data.components) ? data.components : [];
+		projectComponentNames = comps
+			.map((c: any) => (c && typeof c.name === "string") ? c.name : "")
+			.filter((n: string) => n.length > 0);
+	} catch {
+		/* swallow — select degrades to a free-text option list */
+	} finally {
+		renderApp();
+	}
+}
 
 // ============================================================================
 // DATA LOADING
@@ -130,8 +210,12 @@ function showEdit(workflow: Workflow): void {
 	editDescription = workflow.description;
 	editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
 	saving = false;
+	saveAttempted = false;
+	saveBlockedReason = null;
 	expandedGateIndices = new Set();
 	expandedVStepKeys = new Set();
+	seedMetadataDrafts(editGates);
+	void loadProjectComponentsForEditor();
 	setHashRoute("workflow-edit", workflow.id);
 }
 
@@ -144,8 +228,12 @@ function showNewEdit(): void {
 	editDescription = "";
 	editGates = [];
 	saving = false;
+	saveAttempted = false;
+	saveBlockedReason = null;
 	expandedGateIndices = new Set();
 	expandedVStepKeys = new Set();
+	metadataDrafts = new Map();
+	void loadProjectComponentsForEditor();
 	renderApp();
 }
 
@@ -367,17 +455,35 @@ function handleVStepTouchEnd(): void {
 }
 
 async function handleSave(): Promise<void> {
+	saveAttempted = true;
+	saveBlockedReason = null;
+
+	// Run validation before persisting. Block save on any error and surface
+	// inline messages in the editor + a top-level banner.
+	const issues = collectValidationErrors(editGates);
+	if (issues.length > 0) {
+		// Expand any gates that contain an invalid step so the user can see the
+		// inline error without hunting for it.
+		for (const { gateIdx, stepIdx } of issues) {
+			expandedGateIndices.add(gateIdx);
+			expandedVStepKeys.add(`${gateIdx}-${stepIdx}`);
+		}
+		saveBlockedReason = `${issues.length} verification step${issues.length === 1 ? "" : "s"} ha${issues.length === 1 ? "s" : "ve"} validation errors. Fix them and try again.`;
+		saving = false;
+		renderApp();
+		return;
+	}
+
 	saving = true;
 	renderApp();
 
 	// Compact phases before saving
 	const compacted = compactPhases(editGates);
 
-	// Auto-compute dependsOn from gate order (each gate depends on the one above it)
-	const gatesWithDeps = compacted.map((g, i) => ({
-		...g,
-		dependsOn: i > 0 && compacted[i - 1].id ? [compacted[i - 1].id] : [],
-	}));
+	// Preserve the explicit DAG exactly as edited. `dependsOn: []` is a valid
+	// YAML shape for root/parallel gates; do not silently rewrite it to a linear
+	// previous-gate dependency on save.
+	const gatesWithDeps = compacted.map(g => ({ ...g, dependsOn: g.dependsOn || [] }));
 
 	if (isNew) {
 		const result = await createWorkflow({
@@ -450,6 +556,13 @@ function removeGate(index: number): void {
 		else if (idx > index) newExpanded.add(idx - 1);
 	}
 	expandedGateIndices = newExpanded;
+	// Remap metadata drafts so they stay aligned with gate indices.
+	const nextDrafts: Map<number, Array<[string, string]>> = new Map();
+	for (const [i, rows] of metadataDrafts) {
+		if (i < index) nextDrafts.set(i, rows);
+		else if (i > index) nextDrafts.set(i - 1, rows);
+	}
+	metadataDrafts = nextDrafts;
 	renderApp();
 }
 
@@ -501,6 +614,10 @@ function moveGate(fromIdx: number, toIdx: number): void {
 	const newExpanded = new Set<number>();
 	for (const idx of expandedGateIndices) newExpanded.add(remap(idx));
 	expandedGateIndices = newExpanded;
+
+	const nextDrafts: Map<number, Array<[string, string]>> = new Map();
+	for (const [i, rows] of metadataDrafts) nextDrafts.set(remap(i), rows);
+	metadataDrafts = nextDrafts;
 
 	renderApp();
 }
@@ -649,12 +766,114 @@ function getVerifySummary(gate: WorkflowGate): string {
 // RENDER: VERIFY STEP EDITOR
 // ============================================================================
 
+/** Step-type icon lookup. */
+function stepTypeIcon(type: VerifyStep["type"] | undefined): typeof Terminal {
+	switch (type) {
+		case "command": return Terminal;
+		case "agent-qa": return TestTube;
+		case "human-signoff": return UserCheck;
+		case "llm-review": return MessageSquare;
+		default: return Terminal;
+	}
+}
+
+/**
+ * Mutate a step's shape when the user picks a new `type`. Strips fields that
+ * don't apply to the new type and initialises any required defaults so the
+ * UI for the new type is immediately usable.
+ */
+function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]): VerifyStep {
+	const next: VerifyStep = { ...prev, type: newType };
+
+	// Fields that are not meaningful for the new type should not survive as
+	// hidden stale YAML. Keep only fields visible/valid for the chosen type.
+	if (newType !== "command") {
+		delete next.run;
+		delete next.expect;
+		delete next.command;
+	} else {
+		delete next.prompt;
+		delete next.label;
+		delete next.role;
+		if (next.run === undefined && (next.command === undefined || next.command === "")) next.run = "";
+	}
+
+	if (newType !== "agent-qa" && newType !== "command") delete next.component;
+	if (newType === "human-signoff") delete next.timeout;
+	if (newType !== "human-signoff") delete next.label;
+	if (next.optional !== true) delete next.optionalLabel;
+
+	if (newType === "human-signoff") {
+		if (next.label === undefined) next.label = "";
+		if (next.prompt === undefined) next.prompt = "";
+	} else if (newType !== "command") {
+		if (next.prompt === undefined) next.prompt = "";
+	}
+	return next;
+}
+
 function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
-	const typeIcon = step.type === "command" ? Terminal : step.type === "agent-qa" ? TestTube : MessageSquare;
+	const typeIcon = stepTypeIcon(step.type);
 	const isVStepExpanded = expandedVStepKeys.has(`${gateIdx}-${stepIdx}`);
 	const isDragging = vstepDragGateIdx === gateIdx && vstepDragStepIdx === stepIdx;
+	const errs = saveAttempted ? validateStep(step) : {};
+
+	const currentSteps = (): VerifyStep[] => [...(((editGates[gateIdx] || gate).verify) || [])];
+	const updateStep = (patch: Partial<VerifyStep>, rerender = false) => {
+		// Read from the latest editGates state, not the render-time `gate` closure.
+		// Most text inputs do not need a full app render on every keystroke; avoiding
+		// that rerender keeps the focused DOM node stable and prevents rapid adjacent
+		// edits from racing a stale render that clobbers sibling fields. Structural
+		// edits (type switches, optional toggles, command-mode toggles) still call
+		// updateGateField below because their visible controls change.
+		const nextGates = [...editGates];
+		const nextGate = { ...(nextGates[gateIdx] || gate) };
+		const steps = [...(nextGate.verify || [])];
+		steps[stepIdx] = { ...steps[stepIdx], ...patch };
+		nextGate.verify = steps;
+		nextGates[gateIdx] = nextGate;
+		editGates = nextGates;
+		if (rerender || saveAttempted) renderApp();
+	};
+
+	const stepType = step.type || "command";
+	const showTimeoutField = stepType !== "human-signoff";
+	const showRoleField = stepType === "llm-review" || stepType === "agent-qa" || stepType === "human-signoff";
+	const showComponentField = stepType === "command" || stepType === "agent-qa";
+	const componentOptions = projectComponentNames;
+
+	const handleTypeChange = (e: Event) => {
+		const steps = currentSteps();
+		const newType = (e.target as HTMLSelectElement).value as VerifyStep["type"];
+		steps[stepIdx] = mutateStepForTypeChange(steps[stepIdx], newType);
+		updateGateField(gateIdx, "verify", steps);
+	};
+	const setCommandMode = (mode: "run" | "command") => {
+		const steps = currentSteps();
+		const patch: Partial<VerifyStep> = {};
+		if (mode === "run") {
+			patch.command = undefined;
+			if (steps[stepIdx].run === undefined) patch.run = "";
+			steps[stepIdx] = { ...steps[stepIdx], ...patch };
+			delete steps[stepIdx].command;
+		} else {
+			patch.run = undefined;
+			if (steps[stepIdx].command === undefined) patch.command = "";
+			steps[stepIdx] = { ...steps[stepIdx], ...patch };
+			delete steps[stepIdx].run;
+		}
+		updateGateField(gateIdx, "verify", steps);
+	};
+
+	// `command` step ships two mutually-exclusive ways to specify the command:
+	//   - free-form `run` string (with template variables)
+	//   - structural ref to a named `command` on the chosen `component`
+	const useNamedCommand = stepType === "command" && step.command !== undefined;
+
 	return html`
 		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""} ${isDragging ? "vstep-dragging" : ""}"
+			data-testid="wf-vstep-card"
+			data-step-type="${stepType}"
 			draggable="true"
 			@dragstart=${(e: DragEvent) => { e.stopPropagation(); handleVStepDragStart(e, gateIdx, stepIdx); }}
 			@dragend=${handleVStepDragEnd}>
@@ -670,8 +889,9 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 				<span class="wf-verify-type-icon">${icon(typeIcon, "sm")}</span>
 				<span class="wf-vstep-name-label">${step.name || "(unnamed)"}</span>
 				<span class="wf-vstep-sep">\u00B7</span>
-				<span class="wf-vstep-type-label">${step.type || "command"}</span>
+				<span class="wf-vstep-type-label">${stepType}</span>
 				${step.optional ? html`<span class="wf-vstep-optional-badge">optional</span>` : nothing}
+				${saveAttempted && Object.keys(errs).length > 0 ? html`<span class="wf-vstep-error-badge" title="This step has validation errors">${icon(AlertCircle, "sm")}</span>` : nothing}
 				<span class="wf-vstep-spacer"></span>
 				<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
@@ -683,79 +903,162 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 				<div class="wf-vstep-fields">
 					<div class="wf-identity-row">
 						<label class="wf-field-label">Name</label>
-						<input class="wf-input" style="flex:1;min-width:0;" .value=${step.name || ""} placeholder="Step name"
+						<input class="wf-input ${errs.name ? "wf-input-error" : ""}" data-testid="wf-step-name" style="flex:1;min-width:0;" .value=${step.name || ""} placeholder="Step name"
 							@click=${(e: Event) => e.stopPropagation()}
-							@input=${(e: Event) => {
-								const steps = [...(gate.verify || [])];
-								steps[stepIdx] = { ...steps[stepIdx], name: (e.target as HTMLInputElement).value };
-								updateGateField(gateIdx, "verify", steps);
-							}} />
+							@input=${(e: Event) => updateStep({ name: (e.target as HTMLInputElement).value })} />
 						<label class="wf-field-label" style="margin-left:8px;">Type</label>
-						<select class="wf-select" .value=${step.type || "command"}
+						<select class="wf-select" data-testid="wf-step-type" .value=${stepType}
 							@click=${(e: Event) => e.stopPropagation()}
-							@change=${(e: Event) => {
-								const steps = [...(gate.verify || [])];
-								steps[stepIdx] = { ...steps[stepIdx], type: (e.target as HTMLSelectElement).value as "command" | "llm-review" | "agent-qa" };
-								updateGateField(gateIdx, "verify", steps);
-							}}>
-							<option value="command" ?selected=${step.type === "command"}>command</option>
-							<option value="llm-review" ?selected=${step.type === "llm-review"}>llm-review</option>
-							<option value="agent-qa" ?selected=${step.type === "agent-qa"}>agent-qa</option>
+							@input=${handleTypeChange}
+							@change=${handleTypeChange}>
+							<option value="command" ?selected=${stepType === "command"}>command</option>
+							<option value="llm-review" ?selected=${stepType === "llm-review"}>llm-review</option>
+							<option value="agent-qa" ?selected=${stepType === "agent-qa"}>agent-qa</option>
+							<option value="human-signoff" ?selected=${stepType === "human-signoff"}>human-signoff</option>
 						</select>
-						${step.type === "command" ? html`
+						${stepType === "command" ? html`
 							<label class="wf-field-label" style="margin-left:8px;">Expect</label>
-							<select class="wf-select" .value=${step.expect || "success"}
+							<select class="wf-select" data-testid="wf-step-expect" .value=${step.expect || "success"}
 								@click=${(e: Event) => e.stopPropagation()}
-								@change=${(e: Event) => {
-									const steps = [...(gate.verify || [])];
-									steps[stepIdx] = { ...steps[stepIdx], expect: (e.target as HTMLSelectElement).value as "success" | "failure" };
-									updateGateField(gateIdx, "verify", steps);
-								}}>
+								@change=${(e: Event) => updateStep({ expect: (e.target as HTMLSelectElement).value as "success" | "failure" })}>
 								<option value="success" ?selected=${step.expect !== "failure"}>success</option>
 								<option value="failure" ?selected=${step.expect === "failure"}>failure</option>
 							</select>
 						` : nothing}
 					</div>
-					${step.type === "command" ? html`
-						<input class="wf-input" .value=${step.run || ""} placeholder="Command to run..."
-							@click=${(e: Event) => e.stopPropagation()}
-							@input=${(e: Event) => {
-								const steps = [...(gate.verify || [])];
-								steps[stepIdx] = { ...steps[stepIdx], run: (e.target as HTMLInputElement).value };
-								updateGateField(gateIdx, "verify", steps);
-							}} />
-						<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
+					${errs.name ? html`<div class="wf-field-error" data-testid="wf-step-name-error">${errs.name}</div>` : nothing}
+
+					${stepType === "command" ? html`
+						<div class="wf-cmd-mode-row">
+							<span class="wf-field-label">Source</span>
+							<button class="wf-cmd-mode-toggle ${!useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-run"
+								@pointerdown=${(e: Event) => { e.stopPropagation(); setCommandMode("run"); }}
+								@click=${(e: Event) => { e.stopPropagation(); setCommandMode("run"); }}>Free-form <code>run</code></button>
+							<button class="wf-cmd-mode-toggle ${useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-command"
+								@pointerdown=${(e: Event) => { e.stopPropagation(); setCommandMode("command"); }}
+								@click=${(e: Event) => { e.stopPropagation(); setCommandMode("command"); }}>Named <code>command</code></button>
+						</div>
+						${!useNamedCommand ? html`
+							<input class="wf-input ${errs.run ? "wf-input-error" : ""}" data-testid="wf-step-run" .value=${step.run || ""} placeholder="Command to run..."
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => updateStep({ run: (e.target as HTMLInputElement).value })} />
+							<div class="wf-field-hint">Variables: {{branch}}, {{master}}, {{cwd}}, {{project.key}}, {{agent.key}}, {{gate_id.meta.key}}</div>
+							${errs.run ? html`<div class="wf-field-error" data-testid="wf-step-run-error">${errs.run}</div>` : nothing}
+						` : html`
+							<input class="wf-input ${errs.command ? "wf-input-error" : ""}" data-testid="wf-step-command" .value=${step.command || ""} placeholder="Named command (e.g. build, unit)"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => updateStep({ command: (e.target as HTMLInputElement).value })} />
+							<div class="wf-field-hint">Resolves against the chosen component's <code>commands:</code> map.</div>
+							${errs.command ? html`<div class="wf-field-error" data-testid="wf-step-command-error">${errs.command}</div>` : nothing}
+						`}
 					` : html`
-						<textarea class="wf-textarea" .value=${step.prompt || ""} placeholder="${step.type === "agent-qa" ? "QA test prompt..." : "Review prompt..."}"
+						<textarea class="wf-textarea ${errs.prompt ? "wf-input-error" : ""}" data-testid="wf-step-prompt" .value=${step.prompt || ""} placeholder="${stepType === "agent-qa" ? "QA test prompt..." : stepType === "human-signoff" ? "What to ask the reviewer…" : "Review prompt..."}"
 							@click=${(e: Event) => e.stopPropagation()}
-							@input=${(e: Event) => {
-								const steps = [...(gate.verify || [])];
-								steps[stepIdx] = { ...steps[stepIdx], prompt: (e.target as HTMLTextAreaElement).value };
-								updateGateField(gateIdx, "verify", steps);
-							}}></textarea>
+							@input=${(e: Event) => updateStep({ prompt: (e.target as HTMLTextAreaElement).value })}></textarea>
+						${errs.prompt ? html`<div class="wf-field-error" data-testid="wf-step-prompt-error">${errs.prompt}</div>` : nothing}
 					`}
+
+					${stepType === "human-signoff" ? html`
+						<div class="wf-field">
+							<label class="wf-field-label">Card Title</label>
+							<input class="wf-input ${errs.label ? "wf-input-error" : ""}" data-testid="wf-step-label" .value=${step.label || ""} placeholder="Approve design doc"
+								@click=${(e: Event) => e.stopPropagation()}
+								@input=${(e: Event) => updateStep({ label: (e.target as HTMLInputElement).value })} />
+							<div class="wf-field-hint">Title shown on the sign-off request card.</div>
+							${errs.label ? html`<div class="wf-field-error" data-testid="wf-step-label-error">${errs.label}</div>` : nothing}
+						</div>
+					` : nothing}
+
+					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
+						<summary class="wf-vstep-advanced-summary">Advanced</summary>
+						<div class="wf-vstep-advanced-fields">
+							<div class="wf-field">
+								<label class="wf-field-label">Phase</label>
+								<input class="wf-input" data-testid="wf-step-phase" type="number" min="0" step="1" .value=${String(step.phase ?? 0)}
+									@click=${(e: Event) => e.stopPropagation()}
+									@input=${(e: Event) => {
+										const raw = (e.target as HTMLInputElement).value.trim();
+										const n = raw === "" ? 0 : Math.max(0, Math.floor(Number(raw)));
+										updateStep({ phase: Number.isFinite(n) && n > 0 ? n : undefined });
+									}} />
+								<div class="wf-field-hint">Steps in later phases wait for earlier phases in the same gate.</div>
+							</div>
+							${showTimeoutField ? html`
+								<div class="wf-field">
+									<label class="wf-field-label">Timeout (seconds)</label>
+									<input class="wf-input" data-testid="wf-step-timeout" type="number" min="1" step="1" placeholder="300" .value=${step.timeout != null ? String(step.timeout) : ""}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => {
+											const raw = (e.target as HTMLInputElement).value.trim();
+											if (raw === "") { updateStep({ timeout: undefined }); return; }
+											const n = Math.floor(Number(raw));
+											if (!Number.isFinite(n) || n <= 0) { updateStep({ timeout: undefined }); return; }
+											updateStep({ timeout: n });
+										}} />
+									<div class="wf-field-hint">Empty = built-in default. Must be a positive integer.</div>
+								</div>
+							` : nothing}
+							${showRoleField ? html`
+								<div class="wf-field">
+									<label class="wf-field-label">Role</label>
+									<input class="wf-input" data-testid="wf-step-role" placeholder="reviewer" .value=${step.role || ""}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => updateStep({ role: (e.target as HTMLInputElement).value || undefined })} />
+									<div class="wf-field-hint">Agent persona used to render the step (empty = built-in default).</div>
+								</div>
+							` : nothing}
+							${showComponentField ? html`
+								<div class="wf-field">
+									<label class="wf-field-label">Component</label>
+									${componentOptions.length > 0 ? html`
+										<select class="wf-select ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""}
+											@click=${(e: Event) => e.stopPropagation()}
+											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined })}>
+											<option value="" ?selected=${!step.component}>(first component)</option>
+											${componentOptions.map(n => html`<option value="${n}" ?selected=${step.component === n}>${n}</option>`)}
+										</select>
+									` : html`
+										<input class="wf-input ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""} placeholder="Component name"
+											@click=${(e: Event) => e.stopPropagation()}
+											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined })} />
+									`}
+									<div class="wf-field-hint">Required when using a named <code>command</code>; empty is valid only for free-form <code>run</code>.</div>
+									${errs.component ? html`<div class="wf-field-error" data-testid="wf-step-component-error">${errs.component}</div>` : nothing}
+								</div>
+							` : nothing}
+							<div class="wf-field">
+								<label class="wf-field-label">Description</label>
+								<textarea class="wf-textarea" data-testid="wf-step-description" rows="2" .value=${step.description || ""} placeholder="Free-form description (shown in tooltips and the opt-in card)"
+									@click=${(e: Event) => e.stopPropagation()}
+									@input=${(e: Event) => updateStep({ description: (e.target as HTMLTextAreaElement).value || undefined })}></textarea>
+							</div>
+						</div>
+					</details>
+
 					<div class="wf-vstep-optional-row">
 						<label class="wf-toggle-compact">
-							<input type="checkbox" .checked=${step.optional === true}
+							<input type="checkbox" data-testid="wf-step-optional" .checked=${step.optional === true}
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => {
-									const steps = [...(gate.verify || [])];
-									steps[stepIdx] = { ...steps[stepIdx], optional: (e.target as HTMLInputElement).checked || undefined };
-									if (!steps[stepIdx].optional) { delete steps[stepIdx].label; delete steps[stepIdx].optional; }
+									const checked = (e.target as HTMLInputElement).checked;
+									const steps = currentSteps();
+									steps[stepIdx] = { ...steps[stepIdx], optional: checked || undefined };
+									if (!checked) {
+										delete steps[stepIdx].optional;
+										delete steps[stepIdx].optionalLabel;
+									}
 									updateGateField(gateIdx, "verify", steps);
 								}} />
 							<span>Optional</span>
+							<span class="wf-info-icon" title="User opts in at goal-creation time">i</span>
 						</label>
 						${step.optional ? html`
-							<input class="wf-input" style="flex:1;" .value=${step.label || ""} placeholder="UI label (e.g. Enable QA Testing)"
+							<input class="wf-input" data-testid="wf-step-optional-label" style="flex:1;" .value=${step.optionalLabel || ""} placeholder="Toggle label (e.g. Enable QA Testing)"
 								@click=${(e: Event) => e.stopPropagation()}
-								@input=${(e: Event) => {
-									const steps = [...(gate.verify || [])];
-									steps[stepIdx] = { ...steps[stepIdx], label: (e.target as HTMLInputElement).value || undefined };
-									updateGateField(gateIdx, "verify", steps);
-								}} />
+								@input=${(e: Event) => updateStep({ optionalLabel: (e.target as HTMLInputElement).value || undefined })} />
 						` : nothing}
 					</div>
+					${step.optional ? html`<div class="wf-field-hint">Toggle label shown at goal creation.</div>` : nothing}
 				</div>
 			</div>
 		</div>
@@ -995,6 +1298,110 @@ function renderPhaseGroups(gate: WorkflowGate, gateIdx: number): TemplateResult 
 }
 
 // ============================================================================
+// RENDER: DEPENDS-ON CHIP STRIP
+// ============================================================================
+
+function renderDependsOnEditor(gate: WorkflowGate, idx: number): TemplateResult {
+	const others = editGates
+		.map((g, i) => ({ g, i }))
+		.filter(({ g, i }) => i !== idx && g.id && g.id.trim().length > 0);
+	const current = new Set(gate.dependsOn || []);
+	return html`
+		<div class="wf-field">
+			<label class="wf-field-label">Depends on</label>
+			<div class="wf-dep-list" data-testid="wf-gate-depends-on">
+				${others.length === 0 ? html`
+					<span class="wf-dep-none">No other gates with IDs yet.</span>
+				` : others.map(({ g }) => {
+					const active = current.has(g.id);
+					return html`
+						<button class="wf-dep-toggle-chip ${active ? "wf-dep-toggle-chip--active" : ""}"
+							data-testid="wf-dep-chip-${g.id}"
+							@click=${(e: Event) => {
+								e.stopPropagation();
+								const next = new Set(current);
+								if (next.has(g.id)) next.delete(g.id); else next.add(g.id);
+								updateGateField(idx, "dependsOn", [...next]);
+							}}>${g.id}</button>
+					`;
+				})}
+			</div>
+			<div class="wf-field-hint">This gate depends only on the selected gates. Select none to make it an independent root/parallel gate.</div>
+		</div>
+	`;
+}
+
+// ============================================================================
+// RENDER: METADATA KEY-VALUE EDITOR
+// ============================================================================
+
+/** Persist draft rows back into `gate.metadata` (stripping blank keys). */
+function commitMetadataRows(idx: number, rows: Array<[string, string]>, rerender = false): void {
+	metadataDrafts.set(idx, rows);
+	const rec: Record<string, string> = {};
+	for (const [k, v] of rows) {
+		const trimmed = k.trim();
+		if (trimmed) rec[trimmed] = v;
+	}
+	const nextGates = [...editGates];
+	const nextGate = { ...nextGates[idx], metadata: Object.keys(rec).length > 0 ? rec : undefined };
+	nextGates[idx] = nextGate;
+	editGates = nextGates;
+	if (rerender) renderApp();
+}
+
+function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
+	let rows = metadataDrafts.get(idx);
+	if (!rows) {
+		rows = gate.metadata ? Object.entries(gate.metadata).map(([k, v]) => [k, v] as [string, string]) : [];
+		metadataDrafts.set(idx, rows);
+	}
+
+	return html`
+		<div class="wf-field">
+			<label class="wf-field-label">Metadata</label>
+			<div class="wf-metadata-list" data-testid="wf-gate-metadata">
+				${rows.length === 0 ? html`<div class="wf-dep-none">No metadata entries.</div>` : rows.map(([k, v], rowIdx) => html`
+					<div class="wf-metadata-row" data-testid="wf-metadata-row">
+						<input class="wf-input" data-testid="wf-metadata-key" placeholder="key" .value=${k}
+							@click=${(e: Event) => e.stopPropagation()}
+							@input=${(e: Event) => {
+								// Read the latest draft rows instead of the render-time closure. Input
+								// events across adjacent key/value fields can fire before the previous
+								// render has swapped listeners, and using the stale `rows` closure would
+								// clobber a just-entered sibling value.
+								const currentRows = metadataDrafts.get(idx) || rows!;
+								const next: Array<[string, string]> = currentRows.map((p, i) => i === rowIdx ? [(e.target as HTMLInputElement).value, p[1]] : p);
+								commitMetadataRows(idx, next);
+							}} />
+						<input class="wf-input" data-testid="wf-metadata-value" placeholder="value" .value=${v}
+							@click=${(e: Event) => e.stopPropagation()}
+							@input=${(e: Event) => {
+								const currentRows = metadataDrafts.get(idx) || rows!;
+								const next: Array<[string, string]> = currentRows.map((p, i) => i === rowIdx ? [p[0], (e.target as HTMLInputElement).value] : p);
+								commitMetadataRows(idx, next);
+							}} />
+						<button class="wf-criteria-remove" title="Remove metadata entry" data-testid="wf-metadata-remove" @click=${(e: Event) => {
+							e.stopPropagation();
+							const currentRows = metadataDrafts.get(idx) || rows!;
+							const next: Array<[string, string]> = currentRows.filter((_, i) => i !== rowIdx);
+							commitMetadataRows(idx, next, true);
+						}}>${icon(Trash2, "sm")}</button>
+					</div>
+				`)}
+			</div>
+			<button class="wf-criteria-add-btn" data-testid="wf-metadata-add" @click=${(e: Event) => {
+				e.stopPropagation();
+				const currentRows = metadataDrafts.get(idx) || rows || [];
+				const next: Array<[string, string]> = [...currentRows, ["", ""]];
+				commitMetadataRows(idx, next, true);
+			}}>Add metadata</button>
+			<div class="wf-field-hint">Free-form key/value pairs (used by some workflows for routing).</div>
+		</div>
+	`;
+}
+
+// ============================================================================
 // RENDER: GATE EDITOR (collapsible card)
 // ============================================================================
 
@@ -1031,27 +1438,43 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 				<div class="wf-gate-body-inner">
 					<div class="wf-identity-row">
 						<label class="wf-field-label">ID</label>
-						<input class="wf-input" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
+						<input class="wf-input" data-testid="wf-gate-id" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
 							@input=${(e: Event) => updateGateField(idx, "id", (e.target as HTMLInputElement).value)} />
 						<label class="wf-field-label" style="margin-left:8px;">Name</label>
-						<input class="wf-input" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
+						<input class="wf-input" data-testid="wf-gate-name" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
 							@input=${(e: Event) => updateGateField(idx, "name", (e.target as HTMLInputElement).value)} />
 					</div>
 
 					<div class="wf-toggles-row">
 						<label class="wf-toggle-compact">
-							<input type="checkbox" class="toggle-switch" .checked=${gate.content === true}
+							<input type="checkbox" class="toggle-switch" data-testid="wf-gate-content" .checked=${gate.content === true}
 								@change=${(e: Event) => updateGateField(idx, "content", (e.target as HTMLInputElement).checked || undefined)} />
 							<span>Content</span>
 							<span class="wf-info-icon" title="Content gates store a markdown document">i</span>
 						</label>
 						<label class="wf-toggle-compact">
-							<input type="checkbox" class="toggle-switch" .checked=${gate.injectDownstream === true}
+							<input type="checkbox" class="toggle-switch" data-testid="wf-gate-inject-downstream" .checked=${gate.injectDownstream === true}
 								@change=${(e: Event) => updateGateField(idx, "injectDownstream", (e.target as HTMLInputElement).checked || undefined)} />
 							<span>Inject downstream</span>
 							<span class="wf-info-icon" title="Agents working towards subsequent gates have the content attached to this gate injected into their context">i</span>
 						</label>
+						<label class="wf-toggle-compact">
+							<input type="checkbox" class="toggle-switch" data-testid="wf-gate-optional" .checked=${gate.optional === true}
+								@change=${(e: Event) => updateGateField(idx, "optional", (e.target as HTMLInputElement).checked || undefined)} />
+							<span>Optional</span>
+							<span class="wf-info-icon" title="Whole gate is skippable for the goal">i</span>
+						</label>
+						<label class="wf-toggle-compact">
+							<input type="checkbox" class="toggle-switch" data-testid="wf-gate-manual" .checked=${gate.manual === true}
+								@change=${(e: Event) => updateGateField(idx, "manual", (e.target as HTMLInputElement).checked || undefined)} />
+							<span>Manual</span>
+							<span class="wf-info-icon" title="Don't auto-verify on signal; require an explicit human signal. (Different from a human-signoff step type — manual gates have no per-step approval UI.)">i</span>
+						</label>
 					</div>
+
+					${renderDependsOnEditor(gate, idx)}
+
+					${renderMetadataEditor(gate, idx)}
 
 					<div class="wf-field">
 						<span class="wf-verify-label">Verification Steps (${verifyCount})</span>
@@ -1089,6 +1512,12 @@ function autoGrowTextarea(el: HTMLTextAreaElement): void {
 function renderEditView(): TemplateResult {
 	return html`
 		<div class="wf-edit-container">
+			${saveBlockedReason ? html`
+				<div class="wf-save-error-banner" data-testid="wf-save-error-banner" role="alert">
+					${icon(AlertCircle, "sm")}
+					<span>${saveBlockedReason}</span>
+				</div>
+			` : nothing}
 			<div class="wf-edit-identity">
 				<div class="flex items-center justify-between mb-1">
 					<span>${selectedWorkflow ? renderOriginBadge((selectedWorkflow as any).origin, (selectedWorkflow as any).overrides) : ""}</span>

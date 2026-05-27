@@ -109,22 +109,27 @@ export interface Component {
 	config?: Record<string, string>;    // opaque key→string map. Used by /qa-test skill etc.
 }
 
+// `label` is reserved exclusively for the `human-signoff` card title.
+// `optionalLabel` is the goal-creation opt-in toggle label for any
+// `optional: true` step (regardless of type). Old YAML overloaded `label`
+// for both purposes — see workflow-store.ts::normalizeStep for the forward
+// migration that moves the legacy shape onto `optionalLabel` on load.
 export type CommandStepStructural = {
 	name: string; type: "command"; component: string; command: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
 export type CommandStepComponentRun = {
 	name: string; type: "command"; component: string; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
 export type CommandStepFreeform = {
 	name: string; type: "command"; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
-	optional?: boolean; label?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
 export type CommandStep = CommandStepStructural | CommandStepComponentRun | CommandStepFreeform;
@@ -132,18 +137,18 @@ export type CommandStep = CommandStepStructural | CommandStepComponentRun | Comm
 export type LlmReviewStep = {
 	name: string; type: "llm-review"; prompt: string;
 	role?: string; phase?: number; expect?: "success" | "failure";
-	timeout?: number; optional?: boolean; label?: string; description?: string;
+	timeout?: number; optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
 export type AgentQaStep = {
 	name: string; type: "agent-qa"; prompt: string;
 	role?: string; component?: string; phase?: number; timeout?: number;
-	optional?: boolean; label?: string; description?: string;
+	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
 export type HumanSignoffStep = {
 	name: string; type: "human-signoff"; prompt: string; label: string;
-	phase?: number; optional?: boolean; description?: string;
+	phase?: number; optional?: boolean; optionalLabel?: string; description?: string;
 };
 
 export type InlineVerifyStep = CommandStep | LlmReviewStep | AgentQaStep | HumanSignoffStep;

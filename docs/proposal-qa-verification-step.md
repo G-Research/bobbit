@@ -45,7 +45,7 @@ verify:
     type: agent-qa
     phase: 2
     optional: true
-    label: "Enable QA Testing"
+    optionalLabel: "Enable QA Testing"
     prompt: |
       ...
 ```
@@ -94,7 +94,7 @@ A new step type that spawns a test-engineer agent to stand up an ephemeral envir
   type: agent-qa
   phase: 2
   optional: true
-  label: "Enable QA Testing"
+  optionalLabel: "Enable QA Testing"
   prompt: |
     You are performing QA testing for this goal. Your job is to verify the implementation
     works correctly by driving a real browser through user scenarios.
@@ -139,13 +139,13 @@ A new step type that spawns a test-engineer agent to stand up an ephemeral envir
 
 ### 4. Optional steps with goal-level toggles
 
-**Workflow YAML:** Steps can declare `optional: true` with a `label` for UI display.
+**Workflow YAML:** Steps can declare `optional: true` with an `optionalLabel` for UI display. Legacy non-human optional steps that used `label` are migrated on load and saved as `optionalLabel`; `label` is now reserved for human sign-off card titles.
 
 ```yaml
 - name: "QA testing"
   type: agent-qa
   optional: true
-  label: "Enable QA Testing"
+  optionalLabel: "Enable QA Testing"
 ```
 
 **Goal creation UI:** When the user picks a workflow from the dropdown, the UI reads the workflow's steps, finds those with `optional: true`, and renders toggles to the right of the dropdown:
@@ -274,7 +274,7 @@ The `qa-testing` gate is removed. QA testing becomes a phase-2 verification step
       type: agent-qa
       phase: 2
       optional: true
-      label: "Enable QA Testing"
+      optionalLabel: "Enable QA Testing"
       prompt: |
         ...
 ```
@@ -310,7 +310,7 @@ The same change applies to `bug-fix.yaml`.
 
 ### Phase 4: Optional steps with toggles (server + UI)
 
-1. Add `optional?: boolean` and `label?: string` to `VerifyStep` in `workflow-store.ts`.
+1. Add `optional?: boolean` and `optionalLabel?: string` to `VerifyStep` in `workflow-store.ts`.
 2. Add `enabledOptionalSteps?: string[]` to `PersistedGoal` in `goal-store.ts`.
 3. Update `GoalManager.createGoal()` to accept and store enabled optional steps.
 4. Update `VerificationHarness` to skip optional steps not in `enabledOptionalSteps`.
@@ -342,7 +342,7 @@ No data migration is needed. The `enabledOptionalSteps` field defaults to `undef
 
 | File | Change |
 |------|--------|
-| `src/server/agent/workflow-store.ts` | Add `phase`, `optional`, `label` to `VerifyStep` |
+| `src/server/agent/workflow-store.ts` | Add `phase`, `optional`, `optionalLabel` to `VerifyStep` |
 | `src/server/agent/gate-store.ts` | Add `artifact` to `GateSignalStep` |
 | `src/server/agent/goal-store.ts` | Add `enabledOptionalSteps` to `PersistedGoal` |
 | `src/server/agent/goal-manager.ts` | Accept `enabledOptionalSteps` in `createGoal()` |

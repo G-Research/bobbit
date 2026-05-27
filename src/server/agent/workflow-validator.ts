@@ -29,7 +29,10 @@ export interface ValidatorVerifyStep {
 	prompt?: string;
 	role?: string;
 	optional?: boolean;
+	/** Human-signoff card title. Legacy optional-step toggle label may still appear here on old configs. */
 	label?: string;
+	/** Optional-step opt-in toggle label (canonical after the label/optionalLabel split). */
+	optionalLabel?: string;
 	[k: string]: unknown;
 }
 
@@ -144,9 +147,12 @@ export function validateWorkflow(
 				}));
 			};
 
-			// `optional: true` requires `label:` so the UI can render the toggle.
-			if (step.optional === true && !step.label) {
-				fail(`step is optional: true but has no label.`);
+			// `optional: true` requires a goal-creation toggle label. The canonical
+			// field is `optionalLabel`; accept legacy `label` as a backwards-compatible
+			// read path for old configs that have not yet been migrated by
+			// workflow-store::normalizeStep.
+			if (step.optional === true && !step.optionalLabel && !step.label) {
+				fail(`step is optional: true but has no optionalLabel.`);
 			}
 
 			const stepType = step.type ?? "command";

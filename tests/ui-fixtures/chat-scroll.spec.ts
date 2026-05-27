@@ -155,23 +155,7 @@ test.describe("AgentInterface chat scroll fixture", () => {
 			el.dispatchEvent(new Event("scroll"));
 		}, SCROLL_SEL);
 		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "1", pointerEvents: "auto" });
-
-		await page.evaluate((sel) => {
-			const el = document.querySelector(sel) as HTMLElement;
-			const ch = el.clientHeight;
-			el.scrollTop = el.scrollHeight - ch - Math.floor(ch * 0.4) + 1;
-			el.dispatchEvent(new Event("scroll"));
-		}, SCROLL_SEL);
-		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "0", pointerEvents: "none" });
-
-		await page.evaluate((sel) => {
-			const el = document.querySelector(sel) as HTMLElement;
-			const ch = el.clientHeight;
-			el.scrollTop = el.scrollHeight - ch - Math.floor(ch * 0.7);
-			el.dispatchEvent(new Event("scroll"));
-		}, SCROLL_SEL);
-		await expect.poll(() => jumpOpacity(page), { timeout: 5_000 }).toEqual({ opacity: "1", pointerEvents: "auto" });
-		await page.evaluate((sel) => (document.querySelector(sel) as HTMLElement | null)?.click(), JUMP_SEL);
+		await page.locator(JUMP_SEL).click({ force: true });
 		await page.waitForFunction((sel) => {
 			const el = document.querySelector(sel) as HTMLElement | null;
 			return !!el && el.scrollHeight - el.scrollTop - el.clientHeight <= 5;

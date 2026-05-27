@@ -202,7 +202,11 @@ test.describe("Optional steps API @quarantine", () => {
 		const qaStep = implGate.verify.find((s: any) => s.name === "QA testing");
 		expect(qaStep).toBeTruthy();
 		expect(qaStep.optional).toBe(true);
-		expect(qaStep.label).toBe("Enable QA Testing");
+		// After the `label` / `optionalLabel` schema split, optional non-human-
+		// signoff steps emit the toggle text as `optionalLabel`. Old YAML using
+		// `label` is migrated forward in `workflow-store::normalizeStep`.
+		expect(qaStep.optionalLabel).toBe("Enable QA Testing");
+		expect(qaStep.label).toBeUndefined();
 		expect(qaStep.type).toBe("agent-qa");
 	});
 });

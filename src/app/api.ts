@@ -1155,15 +1155,23 @@ export async function teardownTeam(goalId: string): Promise<boolean> {
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "human-signoff";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
 	phase?: number;
 	optional?: boolean;
+	/** Sign-off card title — only meaningful for `human-signoff` steps. */
 	label?: string;
+	/** Toggle label shown at goal creation — only meaningful for `optional` steps. */
+	optionalLabel?: string;
+	role?: string;
 	description?: string;
+	/** Structural reference: which component to run from (Phase 2). */
+	component?: string;
+	/** Structural reference: which command on that component to invoke (Phase 2). */
+	command?: string;
 }
 
 export interface WorkflowGate {
@@ -1172,6 +1180,8 @@ export interface WorkflowGate {
 	dependsOn: string[];
 	content?: boolean;
 	injectDownstream?: boolean;
+	optional?: boolean;
+	manual?: boolean;
 	metadata?: Record<string, string>;
 	verify?: VerifyStep[];
 }
