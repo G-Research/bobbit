@@ -18,7 +18,7 @@
  *  - On reload the popover state rehydrates from `/verifications/active`.
  */
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "../e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const STEP_NAME = "approve-design";
@@ -221,6 +221,104 @@ test.describe("<goal-status-widget>", () => {
 			await expect(textarea).toHaveCount(0, { timeout: 5_000 });
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
+
+	/**
+	 * Regression — pin the pill's strict visibility on a REAL team-lead session
+	 * (not a fixture `goalId`-only session). The original report was that the
+	 * widget was invisible on team-lead sessions. A team-lead session has
+	 * `teamGoalId` set (not `goalId`) — exercises the second branch of the
+	 * mount gate at `AgentInterface.ts:1997`:
+	 *
+	 *   ${(this.goalId || this.teamGoalId) ? html`<goal-status-widget ...`}
+	 *
+	 * The widget receives `goalId={this.teamGoalId || this.goalId}`. We also
+	 * pin visibility across reload (the prop must survive session refresh) and
+	 * — when feasible — at narrow viewport widths (the overflow-math at
+	 * `AgentInterface.ts:2557-2562` collapses pills, but the goal-status-widget
+	 * is NOT a bg-process-pill and must never get demoted into the "more"
+	 * popover).
+	 */
+	test("pill is strictly visible on a real team-lead session (and across reload + narrow viewport)", async ({ page }) => {
+		const goal = await createGoal({
+			title: `Goal-Status-Widget Team-Lead ${Date.now()}`,
+			team: true,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		try {
+			// Install read-mock so the widget has something to render even without
+			// a real workflow signal having landed. Backend still owns the routes
+			// but the team-lead session is real.
+			installMocks(page, goalId);
+
+			teamLeadId = await startTeam(goalId);
+			await waitForSessionStatus(teamLeadId, "idle");
+
+			// Sanity-check the REST contract — `teamGoalId` MUST be on the session
+			// serialiser response (server.ts:3411). If absent the widget's mount
+			// gate fails because both `goalId` and `teamGoalId` end up empty on
+			// the AgentInterface host.
+			const sessionInfo = await apiFetch(`/api/sessions/${teamLeadId}`).then(r => r.json());
+			expect(sessionInfo.teamGoalId, "REST /api/sessions/:id MUST expose teamGoalId for the widget to render").toBe(goalId);
+
+			await openApp(page);
+			await openSession(page, teamLeadId);
+
+			// Strict visibility — Playwright's `toBeVisible()` requires the element
+			// to be in the DOM AND have a non-zero bounding box AND not be hidden
+			// via CSS (display, visibility, opacity:0) or by an ancestor. This is
+			// stronger than the original PR's check and pins the team-lead path.
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+
+			// Diagnostic: surface the actual prop state if the assertion above
+			// ever fails — easier to debug a future regression than chasing CSS.
+			const diag = await page.evaluate(() => {
+				const host = document.querySelector("agent-interface") as any;
+				const widget = document.querySelector("goal-status-widget") as any;
+				if (!widget) return { reason: "no-widget", hostGoalId: host?.goalId, hostTeamGoalId: host?.teamGoalId };
+				const rect = widget.getBoundingClientRect();
+				const cs = getComputedStyle(widget);
+				return {
+					hostGoalId: host?.goalId ?? null,
+					hostTeamGoalId: host?.teamGoalId ?? null,
+					widgetGoalId: widget.goalId,
+					display: cs.display,
+					visibility: cs.visibility,
+					opacity: cs.opacity,
+					width: rect.width,
+					height: rect.height,
+				};
+			});
+			expect(diag.widgetGoalId, `widget.goalId must equal goalId (got ${JSON.stringify(diag)})`).toBe(goalId);
+
+			// ── Visibility persists across full page reload (the prop
+			//    propagation in session-manager.ts:1775-1777 / :2055-2057 must
+			//    set teamGoalId during refreshSessions). This is the path the
+			//    original PR test entirely skipped — its reload step navigated
+			//    back through the same goalId-shortcut session.
+			await page.reload();
+			await openSession(page, teamLeadId);
+			const pillAfterReload = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pillAfterReload).toBeVisible({ timeout: 15_000 });
+
+			// ── Narrow viewport regression — the chat-header pill strip's
+			//    overflow math (AgentInterface.ts:2557-2562) subtracts
+			//    goal-status-widget's width from the bg-process-pill budget but
+			//    the widget itself must NEVER be collapsed into the "more"
+			//    popover. Resize down to a narrow width (the project's _isNarrow
+			//    threshold is the chat input width — well below 640px) and
+			//    re-assert strict visibility.
+			await page.setViewportSize({ width: 640, height: 800 });
+			await expect(pillAfterReload).toBeVisible({ timeout: 5_000 });
+		} finally {
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => { /* ignore */ });
+			await teardownTeam(goalId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
 		}
 	});
