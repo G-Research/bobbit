@@ -142,6 +142,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache } from "./agent/model-registry.js";
+import { testModelPreference } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, imageModelMentionedInText } from "./agent/image-generation.js";
 import { ProjectRegistry, SymlinkProjectRootError, PreflightFailedError, SYSTEM_PROJECT_ID, ProjectOrderError } from "./agent/project-registry.js";
@@ -4720,11 +4721,8 @@ async function handleApiRoute(
 				return;
 			}
 			if (provider !== "aigw") {
-				json({
-					ok: false,
-					modelResolved: resolved.id,
-					error: "Test not supported for this provider yet — only AI Gateway models can be tested from here.",
-				}, 422);
+				const result = await testModelPreference(preferencesStore, pref);
+				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
 			const aigwUrl = getAigwUrl(preferencesStore);
