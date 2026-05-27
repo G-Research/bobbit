@@ -155,11 +155,11 @@ test.describe("<goal-status-widget>", () => {
 
 			// Eventually the awaiting overlay clears (next /verifications/active poll
 			// after the WS step_complete equivalent — we trigger via setState).
-			// Closing + reopening the popover triggers an explicit refresh.
+			// Closing + reopening the popover triggers an explicit refresh; the
+			// toHaveAttribute assertion below polls until the refresh has landed,
+			// so no manual sleep is required.
 			await page.keyboard.press("Escape");
 			await pill.click();
-			// Submit a tiny tick to let refresh fire.
-			await page.waitForTimeout(150);
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 10_000 });
 
 			// ── Reload — popover state must rehydrate (no awaiting since we

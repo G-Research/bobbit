@@ -19,6 +19,7 @@
  */
 import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
+import { waitForAwaitingHuman, waitForGateStatus } from "./test-utils/signoff-polling.mjs";
 
 function makeWorkflowId(): string {
 	return `signoff-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -54,51 +55,6 @@ async function createSignoffWorkflow(workflowId: string): Promise<void> {
 
 async function deleteSignoffWorkflow(workflowId: string): Promise<void> {
 	await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => {});
-}
-
-/** Poll `/verifications/active` until a parked human-signoff step appears, or time out. */
-async function waitForAwaitingHuman(
-	goalId: string,
-	signalId: string,
-	stepName: string,
-	timeoutMs = 5_000,
-): Promise<{ goalId: string; gateId: string; signalId: string; steps: any[] }> {
-	const deadline = Date.now() + timeoutMs;
-	let last: any = null;
-	while (Date.now() < deadline) {
-		const res = await apiFetch(`/api/goals/${goalId}/verifications/active`);
-		if (res.ok) {
-			const body = await res.json();
-			const match = (body.verifications || []).find((v: any) => v.signalId === signalId);
-			if (match) {
-				last = match;
-				const step = match.steps.find((s: any) => s.name === stepName);
-				if (step?.awaitingHuman === true) return match;
-			}
-		}
-		await new Promise(r => setTimeout(r, 50));
-	}
-	throw new Error(`Timed out waiting for awaitingHuman; last active=${JSON.stringify(last)}`);
-}
-
-/** Poll a gate's status until it matches `expected` or time out. */
-async function waitForGateStatus(
-	goalId: string,
-	gateId: string,
-	expected: "passed" | "failed",
-	timeoutMs = 5_000,
-): Promise<any> {
-	const deadline = Date.now() + timeoutMs;
-	let last: any = null;
-	while (Date.now() < deadline) {
-		const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}`);
-		if (res.ok) {
-			last = await res.json();
-			if (last?.status === expected) return last;
-		}
-		await new Promise(r => setTimeout(r, 50));
-	}
-	throw new Error(`Timed out waiting for gate ${gateId} to reach ${expected}; last=${JSON.stringify(last)}`);
 }
 
 test.describe("human-signoff verification step", () => {
