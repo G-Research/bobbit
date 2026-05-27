@@ -838,7 +838,7 @@
 	transition: max-height 0.3s ease;
 }
 .wf-vstep-card.vstep-expanded .wf-vstep-body {
-	max-height: 500px;
+	max-height: 1200px;
 }
 .wf-vstep-fields {
 	padding: 8px;
@@ -969,6 +969,106 @@
 	font-weight: 500;
 	white-space: nowrap;
 	flex-shrink: 0;
+}
+
+/* ============================================================================
+ * ADVANCED FIELDS / VALIDATION / METADATA / COMMAND-MODE TOGGLE
+ * (added for workflow-editor YAML/UI parity)
+ * ============================================================================ */
+
+.wf-vstep-advanced {
+	border-top: 1px dashed var(--border);
+	padding-top: 6px;
+	margin-top: 4px;
+}
+.wf-vstep-advanced-summary {
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	padding: 2px 0;
+	user-select: none;
+}
+.wf-vstep-advanced-summary:hover { color: var(--foreground); }
+.wf-vstep-advanced-fields {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 6px;
+	padding-left: 8px;
+}
+
+.wf-field-error {
+	font-size: 11px;
+	color: var(--destructive, #c53030);
+	margin-top: 2px;
+}
+.wf-input-error,
+.wf-textarea.wf-input-error,
+.wf-select.wf-input-error {
+	border-color: var(--destructive, #c53030) !important;
+}
+
+.wf-vstep-error-badge {
+	display: inline-flex;
+	align-items: center;
+	color: var(--destructive, #c53030);
+	flex-shrink: 0;
+}
+
+.wf-save-error-banner {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	border: 1px solid var(--destructive, #c53030);
+	border-radius: 6px;
+	background: color-mix(in oklch, var(--destructive, #c53030) 10%, transparent);
+	color: var(--destructive, #c53030);
+	font-size: 12px;
+	margin-bottom: 8px;
+}
+
+.wf-metadata-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 4px;
+}
+.wf-metadata-row {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+.wf-metadata-row > .wf-input { flex: 1; min-width: 0; }
+
+.wf-cmd-mode-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.wf-cmd-mode-toggle {
+	font-size: 11px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	border: 1px solid var(--border);
+	background: var(--background);
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: background 150ms, border-color 150ms, color 150ms;
+}
+.wf-cmd-mode-toggle:hover { color: var(--foreground); }
+.wf-cmd-mode-toggle.is-active {
+	background: color-mix(in oklch, var(--primary) 15%, transparent);
+	border-color: var(--primary);
+	color: var(--foreground);
+}
+.wf-cmd-mode-toggle code {
+	font-family: var(--font-mono, monospace);
+	font-size: 10px;
 }
 
 /* ============================================================================
