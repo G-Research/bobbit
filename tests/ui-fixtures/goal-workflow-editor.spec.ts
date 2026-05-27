@@ -128,12 +128,16 @@ test.describe("Goal/workflow editor fixture", () => {
 		await expect.poll(() => lastPutBody(page), { timeout: 5_000 }).not.toBeNull();
 
 		const body = await lastPutBody(page);
+		// Optional-step toggle labels live in `optionalLabel` after the
+		// label/optionalLabel split (Re-attempt: Sign-Off Gates). `label`
+		// is now exclusively the `human-signoff` card title.
 		expect(body.gates[0].verify[0]).toMatchObject({
 			name: "QA step",
 			type: "agent-qa",
 			optional: true,
-			label: "Enable QA Testing",
+			optionalLabel: "Enable QA Testing",
 		});
+		expect(body.gates[0].verify[0].label).toBeUndefined();
 	});
 
 	test("Add Phase creates a removable empty phase group", async ({ page }) => {
