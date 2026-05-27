@@ -111,10 +111,15 @@ function normalizeStep(raw: unknown): VerifyStep {
 	// canonical shape on the next save (see `serializeStep`).
 	const rawOptionalLabel = typeof r.optionalLabel === "string" ? r.optionalLabel : "";
 	const rawLabel = typeof r.label === "string" ? r.label : undefined;
-	if (type !== "human-signoff" && step.optional === true && !rawOptionalLabel && typeof rawLabel === "string") {
-		// Forward migration: overloaded `label` on a non-human-signoff optional
-		// step is the opt-in toggle label. Move it; drop the original `label`.
-		step.optionalLabel = rawLabel;
+	if (type !== "human-signoff") {
+		if (rawOptionalLabel) step.optionalLabel = rawOptionalLabel;
+		else if (step.optional === true && typeof rawLabel === "string") {
+			// Forward migration: overloaded `label` on a non-human-signoff optional
+			// step is the opt-in toggle label. Move it; drop the original `label`.
+			step.optionalLabel = rawLabel;
+		}
+		// Drop any non-human-signoff `label` on read. Saved workflows should always
+		// emit the canonical split: `label` is only the human-signoff card title.
 	} else {
 		if (rawOptionalLabel) step.optionalLabel = rawOptionalLabel;
 		if (typeof rawLabel === "string") step.label = rawLabel;
@@ -177,7 +182,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.timeout !== undefined) out.timeout = s.timeout;
 	if (s.phase !== undefined) out.phase = s.phase;
 	if (s.optional) out.optional = true;
-	if (s.label !== undefined) out.label = s.label;
+	if (s.type === "human-signoff" && s.label !== undefined) out.label = s.label;
 	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
 	if (s.description !== undefined) out.description = s.description;
@@ -266,7 +271,12 @@ export class InlineWorkflowStore {
 
 	put(workflow: Workflow): void {
 		const block = this.cfg.getWorkflows() ?? {};
-		block[workflow.id] = serializeWorkflow(workflow) as unknown as InlineWorkflowDef;
+		// API/proposal callers can still hand us legacy or YAML-shaped objects
+		// (`depends_on`, non-human `label`, etc.). Normalize before serializing so
+		// every write emits the canonical shape and legacy labels migrate instead of
+		// being dropped by `serializeStep`.
+		const canonical = normalizeWorkflow(workflow, workflow.id) ?? workflow;
+		block[canonical.id] = serializeWorkflow(canonical) as unknown as InlineWorkflowDef;
 		this.cfg.setWorkflows(block);
 	}
 

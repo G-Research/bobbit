@@ -128,15 +128,12 @@ describe("normalizeStep — label / optionalLabel split & migration", () => {
 		assert.equal(step.optionalLabel, "Enable release sign-off");
 	});
 
-	it("does NOT migrate when the step is not optional, even if label is present", () => {
-		// A non-optional non-human-signoff step with a stray `label:` keeps it
-		// as-is. The migration only applies to the overloaded opt-in toggle
-		// case (optional: true).
+	it("drops stray label on non-human-signoff steps", () => {
 		writeProjectYaml(projectFor([
 			{ name: "build", type: "command", run: "npm run build", label: "stray label" },
 		]));
 		const step = makeStore().getAll()[0].gates[0].verify![0];
-		assert.equal(step.label, "stray label");
+		assert.equal(step.label, undefined);
 		assert.equal(step.optionalLabel, undefined);
 	});
 
@@ -153,10 +150,8 @@ describe("normalizeStep — label / optionalLabel split & migration", () => {
 		]));
 		const step = makeStore().getAll()[0].gates[0].verify![0];
 		assert.equal(step.optionalLabel, "New explicit label");
-		// The explicit `label:` is preserved when `optionalLabel` is already set,
-		// since the canonical shape would not have set `label` for a non-human
-		// step. We don't auto-drop it because that risks silent data loss.
-		assert.equal(step.label, "Old overloaded label");
+		assert.equal(step.label, undefined,
+			"non-human-signoff `label` must be dropped so saves emit canonical shape");
 	});
 });
 

@@ -63,25 +63,52 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
 	}
 
+	async function openWorkflowEditor(page: import("@playwright/test").Page, wfId: string): Promise<void> {
+		await openApp(page);
+		await navigateToHash(page, `#/settings/${projectId}/workflows`);
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab).toBeVisible({ timeout: 10_000 });
+		await tab.getByText(`Test Workflow ${wfId}`).first().click();
+		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
+	}
+
+	async function expandGate(page: import("@playwright/test").Page, index: number): Promise<void> {
+		const card = page.locator(".wf-gate-card").nth(index);
+		const cls = await card.getAttribute("class");
+		if (!cls?.includes("expanded")) {
+			await card.locator(".wf-gate-header .wf-gate-name").click();
+		}
+		await expect(card).toHaveClass(/expanded/);
+	}
+
 	async function expandFirstGate(page: import("@playwright/test").Page): Promise<void> {
-		const header = page.locator(".wf-gate-header").first();
-		await header.click();
-		await expect(page.locator(".wf-gate-card.expanded").first()).toBeVisible();
+		await expandGate(page, 0);
+	}
+
+	async function expandStep(page: import("@playwright/test").Page, index: number): Promise<void> {
+		const card = page.locator("[data-testid='wf-vstep-card']").nth(index);
+		const cls = await card.getAttribute("class");
+		if (!cls?.includes("vstep-expanded")) {
+			await card.locator(".wf-vstep-collapsed-header").click();
+		}
+		await expect(card).toHaveClass(/vstep-expanded/);
 	}
 
 	async function expandFirstStep(page: import("@playwright/test").Page): Promise<void> {
-		const header = page.locator(".wf-vstep-collapsed-header").first();
-		await header.click();
-		await expect(page.locator(".wf-vstep-card.vstep-expanded").first()).toBeVisible();
+		await expandStep(page, 0);
 	}
 
-	async function expandFirstStepAdvanced(page: import("@playwright/test").Page): Promise<void> {
-		const details = page.locator(".wf-vstep-card.vstep-expanded details.wf-vstep-advanced").first();
+	async function expandStepAdvanced(page: import("@playwright/test").Page, index: number): Promise<void> {
+		const details = page.locator("[data-testid='wf-vstep-card']").nth(index).locator("details.wf-vstep-advanced");
 		await expect(details.locator("summary")).toBeVisible();
 		if (!(await details.evaluate((el) => (el as HTMLDetailsElement).open))) {
 			await details.locator("summary").click();
 		}
-		await expect(page.locator(".wf-vstep-card.vstep-expanded .wf-vstep-advanced-fields").first()).toBeVisible();
+		await expect(details.locator(".wf-vstep-advanced-fields")).toBeVisible();
+	}
+
+	async function expandFirstStepAdvanced(page: import("@playwright/test").Page): Promise<void> {
+		await expandStepAdvanced(page, 0);
 	}
 
 	async function clickSaveAndWait(page: import("@playwright/test").Page, wfId: string): Promise<void> {
@@ -304,7 +331,10 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		}]);
 		await expandFirstGate(page);
 
-		// Toggle optional + manual
+		await page.locator("[data-testid='wf-gate-id']").first().fill("review-gate");
+		await page.locator("[data-testid='wf-gate-name']").first().fill("Review Gate");
+		await page.locator("[data-testid='wf-gate-content']").first().check();
+		await page.locator("[data-testid='wf-gate-inject-downstream']").first().check();
 		await page.locator("[data-testid='wf-gate-optional']").first().check();
 		await page.locator("[data-testid='wf-gate-manual']").first().check();
 
@@ -324,9 +354,39 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		const r = await rawApiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "GET" });
 		const wf = await r.json();
+		expect(wf.gates[0].id).toBe("review-gate");
+		expect(wf.gates[0].name).toBe("Review Gate");
+		expect(wf.gates[0].content).toBe(true);
+		expect(wf.gates[0].injectDownstream).toBe(true);
 		expect(wf.gates[0].optional).toBe(true);
 		expect(wf.gates[0].manual).toBe(true);
 		expect(wf.gates[0].metadata).toEqual({ priority: "high", team: "backend" });
+
+		// Re-open and assert the UI reflects every gate-level field after reload.
+		await openWorkflowEditor(page, wfId);
+		await expandFirstGate(page);
+		await expect(page.locator("[data-testid='wf-gate-id']").first()).toHaveValue("review-gate");
+		await expect(page.locator("[data-testid='wf-gate-name']").first()).toHaveValue("Review Gate");
+		await expect(page.locator("[data-testid='wf-gate-content']").first()).toBeChecked();
+		await expect(page.locator("[data-testid='wf-gate-inject-downstream']").first()).toBeChecked();
+		await expect(page.locator("[data-testid='wf-gate-optional']").first()).toBeChecked();
+		await expect(page.locator("[data-testid='wf-gate-manual']").first()).toBeChecked();
+		await expect(page.locator("[data-testid='wf-metadata-row']")).toHaveCount(2);
+
+		// Cleanup/removal path for the new gate-level controls.
+		await page.locator("[data-testid='wf-gate-content']").first().uncheck();
+		await page.locator("[data-testid='wf-gate-inject-downstream']").first().uncheck();
+		await page.locator("[data-testid='wf-gate-optional']").first().uncheck();
+		await page.locator("[data-testid='wf-gate-manual']").first().uncheck();
+		await page.locator("[data-testid='wf-metadata-remove']").first().click();
+		await page.locator("[data-testid='wf-metadata-remove']").first().click();
+		await clickSaveAndWait(page, wfId);
+		const cleaned = await (await rawApiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "GET" })).json();
+		expect(cleaned.gates[0].content).toBeUndefined();
+		expect(cleaned.gates[0].injectDownstream).toBeUndefined();
+		expect(cleaned.gates[0].optional).toBeUndefined();
+		expect(cleaned.gates[0].manual).toBeUndefined();
+		expect(cleaned.gates[0].metadata).toBeUndefined();
 
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	});
@@ -340,11 +400,11 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		]);
 
 		// Expand the second gate (idx 1).
-		const headers = page.locator(".wf-gate-header");
-		await headers.nth(1).click();
+		await expandGate(page, 1);
 
 		// Toggle the "first" chip ON inside the second gate's body.
-		const chipInsideSecond = page.locator(".wf-gate-card.expanded [data-testid='wf-dep-chip-first']").first();
+		await expect(page.locator(".wf-gate-card").nth(1)).toHaveClass(/expanded/);
+		const chipInsideSecond = page.locator(".wf-gate-card").nth(1).locator("[data-testid='wf-dep-chip-first']");
 		await expect(chipInsideSecond).toBeVisible();
 		await chipInsideSecond.click();
 		await expect(chipInsideSecond).toHaveClass(/wf-dep-toggle-chip--active/);
@@ -355,6 +415,38 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		const wf = await r.json();
 		expect(wf.gates[1].dependsOn).toEqual(["first"]);
 
+		// Toggle back off — explicit empty dependency list must persist so users can
+		// create root/parallel gates instead of the editor silently linearising them.
+		await expect(page.locator(".wf-gate-card").nth(1)).toHaveClass(/expanded/);
+		const chipAfterSave = page.locator(".wf-gate-card").nth(1).locator("[data-testid='wf-dep-chip-first']");
+		await chipAfterSave.click();
+		await expect(chipAfterSave).not.toHaveClass(/wf-dep-toggle-chip--active/);
+		await clickSaveAndWait(page, wfId);
+		const cleaned = await (await rawApiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "GET" })).json();
+		expect(cleaned.gates[1].dependsOn).toEqual([]);
+
+		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+	});
+
+	test("phase UI round-trips step movement", async ({ page }) => {
+		const wfId = "phase-rt-" + Date.now();
+		await gotoNewEditor(page, wfId, [{
+			id: "g1", name: "Gate", depends_on: [],
+			verify: [
+				{ name: "Build", type: "command", run: "echo build", phase: 0 },
+				{ name: "Test", type: "command", run: "echo test", phase: 0 },
+			],
+		}]);
+		await expandFirstGate(page);
+		await page.locator("button").filter({ hasText: /Add Phase/i }).first().click();
+		await expect(page.locator(".wf-phase-group")).toHaveCount(2, { timeout: 5_000 });
+		await expandStep(page, 1);
+		await expandStepAdvanced(page, 1);
+		await fillAndExpect(page.locator("[data-testid='wf-vstep-card']").nth(1).locator("[data-testid='wf-step-phase']"), "1");
+		await clickSaveAndWait(page, wfId);
+		const wf = await (await rawApiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "GET" })).json();
+		const moved = wf.gates[0].verify.find((s: any) => s.name === "Test");
+		expect(moved.phase).toBe(1);
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	});
 
@@ -408,6 +500,8 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		// Switch to named-command mode.
 		await switchToNamedCommand(page);
 		await fillAndExpect(page.locator("[data-testid='wf-step-command']").first(), "build");
+		await page.getByRole("button", { name: /^Save$/ }).click();
+		await expect(page.locator("[data-testid='wf-step-component-error']").first()).toBeVisible({ timeout: 5_000 });
 		// Set component. The editor renders a select when the project has structured
 		// components, and a free-text fallback when it does not.
 		const componentControl = page.locator("[data-testid='wf-step-component']").first();

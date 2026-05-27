@@ -480,12 +480,10 @@ async function handleSave(): Promise<void> {
 	// Compact phases before saving
 	const compacted = compactPhases(editGates);
 
-	// Preserve any explicit user-set `dependsOn` (empty = depends on gate
-	// above in linear order, for backwards compatibility with the pre-DAG UI).
-	const gatesWithDeps = compacted.map((g, i) => {
-		if (g.dependsOn && g.dependsOn.length > 0) return g;
-		return { ...g, dependsOn: i > 0 && compacted[i - 1].id ? [compacted[i - 1].id] : [] };
-	});
+	// Preserve the explicit DAG exactly as edited. `dependsOn: []` is a valid
+	// YAML shape for root/parallel gates; do not silently rewrite it to a linear
+	// previous-gate dependency on save.
+	const gatesWithDeps = compacted.map(g => ({ ...g, dependsOn: g.dependsOn || [] }));
 
 	if (isNew) {
 		const result = await createWorkflow({
@@ -971,9 +969,20 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						</div>
 					` : nothing}
 
-					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || (saveAttempted && Object.keys(errs).length > 0))}>
+					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
 						<summary class="wf-vstep-advanced-summary">Advanced</summary>
 						<div class="wf-vstep-advanced-fields">
+							<div class="wf-field">
+								<label class="wf-field-label">Phase</label>
+								<input class="wf-input" data-testid="wf-step-phase" type="number" min="0" step="1" .value=${String(step.phase ?? 0)}
+									@click=${(e: Event) => e.stopPropagation()}
+									@input=${(e: Event) => {
+										const raw = (e.target as HTMLInputElement).value.trim();
+										const n = raw === "" ? 0 : Math.max(0, Math.floor(Number(raw)));
+										updateStep({ phase: Number.isFinite(n) && n > 0 ? n : undefined });
+									}} />
+								<div class="wf-field-hint">Steps in later phases wait for earlier phases in the same gate.</div>
+							</div>
 							${showTimeoutField ? html`
 								<div class="wf-field">
 									<label class="wf-field-label">Timeout (seconds)</label>
@@ -1297,7 +1306,6 @@ function renderDependsOnEditor(gate: WorkflowGate, idx: number): TemplateResult 
 		.map((g, i) => ({ g, i }))
 		.filter(({ g, i }) => i !== idx && g.id && g.id.trim().length > 0);
 	const current = new Set(gate.dependsOn || []);
-	const isExplicit = (gate.dependsOn || []).length > 0;
 	return html`
 		<div class="wf-field">
 			<label class="wf-field-label">Depends on</label>
@@ -1318,9 +1326,7 @@ function renderDependsOnEditor(gate: WorkflowGate, idx: number): TemplateResult 
 					`;
 				})}
 			</div>
-			<div class="wf-field-hint">${isExplicit
-				? "This gate depends only on the selected gates."
-				: "No explicit dependencies — defaults to the gate above in order."}</div>
+			<div class="wf-field-hint">This gate depends only on the selected gates. Select none to make it an independent root/parallel gate.</div>
 		</div>
 	`;
 }
@@ -1432,10 +1438,10 @@ function renderGateEditor(gate: WorkflowGate, idx: number): TemplateResult {
 				<div class="wf-gate-body-inner">
 					<div class="wf-identity-row">
 						<label class="wf-field-label">ID</label>
-						<input class="wf-input" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
+						<input class="wf-input" data-testid="wf-gate-id" style="width:140px;" .value=${gate.id} placeholder="e.g. issue-analysis"
 							@input=${(e: Event) => updateGateField(idx, "id", (e.target as HTMLInputElement).value)} />
 						<label class="wf-field-label" style="margin-left:8px;">Name</label>
-						<input class="wf-input" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
+						<input class="wf-input" data-testid="wf-gate-name" style="flex:1;min-width:0;" .value=${gate.name} placeholder="Display name"
 							@input=${(e: Event) => updateGateField(idx, "name", (e.target as HTMLInputElement).value)} />
 					</div>
 
