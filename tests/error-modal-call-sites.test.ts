@@ -35,11 +35,10 @@ const REQUIRED_CALL_SITES: Site[] = [
 	{ file: "src/app/tool-manager-page.ts", title: "Failed to create tool assistant" },
 	{ file: "src/app/dialogs.ts", title: "Failed to create goal assistant" },
 	{ file: "src/app/dialogs.ts", title: "Failed to create project assistant" },
-	// 4 = 2 legacy `showProjectDialog` + 2 V2 `showProjectDialogV2`
-	// (each dialog handles both the !res.ok branch and the catch branch).
-	{ file: "src/app/dialogs.ts", title: "Failed to archive .bobbit/", count: 4 },
-	// 2 = 1 legacy + 1 V2 (symlink-confirm retry path in each).
-	{ file: "src/app/dialogs.ts", title: "Failed to register project", count: 2 },
+	// 2 = the !res.ok branch and the catch branch in showProjectDialog.
+	{ file: "src/app/dialogs.ts", title: "Failed to archive .bobbit/", count: 2 },
+	// 1 = the symlink-confirm retry path in showProjectDialog.
+	{ file: "src/app/dialogs.ts", title: "Failed to register project", count: 1 },
 	{ file: "src/app/proposal-panels.ts", title: "Failed to create goal", count: 2 },
 	{ file: "src/app/session-manager.ts", title: "Connection Failed" },
 ];

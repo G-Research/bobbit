@@ -360,11 +360,20 @@ export class DirectoryPicker extends LitElement {
 		}
 		if (e.key === "Escape") {
 			if (this._open) {
+				// Suggestions overlay open: swallow Esc so the surrounding dialog
+				// (Mini-lit Dialog listens for Esc on `document`) does not also
+				// close. Design doc: "Esc closes suggestions → browse → dialog
+				// (in that order)". Pinned by
+				// tests/e2e/ui/add-project-typeahead.spec.ts.
 				e.preventDefault();
+				e.stopPropagation();
 				this._open = false;
 				this._highlight = -1;
 				return;
 			}
+			// Overlay already closed — propagate cancel up; the surrounding dialog
+			// (parent dialog's onClose / directory-cancel listener) decides whether
+			// to close itself.
 			e.preventDefault();
 			this._fire<void>("directory-cancel", undefined as unknown as void);
 			return;
