@@ -12,7 +12,11 @@
  *      scroll runway; while pinned at the bottom, the user prompt is
  *      naturally off-screen above).
  *   4. Click springs the last <user-message> to ~16 px below the viewport
- *      top and re-hides the button.
+ *      top. Because this session has TWO prompts ("hi" + "STREAM_BURST:3"),
+ *      after landing at depth 1 the up button stays visible with label
+ *      "previous" (older prompt exists to walk back to). The
+ *      jump-to-bottom button also REVEALS (spec change vs PR #639 —
+ *      prompt-nav clicks escape the lock so the user can return to the tail).
  *   5. From a state where the button is visible (re-scrolled to bottom
  *      programmatically), sending a new prompt re-pins to the bottom on
  *      the new <user-message> and re-hides the button.
@@ -132,13 +136,20 @@ test.describe("jump-to-last-prompt button", () => {
 		).toBe("1");
 		await rec.capture("Last prompt off-screen; jump-to-last-prompt visible");
 
-		// --- Case 4: click scrolls last <user-message> to top and re-hides ---
+		// --- Case 4: click scrolls last <user-message> to top. The up
+		// button transitions to label="previous" (this session has 2
+		// prompts — "hi" and "STREAM_BURST:3" — so there's an older one to
+		// walk back to). AND the jump-to-bottom button reveals: per design
+		// §3 the prompt-nav click escapes the lock so the user can return
+		// to the tail.
 		await jumpBtn.click();
 		// Spring animation can take ~30 frames at default damping/stiffness;
 		// poll for landing rather than fixed sleep so we don't flake on
 		// slow CI runners. Production scrolls so the last prompt sits
-		// TOP_MARGIN (16 px) below the container top; ±32 px tolerance per
-		// the design doc.
+		// TOP_MARGIN (16 px) below the container top. Require both: the
+		// landing offset is within ±32 px AND scrollTop has been stable for
+		// one frame — the latter guards against case 5's programmatic
+		// scrollTop write racing the spring's final RAF under parallel load.
 		await page.waitForFunction((sel) => {
 			const el = document.querySelector(sel) as HTMLElement | null;
 			if (!el) return false;
@@ -148,24 +159,62 @@ test.describe("jump-to-last-prompt button", () => {
 			const elRect = el.getBoundingClientRect();
 			const lastRect = last.getBoundingClientRect();
 			const offset = lastRect.top - elRect.top;
-			return Math.abs(offset - 16) <= 32;
+			if (Math.abs(offset - 16) > 32) return false;
+			// Stability: same scrollTop across two consecutive observations
+			// stored on a window cookie.
+			const w = window as unknown as { __lastSpringScrollTop?: number };
+			const prev = w.__lastSpringScrollTop;
+			w.__lastSpringScrollTop = el.scrollTop;
+			return prev !== undefined && prev === el.scrollTop;
 		}, SCROLL_SEL, { timeout: 10_000 });
 		await settleFrames(page, 3);
 		await rec.capture("Clicked jump-to-last-prompt; spring landed at top");
 
+		// Up button stays visible with label="previous" (older prompt
+		// exists to walk back to — we're at depth 1 with 2 prompts in this
+		// session).
 		await expect.poll(
 			async () => await readJumpOpacity(page),
-			{ timeout: 5_000, message: "button must re-hide after the click brings the last prompt back into view" },
-		).toBe("0");
+			{ timeout: 5_000, message: "up button must stay visible after click while older prompts exist" },
+		).toBe("1");
+		await expect.poll(
+			async () => await jumpBtn.getAttribute("data-label"),
+			{ timeout: 5_000, message: "up button must transition to 'previous' label after first click with older prompts" },
+		).toBe("previous");
+
+		// Jump-to-bottom button is now visible (chat end isn't visible —
+		// the last user-message sits at the top of the viewport, the burst
+		// output is below the fold).
+		const jumpToBottomBtn = page.locator('[data-testid="jump-to-bottom"]');
+		await expect.poll(
+			async () => await jumpToBottomBtn.evaluate((el: HTMLElement) => el.style.opacity),
+			{ timeout: 5_000, message: "jump-to-bottom must reveal after a prompt-nav click (spec §3)" },
+		).toBe("1");
 
 		// --- Case 5: re-scroll to bottom programmatically (button visible
 		// again), then send a new prompt. The new <user-message> becomes
 		// the last one and sits at the bottom — button must hide.
-		await page.evaluate((sel) => {
-			const el = document.querySelector(sel) as HTMLElement;
-			el.scrollTop = el.scrollHeight;
-		}, SCROLL_SEL);
-		await waitForLastPromptOffTop(page);
+		//
+		// Under parallel load the spring from case 4 may not have fully
+		// settled by the time the no-gesture handler ran (`_animation` is
+		// nulled only on the spring's final RAF). To avoid racing pending
+		// scrolls, re-assert the bottom in a polled loop until last prompt
+		// is fully off the top.
+		await expect.poll(async () => {
+			return await page.evaluate((sel) => {
+				const el = document.querySelector(sel) as HTMLElement;
+				el.scrollTop = el.scrollHeight;
+				const users = document.querySelectorAll("user-message");
+				if (users.length === 0) return false;
+				const last = users[users.length - 1] as HTMLElement;
+				const elRect = el.getBoundingClientRect();
+				const lastRect = last.getBoundingClientRect();
+				return lastRect.bottom < elRect.top - 1;
+			}, SCROLL_SEL);
+		}, {
+			timeout: 10_000,
+			message: "last prompt must be off-top after programmatic scroll-to-bottom",
+		}).toBe(true);
 		await expect.poll(
 			async () => await readJumpOpacity(page),
 			{ timeout: 5_000, message: "button should re-show after programmatic scroll-to-bottom" },
