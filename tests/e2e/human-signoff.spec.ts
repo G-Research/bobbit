@@ -124,7 +124,9 @@ test.describe("human-signoff verification step", () => {
 					feedback: "LGTM",
 				}),
 			});
-			expect(okRes.status, `signoff POST status: ${okRes.status} ${await okRes.text().catch(() => "")}`).toBe(200);
+					// `okRes.text()` would consume the body before the subsequent
+			// `.json()` call — clone for the diagnostic read.
+			expect(okRes.status, `signoff POST status: ${okRes.status} ${await okRes.clone().text().catch(() => "")}`).toBe(200);
 			const okBody = await okRes.json();
 			expect(okBody.resolved).toBe(true);
 
