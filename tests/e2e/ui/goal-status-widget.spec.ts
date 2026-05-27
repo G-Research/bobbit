@@ -113,6 +113,32 @@ async function openSession(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
+async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
+	await page.evaluate(({ commentText, quoteText }) => {
+		const doc = document.querySelector("review-document") as any;
+		if (!doc?.backend || !doc.sessionId || !doc.docTitle) throw new Error("active review-document not ready");
+		const markdown = typeof doc.markdown === "string" ? doc.markdown : "";
+		const start = markdown.indexOf(quoteText);
+		doc.backend.add({ sessionId: doc.sessionId, bucket: doc.docTitle }, {
+			id: `signoff-inline-${Date.now()}`,
+			quote: quoteText,
+			comment: commentText,
+			start: start >= 0 ? start : undefined,
+			end: start >= 0 ? start + quoteText.length : undefined,
+		});
+		doc.dispatchEvent(new CustomEvent("annotation-change", { bubbles: true, composed: true }));
+	}, { commentText: comment, quoteText: "Content awaiting sign-off" });
+}
+
+async function signoffReviewDocTitle(page: Page): Promise<string> {
+	const title = await page.evaluate(() => {
+		const docs = (window as any).bobbitState?.reviewDocuments;
+		return Array.from(docs?.keys?.() || []).find((candidate): candidate is string => typeof candidate === "string" && candidate.startsWith("Sign-off:")) || "";
+	});
+	expect(title, "sign-off review document should be present in app state").not.toBe("");
+	return title;
+}
+
 function signoffReviewTab(page: Page) {
 	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: /Sign-off:/ }).first();
 }
@@ -370,7 +396,7 @@ test.describe("<goal-status-widget>", () => {
 		}
 	});
 
-	test("widget-opened review document and signoff source survive reload until submitted", async ({ page }) => {
+	test("widget-opened review document and signoff source survive reload, and inline annotations submit", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget Reload ${Date.now()}` });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
@@ -381,6 +407,7 @@ test.describe("<goal-status-widget>", () => {
 			await openApp(page);
 			await openSession(page, sessionId);
 			await openSignoffReviewFromWidget(page, goalId);
+			const docTitle = await signoffReviewDocTitle(page);
 
 			await page.reload();
 			await openSession(page, sessionId);
@@ -394,8 +421,9 @@ test.describe("<goal-status-widget>", () => {
 			await expect(reviewPane(page)).toBeVisible({ timeout: 5_000 });
 			await expect(page.locator("review-document").getByText("Content awaiting sign-off").first()).toBeVisible({ timeout: 5_000 });
 
-			const feedback = "Rejected after reload with persisted signoff context.";
-			await (await finalCommentTextarea(page)).fill(feedback);
+			const inlineComment = `signoff-inline-comment-${Date.now()}`;
+			await addInlineAnnotationToActiveReview(page, inlineComment);
+			await expect(reviewPane(page).locator(".review-tab-badge"), "inline comments should count before rejecting from the sign-off review").toHaveText("1", { timeout: 5_000 });
 			await reviewPane(page).getByRole("button", { name: /^Reject$/ }).click();
 
 			await expect.poll(() => signoffCalls.length, { timeout: 5_000 }).toBeGreaterThan(0);
@@ -403,7 +431,11 @@ test.describe("<goal-status-widget>", () => {
 			expect(rejectCall.decision).toBe("fail");
 			expect(rejectCall.signalId).toBe(SIGNAL_ID);
 			expect(rejectCall.stepName).toBe(STEP_NAME);
-			expect(String(rejectCall.feedback ?? "")).toContain(feedback);
+			const feedback = String(rejectCall.feedback ?? "");
+			expect(feedback).toContain("Inline comments");
+			expect(feedback).toContain("Content awaiting sign-off");
+			expect(feedback).toContain(inlineComment);
+			expect(feedback).toContain(docTitle);
 			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
