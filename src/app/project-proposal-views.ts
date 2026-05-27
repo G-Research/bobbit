@@ -38,7 +38,10 @@ export interface ProposalVerifyStep {
 	timeout?: number;
 	expect?: "success" | "failure" | string;
 	optional?: boolean;
+	/** Card title shown on `human-signoff` sign-off requests. */
 	label?: string;
+	/** Opt-in toggle label shown at goal creation for `optional: true` steps. */
+	optionalLabel?: string;
 	description?: string;
 	[key: string]: unknown;
 }
@@ -390,9 +393,14 @@ function stepDetails(step: ProposalVerifyStep, type: string, componentNames: Set
 		`;
 	}
 	if (type === "agent-qa") {
+		// `agent-qa` steps never use the human-signoff card-title meaning of `label`.
+		// After the `label` / `optionalLabel` split this preview shows the opt-in
+		// toggle label (now `optionalLabel`); fall back to legacy `label` so any
+		// stale in-memory proposal that pre-dates the server migration still renders.
+		const toggleLabel = step.optionalLabel || step.label;
 		return html`
 			${step.role ? html`<div class="text-[11px]"><span class="text-muted-foreground">Role:</span> <span class="font-mono">${step.role}</span></div>` : ""}
-			${step.label ? html`<div class="text-[11px]"><span class="text-muted-foreground">Label:</span> ${step.label}</div>` : ""}
+			${toggleLabel ? html`<div class="text-[11px]"><span class="text-muted-foreground">Toggle:</span> ${toggleLabel}</div>` : ""}
 			${step.description ? html`<div class="text-[11px] text-muted-foreground">${step.description}</div>` : ""}
 		`;
 	}

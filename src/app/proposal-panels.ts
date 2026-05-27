@@ -437,7 +437,12 @@ function renderGoalForm(config: GoalFormConfig) {
 			if (gate.verify) {
 				for (const step of gate.verify) {
 					if (step.optional) {
-						optionalSteps.push({ name: step.name, label: step.label || step.name, description: step.description, type: step.type });
+						// Prefer `optionalLabel` (the canonical opt-in toggle label after the
+						// `label`/`optionalLabel` schema split). Fall back to `label` to remain
+						// defensive against any stale in-memory state that pre-dates the server-
+						// side `normalizeStep` migration, then to `name`.
+						const toggleLabel = step.optionalLabel || step.label || step.name;
+						optionalSteps.push({ name: step.name, label: toggleLabel, description: step.description, type: step.type });
 					}
 				}
 			}

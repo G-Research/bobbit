@@ -75,6 +75,15 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expect(page.locator(".wf-vstep-card.vstep-expanded").first()).toBeVisible();
 	}
 
+	async function expandFirstStepAdvanced(page: import("@playwright/test").Page): Promise<void> {
+		const details = page.locator(".wf-vstep-card.vstep-expanded details.wf-vstep-advanced").first();
+		await expect(details.locator("summary")).toBeVisible();
+		if (!(await details.evaluate((el) => (el as HTMLDetailsElement).open))) {
+			await details.locator("summary").click();
+		}
+		await expect(page.locator(".wf-vstep-card.vstep-expanded .wf-vstep-advanced-fields").first()).toBeVisible();
+	}
+
 	async function clickSaveAndWait(page: import("@playwright/test").Page, wfId: string): Promise<void> {
 		const responsePromise = page.waitForResponse((res) =>
 			res.request().method() === "PUT"
@@ -83,7 +92,8 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 			{ timeout: 10_000 },
 		).catch(() => null);
 		await page.getByRole("button", { name: /^Save$/ }).click();
-		await responsePromise;
+		const response = await responsePromise;
+		expect(response, "workflow save should issue a PUT request").not.toBeNull();
 	}
 
 	test("type dropdown lists all four step types (including human-signoff)", async ({ page }) => {
@@ -116,19 +126,28 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		// Switch type to human-signoff (also strips run/expect, initialises label/prompt)
 		await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");
+		await expect(page.locator("[data-testid='wf-step-label']").first()).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator("[data-testid='wf-step-prompt']").first()).toBeVisible();
 
-		// Fill required + advanced fields
+		// Fill required + advanced fields. Role/description live inside the collapsed
+		// Advanced <details> section, so open it before targeting those controls.
 		await page.locator("[data-testid='wf-step-name']").first().fill("Design Approval");
 		await page.locator("[data-testid='wf-step-label']").first().fill("Approve design doc");
 		await page.locator("[data-testid='wf-step-prompt']").first().fill("Please review and approve the design.");
+		await page.locator("[data-testid='wf-step-optional']").first().check();
+		await page.locator("[data-testid='wf-step-optional-label']").first().fill("Require design approval");
+		await expandFirstStepAdvanced(page);
 		await page.locator("[data-testid='wf-step-role']").first().fill("architect");
 		await page.locator("[data-testid='wf-step-description']").first().fill("Final architectural sign-off.");
 
-		// Save
+		// Save, then reload the edit route to prove the fields round-trip through
+		// persistence rather than staying only in client-side edit state.
 		await clickSaveAndWait(page, wfId);
-		// Re-open editor by navigating away and back
 		await navigateToHash(page, `#/settings/${projectId}/workflows`);
-		await page.getByText(`Test Workflow ${wfId}`).first().click();
+		await page.reload();
+		const tab = page.locator("[data-testid='workflows-tab']").first();
+		await expect(tab).toBeVisible({ timeout: 10_000 });
+		await tab.getByText(`Test Workflow ${wfId}`).first().click();
 		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
 		await expandFirstGate(page);
 		await expandFirstStep(page);
@@ -138,6 +157,8 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expect(page.locator("[data-testid='wf-step-name']").first()).toHaveValue("Design Approval");
 		await expect(page.locator("[data-testid='wf-step-label']").first()).toHaveValue("Approve design doc");
 		await expect(page.locator("[data-testid='wf-step-prompt']").first()).toHaveValue("Please review and approve the design.");
+		await expect(page.locator("[data-testid='wf-step-optional']").first()).toBeChecked();
+		await expect(page.locator("[data-testid='wf-step-optional-label']").first()).toHaveValue("Require design approval");
 		await expect(page.locator("[data-testid='wf-step-role']").first()).toHaveValue("architect");
 		await expect(page.locator("[data-testid='wf-step-description']").first()).toHaveValue("Final architectural sign-off.");
 
@@ -149,6 +170,7 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		expect(step.run).toBeUndefined();
 		expect(step.expect).toBeUndefined();
 		expect(step.label).toBe("Approve design doc");
+		expect(step.optionalLabel).toBe("Require design approval");
 		expect(step.prompt).toBe("Please review and approve the design.");
 
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
@@ -195,6 +217,8 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		// Switch type → human-signoff
 		await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");
+		await expect(page.locator("[data-testid='wf-step-type']").first()).toHaveValue("human-signoff");
+		await expect(page.locator("[data-testid='wf-step-label']").first()).toBeVisible({ timeout: 10_000 });
 		// Free-form `run` input must no longer be visible.
 		await expect(page.locator("[data-testid='wf-step-run']")).toHaveCount(0);
 		// Prompt textarea now visible.
@@ -320,14 +344,28 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expandFirstGate(page);
 		await expandFirstStep(page);
 
-		// Set timeout
+		// Set timeout. Timeout/component live inside the collapsed Advanced section.
+		await expandFirstStepAdvanced(page);
 		await page.locator("[data-testid='wf-step-timeout']").first().fill("120");
 		// Switch to named-command mode
 		await page.locator("[data-testid='wf-cmd-mode-command']").first().click();
 		await expect(page.locator("[data-testid='wf-step-command']").first()).toBeVisible();
 		await page.locator("[data-testid='wf-step-command']").first().fill("build");
-		// Set component (free-text input since this project has no components)
-		await page.locator("[data-testid='wf-step-component']").first().fill("server");
+		// Set component. The editor renders a select when the project has structured
+		// components, and a free-text fallback when it does not.
+		const componentControl = page.locator("[data-testid='wf-step-component']").first();
+		const componentTag = await componentControl.evaluate((el) => el.tagName.toLowerCase());
+		let expectedComponent = "server";
+		if (componentTag === "select") {
+			const optionValues = await componentControl.locator("option").evaluateAll((els) =>
+				(els as HTMLOptionElement[]).map(o => o.value).filter(Boolean),
+			);
+			expect(optionValues.length).toBeGreaterThan(0);
+			expectedComponent = optionValues[0];
+			await componentControl.selectOption(expectedComponent);
+		} else {
+			await componentControl.fill(expectedComponent);
+		}
 
 		await clickSaveAndWait(page, wfId);
 
@@ -335,7 +373,7 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		const wf = await r.json();
 		const step = wf.gates[0].verify[0];
 		expect(step.timeout).toBe(120);
-		expect(step.component).toBe("server");
+		expect(step.component).toBe(expectedComponent);
 		expect(step.command).toBe("build");
 		// `run` should have been stripped by the named-command toggle.
 		expect(step.run).toBeUndefined();

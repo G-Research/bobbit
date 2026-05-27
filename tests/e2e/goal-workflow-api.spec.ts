@@ -37,6 +37,10 @@ test.describe("Goal/workflow API", () => {
 								type: "agent-qa",
 								phase: 1,
 								optional: true,
+								// Old `label:` on a non-human-signoff optional step is migrated
+								// forward to `optionalLabel:` on workflow load — see
+								// `workflow-store.ts::normalizeStep` and the design doc for
+								// the `label`/`optionalLabel` schema split.
 								label: "Enable QA Testing",
 								description: "Run a real browser QA pass.",
 								prompt: "Validate the goal end-to-end.",
@@ -58,10 +62,14 @@ test.describe("Goal/workflow API", () => {
 				type: "agent-qa",
 				phase: 1,
 				optional: true,
-				label: "Enable QA Testing",
+				// After the schema split, optional non-human-signoff steps emit
+				// `optionalLabel` (not `label`). The POST above intentionally still
+				// sends the old shape to pin that `normalizeStep` migrates it.
+				optionalLabel: "Enable QA Testing",
 				description: "Run a real browser QA pass.",
 				prompt: "Validate the goal end-to-end.",
 			});
+			expect(steps[1].label).toBeUndefined();
 		} finally {
 			await deleteWorkflow(id);
 		}
@@ -81,8 +89,11 @@ test.describe("Goal/workflow API", () => {
 		expect(qaStep).toMatchObject({
 			type: "agent-qa",
 			optional: true,
-			label: "Enable QA Testing",
+			// Seeded `.bobbit/config/project.yaml` migrated forward to the
+			// canonical `optionalLabel` shape on workflow load.
+			optionalLabel: "Enable QA Testing",
 		});
+		expect(qaStep.label).toBeUndefined();
 		expect(qaStep.description).toMatch(/QA agent/i);
 		expect(qaStep.description).toMatch(/ephemeral server/i);
 		expect(qaStep.description).toMatch(/browser/i);
