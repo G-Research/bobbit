@@ -1,8 +1,9 @@
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import {
-  buildReviewDecisionPayload,
+  buildReviewDecisionPayloadForDocument,
   getAnnotations,
+  getDocumentAnnotationCount,
   getTotalAnnotationCount,
 } from "./AnnotationStore.js";
 import { ensureReviewComponents } from "../../../app/lazy-review.js";
@@ -94,16 +95,17 @@ export class ReviewPane extends LitElement {
     if (!activeDoc) return;
 
     const finalComment = this._finalComment.trim();
-    const totalCount = getTotalAnnotationCount(this.sessionId, this.documents);
-    if (decision === "reject" && totalCount === 0 && !finalComment) {
+    const activeCount = getDocumentAnnotationCount(this.sessionId, this.activeTab);
+    if (decision === "reject" && activeCount === 0 && !finalComment) {
       this._validationError = "Add a final comment or at least one inline comment before rejecting.";
       return;
     }
 
     this._validationError = "";
-    const payload = buildReviewDecisionPayload(
+    const payload = buildReviewDecisionPayloadForDocument(
       this.sessionId,
-      this.documents,
+      this.activeTab,
+      activeDoc,
       decision,
       finalComment,
     );
@@ -175,7 +177,7 @@ export class ReviewPane extends LitElement {
   render() {
     const titles = Array.from(this.documents.keys());
     const activeDoc = this.documents.get(this.activeTab);
-    const totalCount = getTotalAnnotationCount(this.sessionId, this.documents);
+    const activeCount = activeDoc ? getDocumentAnnotationCount(this.sessionId, this.activeTab) : 0;
 
     // Split tabs: visible (first 5) and overflow (rest)
     const MAX_VISIBLE = 5;
@@ -258,9 +260,9 @@ export class ReviewPane extends LitElement {
         <div class="review-submit-bar">
           <div class="review-submit-summary">
             <span class="review-submit-count">
-              ${totalCount > 0
-                ? `${totalCount} comment${totalCount !== 1 ? "s" : ""}`
-                : "No inline comments"}
+              ${activeCount > 0
+                ? `${activeCount} comment${activeCount !== 1 ? "s" : ""} on active document`
+                : "No inline comments on active document"}
             </span>
           </div>
 

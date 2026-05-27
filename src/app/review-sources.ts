@@ -210,15 +210,21 @@ function inlineCommentsFromAnnotations(sessionId: string, documentTitle: string)
 	}));
 }
 
+function inlineCommentBelongsToDocument(comment: ReviewInlineCommentPayload, doc: ReviewDocumentModel): boolean {
+	return !comment.documentTitle || comment.documentTitle === doc.title;
+}
+
 function normalizeDecisionPayload(input: ReviewDecisionPayload, sessionId: string, doc: ReviewDocumentModel): ReviewDecisionPayload {
-	const inlineComments = Array.isArray(input.inlineComments) && input.inlineComments.length > 0
-		? input.inlineComments
+	const providedInlineComments = Array.isArray(input.inlineComments) ? input.inlineComments : [];
+	const inputInlineComments = providedInlineComments.filter((comment) => inlineCommentBelongsToDocument(comment, doc));
+	const inlineComments = inputInlineComments.length > 0
+		? inputInlineComments.map((comment) => ({ ...comment, documentTitle: comment.documentTitle || doc.title }))
 		: inlineCommentsFromAnnotations(sessionId, doc.title);
 	return {
 		decision: input.decision,
 		finalComment: typeof input.finalComment === "string" ? input.finalComment : "",
 		inlineComments,
-		feedback: typeof input.feedback === "string" ? input.feedback : "",
+		feedback: providedInlineComments.length > 0 || inlineComments.length > 0 ? "" : typeof input.feedback === "string" ? input.feedback : "",
 	};
 }
 
@@ -305,7 +311,7 @@ async function postSignoffDecision(source: Extract<ReviewSource, { kind: "verifi
 export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayload: ReviewDecisionPayload, options: SubmitReviewDecisionOptions = {}): Promise<void> {
 	const sessionId = options.sessionId || activeSessionId() || "";
 	const payload = normalizeDecisionPayload(inputPayload, sessionId, doc);
-	const hasComment = payload.finalComment.trim().length > 0 || payload.inlineComments.length > 0 || payload.feedback.trim().length > 0;
+	const hasComment = payload.finalComment.trim().length > 0 || payload.inlineComments.length > 0;
 	if (payload.decision === "reject" && !hasComment) {
 		throw new Error("Reject requires at least one comment.");
 	}

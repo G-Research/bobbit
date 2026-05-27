@@ -1945,6 +1945,7 @@ export function doRenderApp(): void {
 					}
 				}}
 				@review-decision=${async (e: CustomEvent) => {
+					e.preventDefault();
 					const sid = activeSessionId() || "";
 					const doc = reviewDocumentFromDecisionDetail(e.detail);
 					const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);

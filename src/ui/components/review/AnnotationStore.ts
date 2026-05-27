@@ -311,16 +311,17 @@ export function getTotalAnnotationCount(
   return total;
 }
 
-/**
- * Return structured inline-comment payloads for all annotations across open documents.
- */
-export function getInlineCommentPayloads(
+export function getDocumentAnnotationCount(sessionId: string, documentTitle: string): number {
+  return getAnnotations(sessionId, documentTitle).length;
+}
+
+function _inlineCommentPayloadsForEntries(
   sessionId: string,
-  documents: ReviewDocumentCollection,
+  entries: Iterable<readonly [string, Pick<ReviewDocumentModel, "title" | "markdown">]>,
 ): ReviewInlineCommentPayload[] {
   const inlineComments: ReviewInlineCommentPayload[] = [];
 
-  for (const [title, doc] of documents) {
+  for (const [title, doc] of entries) {
     for (const ann of getAnnotations(sessionId, title)) {
       inlineComments.push({
         documentTitle: _displayTitle(title, doc),
@@ -336,6 +337,24 @@ export function getInlineCommentPayloads(
   }
 
   return inlineComments;
+}
+
+/**
+ * Return structured inline-comment payloads for all annotations across open documents.
+ */
+export function getInlineCommentPayloads(
+  sessionId: string,
+  documents: ReviewDocumentCollection,
+): ReviewInlineCommentPayload[] {
+  return _inlineCommentPayloadsForEntries(sessionId, documents);
+}
+
+export function getInlineCommentPayloadsForDocument(
+  sessionId: string,
+  documentTitle: string,
+  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+): ReviewInlineCommentPayload[] {
+  return _inlineCommentPayloadsForEntries(sessionId, [[documentTitle, document]]);
 }
 
 /**
@@ -385,6 +404,24 @@ export function buildReviewDecisionPayload(
 ): ReviewDecisionPayload {
   const normalizedFinalComment = finalComment.trim();
   const inlineComments = getInlineCommentPayloads(sessionId, documents);
+  return {
+    decision,
+    finalComment: normalizedFinalComment,
+    inlineComments,
+    feedback: composeReviewDecisionFeedback(decision, normalizedFinalComment, inlineComments, documents),
+  };
+}
+
+export function buildReviewDecisionPayloadForDocument(
+  sessionId: string,
+  documentTitle: string,
+  document: Pick<ReviewDocumentModel, "title" | "markdown">,
+  decision: ReviewDecision,
+  finalComment: string,
+): ReviewDecisionPayload {
+  const documents = new Map([[documentTitle, document]]);
+  const normalizedFinalComment = finalComment.trim();
+  const inlineComments = getInlineCommentPayloadsForDocument(sessionId, documentTitle, document);
   return {
     decision,
     finalComment: normalizedFinalComment,
