@@ -32,6 +32,8 @@ export interface ApiModel {
 	thinkingLevelMap?: Record<string, string | null>;
 	input: ("text" | "image")[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	headers?: Record<string, string>;
+	compat?: unknown;
 	authenticated: boolean;
 }
 
@@ -158,6 +160,8 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 						...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap as Record<string, string | null> } : {}),
 						input: (meta.input && meta.input.length > (m.input?.length || 0)) ? meta.input : (m.input || ["text"]) as ("text" | "image")[],
 						cost: m.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						...((m as any).headers ? { headers: (m as any).headers } : {}),
+						...((m as any).compat ? { compat: (m as any).compat } : {}),
 						authenticated: isAuth,
 					});
 				}
