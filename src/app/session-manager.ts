@@ -27,6 +27,7 @@ import { markSessionVisited } from "./render-helpers.js";
 import { showHeaderToast } from "./render.js";
 import { setSelectedWorkflowId, showProposalToast, resetProposalAnnCount } from "./proposal-panels-lazy.js";
 import { clearProposalAnnotations } from "../ui/components/review/proposal-annotations.js";
+import { restorePersistedReviewDocuments } from "./review-sources.js";
 import { buildProjectConfigDiff } from "./project-proposal-diff.js";
 // settings-page is dynamic-imported lazily below to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -1034,6 +1035,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -1726,6 +1728,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
+		restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
