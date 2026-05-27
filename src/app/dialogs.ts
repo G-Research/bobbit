@@ -1673,7 +1673,7 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 		let highlight = -1;
 
 		const close = (result: string | null) => {
-			document.removeEventListener("keydown", onKeyDown);
+			document.removeEventListener("keydown", onKeyDown, true);
 			render(html``, container);
 			container.remove();
 			resolve(result);
@@ -1703,7 +1703,14 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
+				// Capture-phase + stopImmediatePropagation so the parent Add Project
+				// dialog's Mini-lit Dialog (which also listens to `document` keydown
+				// for Esc) does not also close when the user dismisses the browse
+				// overlay. Design doc invariant: "Esc closes suggestions → browse →
+				// dialog (in that order)". Pinned by
+				// tests/e2e/ui/add-project-browse-modal.spec.ts.
 				e.preventDefault();
+				e.stopImmediatePropagation();
 				close(null);
 				return;
 			}
@@ -1814,7 +1821,7 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 			);
 		};
 
-		document.addEventListener("keydown", onKeyDown);
+		document.addEventListener("keydown", onKeyDown, true);
 		renderDialog();
 		void navigate(initialPath?.trim() || undefined);
 	});
