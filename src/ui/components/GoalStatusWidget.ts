@@ -542,7 +542,11 @@ export class GoalStatusWidget extends LitElement {
 		for (const [key, r] of this._resolved) {
 			if (!live.some(l => signoffKey(l) === key)) {
 				// Reconstruct a minimal record for display by parsing the key.
-				const [signalId, stepName] = key.split("::");
+				// signoffKey format is `${signalId}::${stepName}` — split on the
+				// FIRST `::` only so step names containing `::` survive.
+				const sepIdx = key.indexOf("::");
+				const signalId = sepIdx >= 0 ? key.slice(0, sepIdx) : key;
+				const stepName = sepIdx >= 0 ? key.slice(sepIdx + 2) : "";
 				resolvedList.push({ signalId, stepName, gateId: "", label: stepName, prompt: r.feedback ?? "" });
 			}
 		}

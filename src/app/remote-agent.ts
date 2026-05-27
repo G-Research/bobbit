@@ -1527,6 +1527,16 @@ export class RemoteAgent {
 				dispatchVerificationEvent(msg);
 				break;
 
+			case "gate_verification_awaiting_human":
+				// A human-signoff step has parked — trigger a gate-status
+				// cache refresh so `awaitingHumanSignoff` flips on for the
+				// goal. Without this, notification-policy Rule 2 (the
+				// read-state-bypassing trigger for pending sign-offs) stays
+				// dormant until a sidebar poll catches up.
+				dispatchVerificationEvent(msg);
+				refreshGateStatusForGoal((msg as any).goalId);
+				break;
+
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);

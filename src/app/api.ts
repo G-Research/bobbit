@@ -700,13 +700,17 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
-/** Fetch goal gates + the per-goal `awaitingSignoffCount` field. Track A
- *  (server) adds the count to the `/api/goals/:id/gates` response top-level
- *  payload as part of the human-signoff feature. Until that lands, the field
- *  is missing and we default to 0 — the rest of the policy is dormant. */
+/** Fetch goal gates + the per-goal `awaitingSignoffCount` field. The
+ *  `awaitingSignoffCount` total is exposed by the server only on the
+ *  `?view=summary` flavour of the gates endpoint — see
+ *  `human-sign-off` design doc §2.1 and `server.ts` summary handler. The
+ *  full gate list (with signals, content, metadata) is also returned by
+ *  the summary view, so we can use it as a drop-in replacement for the
+ *  bare endpoint for the cache-refresh use case. Falls back to 0 if the
+ *  server hasn't been redeployed yet. */
 async function fetchGoalGatesWithSignoffCount(goalId: string): Promise<{ gates: GateState[]; awaitingSignoffCount: number }> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/gates`);
+		const res = await gatewayFetch(`/api/goals/${goalId}/gates?view=summary`);
 		if (!res.ok) return { gates: [], awaitingSignoffCount: 0 };
 		const data = await res.json();
 		const gates: GateState[] = data.gates || [];
