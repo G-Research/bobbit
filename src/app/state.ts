@@ -124,6 +124,56 @@ export interface Goal {
 
 export type AppView = "disconnected" | "gateway-starting" | "authenticated";
 
+export type ReviewDecision = "approve" | "reject";
+
+export interface ReviewInlineCommentPayload {
+	documentTitle: string;
+	quote: string;
+	comment: string;
+	prefix?: string;
+	suffix?: string;
+	start?: number;
+	end?: number;
+	isCode?: boolean;
+}
+
+export interface ReviewDecisionPayload {
+	decision: ReviewDecision;
+	finalComment: string;
+	inlineComments: ReviewInlineCommentPayload[];
+	feedback: string;
+}
+
+export type ReviewSource =
+	| { kind: "markdown-review"; sessionId: string }
+	| {
+		kind: "verification-signoff-markdown";
+		goalId: string;
+		gateId: string;
+		signalId: string;
+		stepName: string;
+		goalTitle?: string;
+		gateName?: string;
+		stepLabel?: string;
+	}
+	| {
+		kind: "verification-signoff-pr";
+		goalId: string;
+		gateId: string;
+		signalId: string;
+		stepName: string;
+		prUrl: string;
+		goalTitle?: string;
+		gateName?: string;
+		stepLabel?: string;
+	};
+
+export interface ReviewDocumentModel {
+	title: string;
+	markdown: string;
+	source?: ReviewSource;
+}
+
 // ============================================================================
 // SIDEBAR WIDTH (user-resizable) — helpers declared before `state` so the
 // object initializer can safely call loadSidebarWidth() under bundlers that
@@ -348,8 +398,8 @@ export const state = {
 	// Unified preview panel tab (legacy compatibility for non-assistant sessions)
 	previewPanelActiveTab: "preview" as "preview" | "goal" | "review" | "project" | "role" | "tool" | "staff" | "inbox",
 
-	// Review pane state (agent-initiated markdown review documents)
-	reviewDocuments: new Map() as Map<string, { title: string; markdown: string }>,
+	// Review pane state (agent-initiated markdown and verification sign-off documents)
+	reviewDocuments: new Map() as Map<string, ReviewDocumentModel>,
 	reviewActiveTab: "" as string,
 	reviewPanelOpen: false,
 

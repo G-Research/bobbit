@@ -22,6 +22,14 @@ import {
 } from "./state.js";
 import { gatewayFetch, refreshSessions } from "./api.js";
 import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import {
+	clearPersistedReviewDocuments,
+	openReviewDocumentFromEvent,
+	removePersistedReviewDocument,
+	reviewDecisionPayloadFromDetail,
+	reviewDocumentFromDecisionDetail,
+	submitReviewDecision,
+} from "./review-sources.js";
 import { backToSessions, createAndConnectSession, terminateSession } from "./session-manager.js";
 // Lazy wrapper for the proposal-panels chunk. Static import here keeps
 // the wrapper itself in the entry bundle while the ~80 kB body of
@@ -184,6 +192,11 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 		state.splashProjectPickerOpen = false;
 		renderApp();
 	}
+});
+
+window.addEventListener("bobbit-open-review-document", (e: Event) => {
+	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
+	if (!doc) showHeaderToast("Could not open review document");
 });
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
@@ -1668,7 +1681,9 @@ export function doRenderApp(): void {
 		if (tab.kind === "review") {
 			const title = reviewTitleFromPanelTab(tab);
 			if (title) {
-				clearAnnotations(activeSessionId() || "", title);
+				const sid = activeSessionId() || "";
+				clearAnnotations(sid, title);
+				removePersistedReviewDocument(sid, title);
 				state.reviewDocuments = new Map(state.reviewDocuments);
 				state.reviewDocuments.delete(title);
 				if (state.reviewActiveTab === title) {
@@ -1920,6 +1935,7 @@ export function doRenderApp(): void {
 						agent.prompt(e.detail.feedback);
 						const sid = activeSessionId() || "";
 						clearAllAnnotations(sid);
+						clearPersistedReviewDocuments(sid);
 						markReviewSubmitted(sid);
 						await flushPendingWrites();
 						state.reviewDocuments = new Map();
@@ -1928,13 +1944,35 @@ export function doRenderApp(): void {
 						renderApp();
 					}
 				}}
-			@review-close-tab=${(e: CustomEvent) => {
+				@review-decision=${async (e: CustomEvent) => {
+					const sid = activeSessionId() || "";
+					const doc = reviewDocumentFromDecisionDetail(e.detail);
+					const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
+					if (!doc || !payload) {
+						showHeaderToast("Could not submit review decision");
+						return;
+					}
+					try {
+						await submitReviewDecision(doc, payload, {
+							sessionId: sid,
+							prompt: async (feedback) => {
+								const agent = state.remoteAgent;
+								if (!agent) throw new Error("No active agent is available for this review.");
+								agent.prompt(feedback);
+							},
+						});
+					} catch (err) {
+						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
+					}
+				}}
+				@review-close-tab=${(e: CustomEvent) => {
 					const title = e.detail.title as string;
 					const tab = findPanelTab(unifiedPanelTabs(), reviewPanelTabId(title));
 					if (tab) closeUnifiedPanelTab(tab, e);
 					else {
 						const sid = activeSessionId() || "";
 						clearAnnotations(sid, title);
+						removePersistedReviewDocument(sid, title);
 						state.reviewDocuments = new Map(state.reviewDocuments);
 						state.reviewDocuments.delete(title);
 						if (state.reviewActiveTab === title) {
@@ -1947,8 +1985,10 @@ export function doRenderApp(): void {
 				}}
 				@review-dismiss=${() => {
 					const sid = activeSessionId() || "";
+					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
 					clearAllAnnotations(sid);
-					markReviewSubmitted(sid);
+					clearPersistedReviewDocuments(sid);
+					if (hasMarkdownReview) markReviewSubmitted(sid);
 					state.reviewDocuments = new Map();
 					state.reviewPanelOpen = false;
 					state.reviewActiveTab = "";
