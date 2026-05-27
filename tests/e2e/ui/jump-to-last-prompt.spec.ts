@@ -232,27 +232,33 @@ test.describe("jump-to-prompt buttons (geometric)", () => {
 			expect(state.bottomVisible, "bottom hidden when geometrically at the tail").toBe(false);
 		}
 
-		// Now wheel-up a tiny amount so we're no longer at the tail. The
-		// trusted wheel sets `_escapedFromLock = true` synchronously, then
-		// the deferred scroll handler classifies it as a real user gesture.
-		// Per the new spec rule 3 (no `geoFar` threshold), bottom-single
-		// must show as long as `dist > 1` AND no prompt is below the
-		// viewport.
+		// Now wheel-up enough to clear the half-viewport "far from bottom"
+		// threshold so the bottom-single pill is shown. The threshold
+		// (`dist > clientHeight * 0.5`) is the pre-existing UX guard
+		// against flashing the big pill on tiny scroll deltas — pinned by
+		// `tests/ui-fixtures/chat-scroll.spec.ts`. The trusted wheel sets
+		// `_escapedFromLock = true` synchronously, then the deferred scroll
+		// handler classifies it as a real user gesture.
 		const box = await page.locator(SCROLL_SEL).first().boundingBox();
 		if (!box) throw new Error("scroll container has no bounding box");
 		await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-		await page.mouse.wheel(0, -100);
+		// Scroll well past 50% of viewport height in a single trusted wheel.
+		await page.mouse.wheel(0, -Math.ceil(box.height * 0.7));
 		await settleFrames(page, 3);
 
 		const cls2 = await classifyPrompts(page);
 		expect(cls2.userCount, "must still have one prompt after wheel-up").toBe(1);
 
-		// Verify we actually moved off the tail.
-		const dist = await page.evaluate((sel) => {
+		// Verify we moved off the tail AND past the half-viewport threshold.
+		const { dist, halfClient } = await page.evaluate((sel) => {
 			const el = document.querySelector(sel) as HTMLElement;
-			return el.scrollHeight - el.scrollTop - el.clientHeight;
+			return {
+				dist: el.scrollHeight - el.scrollTop - el.clientHeight,
+				halfClient: el.clientHeight * 0.5,
+			};
 		}, SCROLL_SEL);
 		expect(dist, "wheel-up moved us off the tail (dist > 1)").toBeGreaterThan(1);
+		expect(dist, "wheel-up cleared the half-viewport threshold").toBeGreaterThan(halfClient);
 
 		const state = await readButtonState(page);
 		// Strict per-spec assertions: button visibility tracks classification.
@@ -260,9 +266,10 @@ test.describe("jump-to-prompt buttons (geometric)", () => {
 			.toBe(cls2.above > 0);
 		expect(state.splitPresent, `split visibility = (below > 0); below=${cls2.below}`)
 			.toBe(cls2.below > 0);
-		// Bottom button visible iff (not at bottom) OR (below > 0).
-		expect(state.bottomVisible, "bottom-single visible when not at bottom and no prompts below")
-			.toBe(dist > 1 || cls2.below > 0);
+		// Bottom-single visibility tracks the half-viewport threshold:
+		// visible iff (dist > clientHeight * 0.5) OR (below > 0).
+		expect(state.bottomVisible, "bottom-single visible past the half-viewport threshold with no prompts below")
+			.toBe(dist > halfClient || cls2.below > 0);
 	});
 
 	test("walk up + walk down + scroll-down-while-parked + new-prompt + return-near-bottom", async ({ page, rec }) => {

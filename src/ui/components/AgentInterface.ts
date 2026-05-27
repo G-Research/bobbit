@@ -348,9 +348,14 @@ export class AgentInterface extends LitElement {
 	private _imageLoadHandler?: (e: Event) => void;
 
 	/** Jump-to-bottom button visibility (single OR split-bottom variant).
-	 * Pure function of DOM geometry: true iff at least one `<user-message>`
-	 * is below the viewport OR the scroll position is not at the bottom
-	 * (`dist > 1`). Recomputed in `_refreshJumpToLastPromptButton`. */
+	 * Recomputed in `_refreshJumpToLastPromptButton` as a function of DOM
+	 * geometry: true iff at least one `<user-message>` is below the
+	 * viewport OR the scroll position is more than half a viewport away
+	 * from the bottom (`dist > clientHeight * 0.5`). The half-viewport
+	 * threshold (vs a strict `dist > 1`) preserves the pre-existing UX of
+	 * not flashing the big "Jump to bottom" pill on tiny scroll deltas;
+	 * the split-bottom and top-button variants still use pure-geometric
+	 * classification against the viewport edges. */
 	private _showJumpToBottom = false;
 
 	/** Jump-to-previous-prompt (top button) visibility. Pure function of
@@ -643,17 +648,26 @@ export class AgentInterface extends LitElement {
 	 *   - below viewport: `userRect.top > containerRect.bottom`
 	 *   - in viewport: otherwise
 	 *
-	 * Then apply the four spec rendering rules:
-	 *   1. Top button         visible iff `aboveExists`.
-	 *   2. Bottom-centre split visible iff `belowExists`.
-	 *   3. Bottom-centre single visible iff `!atBottom && !belowExists`.
-	 *   4. Nothing rendered iff `atBottom && !aboveExists`.
+	 * Then apply the spec rendering rules:
+	 *   1. Top button         visible iff `aboveExists` (pure geometry).
+	 *   2. Bottom-centre split visible iff `belowExists` (pure geometry).
+	 *   3. Bottom-centre single visible iff `farFromBottom && !belowExists`.
+	 *   4. Nothing rendered  iff neither `aboveExists` nor `belowExists`
+	 *                            and the scroll position is near the bottom.
 	 *
-	 * Combined: `_showJumpToBottom = belowExists || !atBottom`. No state
-	 * machine — every scroll / resize / mutation tick recomputes from
-	 * current geometry. "At bottom" is purely geometric (`dist <= 1`) so
-	 * intent flags (`_isAtBottom`, `_escapedFromLock`) play no role in
-	 * button visibility. */
+	 * Combined: `_showJumpToBottom = belowExists || farFromBottom`, where
+	 * `farFromBottom` is the pre-existing half-viewport threshold
+	 * (`dist > clientHeight * 0.5`) carried over from the legacy
+	 * implementation. The threshold is intentionally scoped to the
+	 * bottom-single "Jump to bottom" variant only — it preserves the
+	 * UX of not flashing the big pill on tiny scroll deltas (pinned by
+	 * `tests/ui-fixtures/chat-scroll.spec.ts`). The top button and the
+	 * split-bottom variant remain purely geometric so they track
+	 * viewport edges with no state.
+	 *
+	 * No state machine — every scroll / resize / mutation tick recomputes
+	 * from current geometry. Intent flags (`_isAtBottom`,
+	 * `_escapedFromLock`) play no role in button visibility. */
 	private _refreshJumpToLastPromptButton() {
 		if (!this._scrollContainer) return;
 		const container = this._scrollContainer;
@@ -669,12 +683,18 @@ export class AgentInterface extends LitElement {
 			if (aboveExists && belowExists) break;
 		}
 
-		// Geometric "at bottom". `_targetScrollTop()` clamps to
-		// `scrollHeight - 1 - clientHeight` (the -1 absorbs sub-pixel
-		// rounding), so the canonical pinned state has `dist === 1`.
+		// Half-viewport "far from bottom" threshold for the bottom-single
+		// pill. `_targetScrollTop()` clamps to `scrollHeight - 1 -
+		// clientHeight` (the -1 absorbs sub-pixel rounding), so the
+		// canonical pinned state has `dist === 1`. The legacy
+		// `dist > clientHeight * 0.5` threshold is preserved here so the
+		// big "Jump to bottom" pill does not flash on tiny scroll deltas
+		// (pinned by `tests/ui-fixtures/chat-scroll.spec.ts`). The top
+		// button (`aboveExists`) and split-bottom variant (`belowExists`)
+		// keep pure-geometric semantics against the viewport edges.
 		const dist = container.scrollHeight - container.scrollTop - container.clientHeight;
-		const notAtBottom = dist > 1;
-		const nextBottom = belowExists || notAtBottom;
+		const farFromBottom = dist > container.clientHeight * 0.5;
+		const nextBottom = belowExists || farFromBottom;
 
 		let changed = false;
 		if (aboveExists !== this._showJumpToLastPrompt) {
