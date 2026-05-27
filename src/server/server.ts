@@ -5136,6 +5136,19 @@ async function handleApiRoute(
 			return { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 		});
 		if (url.searchParams.get("view") === "summary") {
+			// Aggregate per-gate awaiting-human-signoff counts so the sidebar's
+			// gate-status poll picks up pending sign-offs without a second fetch.
+			const activeForGoal = verificationHarness.getActiveVerifications(goalId);
+			const awaitingByGate = new Map<string, number>();
+			let awaitingTotal = 0;
+			for (const av of activeForGoal) {
+				let n = 0;
+				for (const s of av.steps) if (s.awaitingHuman) n++;
+				if (n > 0) {
+					awaitingByGate.set(av.gateId, (awaitingByGate.get(av.gateId) ?? 0) + n);
+					awaitingTotal += n;
+				}
+			}
 			const slim = enriched.map(g => {
 				const base: Record<string, unknown> = {
 					gateId: g.gateId,
@@ -5153,9 +5166,11 @@ async function handleApiRoute(
 							.map((s: any) => s.name);
 					}
 				}
+				const awaitingForGate = awaitingByGate.get(g.gateId) ?? 0;
+				if (awaitingForGate > 0) base.awaitingSignoffCount = awaitingForGate;
 				return base;
 			});
-			json({ gates: slim });
+			json({ gates: slim, awaitingSignoffCount: awaitingTotal });
 			return;
 		}
 		json({ gates: enriched });
@@ -5556,6 +5571,59 @@ async function handleApiRoute(
 		const cancelCtx = projectContextManager.getContextForGoal(goalId);
 		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
 		json({ cancelled: true }, 200);
+		return;
+	}
+
+	// POST /api/goals/:goalId/gates/:gateId/signoff — resolve a parked human-signoff step.
+	// Body: { signalId, stepName, decision: "pass" | "fail", feedback? }.
+	// Idempotent — already-resolved steps respond 409 with the current step state.
+	const signoffMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/signoff$/);
+	if (signoffMatch && req.method === "POST") {
+		const [, goalId, gateId] = signoffMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (goal.state === "shelved") { json({ error: "Goal is shelved" }, 400); return; }
+
+		const body = await readBody(req);
+		if (!body
+			|| typeof body.signalId !== "string" || !body.signalId
+			|| typeof body.stepName !== "string" || !body.stepName
+			|| (body.decision !== "pass" && body.decision !== "fail")) {
+			json({ error: "Invalid body: { signalId, stepName, decision: 'pass'|'fail', feedback? }" }, 400);
+			return;
+		}
+
+		const active = verificationHarness.getActiveVerification(body.signalId);
+		if (!active || active.goalId !== goalId || active.gateId !== gateId) {
+			json({ error: "No active verification for that signal/goal/gate" }, 404);
+			return;
+		}
+		const step = active.steps.find(s => s.name === body.stepName);
+		if (!step) {
+			json({ error: `Step "${body.stepName}" not found in active verification` }, 404);
+			return;
+		}
+		if (!step.awaitingHuman) {
+			json({
+				error: "step is no longer awaiting human input",
+				stepName: step.name,
+				status: step.status,
+			}, 409);
+			return;
+		}
+
+		const feedback = typeof body.feedback === "string" ? body.feedback : undefined;
+		const resolved = verificationHarness.resolveSignoff(body.signalId, body.stepName, {
+			decision: body.decision,
+			feedback,
+		});
+		if (!resolved) {
+			// Raced with cancellation or a prior resolve — idempotent surface.
+			json({ error: "step is no longer awaiting human input" }, 409);
+			return;
+		}
+		json({ resolved: true }, 200);
 		return;
 	}
 

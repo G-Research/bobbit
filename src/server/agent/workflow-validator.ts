@@ -215,8 +215,18 @@ export function validateWorkflow(
 				if (typeof step.prompt !== "string" || step.prompt.length === 0) {
 					fail(`type: ${stepType} step requires a non-empty "prompt".`);
 				}
+			} else if (stepType === "human-signoff") {
+				// Human sign-off steps surface to the user via the goal-status widget;
+				// the prompt is rendered as markdown context and the label is shown as
+				// the card header. Both are mandatory.
+				if (typeof step.prompt !== "string" || step.prompt.length === 0) {
+					fail(`type: human-signoff step requires a non-empty "prompt".`);
+				}
+				if (typeof step.label !== "string" || step.label.length === 0) {
+					fail(`type: human-signoff step requires a non-empty "label".`);
+				}
 			} else {
-				fail(`unknown step type "${stepType}"; expected one of: command, llm-review, agent-qa.`);
+				fail(`unknown step type "${stepType}"; expected one of: command, llm-review, agent-qa, human-signoff.`);
 			}
 		}
 	}

@@ -141,7 +141,12 @@ export type AgentQaStep = {
 	optional?: boolean; label?: string; description?: string;
 };
 
-export type InlineVerifyStep = CommandStep | LlmReviewStep | AgentQaStep;
+export type HumanSignoffStep = {
+	name: string; type: "human-signoff"; prompt: string; label: string;
+	phase?: number; optional?: boolean; description?: string;
+};
+
+export type InlineVerifyStep = CommandStep | LlmReviewStep | AgentQaStep | HumanSignoffStep;
 
 export interface InlineWorkflowGate {
 	id: string;

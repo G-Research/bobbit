@@ -19,7 +19,7 @@ import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineV
 
 export interface VerifyStep {
 	name: string;
-	type: "command" | "llm-review" | "agent-qa";
+	type: "command" | "llm-review" | "agent-qa" | "human-signoff";
 	run?: string;
 	prompt?: string;
 	expect?: "success" | "failure";
@@ -64,7 +64,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 	const r = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
 	const step: VerifyStep = {
 		name: typeof r.name === "string" ? r.name : "",
-		type: (r.type === "llm-review" || r.type === "agent-qa") ? r.type : "command",
+		type: (r.type === "llm-review" || r.type === "agent-qa" || r.type === "human-signoff") ? r.type : "command",
 	};
 	if (typeof r.run === "string") step.run = r.run;
 	if (typeof r.prompt === "string") step.prompt = r.prompt;
