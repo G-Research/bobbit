@@ -157,6 +157,12 @@ workflows:
 
 The validator does **not** reject template tokens in free-form `run:` or `prompt:` strings. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{goal_title}}`, etc.) are necessary for workflows to function and are substituted by the gate runner before each step executes. Any other tokens (e.g. a stale `{{project.foo}}` left from a hand edit) just pass through to the shell as literal strings and fail at runtime the same way any other typo would.
 
+#### Workflow editor authoring
+
+Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
+
+The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
+
 #### Dependency DAG
 
 Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. An empty list is explicit and valid: it makes the gate an independent root/parallel gate. The workflow editor preserves `dependsOn: []` instead of silently converting it into a dependency on the previous gate.

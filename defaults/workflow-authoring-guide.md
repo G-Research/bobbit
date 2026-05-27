@@ -243,8 +243,8 @@ Common optional fields (apply to all three shapes):
 > label for any `optional: true` step. `label:` is reserved exclusively
 > for the sign-off card title on `type: human-signoff` steps. Older YAML
 > that overloaded `label:` for the opt-in toggle on non-human-signoff
-> steps is migrated forward on load (and rewritten in canonical shape on
-> next save) — see `src/server/agent/workflow-store.ts::normalizeStep`.
+> steps is migrated forward by the workflow loader and rewritten in canonical
+> shape on next save. See `docs/goals-workflows-tasks.md` for durable details.
 
 ### 4.2 `type: llm-review`
 

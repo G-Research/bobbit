@@ -223,7 +223,7 @@ Surface the warning in the project assistant chat and in Settings → project ta
 3. **Workflow gate semantics:** id, name, depends_on, content, inject_downstream, optional, manual (see §3.6), metadata schema, signal contracts.
 4. **Verification step shapes:**
    - `type: command` — structural `{ component, command }`, structural `{ component, run }`, or pure `{ run }`.
-   - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `label`, `description`, `timeout`.
+   - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `optionalLabel`, `description`, `timeout`.
    - `type: agent-qa` — same plus implicit dependency on project-level `qa_*` fields.
 5. **Runtime context tokens:** `{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{agent.<key>}}`, `{{<gate_id>.meta.<key>}}`. **No `{{project.<key>}}`** (replaced by structural references).
 6. **Pattern library** — typical gates per workflow style: general / feature / bug-fix / quick-fix / pr-review. The bobbit appendix in the goal spec is reproduced as a worked single-repo example; multi-repo and monorepo worked examples follow the same shape.
@@ -240,24 +240,24 @@ Stored in `project.yaml`. Discriminated union for steps:
 export type CommandStep =
   | { name: string; type: "command"; component: string; command: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string }
+      optional?: boolean; optionalLabel?: string; description?: string }
   | { name: string; type: "command"; component: string; run: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string }
+      optional?: boolean; optionalLabel?: string; description?: string }
   | { name: string; type: "command"; run: string;
       phase?: number; expect?: "success" | "failure"; timeout?: number;
-      optional?: boolean; label?: string; description?: string };
+      optional?: boolean; optionalLabel?: string; description?: string };
 
 export type LlmReviewStep = {
   name: string; type: "llm-review"; prompt: string;
   role?: string; phase?: number; expect?: "success" | "failure";
-  timeout?: number; optional?: boolean; label?: string; description?: string;
+  timeout?: number; optional?: boolean; optionalLabel?: string; description?: string;
 };
 
 export type AgentQaStep = {
   name: string; type: "agent-qa"; prompt: string;
   role?: string; phase?: number; timeout?: number;
-  optional?: boolean; label?: string; description?: string;
+  optional?: boolean; optionalLabel?: string; description?: string;
 };
 
 export type VerifyStep = CommandStep | LlmReviewStep | AgentQaStep;
@@ -345,7 +345,7 @@ Rules:
   - `command` step with neither `command` nor `run` → reject.
   - `command`/`component` pair where component or command name is unknown → reject (with "did you mean" suggestion via Levenshtein on the available set).
 - Free-form `run:` strings and `prompt:` strings → **not** validated for tokens. Runtime context tokens (`{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{agent.x}}`, `{{<gate>.meta.x}}`) pass through to `verification-logic.ts::substituteVars`. Anything else fails at shell-time as a typo. (Acceptance criterion 6.)
-- `optional` step requires `label`.
+- `optional` step requires `optionalLabel` (legacy non-human `label` is migrated on load and saved canonically).
 - `agent-qa` step requires the project to have `qa_start_command` configured (warn, don't reject — runtime already returns "QA not configured").
 
 Error format (acceptance criterion 8):
@@ -384,7 +384,7 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 | 13 | Step `expect: failure` | bug-fix `reproducing-test` (and TDD) | Unchanged on all `command` shapes | `step-expect-failure.spec.ts` |
 | 14 | Step `timeout:` (seconds) | build/E2E steps | Unchanged | `step-timeout.spec.ts` |
 | 15 | Step `phase:` (parallel grouping) | many | Unchanged | `phased-verification.spec.ts` (existing) |
-| 16 | Step `optional: true` + `label` + `description` | feature/bug-fix QA testing | Unchanged | `optional-step-toggle.spec.ts` (existing) |
+| 16 | Step `optional: true` + `optionalLabel` + `description` | feature/bug-fix QA testing | `optionalLabel` is canonical for goal-creation toggles; legacy non-human `label` is migrated on load/save. `label` is reserved for human-signoff card titles. | `optional-step-toggle.spec.ts` (existing) |
 | 17 | `{{branch}}` / `{{master}}` runtime tokens | many | Unchanged in `run:` and `prompt:` | `template-vars.spec.ts` (existing) |
 | 18 | `{{goal_spec}}` injection | many | Unchanged | existing |
 | 19 | `{{agent.X}}` from signal metadata | bug-fix `{{agent.test_command}}` | Unchanged | existing |
