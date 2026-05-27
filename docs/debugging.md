@@ -13,7 +13,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 
 ## Gate verification stuck on a `human-signoff` step
 
-- **Symptom**: a gate's verification stays in `running` indefinitely; one of its steps is `type: human-signoff`. The chat-header `<goal-status-widget>` should be pulsing its red exclamation overlay and exposing Approve / Reject controls inside its popover, but doesn't. Or: the widget shows the pending request but Approve / Reject submissions never resolve the step.
+- **Symptom**: a gate's verification stays in `running` indefinitely; one of its steps is `type: human-signoff`. The chat-header `<goal-status-widget>` should be pulsing its primary-colour exclamation icon between the goal icon and gate counter and exposing Approve / Reject controls inside its popover, but doesn't. Or: the widget shows the pending request but Approve / Reject submissions never resolve the step.
 - **Architecture**: the harness parks on a deferred resolver keyed by `${signalId}::${stepName}` in `VerificationHarness.pendingSignoffs`. The user resolves it via `POST /api/goals/:id/gates/:gateId/signoff`. The `awaitingHuman` bit on the step record is the source of truth; `gate_verification_awaiting_human` is broadcast on park and `gate_verification_step_complete` on resolve. Full design: [docs/design/human-signoff-gates.md](design/human-signoff-gates.md).
 - **Diagnostic chain**:
   1. `curl /api/goals/:id/verifications/active` — confirm the step shows `awaitingHuman: true` and the substituted `humanPrompt` / `humanLabel` are non-empty.

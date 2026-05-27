@@ -9,10 +9,10 @@
  *
  * Asserts:
  *  - The pill renders for a goal-scoped session.
- *  - The pill shows the pulsing red sign-off overlay when ≥1 sign-off awaits.
- *  - Clicking the pill opens a popover with gate rows + a sign-off card.
+ *  - The pill shows the pulsing primary-colour sign-off icon between the goal icon and gate counter when ≥1 sign-off awaits.
+ *  - Clicking the pill opens a popover with gate rows + a sign-off card and content toggle.
  *  - Approve POSTs `/signoff` with `decision: "pass"`, the card transitions to
- *    "Approved ✓", and the awaiting overlay clears.
+ *    "Approved ✓", and the awaiting icon clears.
  *  - Reject opens a modal with a feedback textarea; Submit is disabled while
  *    empty, enabled with text, and POSTs `decision: "fail", feedback`.
  *  - On reload the popover state rehydrates from `/verifications/active`.
@@ -50,6 +50,7 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 
 	const gatesRe = new RegExp(`/api/goals/${goalId}/gates(?:\\?.*)?$`);
 	const activeRe = new RegExp(`/api/goals/${goalId}/verifications/active(?:\\?.*)?$`);
+	const signalsRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/signals(?:\\?.*)?$`);
 	const signoffRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/signoff$`);
 
 	void page.route(gatesRe, async (route: Route) => {
@@ -80,6 +81,23 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 			status: 200,
 			contentType: "application/json",
 			body: JSON.stringify({ verifications }),
+		});
+	});
+
+	void page.route(signalsRe, async (route: Route) => {
+		if (route.request().method() !== "GET") return route.fallback();
+		await route.fulfill({
+			status: 200,
+			contentType: "application/json",
+			body: JSON.stringify({
+				signals: [{
+					id: SIGNAL_ID,
+					gateId: "human-design-approval",
+					goalId,
+					content: "## Design\n\nContent awaiting sign-off.",
+					verification: { status: "running", steps: [] },
+				}],
+			}),
 		});
 	});
 
@@ -151,7 +169,7 @@ async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): P
 }
 
 test.describe("<goal-status-widget>", () => {
-	test("pill renders + popover shows sign-off card; approve clears overlay; reload rehydrates", async ({ page }) => {
+	test("pill renders + popover shows sign-off card; approve clears icon; reload rehydrates", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget ${Date.now()}` });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
@@ -167,9 +185,30 @@ test.describe("<goal-status-widget>", () => {
 			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
 
-			// Pulsing overlay visible while awaiting sign-off.
+			// Pulsing icon visible while awaiting sign-off, positioned between the goal icon and gate counter.
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "true", { timeout: 10_000 });
-			await expect(page.locator("[data-testid='goal-status-widget-awaiting']")).toBeVisible();
+			const awaitingIcon = page.locator("[data-testid='goal-status-widget-awaiting']");
+			await expect(awaitingIcon).toBeVisible();
+			expect(await awaitingIcon.evaluate((el) => {
+				const style = getComputedStyle(el);
+				const primaryProbe = document.createElement("span");
+				primaryProbe.style.color = "var(--primary)";
+				document.body.appendChild(primaryProbe);
+				const primaryColor = getComputedStyle(primaryProbe).color;
+				primaryProbe.remove();
+				const previous = el.previousElementSibling as HTMLElement | null;
+				return {
+					isDirectPillChild: el.parentElement?.getAttribute("data-testid") === "goal-status-widget-pill",
+					previousIsGoalIcon: previous?.getAttribute("data-testid") === "goal-status-widget-icon",
+					background: style.backgroundColor,
+					usesPrimaryColor: style.color === primaryColor,
+				};
+			})).toMatchObject({
+				isDirectPillChild: true,
+				previousIsGoalIcon: true,
+				background: "rgba(0, 0, 0, 0)",
+				usesPrimaryColor: true,
+			});
 
 			// Open popover.
 			await pill.click();
@@ -180,14 +219,19 @@ test.describe("<goal-status-widget>", () => {
 			await expect(gateRows).toHaveCount(3, { timeout: 5_000 });
 			await expect(gateRows.filter({ hasText: "Design Document" })).toHaveAttribute("data-gate-status", "passed");
 			await expect(gateRows.filter({ hasText: "Approve Design" })).toHaveAttribute("data-gate-status", "pending");
+			await expect(page.locator("[data-testid='goal-widget-dashboard-link']")).toContainText("Goal Dashboard");
+			await expect(page.locator("[data-testid='goal-widget-dashboard-link'] svg")).toBeVisible();
 
-			// Sign-off card with Approve + Reject.
+			// Sign-off card with content toggle, Approve + Reject.
 			const card = page.locator("[data-testid='goal-widget-signoff']").first();
 			await expect(card).toBeVisible();
+			await expect(card.locator("[data-testid='goal-widget-signoff-content-toggle']")).toBeVisible();
+			await card.locator("[data-testid='goal-widget-signoff-content-toggle']").click();
+			await expect(card.locator("[data-testid='goal-widget-signoff-content']")).toContainText("Content awaiting sign-off", { timeout: 5_000 });
 			await expect(card.locator("[data-testid='goal-widget-approve']")).toBeVisible();
 			await expect(card.locator("[data-testid='goal-widget-reject']")).toBeVisible();
 
-			// Approve → POSTs /signoff, card transitions to resolved state, overlay clears.
+			// Approve → POSTs /signoff, card transitions to resolved state, awaiting icon clears.
 			await card.locator("[data-testid='goal-widget-approve']").click();
 
 			// Wait for the POST to land + state to flip.
@@ -200,7 +244,7 @@ test.describe("<goal-status-widget>", () => {
 			// The approval may clear the sign-off card immediately or briefly show a
 			// resolved state; the durable user-facing outcome is that awaiting clears.
 
-			// Eventually the awaiting overlay clears (next /verifications/active poll
+			// Eventually the awaiting icon clears (next /verifications/active poll
 			// after the WS step_complete equivalent — we trigger via setState).
 			// Closing + reopening the popover triggers an explicit refresh; the
 			// toHaveAttribute assertion below polls until the refresh has landed,

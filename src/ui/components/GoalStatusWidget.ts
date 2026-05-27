@@ -7,16 +7,16 @@
  *   - Goal icon + `(passed/total)` badge via the shared `renderGateProgressBadge`
  *     helper (extracted from sidebar's `renderGoalBadge` so visual vocabulary is
  *     shared).
- *   - Pulsing red exclamation overlay when ≥1 human-signoff step is awaiting
- *     input (`.goal-signoff-pulse` keyframes).
+ *   - Pulsing primary-colour exclamation icon between the goal icon and gate
+ *     counter when ≥1 human-signoff step is awaiting input.
  *
  * Popover (click pill):
  *   - Gate list with status icons via `renderGateStatusIcon`.
- *   - Inline sign-off cards: label + substituted prompt (markdown), Approve and
- *     Reject buttons.
+ *   - Inline sign-off cards: label + substituted prompt (markdown), signal
+ *     content toggle, Approve and Reject buttons.
  *   - Reject opens a modal with a feedback textarea + Submit; on submit, POSTs
  *     `decision: "fail", feedback` to the sign-off endpoint.
- *   - Goal Dashboard link at the bottom.
+ *   - Goal Dashboard icon button at the bottom.
  *
  * Data:
  *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
@@ -28,8 +28,10 @@
  * Authz: trusts the gateway token (v1 — no identity model). Sign-off submission
  * records only a server-side timestamp.
  */
+import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { LayoutDashboard } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -82,6 +84,10 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _rejectError = "";
 	@state() private _submitting: Set<string> = new Set();
 	@state() private _submitErrors: Map<string, string> = new Map();
+	@state() private _contentExpanded: Set<string> = new Set();
+	@state() private _contentLoading: Set<string> = new Set();
+	@state() private _contentByKey: Map<string, string> = new Map();
+	@state() private _contentErrors: Map<string, string> = new Map();
 	@state() private _closing = false;
 
 	private _ws: WebSocket | null = null;
@@ -154,6 +160,10 @@ export class GoalStatusWidget extends LitElement {
 			this._gates = [];
 			this._awaitingSignoffs = [];
 			this._resolved.clear();
+			this._contentExpanded = new Set();
+			this._contentLoading = new Set();
+			this._contentByKey = new Map();
+			this._contentErrors = new Map();
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -161,7 +171,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_resolved") || changed.has("_submitting") || changed.has("_submitErrors") || changed.has("_rejectFor") || changed.has("_rejectText") || changed.has("_rejectSubmitting") || changed.has("_rejectError")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_resolved") || changed.has("_submitting") || changed.has("_submitErrors") || changed.has("_contentExpanded") || changed.has("_contentLoading") || changed.has("_contentByKey") || changed.has("_contentErrors") || changed.has("_rejectFor") || changed.has("_rejectText") || changed.has("_rejectSubmitting") || changed.has("_rejectError")) {
 			this._syncDropdown();
 			this._syncRejectModal();
 		}
@@ -346,6 +356,46 @@ export class GoalStatusWidget extends LitElement {
 			}
 			default:
 				break;
+		}
+	}
+
+	// ── Sign-off content ──────────────────────────────────────────────
+
+	private _toggleSignoffContent(req: SignoffRequest): void {
+		const key = signoffKey(req);
+		const expanded = new Set(this._contentExpanded);
+		if (expanded.has(key)) {
+			expanded.delete(key);
+			this._contentExpanded = expanded;
+			return;
+		}
+		expanded.add(key);
+		this._contentExpanded = expanded;
+		if (!this._contentByKey.has(key) && !this._contentLoading.has(key)) {
+			void this._fetchSignoffContent(req);
+		}
+	}
+
+	private async _fetchSignoffContent(req: SignoffRequest): Promise<void> {
+		const key = signoffKey(req);
+		const loading = new Set(this._contentLoading); loading.add(key); this._contentLoading = loading;
+		const errors = new Map(this._contentErrors); errors.delete(key); this._contentErrors = errors;
+		try {
+			const resp = await this._fetch(`/api/goals/${this.goalId}/gates/${encodeURIComponent(req.gateId)}/signals`);
+			if (!resp?.ok) throw new Error(`Unable to load signal content (${resp?.status ?? "network"})`);
+			const data = await resp.json().catch(() => null);
+			const signals = Array.isArray(data?.signals) ? data.signals : [];
+			const signal = signals.find((s: unknown) => !!s && typeof s === "object" && (s as Record<string, unknown>).id === req.signalId) as Record<string, unknown> | undefined;
+			const content = typeof signal?.content === "string" && signal.content.trim()
+				? signal.content
+				: "No content was attached to this sign-off signal.";
+			const next = new Map(this._contentByKey); next.set(key, content); this._contentByKey = next;
+		} catch (err) {
+			const next = new Map(this._contentErrors);
+			next.set(key, err instanceof Error ? err.message : "Unable to load signal content");
+			this._contentErrors = next;
+		} finally {
+			const next = new Set(this._contentLoading); next.delete(key); this._contentLoading = next;
 		}
 	}
 
@@ -597,11 +647,12 @@ export class GoalStatusWidget extends LitElement {
 
 			<div class="border-t border-border pt-2 mt-2 flex justify-end">
 				<button
-					class="text-blue-600 dark:text-blue-400 hover:underline"
-					style="font-size:12px;background:none;border:none;cursor:pointer;padding:0"
+					class="inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80"
+					style="font-size:12px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:3px 8px"
 					@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
 					data-testid="goal-widget-dashboard-link"
-				>Goal Dashboard \u2192</button>
+					title="Goal dashboard"
+				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 			</div>
 		`;
 	}
@@ -612,6 +663,10 @@ export class GoalStatusWidget extends LitElement {
 		const submitting = this._submitting.has(key);
 		const resolved = this._resolved.get(key);
 		const err = this._submitErrors.get(key);
+		const contentExpanded = this._contentExpanded.has(key);
+		const contentLoading = this._contentLoading.has(key);
+		const content = this._contentByKey.get(key);
+		const contentError = this._contentErrors.get(key);
 		return html`
 			<div class="border border-border rounded-md p-2 flex flex-col gap-1.5"
 				data-testid="goal-widget-signoff"
@@ -623,29 +678,45 @@ export class GoalStatusWidget extends LitElement {
 						<markdown-block .content=${req.prompt}></markdown-block>
 					</div>
 				` : nothing}
+				<div class="flex items-center justify-between gap-2 mt-1">
+					<button
+						class="hover:bg-secondary/80"
+						style="font-size:12px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:pointer;font-weight:500"
+						@click=${(e: MouseEvent) => { e.stopPropagation(); this._toggleSignoffContent(req); }}
+						data-testid="goal-widget-signoff-content-toggle"
+					>${contentExpanded ? "Hide content" : "View content"}</button>
+					${!resolved ? html`
+						<div class="flex items-center gap-2">
+							<button
+								class="hover:bg-green-100 dark:hover:bg-green-900/20"
+								style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
+								?disabled=${submitting}
+								@click=${(e: MouseEvent) => { e.stopPropagation(); void this._submitSignoff(req, "pass"); }}
+								data-testid="goal-widget-approve"
+							>${submitting ? "Approving\u2026" : "Approve"}</button>
+							<button
+								class="hover:bg-red-100 dark:hover:bg-red-900/20"
+								style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
+								?disabled=${submitting}
+								@click=${(e: MouseEvent) => { e.stopPropagation(); this._openRejectModal(req); }}
+								data-testid="goal-widget-reject"
+							>Reject\u2026</button>
+						</div>
+					` : nothing}
+				</div>
+				${contentExpanded ? html`
+					<div class="border border-border rounded-md bg-background p-2 text-foreground" style="font-size:12px;max-height:220px;overflow:auto" data-testid="goal-widget-signoff-content">
+						${contentLoading ? html`<div class="text-muted-foreground">Loading content\u2026</div>`
+							: contentError ? html`<div style="color:var(--destructive)">${contentError}</div>`
+							: html`<markdown-block .content=${content || ""}></markdown-block>`}
+					</div>
+				` : nothing}
 				${resolved ? html`
 					<div class="${resolved.decision === "pass" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}" style="font-size:12px;font-weight:600">
 						${resolved.decision === "pass" ? "Approved \u2713" : "Rejected \u2717"}
 						${resolved.feedback ? html`<div class="text-muted-foreground mt-1" style="font-weight:400;white-space:pre-wrap">${resolved.feedback}</div>` : nothing}
 					</div>
-				` : html`
-					<div class="flex items-center gap-2 mt-1">
-						<button
-							class="hover:bg-green-100 dark:hover:bg-green-900/20"
-							style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
-							?disabled=${submitting}
-							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._submitSignoff(req, "pass"); }}
-							data-testid="goal-widget-approve"
-						>${submitting ? "Approving\u2026" : "Approve"}</button>
-						<button
-							class="hover:bg-red-100 dark:hover:bg-red-900/20"
-							style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
-							?disabled=${submitting}
-							@click=${(e: MouseEvent) => { e.stopPropagation(); this._openRejectModal(req); }}
-							data-testid="goal-widget-reject"
-						>Reject\u2026</button>
-					</div>
-				`}
+				` : nothing}
 				${err && !resolved ? html`<div style="font-size:11px;color:var(--destructive)">${err}</div>` : nothing}
 			</div>
 		`;
@@ -717,10 +788,10 @@ export class GoalStatusWidget extends LitElement {
 				data-awaiting-signoffs=${awaiting ? "true" : "false"}
 				@click=${this._togglePill}
 			>
-				<span class="shrink-0 relative" style="display:inline-flex;align-items:center">
+				<span class="shrink-0" style="display:inline-flex;align-items:center" data-testid="goal-status-widget-icon">
 					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-					${awaiting ? html`<span class="goal-signoff-pulse" data-testid="goal-status-widget-awaiting" aria-label="Awaiting human sign-off" title="Awaiting human sign-off">!</span>` : nothing}
 				</span>
+				${awaiting ? html`<span class="goal-signoff-pulse shrink-0" data-testid="goal-status-widget-awaiting" aria-label="Awaiting human sign-off" title="Awaiting human sign-off">!</span>` : nothing}
 				${renderGateProgressBadge(this.goalId)}
 			</button>
 		`;
@@ -733,29 +804,22 @@ export class GoalStatusWidget extends LitElement {
 		style.id = "goal-status-widget-styles";
 		style.textContent = `
 			@keyframes goal-signoff-pulse-anim {
-				0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
-				50%      { transform: scale(1.15); opacity: 0.9; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+				0%, 100% { transform: scale(1); opacity: 1; }
+				50%      { transform: scale(1.16); opacity: 0.72; }
 			}
 			.goal-signoff-pulse {
-				position: absolute;
-				top: -5px;
-				right: -6px;
-				min-width: 12px;
-				height: 12px;
-				padding: 0 3px;
-				border-radius: 9999px;
-				background: #ef4444;
-				color: #fff;
-				font-size: 10px;
-				font-weight: 700;
-				line-height: 12px;
-				text-align: center;
+				width: 10px;
+				height: 14px;
+				color: var(--primary) !important;
+				background: transparent;
 				display: inline-flex;
 				align-items: center;
 				justify-content: center;
+				font-size: 14px;
+				font-weight: 800;
+				line-height: 14px;
 				animation: goal-signoff-pulse-anim 1.4s ease-in-out infinite;
 				pointer-events: none;
-				z-index: 1;
 			}
 			@keyframes goal-status-in {
 				0%   { opacity: 0; transform: translateY(8px) scale(0.92); filter: blur(3px); }
