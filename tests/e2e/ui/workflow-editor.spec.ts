@@ -102,14 +102,8 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 	}
 
 	async function switchToNamedCommand(page: import("@playwright/test").Page): Promise<void> {
-		const button = page.locator("[data-testid='wf-cmd-mode-command']").first();
-		const commandInput = page.locator("[data-testid='wf-step-command']").first();
-		for (let i = 0; i < 3; i++) {
-			await button.click();
-			if (await commandInput.isVisible().catch(() => false)) return;
-			await page.waitForTimeout(100);
-		}
-		await expect(commandInput).toBeVisible();
+		await page.locator("[data-testid='wf-cmd-mode-command']").first().click();
+		await expect(page.locator("[data-testid='wf-step-command']").first()).toBeVisible();
 	}
 
 	test("type dropdown lists all four step types (including human-signoff)", async ({ page }) => {
