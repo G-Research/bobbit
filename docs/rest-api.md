@@ -176,6 +176,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
+| `POST` | `/api/goals/:id/gates/:gateId/signoff` | Resolve a parked `human-signoff` step (`{ signalId, stepName, decision: "pass"\|"fail", feedback? }`); idempotent 409 on already-resolved steps. See [Sign-off endpoint](#sign-off-endpoint). |
 
 ### Goal Team
 
@@ -749,7 +750,7 @@ Returns status, dependency, and signal count per gate — no signal arrays or co
 }
 ```
 
-Fields: `gateId`, `name`, `status`, `dependsOn`, `signalCount`. Conditional: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps).
+Fields: `gateId`, `name`, `status`, `dependsOn`, `signalCount`. Conditional: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps), `awaitingSignoffCount` (number of `human-signoff` verification steps on this gate currently waiting on a human — omitted when zero). The response envelope carries a goal-wide total as `awaitingSignoffCount` alongside `gates[]`. This is the single source of truth for the sidebar's `state.gateStatusCache.awaitingHumanSignoff` flag and rule 2 of the [notification policy](design/notification-policy.md); the bare `/gates` endpoint does **not** include the count.
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 
@@ -803,6 +804,38 @@ Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`,
   }]
 }
 ```
+
+### Sign-off endpoint
+
+**`POST /api/goals/:id/gates/:gateId/signoff`** — resolves a `human-signoff` verification step that is parked waiting on a human decision (`awaitingHuman: true` on the active verification's step). See [goals-workflows-tasks.md — Human sign-off steps](goals-workflows-tasks.md#human-sign-off-steps) for the full lifecycle.
+
+Request body:
+
+```json
+{
+  "signalId": "sig-7",
+  "stepName": "design-approval",
+  "decision": "pass",
+  "feedback": "Approved — ship it."
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `signalId` | yes | Id of the gate signal whose verification owns the step. |
+| `stepName` | yes | `name` of the parked step as declared in the workflow YAML. |
+| `decision` | yes | `"pass"` or `"fail"`. Anything else → 400. |
+| `feedback` | no | Free-form markdown. Stored verbatim in the step `output` and a `text/markdown` artifact. |
+
+Responses:
+
+- **200** `{ "resolved": true }` — the resolver was invoked. The step result is built (`passed = decision === "pass"`) and the gate continues through the standard phase machinery.
+- **400** — missing or malformed body.
+- **404** — goal / signal / step does not exist or no active verification owns the signal/gate pair.
+- **409** — idempotent surface. The step exists but is no longer awaiting human input. Body: `{ "error": "step is no longer awaiting human input", "stepName", "status": "passed" | "failed" | "skipped" }`. Distinguishes "another client just resolved it" from "never parked here".
+- **400** when the goal is shelved; **409** when archived.
+
+Authz (v1) trusts the gateway token — anyone with UI access can submit. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve a sign-off step that gates their own work.
 
 ### Gate inspect endpoint
 

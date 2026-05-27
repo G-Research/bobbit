@@ -60,7 +60,7 @@ On failure (any rejection from `createGoal`), the assistant session, chat histor
 ```typescript
 interface VerifyStep {
   name: string;
-  type: "command" | "llm-review" | "agent-qa";
+  type: "command" | "llm-review" | "agent-qa" | "human-signoff";
   // For type: "command" — three exclusive shapes:
   component?: string; // Component name to resolve against components[]
   command?: string;   // Named command on that component (component.commands[command])
@@ -191,6 +191,7 @@ Gates can define automated verification that runs when signaled:
 - **Command** — runs shell commands, checks exit codes (e.g. `npm run check`)
 - **LLM review** — spawns a sub-agent for qualitative review against a prompt
 - **Agent QA** — spawns a test-engineer session that drives browser-based QA testing via the `/qa-test` skill
+- **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
@@ -336,6 +337,40 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 **Resume support:** If the server restarts during an `agent-qa` step, the harness re-executes the step from scratch on the next verification cycle.
 
 The `agent-qa` step typically runs at phase 2 in the `feature` and `bug-fix` workflows — after command checks (phase 0) and LLM reviews (phase 1) have passed. See [QA Testing](qa-testing.md) for project configuration and the `/qa-test` skill protocol.
+
+#### Human sign-off steps
+
+A `human-signoff` verification step parks the gate on a deferred resolver until a human approves or rejects it via the UI. It reuses the same async-verification machinery as `llm-review` and `agent-qa` — the only difference is *who* resolves the await: a REST submission from the browser rather than a reviewer agent's `verification_result` call.
+
+**Why it exists.** Some gates need an authoritative human decision — a design review, a release sign-off, a security exception — without coupling the decision to the team lead's liveness or context-window budget. A dedicated step type keeps approval state on the verification record (restart-safe, cancellable, persisted) and emits the same `{ passed, output, artifact }` shape every other step produces, so failed sign-off feedback flows back through the team lead's normal "consume failed reviewer findings" path.
+
+**YAML shape:**
+
+```yaml
+verify:
+  - name: design-approval
+    type: human-signoff
+    phase: 1
+    label: "Approve design doc"
+    prompt: |
+      Review the design doc for {{branch}} and approve or reject.
+```
+
+Both `label` and `prompt` are required (the validator rejects the step on load otherwise). `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` tokens are substituted before the prompt is shown to the user — same machinery as the other step types.
+
+**Lifecycle.** When the harness reaches the step it broadcasts `gate_verification_awaiting_human` (see [websocket-protocol.md](websocket-protocol.md)), sets `awaitingHuman: true` on the active step, persists, and `await`s a deferred resolver. The chat-header `<goal-status-widget>` (mounted on any session with a goal id) surfaces the request inline with Approve / Reject buttons. Reject opens a modal collecting feedback. The browser POSTs to `/api/goals/:id/gates/:gateId/signoff` with `{ signalId, stepName, decision, feedback? }`; the harness builds a step result (passed = `decision === "pass"`; `output` and a `text/markdown` artifact carry the feedback) and the gate completes through the standard phase machinery.
+
+**Resume / cancellation.**
+
+- Server restart re-broadcasts `gate_verification_awaiting_human` from the resume path; the persisted `humanPrompt` / `humanLabel` survive intact. No data loss, no duplicate UI prompt — the widget reconciles by `(signalId, stepName)`.
+- Re-signaling the gate while a sign-off is pending drains the resolver with `{ cancelled: true }`; the failed step result is suppressed and the fresh signal opens a new request.
+- `POST /signoff` is idempotent — already-resolved or cancelled steps respond `409 { error: "step is no longer awaiting human input", status }`.
+
+**Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Bobbit has no user-identity model today; submission records only a server-side timestamp. Sandboxed sub-agents are blocked from POSTing to `/signoff` at the `sandbox-guard` layer so a sandboxed agent cannot self-approve a sign-off step that gates its own work.
+
+**Test bypass.** Respects `BOBBIT_LLM_REVIEW_SKIP=1` — the step auto-passes without surfacing to the UI. Mirrors `agent-qa` / `llm-review`.
+
+Full design: [design/human-signoff-gates.md](design/human-signoff-gates.md). UI-side notification rules: [design/notification-policy.md](design/notification-policy.md).
 
 ### Gate Re-Signal Cancellation
 
