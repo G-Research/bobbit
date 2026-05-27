@@ -559,7 +559,13 @@ function applyGateState(goalId: string, newGates: GateState[]): void {
 		const total = goal.workflow.gates.length;
 		const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
 		const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
-		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
+		// Preserve human-sign-off counters from the previous cache entry — the
+		// dashboard refresh path does not know about pending sign-offs; only
+		// `refreshGateStatusCache` / `refreshGateStatusForGoal` in api.ts do.
+		const prev = state.gateStatusCache.get(goalId);
+		const awaitingSignoffCount = prev?.awaitingSignoffCount ?? 0;
+		const awaitingHumanSignoff = prev?.awaitingHumanSignoff ?? false;
+		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
 	}
 }
 

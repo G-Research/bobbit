@@ -32,7 +32,7 @@ import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { showFaviconBadge } from "./favicon-badge.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import { refreshGateStatusForGoal } from "./api.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
@@ -2048,7 +2048,8 @@ export class RemoteAgent {
 					if (sess) {
 						const goalId = sess.teamGoalId || sess.goalId;
 						const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-						if (needsHumanAttention(sess, goal, state.gatewaySessions, state.gateStatusCache)) {
+						if (needsHumanAttention(sess, goal, state.gatewaySessions, state.gateStatusCache)
+							|| needsImmediateHumanAttention(sess, state.gateStatusCache)) {
 							RemoteAgent.playNotificationBeep();
 							showFaviconBadge();
 						}

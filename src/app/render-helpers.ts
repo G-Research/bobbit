@@ -25,7 +25,7 @@ import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 
 // ============================================================================
 // FORMATTING
@@ -181,7 +181,16 @@ export function markSessionVisited(sessionId: string): void {
 /** Returns true if the session has activity the user hasn't seen yet.
  *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt
  *  AND the session warrants human attention (see `needsHumanAttention` —
- *  team members never surface, team leads only when goal is complete or stuck). */
+ *  team members never surface, team leads only when goal is complete or stuck).
+ *
+ *  Read-filter split (see `notification-policy.ts`):
+ *  — `needsImmediateHumanAttention` (pending sign-off, errored-and-parked)
+ *    bypasses the read-state filter — these states demand attention until
+ *    the user explicitly resolves them.
+ *  — `needsHumanAttention` (goal complete, idle stuck) is subject to the
+ *    normal read-state filter — once the user has visited the session, the
+ *    dot clears.
+ */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
@@ -191,6 +200,11 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+
+	// Immediate predicate — short-circuits the read-state filter for states that
+	// require explicit user action (pending sign-off, errored-and-parked).
+	if (needsImmediateHumanAttention(session, state.gateStatusCache)) return true;
+
 	if (!needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)) return false;
 
 	const mirror = _readMirror.get(session.id) ?? 0;

@@ -66,6 +66,12 @@ export interface GatewaySession {
 	sandboxed?: boolean;
 	/** Whether this is an automated non-interactive session (e.g. verification reviewer) */
 	nonInteractive?: boolean;
+	/** Server-emitted: true when the most recent turn produced an error frame.
+	 *  Used by `notification-policy.ts` rule 3 (errored-and-parked). */
+	lastTurnErrored?: boolean;
+	/** Server-emitted: count of consecutive errored turns. Compared against
+	 *  `MAX_CONSECUTIVE_ERROR_TURNS` (3 today) by notification-policy.ts rule 3. */
+	consecutiveErrorTurns?: number;
 }
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved";
@@ -212,8 +218,10 @@ export const state = {
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
 	goalsGeneration: -1,
-	/** Gate status cache: goalId → { passed, total, verifying } */
-	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number }>(),
+	/** Gate status cache: goalId → { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff }.
+	 *  `awaitingHumanSignoff` is denormalised (= awaitingSignoffCount > 0) so the
+	 *  notification-policy hot path can do an O(1) check without recounting. */
+	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number; awaitingSignoffCount: number; awaitingHumanSignoff: boolean }>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
 	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
 	sessionsLoading: false,
