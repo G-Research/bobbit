@@ -290,7 +290,12 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 		assert.equal(res.statusCode, 200);
 		const txt = bodyText(res);
 		assert.match(txt, new RegExp(`<base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
-		assert.match(txt, /v1<\/body>/);
+		// Body content survives the rewrite. We can't assert `v1</body>` adjacency
+		// because injectBaseAndScripts adds the bridge scripts before </body>;
+		// instead assert v1 sits at the start of <body>, and that the bridge was
+		// injected (mirrors the live-mount assertion above).
+		assert.match(txt, /<body>v1</);
+		assert.match(txt, /preview-swipe-start|MutationObserver/);
 	});
 
 	it("serves non-HTML artifact assets unmodified", async () => {
