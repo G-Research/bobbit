@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { ArrowDown, ArrowUp, Brain, Image as ImageIcon, Sparkles } from "lucide";
+import { ArrowDown, ArrowUp, Brain, ChevronsDown, Image as ImageIcon, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -359,6 +359,30 @@ export class AgentInterface extends LitElement {
 	 * resize and on transcript-mutating events. */
 	private _showJumpToLastPrompt = false;
 
+	/** Label currently rendered on the up button. `null` when the button is
+	 * hidden. "last" = default (no nav yet), "previous" = after at least one
+	 * step back. Surfaced as `data-label="…"` for tests. */
+	private _jumpToPromptLabel: "last" | "previous" | null = null;
+
+	/** True iff the bottom button should render as the split "Next prompt |
+	 * Bottom" pill (depth >= 2 history navigation). Computed in
+	 * `_refreshJumpToLastPromptButton`. */
+	private _showSplitBottom = false;
+
+	/** Index (into the live `<user-message>` NodeList) of the prompt the user
+	 * is currently parked on. `null` = not navigating, the up button targets
+	 * the most-recent user message. After a successful up-click that lands
+	 * prompt N at the top, `_viewedPromptIdx === N` so the *next* up-click
+	 * targets N-1. Cleared by: new prompt sent, near-bottom dominates,
+	 * jump-to-bottom click, session navigate, or user scrolling away from
+	 * the parked prompt. */
+	private _viewedPromptIdx: number | null = null;
+
+	/** Last observed `<user-message>` count, used by
+	 * `_refreshJumpToLastPromptButton` to detect new-prompt-sent and clear
+	 * `_viewedPromptIdx` accordingly. */
+	private _lastSeenUserCount = 0;
+
 	// --- Legacy backward-compat shims ---
 	// Several E2E tests directly poke `ai._stickToBottom = true` and push
 	// into `ai._programmaticEchoes` as part of test setup. These keep the
@@ -487,6 +511,7 @@ export class AgentInterface extends LitElement {
 		this._isAtBottom = enabled;
 		if (enabled) {
 			this._escapedFromLock = false;
+			this._viewedPromptIdx = null;
 			this._scrollToBottomNow({ animate: false });
 		}
 		this._refreshJumpButton();
@@ -613,10 +638,12 @@ export class AgentInterface extends LitElement {
 		});
 	}
 
-	/** Pin to bottom IFF intent says we want to be there. The single
-	 * programmatic re-pin gate. */
+	/** Pin to bottom IFF intent says we want to be there AND the user
+	 * isn't actively parked on a historical prompt. The single programmatic
+	 * re-pin gate. */
 	private _pinIfSticking() {
 		if (!this._isAtBottom || this._escapedFromLock) return;
+		if (this._viewedPromptIdx !== null) return;
 		this._scrollToBottomNow({ animate: false });
 	}
 
@@ -624,19 +651,24 @@ export class AgentInterface extends LitElement {
 	 * ("Jump button never recomputed on echo path") — every scroll-handler
 	 * tick, including echo + resize-skip paths, calls this. */
 	private _refreshJumpButton() {
-		// Two-part visibility:
+		// Visibility rule:
 		//   intent: `_isAtBottom` says we want to be there.
 		//   geometry: dist <= 50 % of viewport height (legacy threshold,
 		//             retained for jump-to-bottom.spec.ts contract).
-		// Button visible iff intent says NO and we're geometrically far
-		// from the bottom — so e.g. a programmatic scroll-down to within
-		// half a viewport hides the button even before any auto-relock
-		// mutation lands.
+		//   prompt-nav override: while parked on a historical prompt
+		//             (`_viewedPromptIdx !== null`), the user has explicitly
+		//             chosen to leave the tail. Show the bottom button so
+		//             they can return — spec change vs PR #639 per design §3.
+		//             Still gated by `geoFar` so we don't render the button
+		//             on top of an already-visible bottom.
+		// Button visible iff (intent != "tail" OR navigating) AND we're
+		// geometrically far from the bottom.
 		if (!this._scrollContainer) return;
 		const el = this._scrollContainer;
 		const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
 		const geoFar = dist > el.clientHeight * 0.5;
-		const next = !this._isAtBottom && geoFar;
+		const intentAway = !this._isAtBottom || this._viewedPromptIdx !== null;
+		const next = intentAway && geoFar;
 		if (next !== this._showJumpToBottom) {
 			this._showJumpToBottom = next;
 			this.requestUpdate();
@@ -648,28 +680,115 @@ export class AgentInterface extends LitElement {
 		this._refreshJumpToLastPromptButton();
 	}
 
-	/** Recompute jump-to-last-prompt visibility. Visible iff at least one
-	 * <user-message> exists AND the bottom edge of the LAST one is above the
-	 * top edge of the scroll viewport. Mirrors `_refreshJumpButton()`'s
-	 * "delta+requestUpdate only on transition" pattern to avoid render
-	 * thrash on every scroll tick. */
-	private _refreshJumpToLastPromptButton() {
+	/** Recompute jump-to-last-prompt visibility, label, and split-bottom
+	 * state. Drives the up button (top-centre) and the split layout of the
+	 * bottom button (depth >= 2 history navigation).
+	 *
+	 * Visibility rule for the up button:
+	 *   - hidden when there are no `<user-message>`s
+	 *   - hidden when parked on the oldest prompt (`_viewedPromptIdx === 0`)
+	 *   - when not navigating: visible iff the last prompt's bottom edge is
+	 *     above the viewport top (matches PR #639 contract)
+	 *   - when navigating: visible iff older prompts exist
+	 *     (`_viewedPromptIdx > 0`)
+	 *
+	 * Reset rules folded in:
+	 *   - new prompt sent (transcript user-count grew) -> clear
+	 *     `_viewedPromptIdx`
+	 *   - on `opts.userGesture`, when the parked prompt is no longer near
+	 *     the viewport top (user scrolled past it) -> clear
+	 *
+	 * Mirrors `_refreshJumpButton()`'s "transition-only requestUpdate"
+	 * pattern to avoid render thrash on every scroll tick. */
+	private _refreshJumpToLastPromptButton(opts: { userGesture?: boolean } = {}) {
 		if (!this._scrollContainer) return;
 		const container = this._scrollContainer;
 		const userMessages = container.querySelectorAll("user-message");
-		let next = false;
-		if (userMessages.length > 0) {
-			const last = userMessages[userMessages.length - 1] as HTMLElement;
-			const containerRect = container.getBoundingClientRect();
-			const lastRect = last.getBoundingClientRect();
-			// "Bottom edge above viewport top" — last user message fully
-			// scrolled off the top. 1px epsilon avoids sub-pixel flicker.
-			next = lastRect.bottom < containerRect.top - 1;
+		const userCount = userMessages.length;
+		const lastUserIdx = userCount - 1;
+
+		// Reset rule 1: new user prompt appended -> exit nav mode.
+		if (userCount > this._lastSeenUserCount && this._viewedPromptIdx !== null) {
+			this._viewedPromptIdx = null;
 		}
-		if (next !== this._showJumpToLastPrompt) {
-			this._showJumpToLastPrompt = next;
-			this.requestUpdate();
+		this._lastSeenUserCount = userCount;
+
+		// Belt-and-braces: clamp index into [0, lastUserIdx]. Guards against
+		// any future code path that mutates _viewedPromptIdx without going
+		// through the click handlers.
+		if (this._viewedPromptIdx !== null) {
+			if (lastUserIdx < 0) {
+				this._viewedPromptIdx = null;
+			} else if (this._viewedPromptIdx > lastUserIdx) {
+				this._viewedPromptIdx = lastUserIdx;
+			} else if (this._viewedPromptIdx < 0) {
+				this._viewedPromptIdx = 0;
+			}
 		}
+
+		// Reset rule 4 (gated): user scrolled away from the parked prompt.
+		// Only run when the deferred scroll handler classified this as a real
+		// user gesture AND the echo latch is clear (so we don't fight the
+		// spring-scroll that just landed us on the parked prompt).
+		if (
+			opts.userGesture
+			&& this._ignoreScrollToTop === null
+			&& this._viewedPromptIdx !== null
+			&& userCount > 0
+		) {
+			const parked = userMessages[this._viewedPromptIdx] as HTMLElement | undefined;
+			if (!parked) {
+				this._viewedPromptIdx = null;
+			} else {
+				const ctop = container.getBoundingClientRect().top;
+				const pRect = parked.getBoundingClientRect();
+				const tooFarBelow = pRect.top - ctop > 200;
+				const scrolledAbove = pRect.bottom < ctop;
+				if (tooFarBelow || scrolledAbove) {
+					this._viewedPromptIdx = null;
+				}
+			}
+		}
+
+		let nextShow = false;
+		let nextLabel: "last" | "previous" | null = null;
+		if (userCount > 0) {
+			if (this._viewedPromptIdx !== null) {
+				// Navigating — show while there are older prompts to walk to.
+				if (this._viewedPromptIdx > 0) {
+					nextShow = true;
+					nextLabel = "previous";
+				}
+			} else {
+				// Default — show iff the last prompt is off the top.
+				const last = userMessages[lastUserIdx] as HTMLElement;
+				const containerRect = container.getBoundingClientRect();
+				const lastRect = last.getBoundingClientRect();
+				if (lastRect.bottom < containerRect.top - 1) {
+					nextShow = true;
+					nextLabel = "last";
+				}
+			}
+		}
+
+		const nextSplit = this._viewedPromptIdx !== null
+			&& lastUserIdx >= 0
+			&& this._viewedPromptIdx < lastUserIdx;
+
+		let changed = false;
+		if (nextShow !== this._showJumpToLastPrompt) {
+			this._showJumpToLastPrompt = nextShow;
+			changed = true;
+		}
+		if (nextLabel !== this._jumpToPromptLabel) {
+			this._jumpToPromptLabel = nextLabel;
+			changed = true;
+		}
+		if (nextSplit !== this._showSplitBottom) {
+			this._showSplitBottom = nextSplit;
+			changed = true;
+		}
+		if (changed) this.requestUpdate();
 	}
 
 	/**
@@ -778,13 +897,15 @@ export class AgentInterface extends LitElement {
 
 				if (delta > 0) {
 					// Positive growth — if intent says we want bottom, pin.
-					if (this._isAtBottom && !this._escapedFromLock) {
+					// Skip while parked on a historical prompt: the user is
+					// reading older content and we must not yank them back.
+					if (this._isAtBottom && !this._escapedFromLock && this._viewedPromptIdx === null) {
 						this._scrollToBottomNow({ animate: false });
 					}
 				} else {
 					// Negative shrink — if we're now in the near-bottom band
 					// and the user hasn't explicitly escaped, re-engage stick.
-					if (this._isNearBottom() && !this._escapedFromLock) {
+					if (this._isNearBottom() && !this._escapedFromLock && this._viewedPromptIdx === null) {
 						this._isAtBottom = true;
 						this._refreshJumpButton();
 						// Apply the post-collapse clamp inherited from the old
@@ -822,7 +943,7 @@ export class AgentInterface extends LitElement {
 			// the same task as the layout commit and pins synchronously, so
 			// the user never sees the intermediate frame.
 			this._imageLoadHandler = (_e: Event) => {
-				if (this._isAtBottom && !this._escapedFromLock) {
+				if (this._isAtBottom && !this._escapedFromLock && this._viewedPromptIdx === null) {
 					this._scrollToBottomNow({ animate: false });
 				}
 			};
@@ -923,6 +1044,13 @@ export class AgentInterface extends LitElement {
 			this._showJumpToLastPrompt = false;
 			this.requestUpdate();
 		}
+		if (this._showSplitBottom) {
+			this._showSplitBottom = false;
+			this.requestUpdate();
+		}
+		this._jumpToPromptLabel = null;
+		this._viewedPromptIdx = null;
+		this._lastSeenUserCount = 0;
 		// Single re-pin path on session navigate: instant scrollTo bottom
 		// once after Lit's first commit. Subsequent async growth (markdown,
 		// syntax highlighting, hydrated tool-content, image decode) is
@@ -1088,6 +1216,7 @@ export class AgentInterface extends LitElement {
 	private _scrollToBottom() {
 		this._isAtBottom = true;
 		this._escapedFromLock = false;
+		this._viewedPromptIdx = null;
 		this._refreshJumpButton();
 		this._scrollToBottomNow({ animate: false });
 	}
@@ -1166,8 +1295,22 @@ export class AgentInterface extends LitElement {
 			// `_stickToBottom = true` plus a stray scroll event still keeps
 			// us pinned — exercised by tail-chat-jump-button-false-positive.
 			if (!gestureFresh) {
-				if (this._isAtBottom && !this._escapedFromLock && !this._isNearBottom()) {
+				// Suppress auto-relock while the user is parked on a
+				// historical prompt — the spring-scroll moved the viewport
+				// up deliberately and we must not yank it back.
+				if (
+					this._isAtBottom
+					&& !this._escapedFromLock
+					&& this._viewedPromptIdx === null
+					&& !this._isNearBottom()
+				) {
 					requestAnimationFrame(() => this._pinIfSticking());
+				}
+				// Reset rule 2 (design §1): "user reaches bottom by any
+				// means" — a programmatic scroll-to-bottom counts. Clear
+				// nav state so the up button reverts to default geometry.
+				if (this._isNearBottom() && this._viewedPromptIdx !== null) {
+					this._viewedPromptIdx = null;
 				}
 				this._refreshJumpButton();
 				return;
@@ -1199,9 +1342,16 @@ export class AgentInterface extends LitElement {
 			if (nearBottom) {
 				this._escapedFromLock = false;
 				this._isAtBottom = true;
+				// User returned to the tail by any means — exit history-nav.
+				this._viewedPromptIdx = null;
 			}
 
+			// User-gesture branch: run the "still parked?" check (reset rule 4)
+			// via `_refreshJumpToLastPromptButton({ userGesture: true })`. The
+			// chained call from `_refreshJumpButton()` runs without the flag —
+			// that's the no-reset path used by echo + non-gesture scrolls.
 			this._refreshJumpButton();
+			this._refreshJumpToLastPromptButton({ userGesture: true });
 		}, 0);
 	};
 
@@ -1252,42 +1402,81 @@ export class AgentInterface extends LitElement {
 		}
 	};
 
-	/** Jump-to-bottom click handler. Spring-animated landing. */
+	/** Jump-to-bottom click handler. Spring-animated landing. Also clears
+	 * any active prompt-navigation state — the user is explicitly returning
+	 * to the tail. */
 	private _handleJumpToBottomClick = () => {
 		this._isAtBottom = true;
 		this._escapedFromLock = false;
+		this._viewedPromptIdx = null;
 		this._refreshJumpButton();
 		this._scrollToBottomNow({ animate: true });
 	};
 
-	/** Jump-to-last-prompt click handler. Spring-animates the scroll up so
-	 * the last <user-message> lands near the top of the viewport with a
-	 * small breathing margin. Does NOT mutate `_isAtBottom` /
-	 * `_escapedFromLock` — the click is treated as a programmatic scroll,
-	 * not a user-intent change (matches jump-to-bottom's contract). */
+	/** Jump-to-last/previous-prompt click handler. Spring-animates the
+	 * scroll up so the target `<user-message>` lands near the top of the
+	 * viewport with a small breathing margin. When not navigating, targets
+	 * the most-recent prompt (PR #639 behaviour). When already navigating,
+	 * targets the next-older prompt and decrements `_viewedPromptIdx`. */
 	private _handleJumpToLastPromptClick = (): void => {
-		void this._scrollLastUserMessageIntoView();
+		if (!this._scrollContainer) return;
+		const userMessages = this._scrollContainer.querySelectorAll("user-message");
+		if (userMessages.length === 0) return;
+		const lastUserIdx = userMessages.length - 1;
+		let target: number;
+		if (this._viewedPromptIdx === null) {
+			target = lastUserIdx;
+		} else {
+			target = this._viewedPromptIdx - 1;
+			if (target < 0) return; // oldest reached — handler is a no-op
+		}
+		void this._scrollUserMessageIntoView(target);
 	};
 
-	private async _scrollLastUserMessageIntoView(): Promise<void> {
+	/** Symmetric "Next prompt" click handler — split-left button. Walks one
+	 * step forward (toward the most-recent prompt). */
+	private _handleJumpToNextPromptClick = (): void => {
 		if (!this._scrollContainer) return;
+		const userMessages = this._scrollContainer.querySelectorAll("user-message");
+		if (userMessages.length === 0 || this._viewedPromptIdx === null) return;
+		const lastUserIdx = userMessages.length - 1;
+		const target = this._viewedPromptIdx + 1;
+		if (target > lastUserIdx) return;
+		void this._scrollUserMessageIntoView(target);
+	};
+
+	private async _scrollUserMessageIntoView(idx: number): Promise<void> {
+		if (!this._scrollContainer) return;
+		// Cancel any spring animation already in flight so a rapid second
+		// click (e.g. walking through history) doesn't get two RAFs writing
+		// scrollTop in parallel toward different targets.
+		this._cancelAnimation();
 		const container = this._scrollContainer;
 		const userMessages = container.querySelectorAll("user-message");
 		if (userMessages.length === 0) return;
-		const last = userMessages[userMessages.length - 1] as HTMLElement;
+		const clampedIdx = Math.max(0, Math.min(idx, userMessages.length - 1));
+		const targetEl = userMessages[clampedIdx] as HTMLElement;
 		const containerRect = container.getBoundingClientRect();
-		const lastRect = last.getBoundingClientRect();
+		const targetRect = targetEl.getBoundingClientRect();
 		const TOP_MARGIN = 16; // matches the button's top offset
 		const targetScrollTop = Math.max(
 			0,
-			Math.round(container.scrollTop + (lastRect.top - containerRect.top) - TOP_MARGIN),
+			Math.round(container.scrollTop + (targetRect.top - containerRect.top) - TOP_MARGIN),
 		);
+		// Update parked index BEFORE the spring lands so the post-landing
+		// refresh sees the new state and `_refreshJumpButton` reveals
+		// jump-to-bottom (spec §3: nav-click reveals the bottom button).
+		// Setting `_viewedPromptIdx` before the spring also gates the
+		// no-gesture re-pin branch in `_handleScroll` from dragging us back
+		// to the tail mid-spring.
+		this._viewedPromptIdx = clampedIdx;
 		// Echo-latch: classify the resulting scroll event as programmatic so
-		// the deferred handler doesn't flip `_escapedFromLock = true` (which
-		// would be wrong — jump-to-bottom doesn't escape either).
+		// the deferred handler doesn't flip `_escapedFromLock = true`.
 		this._ignoreScrollToTop = targetScrollTop;
 		await this._springScrollTo(targetScrollTop);
-		// After the spring lands, the last prompt is visible — hide button.
+		// Refresh both buttons. Jump-to-bottom now reveals (spec change vs
+		// PR #639); jump-to-last-prompt recomputes label/visibility.
+		this._refreshJumpButton();
 		this._refreshJumpToLastPromptButton();
 	}
 
@@ -2046,31 +2235,78 @@ export class AgentInterface extends LitElement {
 	// the viewport up so the prompt lands ~16px below the container top.
 	private _renderJumpToLastPrompt() {
 		const show = this._showJumpToLastPrompt;
+		const label = this._jumpToPromptLabel ?? "last";
 		const topPx = 16; // matches baseOffsetPx of jump-to-bottom
+		const text = label === "previous" ? "Jump to previous prompt" : "Jump to last prompt";
 		return html`
 			<button
 				type="button"
 				data-testid="jump-to-last-prompt"
-				aria-label="Jump to last prompt"
+				data-label=${label}
+				aria-label=${text}
 				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
 				style="top:${topPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
 				tabindex="${show ? "0" : "-1"}"
 				@click=${this._handleJumpToLastPromptClick}
 			>
 				${icon(ArrowUp, "sm")}
-				<span>Jump to last prompt</span>
+				<span>${text}</span>
 			</button>
 		`;
 	}
 
-	private _renderJumpToBottom() {
-		const show = this._showJumpToBottom;
-		// Base offset matches the pill strip's bottom-edge gap (1rem). When the
-		// strip is rendered, lift the button above its measured height plus an
-		// 8px breathing gap so wrapped/stacked pills don't obscure it.
+	/** Shared bottom-offset math for jump-to-bottom (both single and split
+	 * variants). Base 16 px + pill-strip height + 8 px breathing gap when
+	 * the strip is rendered. */
+	private _getBottomButtonOffsetPx(): number {
 		const baseOffsetPx = 16;
 		const stripGapPx = this._pillStripHeight > 0 ? this._pillStripHeight + 8 : 0;
-		const bottomPx = baseOffsetPx + stripGapPx;
+		return baseOffsetPx + stripGapPx;
+	}
+
+	private _renderJumpToBottom() {
+		const show = this._showJumpToBottom;
+		const bottomPx = this._getBottomButtonOffsetPx();
+		if (this._showSplitBottom) {
+			// Split layout: one rounded-full pill, two inner buttons separated
+			// by a vertical divider. Each half is independently clickable +
+			// focusable. Each button carries its own inline opacity so tests
+			// (and AT trees) can query either half consistently with the
+			// single-button rendering.
+			const btnStyle = `opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out`;
+			return html`
+				<div
+					data-testid="jump-to-bottom-split"
+					class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-stretch rounded-full bg-background border border-input shadow-sm whitespace-nowrap overflow-hidden"
+					style="bottom:${bottomPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, bottom 150ms ease-out"
+				>
+					<button
+						type="button"
+						data-testid="jump-to-next-prompt"
+						aria-label="Jump to next prompt"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted text-foreground"
+						style=${btnStyle}
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleJumpToNextPromptClick}
+					>
+						${icon(ArrowDown, "sm")}
+						<span>Next prompt</span>
+					</button>
+					<button
+						type="button"
+						data-testid="jump-to-bottom"
+						aria-label="Jump to bottom"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted text-foreground border-l border-input"
+						style=${btnStyle}
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleJumpToBottomClick}
+					>
+						${icon(ChevronsDown, "sm")}
+						<span>Bottom</span>
+					</button>
+				</div>
+			`;
+		}
 		return html`
 			<button
 				type="button"
