@@ -5596,6 +5596,27 @@ async function handleApiRoute(
 
 		const active = verificationHarness.getActiveVerification(body.signalId);
 		if (!active || active.goalId !== goalId || active.gateId !== gateId) {
+			// No in-flight verification — the signal may have already completed.
+			// Distinguish "signal genuinely unknown" (404) from "signal exists but
+			// the step is already resolved" (409, idempotent surface).
+			const histCtx = projectContextManager.getContextForGoal(goalId);
+			const histGate = histCtx?.gateStore.getGate(goalId, gateId);
+			const histSignal = histGate?.signals.find(s => s.id === body.signalId);
+			if (histSignal) {
+				const histStep = histSignal.verification.steps.find(s => s.name === body.stepName);
+				if (histStep && histStep.type === "human-signoff") {
+					json({
+						error: "step is no longer awaiting human input",
+						stepName: histStep.name,
+						status: histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed"),
+					}, 409);
+					return;
+				}
+				if (histStep) {
+					json({ error: `Step "${body.stepName}" is not a human-signoff step` }, 409);
+					return;
+				}
+			}
 			json({ error: "No active verification for that signal/goal/gate" }, 404);
 			return;
 		}
