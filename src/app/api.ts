@@ -482,14 +482,60 @@ export interface DetectedRepo {
   detectedCommands: Record<string, string>;
 }
 
-export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]> {
+/**
+ * Monorepo workspace frameworks detected at `rootPath`. Mirrors the server-
+ * side `MonorepoFramework` union (see `src/server/agent/monorepo-scan.ts`).
+ */
+export type MonorepoFramework =
+  | "pnpm"
+  | "npm-yarn-workspaces"
+  | "nx"
+  | "turbo"
+  | "lerna"
+  | "cargo"
+  | "go"
+  | "gradle";
+
+export interface MonorepoCandidate {
+  relativePath: string;
+  frameworks: MonorepoFramework[];
+  packageName?: string;
+}
+
+export interface MonorepoScanResult {
+  frameworks: MonorepoFramework[];
+  candidates: MonorepoCandidate[];
+  truncated: boolean;
+  totalCount: number;
+}
+
+export interface ProjectScanResult {
+  repos: DetectedRepo[];
+  monorepo?: MonorepoScanResult;
+}
+
+/**
+ * Full server payload from POST /api/projects/scan — `{ repos, monorepo }`.
+ * Use this when you need the monorepo block (V2 Add-Project flow); legacy
+ * call sites that only want `repos` should keep using `scanProjectRepos`.
+ */
+export async function scanProject(dirPath: string): Promise<ProjectScanResult> {
   const res = await gatewayFetch(`/api/projects/scan?path=${encodeURIComponent(dirPath)}`, {
     method: 'POST',
     body: JSON.stringify({ path: dirPath }),
   });
   if (!res.ok) throw new Error(`Scan failed (${res.status})`);
   const data = await res.json();
-  return Array.isArray(data?.repos) ? data.repos as DetectedRepo[] : [];
+  const repos = Array.isArray(data?.repos) ? data.repos as DetectedRepo[] : [];
+  const monorepo = data?.monorepo && typeof data.monorepo === "object"
+    ? data.monorepo as MonorepoScanResult
+    : undefined;
+  return { repos, monorepo };
+}
+
+export async function scanProjectRepos(dirPath: string): Promise<DetectedRepo[]> {
+  const { repos } = await scanProject(dirPath);
+  return repos;
 }
 
 export async function browseDirectory(dirPath?: string): Promise<{

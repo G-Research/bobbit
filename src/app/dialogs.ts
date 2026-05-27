@@ -15,9 +15,18 @@ import {
 	GOAL_STATE_LABELS,
 	type Goal,
 	type GoalState,
-	type Project,
 } from "./state.js";
-import { gatewayFetch, updateGoal, SymlinkRootError } from "./api.js";
+import { gatewayFetch, updateGoal, SymlinkRootError, type DetectedRepo, type MonorepoScanResult } from "./api.js";
+import "../ui/components/DirectoryPicker.js";
+import type {
+	DirectoryPicker as DirectoryPickerEl,
+	DirectoryPickerPathDetail,
+	DirectoryBrowseResult,
+} from "../ui/components/DirectoryPicker.js";
+import type {
+	ProjectScanItem,
+	ProjectAssistantScanContext,
+} from "./project-assistant-autoprompt.js";
 import { errorDetails } from "./error-helpers.js";
 import "../ui/components/ErrorDetails.js";
 import { updateLocalSessionTitle } from "./api.js";
@@ -1476,474 +1485,24 @@ function showGoalEditDialog(existingGoal: Goal): void {
 // PROJECT REGISTRATION DIALOG
 // ============================================================================
 
-export function showProjectDialog(): void {
-	const container = document.createElement("div");
-	document.body.appendChild(container);
-
-	let pathValue = "";
-	let loading = false;
-	let error = "";
-	let browsing = false;
-	let browseEntries: Array<{ name: string; path: string }> = [];
-	let browseCurrent = "";
-	let browseParent: string | null = null;
-	let browseLoading = false;
-	let browseError = "";
-
-	// Live detection state — updated as the user types/selects a path
-	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
-	let detectTimer: ReturnType<typeof setTimeout> | null = null;
-
-	// Preflight validation state — runs alongside detection. See
-	// docs/design/robust-add-project.md. Surfaces pass/warn/fail checks before
-	// the user can submit; a fail blocks submission. Renders between path input
-	// and footer; gracefully degrades when the server endpoint is missing
-	// (older gateway) by hiding the panel entirely.
-	let preflightReport: PreflightReport | null = null;
-	let preflightLoading = false;
-	let preflightError = "";
-	let preflightToken = 0;
-	let archiving = false;
-	let preflightUnavailable = false;
-
-	const runPreflight = async (dirPath: string) => {
-		const trimmed = dirPath.trim();
-		if (!trimmed) {
-			preflightReport = null;
-			preflightLoading = false;
-			preflightError = "";
-			renderDialog();
-			return;
-		}
-		if (preflightUnavailable) return;
-		const token = ++preflightToken;
-		preflightLoading = true;
-		preflightError = "";
-		renderDialog();
-		try {
-			const res = await gatewayFetch(`/api/projects/preflight?path=${encodeURIComponent(trimmed)}`);
-			if (token !== preflightToken) return; // stale
-			if (res.status === 404) {
-				// Older gateway without preflight — silently skip.
-				// Guarded by the `if (preflightUnavailable) return` above, so this warns at most once.
-				console.warn("[preflight] endpoint unavailable — hiding panel");
-				preflightUnavailable = true;
-				preflightReport = null;
-				preflightLoading = false;
-				renderDialog();
-				return;
-			}
-			if (!res.ok) {
-				preflightError = `Preflight failed (${res.status})`;
-				preflightReport = null;
-			} else {
-				preflightReport = await res.json() as PreflightReport;
-			}
-		} catch (err) {
-			if (token !== preflightToken) return;
-			preflightError = err instanceof Error ? err.message : String(err);
-			preflightReport = null;
-		} finally {
-			if (token === preflightToken) {
-				preflightLoading = false;
-				renderDialog();
-			}
-		}
-	};
-
-	// Multi-repo scan checklist state — surfaced as an intermediate step when
-	// the chosen path resolves to more than one detected repo. Single-repo
-	// projects skip this step entirely. The selection is informational
-	// (transparency before routing to the assistant); the project assistant
-	// re-runs `scanRepos` server-side and uses it as ground truth, but this
-	// step gives the user a chance to confirm + understand what's coming
-	// without typing anything in chat.
-	interface DetectedRepo { folder: string; hasGit: boolean; detectedCommands: Record<string, string> }
-	let scanResults: DetectedRepo[] | null = null;
-	let scanSelection: Set<string> = new Set();
-	let showingScan = false;
-	let scanScaffolding = false;
-
-	const runDetection = async (dirPath: string) => {
-		if (!dirPath.trim()) { detectionResult = null; renderDialog(); return; }
-		try {
-			const { detectProject } = await import("./api.js");
-			detectionResult = await detectProject(dirPath.trim());
-		} catch {
-			detectionResult = null;
-		}
-		renderDialog();
-	};
-
-	const debouncedDetect = (dirPath: string) => {
-		if (detectTimer) clearTimeout(detectTimer);
-		detectTimer = setTimeout(() => {
-			runDetection(dirPath);
-			runPreflight(dirPath);
-		}, 400);
-	};
-
-	const openArchiveConfirm = async () => {
-		if (!preflightReport) return;
-		const rootPath = preflightReport.rootPath;
-		const gatewayOwned = preflightReport.checks.some(c => c.id === "bobbit.gateway-owned" && c.level !== "pass");
-		const existingDetail = preflightReport.checks.find(c => c.id === "bobbit.existing")?.detail || "";
-		const confirmed = await promptArchiveConfirm({ rootPath, gatewayOwned, existingDetail });
-		if (!confirmed) return;
-		archiving = true;
-		renderDialog();
-		try {
-			const res = await gatewayFetch("/api/projects/archive-bobbit", {
-				method: "POST",
-				body: JSON.stringify({ rootPath }),
-			});
-			if (!res.ok) {
-				const data = await res.json().catch(() => ({} as any));
-				showConnectionError(
-					"Failed to archive .bobbit/",
-					data?.error || `Failed: ${res.status}`,
-					{ code: data?.code, stack: data?.stack },
-				);
-			}
-		} catch (err) {
-			const { message, code, stack } = errorDetails(err);
-			showConnectionError("Failed to archive .bobbit/", message, { code, stack });
-		} finally {
-			archiving = false;
-			// Re-run preflight + detection to reflect the new on-disk state.
-			runDetection(pathValue);
-			runPreflight(pathValue);
-		}
-	};
-
-	const cleanup = () => {
-		render(html``, container);
-		container.remove();
-	};
-
-	const doContinue = async () => {
-		const trimmedPath = pathValue.trim();
-		if (!trimmedPath) return;
-		loading = true;
-		error = "";
-		renderDialog();
-
-		try {
-			const { detectProject, registerProject, fetchProjects, scanProjectRepos } = await import("./api.js");
-			const detection = await detectProject(trimmedPath);
-
-			if (detection.hasBobbit) {
-				// Path A: Auto-import
-				let project: Project | null = null;
-				try {
-					project = await registerProject(detection.name, trimmedPath, undefined);
-				} catch (e) {
-					if (e instanceof SymlinkRootError) {
-						await promptSymlinkConfirm(detection.name, trimmedPath, e.canonical, async (canonical) => {
-							try {
-								const p2 = await registerProject(detection.name, canonical, undefined, false, true);
-								if (p2) {
-									setProjects(await fetchProjects());
-									renderApp();
-									cleanup();
-								} else {
-									loading = false;
-									renderDialog();
-								}
-							} catch (err2) {
-								const { message, code, stack } = errorDetails(err2);
-								showConnectionError("Failed to register project", message, { code, stack });
-								loading = false;
-								renderDialog();
-							}
-						}, () => {
-							loading = false;
-							error = "";
-							renderDialog();
-						});
-						return;
-					}
-					throw e;
-				}
-				if (project) {
-					setProjects(await fetchProjects());
-					renderApp();
-					cleanup();
-				} else {
-					loading = false;
-					renderDialog();
-				}
-				return;
-			}
-
-			const scaffolding = !(detection.exists && !detection.isEmpty);
-			// Run a multi-repo scan for non-scaffolding paths so we can surface
-			// detected sibling repos as a checklist before routing to the
-			// assistant. Scaffolding (empty dir / new path) skips the scan.
-			if (!scaffolding) {
-				try {
-					const repos = await scanProjectRepos(trimmedPath);
-					const hasMulti = repos.length > 1 || repos.some(r => r.folder !== ".");
-					if (hasMulti) {
-						scanResults = repos;
-						scanSelection = new Set(repos.map(r => r.folder));
-						showingScan = true;
-						scanScaffolding = false;
-						loading = false;
-						renderDialog();
-						return;
-					}
-				} catch {
-					// Scan failure is non-fatal — fall through to the standard flow.
-				}
-			}
-
-			// Single-repo (or scan failed / scaffolding): existing flow.
-			cleanup();
-			await createProjectAssistantSession(trimmedPath, scaffolding);
-		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
-			loading = false;
-			renderDialog();
-		}
-	};
-
-	const confirmScanAndContinue = async () => {
-		const trimmedPath = pathValue.trim();
-		if (!trimmedPath) return;
-		cleanup();
-		await createProjectAssistantSession(trimmedPath, scanScaffolding);
-	};
-
-	const openBrowser = async () => {
-		browsing = true;
-		browseLoading = true;
-		browseError = "";
-		renderDialog();
-		try {
-			const { browseDirectory } = await import("./api.js");
-			const result = await browseDirectory(pathValue.trim() || undefined);
-			browseEntries = result.entries;
-			browseCurrent = result.current;
-			browseParent = result.parent;
-		} catch (err) {
-			browseError = err instanceof Error ? err.message : String(err);
-		}
-		browseLoading = false;
-		renderDialog();
-	};
-
-	const navigateBrowse = async (dirPath: string) => {
-		browseLoading = true;
-		browseError = "";
-		renderDialog();
-		try {
-			const { browseDirectory } = await import("./api.js");
-			const result = await browseDirectory(dirPath);
-			browseEntries = result.entries;
-			browseCurrent = result.current;
-			browseParent = result.parent;
-		} catch (err) {
-			browseError = err instanceof Error ? err.message : String(err);
-		}
-		browseLoading = false;
-		renderDialog();
-	};
-
-	const selectBrowsed = () => {
-		pathValue = browseCurrent;
-		browsing = false;
-		renderDialog();
-		runDetection(pathValue);
-		runPreflight(pathValue);
-	};
-
-	const renderDialog = () => {
-		const browseContent = browsing ? html`
-			<div class="flex flex-col gap-2" data-testid="directory-browser">
-				<div class="flex items-center gap-2">
-					${browseParent != null ? html`
-						<button
-							class="px-2 py-1 text-xs text-foreground rounded border border-border hover:bg-secondary/50 transition-colors"
-							@click=${() => navigateBrowse(browseParent!)}
-							data-testid="browse-up"
-						>Up</button>
-					` : ""}
-					<span class="text-xs text-muted-foreground truncate flex-1" title="${browseCurrent}">${browseCurrent}</span>
-				</div>
-				${browseLoading ? html`<p class="text-xs text-muted-foreground">Loading…</p>` : ""}
-				${browseError ? html`<p class="text-xs text-red-500">${browseError}</p>` : ""}
-				${!browseLoading && !browseError ? html`
-					<div class="max-h-[200px] overflow-y-auto border border-border rounded">
-						${browseEntries.length === 0
-							? html`<div class="px-3 py-2 text-xs text-muted-foreground">No subdirectories</div>`
-							: browseEntries.map(entry => html`
-								<button
-									class="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-secondary/50 transition-colors flex items-center gap-2 border-b border-border last:border-0"
-									@click=${() => navigateBrowse(entry.path)}
-									data-testid="browse-entry"
-								>
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-									<span class="truncate">${entry.name}</span>
-								</button>
-							`)}
-					</div>
-				` : ""}
-				<div class="flex gap-2 justify-end">
-					${Button({ variant: "ghost", size: "sm" as any, onClick: () => { browsing = false; renderDialog(); }, children: "Cancel" })}
-					${Button({ variant: "default", size: "sm" as any, onClick: selectBrowsed, children: "Select", disabled: !browseCurrent })}
-				</div>
-			</div>
-		` : "";
-
-		const scanContent = showingScan && scanResults ? html`
-			<div class="flex flex-col gap-3" data-testid="project-scan-checklist">
-				<p class="text-xs text-muted-foreground">
-					Detected ${scanResults.length} repo${scanResults.length === 1 ? "" : "s"} in <code class="font-mono">${pathValue.trim()}</code>.
-					The project assistant will use this as a starting point — you can refine
-					the selection in the chat.
-				</p>
-				<div class="max-h-[260px] overflow-y-auto border border-border rounded" data-testid="scan-repo-list">
-					${scanResults.length === 0
-						? html`<div class="px-3 py-2 text-xs text-muted-foreground">No repos detected.</div>`
-						: scanResults.map(r => {
-							const checked = scanSelection.has(r.folder);
-							const cmdCount = Object.keys(r.detectedCommands || {}).length;
-							return html`
-								<label class="flex items-start gap-2 px-3 py-2 text-sm border-b border-border last:border-0 cursor-pointer hover:bg-secondary/40" data-testid="scan-repo-row" data-repo-folder=${r.folder}>
-									<input type="checkbox" class="mt-1 shrink-0" .checked=${checked}
-										data-testid="scan-repo-toggle"
-										@change=${(e: Event) => {
-											if ((e.target as HTMLInputElement).checked) scanSelection.add(r.folder);
-											else scanSelection.delete(r.folder);
-											renderDialog();
-										}}/>
-									<div class="flex flex-col min-w-0 flex-1">
-										<div class="flex items-center gap-2">
-											<code class="font-mono text-foreground">${r.folder === "." ? "(root)" : r.folder}</code>
-											<span class="text-[10px] text-muted-foreground uppercase tracking-wider">${r.hasGit ? "git" : "manifest"}</span>
-											<span class="text-[10px] text-muted-foreground">${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>
-											${cmdCount === 0
-												? html`<span class="text-[10px] text-amber-600 dark:text-amber-400 italic" data-testid="scan-repo-data-only">data-only</span>`
-												: ""}
-										</div>
-										${cmdCount > 0 ? html`<div class="text-[10px] text-muted-foreground font-mono truncate" title=${Object.keys(r.detectedCommands).join(", ")}>${Object.keys(r.detectedCommands).join(", ")}</div>` : ""}
-									</div>
-								</label>
-							`;
-						})}
-				</div>
-				<p class="text-[11px] text-muted-foreground">
-					Unchecked repos won't be added as components. The project assistant
-					will scaffold workflows for the checked ones, or you can preview
-					and edit later in <strong>Settings → Components</strong>.
-				</p>
-			</div>
-		` : "";
-
-		render(
-			Dialog({
-				isOpen: true,
-				onClose: cleanup,
-				width: "min(480px, 92vw)",
-				height: "auto",
-				backdropClassName: "bg-black/50 backdrop-blur-sm",
-				children: html`
-					${DialogContent({
-						children: html`
-							${DialogHeader({ title: showingScan ? "Detected repos" : (detectionResult?.hasBobbit ? "Register Project" : "Add Project") })}
-							<div class="mt-4 flex flex-col gap-4">
-								${showingScan ? scanContent : !browsing ? html`
-									<div>
-										<label class="text-xs text-muted-foreground mb-1 block">Project Directory</label>
-										<div class="flex items-center gap-2">
-											<div class="flex-1">
-												${Input({
-													type: "text",
-													placeholder: "/path/to/project",
-													value: pathValue,
-													onInput: (e: Event) => {
-														pathValue = (e.target as HTMLInputElement).value;
-														debouncedDetect(pathValue);
-														renderDialog();
-													},
-													onKeyDown: (e: KeyboardEvent) => {
-														if (e.key === "Enter") { e.preventDefault(); doContinue(); }
-														if (e.key === "Escape") cleanup();
-													},
-												})}
-											</div>
-											${Button({
-												variant: "ghost",
-												onClick: openBrowser,
-												children: "Browse",
-											})}
-										</div>
-										${detectionResult && pathValue.trim() ? html`
-											<p class="text-xs mt-1.5 ${detectionResult.hasBobbit ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}">
-												${detectionResult.hasBobbit
-													? html`An existing Bobbit project was found in this directory. Click <strong>Continue</strong> to register it.`
-													: detectionResult.exists && !detectionResult.isEmpty
-														? "This directory will be set up as a new Bobbit project."
-														: "A new project will be scaffolded in this directory."}
-											</p>
-										` : ""}
-										${pathValue.trim() && !preflightUnavailable ? renderPreflightPanel({
-											report: preflightReport,
-											loading: preflightLoading,
-											error: preflightError,
-											archiving,
-											onArchive: openArchiveConfirm,
-										}) : ""}
-									</div>
-								` : browseContent}
-								${error ? html`<p class="text-xs text-red-500">${error}</p>` : ""}
-							</div>
-						`,
-					})}
-					${showingScan ? DialogFooter({
-						className: "px-6 pb-4",
-						children: html`
-							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: () => { showingScan = false; scanResults = null; renderDialog(); }, children: "Back" })}
-								${Button({
-									variant: "default",
-									onClick: confirmScanAndContinue,
-									disabled: scanSelection.size === 0,
-									children: "Continue with assistant",
-								})}
-							</div>
-						`,
-					}) : !browsing ? DialogFooter({
-						className: "px-6 pb-4",
-						children: html`
-							<div class="flex gap-2 justify-end">
-								${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
-								${Button({
-									variant: "default",
-									onClick: doContinue,
-									disabled: !pathValue.trim() || loading || archiving || (preflightReport?.hasFail === true),
-									children: loading ? "Detecting…" : (archiving ? "Archiving…" : "Continue"),
-								})}
-							</div>
-						`,
-					}) : ""}
-				`,
-			}),
-			container,
-		);
-
-		requestAnimationFrame(() => {
-			const input = container.querySelector("input");
-			if (input && !browsing) input.focus();
-		});
-	};
-
-	if (pathValue.trim()) { runDetection(pathValue); runPreflight(pathValue); }
-	renderDialog();
-}
-
-export async function createProjectAssistantSession(dirPath: string, scaffolding: boolean, opts?: { projectId?: string; existingProjectName?: string }): Promise<void> {
+export async function createProjectAssistantSession(
+	dirPath: string,
+	scaffolding: boolean,
+	opts?: {
+		projectId?: string;
+		existingProjectName?: string;
+		/**
+		 * User-confirmed initial repo/subdirectory selection from the Add
+		 * Project scan checklist. Forwarded to the project-assistant's first
+		 * turn via `connectToSession`'s `projectInitialScanContext` option so
+		 * the assistant treats the selected ids as authoritative starting
+		 * candidates for `propose_project.components`. Only meaningful when
+		 * `scaffolding === false` (new-project registration); ignored
+		 * otherwise. See `src/app/project-assistant-autoprompt.ts`.
+		 */
+		initialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext;
+	},
+): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	renderApp();
@@ -1978,12 +1537,872 @@ export async function createProjectAssistantSession(dirPath: string, scaffolding
 		const projectEditContext = opts?.projectId
 			? { name: opts.existingProjectName || opts.projectId, rootPath: dirPath }
 			: undefined;
-		await connectToSession(id, false, { assistantType: actualType, projectDirPath: dirPath, projectEditContext });
+		// Forward the optional user-confirmed initial scan subset to the
+		// project-assistant's first turn. Only applies to new-project
+		// registration (not scaffolding, not edit-mode) — the Add Project
+		// scan checklist is the only caller that supplies it.
+		const projectInitialScanContext =
+			!scaffolding && !opts?.projectId ? opts?.initialScanContext : undefined;
+		await connectToSession(id, false, {
+			assistantType: actualType,
+			projectDirPath: dirPath,
+			projectEditContext,
+			projectInitialScanContext,
+		});
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create project assistant", message, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		renderApp();
+	}
+}
+
+// ============================================================================
+// PROJECT REGISTRATION DIALOG
+// ----------------------------------------------------------------------------
+// Add Project dialog. Design source of truth: `design-doc` gate on the goal.
+// Key invariants:
+//   - Reusable `<directory-picker>` element (typeahead + browse trigger) for
+//     the path input. Suggestions are absolutely-positioned by the picker so
+//     the surrounding layout (in particular the footer) never shifts.
+//   - Dedicated browse modal (`openProjectBrowseDialog`) opens on top of the
+//     Add Project dialog when the user clicks Browse — the parent dialog
+//     stays mounted with its footer in place.
+//   - Fixed dialog shell (`min(720px, 94vw)` x `min(720px, 92vh)`) with
+//     sticky header, scrollable body, and persistent footer. The footer
+//     container is identical across all states (path/scan + loading + error)
+//     so its bounding box is invariant. Pinned by
+//     `tests/e2e/ui/add-project-footer-stability.spec.ts`.
+//   - Scan checklist surfaces every detected repo *and* monorepo workspace
+//     candidate as a normalized `ProjectScanItem` and forwards the
+//     user-confirmed subset into the project-assistant's first turn via
+//     `createProjectAssistantSession({ initialScanContext })`.
+// ============================================================================
+
+/**
+ * Normalize the `scanProject` payload into a flat `ProjectScanItem[]` for the
+ * scan checklist. Mirrors the spec in `project-assistant-autoprompt.ts`:
+ *
+ *   - One item per `repos[]` entry (`id = "repo:<folder>"`).
+ *   - One item per `monorepo.candidates[]` entry (`id = "workspace:<rel>"`).
+ *   - Fallback single-component candidate (`id = "repo:."`, label "(root)")
+ *     when both arrays are empty, so the legacy single-repo path still
+ *     routes through the assistant with a non-empty `selectedIds`.
+ *
+ * `absolutePath` is the on-disk path of the item; `joinPath` picks the
+ * separator from the root so Windows roots stay Windows-y.
+ */
+function joinScanPath(root: string, rel: string): string {
+	if (!rel || rel === ".") return root;
+	const looksWindows = /^[A-Za-z]:[\\/]/.test(root) || (root.includes("\\") && !root.startsWith("/"));
+	const sep = looksWindows ? "\\" : "/";
+	const trimmedRoot = root.replace(/[\\/]+$/, "");
+	const trimmedRel = rel.replace(/^[\\/]+/, "");
+	return `${trimmedRoot}${sep}${trimmedRel}`;
+}
+
+function buildScanItems(
+	rootPath: string,
+	scan: { repos: DetectedRepo[]; monorepo?: MonorepoScanResult },
+): ProjectScanItem[] {
+	const out: ProjectScanItem[] = [];
+	const repos = Array.isArray(scan.repos) ? scan.repos : [];
+	for (const r of repos) {
+		if (!r || typeof r.folder !== "string") continue;
+		out.push({
+			id: `repo:${r.folder}`,
+			kind: "repo",
+			label: r.folder === "." ? "(root)" : r.folder,
+			repo: r.folder,
+			absolutePath: joinScanPath(rootPath, r.folder),
+			hasGit: !!r.hasGit,
+			detectedCommands: { ...(r.detectedCommands || {}) },
+		});
+	}
+	const candidates = scan.monorepo?.candidates ?? [];
+	for (const w of candidates) {
+		if (!w || typeof w.relativePath !== "string") continue;
+		const wAny = w as unknown as { detectedCommands?: Record<string, string> };
+		out.push({
+			id: `workspace:${w.relativePath}`,
+			kind: "workspace",
+			label: w.relativePath,
+			repo: ".",
+			relativePath: w.relativePath,
+			absolutePath: joinScanPath(rootPath, w.relativePath),
+			hasGit: false,
+			// MonorepoCandidate has no detectedCommands on the wire today; the
+			// autoprompt helper only requires the field to be present.
+			detectedCommands: wAny.detectedCommands ? { ...wAny.detectedCommands } : {},
+		});
+	}
+	if (out.length === 0) {
+		out.push({
+			id: "repo:.",
+			kind: "repo",
+			label: "(root)",
+			repo: ".",
+			absolutePath: rootPath,
+			hasGit: false,
+			detectedCommands: {},
+		});
+	}
+	return out;
+}
+
+/**
+ * Standalone browse modal. Opens on top of the Add Project dialog when the
+ * user clicks the picker's Browse button. Resolves with the selected absolute
+ * path or `null` on cancel. Mirrors the legacy in-dialog browser semantics
+ * (directory-only entries; skips hidden / `node_modules` / symlinks — that
+ * filtering is done server-side by `/api/browse-directory`), but in a
+ * dedicated overlay so the parent dialog's footer stays put.
+ */
+function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
+	return new Promise((resolve) => {
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+
+		let current = "";
+		let parent: string | null = null;
+		let entries: Array<{ name: string; path: string }> = [];
+		let truncated = false;
+		let loading = true;
+		let errorMessage = "";
+		let highlight = -1;
+
+		const close = (result: string | null) => {
+			document.removeEventListener("keydown", onKeyDown, true);
+			render(html``, container);
+			container.remove();
+			resolve(result);
+		};
+
+		const navigate = async (dirPath: string | undefined) => {
+			loading = true;
+			errorMessage = "";
+			renderDialog();
+			try {
+				const { browseDirectory } = await import("./api.js");
+				const result = await browseDirectory(dirPath) as DirectoryBrowseResult & { truncated?: boolean };
+				current = result.current;
+				parent = result.parent;
+				entries = result.entries ?? [];
+				truncated = !!result.truncated;
+				highlight = entries.length > 0 ? 0 : -1;
+			} catch (err) {
+				errorMessage = err instanceof Error ? err.message : String(err);
+				// Keep `current` so the user can still hit Select if they had a
+				// valid path before the error.
+			} finally {
+				loading = false;
+				renderDialog();
+			}
+		};
+
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				// Capture-phase + stopImmediatePropagation so the parent Add Project
+				// dialog's Mini-lit Dialog (which also listens to `document` keydown
+				// for Esc) does not also close when the user dismisses the browse
+				// overlay. Design doc invariant: "Esc closes suggestions → browse →
+				// dialog (in that order)". Pinned by
+				// tests/e2e/ui/add-project-browse-modal.spec.ts.
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				close(null);
+				return;
+			}
+			if (e.key === "ArrowDown") {
+				if (entries.length === 0) return;
+				e.preventDefault();
+				highlight = highlight < 0 ? 0 : (highlight + 1) % entries.length;
+				renderDialog();
+				return;
+			}
+			if (e.key === "ArrowUp") {
+				if (entries.length === 0) return;
+				e.preventDefault();
+				highlight = highlight <= 0 ? entries.length - 1 : highlight - 1;
+				renderDialog();
+				return;
+			}
+			if (e.key === "Enter") {
+				e.preventDefault();
+				if (highlight >= 0 && highlight < entries.length) {
+					const target = entries[highlight];
+					if (target) void navigate(target.path);
+				} else if (current) {
+					close(current);
+				}
+				return;
+			}
+		};
+
+		const renderDialog = () => {
+			render(
+				Dialog({
+					isOpen: true,
+					onClose: () => close(null),
+					width: "min(640px, 92vw)",
+					height: "min(560px, 88vh)",
+					backdropClassName: "bg-black/60 backdrop-blur-sm",
+					children: html`
+						<div class="flex flex-col h-full" data-testid="add-project-browse-dialog">
+							<div class="shrink-0 px-6 pt-6 pb-2">
+								${DialogHeader({ title: "Browse for directory" })}
+								<div class="flex items-center gap-2 mt-3 min-h-[28px]">
+									<button
+										type="button"
+										class="px-2 py-1 text-xs rounded border border-border text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+										?disabled=${parent == null || loading}
+										@click=${() => parent != null && void navigate(parent)}
+										data-testid="add-project-browse-up"
+									>Up</button>
+									<span
+										class="text-xs text-muted-foreground flex-1 min-w-0 truncate font-mono"
+										title=${current}
+										data-testid="add-project-browse-current"
+									>${current || "Loading…"}</span>
+								</div>
+							</div>
+							<div class="flex-1 min-h-0 px-6 overflow-hidden flex flex-col gap-2">
+								<div class="text-[11px] min-h-[16px] ${errorMessage ? "text-red-500" : "text-muted-foreground"}" data-testid="add-project-browse-status">
+									${loading
+										? "Loading…"
+										: errorMessage
+											? `Error: ${errorMessage}`
+											: entries.length === 0
+												? "No subdirectories."
+												: truncated
+													? `Showing first ${entries.length} directories.`
+													: ""}
+								</div>
+								<div class="flex-1 min-h-0 overflow-y-auto border border-border rounded" data-testid="add-project-browse-list">
+									${entries.length === 0 && !loading && !errorMessage
+										? html`<div class="px-3 py-2 text-xs text-muted-foreground">No subdirectories</div>`
+										: entries.map((entry, idx) => {
+											const active = idx === highlight;
+											const rowClass = active
+												? "bg-accent text-accent-foreground"
+												: "text-foreground hover:bg-secondary/50";
+											return html`
+												<button
+													type="button"
+													class="w-full text-left px-3 py-1.5 text-sm transition-colors flex items-center gap-2 border-b border-border last:border-0 ${rowClass}"
+													data-testid="add-project-browse-entry"
+													data-path=${entry.path}
+													@click=${() => void navigate(entry.path)}
+													@mouseenter=${() => { highlight = idx; renderDialog(); }}
+												>
+													<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+													<span class="truncate">${entry.name}</span>
+												</button>
+											`;
+										})}
+								</div>
+							</div>
+							<div class="shrink-0 px-6 py-4 border-t border-border" data-testid="add-project-browse-footer">
+								<div class="flex gap-2 justify-end">
+									${Button({ variant: "ghost", onClick: () => close(null), children: "Cancel" })}
+									${Button({
+										variant: "default",
+										onClick: () => close(current || null),
+										disabled: !current || loading,
+										children: "Select current",
+									})}
+								</div>
+							</div>
+						</div>
+					`,
+				}),
+				container,
+			);
+		};
+
+		document.addEventListener("keydown", onKeyDown, true);
+		renderDialog();
+		void navigate(initialPath?.trim() || undefined);
+	});
+}
+
+/**
+ * Add Project dialog — see header comment above for design rationale.
+ * Single entry point invoked from `src/app/dialogs-lazy.ts::showProjectDialog`.
+ */
+export function showProjectDialog(): void {
+	const container = document.createElement("div");
+	document.body.appendChild(container);
+
+	type Step = "path" | "scan";
+	let step: Step = "path";
+	let pathValue = "";
+
+	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
+	let detectionToken = 0;
+
+	let preflightReport: PreflightReport | null = null;
+	let preflightLoading = false;
+	let preflightError = "";
+	let preflightToken = 0;
+	let preflightUnavailable = false;
+	let archiving = false;
+
+	let scanItems: ProjectScanItem[] = [];
+	let scanSelection = new Set<string>();
+
+	let busy = false;
+	let errorMessage: string | null = null;
+	let detectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Single picker instance reused across renders so its internal state
+	// (focus, suggestion list, etc.) is preserved.
+	const pickerEl = document.createElement("directory-picker") as DirectoryPickerEl;
+	pickerEl.placeholder = "/path/to/project";
+	pickerEl.setAttribute("data-testid", "add-project-picker");
+
+	const recentPaths = (): Array<{ path: string; source: string }> => {
+		const seen = new Set<string>();
+		const out: Array<{ path: string; source: string }> = [];
+		for (const p of state.projects ?? []) {
+			if (!p?.rootPath || seen.has(p.rootPath)) continue;
+			seen.add(p.rootPath);
+			out.push({ path: p.rootPath, source: "registered" });
+		}
+		return out;
+	};
+
+	const cleanup = () => {
+		if (detectDebounceTimer) {
+			clearTimeout(detectDebounceTimer);
+			detectDebounceTimer = null;
+		}
+		render(html``, container);
+		container.remove();
+	};
+
+	const runDetection = async (dirPath: string) => {
+		const trimmed = dirPath.trim();
+		if (!trimmed) {
+			detectionResult = null;
+			renderDialog();
+			return;
+		}
+		const token = ++detectionToken;
+		try {
+			const { detectProject } = await import("./api.js");
+			const result = await detectProject(trimmed);
+			if (token !== detectionToken) return;
+			detectionResult = result;
+		} catch {
+			if (token !== detectionToken) return;
+			detectionResult = null;
+		}
+		renderDialog();
+	};
+
+	const runPreflight = async (dirPath: string) => {
+		const trimmed = dirPath.trim();
+		if (!trimmed) {
+			preflightReport = null;
+			preflightLoading = false;
+			preflightError = "";
+			renderDialog();
+			return;
+		}
+		if (preflightUnavailable) return;
+		const token = ++preflightToken;
+		preflightLoading = true;
+		preflightError = "";
+		renderDialog();
+		try {
+			const res = await gatewayFetch(`/api/projects/preflight?path=${encodeURIComponent(trimmed)}`);
+			if (token !== preflightToken) return;
+			if (res.status === 404) {
+				console.warn("[preflight] endpoint unavailable — hiding panel");
+				preflightUnavailable = true;
+				preflightReport = null;
+				preflightLoading = false;
+				renderDialog();
+				return;
+			}
+			if (!res.ok) {
+				preflightError = `Preflight failed (${res.status})`;
+				preflightReport = null;
+			} else {
+				preflightReport = (await res.json()) as PreflightReport;
+			}
+		} catch (err) {
+			if (token !== preflightToken) return;
+			preflightError = err instanceof Error ? err.message : String(err);
+			preflightReport = null;
+		} finally {
+			if (token === preflightToken) {
+				preflightLoading = false;
+				renderDialog();
+			}
+		}
+	};
+
+	const onEffectivePathChange = (next: string, immediate: boolean): void => {
+		pathValue = next;
+		// Any path change drops us back to the path step and clears scan state.
+		if (step !== "path") {
+			step = "path";
+			scanItems = [];
+			scanSelection = new Set();
+		}
+		errorMessage = null;
+		// Bump tokens immediately so stale in-flight responses for the previous
+		// path can't overwrite the new path's state.
+		detectionToken++;
+		preflightToken++;
+		if (detectDebounceTimer) {
+			clearTimeout(detectDebounceTimer);
+			detectDebounceTimer = null;
+		}
+		if (!next.trim()) {
+			detectionResult = null;
+			preflightReport = null;
+			preflightLoading = false;
+			preflightError = "";
+			renderDialog();
+			return;
+		}
+		const run = () => {
+			void runDetection(pathValue);
+			void runPreflight(pathValue);
+		};
+		if (immediate) {
+			run();
+		} else {
+			detectDebounceTimer = setTimeout(run, 350);
+		}
+		renderDialog();
+	};
+
+	pickerEl.addEventListener("directory-input", (e: Event) => {
+		const detail = (e as CustomEvent<DirectoryPickerPathDetail>).detail;
+		onEffectivePathChange(detail.path, false);
+	});
+	pickerEl.addEventListener("directory-select", (e: Event) => {
+		const detail = (e as CustomEvent<DirectoryPickerPathDetail>).detail;
+		onEffectivePathChange(detail.path, true);
+	});
+	pickerEl.addEventListener("directory-commit", () => {
+		// Enter with no highlighted suggestion → treat as Continue.
+		void doContinue();
+	});
+	pickerEl.addEventListener("directory-browse-request", () => {
+		void openBrowseModal();
+	});
+	pickerEl.addEventListener("directory-cancel", () => {
+		cleanup();
+	});
+
+	const openBrowseModal = async () => {
+		const selected = await openProjectBrowseDialog(pathValue);
+		if (selected != null) {
+			pickerEl.value = selected;
+			onEffectivePathChange(selected, true);
+		}
+		// Focus returns to the picker regardless of outcome.
+		pickerEl.focusInput();
+	};
+
+	const openArchiveConfirm = async () => {
+		if (!preflightReport) return;
+		const rootPath = preflightReport.rootPath;
+		const gatewayOwned = preflightReport.checks.some(
+			(c) => c.id === "bobbit.gateway-owned" && c.level !== "pass",
+		);
+		const existingDetail = preflightReport.checks.find((c) => c.id === "bobbit.existing")?.detail || "";
+		const confirmed = await promptArchiveConfirm({ rootPath, gatewayOwned, existingDetail });
+		if (!confirmed) return;
+		archiving = true;
+		renderDialog();
+		try {
+			const res = await gatewayFetch("/api/projects/archive-bobbit", {
+				method: "POST",
+				body: JSON.stringify({ rootPath }),
+			});
+			if (!res.ok) {
+				const data = (await res.json().catch(() => ({}))) as any;
+				showConnectionError(
+					"Failed to archive .bobbit/",
+					data?.error || `Failed: ${res.status}`,
+					{ code: data?.code, stack: data?.stack },
+				);
+			}
+		} catch (err) {
+			const { message, code, stack } = errorDetails(err);
+			showConnectionError("Failed to archive .bobbit/", message, { code, stack });
+		} finally {
+			archiving = false;
+			void runDetection(pathValue);
+			void runPreflight(pathValue);
+		}
+	};
+
+	const doContinue = async () => {
+		if (busy) return;
+		const trimmed = pathValue.trim();
+		if (!trimmed) return;
+		if (step === "scan") {
+			void confirmScanAndContinue();
+			return;
+		}
+		// Block when preflight reports a hard fail (matches legacy behavior).
+		if (preflightReport?.hasFail) return;
+		busy = true;
+		errorMessage = null;
+		renderDialog();
+		try {
+			const { detectProject, registerProject, fetchProjects, scanProject } = await import("./api.js");
+			const detection = await detectProject(trimmed);
+
+			if (detection.hasBobbit) {
+				// Auto-import existing project.
+				try {
+					const project = await registerProject(detection.name, trimmed, undefined);
+					if (project) {
+						setProjects(await fetchProjects());
+						renderApp();
+						cleanup();
+					} else {
+						busy = false;
+						renderDialog();
+					}
+				} catch (e) {
+					if (e instanceof SymlinkRootError) {
+						await promptSymlinkConfirm(
+							detection.name,
+							trimmed,
+							e.canonical,
+							async (canonical) => {
+								try {
+									const p2 = await registerProject(
+										detection.name,
+										canonical,
+										undefined,
+										false,
+										true,
+									);
+									if (p2) {
+										setProjects(await fetchProjects());
+										renderApp();
+										cleanup();
+									} else {
+										busy = false;
+										renderDialog();
+									}
+								} catch (err2) {
+									const { message, code, stack } = errorDetails(err2);
+									showConnectionError("Failed to register project", message, { code, stack });
+									busy = false;
+									renderDialog();
+								}
+							},
+							() => {
+								busy = false;
+								errorMessage = null;
+								renderDialog();
+							},
+						);
+						return;
+					}
+					throw e;
+				}
+				return;
+			}
+
+			const scaffolding = !(detection.exists && !detection.isEmpty);
+			if (scaffolding) {
+				// Empty / new directory → scaffolding mode, no scan checklist.
+				cleanup();
+				await createProjectAssistantSession(trimmed, true);
+				return;
+			}
+
+			// Non-bobbit, non-empty: scan to surface repo/subdirectory candidates.
+			let scan: { repos: DetectedRepo[]; monorepo?: MonorepoScanResult } = { repos: [], monorepo: undefined };
+			try {
+				scan = await scanProject(trimmed);
+			} catch {
+				// Scan failure is non-fatal — fall back to a single-component item.
+				scan = { repos: [], monorepo: undefined };
+			}
+			const items = buildScanItems(trimmed, scan);
+			if (items.length <= 1) {
+				const initialScanContext: ProjectAssistantScanContext | undefined =
+					items.length === 1 && items[0]
+						? { rootPath: trimmed, items, selectedIds: [items[0].id] }
+						: undefined;
+				cleanup();
+				await createProjectAssistantSession(trimmed, false, { initialScanContext });
+				return;
+			}
+			scanItems = items;
+			scanSelection = new Set(items.map((it) => it.id));
+			step = "scan";
+			busy = false;
+			renderDialog();
+		} catch (err) {
+			errorMessage = err instanceof Error ? err.message : String(err);
+			busy = false;
+			renderDialog();
+		}
+	};
+
+	const confirmScanAndContinue = async () => {
+		if (busy) return;
+		const trimmed = pathValue.trim();
+		if (!trimmed) return;
+		if (scanSelection.size === 0) return;
+		const initialScanContext: ProjectAssistantScanContext = {
+			rootPath: trimmed,
+			items: scanItems,
+			selectedIds: scanItems.filter((it) => scanSelection.has(it.id)).map((it) => it.id),
+		};
+		busy = true;
+		renderDialog();
+		cleanup();
+		await createProjectAssistantSession(trimmed, false, { initialScanContext });
+	};
+
+	const goBackToPath = () => {
+		if (busy) return;
+		step = "path";
+		scanItems = [];
+		scanSelection = new Set();
+		renderDialog();
+		pickerEl.focusInput();
+	};
+
+	const toggleScanItem = (id: string, checked: boolean) => {
+		if (checked) scanSelection.add(id);
+		else scanSelection.delete(id);
+		renderDialog();
+	};
+
+	const selectAll = () => {
+		scanSelection = new Set(scanItems.map((it) => it.id));
+		renderDialog();
+	};
+	const deselectAll = () => {
+		scanSelection = new Set();
+		renderDialog();
+	};
+
+	// --- detection-status one-liner (reserved height) -----------------------
+	const renderStatusLine = () => {
+		const trimmed = pathValue.trim();
+		if (errorMessage) {
+			return html`<span class="text-red-500 text-xs">${errorMessage}</span>`;
+		}
+		if (!trimmed) {
+			return html`<span class="text-muted-foreground text-xs">Type a path or click Browse to pick a directory.</span>`;
+		}
+		if (!detectionResult) {
+			return html`<span class="text-muted-foreground text-xs">Checking directory…</span>`;
+		}
+		if (detectionResult.hasBobbit) {
+			return html`<span class="text-green-600 dark:text-green-400 text-xs">An existing Bobbit project was found. Click <strong>Continue</strong> to register it.</span>`;
+		}
+		if (detectionResult.exists && !detectionResult.isEmpty) {
+			return html`<span class="text-muted-foreground text-xs">This directory will be set up as a new Bobbit project.</span>`;
+		}
+		return html`<span class="text-muted-foreground text-xs">A new project will be scaffolded in this directory.</span>`;
+	};
+
+	// --- path step body -----------------------------------------------------
+	const renderPathBody = () => html`
+		<div class="flex flex-col gap-3 h-full min-h-0">
+			<label class="text-xs text-muted-foreground block shrink-0">Project Directory</label>
+			<div class="shrink-0">${pickerEl}</div>
+			<div class="shrink-0 min-h-[20px]" data-testid="add-project-status-slot">${renderStatusLine()}</div>
+			<div class="flex-1 min-h-0 overflow-y-auto" data-testid="add-project-preflight-slot">
+				${pathValue.trim() && !preflightUnavailable
+					? renderPreflightPanel({
+						report: preflightReport,
+						loading: preflightLoading,
+						error: preflightError,
+						archiving,
+						onArchive: openArchiveConfirm,
+					})
+					: ""}
+			</div>
+		</div>
+	`;
+
+	// --- scan step body -----------------------------------------------------
+	const renderScanBody = () => {
+		const total = scanItems.length;
+		const selected = scanSelection.size;
+		return html`
+			<div class="flex flex-col gap-3 h-full min-h-0" data-testid="add-project-scan-checklist">
+				<p class="text-xs text-muted-foreground shrink-0">
+					Detected ${total} repo/subdirectory candidate${total === 1 ? "" : "s"} in
+					<code class="font-mono">${pathValue.trim()}</code>.
+				</p>
+				<div class="flex items-center gap-3 shrink-0 text-xs">
+					<span data-testid="add-project-selected-count" class="text-foreground font-medium">
+						Selected ${selected} of ${total}
+					</span>
+					<button
+						type="button"
+						class="px-2 py-1 rounded border border-border text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+						?disabled=${selected === total}
+						@click=${selectAll}
+						data-testid="add-project-select-all"
+					>Select all</button>
+					<button
+						type="button"
+						class="px-2 py-1 rounded border border-border text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+						?disabled=${selected === 0}
+						@click=${deselectAll}
+						data-testid="add-project-deselect-all"
+					>Deselect all</button>
+				</div>
+				<div class="flex-1 min-h-0 overflow-y-auto border border-border rounded">
+					${scanItems.map((item) => {
+						const checked = scanSelection.has(item.id);
+						const cmdCount = Object.keys(item.detectedCommands || {}).length;
+						return html`
+							<label
+								class="flex items-start gap-2 px-3 py-2 text-sm border-b border-border last:border-0 cursor-pointer hover:bg-secondary/40"
+								data-testid="add-project-scan-row-${item.id}"
+								data-scan-id=${item.id}
+							>
+								<input
+									type="checkbox"
+									class="mt-1 shrink-0"
+									.checked=${checked}
+									data-testid="add-project-scan-checkbox-${item.id}"
+									@change=${(e: Event) => toggleScanItem(item.id, (e.target as HTMLInputElement).checked)}
+								/>
+								<div class="flex flex-col min-w-0 flex-1">
+									<div class="flex items-center gap-2 flex-wrap">
+										<code class="font-mono text-foreground">${item.label}</code>
+										<span class="text-[10px] uppercase tracking-wider text-muted-foreground">${item.kind === "workspace" ? "workspace" : item.hasGit ? "git" : "manifest"}</span>
+										${cmdCount > 0
+											? html`<span class="text-[10px] text-muted-foreground">${cmdCount} cmd${cmdCount === 1 ? "" : "s"}</span>`
+											: html`<span class="text-[10px] text-amber-600 dark:text-amber-400 italic">data-only</span>`}
+									</div>
+									${cmdCount > 0
+										? html`<div class="text-[10px] text-muted-foreground font-mono truncate" title=${Object.keys(item.detectedCommands).join(", ")}>${Object.keys(item.detectedCommands).join(", ")}</div>`
+										: ""}
+								</div>
+							</label>
+						`;
+					})}
+				</div>
+				<p class="text-[11px] text-muted-foreground shrink-0">
+					Unchecked repos/subdirectories will not be considered for the initial component proposal.
+					The assistant can still add or remove components later.
+				</p>
+			</div>
+		`;
+	};
+
+	// --- footer (sticky, position-invariant across all states) --------------
+	const renderFooter = () => {
+		if (step === "scan") {
+			return html`
+				<div class="flex gap-2 justify-end">
+					${Button({ variant: "ghost", onClick: goBackToPath, children: "Back", disabled: busy })}
+					${Button({
+						variant: "default",
+						onClick: confirmScanAndContinue,
+						disabled: busy || scanSelection.size === 0,
+						children: html`<span data-testid="add-project-continue">Continue with assistant</span>`,
+					})}
+				</div>
+			`;
+		}
+		const trimmed = pathValue.trim();
+		const continueDisabled =
+			busy || archiving || !trimmed || (preflightReport?.hasFail === true);
+		const continueLabel = busy ? "Detecting…" : archiving ? "Archiving…" : "Continue";
+		return html`
+			<div class="flex gap-2 justify-end">
+				${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+				${Button({
+					variant: "default",
+					onClick: doContinue,
+					disabled: continueDisabled,
+					children: html`<span data-testid="add-project-continue">${continueLabel}</span>`,
+				})}
+			</div>
+		`;
+	};
+
+	const renderDialog = () => {
+		// Keep picker props in sync with current state. Properties are set
+		// imperatively because the picker element is created once and embedded
+		// as a stable DOM node, not via Lit's property bindings.
+		pickerEl.value = pathValue;
+		pickerEl.recentPaths = recentPaths();
+		// Lazily wire the browseDirectory callback (avoids importing the API
+		// module before the dialog is opened).
+		const pickerAny = pickerEl as unknown as { __browseWired?: boolean };
+		if (!pickerAny.__browseWired) {
+			void import("./api.js").then((m) => {
+				pickerEl.browseDirectory = m.browseDirectory;
+				pickerAny.__browseWired = true;
+			});
+		}
+		pickerEl.disabled = busy;
+
+		render(
+			Dialog({
+				isOpen: true,
+				onClose: cleanup,
+				width: "min(720px, 94vw)",
+				height: "min(720px, 92vh)",
+				backdropClassName: "bg-black/50 backdrop-blur-sm",
+				children: html`
+					<div class="flex flex-col h-full" data-testid="add-project-dialog">
+						<div class="shrink-0 px-6 pt-6 pb-2">
+							${DialogHeader({
+								title: step === "scan"
+									? "Confirm repos/subdirectories"
+									: detectionResult?.hasBobbit
+										? "Register Project"
+										: "Add Project",
+							})}
+							<span class="hidden" data-testid="add-project-step">${step}</span>
+						</div>
+						<div class="flex-1 min-h-0 px-6 pb-2 overflow-hidden">
+							${step === "scan" ? renderScanBody() : renderPathBody()}
+						</div>
+						<div
+							class="shrink-0 px-6 py-4 border-t border-border"
+							data-testid="add-project-footer"
+						>
+							${renderFooter()}
+						</div>
+					</div>
+				`,
+			}),
+			container,
+		);
+
+		// Focus the picker input when sitting on the path step (initial open and
+		// when returning from the scan step).
+		if (step === "path") {
+			requestAnimationFrame(() => {
+				if (document.activeElement?.tagName !== "INPUT") pickerEl.focusInput();
+			});
+		}
+	};
+
+	renderDialog();
+	// First-paint kick: if the user opened the dialog with a non-empty pathValue
+	// (e.g. via future deep-link), run detection eagerly. Otherwise the picker
+	// drives everything via events.
+	if (pathValue.trim()) {
+		onEffectivePathChange(pathValue, true);
 	}
 }

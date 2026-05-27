@@ -63,12 +63,16 @@ test.describe("Add Project flow (UI)", () => {
 		await expect(page.getByText("Project Name")).not.toBeVisible();
 		await expect(page.getByText("Color (optional)")).not.toBeVisible();
 
-		// Directory browser opens, Select closes it, and the chosen path is copied back.
-		await page.locator("button").filter({ hasText: "Browse" }).first().click();
-		await expect(page.locator('[data-testid="directory-browser"]')).toBeVisible({ timeout: 5_000 });
-		await expect(page.locator("button").filter({ hasText: "Select" }).first()).toBeVisible();
-		await page.locator("button").filter({ hasText: "Select" }).first().click();
-		await expect(page.locator('[data-testid="directory-browser"]')).not.toBeVisible({ timeout: 5_000 });
+		// Directory browser opens, Select current closes it, and the chosen path is copied back.
+		await page.locator('[data-testid="directory-picker-browse"]').click();
+		await expect(page.locator('[data-testid="add-project-browse-dialog"]')).toBeVisible({ timeout: 5_000 });
+		const selectBtn = page.locator("button").filter({ hasText: "Select current" }).first();
+		await expect(selectBtn).toBeVisible();
+		// Wait for the initial browse to populate so `current` is non-empty (Select current is
+		// disabled while the modal is still showing "Loading…").
+		await expect(selectBtn).toBeEnabled({ timeout: 5_000 });
+		await selectBtn.click();
+		await expect(page.locator('[data-testid="add-project-browse-dialog"]')).not.toBeVisible({ timeout: 5_000 });
 		await expect(pathInput).toBeVisible();
 		expect((await pathInput.inputValue()).length).toBeGreaterThan(0);
 	});
