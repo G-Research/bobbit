@@ -46,8 +46,35 @@ export function showGoalDialog(existingGoal?: Goal, projectId?: string): void {
 	void load().then((m) => m.showGoalDialog(existingGoal, projectId));
 }
 
+/**
+ * Developer-only toggle for the V2 Add Project dialog. While the prototype
+ * is under review:
+ *   - `?addProjectV2=1` in the URL enables V2 and persists to localStorage.
+ *   - `?addProjectV2=0` disables V2 and clears the localStorage flag.
+ *   - With no query param, the flag is read from localStorage (`"1"` → on).
+ *
+ * Once the user signs off, this toggle is removed and V2 becomes the default.
+ */
+function isV2Enabled(): boolean {
+	try {
+		const url = new URL(window.location.href);
+		const v = url.searchParams.get("addProjectV2");
+		if (v === "1") {
+			window.localStorage.setItem("addProjectV2", "1");
+			return true;
+		}
+		if (v === "0") {
+			window.localStorage.removeItem("addProjectV2");
+			return false;
+		}
+		return window.localStorage.getItem("addProjectV2") === "1";
+	} catch {
+		return false;
+	}
+}
+
 export function showProjectDialog(): void {
-	void load().then((m) => m.showProjectDialog());
+	void load().then((m) => (isV2Enabled() ? m.showProjectDialogV2() : m.showProjectDialog()));
 }
 
 // \u2500\u2500 Async wrappers \u2014 propagate the returned promise.  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
