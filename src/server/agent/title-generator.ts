@@ -71,6 +71,8 @@ export interface TitleGenOptions {
 	aigwUrl?: string;
 	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
+	/** Model to try when no explicit naming model is configured (usually default.sessionModel). */
+	fallbackModel?: string;
 	/** Preferences are needed to resolve and authenticate non-AI-Gateway naming models. */
 	preferencesStore?: PreferencesStore;
 	/** Test hook: supplies available models without reading preferences. */
@@ -471,11 +473,23 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}"`);
 			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off");
 		}
-		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back to direct Anthropic API");
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back");
 	}
 
-	// Default: direct Anthropic API (works for public, gateway-less, and
-	// gateway-but-no-Claude setups).
+	// No explicit naming model and no usable gateway fallback. Try the session
+	// default before the legacy Haiku path so OpenAI-only installations still
+	// auto-rename sessions after switching away from Anthropic.
+	if (options?.fallbackModel) {
+		const configured = await findConfiguredModel(options.fallbackModel, options);
+		if (configured?.model) {
+			const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
+			const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
+			console.log(`[title-gen] Using session default fallback naming model "${options.fallbackModel}"`);
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
+		}
+	}
+
+	// Legacy default: direct Anthropic API.
 	return generateViaAnthropic(preview, "off");
 }
 
@@ -657,7 +671,16 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}" for goal summary`);
 			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle);
 		}
-		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back to direct Anthropic API");
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back");
+	}
+
+	if (options?.fallbackModel) {
+		const configured = await findConfiguredModel(options.fallbackModel, options);
+		if (configured?.model) {
+			const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
+			console.log(`[title-gen] Using session default fallback naming model "${options.fallbackModel}" for goal summary`);
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
+		}
 	}
 
 	return generateGoalSummaryViaAnthropic(goalTitle);
