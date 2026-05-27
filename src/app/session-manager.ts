@@ -14,6 +14,7 @@ import {
 	GW_SESSION_KEY,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
+import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
@@ -952,7 +953,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; onMissing?: "toast" | "modal" }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal" }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -1170,12 +1171,20 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (options?.assistantType && !isExisting) {
 			let autoPrompt: string | undefined;
 			if (options.assistantType === "project" && options.projectEditContext) {
-				const pec = options.projectEditContext;
-				autoPrompt = `Edit the existing project '${pec.name}' at ${pec.rootPath}. Read its current \`.bobbit/config/project.yaml\` and propose it back as-is via \`propose_project\`, then ask the user what they want to change or add.`;
+				autoPrompt = formatProjectAssistantAutoPrompt({
+					dirPath: options.projectDirPath ?? options.projectEditContext.rootPath,
+					editContext: options.projectEditContext,
+				});
 			} else if (options.assistantType === "project" && options.projectDirPath) {
-				autoPrompt = `Start the project registration session. The project directory is: ${options.projectDirPath}`;
+				autoPrompt = formatProjectAssistantAutoPrompt({
+					dirPath: options.projectDirPath,
+					initialScanContext: options.projectInitialScanContext,
+				});
 			} else if (options.assistantType === "project-scaffolding" && options.projectDirPath) {
-				autoPrompt = `Start the new project setup session. The target directory is: ${options.projectDirPath}`;
+				autoPrompt = formatProjectAssistantAutoPrompt({
+					dirPath: options.projectDirPath,
+					scaffolding: true,
+				});
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
