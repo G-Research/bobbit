@@ -21,6 +21,22 @@ import { test, expect } from "./in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./e2e-setup.js";
 import { waitForAwaitingHuman, waitForGateStatus } from "./test-utils/signoff-polling.mjs";
 
+// The global in-process harness sets BOBBIT_LLM_REVIEW_SKIP=1 so llm-review /
+// agent-qa steps auto-pass during E2E. The human-signoff branch honours that
+// flag too (see verification-harness.ts), which would auto-pass the step we
+// want to test. Force-park by setting BOBBIT_HUMAN_SIGNOFF_SKIP="0" — the
+// explicit "do not skip" override that defeats the fallback. Restored after
+// the suite so unrelated specs keep their default bypass.
+let __priorHumanSignoffSkip: string | undefined;
+test.beforeAll(() => {
+	__priorHumanSignoffSkip = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+	process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = "0";
+});
+test.afterAll(() => {
+	if (__priorHumanSignoffSkip === undefined) delete process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+	else process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = __priorHumanSignoffSkip;
+});
+
 function makeWorkflowId(): string {
 	return `signoff-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

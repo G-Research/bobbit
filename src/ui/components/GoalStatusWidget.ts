@@ -374,10 +374,14 @@ export class GoalStatusWidget extends LitElement {
 			}
 			// Optimistic resolved state — popover shows ✓/✗ inline. The
 			// awaiting entry is removed when the server's step_complete WS
-			// event lands and `_refreshActive` drops it from the list.
+			// event lands and `_refreshActive` drops it from the list. We
+			// also fire an explicit refetch here as a belt-and-braces measure
+			// so the awaiting state clears even when the WS connection is
+			// momentarily down or routed through a mock (E2E tests).
 			const resolved = new Map(this._resolved);
 			resolved.set(key, { decision, feedback, resolvedAt: Date.now() });
 			this._resolved = resolved;
+			void this._refreshActive();
 			return true;
 		} catch (err) {
 			const e2 = new Map(this._submitErrors); e2.set(key, String(err)); this._submitErrors = e2;

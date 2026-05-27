@@ -2204,8 +2204,24 @@ export class VerificationHarness {
 						} else if (step.type === "human-signoff") {
 							// human-signoff — park on a deferred resolver until the user
 							// POSTs /signoff with a decision. No subprocess, no session.
-							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
-								result = { passed: true, output: "Human sign-off skipped (BOBBIT_LLM_REVIEW_SKIP is set)." };
+							//
+							// Bypass logic: BOBBIT_HUMAN_SIGNOFF_SKIP wins when set ("1" =>
+							// skip, "0" => force park). When unset, fall back to honouring
+							// BOBBIT_LLM_REVIEW_SKIP so the global E2E harness's blanket
+							// skip doesn't leave human-signoff steps parked forever. The
+							// human-signoff E2E spec sets BOBBIT_HUMAN_SIGNOFF_SKIP="0" to
+							// defeat the fallback and exercise the real parking path.
+							const hsExplicit = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+							const skipHumanSignoff = hsExplicit === "1"
+								? true
+								: hsExplicit === "0"
+									? false
+									: !!process.env.BOBBIT_LLM_REVIEW_SKIP;
+							if (skipHumanSignoff) {
+								const reason = hsExplicit === "1"
+									? "BOBBIT_HUMAN_SIGNOFF_SKIP=1"
+									: "BOBBIT_LLM_REVIEW_SKIP is set";
+								result = { passed: true, output: `Human sign-off skipped (${reason}).` };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
 								const label = step.label || step.name;
