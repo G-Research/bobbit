@@ -1,11 +1,20 @@
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { getAnnotations, getTotalAnnotationCount, composeReviewFeedback } from "./AnnotationStore.js";
+import {
+  buildReviewDecisionPayload,
+  getAnnotations,
+  getTotalAnnotationCount,
+} from "./AnnotationStore.js";
 import { ensureReviewComponents } from "../../../app/lazy-review.js";
+import type {
+  ReviewDecision,
+  ReviewDecisionEventDetail,
+  ReviewDocumentModel,
+} from "./review-types.js";
 import "./review-pane.css";
 
 /**
- * <review-pane> — Tabbed container for review documents with a Submit Review button.
+ * <review-pane> — Tabbed container for review documents with review decision controls.
  *
  * Renders a horizontal tab bar, the active `<review-document>`, and a bottom
  * action bar. Uses light DOM for consistent styling with the app theme.
@@ -13,13 +22,15 @@ import "./review-pane.css";
 @customElement("review-pane")
 export class ReviewPane extends LitElement {
   @property({ attribute: false })
-  documents: Map<string, { title: string; markdown: string }> = new Map();
+  documents: Map<string, ReviewDocumentModel> = new Map();
 
   @property({ type: String }) activeTab = "";
   @property({ type: String }) sessionId = "";
 
   @state() private _overflowOpen = false;
   @state() private _annotationCounts: Map<string, number> = new Map();
+  @state() private _finalComment = "";
+  @state() private _validationError = "";
 
   createRenderRoot() {
     return this;
@@ -58,6 +69,7 @@ export class ReviewPane extends LitElement {
   }
 
   private _onAnnotationChange(): void {
+    this._validationError = "";
     this._refreshCounts();
   }
 
@@ -72,16 +84,59 @@ export class ReviewPane extends LitElement {
     );
   }
 
-  private _submitReview(): void {
-    const feedback = composeReviewFeedback(this.sessionId, this.documents);
-    if (!feedback) return;
-    this.dispatchEvent(
-      new CustomEvent("review-submit", {
-        detail: { feedback },
-        bubbles: true,
-        composed: true,
-      }),
+  private _onFinalCommentInput(e: Event): void {
+    this._finalComment = (e.target as HTMLTextAreaElement).value;
+    if (this._finalComment.trim()) this._validationError = "";
+  }
+
+  private _submitDecision(decision: ReviewDecision): void {
+    const activeDoc = this.documents.get(this.activeTab) || null;
+    if (!activeDoc) return;
+
+    const finalComment = this._finalComment.trim();
+    const totalCount = getTotalAnnotationCount(this.sessionId, this.documents);
+    if (decision === "reject" && totalCount === 0 && !finalComment) {
+      this._validationError = "Add a final comment or at least one inline comment before rejecting.";
+      return;
+    }
+
+    this._validationError = "";
+    const payload = buildReviewDecisionPayload(
+      this.sessionId,
+      this.documents,
+      decision,
+      finalComment,
     );
+    const detail: ReviewDecisionEventDetail = {
+      document: activeDoc,
+      source: activeDoc.source,
+      payload,
+      decision: payload.decision,
+      finalComment: payload.finalComment,
+      inlineComments: payload.inlineComments,
+      feedback: payload.feedback,
+    };
+
+    const decisionEvent = new CustomEvent<ReviewDecisionEventDetail>("review-decision", {
+      detail,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    const wasNotCanceled = this.dispatchEvent(decisionEvent);
+
+    // Compatibility bridge for the existing markdown review flow. New app-level
+    // review-decision handlers can call preventDefault() to own routing without
+    // receiving a duplicate legacy review-submit event.
+    if (wasNotCanceled && (!activeDoc.source || activeDoc.source.kind === "markdown-review")) {
+      this.dispatchEvent(
+        new CustomEvent("review-submit", {
+          detail: { feedback: payload.feedback, payload },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
   }
 
   private _closeTab(title: string, e: Event): void {
@@ -201,21 +256,54 @@ export class ReviewPane extends LitElement {
         </div>
 
         <div class="review-submit-bar">
-          <span class="review-submit-count">
-            ${totalCount > 0
-              ? `${totalCount} comment${totalCount !== 1 ? "s" : ""}`
-              : "No comments yet"}
-          </span>
+          <div class="review-submit-summary">
+            <span class="review-submit-count">
+              ${totalCount > 0
+                ? `${totalCount} comment${totalCount !== 1 ? "s" : ""}`
+                : "No inline comments"}
+            </span>
+          </div>
+
+          <label class="review-final-comment">
+            <span class="review-final-comment-label">Final comment</span>
+            <textarea
+              class="review-final-comment-input"
+              .value=${this._finalComment}
+              placeholder="Optional for approval; required to reject without inline comments."
+              rows="3"
+              @input=${this._onFinalCommentInput}
+              aria-invalid=${this._validationError ? "true" : "false"}
+              aria-describedby="review-decision-error"
+            ></textarea>
+          </label>
+
+          ${this._validationError
+            ? html`<div id="review-decision-error" class="review-validation-error" role="alert">${this._validationError}</div>`
+            : ""}
+
           <div class="review-submit-actions">
+            <button
+              class="review-submit-btn review-submit-btn--compat"
+              disabled
+              hidden
+              aria-hidden="true"
+              tabindex="-1"
+              type="button"
+            ></button>
+            <button
+              class="review-approve-btn"
+              ?disabled=${!activeDoc}
+              @click=${() => this._submitDecision("approve")}
+            >Approve</button>
+            <button
+              class="review-reject-btn"
+              ?disabled=${!activeDoc}
+              @click=${() => this._submitDecision("reject")}
+            >Reject</button>
             <button
               class="review-dismiss-btn"
               @click=${this._dismiss}
             >Dismiss</button>
-            <button
-              class="review-submit-btn"
-              ?disabled=${totalCount === 0}
-              @click=${this._submitReview}
-            >Submit Review</button>
           </div>
         </div>
       </div>
