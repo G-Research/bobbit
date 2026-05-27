@@ -68,6 +68,21 @@ describe("workflow-validator — positive cases", () => {
 		assert.deepEqual(validateWorkflow(wf, components), []);
 	});
 
+	it("accepts optional non-signoff steps using canonical optionalLabel", () => {
+		const wf: ValidatorWorkflow = {
+			id: "optional-label",
+			name: "Optional label",
+			gates: [{
+				id: "qa",
+				name: "QA",
+				verify: [
+					{ name: "QA", type: "agent-qa", optional: true, optionalLabel: "Enable QA Testing", prompt: "Run QA." },
+				],
+			}],
+		};
+		assert.deepEqual(validateWorkflow(wf, components), []);
+	});
+
 	it("accepts runtime context tokens in free-form run/prompt without complaint", () => {
 		const wf: ValidatorWorkflow = {
 			id: "merge",
@@ -216,7 +231,7 @@ describe("workflow-validator — negative cases", () => {
 			}],
 		};
 		const errs = validateWorkflow(wf, components);
-		assert.ok(errs.some(e => /optional: true but has no label/.test(e.message)));
+		assert.ok(errs.some(e => /optional: true but has no optionalLabel/.test(e.message)));
 	});
 
 	it("rejects unknown step type", () => {

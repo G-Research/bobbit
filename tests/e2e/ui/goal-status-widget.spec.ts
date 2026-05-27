@@ -18,7 +18,8 @@
  *  - On reload the popover state rehydrates from `/verifications/active`.
  */
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
+import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
+import { waitForGateStatus } from "../test-utils/signoff-polling.mjs";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const STEP_NAME = "approve-design";
@@ -103,6 +104,52 @@ async function openSession(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
+async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): Promise<void> {
+	const projectId = await defaultProjectId();
+	const createRes = await apiFetch("/api/workflows", {
+		method: "POST",
+		body: JSON.stringify({
+			projectId,
+			id: workflowId,
+			name: `Widget Signoff ${workflowId}`,
+			description: "Browser-authored signoff workflow",
+			gates: [{
+				id: "design",
+				name: "Design",
+				content: true,
+				dependsOn: [],
+				verify: [{ name: "Placeholder", type: "command", run: "echo placeholder" }],
+			}],
+		}),
+	});
+	expect(createRes.status, `workflow create failed: ${createRes.status} ${await createRes.text().catch(() => "")}`).toBe(201);
+
+	await openApp(page);
+	await navigateToHash(page, `#/settings/${projectId}/workflows`);
+	const tab = page.locator("[data-testid='workflows-tab']").first();
+	await expect(tab).toBeVisible({ timeout: 10_000 });
+	await tab.getByText(`Widget Signoff ${workflowId}`).first().click();
+	await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
+
+	await page.locator(".wf-gate-header").first().click();
+	await expect(page.locator(".wf-gate-card.expanded").first()).toBeVisible();
+	await page.locator(".wf-vstep-collapsed-header").first().click();
+	await expect(page.locator(".wf-vstep-card.vstep-expanded").first()).toBeVisible();
+
+	await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");
+	await expect(page.locator("[data-testid='wf-step-label']").first()).toBeVisible({ timeout: 10_000 });
+	await page.locator("[data-testid='wf-step-name']").first().fill(STEP_NAME);
+	await page.locator("[data-testid='wf-step-label']").first().fill("Approve design doc");
+	await page.locator("[data-testid='wf-step-prompt']").first().fill("Please review and approve the design from the real widget flow.");
+
+	const saveResponse = page.waitForResponse((res) =>
+		res.request().method() === "PUT" && res.url().includes(`/api/workflows/${workflowId}`) && res.status() < 500,
+		{ timeout: 10_000 },
+	).catch(() => null);
+	await page.getByRole("button", { name: /^Save$/ }).click();
+	expect(await saveResponse, "workflow editor Save must PUT the authored human-signoff workflow").not.toBeNull();
+}
+
 test.describe("<goal-status-widget>", () => {
 	test("pill renders + popover shows sign-off card; approve clears overlay; reload rehydrates", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget ${Date.now()}` });
@@ -176,6 +223,48 @@ test.describe("<goal-status-widget>", () => {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
 			await apiFetch("/api/health").catch(() => { /* keep harness happy */ });
+		}
+	});
+
+	test("real workflow-editor-authored human-signoff signal pulses widget and Approve resolves gate", async ({ page }) => {
+		test.setTimeout(60_000);
+		const workflowId = `widget-real-signoff-${Date.now()}`;
+		let goalId: string | undefined;
+		let sessionId: string | undefined;
+		try {
+			await authorSignoffWorkflowViaEditor(page, workflowId);
+
+			const goal = await createGoal({
+				title: `Goal-Status-Widget Real Signoff ${Date.now()}`,
+				workflowId,
+			});
+			goalId = goal.id;
+			sessionId = await createSession({ goalId });
+
+			await openSession(page, sessionId);
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+
+			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/design/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "## Design\n\nReady for approval." }),
+			});
+			expect(signalRes.status, `signal POST failed: ${signalRes.status} ${await signalRes.text().catch(() => "")}`).toBe(201);
+
+			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "true", { timeout: 15_000 });
+			await expect(page.locator("[data-testid='goal-status-widget-awaiting']")).toBeVisible();
+
+			await pill.click();
+			const card = page.locator("[data-testid='goal-widget-signoff']").first();
+			await expect(card).toBeVisible({ timeout: 10_000 });
+			await expect(card).toContainText("Approve design doc");
+			await card.locator("[data-testid='goal-widget-approve']").click();
+			await waitForGateStatus(goalId, "design", "passed", 20_000);
+			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 15_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			if (goalId) await deleteGoal(goalId).catch(() => { /* ignore */ });
+			await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* ignore */ });
 		}
 	});
 

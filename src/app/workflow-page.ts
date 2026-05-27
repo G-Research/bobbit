@@ -102,6 +102,7 @@ export function validateStep(step: VerifyStep): Record<string, string> {
 		const hasCmd = !!(step.command && step.command.trim());
 		if (!hasRun && !hasCmd) errs.run = "Either a free-form `run` or a named `command` is required.";
 		if (hasRun && hasCmd) errs.command = "Specify exactly one of `run` or `command`, not both.";
+		if (hasCmd && !(step.component && step.component.trim())) errs.component = "Component is required for named commands.";
 	}
 	return errs;
 }
@@ -785,23 +786,29 @@ function stepTypeIcon(type: VerifyStep["type"] | undefined): typeof Terminal {
  */
 function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]): VerifyStep {
 	const next: VerifyStep = { ...prev, type: newType };
+
+	// Fields that are not meaningful for the new type should not survive as
+	// hidden stale YAML. Keep only fields visible/valid for the chosen type.
 	if (newType !== "command") {
 		delete next.run;
 		delete next.expect;
 		delete next.command;
-	}
-	if (newType === "command") {
+	} else {
 		delete next.prompt;
-		// label is a human-signoff card title — meaningless elsewhere.
 		delete next.label;
+		delete next.role;
 		if (next.run === undefined && (next.command === undefined || next.command === "")) next.run = "";
 	}
+
+	if (newType !== "agent-qa" && newType !== "command") delete next.component;
+	if (newType === "human-signoff") delete next.timeout;
+	if (newType !== "human-signoff") delete next.label;
+	if (next.optional !== true) delete next.optionalLabel;
+
 	if (newType === "human-signoff") {
 		if (next.label === undefined) next.label = "";
 		if (next.prompt === undefined) next.prompt = "";
 	} else if (newType !== "command") {
-		// llm-review / agent-qa — drop the human-signoff card label.
-		delete next.label;
 		if (next.prompt === undefined) next.prompt = "";
 	}
 	return next;
@@ -995,18 +1002,19 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 								<div class="wf-field">
 									<label class="wf-field-label">Component</label>
 									${componentOptions.length > 0 ? html`
-										<select class="wf-select" data-testid="wf-step-component" .value=${step.component || ""}
+										<select class="wf-select ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""}
 											@click=${(e: Event) => e.stopPropagation()}
 											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined })}>
 											<option value="" ?selected=${!step.component}>(first component)</option>
 											${componentOptions.map(n => html`<option value="${n}" ?selected=${step.component === n}>${n}</option>`)}
 										</select>
 									` : html`
-										<input class="wf-input" data-testid="wf-step-component" .value=${step.component || ""} placeholder="(first component)"
+										<input class="wf-input ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""} placeholder="Component name"
 											@click=${(e: Event) => e.stopPropagation()}
 											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined })} />
 									`}
-									<div class="wf-field-hint">Empty = first component on the project.</div>
+									<div class="wf-field-hint">Required when using a named <code>command</code>; empty is valid only for free-form <code>run</code>.</div>
+									${errs.component ? html`<div class="wf-field-error" data-testid="wf-step-component-error">${errs.component}</div>` : nothing}
 								</div>
 							` : nothing}
 							<div class="wf-field">

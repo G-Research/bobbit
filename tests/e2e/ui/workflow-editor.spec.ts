@@ -190,6 +190,47 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	});
 
+	test("llm-review and agent-qa fields round-trip", async ({ page }) => {
+		const wfId = "review-qa-rt-" + Date.now();
+		await gotoNewEditor(page, wfId, [{
+			id: "g1", name: "Review", depends_on: [],
+			verify: [
+				{ name: "Review", type: "llm-review", prompt: "Review this.", role: "reviewer", timeout: 111, description: "LLM review description." },
+				{ name: "QA", type: "agent-qa", prompt: "Test this.", role: "tester", timeout: 222, component: "WF Editor Project", description: "QA description." },
+			],
+		}]);
+		await expandFirstGate(page);
+
+		let cards = page.locator("[data-testid='wf-vstep-card']");
+		await cards.nth(0).locator(".wf-vstep-collapsed-header").click();
+		await expandFirstStepAdvanced(page);
+		await expect(page.locator("[data-testid='wf-step-type']").first()).toHaveValue("llm-review");
+		await expect(page.locator("[data-testid='wf-step-prompt']").first()).toHaveValue("Review this.");
+		await expect(page.locator("[data-testid='wf-step-role']").first()).toHaveValue("reviewer");
+		await expect(page.locator("[data-testid='wf-step-timeout']").first()).toHaveValue("111");
+		await expect(page.locator("[data-testid='wf-step-description']").first()).toHaveValue("LLM review description.");
+
+		// Collapse first, expand second.
+		await cards.nth(0).locator(".wf-vstep-collapsed-header").click();
+		cards = page.locator("[data-testid='wf-vstep-card']");
+		await cards.nth(1).locator(".wf-vstep-collapsed-header").click();
+		await expect(cards.nth(1)).toHaveClass(/vstep-expanded/);
+		await cards.nth(1).locator("details.wf-vstep-advanced summary").click();
+		await expect(cards.nth(1).locator("[data-testid='wf-step-type']")).toHaveValue("agent-qa");
+		await expect(cards.nth(1).locator("[data-testid='wf-step-prompt']")).toHaveValue("Test this.");
+		await expect(cards.nth(1).locator("[data-testid='wf-step-role']")).toHaveValue("tester");
+		await expect(cards.nth(1).locator("[data-testid='wf-step-timeout']")).toHaveValue("222");
+		await expect(cards.nth(1).locator("[data-testid='wf-step-component']")).toHaveValue("WF Editor Project");
+		await expect(cards.nth(1).locator("[data-testid='wf-step-description']")).toHaveValue("QA description.");
+
+		await clickSaveAndWait(page, wfId);
+		const wf = await (await rawApiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "GET" })).json();
+		expect(wf.gates[0].verify[0]).toMatchObject({ type: "llm-review", prompt: "Review this.", role: "reviewer", timeout: 111, description: "LLM review description." });
+		expect(wf.gates[0].verify[1]).toMatchObject({ type: "agent-qa", prompt: "Test this.", role: "tester", timeout: 222, component: "WF Editor Project", description: "QA description." });
+
+		await apiFetch(`/api/workflows/${wfId}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+	});
+
 	test("validation: human-signoff with empty prompt blocks save and surfaces inline error", async ({ page }) => {
 		const wfId = "signoff-validate-" + Date.now();
 		await gotoNewEditor(page, wfId, [{
