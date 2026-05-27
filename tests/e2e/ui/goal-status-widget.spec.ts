@@ -143,6 +143,39 @@ function signoffReviewTab(page: Page) {
 	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: /Sign-off:/ }).first();
 }
 
+async function signoffReviewRecords(page: Page): Promise<{ active: string[]; persisted: string[] }> {
+	return page.evaluate(() => {
+		const isSignoffDoc = (doc: any) => (
+			(typeof doc?.title === "string" && doc.title.startsWith("Sign-off:"))
+			|| doc?.source?.kind === "verification-signoff-markdown"
+			|| doc?.source?.kind === "verification-signoff-pr"
+		);
+		const label = (doc: any) => `${String(doc?.title || "")}|${String(doc?.source?.kind || "")}`;
+		const docs = (window as any).bobbitState?.reviewDocuments;
+		const active = Array.from(docs?.values?.() || []).filter(isSignoffDoc).map(label);
+		const persisted: string[] = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const key = localStorage.key(i) || "";
+			if (!key.startsWith("bobbit-review-contexts-v1:")) continue;
+			try {
+				const parsed = JSON.parse(localStorage.getItem(key) || "{}");
+				for (const doc of Object.values(parsed || {})) {
+					if (isSignoffDoc(doc)) persisted.push(label(doc));
+				}
+			} catch { /* ignore unrelated/corrupt storage */ }
+		}
+		return { active, persisted };
+	});
+}
+
+async function expectNoSignoffReviewContext(page: Page, message: string): Promise<void> {
+	await expect(signoffReviewTab(page), message).toHaveCount(0, { timeout: 5_000 });
+	await expect.poll(async () => {
+		const records = await signoffReviewRecords(page);
+		return records.active.length + records.persisted.length;
+	}, { timeout: 5_000, message }).toBe(0);
+}
+
 function reviewPane(page: Page) {
 	return page.locator("review-pane").first();
 }
@@ -437,6 +470,42 @@ test.describe("<goal-status-widget>", () => {
 			expect(feedback).toContain(inlineComment);
 			expect(feedback).toContain(docTitle);
 			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
+
+	test("dismissing widget-opened signoff review clears persisted context and does not rehydrate", async ({ page }) => {
+		const goal = await createGoal({ title: `Goal-Status-Widget Dismiss ${Date.now()}` });
+		const goalId = goal.id;
+		let sessionId: string | undefined;
+		try {
+			const { signoffCalls } = await installMocks(page, goalId);
+			sessionId = await createSession({ goalId });
+
+			await openApp(page);
+			await openSession(page, sessionId);
+			await openSignoffReviewFromWidget(page, goalId);
+			const docTitle = await signoffReviewDocTitle(page);
+			const expectedRecord = `${docTitle}|verification-signoff-markdown`;
+
+			await expect.poll(async () => (await signoffReviewRecords(page)).active.includes(expectedRecord), { timeout: 5_000 }).toBe(true);
+			await expect.poll(async () => (await signoffReviewRecords(page)).persisted.includes(expectedRecord), { timeout: 5_000 }).toBe(true);
+
+			await reviewPane(page).getByRole("button", { name: /^Dismiss$/ }).click();
+			await expectNoSignoffReviewContext(page, "dismissing should remove the active and persisted sign-off review context");
+			expect(signoffCalls, "dismiss must not submit a sign-off decision").toHaveLength(0);
+
+			await page.reload();
+			await openSession(page, sessionId);
+			await expectNoSignoffReviewContext(page, "dismissed sign-off review must not rehydrate after reload");
+			expect(signoffCalls, "reload after dismiss must not submit a sign-off decision").toHaveLength(0);
+
+			await navigateToHash(page, `#/settings/${await defaultProjectId()}`);
+			await openSession(page, sessionId);
+			await expectNoSignoffReviewContext(page, "dismissed sign-off review must not rehydrate after navigation away and back");
+			expect(signoffCalls, "navigation after dismiss must not submit a sign-off decision").toHaveLength(0);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
