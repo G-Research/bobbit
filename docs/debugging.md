@@ -22,7 +22,7 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
   4. Approve / Reject POSTs return 409 `step is no longer awaiting human input`? The step was already resolved (idempotent surface) or cancelled. Inspect the latest signal's `verification.steps[]` for the named step's `passed` / `skipped` status.
   5. Approve / Reject POSTs return 403 for a sandboxed sub-agent? Expected — `sandbox-guard` blocks `/signoff` so an agent inside its own sandbox cannot self-approve a gating step.
 - **After a server restart**: the resume path re-broadcasts `gate_verification_awaiting_human` from `_resumeOneVerification`, re-creates the resolver in `pendingSignoffs`, and `await`s. The persisted `humanPrompt` / `humanLabel` survive intact. If a pending sign-off is missing after restart, check `active-verifications.json` for the entry and confirm `step.awaitingHuman === true` survived the persistence round-trip.
-- **Test bypass**: `BOBBIT_LLM_REVIEW_SKIP=1` auto-passes `human-signoff` steps the same way it auto-passes `agent-qa` / `llm-review`. Useful in E2E suites that don't have a human to drive the widget.
+- **Test bypass**: only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes `human-signoff` steps. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP` — a "human" gate must not share a bypass with `agent-qa` / `llm-review`, or the global E2E harness would silently auto-approve every human gate. With `BOBBIT_HUMAN_SIGNOFF_SKIP` unset or `=0`, the step parks awaiting a real human decision.
 - **Pinning tests**: `tests/e2e/human-signoff.spec.ts` (REST end-to-end), `tests/e2e/ui/goal-status-widget.spec.ts` (browser).
 
 ## Ready-to-merge fails with "Refusing unsafe git push"

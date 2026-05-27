@@ -69,8 +69,15 @@ agent context-window pressure, and would need its own UI surface anyway.
   sign-off step that gates its own work.
 - **Timeout.** None. Steps wait indefinitely. The existing dashboard
   "Cancel verification" affordance still applies.
-- **Test bypass.** Respects `BOBBIT_LLM_REVIEW_SKIP=1` — the step auto-passes,
-  matching `agent-qa` / `llm-review`.
+- **Test bypass.** Only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a
+  human-signoff step. There is **no** fallback to
+  `BOBBIT_LLM_REVIEW_SKIP` — a "human" gate must not share a bypass
+  with `agent-qa` / `llm-review`, otherwise the global E2E harness
+  (which sets `BOBBIT_LLM_REVIEW_SKIP=1`) would silently auto-approve
+  every human gate. With `BOBBIT_HUMAN_SIGNOFF_SKIP` unset or `=0`,
+  the step parks awaiting a real human decision. Removing the legacy
+  fallback was the Bug-1 defense-in-depth fix in the "Re-attempt:
+  Sign-Off Gates" goal.
 
 ## Data flow
 

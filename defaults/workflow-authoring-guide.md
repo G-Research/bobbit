@@ -237,7 +237,14 @@ Common optional fields (apply to all three shapes):
 | `phase: <int>` | groups parallel-runnable steps; phases run in ascending order |
 | `expect: success \| failure` | flips pass/fail (use `failure` for TDD reproducing-tests) |
 | `timeout: <seconds>` | per-step timeout (default 300s) |
-| `optional: true` + `label:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+| `optional: true` + `optionalLabel:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+
+> **Field split.** `optionalLabel:` is the goal-creation opt-in toggle
+> label for any `optional: true` step. `label:` is reserved exclusively
+> for the sign-off card title on `type: human-signoff` steps. Older YAML
+> that overloaded `label:` for the opt-in toggle on non-human-signoff
+> steps is migrated forward on load (and rewritten in canonical shape on
+> next save) — see `src/server/agent/workflow-store.ts::normalizeStep`.
 
 ### 4.2 `type: llm-review`
 
@@ -263,7 +270,7 @@ QA agent. Stands up the owning component's `config.qa_start_command` testbed (as
   component: web                   # which component's config.qa_start_command testbed to start
   phase: 3
   optional: true
-  label: Enable QA Testing
+  optionalLabel: Enable QA Testing
   description: Spawn a QA agent that builds, starts the server, and drives a real browser through scenarios.
   prompt: |
     Stand up the ephemeral testbed (the owning component's `config.qa_start_command`),
@@ -290,7 +297,7 @@ Behavior contract:
 
 - **No timeout.** The step waits indefinitely. Cancel via the dashboard's `Cancel verification` button if a request becomes irrelevant.
 - **Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve their own gating step.
-- **Test bypass.** Respects `BOBBIT_LLM_REVIEW_SKIP=1` (auto-pass), matching `agent-qa` / `llm-review`.
+- **Test bypass.** Only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes a human-signoff step. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP` — a "human" gate must not share a bypass with `agent-qa` / `llm-review`, otherwise the global E2E harness (which sets `BOBBIT_LLM_REVIEW_SKIP=1`) would silently auto-approve every human gate.
 - **Rejection feedback.** When the user rejects with feedback, the text lands in the step `output` and a `text/markdown` artifact. The team lead consumes a failed sign-off identically to a failed `llm-review`.
 
 Use sparingly. Most quality concerns are better served by `llm-review` or a command check; reserve `human-signoff` for decisions that genuinely require human judgement (release approval, security exception, design ratification).

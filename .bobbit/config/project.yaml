@@ -867,7 +867,7 @@ workflows:
             role: qa-tester
             phase: 3
             optional: true
-            label: Enable QA Testing
+            optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
               server, and drives a real browser through user scenarios to
               validate the feature works end-to-end.
@@ -1359,7 +1359,7 @@ workflows:
             role: qa-tester
             phase: 3
             optional: true
-            label: Enable QA Testing
+            optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
               server, and drives a real browser through user scenarios to
               validate the fix works end-to-end.
