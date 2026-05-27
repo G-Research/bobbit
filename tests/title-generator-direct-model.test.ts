@@ -1,15 +1,16 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 import { invalidateModelCache, type ApiModel } from "../src/server/agent/model-registry.js";
 import { generateSessionTitle } from "../src/server/agent/title-generator.js";
-import { testModelPreference } from "../src/server/agent/model-completion.js";
+import { completeModelText, testModelPreference } from "../src/server/agent/model-completion.js";
 
 const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
+const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
 const directModel: ApiModel = {
 	id: "direct-title-model",
 	name: "Direct Title Model",
@@ -27,6 +28,8 @@ const directModel: ApiModel = {
 afterEach(() => {
 	if (previousSkipTitleGen === undefined) delete process.env.BOBBIT_SKIP_TITLE_GEN;
 	else process.env.BOBBIT_SKIP_TITLE_GEN = previousSkipTitleGen;
+	if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+	else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
 	invalidateModelCache();
 });
 
@@ -65,6 +68,25 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		assert.equal(calls[0].model.provider, "direct");
 		assert.equal(calls[0].model.id, "direct-title-model");
 		assert.equal(calls[0].args.thinkingLevel, "off");
+	});
+
+	it("model completions reuse auth.json credentials, matching chat auth", async () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "bobbit-title-auth-"));
+		process.env.BOBBIT_AGENT_DIR = dir;
+		writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "sk-from-auth-json" } }));
+		const calls: any[] = [];
+		try {
+			await completeModelText({ ...directModel, provider: "openai" }, undefined, {
+				systemPrompt: "test",
+				userPrompt: "test",
+			}, async (model, _context, options) => {
+				calls.push({ model, options });
+				return { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } as any;
+			});
+			assert.equal(calls[0].options.apiKey, "sk-from-auth-json");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("model test helper works for non-AI-Gateway models", async () => {
