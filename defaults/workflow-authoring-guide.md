@@ -202,7 +202,7 @@ Practical implications when authoring workflows:
 
 ## 4. Verification step shapes
 
-There are three step `type:` values: `command`, `llm-review`, `agent-qa`.
+There are four step `type:` values: `command`, `llm-review`, `agent-qa`, `human-signoff`.
 
 ### 4.1 `type: command` — three shapes
 
@@ -269,6 +269,33 @@ QA agent. Stands up the owning component's `config.qa_start_command` testbed (as
     Stand up the ephemeral testbed (the owning component's `config.qa_start_command`),
     plan 3-5 scenarios, drive the browser, submit `verification_result`.
 ```
+
+### 4.4 `type: human-signoff`
+
+Parks the gate on a deferred resolver until a human approves or rejects via the chat-header `<goal-status-widget>`. Reuses the async-verification machinery from `llm-review` / `agent-qa` — restart-safe, cancellable on re-signal, and emits the same `{ passed, output, artifact }` shape every other step produces.
+
+```yaml
+- name: design-approval
+  type: human-signoff
+  phase: 1
+  label: "Approve design doc"
+  prompt: |
+    Review the design doc for {{branch}} and approve or reject.
+    Pay attention to the cancellation semantics in §3.
+```
+
+Required: `label` (non-empty) and `prompt` (non-empty). The validator rejects the step on load otherwise. `{{branch}}`, `{{master}}`, `{{goal_spec}}`, and `{{<gate>.meta.<key>}}` are substituted before the prompt is shown to the user.
+
+Behavior contract:
+
+- **No timeout.** The step waits indefinitely. Cancel via the dashboard's `Cancel verification` button if a request becomes irrelevant.
+- **Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve their own gating step.
+- **Test bypass.** Respects `BOBBIT_LLM_REVIEW_SKIP=1` (auto-pass), matching `agent-qa` / `llm-review`.
+- **Rejection feedback.** When the user rejects with feedback, the text lands in the step `output` and a `text/markdown` artifact. The team lead consumes a failed sign-off identically to a failed `llm-review`.
+
+Use sparingly. Most quality concerns are better served by `llm-review` or a command check; reserve `human-signoff` for decisions that genuinely require human judgement (release approval, security exception, design ratification).
+
+Full docs: [docs/goals-workflows-tasks.md — Human sign-off steps](../docs/goals-workflows-tasks.md#human-sign-off-steps).
 
 ## 5. Runtime context tokens
 

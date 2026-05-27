@@ -38,7 +38,7 @@ import "./MessageList.js";
 // never sees them on a given session view. Lazy via `app/lazy-widgets`
 // instead — connectedCallback below fires the imports as fire-and-
 // forget, Lit upgrades the unknown tags when each chunk lands.
-import { ensureGitStatusWidget, ensureBgProcessPill, ensureCostPopover, ensureContinueSessionChooser } from "../../app/lazy-widgets.js";
+import { ensureGitStatusWidget, ensureGoalStatusWidget, ensureBgProcessPill, ensureCostPopover, ensureContinueSessionChooser } from "../../app/lazy-widgets.js";
 import type { BgProcessInfo } from "./BgProcessPill.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
 import { getAppStorage } from "../storage/app-storage.js";
@@ -764,6 +764,7 @@ export class AgentInterface extends LitElement {
 		// state flips on (gitRepoKnown, bgProcesses populated, cost
 		// popover opened, continue-session prompt shown).
 		void ensureGitStatusWidget();
+		void ensureGoalStatusWidget();
 		void ensureBgProcessPill();
 		void ensureCostPopover();
 		void ensureContinueSessionChooser();
@@ -1965,7 +1966,7 @@ export class AgentInterface extends LitElement {
 				<!-- Input Area -->
 				<div class="shrink-0 pt-0 pb-1">
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
-						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' ? html`
+						${this.bgProcesses.length > 0 || this.gitRepoKnown !== 'no' || this.goalId || this.teamGoalId ? html`
 						<div data-pill-strip class="absolute right-2 bottom-full mb-3 z-10 pointer-events-auto" style="max-width:${this._isNarrow ? '75%' : 'calc(100% - 8rem)'}; --pill-h: 22px">
 							<!-- Real pills with a CSS drop-shadow filter for the glow. Drop-shadow
 							     follows the actual rendered shape per-element, so wrapping or
@@ -1993,6 +1994,11 @@ export class AgentInterface extends LitElement {
 							     inside the .relative wrapper inside the strip). -->
 							<div data-pill-content class="flex items-center gap-1.5 ${this._isNarrow ? 'flex-wrap' : 'flex-nowrap'} justify-end" style="position:relative;z-index:1;filter:drop-shadow(0 0 4px var(--background)) drop-shadow(0 0 8px var(--background))">
 							${this._renderPillStrip()}
+							${(this.goalId || this.teamGoalId) ? html`<goal-status-widget
+								.goalId=${this.teamGoalId || this.goalId || ''}
+								.token=${localStorage.getItem("gateway.token") || ""}
+								.branch=${this.gitStatus?.branch ?? ''}
+							></goal-status-widget>` : nothing}
 							${this.gitRepoKnown !== 'no' ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
 								.token=${localStorage.getItem("gateway.token") || ""}
@@ -2548,6 +2554,12 @@ export class AgentInterface extends LitElement {
 			const gw = gitWidget.offsetWidth;
 			if (gw > 0) maxWidth -= gw + gap;
 		}
+		// Subtract goal-status-widget width from available space (mirrors git widget).
+		const goalWidget = contentLayer.querySelector('goal-status-widget') as HTMLElement;
+		if (goalWidget) {
+			const gow = goalWidget.offsetWidth;
+			if (gow > 0) maxWidth -= gow + gap;
+		}
 
 		// Refresh the per-id width cache from every bg-process-pill currently
 		// in the DOM — covers both the visible strip and the expanded popover.
@@ -2668,6 +2680,8 @@ export class AgentInterface extends LitElement {
 				if (contentLayer) this._pillResizeObserver.observe(contentLayer);
 				const gitWidget = pillStrip.querySelector('git-status-widget') as HTMLElement | null;
 				if (gitWidget) this._pillResizeObserver.observe(gitWidget);
+				const goalWidget = pillStrip.querySelector('goal-status-widget') as HTMLElement | null;
+				if (goalWidget) this._pillResizeObserver.observe(goalWidget);
 			}
 			// Measure after renders that change pill count or visible set.
 			if (changedProperties.has('bgProcesses') || changedProperties.has('_moreExpanded')) {

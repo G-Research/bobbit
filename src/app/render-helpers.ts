@@ -25,7 +25,7 @@ import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 
 // ============================================================================
 // FORMATTING
@@ -181,7 +181,16 @@ export function markSessionVisited(sessionId: string): void {
 /** Returns true if the session has activity the user hasn't seen yet.
  *  "Unseen" means: session is idle/terminated AND lastActivity > lastReadAt
  *  AND the session warrants human attention (see `needsHumanAttention` —
- *  team members never surface, team leads only when goal is complete or stuck). */
+ *  team members never surface, team leads only when goal is complete or stuck).
+ *
+ *  Read-filter split (see `notification-policy.ts`):
+ *  — `needsImmediateHumanAttention` (pending sign-off, errored-and-parked)
+ *    bypasses the read-state filter — these states demand attention until
+ *    the user explicitly resolves them.
+ *  — `needsHumanAttention` (goal complete, idle stuck) is subject to the
+ *    normal read-state filter — once the user has visited the session, the
+ *    dot clears.
+ */
 export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Active sessions don't show unseen — user will see it when they connect
 	if (session.status === "streaming" || session.status === "busy") return false;
@@ -191,6 +200,11 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+
+	// Immediate predicate — short-circuits the read-state filter for states that
+	// require explicit user action (pending sign-off, errored-and-parked).
+	if (needsImmediateHumanAttention(session, state.gateStatusCache)) return true;
+
 	if (!needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)) return false;
 
 	const mirror = _readMirror.get(session.id) ?? 0;
@@ -647,32 +661,18 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 /** Track in-flight team start/stop (shared across desktop and mobile). */
 const teamLoading = new Set<string>();
 
-/** Render a PR icon or gate status badge next to a goal in the sidebar. */
-function renderGoalBadge(goalId: string) {
-	// PR status takes priority over gate counts
-	const pr = state.prStatusCache.get(goalId);
-	if (pr) {
-		let color: string;
-		if (pr.state === "MERGED") color = "#a87fd4";
-		else if (pr.state === "CLOSED") color = "#c47070";
-		else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
-		else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
-		else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
-		else color = "#6bc485";
-		const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
-			: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
-			: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
-			: "";
-		const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
-		const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-		const prIcon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
-		if (pr.url) {
-			return html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
-		}
-		return html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
-	}
-
-	// Fall back to gate status
+/**
+ * Render the goal's `(passed/total)` gate-progress badge.
+ *
+ * Reads `state.gateStatusCache` + the live goal sessions exactly like the
+ * sidebar's `renderGoalBadge` did — extracted so the chat-header
+ * `<goal-status-widget>` can render the same badge with the same visual
+ * vocabulary. Returns "" when no gate-status entry is cached for the goal.
+ *
+ * Pinned by sidebar visual tests — the output here must stay byte-identical
+ * to the previous inline implementation when invoked from `renderGoalBadge`.
+ */
+export function renderGateProgressBadge(goalId: string): TemplateResult | string {
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
 	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf);
@@ -701,6 +701,58 @@ function renderGoalBadge(goalId: string) {
 		return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
 	}
 	return html`<span class="shrink-0" style="${baseStyle}" title="${gs.passed} of ${gs.total} gates passed">(${gs.passed}/${gs.total})</span>`;
+}
+
+/**
+ * Render a small per-gate status icon (check/dot/cross/spinner). Shared
+ * between the chat-header `<goal-status-widget>` popover and any other
+ * surfaces that need a compact per-gate indicator. Colors mirror the
+ * palette used by `renderGateProgressBadge` — green for passed, red for
+ * failed, blue for running, muted-foreground for pending.
+ */
+export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "running"): TemplateResult {
+	switch (status) {
+		case "passed":
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="passed"><polyline points="20 6 9 17 4 12"/></svg>`;
+		case "failed":
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#c47070" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-label="failed"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+		case "running":
+			return html`<svg class="shrink-0 animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="running"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
+		case "pending":
+		default:
+			return html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-label="pending" style="color:var(--muted-foreground);opacity:0.6"><circle cx="12" cy="12" r="4"/></svg>`;
+	}
+}
+
+/** Render a PR icon or gate status badge next to a goal in the sidebar. */
+function renderGoalBadge(goalId: string) {
+	// PR status takes priority over gate counts
+	const pr = state.prStatusCache.get(goalId);
+	if (pr) {
+		let color: string;
+		if (pr.state === "MERGED") color = "#a87fd4";
+		else if (pr.state === "CLOSED") color = "#c47070";
+		else if (pr.reviewDecision === "APPROVED") color = "#6bc485";
+		else if (pr.reviewDecision === "CHANGES_REQUESTED") color = "#c47070";
+		else if (pr.reviewDecision === "REVIEW_REQUIRED") color = "#d4a04a";
+		else color = "#6bc485";
+		const reviewLabel = pr.state === "OPEN" && pr.reviewDecision === "REVIEW_REQUIRED" ? " — awaiting review"
+			: pr.state === "OPEN" && pr.reviewDecision === "CHANGES_REQUESTED" ? " — changes requested"
+			: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
+			: "";
+		const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
+		const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
+		const prIcon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
+		if (pr.url) {
+			return html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+		}
+		return html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
+	}
+
+	// Fall back to gate status — extracted to `renderGateProgressBadge` so the
+	// chat-header goal-status widget can render the same badge from the same
+	// cache without forking the implementation.
+	return renderGateProgressBadge(goalId);
 }
 
 /**

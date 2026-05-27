@@ -19,7 +19,7 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
-import { needsHumanAttention } from "./notification-policy.js";
+import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 export { errorFromResponse, errorDetails };
 
@@ -150,7 +150,8 @@ export async function refreshSessions(): Promise<void> {
 				if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
 					const goalId = s.teamGoalId || s.goalId;
 					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)) {
+					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)
+						|| needsImmediateHumanAttention(s, state.gateStatusCache)) {
 						RemoteAgent.playNotificationBeep();
 						showFaviconBadge();
 					}
@@ -745,6 +746,27 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
+/** Fetch goal gates + the per-goal `awaitingSignoffCount` field. The
+ *  `awaitingSignoffCount` total is exposed by the server only on the
+ *  `?view=summary` flavour of the gates endpoint — see
+ *  `human-sign-off` design doc §2.1 and `server.ts` summary handler. The
+ *  full gate list (with signals, content, metadata) is also returned by
+ *  the summary view, so we can use it as a drop-in replacement for the
+ *  bare endpoint for the cache-refresh use case. Falls back to 0 if the
+ *  server hasn't been redeployed yet. */
+async function fetchGoalGatesWithSignoffCount(goalId: string): Promise<{ gates: GateState[]; awaitingSignoffCount: number }> {
+	try {
+		const res = await gatewayFetch(`/api/goals/${goalId}/gates?view=summary`);
+		if (!res.ok) return { gates: [], awaitingSignoffCount: 0 };
+		const data = await res.json();
+		const gates: GateState[] = data.gates || [];
+		const awaitingSignoffCount = typeof data.awaitingSignoffCount === "number" ? data.awaitingSignoffCount : 0;
+		return { gates, awaitingSignoffCount };
+	} catch {
+		return { gates: [], awaitingSignoffCount: 0 };
+	}
+}
+
 /** Fetch gate statuses for all goals with workflows and update the cache.
  *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
 async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
@@ -753,20 +775,27 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 
 	const results = await Promise.all(
 		goalsWithWorkflow.map(async (g) => {
-			const gates = await fetchGoalGates(g.id);
+			const { gates, awaitingSignoffCount } = await fetchGoalGatesWithSignoffCount(g.id);
 			const passed = gates.filter(gs => gs.status === "passed").length;
 			const total = g.workflow!.gates.length;
 			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
 			const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some(s => s.verification?.status === "running")).length;
-			return { goalId: g.id, passed, total, verifying, verifyingCount };
+			return { goalId: g.id, passed, total, verifying, verifyingCount, awaitingSignoffCount };
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, passed, total, verifying, verifyingCount } of results) {
+	for (const { goalId, passed, total, verifying, verifyingCount, awaitingSignoffCount } of results) {
+		const awaitingHumanSignoff = awaitingSignoffCount > 0;
 		const prev = state.gateStatusCache.get(goalId);
-		if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
-			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
+		if (!prev
+			|| prev.passed !== passed
+			|| prev.total !== total
+			|| prev.verifying !== verifying
+			|| prev.verifyingCount !== verifyingCount
+			|| prev.awaitingSignoffCount !== awaitingSignoffCount
+			|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
+			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
 			changed = true;
 		}
 	}
@@ -778,14 +807,21 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
 	const goal = state.goals.find(g => g.id === goalId);
 	if (!goal?.workflow?.gates.length) return;
-	const gates = await fetchGoalGates(goalId);
+	const { gates, awaitingSignoffCount } = await fetchGoalGatesWithSignoffCount(goalId);
 	const passed = gates.filter(gs => gs.status === "passed").length;
 	const total = goal.workflow.gates.length;
 	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
 	const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some((s: any) => s.verification?.status === "running")).length;
+	const awaitingHumanSignoff = awaitingSignoffCount > 0;
 	const prev = state.gateStatusCache.get(goalId);
-	if (!prev || prev.passed !== passed || prev.total !== total || prev.verifying !== verifying || prev.verifyingCount !== verifyingCount) {
-		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount });
+	if (!prev
+		|| prev.passed !== passed
+		|| prev.total !== total
+		|| prev.verifying !== verifying
+		|| prev.verifyingCount !== verifyingCount
+		|| prev.awaitingSignoffCount !== awaitingSignoffCount
+		|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
+		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
 		renderApp();
 	}
 }

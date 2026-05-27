@@ -21,6 +21,13 @@ export function ensureGitStatusWidget(): Promise<unknown> {
 	return _gitWidget;
 }
 
+let _goalStatusWidget: Promise<unknown> | null = null;
+export function ensureGoalStatusWidget(): Promise<unknown> {
+	if (_goalStatusWidget) return _goalStatusWidget;
+	_goalStatusWidget = import("../ui/components/GoalStatusWidget.js");
+	return _goalStatusWidget;
+}
+
 let _askWidget: Promise<unknown> | null = null;
 export function ensureAskUserChoicesWidget(): Promise<unknown> {
 	if (_askWidget) return _askWidget;

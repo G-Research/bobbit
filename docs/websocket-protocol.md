@@ -76,6 +76,7 @@ Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only 
 | `gate_verification_step_started` | `goalId`, `gateId`, `stepIndex`, `stepName` | A verification step began |
 | `gate_verification_step_output` | `goalId`, `gateId`, `stepIndex`, `stream`, `text` | Live output from a verification step |
 | `gate_verification_step_complete` | `goalId`, `gateId`, `stepIndex`, `status` | A verification step finished (passed/failed) |
+| `gate_verification_awaiting_human` | `goalId`, `gateId`, `signalId`, `stepIndex`, `stepName`, `label`, `prompt` | A `human-signoff` step parked waiting on a human decision. Resolution emits `gate_verification_step_complete` (no separate event). See [goals-workflows-tasks.md — Human sign-off steps](goals-workflows-tasks.md#human-sign-off-steps). |
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
 | `goal_setup_complete` | `goalId` | Goal worktree/team setup finished |

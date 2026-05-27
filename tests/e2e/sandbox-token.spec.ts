@@ -159,6 +159,13 @@ test.describe("Sandbox Token Scoping", () => {
 
 		// Other goal
 		expect(isSandboxAllowed("/api/goals/other-goal/gates", "GET", scope)).toBe(false);
+
+		// /signoff is human-only — a sandboxed agent must not be able to
+		// self-approve a human-signoff gate that gates its own goal.
+		expect(isSandboxAllowed("/api/goals/g1/gates/design/signoff", "POST", scope)).toBe(false);
+		expect(isSandboxAllowed("/api/goals/g1/gates/any-gate/signoff", "POST", scope)).toBe(false);
+		// Sibling endpoints under /gates remain accessible.
+		expect(isSandboxAllowed("/api/goals/g1/gates/design/signal", "POST", scope)).toBe(true);
 	});
 
 	test("no goalIds blocks all goal endpoints", async () => {

@@ -456,6 +456,16 @@ export interface VerificationResult {
 	reportHtml?: string;
 }
 
+/**
+ * Outcome of a `human-signoff` step. The verification harness parks an
+ * awaiter in `pendingSignoffs` until either the REST handler resolves it
+ * with a decision (pass/fail + optional feedback) or `cancelStaleVerifications`
+ * drains it with `{ cancelled: true }`.
+ */
+export type SignoffOutcome =
+	| { decision: "pass" | "fail"; feedback?: string }
+	| { cancelled: true };
+
 /** Reminder prompt sent when an agent goes idle without calling verification_result. */
 export const VERIFICATION_RESULT_REMINDER =
 	"You went idle without submitting your results. " +
@@ -541,6 +551,12 @@ export interface ActiveVerification {
 		output?: string;
 		startedAt: number;
 		sessionId?: string;
+		/** True while a `human-signoff` step is parked waiting on the user. */
+		awaitingHuman?: boolean;
+		/** Already-substituted markdown prompt shown to the user (human-signoff). */
+		humanPrompt?: string;
+		/** Human-readable label rendered on the sign-off card (human-signoff). */
+		humanLabel?: string;
 		/** OS process id of the spawned command (Layer 1). */
 		pid?: number;
 		/** Date.now() at spawn — tie-breaker against pid reuse. */
@@ -764,6 +780,34 @@ export class VerificationHarness {
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
 	/**
+	 * Pending human-signoff resolvers keyed by `${signalId}::${stepName}`.
+	 * Populated when a `human-signoff` step parks and `await`s the user;
+	 * drained by `resolveSignoff()` (user decision) or `cancelStaleVerifications()`
+	 * (gate re-signaled / goal completed).
+	 */
+	public pendingSignoffs = new Map<string, (outcome: SignoffOutcome) => void>();
+
+	/**
+	 * Resolve a pending human-signoff. Returns `true` if the resolver was
+	 * found and invoked, `false` if the step is no longer parked (idempotent
+	 * for callers that race with cancellation or a prior resolve).
+	 *
+	 * The verification harness's own `verifyGateSignal` branch builds the
+	 * step result + artifact from the outcome — callers do not write to the
+	 * gate store directly.
+	 */
+	resolveSignoff(signalId: string, stepName: string, outcome: SignoffOutcome): boolean {
+		const key = `${signalId}::${stepName}`;
+		const resolver = this.pendingSignoffs.get(key);
+		if (!resolver) return false;
+		this.pendingSignoffs.delete(key);
+		try { resolver(outcome); } catch (err) {
+			console.error(`[verification] resolveSignoff resolver threw for ${key}:`, err);
+		}
+		return true;
+	}
+
+	/**
 	 * @deprecated The verification_result tool is now registered via the standard
 	 * goal tools extension. No generated extension file needed.
 	 */
@@ -890,6 +934,9 @@ export class VerificationHarness {
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
 			if (step.status !== "running") continue;
+			// human-signoff steps are alive while parked on user input — they have
+			// no session/pid but are legitimately running, not a zombie.
+			if (step.awaitingHuman) return true;
 			if (step.sessionId) {
 				// LLM/agent steps — check if session is still alive
 				const session = this.sessionManager?.getSession(step.sessionId);
@@ -1109,6 +1156,50 @@ export class VerificationHarness {
 				continue;
 			}
 
+			// human-signoff resume — the verification was parked waiting on a
+			// human decision when the server restarted. Re-create the resolver,
+			// re-broadcast `gate_verification_awaiting_human` so any connected UI
+			// rehydrates the pending request, and await the user's decision
+			// inline. The persisted humanPrompt / humanLabel survive the restart.
+			if (step.type === "human-signoff" && step.awaitingHuman) {
+				const stepIndex = v.steps.indexOf(step);
+				const prompt = step.humanPrompt || "";
+				const label = step.humanLabel || step.name;
+				this.broadcastFn(v.goalId, {
+					type: "gate_verification_awaiting_human",
+					goalId: v.goalId, gateId: v.gateId, signalId: v.signalId,
+					stepIndex, stepName: step.name,
+					label, prompt,
+				});
+				const key = `${v.signalId}::${step.name}`;
+				const { promise, resolve: resolver } = deferred<SignoffOutcome>();
+				this.pendingSignoffs.set(key, resolver);
+				const outcome = await promise;
+				this.pendingSignoffs.delete(key);
+				let passed: boolean;
+				let output: string;
+				if ("decision" in outcome) {
+					const fb = outcome.feedback?.trim();
+					passed = outcome.decision === "pass";
+					output = passed
+						? (fb ? `Approved.\n\n${fb}` : "Approved.")
+						: (fb ? `Rejected.\n\n${fb}` : "Rejected.");
+				} else {
+					passed = false; output = "Sign-off cancelled.";
+				}
+				const av = this.activeVerifications.get(v.signalId);
+				if (av && av.steps[stepIndex]) {
+					av.steps[stepIndex].awaitingHuman = false;
+					this._persistActive();
+				}
+				resolvedSteps.push({
+					name: step.name, type: step.type,
+					passed, output,
+					duration_ms: Date.now() - step.startedAt,
+				});
+				continue;
+			}
+
 			// Step was running — for command-type steps, try the file-based
 			// (Layer 1) resume path; for session-backed steps, re-attach to the
 			// restored reviewer session as before.
@@ -1157,7 +1248,7 @@ export class VerificationHarness {
 			status,
 			steps: resolvedSteps.map(r => ({
 				name: r.name,
-				type: r.type as "command" | "llm-review" | "agent-qa",
+				type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
 				passed: r.passed,
 				output: r.output,
 				duration_ms: r.duration_ms,
@@ -1538,6 +1629,26 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Drain every pending human-signoff resolver whose key matches the given
+	 * signalId. Used by `cancelStaleVerifications` / `cancelAllVerifications`
+	 * so a re-signal or goal-complete unblocks any parked `await promise`
+	 * inside `verifyGateSignal`'s human-signoff branch — the awaited promise
+	 * resolves with `{ cancelled: true }` and the outer `active.cancelled`
+	 * short-circuit handles the rest of the cleanup.
+	 */
+	private _drainPendingSignoffsForSignal(signalId: string): void {
+		const prefix = `${signalId}::`;
+		for (const key of Array.from(this.pendingSignoffs.keys())) {
+			if (!key.startsWith(prefix)) continue;
+			const resolver = this.pendingSignoffs.get(key);
+			this.pendingSignoffs.delete(key);
+			try { resolver?.({ cancelled: true }); } catch (err) {
+				console.error(`[verification] Failed to drain pending signoff ${key}:`, err);
+			}
+		}
+	}
+
+	/**
 	 * Graceful shutdown — kill every in-flight tracked subprocess tree so
 	 * orphan chromium / playwright descendants don't survive the gateway exit.
 	 */
@@ -1556,6 +1667,7 @@ export class VerificationHarness {
 			active.overallStatus = "cancelled";
 
 			this._killTrackedForSignal(signalId);
+			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
 				if (step.sessionId && step.status === "running") {
@@ -1591,6 +1703,7 @@ export class VerificationHarness {
 				active.overallStatus = "cancelled";
 
 				this._killTrackedForSignal(signalId);
+				this._drainPendingSignoffsForSignal(signalId);
 
 				// Terminate all running reviewer sessions
 				for (const step of active.steps) {
@@ -2088,6 +2201,73 @@ export class VerificationHarness {
 									await new Promise(r => setTimeout(r, delayMs));
 								}
 							}
+						} else if (step.type === "human-signoff") {
+							// human-signoff — park on a deferred resolver until the user
+							// POSTs /signoff with a decision. No subprocess, no session.
+							//
+							// Bypass logic: BOBBIT_HUMAN_SIGNOFF_SKIP wins when set ("1" =>
+							// skip, "0" => force park). When unset, fall back to honouring
+							// BOBBIT_LLM_REVIEW_SKIP so the global E2E harness's blanket
+							// skip doesn't leave human-signoff steps parked forever. The
+							// human-signoff E2E spec sets BOBBIT_HUMAN_SIGNOFF_SKIP="0" to
+							// defeat the fallback and exercise the real parking path.
+							const hsExplicit = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+							const skipHumanSignoff = hsExplicit === "1"
+								? true
+								: hsExplicit === "0"
+									? false
+									: !!process.env.BOBBIT_LLM_REVIEW_SKIP;
+							if (skipHumanSignoff) {
+								const reason = hsExplicit === "1"
+									? "BOBBIT_HUMAN_SIGNOFF_SKIP=1"
+									: "BOBBIT_LLM_REVIEW_SKIP is set";
+								result = { passed: true, output: `Human sign-off skipped (${reason}).` };
+							} else {
+								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
+								const label = step.label || step.name;
+								const startedAt = Date.now();
+								active.steps[index].startedAt = startedAt;
+								const av = this.activeVerifications.get(signal.id);
+								if (av && av.steps[index]) {
+									av.steps[index].awaitingHuman = true;
+									av.steps[index].humanPrompt = prompt;
+									av.steps[index].humanLabel = label;
+									this._persistActive();
+								}
+								if (!active.cancelled) this.broadcastFn(signal.goalId, {
+									type: "gate_verification_step_started",
+									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+									stepIndex: index, stepName: step.name,
+									startedAt, phase,
+								});
+								if (!active.cancelled) this.broadcastFn(signal.goalId, {
+									type: "gate_verification_awaiting_human",
+									goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+									stepIndex: index, stepName: step.name,
+									label, prompt,
+								});
+								const key = `${signal.id}::${step.name}`;
+								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
+								this.pendingSignoffs.set(key, resolver);
+								const outcome = await promise;
+								this.pendingSignoffs.delete(key);
+								if ("decision" in outcome) {
+									const fb = outcome.feedback?.trim();
+									result = {
+										passed: outcome.decision === "pass",
+										output: outcome.decision === "pass"
+											? (fb ? `Approved.\n\n${fb}` : "Approved.")
+											: (fb ? `Rejected.\n\n${fb}` : "Rejected."),
+									};
+								} else {
+									result = { passed: false, output: "Sign-off cancelled." };
+								}
+								const av2 = this.activeVerifications.get(signal.id);
+								if (av2 && av2.steps[index]) {
+									av2.steps[index].awaitingHuman = false;
+									this._persistActive();
+								}
+							}
 						} else {
 							// llm-review — spawn a one-shot reviewer sub-agent
 							if (process.env.BOBBIT_LLM_REVIEW_SKIP) {
@@ -2115,8 +2295,10 @@ export class VerificationHarness {
 
 						const duration_ms = Date.now() - startTime;
 
-						// Build artifact for llm-review steps (agent-qa artifacts are set during execution)
-						if (!artifact && step.type === "llm-review" && result.output && result.output.length > 0) {
+						// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
+						// Failed sign-offs surface their feedback to the team lead via the same
+						// markdown-artifact channel as failed reviews — no extra steer plumbing needed.
+						if (!artifact && (step.type === "llm-review" || step.type === "human-signoff") && result.output && result.output.length > 0) {
 							artifact = {
 								content: result.output.length > MAX_ARTIFACT_SIZE ? result.output.slice(0, MAX_ARTIFACT_SIZE) : result.output,
 								contentType: "text/markdown",
