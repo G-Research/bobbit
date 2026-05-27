@@ -96,6 +96,22 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		expect(response, "workflow save should issue a PUT request").not.toBeNull();
 	}
 
+	async function fillAndExpect(locator: import("@playwright/test").Locator, value: string): Promise<void> {
+		await locator.fill(value);
+		await expect(locator).toHaveValue(value);
+	}
+
+	async function switchToNamedCommand(page: import("@playwright/test").Page): Promise<void> {
+		const button = page.locator("[data-testid='wf-cmd-mode-command']").first();
+		const commandInput = page.locator("[data-testid='wf-step-command']").first();
+		for (let i = 0; i < 3; i++) {
+			await button.click();
+			if (await commandInput.isVisible().catch(() => false)) return;
+			await page.waitForTimeout(100);
+		}
+		await expect(commandInput).toBeVisible();
+	}
+
 	test("type dropdown lists all four step types (including human-signoff)", async ({ page }) => {
 		const wfId = "type-dropdown-" + Date.now();
 		await gotoNewEditor(page, wfId, [{
@@ -131,14 +147,18 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		// Fill required + advanced fields. Role/description live inside the collapsed
 		// Advanced <details> section, so open it before targeting those controls.
-		await page.locator("[data-testid='wf-step-name']").first().fill("Design Approval");
-		await page.locator("[data-testid='wf-step-label']").first().fill("Approve design doc");
-		await page.locator("[data-testid='wf-step-prompt']").first().fill("Please review and approve the design.");
+		await fillAndExpect(page.locator("[data-testid='wf-step-name']").first(), "Design Approval");
+		await fillAndExpect(page.locator("[data-testid='wf-step-label']").first(), "Approve design doc");
+		await fillAndExpect(page.locator("[data-testid='wf-step-prompt']").first(), "Please review and approve the design.");
 		await page.locator("[data-testid='wf-step-optional']").first().check();
-		await page.locator("[data-testid='wf-step-optional-label']").first().fill("Require design approval");
+		await expect(page.locator("[data-testid='wf-step-optional']").first()).toBeChecked();
+		await fillAndExpect(page.locator("[data-testid='wf-step-optional-label']").first(), "Require design approval");
 		await expandFirstStepAdvanced(page);
-		await page.locator("[data-testid='wf-step-role']").first().fill("architect");
-		await page.locator("[data-testid='wf-step-description']").first().fill("Final architectural sign-off.");
+		await fillAndExpect(page.locator("[data-testid='wf-step-role']").first(), "architect");
+		await fillAndExpect(page.locator("[data-testid='wf-step-description']").first(), "Final architectural sign-off.");
+		// Re-assert the first identity field last; rapid rerenders while filling
+		// adjacent fields previously made this test flaky on Windows/WebKit timing.
+		await fillAndExpect(page.locator("[data-testid='wf-step-name']").first(), "Design Approval");
 
 		// Save, then reload the edit route to prove the fields round-trip through
 		// persistence rather than staying only in client-side edit state.
@@ -225,8 +245,9 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expect(page.locator("[data-testid='wf-step-prompt']").first()).toBeVisible();
 
 		// Fill required fields and save.
-		await page.locator("[data-testid='wf-step-label']").first().fill("Approve");
-		await page.locator("[data-testid='wf-step-prompt']").first().fill("Please approve.");
+		await fillAndExpect(page.locator("[data-testid='wf-step-label']").first(), "Approve");
+		await fillAndExpect(page.locator("[data-testid='wf-step-prompt']").first(), "Please approve.");
+		await expect(page.locator("[data-testid='wf-save-error-banner']")).toHaveCount(0);
 		await clickSaveAndWait(page, wfId);
 
 		// Re-fetch YAML — step must be human-signoff with no run/expect.
@@ -254,13 +275,15 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		// Add two metadata entries
 		await page.locator("[data-testid='wf-metadata-add']").first().click();
+		await expect(page.locator("[data-testid='wf-metadata-row']")).toHaveCount(1);
 		await page.locator("[data-testid='wf-metadata-add']").first().click();
+		await expect(page.locator("[data-testid='wf-metadata-row']")).toHaveCount(2);
 		const keyInputs = page.locator("[data-testid='wf-metadata-key']");
 		const valInputs = page.locator("[data-testid='wf-metadata-value']");
-		await keyInputs.nth(0).fill("priority");
-		await valInputs.nth(0).fill("high");
-		await keyInputs.nth(1).fill("team");
-		await valInputs.nth(1).fill("backend");
+		await fillAndExpect(keyInputs.nth(0), "priority");
+		await fillAndExpect(valInputs.nth(0), "high");
+		await fillAndExpect(keyInputs.nth(1), "team");
+		await fillAndExpect(valInputs.nth(1), "backend");
 
 		await clickSaveAndWait(page, wfId);
 
@@ -346,11 +369,10 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 
 		// Set timeout. Timeout/component live inside the collapsed Advanced section.
 		await expandFirstStepAdvanced(page);
-		await page.locator("[data-testid='wf-step-timeout']").first().fill("120");
-		// Switch to named-command mode
-		await page.locator("[data-testid='wf-cmd-mode-command']").first().click();
-		await expect(page.locator("[data-testid='wf-step-command']").first()).toBeVisible();
-		await page.locator("[data-testid='wf-step-command']").first().fill("build");
+		await fillAndExpect(page.locator("[data-testid='wf-step-timeout']").first(), "120");
+		// Switch to named-command mode.
+		await switchToNamedCommand(page);
+		await fillAndExpect(page.locator("[data-testid='wf-step-command']").first(), "build");
 		// Set component. The editor renders a select when the project has structured
 		// components, and a free-text fallback when it does not.
 		const componentControl = page.locator("[data-testid='wf-step-component']").first();

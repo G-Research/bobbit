@@ -814,13 +814,21 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 	const errs = saveAttempted ? validateStep(step) : {};
 
 	const currentSteps = (): VerifyStep[] => [...(((editGates[gateIdx] || gate).verify) || [])];
-	const updateStep = (patch: Partial<VerifyStep>) => {
+	const updateStep = (patch: Partial<VerifyStep>, rerender = false) => {
 		// Read from the latest editGates state, not the render-time `gate` closure.
-		// Rapid edits across adjacent fields can fire before lit swaps event
-		// listeners, and stale closures would otherwise overwrite sibling fields.
-		const steps = currentSteps();
+		// Most text inputs do not need a full app render on every keystroke; avoiding
+		// that rerender keeps the focused DOM node stable and prevents rapid adjacent
+		// edits from racing a stale render that clobbers sibling fields. Structural
+		// edits (type switches, optional toggles, command-mode toggles) still call
+		// updateGateField below because their visible controls change.
+		const nextGates = [...editGates];
+		const nextGate = { ...(nextGates[gateIdx] || gate) };
+		const steps = [...(nextGate.verify || [])];
 		steps[stepIdx] = { ...steps[stepIdx], ...patch };
-		updateGateField(gateIdx, "verify", steps);
+		nextGate.verify = steps;
+		nextGates[gateIdx] = nextGate;
+		editGates = nextGates;
+		if (rerender || saveAttempted) renderApp();
 	};
 
 	const stepType = step.type || "command";
@@ -828,6 +836,29 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 	const showRoleField = stepType === "llm-review" || stepType === "agent-qa" || stepType === "human-signoff";
 	const showComponentField = stepType === "command" || stepType === "agent-qa";
 	const componentOptions = projectComponentNames;
+
+	const handleTypeChange = (e: Event) => {
+		const steps = currentSteps();
+		const newType = (e.target as HTMLSelectElement).value as VerifyStep["type"];
+		steps[stepIdx] = mutateStepForTypeChange(steps[stepIdx], newType);
+		updateGateField(gateIdx, "verify", steps);
+	};
+	const setCommandMode = (mode: "run" | "command") => {
+		const steps = currentSteps();
+		const patch: Partial<VerifyStep> = {};
+		if (mode === "run") {
+			patch.command = undefined;
+			if (steps[stepIdx].run === undefined) patch.run = "";
+			steps[stepIdx] = { ...steps[stepIdx], ...patch };
+			delete steps[stepIdx].command;
+		} else {
+			patch.run = undefined;
+			if (steps[stepIdx].command === undefined) patch.command = "";
+			steps[stepIdx] = { ...steps[stepIdx], ...patch };
+			delete steps[stepIdx].run;
+		}
+		updateGateField(gateIdx, "verify", steps);
+	};
 
 	// `command` step ships two mutually-exclusive ways to specify the command:
 	//   - free-form `run` string (with template variables)
@@ -873,12 +904,8 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						<label class="wf-field-label" style="margin-left:8px;">Type</label>
 						<select class="wf-select" data-testid="wf-step-type" .value=${stepType}
 							@click=${(e: Event) => e.stopPropagation()}
-							@change=${(e: Event) => {
-								const steps = currentSteps();
-								const newType = (e.target as HTMLSelectElement).value as VerifyStep["type"];
-								steps[stepIdx] = mutateStepForTypeChange(steps[stepIdx], newType);
-								updateGateField(gateIdx, "verify", steps);
-							}}>
+							@input=${handleTypeChange}
+							@change=${handleTypeChange}>
 							<option value="command" ?selected=${stepType === "command"}>command</option>
 							<option value="llm-review" ?selected=${stepType === "llm-review"}>llm-review</option>
 							<option value="agent-qa" ?selected=${stepType === "agent-qa"}>agent-qa</option>
@@ -900,27 +927,11 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						<div class="wf-cmd-mode-row">
 							<span class="wf-field-label">Source</span>
 							<button class="wf-cmd-mode-toggle ${!useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-run"
-								@click=${(e: Event) => {
-									e.stopPropagation();
-									const steps = currentSteps();
-									const patch: Partial<VerifyStep> = {};
-									patch.command = undefined;
-									if (steps[stepIdx].run === undefined) patch.run = "";
-									steps[stepIdx] = { ...steps[stepIdx], ...patch };
-									delete steps[stepIdx].command;
-									updateGateField(gateIdx, "verify", steps);
-								}}>Free-form <code>run</code></button>
+								@pointerdown=${(e: Event) => { e.stopPropagation(); setCommandMode("run"); }}
+								@click=${(e: Event) => { e.stopPropagation(); setCommandMode("run"); }}>Free-form <code>run</code></button>
 							<button class="wf-cmd-mode-toggle ${useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-command"
-								@click=${(e: Event) => {
-									e.stopPropagation();
-									const steps = currentSteps();
-									const patch: Partial<VerifyStep> = {};
-									patch.run = undefined;
-									if (steps[stepIdx].command === undefined) patch.command = "";
-									steps[stepIdx] = { ...steps[stepIdx], ...patch };
-									delete steps[stepIdx].run;
-									updateGateField(gateIdx, "verify", steps);
-								}}>Named <code>command</code></button>
+								@pointerdown=${(e: Event) => { e.stopPropagation(); setCommandMode("command"); }}
+								@click=${(e: Event) => { e.stopPropagation(); setCommandMode("command"); }}>Named <code>command</code></button>
 						</div>
 						${!useNamedCommand ? html`
 							<input class="wf-input ${errs.run ? "wf-input-error" : ""}" data-testid="wf-step-run" .value=${step.run || ""} placeholder="Command to run..."
@@ -1311,14 +1322,18 @@ function renderDependsOnEditor(gate: WorkflowGate, idx: number): TemplateResult 
 // ============================================================================
 
 /** Persist draft rows back into `gate.metadata` (stripping blank keys). */
-function commitMetadataRows(idx: number, rows: Array<[string, string]>): void {
+function commitMetadataRows(idx: number, rows: Array<[string, string]>, rerender = false): void {
 	metadataDrafts.set(idx, rows);
 	const rec: Record<string, string> = {};
 	for (const [k, v] of rows) {
 		const trimmed = k.trim();
 		if (trimmed) rec[trimmed] = v;
 	}
-	updateGateField(idx, "metadata", Object.keys(rec).length > 0 ? rec : undefined);
+	const nextGates = [...editGates];
+	const nextGate = { ...nextGates[idx], metadata: Object.keys(rec).length > 0 ? rec : undefined };
+	nextGates[idx] = nextGate;
+	editGates = nextGates;
+	if (rerender) renderApp();
 }
 
 function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
@@ -1356,7 +1371,7 @@ function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
 							e.stopPropagation();
 							const currentRows = metadataDrafts.get(idx) || rows!;
 							const next: Array<[string, string]> = currentRows.filter((_, i) => i !== rowIdx);
-							commitMetadataRows(idx, next);
+							commitMetadataRows(idx, next, true);
 						}}>${icon(Trash2, "sm")}</button>
 					</div>
 				`)}
@@ -1365,7 +1380,7 @@ function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
 				e.stopPropagation();
 				const currentRows = metadataDrafts.get(idx) || rows || [];
 				const next: Array<[string, string]> = [...currentRows, ["", ""]];
-				commitMetadataRows(idx, next);
+				commitMetadataRows(idx, next, true);
 			}}>Add metadata</button>
 			<div class="wf-field-hint">Free-form key/value pairs (used by some workflows for routing).</div>
 		</div>
