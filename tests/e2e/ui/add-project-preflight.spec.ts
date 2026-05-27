@@ -113,13 +113,13 @@ test.describe("Add Project — preflight panel", () => {
 			await openAddProjectDialog(page);
 			const pathInput = page.locator('input[placeholder="/path/to/project"]');
 
-			// Nothing typed yet: Browse → Select must be the action that starts preflight.
+			// Nothing typed yet: Browse → Select current must be the action that starts preflight.
 			await expect(page.locator('[data-testid="preflight-panel"]')).toHaveCount(0);
-			await page.locator("button").filter({ hasText: "Browse" }).first().click();
-			const directoryBrowser = page.locator('[data-testid="directory-browser"]');
+			await page.locator('[data-testid="directory-picker-browse"]').click();
+			const directoryBrowser = page.locator('[data-testid="add-project-browse-dialog"]');
 			await expect(directoryBrowser).toBeVisible({ timeout: 5_000 });
 
-			const entry = directoryBrowser.locator('[data-testid="browse-entry"]').filter({ hasText: dirName }).first();
+			const entry = directoryBrowser.locator('[data-testid="add-project-browse-entry"]').filter({ hasText: dirName }).first();
 			await expect(entry).toBeVisible({ timeout: 5_000 });
 			const browseResponsePromise = page.waitForResponse((response) => {
 				try {
@@ -132,12 +132,12 @@ test.describe("Add Project — preflight panel", () => {
 			await entry.click();
 			await browseResponsePromise;
 			await expect.poll(
-				async () => (await directoryBrowser.locator("[title]").first().getAttribute("title")) ?? "",
+				async () => (await directoryBrowser.locator('[data-testid="add-project-browse-current"]').first().getAttribute("title")) ?? "",
 				{ timeout: 5_000 },
 			).toContain(dirName);
 
 			const preflightReportPromise = waitForNextPreflightReport(page);
-			const selectBtn = page.locator("button").filter({ hasText: "Select" }).first();
+			const selectBtn = page.locator("button").filter({ hasText: "Select current" }).first();
 			await expect(selectBtn).toBeEnabled({ timeout: 5_000 });
 			await selectBtn.click();
 			const report = await preflightReportPromise;
