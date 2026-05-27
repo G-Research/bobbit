@@ -5613,7 +5613,7 @@ async function handleApiRoute(
 					return;
 				}
 				if (histStep) {
-					json({ error: `Step "${body.stepName}" is not a human-signoff step` }, 409);
+					json({ error: "The specified step is not a human-signoff step" }, 409);
 					return;
 				}
 			}
