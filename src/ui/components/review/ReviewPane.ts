@@ -30,7 +30,7 @@ export class ReviewPane extends LitElement {
 
   @state() private _overflowOpen = false;
   @state() private _annotationCounts: Map<string, number> = new Map();
-  @state() private _finalComment = "";
+  @state() private _finalCommentsByTitle: Map<string, string> = new Map();
   @state() private _validationError = "";
 
   createRenderRoot() {
@@ -59,6 +59,12 @@ export class ReviewPane extends LitElement {
     if (changed.has("documents") || changed.has("sessionId")) {
       this._refreshCounts();
     }
+    if (changed.has("documents")) {
+      this._pruneFinalCommentDrafts();
+    }
+    if (changed.has("activeTab")) {
+      this._validationError = "";
+    }
   }
 
   private _refreshCounts(): void {
@@ -69,6 +75,50 @@ export class ReviewPane extends LitElement {
     this._annotationCounts = counts;
   }
 
+  private _pruneFinalCommentDrafts(): void {
+    let changed = false;
+    const next = new Map<string, string>();
+    for (const [title, comment] of this._finalCommentsByTitle) {
+      if (this.documents.has(title)) next.set(title, comment);
+      else changed = true;
+    }
+    if (changed) this._finalCommentsByTitle = next;
+  }
+
+  private _finalCommentFor(title: string): string {
+    return this._finalCommentsByTitle.get(title) || "";
+  }
+
+  private _setFinalComment(title: string, comment: string): void {
+    const next = new Map(this._finalCommentsByTitle);
+    if (comment) next.set(title, comment);
+    else next.delete(title);
+    this._finalCommentsByTitle = next;
+  }
+
+  private _deleteFinalComment(title: string): void {
+    if (!this._finalCommentsByTitle.has(title)) return;
+    const next = new Map(this._finalCommentsByTitle);
+    next.delete(title);
+    this._finalCommentsByTitle = next;
+  }
+
+  private _hasFinalComment(title: string): boolean {
+    return this._finalCommentFor(title).trim().length > 0;
+  }
+
+  private _unsentCommentCountForDocument(title: string): number {
+    return getDocumentAnnotationCount(this.sessionId, title) + (this._hasFinalComment(title) ? 1 : 0);
+  }
+
+  private _totalUnsentCommentCount(): number {
+    let total = getTotalAnnotationCount(this.sessionId, this.documents);
+    for (const [title] of this.documents) {
+      if (this._hasFinalComment(title)) total += 1;
+    }
+    return total;
+  }
+
   private _onAnnotationChange(): void {
     this._validationError = "";
     this._refreshCounts();
@@ -76,6 +126,7 @@ export class ReviewPane extends LitElement {
 
   private _switchTab(title: string): void {
     this._overflowOpen = false;
+    this._validationError = "";
     this.dispatchEvent(
       new CustomEvent("review-tab-change", {
         detail: { title },
@@ -86,15 +137,18 @@ export class ReviewPane extends LitElement {
   }
 
   private _onFinalCommentInput(e: Event): void {
-    this._finalComment = (e.target as HTMLTextAreaElement).value;
-    if (this._finalComment.trim()) this._validationError = "";
+    const activeDoc = this.documents.get(this.activeTab) || null;
+    if (!activeDoc) return;
+    const finalComment = (e.target as HTMLTextAreaElement).value;
+    this._setFinalComment(this.activeTab, finalComment);
+    if (finalComment.trim()) this._validationError = "";
   }
 
   private _submitDecision(decision: ReviewDecision): void {
     const activeDoc = this.documents.get(this.activeTab) || null;
     if (!activeDoc) return;
 
-    const finalComment = this._finalComment.trim();
+    const finalComment = this._finalCommentFor(this.activeTab).trim();
     const activeCount = getDocumentAnnotationCount(this.sessionId, this.activeTab);
     if (decision === "reject" && activeCount === 0 && !finalComment) {
       this._validationError = "Add a final comment or at least one inline comment before rejecting.";
@@ -143,10 +197,11 @@ export class ReviewPane extends LitElement {
 
   private _closeTab(title: string, e: Event): void {
     e.stopPropagation();
-    const count = this._annotationCounts.get(title) || 0;
+    const count = this._unsentCommentCountForDocument(title);
     if (count > 0) {
-      if (!confirm(`Close "${title}"? ${count} unsaved comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+      if (!confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
     }
+    this._deleteFinalComment(title);
     this.dispatchEvent(
       new CustomEvent("review-close-tab", {
         detail: { title },
@@ -157,10 +212,11 @@ export class ReviewPane extends LitElement {
   }
 
   private _dismiss(): void {
-    const totalCount = getTotalAnnotationCount(this.sessionId, this.documents);
+    const totalCount = this._totalUnsentCommentCount();
     if (totalCount > 0) {
-      if (!confirm(`Dismiss review? ${totalCount} unsaved comment${totalCount !== 1 ? "s" : ""} will be lost.`)) return;
+      if (!confirm(`Dismiss review? ${totalCount} unsent comment${totalCount !== 1 ? "s" : ""} will be lost.`)) return;
     }
+    this._finalCommentsByTitle = new Map();
     this.dispatchEvent(
       new CustomEvent("review-dismiss", {
         bubbles: true,
@@ -178,6 +234,7 @@ export class ReviewPane extends LitElement {
     const titles = Array.from(this.documents.keys());
     const activeDoc = this.documents.get(this.activeTab);
     const activeCount = activeDoc ? getDocumentAnnotationCount(this.sessionId, this.activeTab) : 0;
+    const activeFinalComment = activeDoc ? this._finalCommentFor(this.activeTab) : "";
 
     // Split tabs: visible (first 5) and overflow (rest)
     const MAX_VISIBLE = 5;
@@ -270,7 +327,7 @@ export class ReviewPane extends LitElement {
             <span class="review-final-comment-label">Final comment</span>
             <textarea
               class="review-final-comment-input"
-              .value=${this._finalComment}
+              .value=${activeFinalComment}
               placeholder="Optional for approval; required to reject without inline comments."
               rows="3"
               @input=${this._onFinalCommentInput}
