@@ -225,6 +225,7 @@ Surface the warning in the project assistant chat and in Settings → project ta
    - `type: command` — structural `{ component, command }`, structural `{ component, run }`, or pure `{ run }`.
    - `type: llm-review` — `role`, `prompt`, `phase`, `expect`, `optional`, `optionalLabel`, `description`, `timeout`.
    - `type: agent-qa` — same plus implicit dependency on project-level `qa_*` fields.
+   - `type: human-signoff` — `label` (sign-off card title), `prompt`, `phase`, `role`, `optional`, `optionalLabel`, `description`; no timeout.
 5. **Runtime context tokens:** `{{branch}}`, `{{master}}`, `{{goal_spec}}`, `{{agent.<key>}}`, `{{<gate_id>.meta.<key>}}`. **No `{{project.<key>}}`** (replaced by structural references).
 6. **Pattern library** — typical gates per workflow style: general / feature / bug-fix / quick-fix / pr-review. The bobbit appendix in the goal spec is reproduced as a worked single-repo example; multi-repo and monorepo worked examples follow the same shape.
 7. **Anti-patterns:** literal shell strings instead of structural refs; copy-paste of step bodies; over-broad `expect: failure`.
@@ -260,7 +261,13 @@ export type AgentQaStep = {
   optional?: boolean; optionalLabel?: string; description?: string;
 };
 
-export type VerifyStep = CommandStep | LlmReviewStep | AgentQaStep;
+export type HumanSignoffStep = {
+  name: string; type: "human-signoff"; label: string; prompt: string;
+  role?: string; phase?: number;
+  optional?: boolean; optionalLabel?: string; description?: string;
+};
+
+export type VerifyStep = CommandStep | LlmReviewStep | AgentQaStep | HumanSignoffStep;
 
 export interface WorkflowGate {
   id: string;
@@ -380,7 +387,8 @@ Audit performed by reading every `defaults/workflows/*.yaml`, `workflow-store.ts
 | 9 | Step `type: command` with `{{project.X}}` | implementation gates | **Replaced by** `{ component, command }` | `step-component-resolution.spec.ts` |
 | 10 | Step `type: llm-review` with `prompt` | many | Same shape; structural refs not relevant | `llm-review-step.spec.ts` |
 | 11 | Step `type: agent-qa` with `prompt` | feature, bug-fix | Same shape | `agent-qa-step.spec.ts` |
-| 12 | Step `role:` (architect, code-reviewer, security-reviewer, spec-auditor, qa-tester) | many | Unchanged | covered by 10/11 |
+| 11a | Step `type: human-signoff` with `label` + `prompt` | human approval gates | First-class workflow step; parks verification until the chat-header goal-status widget receives approve/reject. `label` is the sign-off card title. | `human-signoff.spec.ts`, `goal-status-widget.spec.ts` |
+| 12 | Step `role:` (architect, code-reviewer, security-reviewer, spec-auditor, qa-tester) | many | Unchanged | covered by 10/11/11a |
 | 13 | Step `expect: failure` | bug-fix `reproducing-test` (and TDD) | Unchanged on all `command` shapes | `step-expect-failure.spec.ts` |
 | 14 | Step `timeout:` (seconds) | build/E2E steps | Unchanged | `step-timeout.spec.ts` |
 | 15 | Step `phase:` (parallel grouping) | many | Unchanged | `phased-verification.spec.ts` (existing) |
