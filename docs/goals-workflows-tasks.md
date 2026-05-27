@@ -72,7 +72,8 @@ interface VerifyStep {
   timeout?: number;
   phase?: number;     // Execution phase (default 0). See "Phased verification" below.
   optional?: boolean; // If true, step runs only when enabled per-goal. See "Optional verify steps".
-  label?: string;     // Human-readable label for the toggle in goal creation UI.
+  optionalLabel?: string; // Human-readable label for the goal-creation toggle.
+  label?: string;     // Human-signoff card title only (type: "human-signoff").
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
 }
 
@@ -158,7 +159,9 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 
 #### Dependency DAG
 
-Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. This serves two purposes:
+Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. An empty list is explicit and valid: it makes the gate an independent root/parallel gate. The workflow editor preserves `dependsOn: []` instead of silently converting it into a dependency on the previous gate.
+
+This serves two purposes:
 
 1. **Signal gating** — the server returns 409 if you try to signal a gate before its dependencies have passed.
 2. **Context injection** — when an agent is spawned to produce work for a gate, the passed content of upstream gates is automatically injected into the agent's system prompt.
@@ -292,7 +295,9 @@ interface GateSignalStep {
 
 #### Optional verify steps
 
-Verify steps can be marked `optional: true` with a human-readable `label` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when no component in the project has `config.qa_start_command` set (driven by `isQaConfiguredOnAnyComponent()` via `GET /api/projects/:id/qa-testing-config`), and the tooltip is overridden with a configuration hint.
+Verify steps can be marked `optional: true` with a human-readable `optionalLabel` for the UI toggle. Optional steps are **disabled by default** — they only run when explicitly enabled for a specific goal. Steps can also include a `description` string, which renders as an ⓘ tooltip icon next to the toggle. For `agent-qa` steps, the toggle is automatically greyed out when no component in the project has `config.qa_start_command` set (driven by `isQaConfiguredOnAnyComponent()` via `GET /api/projects/:id/qa-testing-config`), and the tooltip is overridden with a configuration hint.
+
+`label` is reserved for `type: human-signoff` card titles. Legacy optional non-human steps that used `label` are migrated to `optionalLabel` on load and written back in canonical shape on save.
 
 **How it works:**
 - Goals carry an `enabledOptionalSteps: string[]` field listing the `name` values of optional steps that should be active.
@@ -311,7 +316,7 @@ verify:
     type: agent-qa
     phase: 2
     optional: true
-    label: "Enable QA Testing"
+    optionalLabel: "Enable QA Testing"
     description: "Spawn a QA agent that builds the project, starts an ephemeral server, and drives a real browser through user scenarios."
     prompt: |
       You are performing QA testing for this goal...
