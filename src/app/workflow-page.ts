@@ -813,8 +813,12 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 	const isDragging = vstepDragGateIdx === gateIdx && vstepDragStepIdx === stepIdx;
 	const errs = saveAttempted ? validateStep(step) : {};
 
+	const currentSteps = (): VerifyStep[] => [...(((editGates[gateIdx] || gate).verify) || [])];
 	const updateStep = (patch: Partial<VerifyStep>) => {
-		const steps = [...(gate.verify || [])];
+		// Read from the latest editGates state, not the render-time `gate` closure.
+		// Rapid edits across adjacent fields can fire before lit swaps event
+		// listeners, and stale closures would otherwise overwrite sibling fields.
+		const steps = currentSteps();
 		steps[stepIdx] = { ...steps[stepIdx], ...patch };
 		updateGateField(gateIdx, "verify", steps);
 	};
@@ -828,7 +832,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 	// `command` step ships two mutually-exclusive ways to specify the command:
 	//   - free-form `run` string (with template variables)
 	//   - structural ref to a named `command` on the chosen `component`
-	const useNamedCommand = stepType === "command" && step.command !== undefined && step.command !== "";
+	const useNamedCommand = stepType === "command" && step.command !== undefined;
 
 	return html`
 		<div class="wf-vstep-card ${isVStepExpanded ? "vstep-expanded" : ""} ${isDragging ? "vstep-dragging" : ""}"
@@ -870,7 +874,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 						<select class="wf-select" data-testid="wf-step-type" .value=${stepType}
 							@click=${(e: Event) => e.stopPropagation()}
 							@change=${(e: Event) => {
-								const steps = [...(gate.verify || [])];
+								const steps = currentSteps();
 								const newType = (e.target as HTMLSelectElement).value as VerifyStep["type"];
 								steps[stepIdx] = mutateStepForTypeChange(steps[stepIdx], newType);
 								updateGateField(gateIdx, "verify", steps);
@@ -898,7 +902,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 							<button class="wf-cmd-mode-toggle ${!useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-run"
 								@click=${(e: Event) => {
 									e.stopPropagation();
-									const steps = [...(gate.verify || [])];
+									const steps = currentSteps();
 									const patch: Partial<VerifyStep> = {};
 									patch.command = undefined;
 									if (steps[stepIdx].run === undefined) patch.run = "";
@@ -909,7 +913,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 							<button class="wf-cmd-mode-toggle ${useNamedCommand ? "is-active" : ""}" data-testid="wf-cmd-mode-command"
 								@click=${(e: Event) => {
 									e.stopPropagation();
-									const steps = [...(gate.verify || [])];
+									const steps = currentSteps();
 									const patch: Partial<VerifyStep> = {};
 									patch.run = undefined;
 									if (steps[stepIdx].command === undefined) patch.command = "";
@@ -1009,7 +1013,7 @@ function renderVerifyStepEditor(gate: WorkflowGate, gateIdx: number, step: Verif
 								@click=${(e: Event) => e.stopPropagation()}
 								@change=${(e: Event) => {
 									const checked = (e.target as HTMLInputElement).checked;
-									const steps = [...(gate.verify || [])];
+									const steps = currentSteps();
 									steps[stepIdx] = { ...steps[stepIdx], optional: checked || undefined };
 									if (!checked) {
 										delete steps[stepIdx].optional;
@@ -1333,18 +1337,25 @@ function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
 						<input class="wf-input" data-testid="wf-metadata-key" placeholder="key" .value=${k}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
-								const next: Array<[string, string]> = rows!.map((p, i) => i === rowIdx ? [(e.target as HTMLInputElement).value, p[1]] : p);
+								// Read the latest draft rows instead of the render-time closure. Input
+								// events across adjacent key/value fields can fire before the previous
+								// render has swapped listeners, and using the stale `rows` closure would
+								// clobber a just-entered sibling value.
+								const currentRows = metadataDrafts.get(idx) || rows!;
+								const next: Array<[string, string]> = currentRows.map((p, i) => i === rowIdx ? [(e.target as HTMLInputElement).value, p[1]] : p);
 								commitMetadataRows(idx, next);
 							}} />
 						<input class="wf-input" data-testid="wf-metadata-value" placeholder="value" .value=${v}
 							@click=${(e: Event) => e.stopPropagation()}
 							@input=${(e: Event) => {
-								const next: Array<[string, string]> = rows!.map((p, i) => i === rowIdx ? [p[0], (e.target as HTMLInputElement).value] : p);
+								const currentRows = metadataDrafts.get(idx) || rows!;
+								const next: Array<[string, string]> = currentRows.map((p, i) => i === rowIdx ? [p[0], (e.target as HTMLInputElement).value] : p);
 								commitMetadataRows(idx, next);
 							}} />
 						<button class="wf-criteria-remove" title="Remove metadata entry" data-testid="wf-metadata-remove" @click=${(e: Event) => {
 							e.stopPropagation();
-							const next: Array<[string, string]> = rows!.filter((_, i) => i !== rowIdx);
+							const currentRows = metadataDrafts.get(idx) || rows!;
+							const next: Array<[string, string]> = currentRows.filter((_, i) => i !== rowIdx);
 							commitMetadataRows(idx, next);
 						}}>${icon(Trash2, "sm")}</button>
 					</div>
@@ -1352,7 +1363,8 @@ function renderMetadataEditor(gate: WorkflowGate, idx: number): TemplateResult {
 			</div>
 			<button class="wf-criteria-add-btn" data-testid="wf-metadata-add" @click=${(e: Event) => {
 				e.stopPropagation();
-				const next: Array<[string, string]> = [...(rows || []), ["", ""]];
+				const currentRows = metadataDrafts.get(idx) || rows || [];
+				const next: Array<[string, string]> = [...currentRows, ["", ""]];
 				commitMetadataRows(idx, next);
 			}}>Add metadata</button>
 			<div class="wf-field-hint">Free-form key/value pairs (used by some workflows for routing).</div>
