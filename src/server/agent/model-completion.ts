@@ -1,97 +1,50 @@
 import { completeSimple, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { execSync } from "node:child_process";
-import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
-import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
+import { globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
 
 interface AuthCredentials {
 	type: string;
-	access?: string;
-	key?: string;
+	access: string;
 	refresh?: string;
 	expires?: number;
 }
 
-const PROVIDER_ENV_KEYS: Record<string, string[]> = {
-	anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"],
-	openai: ["OPENAI_API_KEY"],
-	"openai-codex": ["OPENAI_API_KEY"],
-	google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-	"google-gemini-cli": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-	xai: ["XAI_API_KEY"],
-	groq: ["GROQ_API_KEY"],
-	mistral: ["MISTRAL_API_KEY"],
-	openrouter: ["OPENROUTER_API_KEY"],
-};
-
-function loadAuthData(): Record<string, any> | null {
+function loadAnthropicAuth(): AuthCredentials | null {
 	const authPath = globalAuthPath();
 	if (!existsSync(authPath)) return null;
-	try { return JSON.parse(readFileSync(authPath, "utf-8")); }
-	catch { return null; }
-}
-
-function authCredentialForProvider(provider: string): AuthCredentials | null {
-	const cred = loadAuthData()?.[provider];
-	if (!cred) return null;
-	if (cred.type === "oauth" && cred.access) return { type: "oauth", access: cred.access, refresh: cred.refresh, expires: cred.expires };
-	if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", key: cred.key };
-	if (typeof cred.key === "string" && cred.key.trim()) return { type: "api-key", key: cred.key };
-	if (typeof cred.access === "string" && cred.access.trim()) return { type: cred.type || "oauth", access: cred.access, expires: cred.expires };
-	return null;
-}
-
-function readModelsJsonProvider(provider: string): any | undefined {
 	try {
-		const p = path.join(globalAgentDir(), "models.json");
-		if (!existsSync(p)) return undefined;
-		const data = JSON.parse(readFileSync(p, "utf-8"));
-		return data?.providers?.[provider];
+		const data = JSON.parse(readFileSync(authPath, "utf-8"));
+		const cred = data.anthropic;
+		if (!cred) return null;
+		if (cred.type === "oauth" && cred.access) return cred;
+		if (cred.type === "api-key" && cred.key) return { type: "api-key", access: cred.key };
+		return null;
 	} catch {
-		return undefined;
+		return null;
 	}
-}
-
-function resolveConfigValue(value: unknown): string | undefined {
-	if (typeof value !== "string" || !value.trim()) return undefined;
-	const trimmed = value.trim();
-	if (trimmed === "none") return trimmed;
-	if (trimmed.startsWith("!")) {
-		try {
-			return execSync(trimmed.slice(1), { encoding: "utf-8", timeout: 15_000, windowsHide: true }).trim() || undefined;
-		} catch {
-			return undefined;
-		}
-	}
-	const envValue = process.env[trimmed];
-	if (envValue) return envValue;
-	return trimmed;
 }
 
 async function resolveProviderApiKey(prefs: PreferencesStore | undefined, provider: string): Promise<string | undefined> {
 	const stored = prefs?.get(`providerKey.${provider}`);
 	if (typeof stored === "string" && stored.trim()) return stored.trim();
 
-	for (const key of PROVIDER_ENV_KEYS[provider] || []) {
-		if (process.env[key]) return process.env[key];
+	if (provider === "anthropic") {
+		const auth = loadAnthropicAuth();
+		if (auth?.type === "oauth" && auth.expires && Date.now() > auth.expires) {
+			const refreshed = await refreshOAuthToken();
+			if (refreshed) return refreshed;
+		}
+		if (auth?.access) return auth.access;
 	}
-
-	const auth = authCredentialForProvider(provider);
-	if (auth?.type === "oauth" && provider === "anthropic" && auth.expires && Date.now() > auth.expires) {
-		const refreshed = await refreshOAuthToken();
-		if (refreshed) return refreshed;
-	}
-	if (auth?.access) return auth.access;
-	if (auth?.key) return auth.key;
 
 	const configs = (prefs?.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 	const custom = configs.find(c => (c.name || c.id) === provider || c.id === provider);
 	if (custom) return custom.apiKey?.trim() || "none";
 
-	return resolveConfigValue(readModelsJsonProvider(provider)?.apiKey);
+	return undefined;
 }
 
 export function toPiModel(model: ApiModel): Model<Api> {
@@ -120,8 +73,6 @@ function assistantText(message: any): string {
 		.trim();
 }
 
-type CompleteSimpleFn = typeof completeSimple;
-
 export async function completeModelText(
 	model: ApiModel,
 	prefs: PreferencesStore | undefined,
@@ -132,7 +83,6 @@ export async function completeModelText(
 		thinkingLevel?: ModelThinkingLevel;
 		timeoutMs?: number;
 	},
-	completeFn: CompleteSimpleFn = completeSimple,
 ): Promise<string> {
 	const apiKey = await resolveProviderApiKey(prefs, model.provider);
 	const options: Record<string, any> = {
@@ -146,7 +96,7 @@ export async function completeModelText(
 		options.reasoning = args.thinkingLevel;
 	}
 
-	const result = await completeFn(toPiModel(model) as any, {
+	const result = await completeSimple(toPiModel(model) as any, {
 		systemPrompt: args.systemPrompt,
 		messages: [{ role: "user", content: args.userPrompt, timestamp: Date.now() }],
 	}, options);
