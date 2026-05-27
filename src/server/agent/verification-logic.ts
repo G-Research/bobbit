@@ -394,6 +394,13 @@ export function partitionOptionalSteps(
  *
  * Only steps with `passed: true` from completed (non-running) verifications
  * are cached. The current signal is excluded from the search.
+ *
+ * `human-signoff` steps are **always excluded** — a prior approval is not
+ * consent for a re-signal. Humans must re-confirm any time the gate is
+ * re-signalled, even when the commit SHA hasn't changed. This was the
+ * Bug-1 defense-in-depth fix in the "Re-attempt: Sign-Off Gates" goal:
+ * without this filter, a single approval at SHA X would silently satisfy
+ * every subsequent re-signal at the same SHA.
  */
 export function buildStepCache(
 	signals: GateSignal[],
@@ -408,6 +415,8 @@ export function buildStepCache(
 		if (prev.commitSha !== commitSha) continue;
 		if (!prev.verification?.status || prev.verification.status === "running") continue;
 		for (const s of prev.verification.steps) {
+			// Never reuse a prior human approval — humans must re-confirm.
+			if (s.type === "human-signoff") continue;
 			if (s.passed && !cache.has(s.name)) {
 				cache.set(s.name, s);
 			}

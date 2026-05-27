@@ -368,7 +368,7 @@ Both `label` and `prompt` are required (the validator rejects the step on load o
 
 **Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Bobbit has no user-identity model today; submission records only a server-side timestamp. Sandboxed sub-agents are blocked from POSTing to `/signoff` at the `sandbox-guard` layer so a sandboxed agent cannot self-approve a sign-off step that gates its own work.
 
-**Test bypass.** Respects `BOBBIT_LLM_REVIEW_SKIP=1` — the step auto-passes without surfacing to the UI. Mirrors `agent-qa` / `llm-review`.
+**Test bypass.** Only `BOBBIT_HUMAN_SIGNOFF_SKIP=1` auto-passes the step. There is **no** fallback to `BOBBIT_LLM_REVIEW_SKIP`: a "human" gate must not share a bypass with `agent-qa` / `llm-review`, otherwise the global E2E harness (which sets `BOBBIT_LLM_REVIEW_SKIP=1`) would silently auto-approve every human gate. With `BOBBIT_HUMAN_SIGNOFF_SKIP` unset or `=0`, the step parks awaiting a real human decision.
 
 Full design: [design/human-signoff-gates.md](design/human-signoff-gates.md). UI-side notification rules: [design/notification-policy.md](design/notification-policy.md).
 

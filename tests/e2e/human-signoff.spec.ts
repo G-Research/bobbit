@@ -250,4 +250,74 @@ test.describe("human-signoff verification step", () => {
 			await deleteSignoffWorkflow(workflowId);
 		}
 	});
+
+	// Pins the Bug-1 defense-in-depth fix from the "Re-attempt: Sign-Off
+	// Gates" goal: the harness used to fall back to honouring
+	// `BOBBIT_LLM_REVIEW_SKIP=1` when `BOBBIT_HUMAN_SIGNOFF_SKIP` was
+	// unset. That fallback meant the global E2E harness (which sets
+	// `BOBBIT_LLM_REVIEW_SKIP=1` to auto-pass llm-review / agent-qa) would
+	// silently auto-approve every human gate. Only
+	// `BOBBIT_HUMAN_SIGNOFF_SKIP=1` skips now; unset OR `=0` both park.
+	test("no fallback to BOBBIT_LLM_REVIEW_SKIP: human-signoff parks when only the llm-review skip is set", async () => {
+		// The describe-level beforeAll sets BOBBIT_HUMAN_SIGNOFF_SKIP="0". Drop
+		// the override entirely so the harness sees the env var as unset — the
+		// post-fix behaviour parks regardless. BOBBIT_LLM_REVIEW_SKIP=1 stays
+		// set (it's the harness default) so we're exactly reproducing the
+		// global-E2E configuration.
+		const priorHsSkip = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+		const priorLlmSkip = process.env.BOBBIT_LLM_REVIEW_SKIP;
+		delete process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
+
+		const workflowId = makeWorkflowId();
+		await createSignoffWorkflow(workflowId);
+		const goal = await createGoal({
+			title: `Human Sign-off No Fallback ${Date.now()}`,
+			workflowId,
+		});
+		const goalId = goal.id;
+
+		try {
+			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/design/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "## Design\n\nNo fallback bypass." }),
+			});
+			expect(signalRes.status).toBe(201);
+			const signalId = (await signalRes.json()).signal.id;
+
+			// MUST park awaiting human input. If the LLM_REVIEW_SKIP fallback
+			// were still in place, the step would have auto-passed before this
+			// poller ever observed `awaitingHuman: true`.
+			const active = await waitForAwaitingHuman(goalId, signalId, "approve-design");
+			const step = active.steps.find((s: any) => s.name === "approve-design");
+			expect(step.awaitingHuman).toBe(true);
+
+			// Sanity check: the gate is NOT marked passed.
+			const gatesRes = await apiFetch(`/api/goals/${goalId}/gates`);
+			expect(gatesRes.ok).toBe(true);
+			const gates = await gatesRes.json();
+			const design = gates.gates.find((g: any) => g.id === "design");
+			expect(design?.status).not.toBe("passed");
+
+			// Clean up the parked resolver so the harness doesn't leak it.
+			const okRes = await apiFetch(`/api/goals/${goalId}/gates/design/signoff`, {
+				method: "POST",
+				body: JSON.stringify({
+					signalId,
+					stepName: "approve-design",
+					decision: "pass",
+					feedback: "cleanup",
+				}),
+			});
+			expect(okRes.status).toBe(200);
+		} finally {
+			await deleteGoal(goalId);
+			await deleteSignoffWorkflow(workflowId);
+			// Restore prior env so subsequent suites see their expected state.
+			if (priorHsSkip === undefined) delete process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+			else process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = priorHsSkip;
+			if (priorLlmSkip === undefined) delete process.env.BOBBIT_LLM_REVIEW_SKIP;
+			else process.env.BOBBIT_LLM_REVIEW_SKIP = priorLlmSkip;
+		}
+	});
 });
