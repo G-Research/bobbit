@@ -473,10 +473,19 @@ export class GoalStatusWidget extends LitElement {
 	private _renderDropdownContent(): TemplateResult {
 		const live = this._awaitingSignoffs;
 		return html`
-			<div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-				<span>Goal status</span>
-				${renderGateProgressBadge(this.goalId)}
+			<div class="flex items-center justify-between gap-2 mb-2 text-foreground font-medium text-sm">
+				<div class="flex items-center gap-1.5 min-w-0">
+					${icon(GoalIcon, "sm")}
+					<span>Goal status</span>
+					${renderGateProgressBadge(this.goalId)}
+				</div>
+				<button
+					class="inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 shrink-0"
+					style="font-size:12px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:3px 8px"
+					@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
+					data-testid="goal-widget-dashboard-link"
+					title="Goal dashboard"
+				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 			</div>
 
 			${this._gates.length === 0
@@ -498,16 +507,6 @@ export class GoalStatusWidget extends LitElement {
 					${live.map(req => this._renderSignoffCard(req))}
 				</div>
 			` : nothing}
-
-			<div class="border-t border-border pt-2 mt-2 flex justify-end">
-				<button
-					class="inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80"
-					style="font-size:12px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:3px 8px"
-					@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
-					data-testid="goal-widget-dashboard-link"
-					title="Goal dashboard"
-				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
-			</div>
 		`;
 	}
 
