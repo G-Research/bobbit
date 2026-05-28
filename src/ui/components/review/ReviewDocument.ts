@@ -14,6 +14,78 @@ import {
 } from "./AnnotationPopover.js";
 import "./review-pane.css";
 
+const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
+const URL_ATTRIBUTES = new Set(["href", "src", "poster", "action", "formaction", "xlink:href"]);
+const SAFE_DATA_URL_PATTERN = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i;
+
+function _normalizeUrlForSafety(value: string): string {
+  return value.trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
+}
+
+function _isSafeMarkdownUrl(value: string): boolean {
+  const normalized = _normalizeUrlForSafety(value);
+  if (!normalized) return true;
+
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("javascript:")) return false;
+  if (lower.startsWith("data:")) return SAFE_DATA_URL_PATTERN.test(lower);
+
+  try {
+    const parsed = new URL(normalized, globalThis.location?.href ?? "http://localhost/");
+    return SAFE_URL_PROTOCOLS.has(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function _sanitizeSrcset(value: string): string | null {
+  const candidates = value.split(",").map((candidate) => candidate.trim()).filter(Boolean);
+  if (candidates.length === 0) return "";
+
+  for (const candidate of candidates) {
+    const [url] = candidate.split(/\s+/, 1);
+    if (!_isSafeMarkdownUrl(url)) return null;
+  }
+
+  return candidates.join(", ");
+}
+
+export function sanitizeReviewMarkdownHtml(htmlContent: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = htmlContent;
+
+  for (const element of Array.from(template.content.querySelectorAll("*"))) {
+    for (const attr of Array.from(element.attributes)) {
+      const attrName = attr.name.toLowerCase();
+      if (attrName.startsWith("on")) {
+        element.removeAttribute(attr.name);
+        continue;
+      }
+
+      if (URL_ATTRIBUTES.has(attrName) && !_isSafeMarkdownUrl(attr.value)) {
+        element.removeAttribute(attr.name);
+        continue;
+      }
+
+      if (attrName === "srcset") {
+        const sanitizedSrcset = _sanitizeSrcset(attr.value);
+        if (sanitizedSrcset == null) {
+          element.removeAttribute(attr.name);
+        } else {
+          element.setAttribute(attr.name, sanitizedSrcset);
+        }
+      }
+    }
+
+    if (element instanceof HTMLAnchorElement) {
+      element.setAttribute("target", "_blank");
+      element.setAttribute("rel", "noopener noreferrer");
+    }
+  }
+
+  return template.innerHTML;
+}
+
 /**
  * <review-document> — Renders markdown with text annotation support.
  *
@@ -149,9 +221,10 @@ export class ReviewDocument extends LitElement {
       safeContent = safeContent.replace(`__CODE_BLOCK_${index}__`, block);
     });
 
-    // Render markdown to HTML
+    // Render markdown to HTML, then sanitize generated links/attributes before
+    // inserting into the live document.
     const htmlContent = marked.parse(safeContent, { async: false }) as string;
-    container.innerHTML = htmlContent;
+    container.innerHTML = sanitizeReviewMarkdownHtml(htmlContent);
 
     // Restore and re-anchor existing annotations
     this._reanchorAnnotations();
