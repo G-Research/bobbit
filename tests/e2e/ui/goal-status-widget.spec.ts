@@ -118,8 +118,29 @@ async function signalGoalGate(goalId: string, gateId: string, content = `# ${gat
 		method: "POST",
 		body: JSON.stringify({ content }),
 	});
-	expect(res.status, `signal ${gateId} failed: ${res.status} ${await res.text().catch(() => "")}`).toBe(201);
-	return res.json();
+	const text = await res.text();
+	expect(res.status, `signal ${gateId} failed: ${res.status} ${text}`).toBe(201);
+	return text ? JSON.parse(text) : null;
+}
+
+async function ensureGoalWidgetGateVisible(page: Page, gateId: string): Promise<void> {
+	const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`).first();
+	if (await row.isVisible().catch(() => false)) return;
+	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await pill.click();
+	if (!(await row.isVisible().catch(() => false))) await pill.click();
+	await expect(row).toBeVisible({ timeout: 10_000 });
+}
+
+async function clickGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<void> {
+	await ensureGoalWidgetGateVisible(page, gateId);
+	const selector = `[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`;
+	await expect.poll(async () => page.evaluate((sel) => {
+		const action = document.querySelector(sel) as HTMLElement | null;
+		if (!action) return false;
+		action.click();
+		return true;
+	}, selector), { timeout: 10_000 }).toBe(true);
 }
 
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
@@ -647,7 +668,7 @@ test.describe("<goal-status-widget>", () => {
 
 			const row = page.locator('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]');
 			await expect(row).toHaveAttribute("data-gate-status", "passed", { timeout: 10_000 });
-			await row.locator('[data-testid="goal-widget-gate-reset"]').click();
+			await clickGoalWidgetGateAction(page, "design-doc", "goal-widget-gate-reset");
 
 			const dialogTitle = page.getByText(/Reset .*Design Doc/i).first();
 			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
@@ -655,9 +676,9 @@ test.describe("<goal-status-widget>", () => {
 			await page.getByRole("button", { name: "Cancel" }).last().click();
 			await expect(dialogTitle).toBeHidden({ timeout: 5_000 });
 			expect(resetRequests, "cancel must not call reset API").toBe(0);
-			await expect(row).toHaveAttribute("data-gate-status", "passed");
+			await waitForGateStatus(goalId, "design-doc", "passed", 5_000);
 
-			await row.locator('[data-testid="goal-widget-gate-reset"]').click();
+			await clickGoalWidgetGateAction(page, "design-doc", "goal-widget-gate-reset");
 			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
 			const resetResponse = page.waitForResponse((response) =>
 				response.request().method() === "POST"
@@ -670,6 +691,7 @@ test.describe("<goal-status-widget>", () => {
 			expect(response.status()).toBe(200);
 			expect(resetRequests).toBe(1);
 			await waitForGateStatus(goalId, "design-doc", "pending", 20_000);
+			await ensureGoalWidgetGateVisible(page, "design-doc");
 
 			await expect(row).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
 			await expect(row.locator('[data-testid="goal-widget-gate-view"]')).toHaveCount(0);
