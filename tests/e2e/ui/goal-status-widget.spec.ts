@@ -150,6 +150,20 @@ async function expectDashboardGateStatus(page: Page, gateId: string, status: "pe
 		.toHaveAttribute("data-gate-status", status, { timeout: 15_000 });
 }
 
+async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
+	await expect.poll(async () => page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const cached = state?.gateStatusCache?.get?.(id);
+		return cached ? { passed: cached.passed, total: cached.total } : null;
+	}, goalId), {
+		timeout: 15_000,
+		message: `sidebar gate status cache should update to ${passed}/${total}`,
+	}).toEqual({ passed, total });
+
+	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${passed} of ${total} gates passed"]`).first())
+		.toBeVisible({ timeout: 15_000 });
+}
+
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
 	await page.evaluate(({ commentText, quoteText }) => {
 		const doc = document.querySelector("review-document") as any;
@@ -675,7 +689,7 @@ test.describe("<goal-status-widget>", () => {
 		}
 	});
 
-	test("Reset is confirmation-guarded and refreshes downstream widget rows, dashboard pipeline, and team lead message", async ({ page, context }) => {
+	test("Reset is confirmation-guarded and refreshes downstream widget rows, sidebar badge, dashboard pipeline, and team lead message", async ({ page, context }) => {
 		test.setTimeout(60_000);
 		const goal = await createGoal({
 			title: `Goal-Status-Widget Reset ${Date.now()}`,
@@ -713,6 +727,7 @@ test.describe("<goal-status-widget>", () => {
 
 			await openApp(page);
 			await openSession(page, teamLeadId);
+			await expectSidebarGateBadge(page, goalId, 3, 3);
 			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
 			await pill.click();
@@ -750,6 +765,8 @@ test.describe("<goal-status-widget>", () => {
 			expect(body.changedGateIds).toEqual(expect.arrayContaining(["design-doc", "implementation", "ready-to-merge"]));
 			expect(body.teamLeadNotified).toBe(true);
 			expect(resetRequests).toBe(1);
+
+			await expectSidebarGateBadge(page, goalId, 0, 3);
 
 			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
 				await waitForGateStatus(goalId, gateId, "pending", 20_000);
