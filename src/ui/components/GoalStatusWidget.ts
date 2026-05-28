@@ -581,6 +581,8 @@ export class GoalStatusWidget extends LitElement {
 				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 			</div>
 
+			<div class="border-t border-border mb-2"></div>
+
 			${this._gates.length === 0
 				? html`<div class="text-muted-foreground" style="font-size:12px">${this._loading ? "Loading gates\u2026" : "No gates"}</div>`
 				: html`

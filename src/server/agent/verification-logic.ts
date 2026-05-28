@@ -393,7 +393,10 @@ export function partitionOptionalSteps(
  * that share the same commit SHA.
  *
  * Only steps with `passed: true` from completed (non-running) verifications
- * are cached. The current signal is excluded from the search.
+ * are cached. The current signal is excluded from the search. When a reset
+ * invalidation timestamp is provided, signals at or before that boundary are
+ * excluded so audit history remains intact without making stale results
+ * cache-eligible.
  *
  * `human-signoff` steps are **always excluded** — a prior approval is not
  * consent for a re-signal. Humans must re-confirm any time the gate is
@@ -406,12 +409,14 @@ export function buildStepCache(
 	signals: GateSignal[],
 	currentSignalId: string,
 	commitSha?: string,
+	verificationCacheInvalidatedAt?: number,
 ): Map<string, GateSignalStep> {
 	const cache = new Map<string, GateSignalStep>();
 	if (!commitSha) return cache;
 
 	for (const prev of signals) {
 		if (prev.id === currentSignalId) continue;
+		if (verificationCacheInvalidatedAt !== undefined && prev.timestamp <= verificationCacheInvalidatedAt) continue;
 		if (prev.commitSha !== commitSha) continue;
 		if (!prev.verification?.status || prev.verification.status === "running") continue;
 		for (const s of prev.verification.steps) {
