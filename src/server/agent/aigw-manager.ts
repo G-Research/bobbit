@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { globalAgentDir } from "../bobbit-dir.js";
+import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -342,6 +343,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 		// The literal here JSON-encodes to:
 		//   "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
 		headers: {
+			"User-Agent": BOBBIT_AIGW_USER_AGENT,
 			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
 		},
 		models: models.map(m => {
@@ -550,7 +552,7 @@ function httpGet(url: string, timeoutMs = 10_000): Promise<any> {
 		const parsedUrl = new URL(url);
 		const transport = parsedUrl.protocol === "https:" ? https : http;
 
-		const req = transport.request(parsedUrl, { method: "GET", timeout: timeoutMs }, (res) => {
+		const req = transport.request(parsedUrl, { method: "GET", headers: aigwUserAgentHeaders(), timeout: timeoutMs }, (res) => {
 			const chunks: Buffer[] = [];
 			res.on("data", (c: Buffer) => chunks.push(c));
 			res.on("end", () => {
@@ -585,8 +587,10 @@ export function proxyRequest(
 	incomingReq.on("data", (c: Buffer) => chunks.push(c));
 	incomingReq.on("end", () => {
 		const body = Buffer.concat(chunks);
-		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		if (body.length > 0) headers["Content-Length"] = String(body.length);
+		const headers = aigwUserAgentHeaders({
+			"Content-Type": "application/json",
+			...(body.length > 0 ? { "Content-Length": String(body.length) } : {}),
+		});
 
 		const RESPONSE_TIMEOUT_MS = 120_000;
 		let responseTimer: ReturnType<typeof setTimeout> | undefined;

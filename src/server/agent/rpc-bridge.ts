@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -159,6 +160,7 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
+		ensurePiAiBedrockHeadersPatch();
 		const cliPath = this.options.cliPath || findAgentCli();
 		const args = buildAgentArgs(this.options);
 
