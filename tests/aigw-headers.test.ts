@@ -20,6 +20,7 @@ import path from "node:path";
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
+const EXPECTED_USER_AGENT = `Bobbit/${JSON.parse(readFileSync(path.resolve("package.json"), "utf-8")).version}`;
 
 let tmp: string;
 let previousAgentDir: string | undefined;
@@ -70,13 +71,18 @@ const CLAUDE_MODEL = {
 	maxTokens: 16_384,
 };
 
-describe("writeAigwModelsJson — provider-level x-opencode-session header", () => {
-	it("emits the documented header literal at provider level (non-Claude models)", () => {
+describe("writeAigwModelsJson — provider-level AI Gateway headers", () => {
+	it("emits the documented header literals at provider level (non-Claude models)", () => {
 		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
 		const data = readModels();
 		assert.ok(data?.providers?.aigw, "providers.aigw must exist");
 		const aigw = data.providers.aigw;
 		assert.ok(aigw.headers, "providers.aigw.headers must exist");
+		assert.equal(
+			aigw.headers["User-Agent"],
+			EXPECTED_USER_AGENT,
+			"User-Agent must use the current package version",
+		);
 		assert.equal(
 			aigw.headers["x-opencode-session"],
 			EXPECTED_HEADER_VALUE,
@@ -100,6 +106,7 @@ describe("writeAigwModelsJson — provider-level x-opencode-session header", () 
 		// shape uniform regardless of which models the gateway exposes.
 		writeAigwModelsJson("https://aigw.example/v1", [CLAUDE_MODEL]);
 		const data = readModels();
+		assert.equal(data.providers.aigw.headers["User-Agent"], EXPECTED_USER_AGENT);
 		assert.equal(
 			data.providers.aigw.headers["x-opencode-session"],
 			EXPECTED_HEADER_VALUE,
@@ -133,23 +140,29 @@ describe("writeAigwModelsJson — provider-level x-opencode-session header", () 
 		removeAigwModelsJson();
 		const data = readModels();
 		assert.equal(data.providers.aigw, undefined, "aigw provider must be gone");
-		// anthropic provider untouched + has no x-opencode-session leak.
+		// anthropic provider untouched + has no AI Gateway header leak.
 		assert.ok(data.providers.anthropic, "anthropic provider must survive");
 		assert.equal(data.providers.anthropic.headers, undefined, "no orphan headers on other providers");
 	});
 
-	it("does not leak `headers` onto non-aigw providers when re-written", () => {
+	it("does not leak AI Gateway headers onto non-aigw providers when re-written", () => {
 		// Seed an anthropic provider, then run aigw write. Confirm anthropic is
-		// left alone — no provider-level headers block synthesised on it.
+		// left alone — no AI Gateway headers synthesised on it.
 		const seeded = {
 			providers: {
-				anthropic: { apiKey: "sk-test" },
+				anthropic: {
+					apiKey: "sk-test",
+					headers: { "X-Existing": "keep-me" },
+				},
 			},
 		};
 		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
 		writeAigwModelsJson("https://aigw.example/v1", [NON_CLAUDE_MODEL]);
 		const data = readModels();
-		assert.equal(data.providers.anthropic.headers, undefined);
+		assert.deepEqual(data.providers.anthropic.headers, { "X-Existing": "keep-me" });
+		assert.equal(data.providers.anthropic.headers["User-Agent"], undefined);
+		assert.equal(data.providers.anthropic.headers["x-opencode-session"], undefined);
+		assert.equal(data.providers.aigw.headers["User-Agent"], EXPECTED_USER_AGENT);
 		assert.equal(
 			data.providers.aigw.headers["x-opencode-session"],
 			EXPECTED_HEADER_VALUE,
