@@ -11,6 +11,43 @@ Surfaces requested:
 
 Searches covered `docs/`, `tests/`, and `src/` for `gateStatusCache`, `refreshGateStatusForGoal`, `gate_signal_received`, `gate_status_changed`, `gate_reset`, `gate_verification_*`, human sign-off, and dashboard/widget/sidebar rendering paths.
 
+## Mechanical reproduction scenarios
+
+These are the user-visible stale-count flows the fix and tests should reproduce before implementation and prove fixed afterward.
+
+### Scenario A: running verification count diverges
+
+1. Create or open a workflow goal with at least two gates and a session attached to the goal.
+2. Open three surfaces at once: the sidebar goal row, the chat header `<goal-status-widget>` pill/popover, and the goal dashboard pipeline/list.
+3. Signal the first pending gate so the server emits `gate_signal_received`, then `gate_verification_started`, `gate_verification_phase_started`, and `gate_verification_step_started`.
+4. Expected current truth while verification is running: `passed=0`, `total=N`, `verifying=true`, `verifyingCount=1`.
+5. Failure symptom: dashboard live verification rows update immediately, but sidebar/widget badge can remain at `0/N` without the running colour/count because the shared cache does not refresh on every active verification event.
+6. After `gate_verification_complete` and `gate_status_changed`, all surfaces should converge to `1/N` passed with no running indicator.
+
+### Scenario B: human sign-off pulse/count remains stale after resolution
+
+1. Use a workflow gate with a `human-signoff` verification step and signal it.
+2. Wait for `gate_verification_awaiting_human`; expected truth is `awaitingSignoffCount=1`, `awaitingHumanSignoff=true`, and the widget pulse plus sidebar attention state are visible.
+3. Approve or reject the sign-off through the review pane, which POSTs `/api/goals/:goalId/gates/:gateId/signoff`.
+4. The server resumes the harness, clears `awaitingHuman`, and emits `gate_verification_step_complete`, then eventually `gate_verification_complete` / `gate_status_changed`.
+5. Failure symptom: widget local `_awaitingSignoffs` or dashboard live rows may update, but sidebar/widget badge can keep `awaitingHumanSignoff=true` until final completion, navigation, or polling because `gate_verification_step_complete` is not a shared-cache invalidation.
+6. Expected fixed behavior: the sign-off pulse and shared `awaitingSignoffCount` clear after successful POST and/or the step-complete WS event, before any reload.
+
+### Scenario C: reset invalidates downstream gates inconsistently
+
+1. Start from a goal with gate 1 and at least one downstream dependent gate passed, so all surfaces show e.g. `2/3`.
+2. Reset gate 1 from the goal status widget or dashboard.
+3. The server broadcasts `gate_status_changed` for affected gates and then `gate_reset` with affected/downstream IDs.
+4. Expected truth: selected and downstream gates become pending, active verification/sign-off counts for affected gates clear, and all surfaces show the lower passed count, e.g. `0/3`.
+5. Failure symptom: widget popover/dash list may refresh from their local handlers while sidebar/widget pill remains stale because `RemoteAgent` does not explicitly handle `gate_reset`, and dashboard may preserve stale sign-off counters when it writes the shared cache.
+6. Expected fixed behavior: `gate_reset` is an authoritative shared-summary invalidation and all surfaces match without reload.
+
+### Scenario D: reload/reconnect rehydrates truth
+
+1. Produce any of the states above: running verification, awaiting human sign-off, completed gate, or post-reset pending downstream gates.
+2. Reload the browser or reconnect the viewer/session websocket.
+3. Expected fixed behavior: surfaces rehydrate from `/api/goals/:id/gates?view=summary` plus active verification data and agree before user navigation.
+
 ## Affected files and symbols
 
 | Area | File | Symbols / paths | Current role |
@@ -32,6 +69,27 @@ Searches covered `docs/`, `tests/`, and `src/` for `gateStatusCache`, `refreshGa
 | Re-signal reset path | `src/server/server.ts` | `POST /api/goals/:goalId/gates/:gateId/signal` | If re-signaling a passed gate, `cascadeReset()` resets downstream and broadcasts `gate_status_changed` for downstream gates, then records/broadcasts the new signal. |
 | Human sign-off | `src/server/server.ts`, `src/server/agent/verification-harness.ts` | `/signoff`, `resolveSignoff()`, `gate_verification_awaiting_human`, step complete/final complete events | Sign-off resolution itself returns HTTP 200 without a direct cache event; follow-up harness events must clear `awaitingSignoffCount` and update pass/fail counts. |
 | Pinning / related tests | `tests/e2e/ui/goal-status-widget.spec.ts`, `tests/sidebar-goal-rendering.spec.ts`, `tests/notification-policy.spec.ts`, `tests/e2e/human-signoff.spec.ts`, `tests/gate-signal-step-enumeration.test.ts`, `tests/e2e/gate-signal-progress.spec.ts` | Existing coverage for widget flow, reset, badge rendering, notification policy, sign-off REST, and signal step enumeration. No focused test currently asserts every surface receives the same active verification count/state on each verification phase/step event and after sign-off resolution. |
+
+## Root-cause evidence with source references
+
+- `src/app/state.ts:274` defines `state.gateStatusCache`, the shared summary cache read by sidebar badges, notification policy, and the goal status widget pill.
+- `src/app/api.ts:757` fetches `/api/goals/:id/gates?view=summary`; `src/app/api.ts:772` refreshes all workflow goals; `src/app/api.ts:807` refreshes one goal. These helpers derive `passed`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, and `awaitingHumanSignoff` client-side.
+- `src/app/api.ts:250` hydrates gate summaries during `refreshSessions()` only on initial load or goal list generation changes, so live correctness depends on WS invalidation between reloads.
+- `src/app/render-helpers.ts:675` reads `state.gateStatusCache` in `renderGateProgressBadge()`; `src/app/render-helpers.ts:728` and `src/app/render-helpers.ts:755` make sidebar goal rows fall back to that same badge.
+- `src/ui/components/GoalStatusWidget.ts:180` and `src/ui/components/GoalStatusWidget.ts:189` fetch widget-local full gates and active sign-offs, while `src/ui/components/GoalStatusWidget.ts:688` renders the pill count via the shared `renderGateProgressBadge(this.goalId)`. This creates an internal split between popover details and pill count.
+- `src/ui/components/GoalStatusWidget.ts:339` handles widget viewer WS events; `src/ui/components/GoalStatusWidget.ts:344` refreshes local data on `gate_reset`, and `src/ui/components/GoalStatusWidget.ts:351` refreshes active state on step start/complete. These handlers do not update the shared cache used by the pill.
+- `src/ui/components/GoalStatusWidget.ts:527` POSTs reset and `src/ui/components/GoalStatusWidget.ts:549` refreshes only widget-local gates/active sign-offs afterward.
+- `src/app/remote-agent.ts:1510` refreshes the shared cache for `gate_signal_received`; `src/app/remote-agent.ts:1514` refreshes it for `gate_status_changed`; `src/app/remote-agent.ts:1521` refreshes for `gate_verification_started`; `src/app/remote-agent.ts:1532` refreshes for `gate_verification_awaiting_human`; and `src/app/remote-agent.ts:1542` refreshes for `gate_verification_complete`.
+- `src/app/remote-agent.ts:1525` through `src/app/remote-agent.ts:1529` dispatch `gate_verification_phase_started`, `gate_verification_step_started`, `gate_verification_step_complete`, and `gate_verification_step_output` to live components but do not refresh the shared cache. `gate_verification_step_output` should stay detail-only, but phase/step started and step complete can affect effective running/sign-off state.
+- `src/app/remote-agent.ts` has no `gate_reset` case near the gate-event switch, so shared cache invalidation after reset relies on companion `gate_status_changed` broadcasts and ordering rather than the explicit reset event.
+- `src/app/goal-dashboard.ts:184` opens a dashboard viewer WS; `src/app/goal-dashboard.ts:212` refreshes full gates only for `gate_signal_received` and `gate_status_changed`; other verification events go to `dispatchVerificationEvent()`.
+- `src/app/goal-dashboard.ts:565` stores dashboard-local gates, then `src/app/goal-dashboard.ts:567` syncs to the shared sidebar cache. `src/app/goal-dashboard.ts:576` through `src/app/goal-dashboard.ts:579` preserve old sign-off counters because bare `/gates` does not include active sign-off aggregates.
+- `src/app/goal-dashboard.ts:697` refreshes full gates on `gate_verification_complete`, but dashboard live detail updates for earlier phase/step events do not necessarily update shared summary counts.
+- `src/app/review-sources.ts:296` starts human sign-off submission, `src/app/review-sources.ts:304` POSTs `/signoff`, and `src/app/review-sources.ts:319` already refreshes shared gate status after the successful POST. This is good but insufficient alone because other surfaces still need the WS invalidation path and trailing truth refresh.
+- `src/server/server.ts:5138` aggregates active verification human sign-offs into the `?view=summary` response consumed by the shared cache.
+- `src/server/server.ts:5306` implements explicit reset; `src/server/server.ts:5352` broadcasts `gate_status_changed` for affected gates, then `src/server/server.ts:5355` broadcasts `gate_reset`.
+- `src/server/server.ts:5551` cascade-resets downstream gates when re-signaling a passed gate, and `src/server/server.ts:5557` broadcasts downstream `gate_status_changed` events.
+- `src/server/server.ts:5694` handles human sign-off resolution. `src/server/agent/verification-harness.ts:799` resolves the parked sign-off promise; `src/server/agent/verification-harness.ts:2247` marks a human step awaiting; `src/server/agent/verification-harness.ts:2259` broadcasts `gate_verification_awaiting_human`; `src/server/agent/verification-harness.ts:2282` clears `awaitingHuman`; and `src/server/agent/verification-harness.ts:2324` broadcasts `gate_verification_step_complete`.
 
 ## Current data flow
 
@@ -183,9 +241,28 @@ Client implications:
    - This avoids every client reimplementing the same active-state merge.
 
 7. **Add focused coverage after implementation.**
-   - Unit coverage for the debounced invalidator/coalescer: multiple events for one goal produce one fetch plus a trailing fetch if needed.
-   - Browser E2E comparing sidebar badge, widget pill/popover, dashboard pipeline, and dashboard gate list after: signal received, verification started/running/completed, human sign-off approved/rejected, explicit reset, and reload.
-   - Include a case where a human sign-off is approved and assert the sign-off pulse and `awaitingHumanSignoff` clear before final navigation/reload.
+   - Unit coverage for the debounced invalidator/coalescer:
+     - Given three invalidating events for the same goal within the debounce window (`gate_signal_received`, `gate_verification_started`, `gate_verification_step_started`), expect one summary fetch and one cache write.
+     - Given one invalidation while a fetch is in flight, expect exactly one trailing fetch after the first completes.
+     - Given `gate_verification_step_output`, expect no summary fetch.
+     - Given invalidations for two different goals, expect independent per-goal fetches.
+   - Browser E2E: running verification sync.
+     - Start with a workflow goal showing `0/N` in sidebar badge, widget pill, widget popover, dashboard pipeline, and dashboard list.
+     - Signal the first gate and wait for `gate_verification_started` / `gate_verification_step_started`.
+     - Assert every count surface shows the same effective progress (`0/N` plus one running gate indicator, or the canonical running display chosen by the implementation) before completion.
+     - Wait for completion and assert all surfaces show `1/N` and no running indicator.
+   - Browser E2E: human sign-off resolution.
+     - Signal a gate with one human sign-off step.
+     - Assert sidebar/widget/dashboard agree on awaiting sign-off state: widget pulse visible, popover sign-off card visible, and shared count/cache state reflected in the badge/attention UI.
+     - Approve the sign-off from the review pane.
+     - Assert the widget pulse, popover sign-off card, shared `awaitingHumanSignoff`, and any dashboard live awaiting label clear after POST/`gate_verification_step_complete`, without requiring navigation or reload.
+     - Repeat or parameterize rejection so failed sign-off clears awaiting state and surfaces agree on failed/pending counts.
+   - Browser E2E: reset/downstream invalidation.
+     - Start with at least two passed gates, e.g. `2/3`.
+     - Reset the first gate from the widget or dashboard.
+     - Assert sidebar badge, widget pill/popover, dashboard pipeline, and dashboard gate list all show the reset selected/downstream gates pending and the same lower passed count (for the example, `0/3`).
+   - Browser E2E: reload persistence.
+     - After each of running, awaiting-signoff, completed, and reset states, reload the page and assert the surfaces rehydrate from server truth and keep matching.
 
 ## Suggested target architecture
 
