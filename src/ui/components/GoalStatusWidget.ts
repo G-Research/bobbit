@@ -721,7 +721,7 @@ export class GoalStatusWidget extends LitElement {
 			}
 			goal-status-widget .goal-status-pill > span[title*="gates passed"] {
 				height: 12px;
-				transform: translateY(-1px);
+				transform: translateY(-0.5px);
 			}
 			git-status-widget .git-status-pill > span:not(:first-child) {
 				transform: translateY(-0.5px);
