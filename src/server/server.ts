@@ -5323,20 +5323,19 @@ async function handleApiRoute(
 		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
 
+		const affectedGateIds = getGateAndTransitiveDependents(goal.workflow, gateId);
+		try {
+			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds);
+		} catch (err) {
+			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
+		}
+
 		let resetResult: GateResetResult;
 		try {
 			resetResult = gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
 		} catch (err: any) {
 			json({ error: err?.message || `Unknown gate: ${gateId}` }, 404);
 			return;
-		}
-
-		for (const affectedGateId of resetResult.affectedGateIds) {
-			try {
-				await verificationHarness.cancelStaleVerifications(goalId, affectedGateId);
-			} catch (err) {
-				console.error(`[api] Error cancelling verification for reset gate ${affectedGateId}:`, err);
-			}
 		}
 
 		const affectedGates = resetResult.affectedGateIds.map(affectedGateId => {
@@ -9721,6 +9720,35 @@ async function handleApiRoute(
 	}
 
 	json({ error: "Not found" }, 404);
+}
+
+/** Return a gate plus every transitive dependent in workflow-DAG order. */
+function getGateAndTransitiveDependents(workflow: import("./agent/workflow-store.js").Workflow, gateId: string): string[] {
+	const gateIds = new Set(workflow.gates.map(g => g.id));
+	if (!gateIds.has(gateId)) throw new Error(`Unknown gate: ${gateId}`);
+
+	const adjacency = new Map<string, string[]>();
+	for (const gate of workflow.gates) {
+		for (const depId of gate.dependsOn) {
+			const list = adjacency.get(depId) ?? [];
+			list.push(gate.id);
+			adjacency.set(depId, list);
+		}
+	}
+
+	const affectedGateIds: string[] = [];
+	const visited = new Set<string>([gateId]);
+	const queue = [gateId];
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		affectedGateIds.push(current);
+		for (const dependentId of adjacency.get(current) ?? []) {
+			if (visited.has(dependentId)) continue;
+			visited.add(dependentId);
+			queue.push(dependentId);
+		}
+	}
+	return affectedGateIds;
 }
 
 /** Check if gateId transitively depends on targetId in the workflow DAG */
