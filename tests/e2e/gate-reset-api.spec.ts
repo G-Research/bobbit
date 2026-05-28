@@ -8,6 +8,7 @@ import {
 	defaultProjectId,
 	deleteGoal,
 	deleteSession,
+	gitCwd,
 	startTeam,
 	teardownTeam,
 	type WsConnection,
@@ -60,10 +61,27 @@ async function getGate(goalId: string, gateId: string): Promise<any> {
 	return res.json();
 }
 
+async function waitForGoalSetupReady(goalId: string): Promise<any> {
+	return pollUntil(async () => {
+		const res = await apiFetch(`/api/goals/${goalId}`);
+		if (!res.ok) return null;
+		const goal = await res.json();
+		if (goal.setupStatus === "error") throw new Error(`Goal setup failed: ${JSON.stringify(goal)}`);
+		return goal.setupStatus === "ready" ? goal : null;
+	}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready` });
+}
+
 async function getSignals(goalId: string, gateId: string): Promise<any[]> {
 	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signals`);
 	expect(res.status).toBe(200);
 	return (await res.json()).signals || [];
+}
+
+async function latestVerificationOutput(goalId: string, gateId: string): Promise<string> {
+	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/inspect?section=verification`);
+	expect(res.status).toBe(200);
+	const body = await res.json();
+	return (body.steps || []).map((s: any) => String(s.output || "")).join("\n");
 }
 
 async function resetGate(goalId: string, gateId: string): Promise<{ status: number; body: any }> {
@@ -81,6 +99,54 @@ async function activeVerifications(goalId: string): Promise<any[]> {
 }
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
+	test("manual reset invalidates cached verification output for same-commit re-signals", async () => {
+		const wf = workflowId("gate-reset-cache");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "root fresh marker", type: "command", run: "node -e \"console.log('FRESH_ROOT_AFTER_RESET')\"" }] },
+			{ id: "child", name: "Child", dependsOn: ["root"], verify: [{ name: "child fresh marker", type: "command", run: "node -e \"console.log('FRESH_CHILD_AFTER_RESET')\"" }] },
+		]);
+
+		const goal = await createGoal({ title: `Gate Reset Cache ${Date.now()}`, cwd: gitCwd(), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goalId = goal.id;
+		try {
+			await waitForGoalSetupReady(goalId);
+			await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			expect(await latestVerificationOutput(goalId, "root")).toContain("FRESH_ROOT_AFTER_RESET");
+
+			await signalGate(goalId, "child");
+			await waitForGateStatus(goalId, "child", "passed");
+			expect(await latestVerificationOutput(goalId, "child")).toContain("FRESH_CHILD_AFTER_RESET");
+
+			const reset = await resetGate(goalId, "root");
+			expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+			expect(reset.body.affectedGateIds).toEqual(expect.arrayContaining(["root", "child"]));
+			await waitForGateStatus(goalId, "root", "pending");
+			await waitForGateStatus(goalId, "child", "pending");
+
+			await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			const rootOutput = await latestVerificationOutput(goalId, "root");
+			expect(rootOutput).toContain("FRESH_ROOT_AFTER_RESET");
+			expect.soft(
+				rootOutput,
+				"FRESH_GATE_RESET_CACHE_REUSED: root gate reused pre-reset verification output after manual reset",
+			).not.toContain("[cached from prior signal]");
+
+			await signalGate(goalId, "child");
+			await waitForGateStatus(goalId, "child", "passed");
+			const childOutput = await latestVerificationOutput(goalId, "child");
+			expect(childOutput).toContain("FRESH_CHILD_AFTER_RESET");
+			expect.soft(
+				childOutput,
+				"FRESH_GATE_RESET_CACHE_REUSED: downstream child gate reused pre-reset verification output after upstream manual reset",
+			).not.toContain("[cached from prior signal]");
+		} finally {
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
 	test("invalidates the selected gate plus transitive dependents by DAG, preserves history/content, and is idempotent", async () => {
 		const wf = workflowId("gate-reset-dag");
 		await createWorkflow(wf, [
