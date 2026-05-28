@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const REMOTE_AGENT_SOURCE = readFileSync(new URL("../src/app/remote-agent.ts", import.meta.url), "utf8");
+const API_SOURCE = readFileSync(new URL("../src/app/api.ts", import.meta.url), "utf8");
+const DASHBOARD_SOURCE = readFileSync(new URL("../src/app/goal-dashboard.ts", import.meta.url), "utf8");
 
 function stripComments(source: string): string {
 	return source
@@ -72,4 +74,39 @@ test("RemoteAgent does not refetch gate summaries for detail-only step output", 
 		false,
 		"gate_verification_step_output should not refresh gate summary cache",
 	);
+});
+
+test("api.ts exposes a debounced per-goal shared gate summary invalidator", () => {
+	assert.match(API_SOURCE, /export function invalidateGateStatusForGoal\s*\(/, "expected exported invalidator");
+	assert.match(API_SOURCE, /GATE_STATUS_INVALIDATION_DEBOUNCE_MS/, "expected debounce window");
+	assert.match(API_SOURCE, /_gateStatusInvalidateTimers/, "expected per-goal debounce timers");
+	assert.match(API_SOURCE, /_gateStatusInFlight/, "expected per-goal in-flight coalescing");
+	assert.match(API_SOURCE, /_gateStatusTrailing/, "expected trailing refresh coalescing");
+	assert.match(API_SOURCE, /setTimeout\s*\(/, "expected invalidations to be scheduled, not fetched inline");
+});
+
+test("Goal dashboard schedules shared summary refreshes without writing partial cache entries", () => {
+	assert.doesNotMatch(
+		DASHBOARD_SOURCE,
+		/state\.gateStatusCache\.set\s*\(/,
+		"dashboard must not write stale partial signoff counters into state.gateStatusCache",
+	);
+	assert.match(DASHBOARD_SOURCE, /invalidateGateStatusForGoal/, "dashboard should use the shared gate summary invalidator");
+
+	const eventSet = DASHBOARD_SOURCE.match(/GATE_SUMMARY_INVALIDATING_EVENTS\s*=\s*new Set\(\[([\s\S]*?)\]\)/)?.[1] ?? "";
+	const eventsThatMustInvalidate = [
+		"gate_signal_received",
+		"gate_status_changed",
+		"gate_reset",
+		"gate_verification_started",
+		"gate_verification_phase_started",
+		"gate_verification_step_started",
+		"gate_verification_awaiting_human",
+		"gate_verification_step_complete",
+		"gate_verification_complete",
+	];
+	for (const eventType of eventsThatMustInvalidate) {
+		assert.match(eventSet, new RegExp(`"${eventType}"`), `dashboard should invalidate on ${eventType}`);
+	}
+	assert.doesNotMatch(eventSet, /"gate_verification_step_output"/, "step output is detail-only and should not invalidate summaries");
 });
