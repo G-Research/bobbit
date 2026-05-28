@@ -272,6 +272,89 @@ test.describe("jump-to-prompt buttons (geometric)", () => {
 			.toBe(dist > halfClient || cls2.below > 0);
 	});
 
+	test("mobile: previous-prompt button and landing target clear fixed header", async ({ page, rec }) => {
+		await page.setViewportSize({ width: 375, height: 667 });
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		await openTailSession(page, sessionId);
+		await disableScrollAnchoring(page);
+		await installPreStreamSpacer(page);
+		await rec.capture("Mobile session opened");
+
+		await sendMessage(page, "mobile header offset");
+		await waitForSessionStatus(sessionId, "idle", 60_000);
+		await page.evaluate((scrollSel) => {
+			const content = document.querySelector("agent-interface .max-w-5xl") as HTMLElement | null;
+			const scroller = document.querySelector(scrollSel) as HTMLElement | null;
+			if (!content || !scroller) throw new Error("chat DOM not ready");
+			let spacer = content.querySelector("#__jump_to_prompt_bottom_spacer") as HTMLElement | null;
+			if (!spacer) {
+				spacer = document.createElement("div");
+				spacer.id = "__jump_to_prompt_bottom_spacer";
+				content.appendChild(spacer);
+			}
+			spacer.style.height = `${Math.max(900, window.innerHeight * 1.5)}px`;
+			scroller.scrollTop = scroller.scrollHeight;
+			scroller.dispatchEvent(new Event("scroll"));
+		}, SCROLL_SEL);
+		await settleFrames(page, 4);
+		await expect
+			.poll(async () => await readOpacity(page, UP_SEL), {
+				timeout: 10_000,
+				message: "up button visible after prompt scrolls above mobile viewport",
+			})
+			.toBe("1");
+
+		const buttonClearance = await page.evaluate((upSel) => {
+			const header = document.getElementById("app-header") as HTMLElement | null;
+			const buttons = Array.from(document.querySelectorAll(upSel)) as HTMLElement[];
+			const button = buttons.find((el) => {
+				const r = el.getBoundingClientRect();
+				return r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight;
+			}) ?? null;
+			if (!header || !button) return null;
+			const headerRect = header.getBoundingClientRect();
+			const buttonRect = button.getBoundingClientRect();
+			return {
+				headerBottom: headerRect.bottom,
+				buttonTop: buttonRect.top,
+				buttonLeft: buttonRect.left,
+				buttonRight: buttonRect.right,
+				buttonWidth: buttonRect.width,
+				centerX: buttonRect.left + buttonRect.width / 2,
+				centerY: buttonRect.top + buttonRect.height / 2,
+				innerWidth: window.innerWidth,
+				innerHeight: window.innerHeight,
+				styleTop: button.style.top,
+			};
+		}, UP_SEL);
+		expect(buttonClearance, "mobile header + up button must exist").not.toBeNull();
+		expect(buttonClearance!.styleTop, "top offset should follow the mobile header CSS var")
+			.toContain("--mobile-header-height");
+		expect(buttonClearance!.buttonTop, "up button must render below fixed mobile header")
+			.toBeGreaterThan(buttonClearance!.headerBottom + 8);
+		expect(buttonClearance!.centerX, "visible up button center must be inside the viewport")
+			.toBeGreaterThan(0);
+		expect(buttonClearance!.centerX, "visible up button center must be inside the viewport")
+			.toBeLessThan(buttonClearance!.innerWidth);
+
+		await page.mouse.click(buttonClearance!.centerX, buttonClearance!.centerY);
+		await expect
+			.poll(async () => {
+				return await page.evaluate(({ scrollSel }) => {
+					const header = document.getElementById("app-header") as HTMLElement | null;
+					const firstPrompt = document.querySelector("user-message") as HTMLElement | null;
+					const scroller = document.querySelector(scrollSel) as HTMLElement | null;
+					if (!header || !firstPrompt || !scroller) return -9999;
+					return Math.round(firstPrompt.getBoundingClientRect().top - header.getBoundingClientRect().bottom);
+				}, { scrollSel: SCROLL_SEL });
+			}, {
+				timeout: 15_000,
+				message: "jump target should land below fixed mobile header",
+			})
+			.toBeGreaterThan(8);
+	});
+
 	test("walk up + walk down + scroll-down-while-parked + new-prompt + return-near-bottom", async ({ page, rec }) => {
 		test.setTimeout(180_000);
 		const sessionId = await createSession();

@@ -1318,11 +1318,34 @@ export class AgentInterface extends LitElement {
 		this._scrollToBottomNow({ animate: true });
 	};
 
+	private _hasMobileHeaderOverlay(): boolean {
+		if (typeof document === "undefined" || typeof window === "undefined") return false;
+		const header = document.getElementById("app-header");
+		return !!header && window.getComputedStyle(header).position === "fixed";
+	}
+
+	private _getMobileHeaderHeightPx(): number {
+		if (!this._hasMobileHeaderOverlay() || typeof window === "undefined") return 0;
+		const raw = window.getComputedStyle(document.documentElement).getPropertyValue("--mobile-header-height");
+		const parsed = Number.parseFloat(raw);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+	}
+
+	private _getTopPromptNavOffsetPx(): number {
+		return 16 + this._getMobileHeaderHeightPx();
+	}
+
+	private _getTopPromptNavOffsetCss(): string {
+		return this._hasMobileHeaderOverlay()
+			? "calc(var(--mobile-header-height, 60px) + 16px)"
+			: "16px";
+	}
+
 	/** Jump-to-previous-prompt click handler (top button). Walks the DOM
 	 * live to find the bottom-most `<user-message>` whose bottom edge is
 	 * above the viewport top — i.e. the one closest to the viewport top.
-	 * Springs the viewport up so that prompt lands `TOP_MARGIN` below the
-	 * container top. Stateless: each click reads geometry fresh. */
+	 * Springs the viewport up so that prompt lands below the visible top
+	 * chrome. Stateless: each click reads geometry fresh. */
 	private _handleJumpToLastPromptClick = (): void => {
 		if (!this._scrollContainer) return;
 		const container = this._scrollContainer;
@@ -1382,10 +1405,10 @@ export class AgentInterface extends LitElement {
 		const container = this._scrollContainer;
 		const containerRect = container.getBoundingClientRect();
 		const targetRect = targetEl.getBoundingClientRect();
-		const TOP_MARGIN = 16; // matches the button's top offset
+		const topMargin = this._getTopPromptNavOffsetPx(); // matches the button's top offset
 		const targetScrollTop = Math.max(
 			0,
-			Math.round(container.scrollTop + (targetRect.top - containerRect.top) - TOP_MARGIN),
+			Math.round(container.scrollTop + (targetRect.top - containerRect.top) - topMargin),
 		);
 		// Echo-latch: classify the resulting scroll event as programmatic so
 		// the deferred handler doesn't flip `_escapedFromLock = true`
@@ -2146,13 +2169,13 @@ export class AgentInterface extends LitElement {
 	}
 
 	// Jump-to-previous-prompt floating button. Mirror of jump-to-bottom,
-	// anchored to the TOP-CENTRE of the messages region. Visible iff at
-	// least one `<user-message>` is fully above the viewport. Click springs
-	// the viewport up so the bottom-most above-viewport prompt lands ~16 px
-	// below the container top.
+	// anchored to the TOP-CENTRE of the visible messages region. On mobile
+	// the app header is fixed over the chat, so offset below
+	// --mobile-header-height as well as the normal 16px breathing room.
+	// Visible iff at least one `<user-message>` is fully above the viewport.
 	private _renderJumpToLastPrompt() {
 		const show = this._showJumpToLastPrompt;
-		const topPx = 16; // matches baseOffsetPx of jump-to-bottom
+		const topOffset = this._getTopPromptNavOffsetCss();
 		const text = "Jump to previous prompt";
 		return html`
 			<button
@@ -2160,7 +2183,7 @@ export class AgentInterface extends LitElement {
 				data-testid="jump-to-previous-prompt"
 				aria-label=${text}
 				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
-				style="top:${topPx}px;opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out"
+				style="top:${topOffset};opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, top 150ms ease-out"
 				tabindex="${show ? "0" : "-1"}"
 				@click=${this._handleJumpToLastPromptClick}
 			>
