@@ -628,7 +628,7 @@ All mutations require `projectId` (400 otherwise). Reads without `projectId` ret
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 | `GET` | `/api/goals/:id/verifications/active` | Get in-flight verification state (running steps, sessions) |
 
-The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes, the [Gate reset endpoint](rest-api.md#gate-reset-endpoint) for reset response details, and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint.
+The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes, the [Gate reset endpoint](rest-api.md#gate-reset-endpoint) for reset response details, and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint. Client-side gate count surfaces share the synchronization rules in [gate-status-sync.md](gate-status-sync.md).
 
 ### Tasks (gate-linked)
 
@@ -667,6 +667,8 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
+| `src/app/api.ts` | Shared gate summary refresh and debounced per-goal invalidation |
+| `src/app/remote-agent.ts` | Session WebSocket handling, including gate summary invalidation events |
 | `src/app/goal-dashboard.ts` | Goal dashboard gate pipeline, focused route state, expanded gate/signal sections |
 | `src/ui/components/GoalStatusWidget.ts` | Chat-header gate popover, passed-gate View/Reset controls, sign-off launcher |
 | `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `gate_inspect`, `task_create` |
