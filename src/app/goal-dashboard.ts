@@ -9,7 +9,7 @@ import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { setHashRoute } from "./routing.js";
+import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
 import { statusBobbit } from "./session-colors.js";
@@ -167,7 +167,12 @@ let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
 
 /** Current dashboard tab */
-let dashboardTab: "spec" | "tasks" | "agents" | "commits" | "gates" = "gates";
+let dashboardTab: DashboardTabId = "gates";
+let focusedGateId: string | null = null;
+let focusedSignalId: string | null = null;
+let focusedHighlightGateId: string | null = null;
+let focusedScrollKey: string | null = null;
+let focusHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Role picker dropdown state */
 let roleDropdownOpen = false;
@@ -318,6 +323,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		}
 
 		gates = fetchedGates;
+		applyDashboardRouteFocus(goalId);
 
 		if (gitStatusRes && gitStatusRes.ok) {
 			gitStatus = await gitStatusRes.json();
@@ -378,6 +384,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	}
 
 	renderApp();
+	scheduleFocusedGateScroll();
 }
 
 async function fetchActiveVerifications(goalId: string): Promise<void> {
@@ -436,6 +443,11 @@ export function clearDashboardState(): void {
 	loading = true;
 	error = "";
 	dashboardTab = "gates";
+	focusedGateId = null;
+	focusedSignalId = null;
+	focusedHighlightGateId = null;
+	focusedScrollKey = null;
+	if (focusHighlightTimer) { clearTimeout(focusHighlightTimer); focusHighlightTimer = null; }
 	roleDropdownOpen = false;
 	gitStatus = null;
 	gitRepoKnown = 'unknown';
@@ -931,6 +943,69 @@ function getGateStatusMap(): Map<string, GateState> {
 		map.set(g.gateId, g);
 	}
 	return map;
+}
+
+function getLatestPassedSignal(gs: GateState | undefined): GateSignal | undefined {
+	return [...(gs?.signals ?? [])].reverse().find(signal => signal.verification.status === "passed");
+}
+
+function getSignalById(signalId: string | null): GateSignal | undefined {
+	if (!signalId) return undefined;
+	for (const gate of gates) {
+		const match = gate.signals?.find(signal => signal.id === signalId);
+		if (match) return match;
+	}
+	return undefined;
+}
+
+function applyDashboardRouteFocus(goalId: string): void {
+	const route = getRouteFromHash();
+	if (route.view !== "goal-dashboard" || route.goalId !== goalId) return;
+	if (route.dashboardTab) dashboardTab = route.dashboardTab;
+
+	focusedGateId = route.focusGateId ?? null;
+	focusedSignalId = null;
+	focusedScrollKey = null;
+
+	if (!focusedGateId) return;
+
+	dashboardTab = route.dashboardTab ?? "gates";
+	expandedGateIds.add(focusedGateId);
+	focusedHighlightGateId = focusedGateId;
+
+	if (route.focusSignalId === "latest-passed") {
+		const latestPassed = getLatestPassedSignal(getGateStatusMap().get(focusedGateId));
+		if (latestPassed) {
+			focusedSignalId = latestPassed.id;
+			expandedSignalIds.add(latestPassed.id);
+			setGoalDashboardRoute(goalId, { tab: "gates", gate: focusedGateId, signal: latestPassed.id }, true, true);
+		}
+	} else if (route.focusSignalId) {
+		focusedSignalId = route.focusSignalId;
+		expandedSignalIds.add(route.focusSignalId);
+	}
+}
+
+function scheduleFocusedGateScroll(): void {
+	if (!focusedGateId) return;
+	const key = `${currentGoalId ?? ""}:${focusedGateId}:${focusedSignalId ?? ""}`;
+	if (focusedScrollKey === key) return;
+	focusedScrollKey = key;
+
+	if (focusHighlightTimer) clearTimeout(focusHighlightTimer);
+	focusHighlightTimer = setTimeout(() => {
+		focusedHighlightGateId = null;
+		focusHighlightTimer = null;
+		renderApp();
+	}, 2600);
+
+	requestAnimationFrame(() => requestAnimationFrame(() => {
+		const gateId = focusedGateId?.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+		if (!gateId) return;
+		const selector = `[data-testid="goal-dashboard-gate-detail"][data-gate-id="${gateId}"], [data-testid="goal-dashboard-gate-row"][data-gate-id="${gateId}"]`;
+		const el = document.querySelector(selector);
+		el?.scrollIntoView({ block: "center", behavior: "smooth" });
+	}));
 }
 
 interface GatePipelineNode {
@@ -1453,7 +1528,7 @@ function renderGatePipeline(): TemplateResult {
 function renderGateNode(node: GatePipelineNode): TemplateResult {
 	const statusClass = gateNodeStatusClass(node.status);
 	return html`
-		<div class="phase-node ${statusClass}" @click=${() => toggleGateExpand(node.id)} title="${node.name} (${node.status})${node.signalCount > 0 ? ` \u2014 ${node.signalCount} signal${node.signalCount !== 1 ? "s" : ""}` : ""}">
+		<div class="phase-node ${statusClass}" data-testid="goal-dashboard-pipeline-gate" data-gate-id=${node.id} data-gate-status=${node.status} @click=${() => toggleGateExpand(node.id)} title="${node.name} (${node.status})${node.signalCount > 0 ? ` \u2014 ${node.signalCount} signal${node.signalCount !== 1 ? "s" : ""}` : ""}">
 			${node.status === "passed" ? html`<span class="phase-check">\u2713</span>` : nothing}
 			${node.status === "failed" ? html`<span class="phase-check" style="color:var(--destructive)">\u2717</span>` : nothing}
 			${node.status === "running" ? html`<span class="phase-running-dot"></span>` : nothing}
@@ -1475,10 +1550,24 @@ function gateNodeStatusClass(status: GatePipelineNode["status"]): string {
 function toggleGateExpand(gateId: string): void {
 	if (expandedGateIds.has(gateId)) {
 		expandedGateIds.delete(gateId);
+		if (focusedGateId === gateId) {
+			focusedGateId = null;
+			focusedSignalId = null;
+			focusedHighlightGateId = null;
+		}
+		if (currentGoalId && dashboardTab === "gates") setGoalDashboardRoute(currentGoalId, { tab: "gates" }, true, true);
 	} else {
 		expandedGateIds.add(gateId);
+		dashboardTab = "gates";
+		focusedGateId = gateId;
+		focusedSignalId = getLatestPassedSignal(getGateStatusMap().get(gateId))?.id ?? null;
+		if (focusedSignalId) expandedSignalIds.add(focusedSignalId);
+		focusedHighlightGateId = gateId;
+		focusedScrollKey = null;
+		if (currentGoalId) setGoalDashboardRoute(currentGoalId, { tab: "gates", gate: gateId, ...(focusedSignalId ? { signal: focusedSignalId } : {}) }, true, true);
 	}
 	renderApp();
+	scheduleFocusedGateScroll();
 }
 
 async function cancelVerification(gateId: string): Promise<void> {
@@ -1500,18 +1589,29 @@ async function cancelVerification(gateId: string): Promise<void> {
 function toggleSignalExpand(signalId: string): void {
 	if (expandedSignalIds.has(signalId)) {
 		expandedSignalIds.delete(signalId);
+		if (focusedSignalId === signalId) focusedSignalId = null;
 	} else {
 		expandedSignalIds.add(signalId);
+		const signal = getSignalById(signalId);
+		if (signal) {
+			focusedGateId = signal.gateId;
+			focusedSignalId = signal.id;
+			focusedHighlightGateId = signal.gateId;
+			focusedScrollKey = null;
+			if (currentGoalId) setGoalDashboardRoute(currentGoalId, { tab: "gates", gate: signal.gateId, signal: signal.id }, true, true);
+		}
 	}
 	renderApp();
+	scheduleFocusedGateScroll();
 }
 
 // ============================================================================
 // RENDER: TAB BAR
 // ============================================================================
 
-function setTab(tab: typeof dashboardTab): void {
+function setTab(tab: DashboardTabId): void {
 	dashboardTab = tab;
+	if (currentGoalId) setGoalDashboardRoute(currentGoalId, { tab }, true, true);
 	renderApp();
 }
 
@@ -1520,7 +1620,7 @@ function renderTabBar(): TemplateResult {
 	const passedCount = gates.filter(g => g.status === "passed").length;
 	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
 
-	const tabs: Array<{ id: typeof dashboardTab; label: string; icon: TemplateResult; countStr: string }> = [
+	const tabs: Array<{ id: DashboardTabId; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
 		{ id: "gates", label: "Gates", icon: svgGate, countStr: gateCountStr },
 		{ id: "tasks", label: "Tasks", icon: svgTasks, countStr: String(tasks.length) },
@@ -1529,9 +1629,9 @@ function renderTabBar(): TemplateResult {
 	];
 
 	return html`
-		<div class="tab-bar">
+		<div class="tab-bar" data-testid="goal-dashboard-tabs">
 			${tabs.map(t => html`
-				<div class="tab ${dashboardTab === t.id ? "active" : ""}" @click=${() => setTab(t.id)} title="${t.label}">
+				<div class="tab ${dashboardTab === t.id ? "active" : ""}" data-testid="goal-dashboard-tab" data-tab-id=${t.id} data-active=${String(dashboardTab === t.id)} @click=${() => setTab(t.id)} title="${t.label}">
 					${t.icon}
 					<span class="tab-label">${t.label}</span>
 					${t.countStr ? html`<span class="tab-count">${t.countStr}</span>` : nothing}
@@ -1821,6 +1921,7 @@ function renderGateChecklist(): TemplateResult {
 				const gs = statusMap.get(wfGate.id);
 				const status = gs?.status ?? "pending";
 				const isExpanded = expandedGateIds.has(wfGate.id);
+				const isFocused = focusedGateId === wfGate.id;
 				const signalCount = gs?.signals?.length ?? 0;
 
 				// Check if any signal is running
@@ -1844,7 +1945,7 @@ function renderGateChecklist(): TemplateResult {
 				}
 
 				return html`
-					<div class="wf-checklist-item" @click=${() => toggleGateExpand(wfGate.id)}>
+					<div class="wf-checklist-item ${focusedHighlightGateId === wfGate.id ? "wf-checklist-item--focused" : ""}" data-testid="goal-dashboard-gate-row" data-gate-id=${wfGate.id} data-gate-status=${effectiveStatus} data-expanded=${String(isExpanded)} data-focused=${String(isFocused)} @click=${() => toggleGateExpand(wfGate.id)}>
 						<span class="${dotClass}">${dotContent}</span>
 						<div class="wf-checklist-info">
 							<span class="wf-checklist-name">${wfGate.name}</span>
@@ -1868,13 +1969,31 @@ function renderGateChecklist(): TemplateResult {
 }
 
 function renderGateDetail(
-	_wfGate: NonNullable<Goal["workflow"]>["gates"][number],
+	wfGate: NonNullable<Goal["workflow"]>["gates"][number],
 	gs: GateState | undefined,
 ): TemplateResult {
 	const signals = gs?.signals ?? [];
+	const currentPassedSignal = gs?.status === "passed" ? getLatestPassedSignal(gs) : undefined;
+	const focusedSignal = focusedSignalId ? signals.find(signal => signal.id === focusedSignalId) : undefined;
+	const showFocusedSummary = focusedGateId === wfGate.id;
 
 	return html`
-		<div class="gate-detail-panel">
+		<div class="gate-detail-panel ${focusedHighlightGateId === wfGate.id ? "gate-detail-panel--focused" : ""}" data-testid="goal-dashboard-gate-detail" data-gate-id=${wfGate.id}>
+			${showFocusedSummary && (currentPassedSignal || (focusedSignal && gs?.status !== "passed")) ? html`
+				<div class="gate-detail-section gate-focus-summary">
+					${currentPassedSignal ? html`
+						<div class="gate-detail-section-title">Current pass</div>
+						<div class="gate-focus-summary-text">
+							Passed by signal <code>${currentPassedSignal.id}</code>
+							${currentPassedSignal.commitSha ? html` · commit <code data-testid="goal-dashboard-signal-commit">${currentPassedSignal.commitSha.slice(0, 7)}</code>` : nothing}
+							 · ${formatRelativeTime(currentPassedSignal.timestamp)}
+						</div>
+					` : nothing}
+					${focusedSignal && gs?.status !== "passed" ? html`
+						<div class="gate-historical-notice">This signal is historical; this gate is no longer passed.</div>
+					` : nothing}
+				</div>
+			` : nothing}
 			${/* Metadata section */ ""}
 			${gs?.currentMetadata && Object.keys(gs.currentMetadata).length > 0 ? html`
 				<div class="gate-detail-section">
@@ -1917,6 +2036,7 @@ function renderGateDetail(
 function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const vStatus = signal.verification.status;
 	const isExpanded = expandedSignalIds.has(signal.id);
+	const isFocused = focusedSignalId === signal.id;
 	const shortSha = signal.commitSha ? signal.commitSha.slice(0, 7) : "???????";
 
 	// Check for live verification data
@@ -1929,13 +2049,13 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const liveTotalCount = isLive ? liveEntry!.steps.length : 0;
 
 	return html`
-		<div class="signal-entry signal-entry--${vStatus}">
+		<div class="signal-entry signal-entry--${vStatus} ${isFocused ? "signal-entry--focused" : ""}" data-testid="goal-dashboard-signal-entry" data-signal-id=${signal.id} data-signal-status=${vStatus} data-focused=${String(isFocused)}>
 			<div class="signal-entry__header" @click=${() => toggleSignalExpand(signal.id)}>
 				<span class="signal-status-badge signal-status-badge--${vStatus}">
 					${vStatus === "passed" ? "\u2713" : vStatus === "failed" ? "\u2717" : "\u23F3"}
 					${vStatus}
 				</span>
-				<code class="signal-entry__commit">${shortSha}</code>
+				<code class="signal-entry__commit" data-testid="goal-dashboard-signal-commit">${shortSha}</code>
 				<span class="signal-entry__time">${formatRelativeTime(signal.timestamp)}</span>
 				${isLive && liveTotalCount > 0 ? html`
 					<span class="signal-steps-summary">${livePassedCount}/${liveTotalCount} checks</span>
@@ -2240,11 +2360,11 @@ export function renderGoalDashboard(): TemplateResult {
 			${renderGatePipeline()}
 			${renderTabBar()}
 			<div class="tab-content">
-				<div class="tab-panel ${activeTab === "spec" ? "active" : ""}">${activeTab === "spec" ? renderSpecTab() : nothing}</div>
-				<div class="tab-panel ${activeTab === "gates" ? "active" : ""}">${activeTab === "gates" ? renderGatesTab() : nothing}</div>
-				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}">${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
-				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}">${activeTab === "agents" ? renderAgentsTab() : nothing}</div>
-				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}">${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "spec" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="spec" data-active=${String(activeTab === "spec")}>${activeTab === "spec" ? renderSpecTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "gates" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="gates" data-active=${String(activeTab === "gates")}>${activeTab === "gates" ? renderGatesTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="tasks" data-active=${String(activeTab === "tasks")}>${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="agents" data-active=${String(activeTab === "agents")}>${activeTab === "agents" ? renderAgentsTab() : nothing}</div>
+				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="commits" data-active=${String(activeTab === "commits")}>${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
 			</div>
 		</div>
 		${dashboardModalStep ? html`

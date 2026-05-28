@@ -175,6 +175,7 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
+| `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 | `POST` | `/api/goals/:id/gates/:gateId/signoff` | Resolve a parked `human-signoff` step (`{ signalId, stepName, decision: "pass"\|"fail", feedback? }`); idempotent 409 on already-resolved steps. See [Sign-off endpoint](#sign-off-endpoint). |
 
@@ -838,6 +839,44 @@ Responses:
 Authz (v1) trusts the gateway token — anyone with UI access can submit. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve a sign-off step that gates their own work.
 
 Review-pane behavior and validation are documented in [Review Pane Sign-Off](review-pane-signoff.md).
+
+### Gate reset endpoint
+
+**`POST /api/goals/:id/gates/:gateId/reset`** — invalidates a gate and every transitive downstream dependent from the goal's workflow DAG. The route has no required request body.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "gateId": "design-doc",
+  "affectedGateIds": ["design-doc", "implementation", "ready-to-merge"],
+  "changedGateIds": ["design-doc", "implementation"],
+  "unchangedGateIds": ["ready-to-merge"],
+  "previousStatuses": {
+    "design-doc": "passed",
+    "implementation": "failed",
+    "ready-to-merge": "pending"
+  },
+  "gates": [
+    { "gateId": "design-doc", "name": "Design Doc", "status": "pending" },
+    { "gateId": "implementation", "name": "Implementation", "status": "pending" },
+    { "gateId": "ready-to-merge", "name": "Ready to Merge", "status": "pending" }
+  ],
+  "teamLeadNotified": true
+}
+```
+
+Notes:
+
+- `affectedGateIds` includes the requested gate first, then downstream dependents reached through `dependsOn`.
+- Only gates that were not already `pending` appear in `changedGateIds`; already-pending gates appear in `unchangedGateIds`.
+- Signal history, content, metadata, and verification output are preserved for audit. The gate `status` is the approval source of truth after reset.
+- Active verifications for affected gates are cancelled before status changes are persisted.
+- The server emits `gate_status_changed` plus `gate_reset` WebSocket events and notifies the team lead when one is active.
+- Sandboxed agent tokens are forbidden from this route.
+
+Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate; 409 when the goal is archived.
 
 ### Gate inspect endpoint
 
