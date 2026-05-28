@@ -40,8 +40,9 @@ async function signalGate(goalId: string, gateId: string, body: Record<string, u
 		method: "POST",
 		body: JSON.stringify(body),
 	});
-	expect(res.status, `signal ${gateId} failed: ${res.status} ${await res.text().catch(() => "")}`).toBe(201);
-	return res.json();
+	const text = await res.text();
+	expect(res.status, `signal ${gateId} failed: ${res.status} ${text}`).toBe(201);
+	return text ? JSON.parse(text) : null;
 }
 
 async function waitForGateStatus(goalId: string, gateId: string, status: "pending" | "passed" | "failed", timeoutMs = 15_000): Promise<any> {
@@ -225,7 +226,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		}
 	});
 
-	test("notifies the team lead with reset, invalidation, and downstream-work context", async () => {
+	test("notifies the team lead with reset, invalidation, and downstream-work context", async ({ gateway }) => {
 		const wf = workflowId("gate-reset-team");
 		await createWorkflow(wf, [
 			{ id: "root", name: "Root Gate", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
@@ -246,15 +247,18 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 			expect(reset.body.teamLeadNotified).toBe(true);
 
 			await pollUntil(async () => {
-				const res = await apiFetch(`/api/sessions/${teamLeadId}/transcript?pattern=${encodeURIComponent("Gate reset:")}&verbose=1&limit=20`);
-				if (!res.ok) return null;
-				const text = JSON.stringify(await res.json());
+				const session = gateway.sessionManager.getSession(teamLeadId);
+				if (!session) return null;
+				const messagesResp = await session.rpcClient.getMessages();
+				const messages = messagesResp.data?.messages || messagesResp.data || [];
+				const queued = session.promptQueue?.toArray?.() || [];
+				const text = JSON.stringify({ messages, queued, lastPromptText: session.lastPromptText, inFlightSteerTexts: session.inFlightSteerTexts });
 				return text.includes("Gate reset: Root Gate")
 					&& text.includes("Child Gate")
 					&& /downstream work|revisit dependent implementation|Why this matters/i.test(text)
 					? text
 					: null;
-			}, { timeoutMs: 15_000, intervalMs: 100, label: "team lead reset notification" });
+			}, { timeoutMs: 10_000, intervalMs: 100, label: "team lead reset notification" });
 		} finally {
 			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
 			await teardownTeam(goalId).catch(() => {});
