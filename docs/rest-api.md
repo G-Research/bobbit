@@ -494,6 +494,8 @@ Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debu
 | `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
 | `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
 
+Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session).
+
 ### OAuth
 
 Provider-aware. Bobbit can hold OAuth credentials for several providers concurrently (currently `anthropic` and `openai-codex`); every endpoint takes a `provider` discriminator so the same flow IDs and credential rows do not bleed across providers.
