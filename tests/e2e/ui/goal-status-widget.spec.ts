@@ -19,7 +19,7 @@ const SIGNAL_MARKDOWN = "## Design\n\nContent awaiting sign-off.";
 const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
 
 interface MockState {
-	gates: Array<{ gateId: string; name: string; status: "pending" | "passed" | "failed" }>;
+	gates: Array<{ gateId: string; name: string; status: "pending" | "passed" | "failed" | "running" }>;
 	awaiting: boolean;
 }
 
@@ -252,6 +252,71 @@ async function expectGoalCounterAndIconVerticallyAligned(page: Page): Promise<vo
 	expect(delta, "goal workflow counter and goal icon vertical centers should align").toBeLessThanOrEqual(1);
 }
 
+async function expectGoalGateRowsStaySingleLine(page: Page): Promise<void> {
+	const rows = page.locator("[data-testid='goal-widget-gate']");
+	const count = await rows.count();
+	expect(count, "expected one DOM row per gate").toBeGreaterThan(0);
+	const metrics = await rows.evaluateAll((els) => els.map((el) => {
+		const row = el as HTMLElement;
+		const main = row.querySelector(".goal-widget-gate-main") as HTMLElement | null;
+		const actions = row.querySelector("[data-testid='goal-widget-gate-actions']") as HTMLElement | null;
+		const rowRect = row.getBoundingClientRect();
+		const mainRect = main?.getBoundingClientRect();
+		const actionsRect = actions?.getBoundingClientRect();
+		return {
+			gateId: row.dataset.gateId,
+			flexWrap: getComputedStyle(row).flexWrap,
+			rowHeight: rowRect.height,
+			mainAndActionsCenterDelta: mainRect && actionsRect
+				? Math.abs((mainRect.top + mainRect.height / 2) - (actionsRect.top + actionsRect.height / 2))
+				: 0,
+		};
+	}));
+	for (const metric of metrics) {
+		expect(metric.flexWrap, `${metric.gateId} should not wrap actions onto another line`).toBe("nowrap");
+		expect(metric.rowHeight, `${metric.gateId} should stay a single compact row`).toBeLessThanOrEqual(28);
+		expect(metric.mainAndActionsCenterDelta, `${metric.gateId} main content and actions should share one row`).toBeLessThanOrEqual(1);
+	}
+}
+
+async function expectGoalWidgetButtonsMatchDashboard(page: Page, selectors: string[]): Promise<void> {
+	const dashboardSelector = "[data-testid='goal-widget-dashboard-link']";
+	await expect(page.locator(dashboardSelector)).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator(`${dashboardSelector} svg`)).toBeVisible();
+	for (const selector of selectors) {
+		await expect(page.locator(selector).first()).toBeVisible({ timeout: 5_000 });
+		await expect(page.locator(`${selector} svg`).first()).toBeVisible();
+	}
+	const metrics = await page.evaluate((buttonSelectors) => {
+		const dashboard = document.querySelector("[data-testid='goal-widget-dashboard-link']") as HTMLElement | null;
+		const baselineHeight = dashboard?.getBoundingClientRect().height ?? 0;
+		return buttonSelectors.map((selector) => {
+			const el = document.querySelector(selector) as HTMLElement | null;
+			if (!el) return { selector, missing: true };
+			const style = getComputedStyle(el);
+			return {
+				selector,
+				height: el.getBoundingClientRect().height,
+				baselineHeight,
+				display: style.display,
+				alignItems: style.alignItems,
+				hasSharedClass: el.classList.contains("goal-widget-button"),
+				hasIcon: !!el.querySelector("svg"),
+			};
+		});
+	}, selectors);
+	for (const metric of metrics) {
+		expect(metric, `${metric.selector} should exist`).not.toMatchObject({ missing: true });
+		if ("height" in metric) {
+			expect(Math.abs(metric.height - metric.baselineHeight), `${metric.selector} should match dashboard button height`).toBeLessThanOrEqual(0.5);
+			expect(["inline-flex", "flex"], `${metric.selector} should use shared app button layout`).toContain(metric.display);
+			expect(metric.alignItems, `${metric.selector} should vertically center icon and text`).toBe("center");
+			expect(metric.hasSharedClass, `${metric.selector} should use shared goal widget button theme`).toBe(true);
+			expect(metric.hasIcon, `${metric.selector} should include an icon`).toBe(true);
+		}
+	}
+}
+
 async function expectGoalAndGitPillsVerticallyAligned(page: Page): Promise<void> {
 	const goalPill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(goalPill).toBeVisible({ timeout: 15_000 });
@@ -404,8 +469,23 @@ test.describe("<goal-status-widget>", () => {
 			await expect(gateRows).toHaveCount(3, { timeout: 5_000 });
 			await expect(gateRows.filter({ hasText: "Design Document" })).toHaveAttribute("data-gate-status", "passed");
 			await expect(gateRows.filter({ hasText: GATE_NAME })).toHaveAttribute("data-gate-status", "pending");
+			const runningDot = gateRows.filter({ hasText: GATE_NAME }).locator("[data-testid='goal-widget-gate-running-dot']");
+			await expect(runningDot).toBeVisible();
+			expect(await runningDot.evaluate((el) => {
+				const style = getComputedStyle(el);
+				return {
+					background: style.backgroundColor,
+					animationName: style.animationName,
+					animationDuration: style.animationDuration,
+				};
+			})).toMatchObject({
+				animationName: "goal-widget-running-dot-pulse",
+				animationDuration: "1.25s",
+			});
+			await expectGoalGateRowsStaySingleLine(page);
 			await expect(page.locator("[data-testid='goal-widget-dashboard-link']")).toContainText("Goal Dashboard");
 			await expect(page.locator("[data-testid='goal-widget-dashboard-link'] svg")).toBeVisible();
+			await expectGoalWidgetButtonsMatchDashboard(page, ["[data-testid='goal-widget-signoff-content-toggle']"]);
 
 			await page.keyboard.press("Escape");
 			await openSignoffReviewFromWidget(page, goalId);
@@ -631,6 +711,11 @@ test.describe("<goal-status-widget>", () => {
 			await expect(passedRow).toHaveAttribute("data-gate-status", "passed", { timeout: 10_000 });
 			await expect(passedRow.locator('[data-testid="goal-widget-gate-view"]')).toBeVisible();
 			await expect(passedRow.locator('[data-testid="goal-widget-gate-reset"]')).toBeVisible();
+			await expectGoalWidgetButtonsMatchDashboard(page, [
+				'[data-testid="goal-widget-gate"][data-gate-id="design-doc"] [data-testid="goal-widget-gate-view"]',
+				'[data-testid="goal-widget-gate"][data-gate-id="design-doc"] [data-testid="goal-widget-gate-reset"]',
+			]);
+			await expectGoalGateRowsStaySingleLine(page);
 
 			for (const pendingGate of ["implementation", "ready-to-merge"]) {
 				const pendingRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${pendingGate}"]`);
