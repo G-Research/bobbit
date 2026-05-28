@@ -1,21 +1,9 @@
 /**
  * Browser E2E for the chat-header `<goal-status-widget>`.
  *
- * Track A (backend `human-signoff` step type + `/signoff` REST endpoint) lands
- * separately. This test mocks the two read endpoints (`/gates`,
- * `/verifications/active`) and the write endpoint (`/signoff`) via
- * `page.route()` so it runs against today's gateway without depending on the
- * backend being merged.
- *
- * Asserts:
- *  - The pill renders for a goal-scoped session.
- *  - The pill shows the pulsing primary-colour sign-off icon between the goal icon and gate counter when ≥1 sign-off awaits.
- *  - Clicking the pill opens a popover with gate rows + a sign-off card and content toggle.
- *  - Approve POSTs `/signoff` with `decision: "pass"`, the card transitions to
- *    "Approved ✓", and the awaiting icon clears.
- *  - Reject opens a modal with a feedback textarea; Submit is disabled while
- *    empty, enabled with text, and POSTs `decision: "fail", feedback`.
- *  - On reload the popover state rehydrates from `/verifications/active`.
+ * Sign-off content must use the review pane as the decision surface. The widget
+ * stays compact: `View content` opens a review document, and approve/reject
+ * decisions are submitted from the review pane.
  */
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
@@ -23,7 +11,12 @@ import { waitForGateStatus } from "../test-utils/signoff-polling.mjs";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const STEP_NAME = "approve-design";
+const STEP_LABEL = "Approve design doc";
+const GATE_ID = "human-design-approval";
+const GATE_NAME = "Approve Design";
 const SIGNAL_ID = "mock-signal-1";
+const SIGNAL_MARKDOWN = "## Design\n\nContent awaiting sign-off.";
+const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
 
 interface MockState {
 	gates: Array<{ gateId: string; name: string; status: "pending" | "passed" | "failed" }>;
@@ -31,20 +24,19 @@ interface MockState {
 }
 
 /**
- * Install mock routes for /gates, /verifications/active, and /signoff for the
- * given goal id. Returns a setter the test can call to toggle the awaiting
- * state, plus a list of captured /signoff POST bodies.
+ * Install mock routes for /gates, /verifications/active, /signals, and
+ * /signoff for the given goal id. Returns captured /signoff POST bodies.
  */
-function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockState>) => void; signoffCalls: Array<unknown> } {
+async function installMocks(page: Page, goalId: string): Promise<{ setState: (s: Partial<MockState>) => void; signoffCalls: Array<Record<string, unknown>> }> {
 	const state: MockState = {
 		gates: [
 			{ gateId: "design-doc", name: "Design Document", status: "passed" },
-			{ gateId: "human-design-approval", name: "Approve Design", status: "pending" },
+			{ gateId: GATE_ID, name: GATE_NAME, status: "pending" },
 			{ gateId: "implementation", name: "Implementation", status: "pending" },
 		],
 		awaiting: true,
 	};
-	const signoffCalls: Array<unknown> = [];
+	const signoffCalls: Array<Record<string, unknown>> = [];
 
 	const setState = (patch: Partial<MockState>) => Object.assign(state, patch);
 
@@ -53,7 +45,7 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 	const signalsRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/signals(?:\\?.*)?$`);
 	const signoffRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/signoff$`);
 
-	void page.route(gatesRe, async (route: Route) => {
+	await page.route(gatesRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
 		await route.fulfill({
 			status: 200,
@@ -62,18 +54,18 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 		});
 	});
 
-	void page.route(activeRe, async (route: Route) => {
+	await page.route(activeRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
 		const verifications = state.awaiting ? [{
 			signalId: SIGNAL_ID,
-			gateId: "human-design-approval",
+			gateId: GATE_ID,
 			overallStatus: "running",
 			steps: [{
 				name: STEP_NAME,
 				type: "human-signoff",
 				status: "running",
 				awaitingHuman: true,
-				humanLabel: "Approve design doc",
+				humanLabel: STEP_LABEL,
 				humanPrompt: "Please review the **design doc** for `feature/foo` and approve or reject.",
 			}],
 		}] : [];
@@ -84,7 +76,7 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 		});
 	});
 
-	void page.route(signalsRe, async (route: Route) => {
+	await page.route(signalsRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
 		await route.fulfill({
 			status: 200,
@@ -92,20 +84,19 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 			body: JSON.stringify({
 				signals: [{
 					id: SIGNAL_ID,
-					gateId: "human-design-approval",
+					signalId: SIGNAL_ID,
+					gateId: GATE_ID,
 					goalId,
-					content: "## Design\n\nContent awaiting sign-off.",
+					content: SIGNAL_MARKDOWN,
 					verification: { status: "running", steps: [] },
 				}],
 			}),
 		});
 	});
 
-	void page.route(signoffRe, async (route: Route) => {
+	await page.route(signoffRe, async (route: Route) => {
 		if (route.request().method() !== "POST") return route.fallback();
 		try { signoffCalls.push(JSON.parse(route.request().postData() || "{}")); } catch { /* ignore */ }
-		// Backend would clear the awaiting state and emit step_complete; we
-		// simulate that by flipping the mock state before responding.
 		state.awaiting = false;
 		await route.fulfill({
 			status: 200,
@@ -120,6 +111,105 @@ function installMocks(page: Page, goalId: string): { setState: (s: Partial<MockS
 async function openSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+}
+
+async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
+	await page.evaluate(({ commentText, quoteText }) => {
+		const doc = document.querySelector("review-document") as any;
+		if (!doc?.backend || !doc.sessionId || !doc.docTitle) throw new Error("active review-document not ready");
+		const markdown = typeof doc.markdown === "string" ? doc.markdown : "";
+		const start = markdown.indexOf(quoteText);
+		doc.backend.add({ sessionId: doc.sessionId, bucket: doc.docTitle }, {
+			id: `signoff-inline-${Date.now()}`,
+			quote: quoteText,
+			comment: commentText,
+			start: start >= 0 ? start : undefined,
+			end: start >= 0 ? start + quoteText.length : undefined,
+		});
+		doc.dispatchEvent(new CustomEvent("annotation-change", { bubbles: true, composed: true }));
+	}, { commentText: comment, quoteText: "Content awaiting sign-off" });
+}
+
+async function signoffReviewDocTitle(page: Page): Promise<string> {
+	const title = await page.evaluate(() => {
+		const docs = (window as any).bobbitState?.reviewDocuments;
+		return Array.from(docs?.keys?.() || []).find((candidate): candidate is string => typeof candidate === "string" && candidate.startsWith("Sign-off:")) || "";
+	});
+	expect(title, "sign-off review document should be present in app state").not.toBe("");
+	return title;
+}
+
+function signoffReviewTab(page: Page) {
+	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: /Sign-off:/ }).first();
+}
+
+async function signoffReviewRecords(page: Page): Promise<{ active: string[]; persisted: string[] }> {
+	return page.evaluate(() => {
+		const isSignoffDoc = (doc: any) => (
+			(typeof doc?.title === "string" && doc.title.startsWith("Sign-off:"))
+			|| doc?.source?.kind === "verification-signoff-markdown"
+			|| doc?.source?.kind === "verification-signoff-pr"
+		);
+		const label = (doc: any) => `${String(doc?.title || "")}|${String(doc?.source?.kind || "")}`;
+		const docs = (window as any).bobbitState?.reviewDocuments;
+		const active = Array.from(docs?.values?.() || []).filter(isSignoffDoc).map(label);
+		const persisted: string[] = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const key = localStorage.key(i) || "";
+			if (!key.startsWith("bobbit-review-contexts-v1:")) continue;
+			try {
+				const parsed = JSON.parse(localStorage.getItem(key) || "{}");
+				for (const doc of Object.values(parsed || {})) {
+					if (isSignoffDoc(doc)) persisted.push(label(doc));
+				}
+			} catch { /* ignore unrelated/corrupt storage */ }
+		}
+		return { active, persisted };
+	});
+}
+
+async function expectNoSignoffReviewContext(page: Page, message: string): Promise<void> {
+	await expect(signoffReviewTab(page), message).toHaveCount(0, { timeout: 5_000 });
+	await expect.poll(async () => {
+		const records = await signoffReviewRecords(page);
+		return records.active.length + records.persisted.length;
+	}, { timeout: 5_000, message }).toBe(0);
+}
+
+function reviewPane(page: Page) {
+	return page.locator("review-pane").first();
+}
+
+async function finalCommentTextarea(page: Page) {
+	const pane = reviewPane(page);
+	const labelled = pane.getByLabel(/final comment/i).first();
+	if (await labelled.count()) return labelled;
+	return pane.locator("textarea").first();
+}
+
+async function openSignoffReviewFromWidget(page: Page, goalIdentifier: string): Promise<void> {
+	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await expect(pill).toBeVisible({ timeout: 15_000 });
+	await expect(pill).toHaveAttribute("data-awaiting-signoffs", "true", { timeout: 15_000 });
+	await pill.click();
+
+	const card = page.locator("[data-testid='goal-widget-signoff']").first();
+	await expect(card).toBeVisible({ timeout: 10_000 });
+	await expect(card).toContainText(STEP_LABEL);
+
+	await card.locator("[data-testid='goal-widget-signoff-content-toggle']").click();
+
+	await expect(page.locator("[data-testid='goal-widget-signoff-content']"), "View content must not expand markdown inside the compact widget").toHaveCount(0);
+
+	const tab = signoffReviewTab(page);
+	await expect(tab, "View content should open a sign-off review tab").toBeVisible({ timeout: 10_000 });
+	await expect(tab).toContainText(goalIdentifier);
+	await expect(tab).toContainText(GATE_NAME);
+	await expect(tab).toContainText(STEP_LABEL);
+	await tab.click();
+
+	await expect(reviewPane(page)).toBeVisible({ timeout: 5_000 });
+	await expect(page.locator("review-document").getByText("Content awaiting sign-off").first()).toBeVisible({ timeout: 5_000 });
 }
 
 async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): Promise<void> {
@@ -157,7 +247,7 @@ async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): P
 	await page.locator("[data-testid='wf-step-type']").first().selectOption("human-signoff");
 	await expect(page.locator("[data-testid='wf-step-label']").first()).toBeVisible({ timeout: 10_000 });
 	await page.locator("[data-testid='wf-step-name']").first().fill(STEP_NAME);
-	await page.locator("[data-testid='wf-step-label']").first().fill("Approve design doc");
+	await page.locator("[data-testid='wf-step-label']").first().fill(STEP_LABEL);
 	await page.locator("[data-testid='wf-step-prompt']").first().fill("Please review and approve the design from the real widget flow.");
 
 	const saveResponse = page.waitForResponse((res) =>
@@ -169,12 +259,12 @@ async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): P
 }
 
 test.describe("<goal-status-widget>", () => {
-	test("pill renders + popover shows sign-off card; approve clears icon; reload rehydrates", async ({ page }) => {
+	test("View content opens review pane; approve there posts pass and no inline widget content", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget ${Date.now()}` });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		try {
-			const { signoffCalls } = installMocks(page, goalId);
+			const { signoffCalls } = await installMocks(page, goalId);
 
 			sessionId = await createSession({ goalId });
 
@@ -210,7 +300,6 @@ test.describe("<goal-status-widget>", () => {
 				usesPrimaryColor: true,
 			});
 
-			// Open popover.
 			await pill.click();
 			await expect(page.locator("[data-testid='goal-widget-gates']")).toBeVisible({ timeout: 5_000 });
 
@@ -218,43 +307,29 @@ test.describe("<goal-status-widget>", () => {
 			const gateRows = page.locator("[data-testid='goal-widget-gate']");
 			await expect(gateRows).toHaveCount(3, { timeout: 5_000 });
 			await expect(gateRows.filter({ hasText: "Design Document" })).toHaveAttribute("data-gate-status", "passed");
-			await expect(gateRows.filter({ hasText: "Approve Design" })).toHaveAttribute("data-gate-status", "pending");
+			await expect(gateRows.filter({ hasText: GATE_NAME })).toHaveAttribute("data-gate-status", "pending");
 			await expect(page.locator("[data-testid='goal-widget-dashboard-link']")).toContainText("Goal Dashboard");
 			await expect(page.locator("[data-testid='goal-widget-dashboard-link'] svg")).toBeVisible();
 
-			// Sign-off card with content toggle, Approve + Reject.
-			const card = page.locator("[data-testid='goal-widget-signoff']").first();
-			await expect(card).toBeVisible();
-			await expect(card.locator("[data-testid='goal-widget-signoff-content-toggle']")).toBeVisible();
-			await card.locator("[data-testid='goal-widget-signoff-content-toggle']").click();
-			await expect(card.locator("[data-testid='goal-widget-signoff-content']")).toContainText("Content awaiting sign-off", { timeout: 5_000 });
-			await expect(card.locator("[data-testid='goal-widget-approve']")).toBeVisible();
-			await expect(card.locator("[data-testid='goal-widget-reject']")).toBeVisible();
+			await page.keyboard.press("Escape");
+			await openSignoffReviewFromWidget(page, goalId);
 
-			// Approve → POSTs /signoff, card transitions to resolved state, awaiting icon clears.
-			await card.locator("[data-testid='goal-widget-approve']").click();
+			await expect(reviewPane(page).getByRole("button", { name: /^Approve$/ })).toBeEnabled();
+			await expect(reviewPane(page).getByRole("button", { name: /^Reject$/ })).toBeEnabled();
+			await expect(await finalCommentTextarea(page)).toBeVisible();
 
-			// Wait for the POST to land + state to flip.
+			await reviewPane(page).getByRole("button", { name: /^Approve$/ }).click();
+
 			await expect.poll(() => signoffCalls.length, { timeout: 5_000 }).toBeGreaterThan(0);
-			const approveCall = signoffCalls[0] as Record<string, unknown>;
+			const approveCall = signoffCalls[0];
 			expect(approveCall.decision).toBe("pass");
 			expect(approveCall.signalId).toBe(SIGNAL_ID);
 			expect(approveCall.stepName).toBe(STEP_NAME);
+			expect(String(approveCall.feedback ?? "").trim()).toMatch(/^(|## Review Approved\s+Approved with no comments\.)$/);
 
-			// The approval may clear the sign-off card immediately or briefly show a
-			// resolved state; the durable user-facing outcome is that awaiting clears.
-
-			// Eventually the awaiting icon clears (next /verifications/active poll
-			// after the WS step_complete equivalent — we trigger via setState).
-			// Closing + reopening the popover triggers an explicit refresh; the
-			// toHaveAttribute assertion below polls until the refresh has landed,
-			// so no manual sleep is required.
-			await page.keyboard.press("Escape");
-			await pill.click();
+			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 10_000 });
 
-			// ── Reload — popover state must rehydrate (no awaiting since we
-			//    flipped the mock above). Gate rows still render.
 			await page.reload();
 			await openSession(page, sessionId);
 			const pillAfter = page.locator("[data-testid='goal-status-widget-pill']").first();
@@ -270,7 +345,7 @@ test.describe("<goal-status-widget>", () => {
 		}
 	});
 
-	test("real workflow-editor-authored human-signoff signal pulses widget and Approve resolves gate", async ({ page }) => {
+	test("real workflow-editor-authored human-signoff signal opens review pane and Approve resolves gate", async ({ page }) => {
 		test.setTimeout(60_000);
 		const workflowId = `widget-real-signoff-${Date.now()}`;
 		let goalId: string | undefined;
@@ -301,8 +376,14 @@ test.describe("<goal-status-widget>", () => {
 			await pill.click();
 			const card = page.locator("[data-testid='goal-widget-signoff']").first();
 			await expect(card).toBeVisible({ timeout: 10_000 });
-			await expect(card).toContainText("Approve design doc");
-			await card.locator("[data-testid='goal-widget-approve']").click();
+			await expect(card).toContainText(STEP_LABEL);
+			await card.locator("[data-testid='goal-widget-signoff-content-toggle']").click();
+			await expect(page.locator("[data-testid='goal-widget-signoff-content']")).toHaveCount(0);
+			await expect(signoffReviewTab(page)).toBeVisible({ timeout: 10_000 });
+			await signoffReviewTab(page).click();
+			await expect(page.locator("review-document").getByText("Ready for approval").first()).toBeVisible({ timeout: 5_000 });
+			await reviewPane(page).getByRole("button", { name: /^Approve$/ }).click();
+
 			await waitForGateStatus(goalId, "design", "passed", 20_000);
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 15_000 });
 		} finally {
@@ -312,46 +393,119 @@ test.describe("<goal-status-widget>", () => {
 		}
 	});
 
-	test("reject opens modal; Submit disabled while empty; submitting POSTs feedback", async ({ page }) => {
+	test("review-pane Reject validates feedback and submits fail with final comment", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget Reject ${Date.now()}` });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		try {
-			const { signoffCalls } = installMocks(page, goalId);
+			const { signoffCalls } = await installMocks(page, goalId);
 			sessionId = await createSession({ goalId });
 
 			await openApp(page);
 			await openSession(page, sessionId);
+			await openSignoffReviewFromWidget(page, goalId);
 
-			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-			await expect(pill).toBeVisible({ timeout: 15_000 });
-			await pill.click();
+			const rejectButton = reviewPane(page).getByRole("button", { name: /^Reject$/ });
+			await expect(rejectButton).toBeEnabled();
+			await rejectButton.click();
 
-			const card = page.locator("[data-testid='goal-widget-signoff']").first();
-			await expect(card).toBeVisible({ timeout: 5_000 });
+			await expect.poll(() => signoffCalls.length, { timeout: 1_000 }).toBe(0);
+			await expect(reviewPane(page).getByText(/Add a final comment or at least one inline comment before rejecting\./i).first()).toBeVisible({ timeout: 5_000 });
 
-			// Reject → opens modal with autofocused textarea.
-			await card.locator("[data-testid='goal-widget-reject']").click();
-			const textarea = page.locator("[data-testid='goal-widget-reject-textarea']");
-			await expect(textarea).toBeVisible({ timeout: 5_000 });
+			const feedback = "Needs more detail on the resume path.";
+			await (await finalCommentTextarea(page)).fill(feedback);
+			await rejectButton.click();
 
-			// Submit disabled while empty.
-			const submitBtn = page.locator("[data-testid='goal-widget-reject-submit']");
-			await expect(submitBtn).toBeDisabled();
-
-			// Type feedback → Submit enables.
-			await textarea.fill("Needs more detail on the resume path.");
-			await expect(submitBtn).toBeEnabled();
-
-			// Submit → POSTs decision: "fail", feedback.
-			await submitBtn.click();
 			await expect.poll(() => signoffCalls.length, { timeout: 5_000 }).toBeGreaterThan(0);
-			const rejectCall = signoffCalls[0] as Record<string, unknown>;
+			const rejectCall = signoffCalls[0];
 			expect(rejectCall.decision).toBe("fail");
-			expect(rejectCall.feedback).toBe("Needs more detail on the resume path.");
+			expect(rejectCall.signalId).toBe(SIGNAL_ID);
+			expect(rejectCall.stepName).toBe(STEP_NAME);
+			expect(String(rejectCall.feedback ?? "")).toContain(feedback);
+			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
 
-			// Modal closes on success.
-			await expect(textarea).toHaveCount(0, { timeout: 5_000 });
+	test("widget-opened review document and signoff source survive reload, and inline annotations submit", async ({ page }) => {
+		const goal = await createGoal({ title: `Goal-Status-Widget Reload ${Date.now()}` });
+		const goalId = goal.id;
+		let sessionId: string | undefined;
+		try {
+			const { signoffCalls } = await installMocks(page, goalId);
+			sessionId = await createSession({ goalId });
+
+			await openApp(page);
+			await openSession(page, sessionId);
+			await openSignoffReviewFromWidget(page, goalId);
+			const docTitle = await signoffReviewDocTitle(page);
+
+			await page.reload();
+			await openSession(page, sessionId);
+
+			const tab = signoffReviewTab(page);
+			await expect(tab, "widget-launched sign-off review should rehydrate after reload").toBeVisible({ timeout: 10_000 });
+			await expect(tab).toContainText(goalId);
+			await expect(tab).toContainText(GATE_NAME);
+			await expect(tab).toContainText(STEP_LABEL);
+			await tab.click();
+			await expect(reviewPane(page)).toBeVisible({ timeout: 5_000 });
+			await expect(page.locator("review-document").getByText("Content awaiting sign-off").first()).toBeVisible({ timeout: 5_000 });
+
+			const inlineComment = `signoff-inline-comment-${Date.now()}`;
+			await addInlineAnnotationToActiveReview(page, inlineComment);
+			await expect(reviewPane(page).locator(".review-tab-badge"), "inline comments should count before rejecting from the sign-off review").toHaveText("1", { timeout: 5_000 });
+			await reviewPane(page).getByRole("button", { name: /^Reject$/ }).click();
+
+			await expect.poll(() => signoffCalls.length, { timeout: 5_000 }).toBeGreaterThan(0);
+			const rejectCall = signoffCalls[0];
+			expect(rejectCall.decision).toBe("fail");
+			expect(rejectCall.signalId).toBe(SIGNAL_ID);
+			expect(rejectCall.stepName).toBe(STEP_NAME);
+			const feedback = String(rejectCall.feedback ?? "");
+			expect(feedback).toContain("Inline comments");
+			expect(feedback).toContain("Content awaiting sign-off");
+			expect(feedback).toContain(inlineComment);
+			expect(feedback).toContain(docTitle);
+			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
+
+	test("dismissing widget-opened signoff review clears persisted context and does not rehydrate", async ({ page }) => {
+		const goal = await createGoal({ title: `Goal-Status-Widget Dismiss ${Date.now()}` });
+		const goalId = goal.id;
+		let sessionId: string | undefined;
+		try {
+			const { signoffCalls } = await installMocks(page, goalId);
+			sessionId = await createSession({ goalId });
+
+			await openApp(page);
+			await openSession(page, sessionId);
+			await openSignoffReviewFromWidget(page, goalId);
+			const docTitle = await signoffReviewDocTitle(page);
+			const expectedRecord = `${docTitle}|verification-signoff-markdown`;
+
+			await expect.poll(async () => (await signoffReviewRecords(page)).active.includes(expectedRecord), { timeout: 5_000 }).toBe(true);
+			await expect.poll(async () => (await signoffReviewRecords(page)).persisted.includes(expectedRecord), { timeout: 5_000 }).toBe(true);
+
+			await reviewPane(page).getByRole("button", { name: /^Dismiss$/ }).click();
+			await expectNoSignoffReviewContext(page, "dismissing should remove the active and persisted sign-off review context");
+			expect(signoffCalls, "dismiss must not submit a sign-off decision").toHaveLength(0);
+
+			await page.reload();
+			await openSession(page, sessionId);
+			await expectNoSignoffReviewContext(page, "dismissed sign-off review must not rehydrate after reload");
+			expect(signoffCalls, "reload after dismiss must not submit a sign-off decision").toHaveLength(0);
+
+			await navigateToHash(page, `#/settings/${await defaultProjectId()}`);
+			await openSession(page, sessionId);
+			await expectNoSignoffReviewContext(page, "dismissed sign-off review must not rehydrate after navigation away and back");
+			expect(signoffCalls, "navigation after dismiss must not submit a sign-off decision").toHaveLength(0);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
@@ -387,7 +541,7 @@ test.describe("<goal-status-widget>", () => {
 			// Install read-mock so the widget has something to render even without
 			// a real workflow signal having landed. Backend still owns the routes
 			// but the team-lead session is real.
-			installMocks(page, goalId);
+			await installMocks(page, goalId);
 
 			teamLeadId = await startTeam(goalId);
 			await waitForSessionStatus(teamLeadId, "idle");

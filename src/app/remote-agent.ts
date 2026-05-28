@@ -31,6 +31,7 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
+import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import { refreshGateStatusForGoal } from "./api.js";
@@ -1349,6 +1350,7 @@ export class RemoteAgent {
 							this._checkReviewToolResult(m);
 						}
 					}
+					restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -1908,20 +1910,12 @@ export class RemoteAgent {
 				// (the fire-and-forget PUT would race with concurrent server-side
 				// setSubmitted(true) and clobber it on reload). RP-09.
 				if (isLive && this._sessionId) clearReviewSubmitted(this._sessionId);
-				state.reviewDocuments = new Map(state.reviewDocuments);
-				if (replace || !state.reviewDocuments.has(data.title)) {
-					state.reviewDocuments.set(data.title, { title: data.title, markdown: data.markdown });
-				}
-				state.reviewPanelOpen = true;
-				state.reviewActiveTab = data.title;
-				state.previewPanelActiveTab = "review";
-				state.previewPanelTab = "review";
-				selectReviewWorkspaceTab(data.title, { sessionId: this._sessionId || "", select: true });
-				// Un-collapse panel on desktop
-				if (this._sessionId) {
-					localStorage.removeItem(`bobbit-preview-collapsed-${this._sessionId}`);
-				}
-				renderApp();
+				openMarkdownReviewDocument({
+					title: data.title,
+					markdown: data.markdown,
+					replace,
+					sessionId: this._sessionId || "",
+				});
 			} else if (data.action === "review_close") {
 				const sid = this._sessionId || "";
 				const closingTitle = typeof data.title === "string" ? data.title : undefined;
@@ -1930,6 +1924,7 @@ export class RemoteAgent {
 				if (closingTitle) {
 					state.reviewDocuments.delete(closingTitle);
 					clearAnnotations(sid, closingTitle);
+					removePersistedReviewDocument(sid, closingTitle);
 					if (state.reviewActiveTab === closingTitle) {
 						const keys = [...state.reviewDocuments.keys()];
 						state.reviewActiveTab = keys[0] || "";
@@ -1939,6 +1934,7 @@ export class RemoteAgent {
 					state.reviewDocuments = new Map();
 					state.reviewActiveTab = "";
 					clearAllAnnotations(sid);
+					clearPersistedReviewDocuments(sid);
 					closeReviewWorkspaceTabs(undefined, { sessionId: sid, select: false });
 				}
 				state.reviewPanelOpen = state.reviewDocuments.size > 0;

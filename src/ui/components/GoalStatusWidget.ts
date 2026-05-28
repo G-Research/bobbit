@@ -12,10 +12,8 @@
  *
  * Popover (click pill):
  *   - Gate list with status icons via `renderGateStatusIcon`.
- *   - Inline sign-off cards: label + substituted prompt (markdown), signal
- *     content toggle, Approve and Reject buttons.
- *   - Reject opens a modal with a feedback textarea + Submit; on submit, POSTs
- *     `decision: "fail", feedback` to the sign-off endpoint.
+ *   - Inline sign-off cards: label + substituted prompt (markdown), View content
+ *     launcher for the review pane.
  *   - Goal Dashboard icon button at the bottom.
  *
  * Data:
@@ -52,13 +50,7 @@ interface SignoffRequest {
 	prompt: string;
 }
 
-interface ResolvedSignoff {
-	decision: "pass" | "fail";
-	feedback?: string;
-	resolvedAt: number;
-}
-
-/** Stable key for a pending sign-off in the resolved map. */
+/** Stable key for a pending sign-off row. */
 function signoffKey(s: { signalId: string; stepName: string }): string {
 	return `${s.signalId}::${s.stepName}`;
 }
@@ -71,50 +63,30 @@ export class GoalStatusWidget extends LitElement {
 
 	@state() private _gates: GateSummary[] = [];
 	@state() private _awaitingSignoffs: SignoffRequest[] = [];
-	/** Optimistic local resolution map keyed by `signalId::stepName`.
-	 *  Lets the popover show "Approved ✓"/"Rejected ✗" inline before the
-	 *  WS resolution event lands. Cleared when the server-side step_complete
-	 *  event removes the entry from `_awaitingSignoffs`. */
-	@state() private _resolved: Map<string, ResolvedSignoff> = new Map();
 	@state() private _loading = true;
 	@state() private _expanded = false;
-	@state() private _rejectFor: SignoffRequest | null = null;
-	@state() private _rejectText = "";
-	@state() private _rejectSubmitting = false;
-	@state() private _rejectError = "";
-	@state() private _submitting: Set<string> = new Set();
-	@state() private _submitErrors: Map<string, string> = new Map();
-	@state() private _contentExpanded: Set<string> = new Set();
-	@state() private _contentLoading: Set<string> = new Set();
-	@state() private _contentByKey: Map<string, string> = new Map();
-	@state() private _contentErrors: Map<string, string> = new Map();
+	@state() private _reviewLaunchLoading: Set<string> = new Set();
+	@state() private _reviewLaunchErrors: Map<string, string> = new Map();
 	@state() private _closing = false;
 
 	private _ws: WebSocket | null = null;
 	private _wsIntentionalClose = false;
 	private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _dropdownEl: HTMLElement | null = null;
-	private _modalEl: HTMLElement | null = null;
 	private _closeToken = 0;
 	private _onHashChange = () => {
 		if (this._expanded) this._closeDropdown();
-		if (this._modalEl) this._closeRejectModal();
 	};
 
 	private _onDocumentClick = (e: MouseEvent) => {
 		const target = e.target as Node;
-		if (this._expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target) && !this._modalEl?.contains(target)) {
+		if (this._expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
 			this._closeDropdown();
 		}
 	};
 
 	private _onEscapeKey = (e: KeyboardEvent) => {
 		if (e.key !== "Escape") return;
-		if (this._modalEl) {
-			e.stopPropagation();
-			this._closeRejectModal();
-			return;
-		}
 		if (this._expanded && !this._closing) {
 			e.stopPropagation();
 			this._closeDropdown();
@@ -146,7 +118,6 @@ export class GoalStatusWidget extends LitElement {
 		window.removeEventListener("hashchange", this._onHashChange);
 		this._closeToken++;
 		this._removeDropdown();
-		this._removeRejectModal();
 		this._disconnectWs();
 		this._closing = false;
 		this._expanded = false;
@@ -159,11 +130,8 @@ export class GoalStatusWidget extends LitElement {
 			// but defensive).
 			this._gates = [];
 			this._awaitingSignoffs = [];
-			this._resolved.clear();
-			this._contentExpanded = new Set();
-			this._contentLoading = new Set();
-			this._contentByKey = new Map();
-			this._contentErrors = new Map();
+			this._reviewLaunchLoading = new Set();
+			this._reviewLaunchErrors = new Map();
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -171,9 +139,8 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_resolved") || changed.has("_submitting") || changed.has("_submitErrors") || changed.has("_contentExpanded") || changed.has("_contentLoading") || changed.has("_contentByKey") || changed.has("_contentErrors") || changed.has("_rejectFor") || changed.has("_rejectText") || changed.has("_rejectSubmitting") || changed.has("_rejectError")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors")) {
 			this._syncDropdown();
-			this._syncRejectModal();
 		}
 	}
 
@@ -361,84 +328,61 @@ export class GoalStatusWidget extends LitElement {
 
 	// ── Sign-off content ──────────────────────────────────────────────
 
-	private _toggleSignoffContent(req: SignoffRequest): void {
+	private async _openSignoffContentInReviewPane(req: SignoffRequest): Promise<void> {
 		const key = signoffKey(req);
-		const expanded = new Set(this._contentExpanded);
-		if (expanded.has(key)) {
-			expanded.delete(key);
-			this._contentExpanded = expanded;
-			return;
-		}
-		expanded.add(key);
-		this._contentExpanded = expanded;
-		if (!this._contentByKey.has(key) && !this._contentLoading.has(key)) {
-			void this._fetchSignoffContent(req);
-		}
-	}
-
-	private async _fetchSignoffContent(req: SignoffRequest): Promise<void> {
-		const key = signoffKey(req);
-		const loading = new Set(this._contentLoading); loading.add(key); this._contentLoading = loading;
-		const errors = new Map(this._contentErrors); errors.delete(key); this._contentErrors = errors;
+		const loading = new Set(this._reviewLaunchLoading); loading.add(key); this._reviewLaunchLoading = loading;
+		const errors = new Map(this._reviewLaunchErrors); errors.delete(key); this._reviewLaunchErrors = errors;
 		try {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/gates/${encodeURIComponent(req.gateId)}/signals`);
 			if (!resp?.ok) throw new Error(`Unable to load signal content (${resp?.status ?? "network"})`);
 			const data = await resp.json().catch(() => null);
 			const signals = Array.isArray(data?.signals) ? data.signals : [];
 			const signal = signals.find((s: unknown) => !!s && typeof s === "object" && (s as Record<string, unknown>).id === req.signalId) as Record<string, unknown> | undefined;
-			const content = typeof signal?.content === "string" && signal.content.trim()
+			if (!signal) throw new Error("Signal content is no longer available");
+			const markdown = typeof signal.content === "string" && signal.content.trim()
 				? signal.content
 				: "No content was attached to this sign-off signal.";
-			const next = new Map(this._contentByKey); next.set(key, content); this._contentByKey = next;
+			const goalTitle = this._reviewGoalTitle();
+			const gateName = this._gateName(req.gateId);
+			const title = this._reviewDocumentTitle(req, goalTitle, gateName);
+			window.dispatchEvent(new CustomEvent("bobbit-open-review-document", {
+				detail: {
+					title,
+					markdown,
+					source: {
+						kind: "verification-signoff-markdown",
+						goalId: this.goalId,
+						gateId: req.gateId,
+						signalId: req.signalId,
+						stepName: req.stepName,
+						goalTitle,
+						gateName,
+						stepLabel: req.label,
+					},
+				},
+			}));
+			this._closeDropdown();
 		} catch (err) {
-			const next = new Map(this._contentErrors);
-			next.set(key, err instanceof Error ? err.message : "Unable to load signal content");
-			this._contentErrors = next;
+			const next = new Map(this._reviewLaunchErrors);
+			next.set(key, err instanceof Error ? err.message : "Unable to open review document");
+			this._reviewLaunchErrors = next;
 		} finally {
-			const next = new Set(this._contentLoading); next.delete(key); this._contentLoading = next;
+			const next = new Set(this._reviewLaunchLoading); next.delete(key); this._reviewLaunchLoading = next;
 		}
 	}
 
-	// ── Sign-off POST ────────────────────────────────────────────────
+	private _gateName(gateId: string): string {
+		return this._gates.find(g => g.id === gateId)?.name || gateId;
+	}
 
-	private async _submitSignoff(req: SignoffRequest, decision: "pass" | "fail", feedback?: string): Promise<boolean> {
-		const key = signoffKey(req);
-		const next = new Set(this._submitting); next.add(key); this._submitting = next;
-		const errMap = new Map(this._submitErrors); errMap.delete(key); this._submitErrors = errMap;
-		try {
-			const resp = await this._fetch(
-				`/api/goals/${this.goalId}/gates/${encodeURIComponent(req.gateId)}/signoff`,
-				{
-					method: "POST",
-					body: JSON.stringify({ signalId: req.signalId, stepName: req.stepName, decision, ...(feedback ? { feedback } : {}) }),
-				},
-			);
-			if (!resp || !resp.ok) {
-				let msg = `Sign-off failed${resp?.status ? ` (${resp.status})` : ""}`;
-				try {
-					const body = await resp?.json();
-					if (body?.error) msg = String(body.error);
-				} catch { /* ignore */ }
-				const e2 = new Map(this._submitErrors); e2.set(key, msg); this._submitErrors = e2;
-				return false;
-			}
-			// Optimistic resolved state — popover shows ✓/✗ inline. The
-			// awaiting entry is removed when the server's step_complete WS
-			// event lands and `_refreshActive` drops it from the list. We
-			// also fire an explicit refetch here as a belt-and-braces measure
-			// so the awaiting state clears even when the WS connection is
-			// momentarily down or routed through a mock (E2E tests).
-			const resolved = new Map(this._resolved);
-			resolved.set(key, { decision, feedback, resolvedAt: Date.now() });
-			this._resolved = resolved;
-			void this._refreshActive();
-			return true;
-		} catch (err) {
-			const e2 = new Map(this._submitErrors); e2.set(key, String(err)); this._submitErrors = e2;
-			return false;
-		} finally {
-			const submitting = new Set(this._submitting); submitting.delete(key); this._submitting = submitting;
-		}
+	private _reviewGoalTitle(): string {
+		return this.branch || this.goalId || "Goal";
+	}
+
+	private _reviewDocumentTitle(req: SignoffRequest, goalTitle: string, gateName: string): string {
+		const base = `Sign-off: ${goalTitle} / ${gateName} / ${req.label || req.stepName}`;
+		const duplicateCount = this._awaitingSignoffs.filter(s => this._gateName(s.gateId) === gateName && (s.label || s.stepName) === (req.label || req.stepName)).length;
+		return duplicateCount > 1 ? `${base} (${req.signalId.slice(0, 8)})` : base;
 	}
 
 	// ── Pill toggle ──────────────────────────────────────────────────
@@ -524,83 +468,10 @@ export class GoalStatusWidget extends LitElement {
 		}
 	}
 
-	// ── Reject modal ─────────────────────────────────────────────────
-
-	private _openRejectModal(req: SignoffRequest) {
-		this._rejectFor = req;
-		this._rejectText = "";
-		this._rejectError = "";
-	}
-
-	private _closeRejectModal() {
-		this._rejectFor = null;
-		this._rejectText = "";
-		this._rejectError = "";
-		this._rejectSubmitting = false;
-		this._removeRejectModal();
-	}
-
-	private _removeRejectModal() {
-		if (this._modalEl) {
-			this._modalEl.remove();
-			this._modalEl = null;
-		}
-	}
-
-	private _syncRejectModal(): void {
-		if (this._rejectFor) {
-			if (!this._modalEl) {
-				this._modalEl = document.createElement("div");
-				this._modalEl.id = "goal-status-reject-modal";
-				document.body.appendChild(this._modalEl);
-				// Autofocus the textarea after first paint.
-				requestAnimationFrame(() => {
-					this._modalEl?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
-				});
-			}
-			render(this._renderRejectModalContent(), this._modalEl);
-		} else {
-			this._removeRejectModal();
-		}
-	}
-
-	private async _submitReject() {
-		if (!this._rejectFor) return;
-		const trimmed = this._rejectText.trim();
-		if (!trimmed) return;
-		this._rejectSubmitting = true;
-		this._rejectError = "";
-		const ok = await this._submitSignoff(this._rejectFor, "fail", trimmed);
-		this._rejectSubmitting = false;
-		if (ok) {
-			this._closeRejectModal();
-		} else {
-			const key = signoffKey(this._rejectFor);
-			this._rejectError = this._submitErrors.get(key) || "Submission failed";
-		}
-	}
-
 	// ── Render ───────────────────────────────────────────────────────
 
 	private _renderDropdownContent(): TemplateResult {
 		const live = this._awaitingSignoffs;
-		const resolvedList: SignoffRequest[] = [];
-		// Surface resolved-but-not-yet-cleared entries so the user sees the
-		// transition without the card vanishing mid-render. We hold the row
-		// for as long as the resolved map has the key (cleared on next
-		// `_refreshActive` when the awaiting entry is gone).
-		for (const [key, r] of this._resolved) {
-			if (!live.some(l => signoffKey(l) === key)) {
-				// Reconstruct a minimal record for display by parsing the key.
-				// signoffKey format is `${signalId}::${stepName}` — split on the
-				// FIRST `::` only so step names containing `::` survive.
-				const sepIdx = key.indexOf("::");
-				const signalId = sepIdx >= 0 ? key.slice(0, sepIdx) : key;
-				const stepName = sepIdx >= 0 ? key.slice(sepIdx + 2) : "";
-				resolvedList.push({ signalId, stepName, gateId: "", label: stepName, prompt: r.feedback ?? "" });
-			}
-		}
-
 		return html`
 			<div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
@@ -628,23 +499,6 @@ export class GoalStatusWidget extends LitElement {
 				</div>
 			` : nothing}
 
-			${resolvedList.length > 0 ? html`
-				<div class="border-t border-border pt-2 mt-2 flex flex-col gap-1" data-testid="goal-widget-signoffs-resolved">
-					${resolvedList.map(r => {
-						const key = signoffKey(r);
-						const res = this._resolved.get(key)!;
-						return html`
-							<div class="flex items-center gap-2 text-muted-foreground" style="font-size:12px" data-testid="goal-widget-signoff-resolved" data-step-name=${r.stepName}>
-								<span class="${res.decision === "pass" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}" style="font-weight:600">
-									${res.decision === "pass" ? "Approved \u2713" : "Rejected \u2717"}
-								</span>
-								<span class="truncate" title=${r.stepName}>${r.stepName}</span>
-							</div>
-						`;
-					})}
-				</div>
-			` : nothing}
-
 			<div class="border-t border-border pt-2 mt-2 flex justify-end">
 				<button
 					class="inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80"
@@ -660,13 +514,8 @@ export class GoalStatusWidget extends LitElement {
 	private _renderSignoffCard(req: SignoffRequest): TemplateResult {
 		ensureMarkdownBlock();
 		const key = signoffKey(req);
-		const submitting = this._submitting.has(key);
-		const resolved = this._resolved.get(key);
-		const err = this._submitErrors.get(key);
-		const contentExpanded = this._contentExpanded.has(key);
-		const contentLoading = this._contentLoading.has(key);
-		const content = this._contentByKey.get(key);
-		const contentError = this._contentErrors.get(key);
+		const launchLoading = this._reviewLaunchLoading.has(key);
+		const launchError = this._reviewLaunchErrors.get(key);
 		return html`
 			<div class="border border-border rounded-md p-2 flex flex-col gap-1.5"
 				data-testid="goal-widget-signoff"
@@ -678,96 +527,16 @@ export class GoalStatusWidget extends LitElement {
 						<markdown-block .content=${req.prompt}></markdown-block>
 					</div>
 				` : nothing}
-				<div class="flex items-center justify-between gap-2 mt-1">
+				<div class="flex items-center gap-2 mt-1">
 					<button
 						class="hover:bg-secondary/80"
-						style="font-size:12px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:pointer;font-weight:500"
-						@click=${(e: MouseEvent) => { e.stopPropagation(); this._toggleSignoffContent(req); }}
+						style="font-size:12px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:${launchLoading ? "wait" : "pointer"};font-weight:500;${launchLoading ? "opacity:0.7" : ""}"
+						?disabled=${launchLoading}
+						@click=${(e: MouseEvent) => { e.stopPropagation(); void this._openSignoffContentInReviewPane(req); }}
 						data-testid="goal-widget-signoff-content-toggle"
-					>${contentExpanded ? "Hide content" : "View content"}</button>
-					${!resolved ? html`
-						<div class="flex items-center gap-2">
-							<button
-								class="hover:bg-green-100 dark:hover:bg-green-900/20"
-								style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.68 0.12 145 / 0.12);color:oklch(0.68 0.12 145);cursor:pointer;font-weight:500"
-								?disabled=${submitting}
-								@click=${(e: MouseEvent) => { e.stopPropagation(); void this._submitSignoff(req, "pass"); }}
-								data-testid="goal-widget-approve"
-							>${submitting ? "Approving\u2026" : "Approve"}</button>
-							<button
-								class="hover:bg-red-100 dark:hover:bg-red-900/20"
-								style="font-size:12px;padding:2px 10px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500"
-								?disabled=${submitting}
-								@click=${(e: MouseEvent) => { e.stopPropagation(); this._openRejectModal(req); }}
-								data-testid="goal-widget-reject"
-							>Reject\u2026</button>
-						</div>
-					` : nothing}
+					>${launchLoading ? "Opening…" : "View content"}</button>
 				</div>
-				${contentExpanded ? html`
-					<div class="border border-border rounded-md bg-background p-2 text-foreground" style="font-size:12px;max-height:220px;overflow:auto" data-testid="goal-widget-signoff-content">
-						${contentLoading ? html`<div class="text-muted-foreground">Loading content\u2026</div>`
-							: contentError ? html`<div style="color:var(--destructive)">${contentError}</div>`
-							: html`<markdown-block .content=${content || ""}></markdown-block>`}
-					</div>
-				` : nothing}
-				${resolved ? html`
-					<div class="${resolved.decision === "pass" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}" style="font-size:12px;font-weight:600">
-						${resolved.decision === "pass" ? "Approved \u2713" : "Rejected \u2717"}
-						${resolved.feedback ? html`<div class="text-muted-foreground mt-1" style="font-weight:400;white-space:pre-wrap">${resolved.feedback}</div>` : nothing}
-					</div>
-				` : nothing}
-				${err && !resolved ? html`<div style="font-size:11px;color:var(--destructive)">${err}</div>` : nothing}
-			</div>
-		`;
-	}
-
-	private _renderRejectModalContent(): TemplateResult {
-		const req = this._rejectFor;
-		if (!req) return html``;
-		const canSubmit = this._rejectText.trim().length > 0 && !this._rejectSubmitting;
-		return html`
-			<div style="position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;padding:24px"
-				@click=${(e: MouseEvent) => { if (e.target === e.currentTarget) this._closeRejectModal(); }}>
-				<div style="position:absolute;inset:0;background:rgba(0,0,0,0.5)" @click=${() => this._closeRejectModal()}></div>
-				<div style="position:relative;width:100%;max-width:480px;display:flex;flex-direction:column;background:var(--card);color:var(--foreground);border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25)">
-					<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border)">
-						<span class="text-sm font-medium">Reject sign-off: ${req.label}</span>
-						<button
-							style="background:none;border:none;color:var(--muted-foreground);cursor:pointer;padding:4px 8px;font-size:18px;line-height:1;border-radius:4px"
-							class="hover:text-foreground"
-							@click=${() => this._closeRejectModal()}
-							title="Close"
-						>&times;</button>
-					</div>
-					<div style="padding:14px 16px;display:flex;flex-direction:column;gap:8px">
-						<label class="text-muted-foreground" style="font-size:12px" for="goal-widget-reject-textarea">Feedback</label>
-						<textarea
-							id="goal-widget-reject-textarea"
-							aria-label="Rejection feedback"
-							data-testid="goal-widget-reject-textarea"
-							class="w-full"
-							style="min-height:120px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font-size:13px;resize:vertical"
-							.value=${this._rejectText}
-							@input=${(e: Event) => { this._rejectText = (e.target as HTMLTextAreaElement).value; }}
-							?disabled=${this._rejectSubmitting}
-						></textarea>
-						${this._rejectError ? html`<div style="font-size:12px;color:var(--destructive)">${this._rejectError}</div>` : nothing}
-						<div class="flex items-center gap-2 justify-end mt-1">
-							<button
-								style="font-size:12px;padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:pointer"
-								@click=${() => this._closeRejectModal()}
-								?disabled=${this._rejectSubmitting}
-							>Cancel</button>
-							<button
-								data-testid="goal-widget-reject-submit"
-								style="font-size:12px;padding:4px 12px;border-radius:4px;border:1px solid var(--border);background:oklch(0.62 0.14 25 / 0.12);color:oklch(0.62 0.14 25);cursor:pointer;font-weight:500;${canSubmit ? "" : "opacity:0.5;cursor:not-allowed"}"
-								?disabled=${!canSubmit}
-								@click=${() => void this._submitReject()}
-							>${this._rejectSubmitting ? "Submitting\u2026" : "Submit"}</button>
-						</div>
-					</div>
-				</div>
+				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error">${launchError}</div>` : nothing}
 			</div>
 		`;
 	}
