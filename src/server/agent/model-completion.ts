@@ -6,6 +6,9 @@ import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
+import { ensurePiAiBedrockHeadersPatch } from "./pi-ai-bedrock-headers-patch.js";
+
+ensurePiAiBedrockHeadersPatch();
 
 interface AuthCredentials {
 	type: string;
@@ -69,6 +72,19 @@ function resolveConfigValue(value: unknown): string | undefined {
 	const envValue = process.env[trimmed];
 	if (envValue) return envValue;
 	return trimmed;
+}
+
+function resolveProviderHeaders(provider: string): Record<string, string> | undefined {
+	if (provider !== "aigw") return undefined;
+	const rawHeaders = readModelsJsonProvider(provider)?.headers;
+	if (!rawHeaders || typeof rawHeaders !== "object") return undefined;
+	const headers: Record<string, string> = {};
+	for (const [key, value] of Object.entries(rawHeaders)) {
+		if (typeof key !== "string" || !key.trim()) continue;
+		const resolved = resolveConfigValue(value);
+		if (resolved) headers[key] = resolved;
+	}
+	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
 async function resolveProviderApiKey(prefs: PreferencesStore | undefined, provider: string): Promise<string | undefined> {
@@ -135,12 +151,14 @@ export async function completeModelText(
 	completeFn: CompleteSimpleFn = completeSimple,
 ): Promise<string> {
 	const apiKey = await resolveProviderApiKey(prefs, model.provider);
+	const providerHeaders = resolveProviderHeaders(model.provider);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
 		timeoutMs: args.timeoutMs ?? 30_000,
 		maxRetries: 0,
 		cacheRetention: "none",
 		...(apiKey ? { apiKey } : {}),
+		...(providerHeaders ? { headers: providerHeaders } : {}),
 	};
 	if (args.thinkingLevel && args.thinkingLevel !== "off") {
 		options.reasoning = args.thinkingLevel;
