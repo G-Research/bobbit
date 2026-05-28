@@ -135,8 +135,9 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 ## Gate status stale
 
-- `state.gateStatusCache` refreshed via: (1) `refreshGateStatusCache()` on initial load, (2) `refreshGateStatusForGoal()` on WS events `gate_status_changed` / `gate_verification_complete`
-- Dashboard gate polling also syncs to this cache
+- `state.gateStatusCache` is the shared gate count source for sidebar badges and the goal status widget badge. Live updates should route through `invalidateGateStatusForGoal(goalId, reason)`, which debounces per goal and refetches `/api/goals/:id/gates?view=summary`.
+- Count-changing WS events include gate signal/status/reset and verification lifecycle events through step complete; `gate_verification_step_output` is detail-only and must not refresh summaries.
+- The dashboard keeps full gate detail locally but should not write partial entries into `state.gateStatusCache`. See [gate-status-sync.md](gate-status-sync.md) for the source-of-truth and regression-test contract.
 
 ## Context bar / model state
 

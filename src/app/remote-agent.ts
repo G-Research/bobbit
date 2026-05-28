@@ -34,7 +34,7 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
-import { refreshGateStatusForGoal } from "./api.js";
+import { invalidateGateStatusForGoal } from "./api.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
@@ -1508,23 +1508,27 @@ export class RemoteAgent {
 			}
 
 			case "gate_signal_received":
-				refreshGateStatusForGoal((msg as any).goalId);
+				invalidateGateStatusForGoal((msg as any).goalId, "gate_signal_received");
 				break;
 
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
-				refreshGateStatusForGoal((msg as any).goalId);
+				invalidateGateStatusForGoal((msg as any).goalId, "gate_status_changed");
 				break;
 			}
 
-			case "gate_verification_started":
-				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
+			case "gate_reset":
+				invalidateGateStatusForGoal((msg as any).goalId, "gate_reset");
 				break;
+
+			case "gate_verification_started":
 			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
+				dispatchVerificationEvent(msg);
+				invalidateGateStatusForGoal((msg as any).goalId, (msg as any).type);
+				break;
 			case "gate_verification_step_output":
 				dispatchVerificationEvent(msg);
 				break;
@@ -1536,14 +1540,14 @@ export class RemoteAgent {
 				// read-state-bypassing trigger for pending sign-offs) stays
 				// dormant until a sidebar poll catches up.
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
+				invalidateGateStatusForGoal((msg as any).goalId, "gate_verification_awaiting_human");
 				break;
 
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
+				invalidateGateStatusForGoal((msg as any).goalId, "gate_verification_complete");
 				break;
 			}
 
