@@ -113,6 +113,57 @@ async function openSession(page: Page, sessionId: string): Promise<void> {
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 }
 
+async function signalGoalGate(goalId: string, gateId: string, content = `# ${gateId}\n\nReady.`): Promise<any> {
+	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+		method: "POST",
+		body: JSON.stringify({ content }),
+	});
+	const text = await res.text();
+	expect(res.status, `signal ${gateId} failed: ${res.status} ${text}`).toBe(201);
+	return text ? JSON.parse(text) : null;
+}
+
+async function ensureGoalWidgetGateVisible(page: Page, gateId: string): Promise<void> {
+	const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`).first();
+	if (await row.isVisible().catch(() => false)) return;
+	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await pill.click();
+	if (!(await row.isVisible().catch(() => false))) await pill.click();
+	await expect(row).toBeVisible({ timeout: 10_000 });
+}
+
+async function clickGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<void> {
+	await ensureGoalWidgetGateVisible(page, gateId);
+	const selector = `[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`;
+	await expect.poll(async () => page.evaluate((sel) => {
+		const action = document.querySelector(sel) as HTMLElement | null;
+		if (!action) return false;
+		action.click();
+		return true;
+	}, selector), { timeout: 10_000 }).toBe(true);
+}
+
+async function expectDashboardGateStatus(page: Page, gateId: string, status: "pending" | "passed" | "failed"): Promise<void> {
+	await expect(page.locator(`[data-testid="goal-dashboard-pipeline-gate"][data-gate-id="${gateId}"]`))
+		.toHaveAttribute("data-gate-status", status, { timeout: 15_000 });
+	await expect(page.locator(`[data-testid="goal-dashboard-gate-row"][data-gate-id="${gateId}"]`))
+		.toHaveAttribute("data-gate-status", status, { timeout: 15_000 });
+}
+
+async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
+	await expect.poll(async () => page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const cached = state?.gateStatusCache?.get?.(id);
+		return cached ? { passed: cached.passed, total: cached.total } : null;
+	}, goalId), {
+		timeout: 15_000,
+		message: `sidebar gate status cache should update to ${passed}/${total}`,
+	}).toEqual({ passed, total });
+
+	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${passed} of ${total} gates passed"]`).first())
+		.toBeVisible({ timeout: 15_000 });
+}
+
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
 	await page.evaluate(({ commentText, quoteText }) => {
 		const doc = document.querySelector("review-document") as any;
@@ -553,6 +604,188 @@ test.describe("<goal-status-widget>", () => {
 			expect(signoffCalls, "navigation after dismiss must not submit a sign-off decision").toHaveLength(0);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
+
+	test("passed gates show View and Reset only; View focuses the dashboard gate, supports Back, and survives reload", async ({ page }) => {
+		const goal = await createGoal({ title: `Goal-Status-Widget View Reset ${Date.now()}`, workflowId: "test-fast", worktree: false, team: false });
+		const goalId = goal.id;
+		let sessionId: string | undefined;
+		try {
+			sessionId = await createSession({ goalId });
+			const signalData = await signalGoalGate(goalId, "design-doc", "# Design Doc\n\nCurrent pass for widget view.");
+			const signalId = signalData.signal.id;
+			await waitForGateStatus(goalId, "design-doc", "passed", 20_000);
+
+			await openApp(page);
+			await openSession(page, sessionId);
+			const sourceHash = `#/session/${sessionId}`;
+			await expect.poll(async () => page.evaluate(() => window.location.hash), { timeout: 5_000 }).toContain(sourceHash);
+
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+			await pill.click();
+
+			const passedRow = page.locator('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]');
+			await expect(passedRow).toHaveAttribute("data-gate-status", "passed", { timeout: 10_000 });
+			await expect(passedRow.locator('[data-testid="goal-widget-gate-view"]')).toBeVisible();
+			await expect(passedRow.locator('[data-testid="goal-widget-gate-reset"]')).toBeVisible();
+
+			for (const pendingGate of ["implementation", "ready-to-merge"]) {
+				const pendingRow = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${pendingGate}"]`);
+				await expect(pendingRow).toHaveAttribute("data-gate-status", "pending", { timeout: 10_000 });
+				await expect(pendingRow.locator('[data-testid="goal-widget-gate-view"]')).toHaveCount(0);
+				await expect(pendingRow.locator('[data-testid="goal-widget-gate-reset"]')).toHaveCount(0);
+			}
+
+			await passedRow.locator('[data-testid="goal-widget-gate-view"]').click();
+			await page.waitForFunction(
+				({ goalId: expectedGoalId, gateId, expectedSignalId }) => {
+					const hash = window.location.hash;
+					if (!hash.startsWith(`#/goal/${expectedGoalId}?`)) return false;
+					const query = hash.slice(hash.indexOf("?") + 1);
+					const params = new URLSearchParams(query);
+					return params.get("tab") === "gates"
+						&& params.get("gate") === gateId
+						&& (params.get("signal") === expectedSignalId || params.get("signal") === "latest-passed");
+				},
+				{ goalId, gateId: "design-doc", expectedSignalId: signalId },
+				{ timeout: 10_000 },
+			);
+
+			const focusedRow = page.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design-doc"]');
+			await expect(focusedRow).toHaveAttribute("data-expanded", "true", { timeout: 15_000 });
+			await expect(focusedRow).toHaveAttribute("data-focused", "true");
+			await expect(page.locator('[data-testid="goal-dashboard-gate-detail"][data-gate-id="design-doc"]')).toBeVisible();
+			await expect(page.locator(`[data-testid="goal-dashboard-signal-entry"][data-signal-id="${signalId}"]`)).toHaveAttribute("data-focused", "true", { timeout: 10_000 });
+
+			await page.evaluate(() => window.history.back());
+			await page.waitForFunction((hash) => window.location.hash.startsWith(hash), sourceHash, { timeout: 10_000 });
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 10_000 });
+			await expect(pill).toBeVisible({ timeout: 10_000 });
+
+			await clickGoalWidgetGateAction(page, "design-doc", "goal-widget-gate-view");
+			await page.waitForFunction(
+				({ goalId: expectedGoalId, gateId, expectedSignalId }) => {
+					const hash = window.location.hash;
+					if (!hash.startsWith(`#/goal/${expectedGoalId}?`)) return false;
+					const query = hash.slice(hash.indexOf("?") + 1);
+					const params = new URLSearchParams(query);
+					return params.get("tab") === "gates"
+						&& params.get("gate") === gateId
+						&& (params.get("signal") === expectedSignalId || params.get("signal") === "latest-passed");
+				},
+				{ goalId, gateId: "design-doc", expectedSignalId: signalId },
+				{ timeout: 10_000 },
+			);
+
+			await page.reload();
+			await expect(page.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design-doc"]')).toHaveAttribute("data-expanded", "true", { timeout: 15_000 });
+			await expect(page.locator(`[data-testid="goal-dashboard-signal-entry"][data-signal-id="${signalId}"]`)).toHaveAttribute("data-focused", "true", { timeout: 10_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
+			await deleteGoal(goalId).catch(() => { /* ignore */ });
+		}
+	});
+
+	test("Reset is confirmation-guarded and refreshes downstream widget rows, sidebar badge, dashboard pipeline, and team lead message", async ({ page, context }) => {
+		test.setTimeout(60_000);
+		const goal = await createGoal({
+			title: `Goal-Status-Widget Reset ${Date.now()}`,
+			workflowId: "test-fast",
+			worktree: false,
+			team: true,
+			autoStartTeam: false,
+		});
+		const goalId = goal.id;
+		let teamLeadId: string | undefined;
+		let dashboardPage: Page | undefined;
+		let resetRequests = 0;
+		try {
+			teamLeadId = await startTeam(goalId);
+			await waitForSessionStatus(teamLeadId, "idle", 30_000);
+
+			await signalGoalGate(goalId, "design-doc", "# Design Doc\n\nReset me.");
+			await waitForGateStatus(goalId, "design-doc", "passed", 20_000);
+			await signalGoalGate(goalId, "implementation", "# Implementation\n\nDownstream work depends on design.");
+			await waitForGateStatus(goalId, "implementation", "passed", 20_000);
+			await signalGoalGate(goalId, "ready-to-merge", "# Ready\n\nTransitive downstream work is ready.");
+			await waitForGateStatus(goalId, "ready-to-merge", "passed", 20_000);
+
+			const dashboard = await context.newPage();
+			dashboardPage = dashboard;
+			await openApp(dashboard);
+			await navigateToHash(dashboard, `#/goal/${goalId}?tab=gates`);
+			await expectDashboardGateStatus(dashboard, "design-doc", "passed");
+			await expectDashboardGateStatus(dashboard, "implementation", "passed");
+			await expectDashboardGateStatus(dashboard, "ready-to-merge", "passed");
+
+			page.on("request", (request) => {
+				if (request.method() === "POST" && request.url().includes(`/api/goals/${goalId}/gates/design-doc/reset`)) resetRequests += 1;
+			});
+
+			await openApp(page);
+			await openSession(page, teamLeadId);
+			await expectSidebarGateBadge(page, goalId, 3, 3);
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+			await pill.click();
+
+			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
+				await expect(page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`))
+					.toHaveAttribute("data-gate-status", "passed", { timeout: 10_000 });
+			}
+
+			await clickGoalWidgetGateAction(page, "design-doc", "goal-widget-gate-reset");
+
+			const dialogTitle = page.getByText(/Reset .*Design Doc/i).first();
+			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
+			expect(resetRequests, "opening confirmation must not call reset API").toBe(0);
+			await page.getByRole("button", { name: "Cancel" }).last().click();
+			await expect(dialogTitle).toBeHidden({ timeout: 5_000 });
+			expect(resetRequests, "cancel must not call reset API").toBe(0);
+			await waitForGateStatus(goalId, "design-doc", "passed", 5_000);
+			await waitForGateStatus(goalId, "implementation", "passed", 5_000);
+			await waitForGateStatus(goalId, "ready-to-merge", "passed", 5_000);
+
+			await clickGoalWidgetGateAction(page, "design-doc", "goal-widget-gate-reset");
+			await expect(dialogTitle).toBeVisible({ timeout: 5_000 });
+			const resetResponse = page.waitForResponse((response) =>
+				response.request().method() === "POST"
+				&& response.url().includes(`/api/goals/${goalId}/gates/design-doc/reset`)
+				&& response.status() < 500,
+				{ timeout: 10_000 },
+			);
+			await page.getByRole("button", { name: /^Reset$/ }).last().click();
+			const response = await resetResponse;
+			expect(response.status()).toBe(200);
+			const body = await response.json();
+			expect(body.affectedGateIds).toEqual(expect.arrayContaining(["design-doc", "implementation", "ready-to-merge"]));
+			expect(body.changedGateIds).toEqual(expect.arrayContaining(["design-doc", "implementation", "ready-to-merge"]));
+			expect(body.teamLeadNotified).toBe(true);
+			expect(resetRequests).toBe(1);
+
+			await expectSidebarGateBadge(page, goalId, 0, 3);
+
+			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
+				await waitForGateStatus(goalId, gateId, "pending", 20_000);
+				await ensureGoalWidgetGateVisible(page, gateId);
+				const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`);
+				await expect(row).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
+				await expect(row.locator('[data-testid="goal-widget-gate-view"]')).toHaveCount(0);
+				await expect(row.locator('[data-testid="goal-widget-gate-reset"]')).toHaveCount(0);
+				await expectDashboardGateStatus(dashboard, gateId, "pending");
+			}
+
+			await expect(page.locator("user-message").filter({ hasText: "Gate reset: Design Doc" }).first())
+				.toBeVisible({ timeout: 20_000 });
+			await expect(page.locator("user-message").filter({ hasText: "Implementation" }).filter({ hasText: /downstream work|Why this matters/i }).first())
+				.toBeVisible({ timeout: 20_000 });
+		} finally {
+			if (dashboardPage) await dashboardPage.close().catch(() => { /* ignore */ });
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => { /* ignore */ });
+			await teardownTeam(goalId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
 		}
 	});

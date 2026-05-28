@@ -176,11 +176,71 @@ This serves two purposes:
 
 Each gate has a status: `pending`, `passed`, or `failed`.
 
-- **`pending`** — initial state; the gate has not been signaled, or was reset after an upstream re-signal.
+- **`pending`** — initial state; the gate has not been signaled, or was reset after an upstream re-signal or explicit reset.
 - **`passed`** — the gate was signaled and all verification steps succeeded (or no verification was defined).
 - **`failed`** — the gate was signaled but verification failed.
 
 When a previously-passed gate is re-signaled, all transitive downstream gates are cascade-reset to `pending`.
+
+### Viewing and resetting passed gates
+
+The chat-header `<goal-status-widget>` is the compact workflow surface for the current goal. Its popover lists every gate, but only `passed` rows show gate actions:
+
+- **View** — opens the goal dashboard Gates tab for that gate and expands the gate detail section.
+- **Reset** — asks for confirmation, then clears the selected gate and downstream dependent gates back to `pending`.
+
+Pending, running, and failed rows do not show these actions. This keeps the popover focused on completed approvals that can be inspected or invalidated.
+
+#### Dashboard focus route
+
+The View action navigates with hash-query state so browser Back and reload can restore the focused gate:
+
+```text
+#/goal/<goalId>?tab=gates&gate=<gateId>&signal=<signalId|latest-passed>
+```
+
+The dashboard reads `tab`, `gate`, and `signal` from the route. It switches to the Gates tab, expands the gate row, highlights it briefly, scrolls it into view, and expands/focuses the requested signal entry. `signal=latest-passed` is a convenience token used when the caller does not already know the concrete latest passed signal; after gate data loads, the dashboard replaces it with the resolved signal id when possible.
+
+Manual gate or signal expansion on the dashboard updates the same route state. This makes focused dashboard views shareable and resilient enough for reload/back navigation without introducing separate UI state storage.
+
+#### Reset invalidation semantics
+
+`POST /api/goals/:id/gates/:gateId/reset` resets the selected gate plus every transitive downstream dependent discovered from the workflow DAG (`dependsOn`), not from display order. Independent gates are untouched.
+
+Reset is safe to repeat:
+
+- gates already `pending` stay pending and are reported as unchanged;
+- failed downstream gates are also reset to `pending`, because their result may have depended on the invalidated upstream output;
+- active verifications for any affected gate are cancelled before statuses are rewritten;
+- only gates whose stored status actually changes are counted in `changedGateIds`.
+
+The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so the status widget, sidebar badge, dashboard pipeline, and team lead view refresh promptly.
+
+#### History and audit preservation
+
+Reset invalidates the current pass state; it does **not** delete audit data. Gate signal history, verification output, content, content version, and metadata remain in the gate store. Consumers must treat `status` as the source of truth for whether preserved content is currently approved. In other words, a reset gate may still have historical content attached, but downstream context injection and user trust decisions should require the gate to be `passed` again.
+
+#### Team lead notification
+
+After a reset, Bobbit sends the team lead session a system-origin message when a live team lead exists. The message names:
+
+- the selected gate that was reset;
+- downstream dependent gates invalidated by the DAG traversal;
+- which gates had passed state cleared;
+- which affected gates were already not passed;
+- why downstream implementation, review, or verification work may need to be revisited.
+
+If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally.
+
+#### Usage and test coverage
+
+Use Reset when an approved upstream artifact is no longer trustworthy and downstream work may have been built on it. Use a new gate signal instead when the gate has fresh replacement evidence ready to verify immediately.
+
+Coverage lives in:
+
+- [`tests/gate-store-logic.test.ts`](../tests/gate-store-logic.test.ts) — gate-store reset and dependency behavior.
+- [`tests/e2e/gate-reset-api.spec.ts`](../tests/e2e/gate-reset-api.spec.ts) — DAG invalidation, idempotency, preserved history/content, active verification cancellation, sandbox denial, team lead notification.
+- [`tests/e2e/ui/goal-status-widget.spec.ts`](../tests/e2e/ui/goal-status-widget.spec.ts) — passed-gate View/Reset controls, dashboard focus route reload/back behavior, confirmation guard, widget/sidebar/dashboard refresh, and team lead message visibility.
 
 ### Signaling a gate
 
@@ -562,12 +622,13 @@ All mutations require `projectId` (400 otherwise). Reads without `projectId` ret
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
 | `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval — content, verification, or signal history |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate — triggers verification |
+| `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to pending |
 | `GET` | `/api/goals/:id/gates/:gateId/signals` | Get signal history for a gate |
 | `GET` | `/api/goals/:id/gates/:gateId/content` | Get the current passed content of a gate |
 | `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
 | `GET` | `/api/goals/:id/verifications/active` | Get in-flight verification state (running steps, sessions) |
 
-The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint.
+The gate list, gate detail, and task list endpoints support `?view=summary` for slim agent-facing responses. See [rest-api.md — Summary views](rest-api.md#summary-views-viewsummary) for response shapes, the [Gate reset endpoint](rest-api.md#gate-reset-endpoint) for reset response details, and the [Gate inspect endpoint](rest-api.md#gate-inspect-endpoint) for the `/inspect` endpoint.
 
 ### Tasks (gate-linked)
 
@@ -602,10 +663,12 @@ State is per-project — each project has its own copies of these files in `<pro
 | `src/server/agent/workflow-manager.ts` | Workflow CRUD, DAG validation, cloning |
 | `src/server/agent/verification-harness.ts` | Async verification orchestration (command + LLM review + agent-qa, session lifecycle, artifact population) |
 | `src/server/agent/verification-logic.ts` | Pure verification logic — variable substitution, phase grouping, optional step skipping, cache reuse, error pattern matching (unit-testable without server state) |
-| `src/server/agent/gate-store.ts` | Gate state and signal history persistence |
+| `src/server/agent/gate-store.ts` | Gate state, reset, and signal history persistence |
 | `src/server/agent/task-store.ts` | Task persistence with `workflowGateId` and `inputGateIds` |
 | `src/server/agent/team-manager.ts` | Context injection via `buildDependencyContext()` |
 | `src/server/agent/system-prompt.ts` | System prompt assembly including gate context |
+| `src/app/goal-dashboard.ts` | Goal dashboard gate pipeline, focused route state, expanded gate/signal sections |
+| `src/ui/components/GoalStatusWidget.ts` | Chat-header gate popover, passed-gate View/Reset controls, sign-off launcher |
 | `defaults/tools/tasks/extension.ts` | Agent tools: `gate_signal`, `gate_status`, `gate_list`, `gate_inspect`, `task_create` |
 | `defaults/tools/team/extension.ts` | Agent tools: `team_spawn`, `team_prompt` with context injection |
 | `defaults/roles/team-lead.yaml` | Team Lead prompt template (workflow-aware) |

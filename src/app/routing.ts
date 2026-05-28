@@ -4,11 +4,29 @@
 
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
 
+export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
 
+export interface AppRoute {
+	view: RouteView;
+	sessionId?: string;
+	goalId?: string;
+	roleName?: string;
+	toolName?: string;
+	workflowId?: string;
+	staffId?: string;
+	settingsScope?: string;
+	settingsTab?: SettingsTabId;
+	searchQuery?: string;
+	dashboardTab?: DashboardTabId;
+	focusGateId?: string;
+	focusSignalId?: string;
+}
+
+const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates"]);
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
-export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalId?: string; roleName?: string; toolName?: string; workflowId?: string; staffId?: string; settingsScope?: string; settingsTab?: SettingsTabId; searchQuery?: string } {
+export function getRouteFromHash(): AppRoute {
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
@@ -19,9 +37,17 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 	if (sessionMatch) {
 		return { view: "session", sessionId: sessionMatch[1] };
 	}
-	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)$/i);
+	const goalMatch = hash.match(/^#\/goal\/([a-f0-9-]+)(?:\?(.*))?$/i);
 	if (goalMatch) {
-		return { view: "goal-dashboard", goalId: goalMatch[1] };
+		const params = goalMatch[2] ? new URLSearchParams(goalMatch[2]) : null;
+		const tab = params?.get("tab") || undefined;
+		return {
+			view: "goal-dashboard",
+			goalId: goalMatch[1],
+			dashboardTab: tab && DASHBOARD_TABS.has(tab as DashboardTabId) ? tab as DashboardTabId : undefined,
+			focusGateId: params?.get("gate") || undefined,
+			focusSignalId: params?.get("signal") || undefined,
+		};
 	}
 	const roleEditMatch = hash.match(/^#\/roles\/([a-zA-Z0-9_-]+)$/);
 	if (roleEditMatch) {
@@ -71,6 +97,28 @@ export function getRouteFromHash(): { view: RouteView; sessionId?: string; goalI
 		return { view: "settings", settingsScope: first, settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
 	}
 	return { view: "landing" };
+}
+
+export function setGoalDashboardRoute(
+	goalId: string,
+	params?: { tab?: DashboardTabId; gate?: string; signal?: string },
+	replace?: boolean,
+	silent?: boolean,
+): void {
+	const query = new URLSearchParams();
+	if (params?.tab) query.set("tab", params.tab);
+	if (params?.gate) query.set("gate", params.gate);
+	if (params?.signal) query.set("signal", params.signal);
+	const suffix = query.toString();
+	const newHash = `#/goal/${goalId}${suffix ? `?${suffix}` : ""}`;
+	if (window.location.hash !== newHash) {
+		if (replace) {
+			history.replaceState({}, "", newHash);
+			if (!silent) window.dispatchEvent(new HashChangeEvent("hashchange"));
+		} else {
+			window.location.hash = newHash;
+		}
+	}
 }
 
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {

@@ -40,6 +40,7 @@ interface GateSummary {
 	id: string;
 	name: string;
 	status: GateStatus;
+	latestPassedSignalId?: string;
 }
 
 interface SignoffRequest {
@@ -67,6 +68,8 @@ export class GoalStatusWidget extends LitElement {
 	@state() private _expanded = false;
 	@state() private _reviewLaunchLoading: Set<string> = new Set();
 	@state() private _reviewLaunchErrors: Map<string, string> = new Map();
+	@state() private _resetLoading: Set<string> = new Set();
+	@state() private _resetErrors: Map<string, string> = new Map();
 	@state() private _closing = false;
 
 	private _ws: WebSocket | null = null;
@@ -132,6 +135,8 @@ export class GoalStatusWidget extends LitElement {
 			this._awaitingSignoffs = [];
 			this._reviewLaunchLoading = new Set();
 			this._reviewLaunchErrors = new Map();
+			this._resetLoading = new Set();
+			this._resetErrors = new Map();
 			this._loading = true;
 			this._disconnectWs();
 			if (this.goalId) {
@@ -139,7 +144,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors")) {
 			this._syncDropdown();
 		}
 	}
@@ -207,9 +212,27 @@ export class GoalStatusWidget extends LitElement {
 				: obj.status === "failed" ? "failed"
 				: obj.status === "running" ? "running"
 				: "pending";
-			out.push({ id, name, status });
+			const latestPassedSignalId = typeof obj.latestPassedSignalId === "string"
+				? obj.latestPassedSignalId
+				: this._latestPassedSignalId(obj.signals);
+			out.push({ id, name, status, latestPassedSignalId });
 		}
 		return out;
+	}
+
+	private _latestPassedSignalId(rawSignals: unknown): string | undefined {
+		if (!Array.isArray(rawSignals)) return undefined;
+		for (let i = rawSignals.length - 1; i >= 0; i--) {
+			const signal = rawSignals[i];
+			if (!signal || typeof signal !== "object") continue;
+			const obj = signal as Record<string, unknown>;
+			const verification = obj.verification;
+			const vStatus = verification && typeof verification === "object" ? (verification as Record<string, unknown>).status : undefined;
+			if (vStatus !== "passed") continue;
+			if (typeof obj.id === "string") return obj.id;
+			if (typeof obj.signalId === "string") return obj.signalId;
+		}
+		return undefined;
 	}
 
 	private _extractSignoffs(verifications: unknown[]): SignoffRequest[] {
@@ -297,6 +320,7 @@ export class GoalStatusWidget extends LitElement {
 		switch (t) {
 			case "gate_signal_received":
 			case "gate_status_changed":
+			case "gate_reset":
 			case "gate_verification_complete":
 			case "gate_verification_phase_started":
 				void this._refreshGates();
@@ -430,6 +454,8 @@ export class GoalStatusWidget extends LitElement {
 				this._dropdownEl.className = "fixed z-[9999] bg-card border border-border rounded-lg shadow-lg p-3 text-[13px]";
 				this._dropdownEl.style.maxWidth = "min(420px, calc(100vw - 1rem))";
 				this._dropdownEl.style.minWidth = "260px";
+				this._dropdownEl.style.maxHeight = "min(70vh, 520px)";
+				this._dropdownEl.style.overflowY = "auto";
 				document.body.appendChild(this._dropdownEl);
 			}
 			render(this._renderDropdownContent(), this._dropdownEl);
@@ -468,6 +494,51 @@ export class GoalStatusWidget extends LitElement {
 		}
 	}
 
+	// ── Gate actions ─────────────────────────────────────────────────
+
+	private _viewGate(gate: GateSummary): void {
+		this._closeDropdown();
+		const params = new URLSearchParams({ tab: "gates", gate: gate.id });
+		params.set("signal", gate.latestPassedSignalId || "latest-passed");
+		window.location.hash = `#/goal/${encodeURIComponent(this.goalId)}?${params.toString()}`;
+	}
+
+	private async _resetGate(gate: GateSummary): Promise<void> {
+		if (this._resetLoading.has(gate.id)) return;
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		const confirmed = await confirmAction(
+			`Reset “${gate.name}”?`,
+			"This will clear the passed state for this gate and downstream dependent gates. Historical signals and content will be preserved. The team lead will be notified that downstream work may need to be revisited.",
+			"Reset",
+			true,
+		);
+		if (!confirmed) return;
+
+		const loading = new Set(this._resetLoading); loading.add(gate.id); this._resetLoading = loading;
+		const errors = new Map(this._resetErrors); errors.delete(gate.id); this._resetErrors = errors;
+		try {
+			const resp = await this._fetch(`/api/goals/${encodeURIComponent(this.goalId)}/gates/${encodeURIComponent(gate.id)}/reset`, {
+				method: "POST",
+				body: JSON.stringify({ reason: "user reset from goal status widget" }),
+			});
+			if (!resp) throw new Error("Unable to reset gate (network)");
+			if (!resp.ok) throw new Error(await this._resetErrorMessage(resp));
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
+		} catch (err) {
+			const next = new Map(this._resetErrors);
+			next.set(gate.id, err instanceof Error ? err.message : "Unable to reset gate");
+			this._resetErrors = next;
+		} finally {
+			const next = new Set(this._resetLoading); next.delete(gate.id); this._resetLoading = next;
+		}
+	}
+
+	private async _resetErrorMessage(resp: Response): Promise<string> {
+		const data = await resp.json().catch(() => null);
+		if (typeof data?.error === "string" && data.error.trim()) return data.error;
+		return `Unable to reset gate (${resp.status})`;
+	}
+
 	// ── Render ───────────────────────────────────────────────────────
 
 	private _renderDropdownContent(): TemplateResult {
@@ -492,12 +563,7 @@ export class GoalStatusWidget extends LitElement {
 				? html`<div class="text-muted-foreground" style="font-size:12px">${this._loading ? "Loading gates\u2026" : "No gates"}</div>`
 				: html`
 					<div class="flex flex-col gap-1 mb-2" data-testid="goal-widget-gates">
-						${this._gates.map(g => html`
-							<div class="flex items-center gap-2" data-testid="goal-widget-gate" data-gate-id=${g.id} data-gate-status=${g.status}>
-								${renderGateStatusIcon(g.status)}
-								<span class="truncate text-foreground" title=${g.name}>${g.name}</span>
-							</div>
-						`)}
+						${this._gates.map(g => this._renderGateRow(g))}
 					</div>
 				`}
 
@@ -507,6 +573,37 @@ export class GoalStatusWidget extends LitElement {
 					${live.map(req => this._renderSignoffCard(req))}
 				</div>
 			` : nothing}
+		`;
+	}
+
+	private _renderGateRow(gate: GateSummary): TemplateResult {
+		const resetting = this._resetLoading.has(gate.id);
+		const resetError = this._resetErrors.get(gate.id);
+		return html`
+			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${gate.status}>
+				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
+					${renderGateStatusIcon(gate.status)}
+					<span class="truncate text-foreground" title=${gate.name}>${gate.name}</span>
+				</div>
+				${gate.status === "passed" ? html`
+					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
+						<button
+							type="button"
+							class="goal-widget-gate-action hover:bg-secondary/80"
+							@click=${(e: MouseEvent) => { e.stopPropagation(); this._viewGate(gate); }}
+							data-testid="goal-widget-gate-view"
+						>View</button>
+						<button
+							type="button"
+							class="goal-widget-gate-action goal-widget-gate-reset hover:bg-secondary/80"
+							?disabled=${resetting}
+							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._resetGate(gate); }}
+							data-testid="goal-widget-gate-reset"
+						>${resetting ? "Resetting…" : "Reset"}</button>
+					</div>
+				` : nothing}
+				${resetError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-reset-error">${resetError}</div>` : nothing}
+			</div>
 		`;
 	}
 
@@ -636,6 +733,60 @@ export class GoalStatusWidget extends LitElement {
 			}
 			#goal-status-dropdown.goal-status-closing {
 				animation: goal-status-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
+			}
+			.goal-widget-gate-row {
+				min-height: 36px;
+				padding: 2px 0;
+				flex-wrap: wrap;
+			}
+			.goal-widget-gate-main {
+				flex: 1 1 120px;
+			}
+			.goal-widget-gate-actions {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				margin-left: auto;
+			}
+			.goal-widget-gate-action {
+				min-height: 32px;
+				border: 1px solid var(--border);
+				border-radius: 6px;
+				background: transparent;
+				color: var(--foreground);
+				cursor: pointer;
+				font-size: 12px;
+				font-weight: 500;
+				padding: 4px 8px;
+			}
+			.goal-widget-gate-action:disabled {
+				cursor: wait;
+				opacity: 0.65;
+			}
+			.goal-widget-gate-reset:not(:disabled) {
+				color: var(--negative, var(--foreground));
+			}
+			.goal-widget-gate-error {
+				flex: 1 0 100%;
+				font-size: 11px;
+				color: var(--negative, var(--destructive, var(--foreground)));
+				padding-left: 22px;
+			}
+			@media (max-width: 420px) {
+				.goal-widget-gate-row {
+					align-items: stretch;
+				}
+				.goal-widget-gate-main {
+					flex-basis: 100%;
+				}
+				.goal-widget-gate-actions {
+					width: 100%;
+					margin-left: 22px;
+				}
+				.goal-widget-gate-action {
+					flex: 1 1 0;
+					min-height: 36px;
+				}
 			}
 		`;
 	}

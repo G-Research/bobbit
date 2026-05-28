@@ -1696,50 +1696,69 @@ export class VerificationHarness {
 	 * Terminates reviewer sessions and removes from activeVerifications.
 	 */
 	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
+		await this.cancelStaleVerificationsForGates(goalId, [gateId]);
+	}
+
+	/**
+	 * Cancel in-flight verifications for any matching gate in one synchronous
+	 * marking pass before awaiting reviewer-session cleanup. This lets callers
+	 * invalidate several gates without a later verification completing between
+	 * per-gate awaits and re-marking a reset gate.
+	 */
+	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
+		const gateIdSet = new Set(gateIds);
+		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
+
 		for (const [signalId, active] of this.activeVerifications) {
-			if (active.goalId === goalId && active.gateId === gateId) {
-				// Mark as cancelled
-				active.cancelled = true;
-				active.overallStatus = "cancelled";
+			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
 
-				this._killTrackedForSignal(signalId);
-				this._drainPendingSignoffsForSignal(signalId);
+			active.cancelled = true;
+			active.overallStatus = "cancelled";
 
-				// Terminate all running reviewer sessions
-				for (const step of active.steps) {
-					if (step.sessionId && step.status === "running") {
-						try {
-							await this.sessionManager?.terminateSession(step.sessionId);
-						} catch { /* ignore — may already be terminated */ }
-						if (this.teamManager) {
-							try {
-								await this.teamManager.unregisterReviewerSession(goalId, step.sessionId);
-							} catch { /* ignore */ }
-						}
-					}
+			this._killTrackedForSignal(signalId);
+			this._drainPendingSignoffsForSignal(signalId);
+			this.activeVerifications.delete(signalId);
+
+			cancellations.push({
+				signalId,
+				gateId: active.gateId,
+				runningSessionIds: active.steps
+					.filter(step => step.sessionId && step.status === "running")
+					.map(step => step.sessionId!),
+			});
+		}
+
+		if (cancellations.length > 0) this._persistActive();
+
+		for (const { signalId, gateId, runningSessionIds } of cancellations) {
+			// Terminate all running reviewer sessions after every affected active
+			// verification has already been marked cancelled and removed.
+			for (const sessionId of runningSessionIds) {
+				try {
+					await this.sessionManager?.terminateSession(sessionId);
+				} catch { /* ignore — may already be terminated */ }
+				if (this.teamManager) {
+					try {
+						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
+					} catch { /* ignore */ }
 				}
-
-				// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
-				this.resolveGateStore(goalId).updateSignalVerification(signalId, {
-					status: "failed",
-					steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
-				});
-				// Note: gate status is NOT updated here — the caller decides whether to set it
-				// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
-
-				// Remove from active verifications
-				this.activeVerifications.delete(signalId);
-				this._persistActive();
-
-				// Broadcast cancellation
-				this.broadcastFn(goalId, {
-					type: "gate_verification_complete",
-					goalId, gateId, signalId,
-					status: "cancelled",
-				});
-
-				console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
 			}
+
+			// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
+			this.resolveGateStore(goalId).updateSignalVerification(signalId, {
+				status: "failed",
+				steps: [{ name: "Cancelled", type: "command", passed: false, output: "Verification cancelled.", duration_ms: 0 }],
+			});
+			// Note: gate status is NOT updated here — the caller decides whether to set it
+			// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
+
+			this.broadcastFn(goalId, {
+				type: "gate_verification_complete",
+				goalId, gateId, signalId,
+				status: "cancelled",
+			});
+
+			console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
 		}
 	}
 
