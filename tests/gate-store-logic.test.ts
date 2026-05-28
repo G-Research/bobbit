@@ -210,6 +210,62 @@ describe("GateStore", () => {
 		});
 	});
 
+	// --- resetGateAndDependents ---
+
+	describe("resetGateAndDependents", () => {
+		it("sets verification cache invalidation marker for selected and downstream gates, including pending ones", () => {
+			const wf = makeWorkflow([
+				gate("a"),
+				gate("b", ["a"]),
+				gate("c", ["b"]),
+				gate("d"),
+			]);
+			store.initGatesForGoal("goal-1", ["a", "b", "c", "d"]);
+			store.updateGateStatus("goal-1", "a", "passed");
+			// b intentionally remains pending to ensure reset still invalidates its cache.
+			store.updateGateStatus("goal-1", "c", "passed");
+			store.updateGateStatus("goal-1", "d", "passed");
+			store.recordSignal({
+				id: "sig-a-before-reset",
+				gateId: "a",
+				goalId: "goal-1",
+				sessionId: "s1",
+				timestamp: Date.now() - 10_000,
+				commitSha: "abc123",
+				verification: { status: "passed", steps: [{ name: "test", type: "command", passed: true, output: "pre-reset", duration_ms: 1 }] },
+			});
+			store.recordSignal({
+				id: "sig-c-before-reset",
+				gateId: "c",
+				goalId: "goal-1",
+				sessionId: "s1",
+				timestamp: Date.now() - 10_000,
+				commitSha: "abc123",
+				verification: { status: "passed", steps: [{ name: "test", type: "command", passed: true, output: "pre-reset", duration_ms: 1 }] },
+			});
+
+			const beforeReset = Date.now();
+			const result = store.resetGateAndDependents("goal-1", "a", wf);
+			const afterReset = Date.now();
+
+			assert.deepEqual(result.affectedGateIds, ["a", "b", "c"]);
+			assert.equal(store.getGate("goal-1", "a")!.status, "pending");
+			assert.equal(store.getGate("goal-1", "b")!.status, "pending");
+			assert.equal(store.getGate("goal-1", "c")!.status, "pending");
+			assert.equal(store.getGate("goal-1", "d")!.status, "passed");
+
+			for (const gateId of ["a", "b", "c"]) {
+				const marker = (store.getGate("goal-1", gateId)! as any).verificationCacheInvalidatedAt;
+				assert.equal(typeof marker, "number", `${gateId} should have a reset cache invalidation marker`);
+				assert.ok(marker >= beforeReset && marker <= afterReset, `${gateId} marker should be set during reset`);
+			}
+			assert.equal((store.getGate("goal-1", "d")! as any).verificationCacheInvalidatedAt, undefined);
+
+			assert.equal(store.getGate("goal-1", "a")!.signals[0].id, "sig-a-before-reset");
+			assert.equal(store.getGate("goal-1", "c")!.signals[0].id, "sig-c-before-reset");
+		});
+	});
+
 	// --- updateGateContent ---
 
 	describe("updateGateContent", () => {

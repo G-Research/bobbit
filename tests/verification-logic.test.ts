@@ -38,14 +38,15 @@ function step(name: string, opts: Record<string, unknown> = {}): any {
 function signal(
 	id: string,
 	commitSha: string,
-	verification?: { status: string; steps: { name: string; passed: boolean; output?: string; duration_ms?: number }[] },
+	verification?: { status: string; steps: { name: string; passed: boolean; output?: string; duration_ms?: number; type?: string }[] },
+	opts: { timestamp?: number } = {},
 ): any {
 	return {
 		id,
 		gateId: "g",
 		goalId: "goal",
 		sessionId: "s",
-		timestamp: Date.now(),
+		timestamp: opts.timestamp ?? Date.now(),
 		commitSha,
 		verification: verification ?? { status: "passed", steps: [] },
 	};
@@ -687,6 +688,58 @@ describe("buildStepCache", () => {
 		];
 		const cache = buildStepCache(sigs, "sig-1", "abc");
 		assert.equal(cache.get("test")!.output, "first");
+	});
+
+	it("ignores same-commit passed steps from before the reset invalidation marker", () => {
+		const resetAt = 1_700_000_000_000;
+		const sigs = [
+			signal("sig-before-reset", "abc", {
+				status: "passed",
+				steps: [{ name: "test", passed: true, output: "pre-reset", duration_ms: 100 }],
+			}, { timestamp: resetAt - 1 }),
+			signal("sig-after-reset", "abc", {
+				status: "passed",
+				steps: [{ name: "test", passed: true, output: "post-reset", duration_ms: 125 }],
+			}, { timestamp: resetAt + 1 }),
+		];
+
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+
+		assert.equal(cache.size, 1);
+		assert.equal(cache.get("test")!.output, "post-reset");
+	});
+
+	it("does not cache any pre-reset same-commit passed steps when there are no post-reset passes", () => {
+		const resetAt = 1_700_000_000_000;
+		const sigs = [
+			signal("sig-before-reset", "abc", {
+				status: "passed",
+				steps: [{ name: "test", passed: true, output: "pre-reset", duration_ms: 100 }],
+			}, { timestamp: resetAt - 1 }),
+		];
+
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+
+		assert.equal(cache.size, 0);
+	});
+
+	it("keeps post-reset same-commit passed steps cache eligible while excluding human signoff", () => {
+		const resetAt = 1_700_000_000_000;
+		const sigs = [
+			signal("sig-after-reset", "abc", {
+				status: "passed",
+				steps: [
+					{ name: "build", type: "command", passed: true, output: "ok", duration_ms: 100 },
+					{ name: "approve-design", type: "human-signoff", passed: true, output: "Approved", duration_ms: 1 },
+				],
+			}, { timestamp: resetAt + 1 }),
+		];
+
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+
+		assert.equal(cache.size, 1, "only the command step should be cached after reset");
+		assert.ok(cache.has("build"), "post-reset command step must still be reused");
+		assert.ok(!cache.has("approve-design"), "human-signoff step must still NOT be reused");
 	});
 
 	// Pin the human-signoff exclusion (Bug-1 defense-in-depth fix in the
