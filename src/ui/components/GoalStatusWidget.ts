@@ -568,10 +568,31 @@ export class GoalStatusWidget extends LitElement {
 
 	private _ensureWidgetStyles(): void {
 		if (typeof document === "undefined") return;
-		if (document.getElementById("goal-status-widget-styles")) return;
-		const style = document.createElement("style");
-		style.id = "goal-status-widget-styles";
+		let style = document.getElementById("goal-status-widget-styles") as HTMLStyleElement | null;
+		if (!style) {
+			style = document.createElement("style");
+			style.id = "goal-status-widget-styles";
+			document.head.appendChild(style);
+		}
+		// Always refresh the style text so Vite/HMR and session reloads cannot keep
+		// a stale pre-alignment rule around under the same element id.
 		style.textContent = `
+			goal-status-widget,
+			git-status-widget {
+				display: inline-flex;
+				align-items: center;
+				height: var(--pill-h, auto);
+				line-height: 1;
+				vertical-align: middle;
+			}
+			goal-status-widget .goal-status-pill,
+			git-status-widget .git-status-pill {
+				box-sizing: border-box;
+				align-items: center;
+			}
+			goal-status-widget .goal-status-pill svg {
+				display: block;
+			}
 			@keyframes goal-signoff-pulse-anim {
 				0%, 100% { transform: scale(1); opacity: 1; }
 				50%      { transform: scale(1.16); opacity: 0.72; }
@@ -606,6 +627,5 @@ export class GoalStatusWidget extends LitElement {
 				animation: goal-status-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
 			}
 		`;
-		document.head.appendChild(style);
 	}
 }

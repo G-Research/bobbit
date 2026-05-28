@@ -187,6 +187,31 @@ async function finalCommentTextarea(page: Page) {
 	return pane.locator("textarea").first();
 }
 
+async function expectGoalAndGitPillsVerticallyAligned(page: Page): Promise<void> {
+	const goalPill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await expect(goalPill).toBeVisible({ timeout: 15_000 });
+	await page.evaluate(() => {
+		if (document.querySelector("git-status-widget button")) return;
+		const strip = document.querySelector("[data-pill-content]") || document.body;
+		const fake = document.createElement("git-status-widget");
+		fake.setAttribute("data-testid", "alignment-fake-git-widget");
+		fake.innerHTML = `<button class="git-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground text-[12px] leading-tight" style="max-width:100%; height:var(--pill-h, auto)"><span>⎇</span><span>goal/foo</span></button>`;
+		strip.appendChild(fake);
+	});
+	const gitPill = page.locator("git-status-widget button").first();
+	await expect(gitPill).toBeVisible({ timeout: 15_000 });
+	const delta = await page.evaluate(() => {
+		const goal = document.querySelector("[data-testid='goal-status-widget-pill']") as HTMLElement | null;
+		const git = document.querySelector("git-status-widget button") as HTMLElement | null;
+		if (!goal || !git) return Number.POSITIVE_INFINITY;
+		const gr = goal.getBoundingClientRect();
+		const gitr = git.getBoundingClientRect();
+		return Math.abs((gr.top + gr.height / 2) - (gitr.top + gitr.height / 2));
+	});
+	await page.evaluate(() => document.querySelector("[data-testid='alignment-fake-git-widget']")?.remove());
+	expect(delta, "goal status and git status pill vertical centers should align").toBeLessThanOrEqual(1);
+}
+
 async function openSignoffReviewFromWidget(page: Page, goalIdentifier: string): Promise<void> {
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(pill).toBeVisible({ timeout: 15_000 });
@@ -299,6 +324,10 @@ test.describe("<goal-status-widget>", () => {
 				background: "rgba(0, 0, 0, 0)",
 				usesPrimaryColor: true,
 			});
+
+			await page.setViewportSize({ width: 640, height: 800 });
+			await expectGoalAndGitPillsVerticallyAligned(page);
+			await page.setViewportSize({ width: 1280, height: 800 });
 
 			await pill.click();
 			await expect(page.locator("[data-testid='goal-widget-gates']")).toBeVisible({ timeout: 5_000 });

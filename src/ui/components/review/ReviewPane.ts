@@ -350,19 +350,19 @@ export class ReviewPane extends LitElement {
               type="button"
             ></button>
             <button
-              class="review-approve-btn"
-              ?disabled=${!activeDoc}
-              @click=${() => this._submitDecision("approve")}
-            >Approve</button>
+              class="review-dismiss-btn"
+              @click=${this._dismiss}
+            >Dismiss</button>
             <button
               class="review-reject-btn"
               ?disabled=${!activeDoc}
               @click=${() => this._submitDecision("reject")}
             >Reject</button>
             <button
-              class="review-dismiss-btn"
-              @click=${this._dismiss}
-            >Dismiss</button>
+              class="review-approve-btn"
+              ?disabled=${!activeDoc}
+              @click=${() => this._submitDecision("approve")}
+            >Approve</button>
           </div>
         </div>
       </div>
