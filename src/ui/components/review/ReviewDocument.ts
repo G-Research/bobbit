@@ -15,20 +15,46 @@ import {
 import "./review-pane.css";
 
 const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
-const URL_ATTRIBUTES = new Set(["href", "src", "poster", "action", "formaction", "xlink:href"]);
+const URL_ATTRIBUTES = new Set(["href", "src", "poster", "action", "formaction", "xlink:href", "data"]);
+const DATA_IMAGE_URL_ATTRIBUTES = new Set(["src", "poster", "xlink:href"]);
 const SAFE_DATA_URL_PATTERN = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i;
+const FORBIDDEN_HTML_TAGS = new Set([
+  "base",
+  "button",
+  "embed",
+  "fieldset",
+  "form",
+  "iframe",
+  "input",
+  "link",
+  "math",
+  "meta",
+  "object",
+  "option",
+  "select",
+  "script",
+  "style",
+  "svg",
+  "textarea",
+  "template",
+]);
+const FORBIDDEN_ATTRIBUTES = new Set(["srcdoc", "style"]);
+const CODE_PLACEHOLDER_PREFIX = "\uE000REVIEW_CODE_";
+const CODE_PLACEHOLDER_SUFFIX = "\uE001";
 
 function _normalizeUrlForSafety(value: string): string {
   return value.trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
 }
 
-function _isSafeMarkdownUrl(value: string): boolean {
+function _isSafeMarkdownUrl(value: string, attrName?: string): boolean {
   const normalized = _normalizeUrlForSafety(value);
   if (!normalized) return true;
 
   const lower = normalized.toLowerCase();
   if (lower.startsWith("javascript:")) return false;
-  if (lower.startsWith("data:")) return SAFE_DATA_URL_PATTERN.test(lower);
+  if (lower.startsWith("data:")) {
+    return attrName != null && DATA_IMAGE_URL_ATTRIBUTES.has(attrName) && SAFE_DATA_URL_PATTERN.test(lower);
+  }
 
   try {
     const parsed = new URL(normalized, globalThis.location?.href ?? "http://localhost/");
@@ -38,13 +64,28 @@ function _isSafeMarkdownUrl(value: string): boolean {
   }
 }
 
+function _escapeRawHtmlOutsideCode(markdown: string): string {
+  const codeBlocks: string[] = [];
+  const protectedMarkdown = markdown.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`/g, (match) => {
+    const index = codeBlocks.length;
+    codeBlocks.push(match);
+    return `${CODE_PLACEHOLDER_PREFIX}${index}${CODE_PLACEHOLDER_SUFFIX}`;
+  });
+
+  let escaped = protectedMarkdown.replace(/</g, "&lt;");
+  codeBlocks.forEach((block, index) => {
+    escaped = escaped.replace(`${CODE_PLACEHOLDER_PREFIX}${index}${CODE_PLACEHOLDER_SUFFIX}`, block);
+  });
+  return escaped;
+}
+
 function _sanitizeSrcset(value: string): string | null {
   const candidates = value.split(",").map((candidate) => candidate.trim()).filter(Boolean);
   if (candidates.length === 0) return "";
 
   for (const candidate of candidates) {
     const [url] = candidate.split(/\s+/, 1);
-    if (!_isSafeMarkdownUrl(url)) return null;
+    if (!_isSafeMarkdownUrl(url, "src")) return null;
   }
 
   return candidates.join(", ");
@@ -55,14 +96,19 @@ export function sanitizeReviewMarkdownHtml(htmlContent: string): string {
   template.innerHTML = htmlContent;
 
   for (const element of Array.from(template.content.querySelectorAll("*"))) {
+    if (FORBIDDEN_HTML_TAGS.has(element.tagName.toLowerCase())) {
+      element.remove();
+      continue;
+    }
+
     for (const attr of Array.from(element.attributes)) {
       const attrName = attr.name.toLowerCase();
-      if (attrName.startsWith("on")) {
+      if (attrName.startsWith("on") || FORBIDDEN_ATTRIBUTES.has(attrName)) {
         element.removeAttribute(attr.name);
         continue;
       }
 
-      if (URL_ATTRIBUTES.has(attrName) && !_isSafeMarkdownUrl(attr.value)) {
+      if (URL_ATTRIBUTES.has(attrName) && !_isSafeMarkdownUrl(attr.value, attrName)) {
         element.removeAttribute(attr.name);
         continue;
       }
@@ -84,6 +130,12 @@ export function sanitizeReviewMarkdownHtml(htmlContent: string): string {
   }
 
   return template.innerHTML;
+}
+
+export function renderReviewMarkdownToHtml(markdown: string): string {
+  const safeContent = _escapeRawHtmlOutsideCode(markdown);
+  const htmlContent = marked.parse(safeContent, { async: false }) as string;
+  return sanitizeReviewMarkdownHtml(htmlContent);
 }
 
 /**
@@ -203,28 +255,9 @@ export class ReviewDocument extends LitElement {
     // Destroy previous annotator before re-rendering content
     this._destroyAnnotator();
 
-    // Escape HTML tags before markdown parsing (same pattern as MarkdownBlock)
-    // to prevent XSS from agent-supplied content
-    let safeContent = this.markdown;
-    const codeBlocks: string[] = [];
-    safeContent = safeContent.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {
-      const index = codeBlocks.length;
-      codeBlocks.push(match);
-      return `__CODE_BLOCK_${index}__`;
-    });
-    safeContent = safeContent
-      .replace(/<(\w+)([^>]*)>/g, "&lt;$1$2&gt;")
-      .replace(/<\/(\w+)>/g, "&lt;/$1&gt;")
-      .replace(/<(\w+)([^>]*)\s*\/>/g, "&lt;$1$2/&gt;")
-      .replace(/<(?![^\s])/g, "&lt;");
-    codeBlocks.forEach((block, index) => {
-      safeContent = safeContent.replace(`__CODE_BLOCK_${index}__`, block);
-    });
-
-    // Render markdown to HTML, then sanitize generated links/attributes before
-    // inserting into the live document.
-    const htmlContent = marked.parse(safeContent, { async: false }) as string;
-    container.innerHTML = sanitizeReviewMarkdownHtml(htmlContent);
+    // Escape raw HTML before markdown parsing, then sanitize generated
+    // markdown HTML before inserting it into the live document.
+    container.innerHTML = renderReviewMarkdownToHtml(this.markdown);
 
     // Restore and re-anchor existing annotations
     this._reanchorAnnotations();
