@@ -21,7 +21,7 @@ import {
 	setRenderSuppressed,
 } from "./state.js";
 import { gatewayFetch, refreshSessions } from "./api.js";
-import { clearAllAnnotations, clearAnnotations, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { clearAllAnnotations, clearAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
 import {
 	clearPersistedReviewDocuments,
 	openReviewDocumentFromEvent,
@@ -1657,6 +1657,15 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const reviewPaneUnsentCountForDocument = (sessionId: string, title: string): number => {
+		const pane = document.querySelector("review-pane") as (HTMLElement & { _unsentCommentCountForDocument?: (title: string) => number }) | null;
+		if (pane && typeof pane._unsentCommentCountForDocument === "function") {
+			const count = Number(pane._unsentCommentCountForDocument(title));
+			if (Number.isFinite(count)) return count;
+		}
+		return getDocumentAnnotationCount(sessionId, title);
+	};
+
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
 		event?.preventDefault();
 		event?.stopPropagation();
@@ -1682,6 +1691,10 @@ export function doRenderApp(): void {
 			const title = reviewTitleFromPanelTab(tab);
 			if (title) {
 				const sid = activeSessionId() || "";
+				if (event?.type !== "review-close-tab") {
+					const count = reviewPaneUnsentCountForDocument(sid, title);
+					if (count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be lost.`)) return;
+				}
 				clearAnnotations(sid, title);
 				removePersistedReviewDocument(sid, title);
 				state.reviewDocuments = new Map(state.reviewDocuments);

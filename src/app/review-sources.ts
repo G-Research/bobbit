@@ -283,6 +283,16 @@ function composeDecisionFeedback(doc: ReviewDocumentModel, payload: ReviewDecisi
 	return options.emptyApprovalText || "";
 }
 
+function composeMarkdownReviewDecisionFeedback(doc: ReviewDocumentModel, payload: ReviewDecisionPayload): string {
+	const heading = payload.decision === "approve" ? "## Review Approved" : "## Review Rejected";
+	const body = composeDecisionFeedback(doc, payload).trim();
+	if (body) {
+		if (body.startsWith("## Review Approved") || body.startsWith("## Review Rejected")) return body;
+		return `${heading}\n\n${body}`;
+	}
+	return `${heading}\n\n${payload.decision === "approve" ? "Approved with no comments." : "Rejected."}`;
+}
+
 async function postSignoffDecision(source: Extract<ReviewSource, { kind: "verification-signoff-markdown" }>, doc: ReviewDocumentModel, payload: ReviewDecisionPayload): Promise<void> {
 	const feedback = composeDecisionFeedback(doc, payload);
 	const body: Record<string, unknown> = {
@@ -322,9 +332,7 @@ export async function submitReviewDecision(doc: ReviewDocumentModel, inputPayloa
 	if (source.kind === "verification-signoff-markdown") {
 		await postSignoffDecision(source, doc, payload);
 	} else {
-		const feedback = composeDecisionFeedback(doc, payload, {
-			emptyApprovalText: `Approved review "${doc.title}" with no comments.`,
-		});
+		const feedback = composeMarkdownReviewDecisionFeedback(doc, payload);
 		if (!options.prompt) throw new Error("No active agent is available for this review.");
 		await options.prompt(feedback);
 		if (sessionId) markReviewSubmitted(sessionId);
