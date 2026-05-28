@@ -825,7 +825,7 @@ Request body:
 | `signalId` | yes | Id of the gate signal whose verification owns the step. |
 | `stepName` | yes | `name` of the parked step as declared in the workflow YAML. |
 | `decision` | yes | `"pass"` or `"fail"`. Anything else → 400. |
-| `feedback` | no | Free-form markdown. Stored verbatim in the step `output` and a `text/markdown` artifact. |
+| `feedback` | no | Free-form markdown. Stored verbatim in the step `output` and a `text/markdown` artifact. The review pane composes this from the final comment and inline comments when the decision came from a review document. |
 
 Responses:
 
@@ -836,6 +836,8 @@ Responses:
 - **400** when the goal is shelved; **409** when archived.
 
 Authz (v1) trusts the gateway token — anyone with UI access can submit. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve a sign-off step that gates their own work.
+
+Review-pane behavior and validation are documented in [Review Pane Sign-Off](review-pane-signoff.md).
 
 ### Gate inspect endpoint
 

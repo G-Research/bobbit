@@ -15,9 +15,9 @@ presence of the others:
 
 1. **Backend step type** (`type: human-signoff`) — verification harness
    wiring, REST endpoint, WebSocket event, restart-safe persistence.
-2. **`<goal-status-widget>`** — chat-header pill mounted next to
-   `<git-status-widget>` that surfaces gate progress and inline Approve /
-   Reject controls for every pending sign-off on the session's goal.
+2. **`<goal-status-widget>` + review pane** — chat-header pill mounted next to
+   `<git-status-widget>` that surfaces gate progress and hands pending
+   sign-off content to the review pane for Approve / Reject decisions.
 3. **Four-rule notification policy** — the team-lead unread-dot predicate
    gains pending-sign-off and errored-and-parked rules, and a debounced
    "idle stuck" rule that closes the historical spawn-handoff
@@ -25,8 +25,9 @@ presence of the others:
 
 User-facing docs:
 [goals-workflows-tasks.md — Human sign-off steps](../goals-workflows-tasks.md#human-sign-off-steps)
+· [review-pane-signoff.md](../review-pane-signoff.md)
 · [workflow-authoring-guide.md §4.4](../../defaults/workflow-authoring-guide.md)
-· [rest-api.md — Sign-off endpoint](../rest-api.md#gates).
+· [rest-api.md — Sign-off endpoint](../rest-api.md#sign-off-endpoint).
 
 Sibling design doc: [notification-policy.md](notification-policy.md) covers
 the predicate split and the four-rule team-lead disjunction that this goal
@@ -90,10 +91,12 @@ agent context-window pressure, and would need its own UI surface anyway.
    `gate_verification_awaiting_human`, and `await`s a `pendingSignoffs`
    resolver.
 4. `<goal-status-widget>` receives the WS event, refreshes the awaiting
-   list, pulses the badge.
-5. User clicks Approve / Reject — `POST /api/goals/:id/gates/:gateId/signoff`
-   invokes `verificationHarness.resolveSignoff()`.
-6. Step result is built → standard `gate_verification_step_complete`
+   list, and pulses the badge.
+5. User clicks **View content** — the widget fetches the gate signal content
+   and opens a `verification-signoff-markdown` review document.
+6. User approves or rejects in the review pane — `POST /api/goals/:id/gates/:gateId/signoff`
+   invokes `verificationHarness.resolveSignoff()` with any composed final/inline feedback.
+7. Step result is built → standard `gate_verification_step_complete`
    broadcast → phase machinery proceeds → `gate_verification_complete`.
 
 ## Notification policy — four-rule team-lead disjunction
@@ -155,13 +158,13 @@ analysis caught and signal #8 fixed (`a75ca58`).
 | `src/server/agent/workflow-store.ts` · `project-config-store.ts` · `gate-store.ts` | `VerifyStep.type` / `GateSignalStep.type` discriminant additions |
 | `src/server/server.ts` | `POST /api/goals/:id/gates/:gateId/signoff` handler; `awaitingSignoffCount` aggregation on `?view=summary` |
 | `src/server/auth/sandbox-guard.ts` | Blocks sandboxed agents from POSTing to `/signoff` |
-| `src/ui/components/GoalStatusWidget.ts` | The pill + popover + inline sign-off controls + reject modal |
+| `src/ui/components/GoalStatusWidget.ts` | The pill + popover + pending sign-off launcher that opens submitted content in the review pane |
 | `src/app/lazy-widgets.ts` | `ensureGoalStatusWidget()` lazy loader |
 | `src/ui/components/AgentInterface.ts` | Mounts `<goal-status-widget>` next to `<git-status-widget>` for any session with a `goalId` / `teamGoalId` |
 | `src/app/render-helpers.ts` | `renderGateProgressBadge` and `renderGateStatusIcon` — shared visual vocabulary between sidebar, widget, and dashboard |
 | `src/app/notification-policy.ts` | `needsHumanAttention` + `needsImmediateHumanAttention` predicates |
 | `src/app/api.ts` · `src/app/remote-agent.ts` | Cache refresh wiring (`?view=summary` fetch + WS handler for `gate_verification_awaiting_human`) |
-| `src/app/state.ts` | `gateStatusCache` value shape — `awaitingHumanSignoff: boolean` |
+| `src/app/state.ts` | `gateStatusCache` value shape — `awaitingHumanSignoff: boolean`; review document/source state |
 
 ## Pinning tests
 
@@ -173,4 +176,5 @@ analysis caught and signal #8 fixed (`a75ca58`).
   `awaitingHuman: true` → POST `/signoff` pass and fail paths → idempotent
   409 on repeat.
 - `tests/e2e/ui/goal-status-widget.spec.ts` — pill visibility, popover,
-  Approve / Reject flow, reject modal, reload persistence.
+  View content handoff, review-pane Approve / Reject flow, reload persistence,
+  and cleanup.

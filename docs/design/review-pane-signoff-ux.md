@@ -1,5 +1,7 @@
 # Review Pane Sign-Off UX Guidance
 
+This design note captures UX intent. For the shipped source model, routing, persistence, cleanup, and sanitization contract, see [Review Pane Sign-Off](../review-pane-signoff.md).
+
 ## Intent
 
 Use the review pane as the single decision surface for gate sign-off content. The goal status widget should only alert, orient, and hand off; it should not become a markdown reader or a second approval flow.
