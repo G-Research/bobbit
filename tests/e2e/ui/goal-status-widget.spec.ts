@@ -187,6 +187,20 @@ async function finalCommentTextarea(page: Page) {
 	return pane.locator("textarea").first();
 }
 
+async function expectGoalCounterAndIconVerticallyAligned(page: Page): Promise<void> {
+	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await expect(pill).toBeVisible({ timeout: 15_000 });
+	const delta = await page.evaluate(() => {
+		const icon = document.querySelector("[data-testid='goal-status-widget-icon']") as HTMLElement | null;
+		const counter = document.querySelector("[data-testid='goal-status-widget-pill'] > span[title*='gates passed']") as HTMLElement | null;
+		if (!icon || !counter) return Number.POSITIVE_INFINITY;
+		const ir = icon.getBoundingClientRect();
+		const cr = counter.getBoundingClientRect();
+		return Math.abs((ir.top + ir.height / 2) - (cr.top + cr.height / 2));
+	});
+	expect(delta, "goal workflow counter and goal icon vertical centers should align").toBeLessThanOrEqual(1);
+}
+
 async function expectGoalAndGitPillsVerticallyAligned(page: Page): Promise<void> {
 	const goalPill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(goalPill).toBeVisible({ timeout: 15_000 });
@@ -325,8 +339,10 @@ test.describe("<goal-status-widget>", () => {
 				usesPrimaryColor: true,
 			});
 
+			await expectGoalCounterAndIconVerticallyAligned(page);
 			await page.setViewportSize({ width: 640, height: 800 });
 			await expectGoalAndGitPillsVerticallyAligned(page);
+			await expectGoalCounterAndIconVerticallyAligned(page);
 			await page.setViewportSize({ width: 1280, height: 800 });
 
 			await pill.click();

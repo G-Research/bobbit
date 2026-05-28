@@ -29,7 +29,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { LayoutDashboard } from "lucide";
+import { Goal as GoalIcon, LayoutDashboard } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -558,7 +558,7 @@ export class GoalStatusWidget extends LitElement {
 				@click=${this._togglePill}
 			>
 				<span class="shrink-0" style="display:inline-flex;align-items:center" data-testid="goal-status-widget-icon">
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+					${icon(GoalIcon, "xs")}
 				</span>
 				${awaiting ? html`<span class="goal-signoff-pulse shrink-0" data-testid="goal-status-widget-awaiting" aria-label="Awaiting human sign-off" title="Awaiting human sign-off">!</span>` : nothing}
 				${renderGateProgressBadge(this.goalId)}
@@ -589,6 +589,18 @@ export class GoalStatusWidget extends LitElement {
 			git-status-widget .git-status-pill {
 				box-sizing: border-box;
 				align-items: center;
+			}
+			goal-status-widget .goal-status-pill > span {
+				display: inline-flex;
+				align-items: center;
+				line-height: 12px;
+			}
+			goal-status-widget .goal-status-pill > span[title*="gates passed"] {
+				height: 12px;
+				transform: translateY(-1px);
+			}
+			git-status-widget .git-status-pill > span:not(:first-child) {
+				transform: translateY(-0.5px);
 			}
 			goal-status-widget .goal-status-pill svg {
 				display: block;
