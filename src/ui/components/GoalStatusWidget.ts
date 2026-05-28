@@ -14,7 +14,7 @@
  *   - Gate list with status icons via `renderGateStatusIcon`.
  *   - Inline sign-off cards: label + substituted prompt (markdown), View content
  *     launcher for the review pane.
- *   - Goal Dashboard icon button at the bottom.
+ *   - Passed gate View / Reset controls and a top-right Goal Dashboard button.
  *
  * Data:
  *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
@@ -29,7 +29,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { Goal as GoalIcon, LayoutDashboard } from "lucide";
+import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -64,6 +64,7 @@ export class GoalStatusWidget extends LitElement {
 
 	@state() private _gates: GateSummary[] = [];
 	@state() private _awaitingSignoffs: SignoffRequest[] = [];
+	@state() private _activeGateIds: Set<string> = new Set();
 	@state() private _loading = true;
 	@state() private _expanded = false;
 	@state() private _reviewLaunchLoading: Set<string> = new Set();
@@ -133,6 +134,7 @@ export class GoalStatusWidget extends LitElement {
 			// but defensive).
 			this._gates = [];
 			this._awaitingSignoffs = [];
+			this._activeGateIds = new Set();
 			this._reviewLaunchLoading = new Set();
 			this._reviewLaunchErrors = new Map();
 			this._resetLoading = new Set();
@@ -144,7 +146,7 @@ export class GoalStatusWidget extends LitElement {
 				this._connectWs();
 			}
 		}
-		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors")) {
+		if (changed.has("_expanded") || changed.has("_gates") || changed.has("_awaitingSignoffs") || changed.has("_activeGateIds") || changed.has("_reviewLaunchLoading") || changed.has("_reviewLaunchErrors") || changed.has("_resetLoading") || changed.has("_resetErrors")) {
 			this._syncDropdown();
 		}
 	}
@@ -164,7 +166,10 @@ export class GoalStatusWidget extends LitElement {
 			}
 			if (vActiveResp?.ok) {
 				const data = await vActiveResp.json().catch(() => null);
-				if (data?.verifications) this._awaitingSignoffs = this._extractSignoffs(data.verifications);
+				if (data?.verifications) {
+					this._awaitingSignoffs = this._extractSignoffs(data.verifications);
+					this._activeGateIds = this._extractActiveGateIds(data.verifications);
+				}
 			}
 		} catch {
 			// non-fatal — WS events will rehydrate
@@ -186,7 +191,10 @@ export class GoalStatusWidget extends LitElement {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/verifications/active`);
 			if (!resp?.ok) return;
 			const data = await resp.json().catch(() => null);
-			if (data?.verifications) this._awaitingSignoffs = this._extractSignoffs(data.verifications);
+			if (data?.verifications) {
+				this._awaitingSignoffs = this._extractSignoffs(data.verifications);
+				this._activeGateIds = this._extractActiveGateIds(data.verifications);
+			}
 		} catch { /* non-fatal */ }
 	}
 
@@ -233,6 +241,19 @@ export class GoalStatusWidget extends LitElement {
 			if (typeof obj.signalId === "string") return obj.signalId;
 		}
 		return undefined;
+	}
+
+	private _extractActiveGateIds(verifications: unknown[]): Set<string> {
+		const out = new Set<string>();
+		for (const v of verifications) {
+			if (!v || typeof v !== "object") continue;
+			const vv = v as Record<string, unknown>;
+			const gateId = typeof vv.gateId === "string" ? vv.gateId : null;
+			if (!gateId) continue;
+			const status = typeof vv.overallStatus === "string" ? vv.overallStatus : typeof vv.status === "string" ? vv.status : "running";
+			if (status === "running" || status === "pending") out.add(gateId);
+		}
+		return out;
 	}
 
 	private _extractSignoffs(verifications: unknown[]): SignoffRequest[] {
@@ -506,12 +527,14 @@ export class GoalStatusWidget extends LitElement {
 	private async _resetGate(gate: GateSummary): Promise<void> {
 		if (this._resetLoading.has(gate.id)) return;
 		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		this._dropdownEl?.classList.add("goal-status-confirming");
 		const confirmed = await confirmAction(
 			`Reset “${gate.name}”?`,
 			"This will clear the passed state for this gate and downstream dependent gates. Historical signals and content will be preserved. The team lead will be notified that downstream work may need to be revisited.",
 			"Reset",
 			true,
 		);
+		this._dropdownEl?.classList.remove("goal-status-confirming");
 		if (!confirmed) return;
 
 		const loading = new Set(this._resetLoading); loading.add(gate.id); this._resetLoading = loading;
@@ -551,8 +574,7 @@ export class GoalStatusWidget extends LitElement {
 					${renderGateProgressBadge(this.goalId)}
 				</div>
 				<button
-					class="inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary/80 shrink-0"
-					style="font-size:12px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:3px 8px"
+					class="goal-widget-button goal-widget-button-neutral shrink-0"
 					@click=${(e: MouseEvent) => { e.stopPropagation(); this._closeDropdown(); setHashRoute("goal-dashboard", this.goalId); }}
 					data-testid="goal-widget-dashboard-link"
 					title="Goal dashboard"
@@ -582,29 +604,36 @@ export class GoalStatusWidget extends LitElement {
 		return html`
 			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${gate.status}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
-					${renderGateStatusIcon(gate.status)}
+					${this._renderGateStatusIndicator(gate)}
 					<span class="truncate text-foreground" title=${gate.name}>${gate.name}</span>
 				</div>
 				${gate.status === "passed" ? html`
 					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
 						<button
 							type="button"
-							class="goal-widget-gate-action hover:bg-secondary/80"
+							class="goal-widget-button goal-widget-button-neutral goal-widget-gate-action"
 							@click=${(e: MouseEvent) => { e.stopPropagation(); this._viewGate(gate); }}
 							data-testid="goal-widget-gate-view"
-						>View</button>
+						>${icon(Eye, "xs")}<span>View</span></button>
 						<button
 							type="button"
-							class="goal-widget-gate-action goal-widget-gate-reset hover:bg-secondary/80"
+							class="goal-widget-button goal-widget-button-reset goal-widget-gate-action"
 							?disabled=${resetting}
 							@click=${(e: MouseEvent) => { e.stopPropagation(); void this._resetGate(gate); }}
 							data-testid="goal-widget-gate-reset"
-						>${resetting ? "Resetting…" : "Reset"}</button>
+						>${resetting ? icon(Loader2, "xs", "animate-spin") : icon(RotateCcw, "xs")}<span>${resetting ? "Resetting…" : "Reset"}</span></button>
 					</div>
 				` : nothing}
 				${resetError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-reset-error">${resetError}</div>` : nothing}
 			</div>
 		`;
+	}
+
+	private _renderGateStatusIndicator(gate: GateSummary): TemplateResult {
+		if (gate.status === "running" || this._activeGateIds.has(gate.id)) {
+			return html`<span class="goal-widget-running-dot shrink-0" data-testid="goal-widget-gate-running-dot" aria-label="running"></span>`;
+		}
+		return renderGateStatusIcon(gate.status);
 	}
 
 	private _renderSignoffCard(req: SignoffRequest): TemplateResult {
@@ -625,12 +654,11 @@ export class GoalStatusWidget extends LitElement {
 				` : nothing}
 				<div class="flex items-center gap-2 mt-1">
 					<button
-						class="hover:bg-secondary/80"
-						style="font-size:12px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:${launchLoading ? "wait" : "pointer"};font-weight:500;${launchLoading ? "opacity:0.7" : ""}"
+						class="goal-widget-button goal-widget-button-neutral"
 						?disabled=${launchLoading}
 						@click=${(e: MouseEvent) => { e.stopPropagation(); void this._openSignoffContentInReviewPane(req); }}
 						data-testid="goal-widget-signoff-content-toggle"
-					>${launchLoading ? "Opening…" : "View content"}</button>
+					>${launchLoading ? icon(Loader2, "xs", "animate-spin") : icon(FileText, "xs")}<span>${launchLoading ? "Opening…" : "View content"}</span></button>
 				</div>
 				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error">${launchError}</div>` : nothing}
 			</div>
@@ -734,58 +762,101 @@ export class GoalStatusWidget extends LitElement {
 			#goal-status-dropdown.goal-status-closing {
 				animation: goal-status-out 180ms cubic-bezier(0.4, 0, 1, 1) forwards;
 			}
+			.goal-widget-button {
+				display: inline-flex !important;
+				align-items: center;
+				justify-content: center;
+				gap: 3px;
+				height: 22px;
+				min-height: 22px;
+				box-sizing: border-box;
+				padding: 1px 7px;
+				border-radius: 4px;
+				border: 1px solid var(--border);
+				background: transparent;
+				color: var(--muted-foreground);
+				cursor: pointer;
+				font-size: 12px;
+				font-weight: 500;
+				line-height: 1;
+				white-space: nowrap;
+				transition: background 150ms, border-color 150ms, color 150ms, opacity 150ms;
+			}
+			.goal-widget-button svg {
+				width: 12px;
+				height: 12px;
+				flex-shrink: 0;
+				display: block;
+			}
+			.goal-widget-button:disabled {
+				cursor: wait;
+				opacity: 0.65;
+			}
+			.goal-widget-button-neutral:hover:not(:disabled) {
+				background: var(--accent, var(--secondary));
+				color: var(--foreground);
+			}
+			.goal-widget-button-reset:hover:not(:disabled) {
+				background: color-mix(in oklch, var(--negative, var(--destructive, #dc2626)) 10%, transparent);
+				border-color: color-mix(in oklch, var(--negative, var(--destructive, #dc2626)) 40%, var(--border));
+				color: var(--negative, var(--destructive, #dc2626));
+			}
+			@keyframes goal-widget-running-dot-pulse {
+				0%, 100% { transform: scale(0.86); opacity: 0.55; box-shadow: 0 0 0 0 color-mix(in oklch, var(--info, #3b82f6) 36%, transparent); }
+				50% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 4px color-mix(in oklch, var(--info, #3b82f6) 0%, transparent); }
+			}
+			.goal-widget-running-dot {
+				width: 9px;
+				height: 9px;
+				margin: 0 1.5px;
+				border-radius: 999px;
+				background: var(--info, #3b82f6);
+				animation: goal-widget-running-dot-pulse 1.25s ease-in-out infinite;
+			}
+			#goal-status-dropdown.goal-status-confirming {
+				z-index: 40;
+			}
 			.goal-widget-gate-row {
-				min-height: 36px;
+				min-height: 26px;
 				padding: 2px 0;
-				flex-wrap: wrap;
+				flex-wrap: nowrap;
 			}
 			.goal-widget-gate-main {
-				flex: 1 1 120px;
+				flex: 1 1 auto;
+				min-width: 0;
 			}
 			.goal-widget-gate-actions {
 				display: inline-flex;
 				align-items: center;
 				gap: 4px;
 				margin-left: auto;
-			}
-			.goal-widget-gate-action {
-				min-height: 32px;
-				border: 1px solid var(--border);
-				border-radius: 6px;
-				background: transparent;
-				color: var(--foreground);
-				cursor: pointer;
-				font-size: 12px;
-				font-weight: 500;
-				padding: 4px 8px;
-			}
-			.goal-widget-gate-action:disabled {
-				cursor: wait;
-				opacity: 0.65;
-			}
-			.goal-widget-gate-reset:not(:disabled) {
-				color: var(--negative, var(--foreground));
+				flex: 0 0 auto;
 			}
 			.goal-widget-gate-error {
-				flex: 1 0 100%;
+				flex: 0 1 auto;
+				min-width: 0;
 				font-size: 11px;
 				color: var(--negative, var(--destructive, var(--foreground)));
-				padding-left: 22px;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
 			}
 			@media (max-width: 420px) {
 				.goal-widget-gate-row {
 					align-items: stretch;
 				}
+				.goal-widget-button {
+					padding: 1px 6px;
+				}
 				.goal-widget-gate-main {
-					flex-basis: 100%;
+					flex-basis: auto;
 				}
 				.goal-widget-gate-actions {
-					width: 100%;
-					margin-left: 22px;
+					width: auto;
+					margin-left: auto;
 				}
 				.goal-widget-gate-action {
 					flex: 1 1 0;
-					min-height: 36px;
 				}
 			}
 		`;
