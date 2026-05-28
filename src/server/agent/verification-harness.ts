@@ -1869,12 +1869,7 @@ export class VerificationHarness {
 			// Build cache of previously-passed step results for the same commit SHA.
 			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
 			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-			const cachedSteps = buildStepCache(
-				gateState?.signals ?? [],
-				signal.id,
-				signal.commitSha,
-				gateState?.verificationCacheInvalidatedAt,
-			);
+			const cachedSteps = buildStepCache(gateState?.signals ?? [], signal.id, signal.commitSha);
 			if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}

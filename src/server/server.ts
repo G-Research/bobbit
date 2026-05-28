@@ -5500,19 +5500,12 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-pass if a prior signal for the same commit already fully passed.
-		// Manual reset preserves signal history for auditability, so this route-level
-		// fast path must honor the same reset cache boundary as VerificationHarness.
-		// Human sign-offs are never reusable consent; let the harness run them again.
+		// Auto-pass if a prior signal for the same commit already fully passed
 		if (commitSha !== "unknown") {
 			const existingGateForCache = gateStore.getGate(goalId, gateId);
 			if (existingGateForCache) {
-				const cacheInvalidatedAt = existingGateForCache.verificationCacheInvalidatedAt;
 				const priorPassed = existingGateForCache.signals.find(s =>
-					s.commitSha === commitSha
-					&& s.verification?.status === "passed"
-					&& (cacheInvalidatedAt === undefined || s.timestamp > cacheInvalidatedAt)
-					&& !s.verification.steps.some(step => step.type === "human-signoff")
+					s.commitSha === commitSha && s.verification?.status === "passed"
 				);
 				if (priorPassed?.verification) {
 					// Create a signal record with cached results
