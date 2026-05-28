@@ -153,6 +153,7 @@ import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
+import type { GateResetResult } from "./agent/gate-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -5300,6 +5301,122 @@ async function handleApiRoute(
 			});
 			return;
 		}
+	}
+
+	// POST /api/goals/:goalId/gates/:gateId/reset — reset a gate and downstream dependents
+	const gateResetMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/gates\/([^/]+)\/reset$/);
+	if (gateResetMatch && req.method === "POST") {
+		if (sandboxScope) {
+			json({ error: "Forbidden: sandbox token cannot reset gates" }, 403);
+			return;
+		}
+
+		const [, goalId, gateId] = gateResetMatch;
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (!goal.workflow) { json({ error: "Goal has no workflow" }, 400); return; }
+
+		const gateResetCtx = projectContextManager.getContextForGoal(goalId);
+		if (!gateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		const gateStore = gateResetCtx.gateStore;
+		const requestedGateDef = goal.workflow.gates.find(g => g.id === gateId);
+		if (!requestedGateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+
+		let resetResult: GateResetResult;
+		try {
+			resetResult = gateStore.resetGateAndDependents(goalId, gateId, goal.workflow);
+		} catch (err: any) {
+			json({ error: err?.message || `Unknown gate: ${gateId}` }, 404);
+			return;
+		}
+
+		for (const affectedGateId of resetResult.affectedGateIds) {
+			try {
+				await verificationHarness.cancelStaleVerifications(goalId, affectedGateId);
+			} catch (err) {
+				console.error(`[api] Error cancelling verification for reset gate ${affectedGateId}:`, err);
+			}
+		}
+
+		const affectedGates = resetResult.affectedGateIds.map(affectedGateId => {
+			const def = goal.workflow!.gates.find(g => g.id === affectedGateId);
+			const state = gateStore.getGate(goalId, affectedGateId);
+			return {
+				gateId: affectedGateId,
+				name: def?.name || affectedGateId,
+				status: state?.status || "pending",
+			};
+		});
+
+		for (const gate of affectedGates) {
+			broadcastToGoal(goalId, { type: "gate_status_changed", goalId, gateId: gate.gateId, status: gate.status });
+		}
+		broadcastToGoal(goalId, {
+			type: "gate_reset",
+			goalId,
+			gateId,
+			affectedGateIds: resetResult.affectedGateIds,
+			changedGateIds: resetResult.changedGateIds,
+			unchangedGateIds: resetResult.unchangedGateIds,
+		});
+
+		const gateNameById = new Map(goal.workflow.gates.map(g => [g.id, g.name || g.id]));
+		const namesFor = (ids: string[]) => ids.map(id => `- ${gateNameById.get(id) || id}`);
+		const downstreamIds = resetResult.affectedGateIds.filter(id => id !== gateId);
+		const clearedPassedIds = resetResult.affectedGateIds.filter(id => resetResult.previousStatuses[id] === "passed");
+		const alreadyNotPassedIds = resetResult.affectedGateIds.filter(id => resetResult.previousStatuses[id] !== "passed");
+		const notificationLines = [
+			`Gate reset: ${requestedGateDef.name || gateId}`,
+			"",
+			"Reset by user action from the goal status widget.",
+			"",
+			"Selected gate:",
+			`- ${requestedGateDef.name || gateId}`,
+			"",
+			"Invalidated dependent gates:",
+			...(downstreamIds.length ? namesFor(downstreamIds) : ["- None"]),
+			"",
+			"Cleared passed state:",
+			...(clearedPassedIds.length ? namesFor(clearedPassedIds) : ["- None"]),
+			"",
+			"Already not passed but included in reset scope:",
+			...(alreadyNotPassedIds.length ? namesFor(alreadyNotPassedIds) : ["- None"]),
+			"",
+			"Why this matters:",
+			"Downstream work may have relied on outputs from the reset gate. Please revisit dependent implementation, review, or verification work before continuing.",
+		];
+		const notification = notificationLines.join("\n");
+
+		let teamLeadNotified = false;
+		const team = teamManager.getTeamState(goalId);
+		if (team?.teamLeadSessionId) {
+			const teamLeadSession = sessionManager.getSession(team.teamLeadSessionId);
+			if (teamLeadSession && teamLeadSession.status !== "terminated") {
+				try {
+					if (teamLeadSession.status === "streaming") {
+						await sessionManager.deliverLiveSteer(team.teamLeadSessionId, notification, { source: "system" });
+					} else {
+						await sessionManager.enqueuePrompt(team.teamLeadSessionId, notification, { isSteered: true, source: "system" });
+					}
+					teamLeadNotified = true;
+				} catch (err) {
+					console.error(`[api] Failed to notify team lead for gate reset ${goalId}/${gateId}:`, err);
+				}
+			}
+		}
+
+		json({
+			ok: true,
+			gateId,
+			affectedGateIds: resetResult.affectedGateIds,
+			changedGateIds: resetResult.changedGateIds,
+			unchangedGateIds: resetResult.unchangedGateIds,
+			previousStatuses: resetResult.previousStatuses,
+			gates: affectedGates,
+			teamLeadNotified,
+		});
+		return;
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate

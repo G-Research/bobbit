@@ -118,6 +118,7 @@ export type ServerMessage =
 	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "skipped"; durationMs: number; output: string; sessionId?: string; phase?: number; seq?: number }
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string; seq?: number }
 	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
+	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[] }
 	| { type: "goal_setup_complete"; goalId: string }
 	| { type: "goal_setup_error"; goalId: string; error: string }
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }

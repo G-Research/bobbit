@@ -63,10 +63,10 @@ export function isSandboxAllowed(
 			if (!scope.goalIds.has(targetGoalId)) return false;
 
 			if (subpath.startsWith("/team")) return true;
-			// /signoff is a human-only action — a sandboxed agent must not be
-			// able to self-approve a human-signoff verification step that gates
-			// its own goal. Block before the broad /gates allow-rule.
-			if (/^\/gates\/[^/]+\/signoff$/.test(subpath)) return false;
+			// /signoff and /reset are human-only actions — a sandboxed agent must
+			// not be able to self-approve or invalidate workflow gates.
+			// Block before the broad /gates allow-rule.
+			if (/^\/gates\/[^/]+\/(signoff|reset)$/.test(subpath)) return false;
 			if (subpath.startsWith("/gates")) return true;
 			if (subpath.startsWith("/tasks")) return true;
 			if (m === "GET" && subpath === "") return true;
