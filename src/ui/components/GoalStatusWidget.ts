@@ -34,6 +34,8 @@ import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 
+const GATE_STATUS_CACHE_UPDATED_EVENT = "bobbit-gate-status-cache-updated";
+
 type GateStatus = "pending" | "passed" | "failed" | "running";
 
 interface GateSummary {
@@ -82,6 +84,13 @@ export class GoalStatusWidget extends LitElement {
 		if (this._expanded) this._closeDropdown();
 	};
 
+	private _onGateStatusCacheUpdated = (event: Event) => {
+		const detail = (event as CustomEvent<{ goalIds?: string[] }>).detail;
+		if (!this.goalId || (Array.isArray(detail?.goalIds) && !detail.goalIds.includes(this.goalId))) return;
+		this.requestUpdate();
+		this._syncDropdown();
+	};
+
 	private _onDocumentClick = (e: MouseEvent) => {
 		const target = e.target as Node;
 		if (this._expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
@@ -108,6 +117,7 @@ export class GoalStatusWidget extends LitElement {
 		document.addEventListener("click", this._onDocumentClick, true);
 		document.addEventListener("keydown", this._onEscapeKey, true);
 		window.addEventListener("hashchange", this._onHashChange);
+		window.addEventListener(GATE_STATUS_CACHE_UPDATED_EVENT, this._onGateStatusCacheUpdated);
 		this._ensureWidgetStyles();
 		if (this.goalId) {
 			void this._fetchInitial();
@@ -120,6 +130,7 @@ export class GoalStatusWidget extends LitElement {
 		document.removeEventListener("click", this._onDocumentClick, true);
 		document.removeEventListener("keydown", this._onEscapeKey, true);
 		window.removeEventListener("hashchange", this._onHashChange);
+		window.removeEventListener(GATE_STATUS_CACHE_UPDATED_EVENT, this._onGateStatusCacheUpdated);
 		this._closeToken++;
 		this._removeDropdown();
 		this._disconnectWs();
@@ -174,6 +185,7 @@ export class GoalStatusWidget extends LitElement {
 		} catch {
 			// non-fatal — WS events will rehydrate
 		}
+		await this._refreshSharedGateStatus();
 		this._loading = false;
 	}
 
@@ -196,6 +208,27 @@ export class GoalStatusWidget extends LitElement {
 				this._activeGateIds = this._extractActiveGateIds(data.verifications);
 			}
 		} catch { /* non-fatal */ }
+	}
+
+	private async _refreshSharedGateStatus(): Promise<void> {
+		if (!this.goalId) return;
+		try {
+			const { refreshGateStatusForGoal } = await import("../../app/api.js");
+			await refreshGateStatusForGoal(this.goalId);
+		} catch { /* non-fatal */ }
+		this.requestUpdate();
+		this._syncDropdown();
+	}
+
+	private async _refreshWidgetState(options: { gates?: boolean; active?: boolean; shared?: boolean } = {}): Promise<void> {
+		const { gates = false, active = false, shared = true } = options;
+		const tasks: Promise<void>[] = [];
+		if (gates) tasks.push(this._refreshGates());
+		if (active) tasks.push(this._refreshActive());
+		if (shared) tasks.push(this._refreshSharedGateStatus());
+		await Promise.all(tasks);
+		this.requestUpdate();
+		this._syncDropdown();
 	}
 
 	private async _fetch(path: string, init?: RequestInit): Promise<Response | null> {
@@ -344,19 +377,19 @@ export class GoalStatusWidget extends LitElement {
 			case "gate_reset":
 			case "gate_verification_complete":
 			case "gate_verification_phase_started":
-				void this._refreshGates();
-				void this._refreshActive();
+				void this._refreshWidgetState({ gates: true, active: true });
 				break;
 			case "gate_verification_step_started":
+				void this._refreshWidgetState({ active: true });
+				break;
 			case "gate_verification_step_complete":
-				void this._refreshActive();
-				if (t === "gate_verification_step_complete") void this._refreshGates();
+				void this._refreshWidgetState({ gates: true, active: true });
 				break;
 			case "gate_verification_awaiting_human": {
 				const signalId = typeof msg.signalId === "string" ? msg.signalId : null;
 				const gateId = typeof msg.gateId === "string" ? msg.gateId : null;
 				const stepName = typeof msg.stepName === "string" ? msg.stepName : null;
-				if (!signalId || !gateId || !stepName) { void this._refreshActive(); break; }
+				if (!signalId || !gateId || !stepName) { void this._refreshWidgetState({ active: true }); break; }
 				const label = typeof msg.label === "string" ? msg.label : stepName;
 				const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
 				// Dedupe — replace any existing entry for the same key.
@@ -364,6 +397,7 @@ export class GoalStatusWidget extends LitElement {
 				const filtered = this._awaitingSignoffs.filter(s => signoffKey(s) !== key);
 				filtered.push({ signalId, gateId, stepName, label, prompt });
 				this._awaitingSignoffs = filtered;
+				void this._refreshSharedGateStatus();
 				break;
 			}
 			default:
@@ -546,7 +580,7 @@ export class GoalStatusWidget extends LitElement {
 			});
 			if (!resp) throw new Error("Unable to reset gate (network)");
 			if (!resp.ok) throw new Error(await this._resetErrorMessage(resp));
-			await Promise.all([this._refreshGates(), this._refreshActive()]);
+			await this._refreshWidgetState({ gates: true, active: true });
 		} catch (err) {
 			const next = new Map(this._resetErrors);
 			next.set(gate.id, err instanceof Error ? err.message : "Unable to reset gate");

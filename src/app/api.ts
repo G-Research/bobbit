@@ -767,6 +767,13 @@ async function fetchGoalGatesWithSignoffCount(goalId: string): Promise<{ gates: 
 	}
 }
 
+export const GATE_STATUS_CACHE_UPDATED_EVENT = "bobbit-gate-status-cache-updated";
+
+function emitGateStatusCacheUpdated(goalIds: string[]): void {
+	if (goalIds.length === 0 || typeof window === "undefined") return;
+	window.dispatchEvent(new CustomEvent(GATE_STATUS_CACHE_UPDATED_EVENT, { detail: { goalIds } }));
+}
+
 /** Fetch gate statuses for all goals with workflows and update the cache.
  *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
 async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
@@ -784,7 +791,7 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 		})
 	);
 
-	let changed = false;
+	const changedGoalIds: string[] = [];
 	for (const { goalId, passed, total, verifying, verifyingCount, awaitingSignoffCount } of results) {
 		const awaitingHumanSignoff = awaitingSignoffCount > 0;
 		const prev = state.gateStatusCache.get(goalId);
@@ -796,11 +803,14 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 			|| prev.awaitingSignoffCount !== awaitingSignoffCount
 			|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
 			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
-			changed = true;
+			changedGoalIds.push(goalId);
 		}
 	}
-	if (changed && !skipRender) renderApp();
-	return changed;
+	if (changedGoalIds.length > 0) {
+		emitGateStatusCacheUpdated(changedGoalIds);
+		if (!skipRender) renderApp();
+	}
+	return changedGoalIds.length > 0;
 }
 
 /** Refresh gate status cache for a single goal (called from WS event handlers). */
@@ -822,6 +832,7 @@ export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
 		|| prev.awaitingSignoffCount !== awaitingSignoffCount
 		|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
 		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
+		emitGateStatusCacheUpdated([goalId]);
 		renderApp();
 	}
 }

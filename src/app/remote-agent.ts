@@ -1518,6 +1518,10 @@ export class RemoteAgent {
 				break;
 			}
 
+			case "gate_reset":
+				refreshGateStatusForGoal((msg as any).goalId);
+				break;
+
 			case "gate_verification_started":
 				dispatchVerificationEvent(msg);
 				refreshGateStatusForGoal((msg as any).goalId);
@@ -1525,6 +1529,9 @@ export class RemoteAgent {
 			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
 			case "gate_verification_step_started":
+				dispatchVerificationEvent(msg);
+				refreshGateStatusForGoal((msg as any).goalId);
+				break;
 			case "gate_verification_step_output":
 				dispatchVerificationEvent(msg);
 				break;
