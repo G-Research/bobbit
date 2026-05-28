@@ -22,6 +22,7 @@ import path from "node:path";
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
+const EXPECTED_USER_AGENT = `Bobbit/${JSON.parse(readFileSync(path.resolve("package.json"), "utf-8")).version}`;
 
 let tmp: string;
 let stateDir: string;
@@ -108,6 +109,11 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 
 			const data = readModels();
 			assert.ok(data?.providers?.aigw, "providers.aigw must exist");
+			assert.equal(
+				data.providers.aigw.headers["User-Agent"],
+				EXPECTED_USER_AGENT,
+				"provider-level User-Agent must use the current package version",
+			);
 			assert.equal(
 				data.providers.aigw.headers["x-opencode-session"],
 				EXPECTED_HEADER_VALUE,
