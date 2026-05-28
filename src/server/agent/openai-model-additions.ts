@@ -180,6 +180,8 @@ const ADDITION_FIELD_SAMPLE: Record<keyof Omit<OpenAIAddition, "id" | "provider"
 	cost: true,
 	contextWindow: true,
 	maxTokens: true,
+	headers: true,
+	compat: true,
 };
 const ADDITION_FIELDS: Array<keyof OpenAIAddition> = Object.keys(ADDITION_FIELD_SAMPLE) as Array<keyof OpenAIAddition>;
 

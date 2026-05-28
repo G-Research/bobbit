@@ -4606,9 +4606,9 @@ export class SessionManager {
 
 	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
+		const sessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
 		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
-		const namingThinking = this.preferencesStore?.get("default.namingThinkingLevel") as string | undefined;
-		return { namingModel: namingModel || undefined, aigwUrl, thinkingLevel: namingThinking || undefined };
+		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {

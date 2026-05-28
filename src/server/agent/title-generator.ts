@@ -10,7 +10,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { discoverAigwModels } from "./aigw-manager.js";
-import { modelRecencyRank } from "./model-registry.js";
+import { completeModelText } from "./model-completion.js";
+import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
+import type { PreferencesStore } from "./preferences-store.js";
 
 /** Cache for the fallback naming model id, keyed by gateway URL. TTL ~60s. */
 let _fallbackCache: { url: string; modelId: string | null; expiresAt: number } | null = null;
@@ -69,6 +71,14 @@ export interface TitleGenOptions {
 	aigwUrl?: string;
 	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
+	/** Model to try when no explicit naming model is configured (usually default.sessionModel). */
+	fallbackModel?: string;
+	/** Preferences are needed to resolve and authenticate non-AI-Gateway naming models. */
+	preferencesStore?: PreferencesStore;
+	/** Test hook: supplies available models without reading preferences. */
+	availableModels?: ApiModel[] | (() => Promise<ApiModel[]>);
+	/** Test hook: performs the direct-model completion. */
+	directModelCompleter?: (model: ApiModel, args: { systemPrompt: string; userPrompt: string; maxTokens: number; thinkingLevel: "off" }) => Promise<string | null>;
 }
 
 interface AuthCredentials {
@@ -283,7 +293,41 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 /**
  * Generate title via direct Anthropic API call.
  */
-async function generateViaAnthropic(preview: string, thinkingLevel?: string): Promise<string | null> {
+async function getOptionModels(options: TitleGenOptions): Promise<ApiModel[]> {
+	if (Array.isArray(options.availableModels)) return options.availableModels;
+	if (typeof options.availableModels === "function") return options.availableModels();
+	if (options.preferencesStore) return getAvailableModels(options.preferencesStore);
+	return [];
+}
+
+async function findConfiguredModel(pref: string, options: TitleGenOptions): Promise<{ provider: string; modelId: string; model?: ApiModel } | null> {
+	const slash = pref.indexOf("/");
+	if (slash <= 0 || slash >= pref.length - 1) {
+		console.warn(`[title-gen] Malformed namingModel preference: "${pref}", ignoring`);
+		return null;
+	}
+	const provider = pref.slice(0, slash);
+	const modelId = pref.slice(slash + 1);
+	const models = await getOptionModels(options);
+	return { provider, modelId, model: models.find(m => m.provider === provider && m.id === modelId) };
+}
+
+async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: string, systemPrompt: string, options: TitleGenOptions): Promise<string | null> {
+	try {
+		const text = options.directModelCompleter
+			? await options.directModelCompleter(model, { systemPrompt, userPrompt, maxTokens: 500, thinkingLevel: "off" })
+			: await completeModelText(model, options.preferencesStore, { systemPrompt, userPrompt, maxTokens: 500, thinkingLevel: "off" });
+		if (!text) return null;
+		const title = cleanTitle(text);
+		console.log(`[title-gen] Generated title: "${title}"`);
+		return title || null;
+	} catch (err) {
+		console.error(`[title-gen] Direct model "${model.provider}/${model.id}" failed:`, err);
+		return null;
+	}
+}
+
+async function generateViaAnthropic(preview: string, thinkingLevel?: string, modelId = DEFAULT_TITLE_MODEL): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
@@ -315,7 +359,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 		: coreInstruction;
 
 	const body: any = {
-		model: DEFAULT_TITLE_MODEL,
+		model: modelId,
 		// Bumped from 12 → 500 to tolerate brief reasoning preamble (see gateway path).
 		max_tokens: 500,
 		system: auth.type === "oauth"
@@ -339,7 +383,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string): Pr
 		}
 	}
 
-	console.log(`[title-gen] Requesting title via ${DEFAULT_TITLE_MODEL}…`);
+	console.log(`[title-gen] Requesting title via ${modelId}…`);
 
 	try {
 		let response = await fetch(ANTHROPIC_API_URL, {
@@ -399,14 +443,25 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		return null;
 	}
 
-	// If a naming model is configured and we have a gateway, use it
-	if (options?.namingModel && options.aigwUrl) {
-		const slash = options.namingModel.indexOf("/");
-		if (slash > 0 && slash < options.namingModel.length - 1) {
-			const modelId = options.namingModel.slice(slash + 1);
-			return generateViaGateway(options.aigwUrl, modelId, preview, options.thinkingLevel);
+	// If a naming model is configured, respect its provider. AI Gateway models
+	// still use the gateway path; direct/custom models use pi-ai. Title
+	// generation is intentionally forced to thinking=off for cost and latency.
+	if (options?.namingModel) {
+		const configured = await findConfiguredModel(options.namingModel, options);
+		if (configured) {
+			if (configured.provider === "aigw" && options.aigwUrl) {
+				return generateViaGateway(options.aigwUrl, configured.modelId, preview, "off");
+			}
+			if (configured.model) {
+				const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
+				const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
+				return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
+			}
+			if (configured.provider === "anthropic") {
+				return generateViaAnthropic(preview, "off", configured.modelId);
+			}
+			console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
 		}
-		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
 	// Gateway configured but no explicit naming model - auto-select a low-cost
@@ -416,14 +471,26 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		const fallbackId = await pickFallbackAigwNamingModel(options.aigwUrl);
 		if (fallbackId) {
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}"`);
-			return generateViaGateway(options.aigwUrl, fallbackId, preview, options.thinkingLevel);
+			return generateViaGateway(options.aigwUrl, fallbackId, preview, "off");
 		}
-		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back to direct Anthropic API");
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found; falling back");
 	}
 
-	// Default: direct Anthropic API (works for public, gateway-less, and
-	// gateway-but-no-Claude setups).
-	return generateViaAnthropic(preview, options?.thinkingLevel);
+	// No explicit naming model and no usable gateway fallback. Try the session
+	// default before the legacy Haiku path so OpenAI-only installations still
+	// auto-rename sessions after switching away from Anthropic.
+	if (options?.fallbackModel) {
+		const configured = await findConfiguredModel(options.fallbackModel, options);
+		if (configured?.model) {
+			const userPrompt = `Conversation:\n\n---\n${preview}\n---\n\nReply with ONLY <title>YOUR LABEL</title>:`;
+			const systemPrompt = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
+			console.log(`[title-gen] Using session default fallback naming model "${options.fallbackModel}"`);
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, systemPrompt, options);
+		}
+	}
+
+	// Legacy default: direct Anthropic API.
+	return generateViaAnthropic(preview, "off");
 }
 
 // ── Goal title summarization ──────────────────────────────────────────
@@ -479,7 +546,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 /**
  * Generate a 3-word summary of a goal title via direct Anthropic API.
  */
-async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<string | null> {
+async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFAULT_TITLE_MODEL): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
@@ -510,7 +577,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 		: GOAL_SUMMARY_SYSTEM;
 
 	const body = {
-		model: DEFAULT_TITLE_MODEL,
+		model: modelId,
 		// Bumped from 12 → 500 to tolerate brief reasoning preamble.
 		max_tokens: 500,
 		system: auth.type === "oauth"
@@ -521,7 +588,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string): Promise<strin
 		],
 	};
 
-	console.log(`[title-gen] Requesting goal summary via ${DEFAULT_TITLE_MODEL}…`);
+	console.log(`[title-gen] Requesting goal summary via ${modelId}…`);
 
 	try {
 		let response = await fetch(ANTHROPIC_API_URL, {
@@ -579,13 +646,21 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 		return null;
 	}
 
-	if (options?.namingModel && options.aigwUrl) {
-		const slash = options.namingModel.indexOf("/");
-		if (slash > 0 && slash < options.namingModel.length - 1) {
-			const modelId = options.namingModel.slice(slash + 1);
-			return generateGoalSummaryViaGateway(options.aigwUrl, modelId, goalTitle);
+	if (options?.namingModel) {
+		const configured = await findConfiguredModel(options.namingModel, options);
+		if (configured) {
+			if (configured.provider === "aigw" && options.aigwUrl) {
+				return generateGoalSummaryViaGateway(options.aigwUrl, configured.modelId, goalTitle);
+			}
+			if (configured.model) {
+				const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
+				return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
+			}
+			if (configured.provider === "anthropic") {
+				return generateGoalSummaryViaAnthropic(goalTitle, configured.modelId);
+			}
+			console.warn(`[title-gen] Naming model "${options.namingModel}" is not available for goal summary; falling back`);
 		}
-		console.warn(`[title-gen] Malformed namingModel preference: "${options.namingModel}", ignoring`);
 	}
 
 	// Gateway configured but no explicit naming model - auto-select a low-cost
@@ -596,7 +671,16 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 			console.log(`[title-gen] Using fallback gateway naming model "${fallbackId}" for goal summary`);
 			return generateGoalSummaryViaGateway(options.aigwUrl, fallbackId, goalTitle);
 		}
-		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back to direct Anthropic API");
+		console.warn("[title-gen] Gateway configured but no suitable Claude naming model found for goal summary; falling back");
+	}
+
+	if (options?.fallbackModel) {
+		const configured = await findConfiguredModel(options.fallbackModel, options);
+		if (configured?.model) {
+			const userPrompt = `Goal title:\n\n---\n${goalTitle}\n---\n\nReply with ONLY <title>YOUR 3-WORD SUMMARY</title>:`;
+			console.log(`[title-gen] Using session default fallback naming model "${options.fallbackModel}" for goal summary`);
+			return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
+		}
 	}
 
 	return generateGoalSummaryViaAnthropic(goalTitle);
