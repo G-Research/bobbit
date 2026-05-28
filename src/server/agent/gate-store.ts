@@ -53,6 +53,8 @@ export interface GateState {
 	currentContentVersion?: number;
 	currentMetadata?: Record<string, string>;
 	signals: GateSignal[];
+	/** Signals at or before this timestamp are ineligible for verification-step cache reuse. */
+	verificationCacheInvalidatedAt?: number;
 	updatedAt: number;
 }
 
@@ -242,20 +244,24 @@ export class GateStore {
 			const previousStatus = gate?.status ?? "pending";
 			previousStatuses[affectedGateId] = previousStatus;
 
+			if (gate) {
+				gate.verificationCacheInvalidatedAt = now;
+				gate.updatedAt = now;
+			}
+
 			if (gate && gate.status !== "pending") {
 				gate.status = "pending";
-				gate.updatedAt = now;
 				changedGateIds.push(affectedGateId);
 			} else {
 				unchangedGateIds.push(affectedGateId);
 			}
 		}
 
-		if (changedGateIds.length > 0) {
+		if (affectedGateIds.length > 0) {
 			this.save();
-			for (const changedGateId of changedGateIds) {
-				this.onStatusChange?.(goalId, changedGateId);
-			}
+		}
+		for (const changedGateId of changedGateIds) {
+			this.onStatusChange?.(goalId, changedGateId);
 		}
 
 		return {
