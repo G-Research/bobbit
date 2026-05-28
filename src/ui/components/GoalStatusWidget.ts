@@ -615,6 +615,8 @@ export class GoalStatusWidget extends LitElement {
 				>${icon(LayoutDashboard, "xs")}<span>Goal Dashboard</span></button>
 			</div>
 
+			<div class="border-t border-border mb-2"></div>
+
 			${this._gates.length === 0
 				? html`<div class="text-muted-foreground" style="font-size:12px">${this._loading ? "Loading gates\u2026" : "No gates"}</div>`
 				: html`
@@ -755,7 +757,7 @@ export class GoalStatusWidget extends LitElement {
 			}
 			goal-status-widget .goal-status-pill > span[title*="gates passed"] {
 				height: 12px;
-				transform: translateY(-1px);
+				transform: translateY(-0.5px);
 			}
 			git-status-widget .git-status-pill > span:not(:first-child) {
 				transform: translateY(-0.5px);

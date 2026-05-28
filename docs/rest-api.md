@@ -871,7 +871,10 @@ Notes:
 
 - `affectedGateIds` includes the requested gate first, then downstream dependents reached through `dependsOn`.
 - Only gates that were not already `pending` appear in `changedGateIds`; already-pending gates appear in `unchangedGateIds`.
+- Every affected gate gets a `verificationCacheInvalidatedAt` marker. Signals at or before that timestamp cannot supply same-commit cached verification steps, so the next signal runs fresh verification even if the commit SHA is unchanged.
 - Signal history, content, metadata, and verification output are preserved for audit. The gate `status` is the approval source of truth after reset.
+- `human-signoff` approvals are never reused from verification cache; each re-signal requires a fresh human decision.
+- After a fresh post-reset pass, later non-reset re-signals at the same commit may reuse that new passed output normally.
 - Active verifications for affected gates are cancelled before status changes are persisted.
 - The server emits `gate_status_changed` plus `gate_reset` WebSocket events and notifies the team lead when one is active.
 - Sandboxed agent tokens are forbidden from this route.

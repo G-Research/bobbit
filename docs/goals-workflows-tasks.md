@@ -207,18 +207,25 @@ Manual gate or signal expansion on the dashboard updates the same route state. T
 
 `POST /api/goals/:id/gates/:gateId/reset` resets the selected gate plus every transitive downstream dependent discovered from the workflow DAG (`dependsOn`), not from display order. Independent gates are untouched.
 
+Each affected `GateState` also receives `verificationCacheInvalidatedAt`, set to the reset timestamp. Verification cache selection treats that timestamp as a boundary: passed step results from signals at or before the marker are ineligible for same-commit reuse, while later signals remain eligible. This makes the next post-reset signal run active verification steps normally even when the commit SHA is unchanged.
+
 Reset is safe to repeat:
 
 - gates already `pending` stay pending and are reported as unchanged;
 - failed downstream gates are also reset to `pending`, because their result may have depended on the invalidated upstream output;
 - active verifications for any affected gate are cancelled before statuses are rewritten;
+- verification-step cache eligibility is invalidated for both changed and already-pending affected gates;
 - only gates whose stored status actually changes are counted in `changedGateIds`.
 
 The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so the status widget, sidebar badge, dashboard pipeline, and team lead view refresh promptly.
 
 #### History and audit preservation
 
-Reset invalidates the current pass state; it does **not** delete audit data. Gate signal history, verification output, content, content version, and metadata remain in the gate store. Consumers must treat `status` as the source of truth for whether preserved content is currently approved. In other words, a reset gate may still have historical content attached, but downstream context injection and user trust decisions should require the gate to be `passed` again.
+Reset invalidates the current pass state and old cache eligibility; it does **not** delete audit data. Gate signal history, verification output, content, content version, and metadata remain in the gate store. Consumers must treat `status` as the source of truth for whether preserved content is currently approved. In other words, a reset gate may still have historical content attached, but downstream context injection and user trust decisions should require the gate to be `passed` again.
+
+`human-signoff` steps are never reused from cache, regardless of reset state. Prior human approvals stay inspectable in signal history, but every re-signal must obtain a fresh human decision.
+
+After a fresh post-reset signal passes, normal cache behavior resumes from that new signal forward: later non-reset re-signals at the same commit may reuse the post-reset passed step output and show `[cached from prior signal]` for reused non-human steps.
 
 #### Team lead notification
 
