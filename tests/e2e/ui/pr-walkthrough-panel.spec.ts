@@ -127,6 +127,16 @@ async function activeCardId(page: Page): Promise<string> {
 	return (await activeCard(page).getAttribute("data-card-id")) || "";
 }
 
+async function selectCardById(page: Page, cardId: string) {
+	const step = walkthroughPanel(page).locator(`${tid("pr-walkthrough-card-step")}[data-card-id="${cardId}"]`).first();
+	await expect(step, `card step ${cardId} should be available`).toBeVisible({ timeout: 10_000 });
+	await step.click();
+	await expect.poll(() => activeCardId(page), {
+		timeout: 5_000,
+		message: `card ${cardId} should become active`,
+	}).toBe(cardId);
+}
+
 async function openLineCommentEditor(page: Page) {
 	const line = activeCard(page).getByTestId("pr-walkthrough-diff-line").first();
 	await expect(line, "diff lines should be commentable").toBeVisible({ timeout: 10_000 });
@@ -155,6 +165,15 @@ async function saveOpenComment(page: Page, body: string) {
 
 async function createLineComment(page: Page, body: string) {
 	await openLineCommentEditor(page);
+	await saveOpenComment(page, body);
+}
+
+async function createCommentOnDiffLine(page: Page, lineId: string, body: string) {
+	const line = activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="${lineId}"]`).first();
+	await expect(line, `diff line ${lineId} should be visible and commentable`).toBeVisible({ timeout: 10_000 });
+	await line.hover();
+	await line.getByTestId("pr-walkthrough-line-comment-button").click();
+	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toHaveAttribute("data-line-id", lineId, { timeout: 5_000 });
 	await saveOpenComment(page, body);
 }
 
@@ -225,6 +244,37 @@ test.describe("PR walkthrough panel", () => {
 		await panel.getByRole("button", { name: /^Split$/ }).click();
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
+	});
+
+	test("renders right-side split comments for paired replacement rows", async ({ page }) => {
+		const body = `right-side-split-comment-${Date.now()}`;
+		await setupWalkthrough(page, { width: 1920, height: 1080 });
+		await selectCardById(page, "significant-diff");
+		await expectActiveDiffMode(page, "split");
+
+		const rightLine = activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="dr-4"][data-line-side="new"]`).first();
+		await expect(rightLine, "paired new-side replacement line should render in split mode").toBeVisible();
+		await createCommentOnDiffLine(page, "dr-4", body);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-comment").filter({ hasText: body }), "right-side split line comment should render below the paired row").toBeVisible({ timeout: 5_000 });
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-comment")}[data-line-id="dr-4"]`).filter({ hasText: body })).toBeVisible();
+	});
+
+	test("audit phase includes normal diff/comment behavior while keeping the final draft visible", async ({ page }) => {
+		const auditLineComment = `audit-line-comment-${Date.now()}`;
+		const auditCardComment = `audit-card-comment-${Date.now()}`;
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+
+		await completeRemainingCardsWithLikes(page);
+		await expect(activeCard(page)).toHaveAttribute("data-phase-id", "audit");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-block").first(), "audit should expose remaining-line diff blocks like other cards").toBeVisible({ timeout: 10_000 });
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-comments"), "audit should keep card-level comment support").toBeVisible();
+		await expect(panel.getByTestId("pr-walkthrough-audit"), "audit should preserve the final draft review surface").toBeVisible();
+		await expect(panel.getByTestId("pr-walkthrough-draft")).toBeVisible();
+
+		await createCommentOnDiffLine(page, "ar-3", auditLineComment);
+		await createCardComment(page, auditCardComment);
+		await expect(panel.getByTestId("pr-walkthrough-draft"), "audit line comments should feed the final draft").toContainText(auditLineComment);
+		await expect(panel.getByTestId("pr-walkthrough-draft"), "audit card comments should feed the final draft").toContainText(auditCardComment);
 	});
 
 	test("supports line comments, dislike gating, revisions, audit draft, and reload persistence", async ({ page }) => {
@@ -364,6 +414,9 @@ test.describe("PR walkthrough panel", () => {
 					prTitle: "Widget Launched Walkthrough",
 					baseSha: "fixture-base",
 					headSha: "fixture-head",
+					insertionsVsPrimary: 17,
+					deletionsVsPrimary: 9,
+					statusFiles: [{ file: "src/app/pr-walkthrough.ts", status: "M" }, { file: "src/ui/components/pr-walkthrough/fixtures.ts", status: "M" }],
 				},
 			}));
 		});
@@ -374,6 +427,9 @@ test.describe("PR walkthrough panel", () => {
 			title: /Widget Launched Walkthrough/i,
 			href: "https://github.com/SuuBro/bobbit/pull/638",
 		});
+		await expect(panel.getByTestId("pr-walkthrough-stat-files"), "Git Status launches should thread available file counts into walkthrough stats").toContainText("2 files");
+		await expect(panel.getByTestId("pr-walkthrough-stat-additions"), "Git Status insertionsVsPrimary should become walkthrough additions").toContainText("+17");
+		await expect(panel.getByTestId("pr-walkthrough-stat-deletions"), "Git Status deletionsVsPrimary should become walkthrough deletions").toContainText("-9");
 	});
 
 	test("switching walkthrough tabs with no persisted state resets per-card UI state", async ({ page }) => {

@@ -566,20 +566,20 @@ export class PrWalkthroughPanel extends LitElement {
 	private get changesetStats(): { files: number; additions: number; deletions: number } {
 		const changeset = this.effectiveChangeset;
 		const blocks = this.cards.flatMap(card => card.diffBlocks);
-		const files = changeset.filesChanged ?? fixturePrWalkthroughChangeset.filesChanged ?? new Set(blocks.map(block => block.filePath)).size;
-		let additions = changeset.additions ?? fixturePrWalkthroughChangeset.additions ?? 0;
-		let deletions = changeset.deletions ?? fixturePrWalkthroughChangeset.deletions ?? 0;
-		if (changeset.additions == null && fixturePrWalkthroughChangeset.additions == null || changeset.deletions == null && fixturePrWalkthroughChangeset.deletions == null) {
-			for (const block of blocks) {
-				for (const hunk of block.hunks) {
-					for (const line of hunk.lines) {
-						if (line.kind === "add" && changeset.additions == null) additions += 1;
-						if (line.kind === "del" && changeset.deletions == null) deletions += 1;
-					}
+		const derived = { files: new Set(blocks.map(block => block.filePath)).size, additions: 0, deletions: 0 };
+		for (const block of blocks) {
+			for (const hunk of block.hunks) {
+				for (const line of hunk.lines) {
+					if (line.kind === "add") derived.additions += 1;
+					if (line.kind === "del") derived.deletions += 1;
 				}
 			}
 		}
-		return { files: Math.max(files, 0), additions: Math.max(additions, 0), deletions: Math.max(deletions, 0) };
+		return {
+			files: Math.max(changeset.filesChanged ?? derived.files, 0),
+			additions: Math.max(changeset.additions ?? derived.additions, 0),
+			deletions: Math.max(changeset.deletions ?? derived.deletions, 0),
+		};
 	}
 
 	private formatNumber(value: number): string {
@@ -597,7 +597,7 @@ export class PrWalkthroughPanel extends LitElement {
 				${this.renderHeader()}
 				<div class="body ${this.isNarrowLayout ? "narrow" : ""}">
 					${this.renderRail()}
-					<main class="content">${active.phaseId === "audit" ? this.renderAudit(active) : this.renderCard(active)}</main>
+					<main class="content">${this.renderCard(active)}</main>
 				</div>
 			</section>
 		`;
@@ -739,6 +739,7 @@ export class PrWalkthroughPanel extends LitElement {
 					` : nothing}
 					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
 					${this.renderCardComments(card)}
+					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
 						<span class="decision-note">${this._decisions[card.id] ? html`Current: <b>${this._decisions[card.id].value}</b>` : commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
 						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}>← Prev</button>
@@ -777,7 +778,9 @@ export class PrWalkthroughPanel extends LitElement {
 								${this.renderDiffLine(card, block, pair.left, "old")}
 								${this.renderDiffLine(card, block, pair.right, "new")}
 							</div>
-							${this.renderLineDetails(card, block, pair.left ?? pair.right)}
+							${pair.left?.id === pair.right?.id
+								? this.renderLineDetails(card, block, pair.left)
+								: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
 						`)}
 					`)}
 				</div>
@@ -904,27 +907,16 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
-	private renderAudit(card: PrWalkthroughCard): TemplateResult {
+	private renderAuditDraftSection(): TemplateResult {
 		const draftText = this.buildAuditText();
 		return html`
-			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
-				<section class="card-head">
-					<div class="phase-label">Audit</div>
-					<h2>${card.title}</h2>
-					<p class="summary">${card.summary}</p>
-				</section>
-				<section class="audit" data-testid="pr-walkthrough-audit">
-					<h3>Draft review</h3>
-					<pre data-testid="pr-walkthrough-draft">${draftText}</pre>
-					<div class="comment-actions">
-						<button class="copy-button" type="button" @click=${() => this.copyAudit(draftText)}>${this._copied ? "Copied" : "Copy draft"}</button>
-					</div>
-				</section>
-				<div class="actions">
-					<span class="decision-note">Review draft updates as you revise previous cards.</span>
-					<button data-testid="pr-walkthrough-prev" type="button" @click=${this.goPrev}>Prev</button>
+			<section class="audit" data-testid="pr-walkthrough-audit">
+				<h3>Draft review</h3>
+				<pre data-testid="pr-walkthrough-draft">${draftText}</pre>
+				<div class="comment-actions">
+					<button class="copy-button" type="button" @click=${() => this.copyAudit(draftText)}>${this._copied ? "Copied" : "Copy draft"}</button>
 				</div>
-			</article>
+			</section>
 		`;
 	}
 

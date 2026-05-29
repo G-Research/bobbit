@@ -25,6 +25,9 @@ export interface OpenPrWalkthroughInput {
 	title?: string;
 	prTitle?: string;
 	provider?: string;
+	filesChanged?: number;
+	additions?: number;
+	deletions?: number;
 }
 
 export function parseWalkthroughPrCommand(input: string): OpenPrWalkthroughInput | null {
@@ -48,6 +51,11 @@ function normalizePrNumber(value: unknown): string | undefined {
 	if (!raw) return undefined;
 	const normalized = raw.replace(/^#/, "").trim();
 	return normalized || undefined;
+}
+
+function finiteNonNegativeNumber(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	return Math.max(0, Math.trunc(value));
 }
 
 function prMetadataFromUrl(value: string): Pick<OpenPrWalkthroughInput, "prNumber" | "provider"> {
@@ -101,6 +109,9 @@ function normalizeInput(state: AppState, input: OpenPrWalkthroughInput): OpenPrW
 		prTitle: cleanString(merged.prTitle) || cleanString(merged.title),
 		title: cleanString(merged.title) || cleanString(merged.prTitle),
 		provider: cleanString(merged.provider) || urlMetadata.provider || (url ? "external-pr" : undefined),
+		filesChanged: finiteNonNegativeNumber(merged.filesChanged),
+		additions: finiteNonNegativeNumber(merged.additions),
+		deletions: finiteNonNegativeNumber(merged.deletions),
 	};
 }
 
@@ -130,7 +141,13 @@ export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWal
 		headSha: cleanString(input.headSha) || "fixture-head",
 		provider: cleanString(input.provider) || (externalUrl ? "external-pr" : prNumber ? "pr" : undefined),
 		externalUrl,
+		prUrl: externalUrl,
+		prNumber,
+		prTitle: cleanString(input.prTitle),
 		title: titleForInput(input),
+		filesChanged: finiteNonNegativeNumber(input.filesChanged),
+		additions: finiteNonNegativeNumber(input.additions),
+		deletions: finiteNonNegativeNumber(input.deletions),
 	};
 }
 
@@ -162,6 +179,9 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		prUrl,
 		prNumber,
 		prTitle,
+		filesChanged: changeset.filesChanged,
+		additions: changeset.additions,
+		deletions: changeset.deletions,
 	};
 	const tab: PanelWorkspaceTab = {
 		id: tabId,
@@ -170,7 +190,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		label: "Walkthrough",
 		legacyTab: "walkthrough",
 		source,
-		state: { changesetId, changeset, prUrl, prNumber, prTitle, baseSha: changeset.baseSha, headSha: changeset.headSha },
+		state: { changesetId, changeset, prUrl, prNumber, prTitle, baseSha: changeset.baseSha, headSha: changeset.headSha, filesChanged: changeset.filesChanged, additions: changeset.additions, deletions: changeset.deletions },
 	};
 
 	const existing = panelTabsForSession(state, sessionId);

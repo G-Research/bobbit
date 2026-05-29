@@ -219,7 +219,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			title: "MVP omissions are explicit",
 			summary: "Keeps card synthesis fixture-driven and leaves provider launch, persistence, and GitHub submission as app-level or future adapter work.",
 			rationale: "A production-quality component can be integrated incrementally without leaking fixture assumptions into the app shell.",
-			checklist: ["No GitHub API calls in the component", "Fixture shape matches public model", "Audit remains copy-only"],
+			checklist: ["No GitHub API calls in the component", "Fixture shape matches public model", "Audit runs as a normal review card"],
 			cardSuggestions: ["Fixture cards are acceptable for MVP, but the model should stay ready for generated logical cards."],
 			diffBlocks: [
 				{
@@ -242,11 +242,39 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 		{
 			id: "audit-draft",
 			phaseId: "audit",
-			title: "Draft review",
-			summary: "Summarises accepted cards, concerns, and queued comments into a copyable draft for the human reviewer.",
-			rationale: "The MVP never submits externally; it only prepares review state for a later adapter.",
-			checklist: ["Liked cards are grouped", "Disliked cards include comment IDs", "Line comments are grouped by file and line"],
-			diffBlocks: [],
+			title: "Remaining-lines audit and draft review",
+			summary: "Audits plumbing and omission-prone lines that were not central enough for earlier logical cards, then keeps the copyable final review draft visible below the normal diff workflow.",
+			rationale: "Audit is still reviewable: remaining lines expand into normal diff blocks, accept line/card comments, and feed the draft review before any external submission exists.",
+			checklist: ["Remaining lines are reviewed as a normal card", "Line and card comments update the draft", "Final draft stays copyable"],
+			cardSuggestions: ["Double-check audit shrapnel for fixture assumptions before this becomes generated from real unreviewed diff lines."],
+			diffBlocks: [
+				{
+					id: "audit-remaining-lines",
+					filePath: "src/app/pr-walkthrough.ts",
+					hunks: [
+						{
+							id: "audit-remaining-lines-h1",
+							header: "@@ -88,8 +96,15 @@ export function openPrWalkthroughPanel",
+							lines: [
+								{ id: "ar-1", side: "context", oldLine: 88, newLine: 96, kind: "context", text: "const changeset = changesetRefForWalkthrough(input);" },
+								{ id: "ar-2", side: "old", oldLine: 89, kind: "del", text: "const tabId = walkthroughPanelTabId(`${changeset.baseSha}..${changeset.headSha}`);" },
+								{ id: "ar-3", side: "new", newLine: 97, kind: "add", text: "const changesetId = changesetIdForInput(input, changeset.baseSha, changeset.headSha);" },
+								{ id: "ar-4", side: "new", newLine: 98, kind: "add", text: "const tabId = walkthroughPanelTabId(changesetId);" },
+								{ id: "ar-5", side: "context", oldLine: 90, newLine: 99, kind: "context", text: "const title = changeset.title || titleForInput(input);" },
+							],
+						},
+					],
+				},
+			],
+			suggestedComments: [
+				{
+					id: "suggest-audit-tab-id",
+					cardId: "audit-draft",
+					diffBlockId: "audit-remaining-lines",
+					lineId: "ar-3",
+					body: "Audit generated changeset IDs against URL and PR-number launches so review state does not collide between walkthrough tabs.",
+				},
+			],
 		},
 	];
 }
