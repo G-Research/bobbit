@@ -28,15 +28,15 @@ Each walkthrough consists of phases:
 1. **Key design choices** — architectural/design decisions made by the PR.
 2. **Significant changes** — major, controversial, or review-worthy changes.
 3. **Other changes + omissions** — secondary changes and missing expected artefacts such as tests/docs/migrations.
-4. **Audit** — remaining plumbing/shrapnel. Items expand inline into normal diff blocks and can be commented on.
+4. **Audit** — remaining plumbing/shrapnel. This is a normal diff-backed review card: items expand inline into diff blocks, support line and card comments, and participate in the same Like/Dislike flow as other cards. The audit card also includes the final draft review section assembled from accumulated decisions and comments.
 
-Cards are LLM-synthesised logical change sets, not raw files/hunks. A card may contain multiple code blocks.
+Cards are LLM-synthesised logical change sets, not raw files/hunks. A card may contain multiple code blocks, including the audit card.
 
 ## Layout
 
 - Header:
   - PR number/title, matching the prototype's prominent review-header treatment.
-  - GitHub/GitStatus-style stats: `50 files`, green `+4,650`, red `-2,353`.
+  - GitHub/GitStatus-style stats: `50 files`, green `+4,650`, red `-2,353`. Prefer explicit changeset stats from the launch source; otherwise derive file/addition/deletion counts from the rendered cards.
   - A GitHub/PR link affordance that behaves like the PR pill on the goal dashboard: when the walkthrough was launched from or can infer a GitHub PR, expose the PR number/title as an external link to GitHub.
   - Review progress.
   - Submit review button.
@@ -55,6 +55,7 @@ Cards are LLM-synthesised logical change sets, not raw files/hunks. A card may c
 - Full-width mode defaults to side-by-side diffs.
 - Narrow/half-width mode defaults to inline diffs, but must not force it; the user can still choose side-by-side.
 - There should be at most one horizontal scrollbar per diff widget. The scrollbar should move the whole code snippet and both sides together, not appear per overflowing line.
+- Split diff rows must render line details for both old and new sides of paired rows. Old-side deletions and new-side additions can each have their own comments, LLM suggestions, and active editor; context rows may share details because they are one logical line.
 - Diff blocks can be independently expanded/collapsed.
 - Multiple code blocks per card are allowed and expected.
 
@@ -120,11 +121,12 @@ type CardReviewState = {
 
 V1 should review any two SHAs, defaulting to PR base..head when launched from a PR. Avoid coupling core logic to GitHub-specific concepts. GitHub/GitLab/etc. should be adapters for fetching PR metadata and exporting final review comments.
 
-Launch points proposed:
+Launch points and surfaces:
 
-1. Button in the Git Status Widget.
-2. Popover/action on GitHub PR links in chat history.
+1. Button in the Git Status Widget. It should pass branch/PR metadata plus insertion, deletion, and file-count stats into the changeset model.
+2. Popover/action on GitHub PR links in chat history, preserving PR URL/number/title metadata for header and toolbar links.
 3. `/walkthrough-pr <url|number>` skill.
+4. Side-panel toolbar actions for fullscreen/wide review and opening the same walkthrough in a standalone `/walkthrough?...` browser tab.
 
 ## LLM responsibilities
 
@@ -141,12 +143,13 @@ Launch points proposed:
 
 ## MVP constraints
 
-- The checked-in prototype is the target UX. Fixture data is acceptable, but the production slice must still look and behave substantially like the prototype.
+- The checked-in prototype is the target UX and source of truth unless a deviation is explicitly reviewed and accepted. Fixture data is acceptable, but the production slice must still look and behave substantially like the prototype.
 - Server-side generation can come later; first production slice can use mocked/fixture card data if needed to validate UI.
 - The UI should live as a first-class preview/side-panel surface, not as cards embedded in chat messages.
 - It must be usable at half-width alongside chat.
 - It must support inline comments before external review export exists.
 - The final output should be an internal draft review model first; GitHub export can be an adapter.
+- Audit must remain a normal review card with diff blocks and comments, not only a summary screen.
 
 ## Prototype notes from session
 
@@ -157,6 +160,7 @@ Final prototype decisions:
 - Collapsed rail uses visible phase pips plus clickable card-dot substeps.
 - Full width defaults side-by-side; narrow defaults inline, but user may choose side-by-side.
 - Side-by-side diff overflow uses a single widget-level horizontal scrollbar.
+- Side-by-side rows expose comments, suggestions, and editors on both old and new sides of paired rows.
 - Like uses primary button styling.
 - Dislike is neutral at rest and red on hover/focus.
 - The prototype used realistic PR #637 content:

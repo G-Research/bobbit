@@ -270,12 +270,14 @@ the session's `reviewDocuments` map. Closing a review tab fires the
 existing review-close behaviour.
 
 **Walkthrough tabs** use `walkthrough:<changeset-id>` and render the PR /
-changeset review surface for that changeset. Slash-command and Git Status
-Widget launch paths upsert the matching tab and take focus; reopening the
-same changeset updates that tab instead of duplicating it. The walkthrough
-component persists its card decisions, comments, diff mode, and audit
-state by tab id, so separate changesets keep independent review state
-inside the shared side-panel workspace.
+changeset review surface for that changeset. Slash-command, Git Status
+Widget, and PR-link metadata launch paths upsert the matching tab and take
+focus; reopening the same changeset updates that tab instead of duplicating
+it. The same tab can render in the side panel, fullscreen/wide surface, or
+standalone `/walkthrough?...` route. The walkthrough component persists its
+card decisions, comments, diff mode, and audit state by tab id, so separate
+changesets keep independent review state inside the shared side-panel
+workspace.
 
 **Inbox** is special. For staff-agent sessions it is an always-present,
 pinned side-pane tab:
