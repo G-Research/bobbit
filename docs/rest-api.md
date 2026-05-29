@@ -897,25 +897,64 @@ Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 fo
 
 **`GET /api/goals/:id/gates/:gateId/inspect`**
 
-A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool.
+A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspect` agent tool. It applies bounded text selection to text-heavy gate fields so agents can inspect large content, verification output, and signal history without loading the full payload into context.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
-| `signal_index` | integer | no | -1 (latest) | Which signal. 0-based, negative indexes from end. |
+| `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
+| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns a bounded tail, not full output. |
+| `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
+| `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
+| `max_results` | integer | no | server default | Maximum grep matches before truncating. |
+| `lines` | integer | no | server default | Number of lines for `mode=head` or `mode=tail`. |
+| `from` / `to` | integer | for `slice` | — | 1-indexed inclusive line range for `mode=slice`. |
 
-**`section=content`** — Returns the markdown content body from a specific signal.
+Retrieval controls mirror the background-shell inspection tools where they make sense:
+
+- `grep` returns line-numbered regex matches with optional merged context.
+- `slice` returns a line-numbered 1-indexed inclusive range.
+- `head` and `tail` return bounded ranges identified in metadata.
+- `full` requests the full rendered text, but normal line/byte/tool-result caps still apply.
+
+When `mode` is omitted, the endpoint defaults to a bounded tail. If that implicit default omits earlier lines, the response includes an omission hint such as:
+
+```text
+[N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]
+```
+
+Explicit `grep`, `head`, `tail`, `slice`, and `full` requests do not add this guidance hint beyond normal truncation metadata.
+
+Selection metadata is returned with filtered output:
+
+| Field | Meaning |
+|---|---|
+| `selection.mode` | Retrieval mode used |
+| `selection.totalLines` | Total rendered line count when available |
+| `selection.range` | Selected line range, when applicable |
+| `selection.matchCount` / `selection.shownMatches` | Total and returned grep matches, when applicable |
+| `selection.truncated` | Whether selection or response caps were applied |
+| `selection.truncationReason` | Why output was truncated, when applicable |
+| `selection.omittedHint` | Hint shown only for implicit default tails that omitted lines |
+
+**`section=content`** — Returns selected markdown content from a specific signal.
 ```json
 {
   "gateId": "design-doc",
   "section": "content",
   "signalIndex": 0,
   "signalId": "sig-1",
-  "text": "## Design Document\n\n..."
+  "text": "120: ## Detailed Plan\n121: ...",
+  "selection": {
+    "mode": "slice",
+    "totalLines": 240,
+    "range": { "from": 120, "to": 180 },
+    "truncated": false
+  }
 }
 ```
 
-**`section=verification`** — Returns full verification step output (all steps, not truncated).
+**`section=verification`** — Returns verification steps with each step's `output` independently selected. A top-level `selection` may also appear when the combined response is capped.
 ```json
 {
   "gateId": "implementation",
@@ -923,24 +962,55 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
   "signalIndex": 21,
   "signalId": "sig-22",
   "steps": [
-    { "name": "Type check", "type": "command", "passed": true, "duration_ms": 12400, "output": "Found 0 errors.\n" },
-    { "name": "E2E tests", "type": "command", "passed": false, "duration_ms": 95200, "output": "..." }
+    {
+      "name": "E2E tests",
+      "type": "command",
+      "passed": false,
+      "duration_ms": 95200,
+      "output": "317: Error: expected button to be visible\n318: failed locator check",
+      "selection": {
+        "mode": "grep",
+        "totalLines": 900,
+        "matchCount": 2,
+        "shownMatches": 2,
+        "truncated": false
+      }
+    }
   ]
 }
 ```
 
-**`section=signals`** — Returns a summary list of all signals (no content bodies or verification output).
+**`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json
 {
   "gateId": "implementation",
   "section": "signals",
+  "signalsTotal": 22,
+  "signalsShown": 1,
+  "signalsTruncated": true,
   "signals": [
-    { "index": 0, "id": "sig-1", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
-  ]
+    { "index": 21, "id": "sig-22", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
+  ],
+  "text": "{\"index\":21,\"id\":\"sig-22\",\"timestamp\":1775812345000,\"sessionId\":\"efed71fb\",\"commitSha\":\"abc123\",\"verdict\":\"failed\",\"hasContent\":true,\"metadataKeys\":[\"new_regressions\"]}",
+  "selection": {
+    "mode": "tail",
+    "totalLines": 22,
+    "range": { "from": 22, "to": 22 },
+    "truncated": false
+  }
 }
 ```
 
-Returns 400 if `section` is missing or invalid. Returns 404 if the resolved signal index is out of range.
+Examples:
+
+```text
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=grep&pattern=error%7Cfailed&context=2
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=tail&lines=80
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=slice&from=120&to=180
+GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=full
+```
+
+Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, or a slice range is missing/non-integer/below 1/`from > to`. Returns 404 if the resolved signal index is out of range.
 
 ### Session error-state fields
 

@@ -77,7 +77,7 @@ promptTemplate: |
   - **gate_list** — List all gates with status and definitions. No parameters.
   - **gate_signal** — Signal a gate with content and/or metadata. Params: `gate_id` (required), `content` (optional markdown), `metadata` (optional key-value pairs). Re-signaling a passed gate cascade-resets downstream gates to pending.
   - **gate_status** — Get latest signal details for a gate — verdict, truncated failed-step output, and metadata. Param: `gate_id`.
-  - **gate_inspect** — Read gate content, verification output, or signal history. Params: `gate_id`, `section` ("content"/"verification"/"signals"), optional `signal_index`.
+  - **gate_inspect** — Read bounded gate content, verification output, or signal history. Params: `gate_id`, `section` ("content"/"verification"/"signals"), optional `signal_index`, `mode` ("grep"/"tail"/"head"/"slice"/"full"), `pattern`, `context`, `max_results`, `lines`, `from`, `to`.
 
   ## Available Roles
 
@@ -266,19 +266,23 @@ promptTemplate: |
      Returns latest verdict, failed step output tail, and metadata.
      Usually enough to decide next steps.
 
-  3. **Content** (`gate_inspect`) — call only when you need to READ something:
-     - `gate_inspect(gate_id="design-doc", section="content")` — read a design doc
-     - `gate_inspect(gate_id="implementation", section="verification")` — full verification output
-     - `gate_inspect(gate_id="implementation", section="signals")` — signal history overview
+  3. **Content** (`gate_inspect`) — call only when you need to READ something. Default output is a bounded tail, not full output:
+     - `gate_inspect(gate_id="design-doc", section="content")` — read a design doc, bounded if large
+     - `gate_inspect(gate_id="implementation", section="verification", mode="grep", pattern="error|failed", context=2)` — targeted failure triage
+     - `gate_inspect(gate_id="implementation", section="verification", mode="tail", lines=80)` — recent verification output when grep is insufficient
+     - `gate_inspect(gate_id="implementation", section="verification", mode="slice", from=120, to=180)` — a known line range
+     - `gate_inspect(gate_id="implementation", section="signals")` — bounded signal history overview
+     - `gate_inspect(gate_id="implementation", section="verification", mode="full")` — rare escape hatch; still bounded by tool-result limits
 
   ### Decision flow after a gate notification
 
   1. Already know what failed from the notification? → Spawn fix agent directly.
-  2. Need more detail? → `gate_status(gate_id="...")` — check the output tail.
-  3. Still unclear? → `gate_inspect(gate_id="...", section="verification")` — full output.
-  4. Need to read upstream content? → `gate_inspect(gate_id="...", section="content")`.
+  2. Need more detail? → `gate_status(gate_id="...")` — check the verdict and output tail first.
+  3. Still unclear? → `gate_inspect(gate_id="...", section="verification", mode="grep", pattern="error|failed", context=2)` — inspect matching failure lines.
+  4. Need surrounding output? → Use `mode="tail"` or `mode="slice"`; prefer `mode="full"` only as a rare escape hatch.
+  5. Need to read upstream content? → `gate_inspect(gate_id="...", section="content")`.
 
-  Do NOT call `gate_inspect` "just in case" — only when the decision requires it.
+  Do NOT call `gate_inspect` "just in case" — only when the decision requires it. Prefer `gate_status` first, then targeted `grep`, then `tail`/`slice`.
 
   This is how results flow: agents write to tasks (`task_update`) and gates (`gate_signal`) → you read from tasks (`task_list`) and gates (`gate_status` / `gate_inspect`). You do NOT need to read agent session logs or parse their chat output.
 

@@ -1,189 +1,158 @@
 name: gate_inspect
-description: "Fetch one section: content, verification, or signals"
-summary: "Read gate content, verification, or signals"
-params: [gate_id, section, signal_index?]
+description: "Fetch one bounded gate section: content, verification, or signals"
+summary: "Read bounded gate content, verification, or signals"
+params: ["gate_id", "section", "signal_index?", "mode?", "pattern?", "context?", "max_results?", "lines?", "from?", "to?"]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Gates
 docs: >-
   Scoped read tool for gate data. Fetches exactly one section per call:
-  content (markdown body), verification (full step output), or signals
-  (summary list of all signals). Use after gate_status when you need to
-  drill deeper.
-detail_docs: >-
+  content, verification, or signals. Output is bounded by default; use grep,
+  tail, head, slice, or full mode to inspect only the detail you need.
+detail_docs: |-
   ## Purpose
 
-
-  Read detailed gate data by section. This is the Layer 3 content retrieval
-  tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't
-  have enough detail. Each call fetches exactly one piece of data to keep
-  responses focused.
-
+  Read detailed gate data by section. This is the Layer 3 content retrieval tool — use it when `gate_list` (Layer 1) and `gate_status` (Layer 2) don't have enough detail. Each call fetches exactly one piece of data and applies bounded text selection so large verification logs do not flood context.
 
   ## Parameters
 
-
   | Name | Type | Required | Default | Description |
-
   |------|------|----------|---------|-------------|
+  | `gate_id` | string | **Yes** | — | Gate ID (e.g. `"design-doc"`, `"implementation"`) |
+  | `section` | `"content"` / `"verification"` / `"signals"` | **Yes** | — | What to read |
+  | `signal_index` | number | No | `-1` (latest) | Which signal. 0-based, negative from end. Ignored for `section="signals"`. |
+  | `mode` | `"full"` / `"grep"` / `"head"` / `"tail"` / `"slice"` | No | `"tail"` | Retrieval mode. Default output is a bounded tail, not full content. |
+  | `pattern` | string | For `grep` | — | Regex to match. Invalid regexes return a validation error. |
+  | `context` | number | No | `0` | Surrounding lines to include around each grep match. |
+  | `max_results` | number | No | server default | Maximum grep matches to show before truncating. |
+  | `lines` | number | No | server default | Line count for `head` or `tail`. |
+  | `from` / `to` | number | For `slice` | — | 1-indexed inclusive line range. Missing or invalid ranges are rejected. |
 
-  | `gate_id` | string | **Yes** | — | Gate ID (e.g. "design-doc",
-  "implementation") |
+  ## Retrieval Modes
 
-  | `section` | `"content"` / `"verification"` / `"signals"` | **Yes** | — |
-  What to read |
+  - `tail` — show the last `lines` lines. This is the default when `mode` is omitted.
+  - `head` — show the first `lines` lines.
+  - `slice` — show a 1-indexed inclusive line range. Selected lines are line-numbered.
+  - `grep` — show regex matches, optionally with surrounding `context`. Matching excerpts are line-numbered and overlapping context is merged.
+  - `full` — request the full rendered text. This is still bounded by normal tool-result budgets and is marked as truncated when caps apply.
 
-  | `signal_index` | number | No | -1 (latest) | Which signal. 0-based,
-  negative from end. |
+  Default calls are intentionally bounded. When the implicit default tail omits lines, the response includes an agent-facing hint such as:
 
+  `[N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]`
+
+  Explicit `grep`, `head`, `tail`, `slice`, and `full` requests do not add this guidance hint beyond normal metadata and truncation markers.
 
   ## Returns
 
+  All text-heavy sections include compact selection metadata when filtering is applied:
+
+  - `selection.mode` — retrieval mode used
+  - `selection.totalLines` — total rendered line count when available
+  - `selection.range` — selected line range, when applicable
+  - `selection.matchCount` / `selection.shownMatches` — grep match counts, when applicable
+  - `selection.truncated` — whether selection or output caps were applied
+  - `selection.truncationReason` — why output was truncated, when applicable
+  - `selection.omittedHint` — only for implicit default tails that omitted earlier lines
 
   ### section="content" — Read gate content
 
-
-  Returns the markdown content from the specified signal.
-
+  Returns the selected markdown content from the specified signal.
 
   - `gateId` — gate identifier
-
   - `section` — `"content"`
-
   - `signalIndex` — resolved 0-based index
-
   - `signalId` — signal identifier
+  - `text` — selected markdown content body, or `null` if no content
+  - `selection` — text-selection metadata
 
-  - `text` — the markdown content body (or null if no content)
+  ### section="verification" — Read verification output
 
-
-  Typical size: 2–8KB for a design doc.
-
-
-  ### section="verification" — Read full verification output
-
-
-  Returns all verification steps with full (untruncated) output.
-
+  Returns verification steps with each step's `output` independently selected.
 
   - `gateId` — gate identifier
-
   - `section` — `"verification"`
-
   - `signalIndex` — resolved 0-based index
-
   - `signalId` — signal identifier
-
   - `steps[]` — array of verification step results:
     - `name` — step name
-    - `type` — step type (e.g. "command", "llm-review")
+    - `type` — step type (e.g. `"command"`, `"llm-review"`)
     - `passed` — boolean
-    - `skipped` — boolean (if skipped)
+    - `skipped` — boolean, if skipped
     - `duration_ms` — execution time in milliseconds
-    - `output` — full output text (untruncated)
-
-
-  Can be large (10–50KB for LLM review steps).
-
+    - `output` — selected output text
+    - `selection` — per-step selection metadata
+  - `selection` — optional top-level aggregate truncation metadata when the combined response is capped
 
   ### section="signals" — Browse signal history
 
-
-  Summary-only listing of all signals. No content bodies, no verification
-  output.
-
+  Returns bounded signal history. The structural `signals[]` field is preserved, but large histories are summarized according to the selected range or aggregate cap.
 
   - `gateId` — gate identifier
-
   - `section` — `"signals"`
-
-  - `signals[]` — array of signal summaries:
+  - `signals[]` — bounded array of signal summaries:
     - `index` — 0-based position
     - `id` — signal identifier
     - `timestamp` — when the signal was sent
     - `sessionId` — which session sent it
-    - `commitSha` — git commit SHA (if provided)
+    - `commitSha` — git commit SHA, if provided
     - `verdict` — `"passed"`, `"failed"`, or `"running"`
     - `hasContent` — whether this signal included content
     - `metadataKeys` — array of metadata key names
-
-
-  Each entry is ~150 bytes. Even 22 signals = ~3.3KB.
-
+  - `signalsTotal` — total signals in history
+  - `signalsShown` — number of summaries returned
+  - `signalsTruncated` — whether some summaries were omitted
+  - `text` — deterministic selected JSON-lines text form of the history
+  - `selection` — text-selection metadata
 
   ## When to Use
 
-
-  - **Reading a design doc** —
-  `gate_inspect(gate_id="design-doc", section="content")`
-
-  - **Getting full verification output** — when the 40-line tail from
-  `gate_status` wasn't enough to diagnose the issue
-
-  - **Browsing signal history** — to see how many attempts were made, compare
-  versions, or find a specific signal
-
-  - **Reading upstream content for planning** — get the content from any gate
-  to understand requirements
-
+  - **Start with status** — call `gate_status(gate_id="...")` first; its verdict and output tail are usually enough.
+  - **Target failure lines** — use `mode="grep"` with `pattern="error|failed"` and `context=2` for large verification logs.
+  - **Inspect nearby output** — use `mode="tail"` or `mode="slice"` when grep shows where to look.
+  - **Read upstream content** — use `section="content"` when you need the gate's actual content.
+  - **Browse attempts** — use `section="signals"` to compare signal history.
 
   ## When NOT to Use
 
-
   - **Quick status check** — use `gate_list` (Layer 1) instead.
-
-  - **Latest verdict and truncated output** — use `gate_status` (Layer 2)
-  instead.
-
-  - **Do NOT call "just in case"** — only when the decision requires reading
-  the actual content or full output.
-
+  - **Latest verdict and failed-step tail** — use `gate_status` (Layer 2) instead.
+  - **Full output by default** — default `gate_inspect` is a bounded tail. Use `mode="full"` only as a rare escape hatch.
+  - **Just in case** — only call when the decision requires reading the actual content or detailed output.
 
   ## Examples
 
-
   ```
-
-  # Read the design document content
-
+  # Read the design document content (bounded tail by default if large)
   gate_inspect(gate_id="design-doc", section="content")
 
+  # Grep large implementation verification output for failure lines
+  gate_inspect(gate_id="implementation", section="verification", mode="grep", pattern="error|failed", context=2)
 
-  # Get full verification output for the latest signal
+  # Inspect the latest tail with an explicit line count
+  gate_inspect(gate_id="implementation", section="verification", mode="tail", lines=80)
 
-  gate_inspect(gate_id="implementation", section="verification")
+  # Inspect a specific 1-indexed line range
+  gate_inspect(gate_id="implementation", section="verification", mode="slice", from=120, to=180)
 
+  # Rare escape hatch: request full rendered output, still bounded by tool budgets
+  gate_inspect(gate_id="implementation", section="verification", mode="full")
 
-  # Browse all signals to see attempt history
+  # Browse signal history with bounded output
+  gate_inspect(gate_id="implementation", section="signals", mode="tail", lines=40)
 
-  gate_inspect(gate_id="implementation", section="signals")
-
-
-  # Read content from a specific earlier signal (comparing versions)
-
+  # Read content from a specific earlier signal
   gate_inspect(gate_id="implementation", section="content", signal_index=0)
 
-
-  # Read verification from second-to-last signal
-
-  gate_inspect(gate_id="implementation", section="verification",
-  signal_index=-2)
-
+  # Read verification from the second-to-last signal and grep errors
+  gate_inspect(gate_id="implementation", section="verification", signal_index=-2, mode="grep", pattern="error|failed", context=2)
   ```
-
 
   ## Notes / Gotchas
 
-
-  - **signal_index** defaults to -1 (latest). Use 0 for the first signal,
-  -2 for second-to-last, etc.
-
-  - **section="signals" ignores signal_index** — it always returns all
-  signals as summaries.
-
-  - **Large responses possible** — `section="verification"` can return
-  10–50KB for LLM review steps. Only call when needed.
-
-  - **404 if signal not found** — if the signal_index is out of range, the
-  endpoint returns a 404 error.
+  - `signal_index` defaults to `-1` (latest). Use `0` for the first signal, `-2` for second-to-last, etc.
+  - `section="signals"` ignores `signal_index`; it reads history rather than one signal.
+  - Default output is a bounded tail, not the full rendered payload.
+  - `mode="full"` can still be truncated by normal tool-result budgets; check `selection.truncated` and `selection.truncationReason`.
+  - Invalid regexes, missing slice bounds, non-integer ranges, ranges below 1, or `from > to` return clear validation errors.
+  - For triage, prefer `gate_status`, then `gate_inspect(..., mode="grep", pattern="error|failed", context=2)`, then `tail` or `slice`.
