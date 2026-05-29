@@ -15,18 +15,22 @@
 /**
  * SB-09 / SB-10: Goal badge info (gate status or PR status).
  *
- * Replicates renderGoalBadge() logic from src/app/render-helpers.ts (~line 421).
+ * Replicates renderGoalBadge() logic from src/app/render-helpers.ts.
  *
  * @param {string} goalId
  * @param {Map} gateStatusCache - Map<goalId, {passed, total, verifying, verifyingCount}>
  * @param {Map} prStatusCache - Map<goalId, {state, reviewDecision, mergeable, number, url}>
  * @param {Array} sessions - Array of {goalId, teamGoalId, delegateOf, role, status, isCompacting}
+ * @param {Object=} goal - Optional goal metadata with workflowId/workflow gates.
  * @returns {{ type: "pr"|"gate"|"none", ... }}
  */
-function getGoalBadgeInfo(goalId, gateStatusCache, prStatusCache, sessions) {
-  // PR status takes priority over gate counts
+function getGoalBadgeInfo(goalId, gateStatusCache, prStatusCache, sessions, goal) {
   const pr = prStatusCache.get(goalId);
-  if (pr) {
+  const hasWorkflowGates = !!(goal && (goal.workflowId || (goal.workflow && goal.workflow.gates && goal.workflow.gates.length > 0)));
+  const gs = gateStatusCache.get(goalId);
+  // Workflow progress is primary. Non-workflow goals keep showing PR status even
+  // when there is no gate summary.
+  if (pr && (!hasWorkflowGates || (gs && gs.total > 0 && gs.passed === gs.total))) {
     let color;
     if (pr.state === "MERGED") color = "#a87fd4";
     else if (pr.state === "CLOSED") color = "#c47070";
@@ -41,7 +45,6 @@ function getGoalBadgeInfo(goalId, gateStatusCache, prStatusCache, sessions) {
   }
 
   // Fall back to gate status
-  const gs = gateStatusCache.get(goalId);
   if (!gs) return { type: "none" };
 
   const goalAgents = sessions.filter(function(s) {

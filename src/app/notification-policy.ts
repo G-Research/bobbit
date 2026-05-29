@@ -11,10 +11,11 @@
  *
  * Two exported predicates with different read-filter semantics:
  *
- *   | Predicate                       | Read-filterable | Rules covered |
- *   |---------------------------------|-----------------|---------------|
- *   | `needsHumanAttention`           | Yes             | 1, 4          |
- *   | `needsImmediateHumanAttention`  | No (bypass)     | 2, 3          |
+ *   | Predicate                             | Read-filterable | Rules covered |
+ *   |---------------------------------------|-----------------|---------------|
+ *   | `needsHumanAttention`                 | Yes             | 1, 4          |
+ *   | `needsHumanAttentionOnIdleTransition` | Yes             | 1             |
+ *   | `needsImmediateHumanAttention`        | No (bypass)     | 2, 3          |
  *
  * Rule table (see goal "Human Sign-Off Gates", design-doc §2.3):
  *
@@ -195,11 +196,12 @@ export function needsImmediateHumanAttention(
  * @param allSessions All known gateway sessions (used to detect live siblings).
  * @param gateStatusCache Goal-id → gate status (used to detect in-flight verification + signoff).
  */
-export function needsHumanAttention(
+function needsHumanAttentionInternal(
 	session: GatewaySession,
 	goal: Goal | undefined,
 	allSessions: GatewaySession[],
 	gateStatusCache: Map<string, GateStatusCacheValue>,
+	opts?: { includeIdleStuck?: boolean },
 ): boolean {
 	// Delegates and team members never notify the human directly — they
 	// escalate to their parent / team lead.
@@ -216,10 +218,15 @@ export function needsHumanAttention(
 		// Team lead with no resolvable goal — treat as standalone-ish; notify.
 		if (!goalId) return true;
 
-		// Rule 4 — idle stuck (debounced). Skip when the lead is itself live
-		// or compacting; idleFor < threshold suppresses the spawn-handoff
-		// false-positive; siblings / verification / sign-off explain idleness
-		// (no need to notify the user again).
+		// Rule 4 — idle stuck (debounced). This is for persistent surfaces
+		// (sidebar unread), not one-shot streaming→idle beeps: a lead simply
+		// finishing a turn and waiting for workers/verifications is not itself
+		// user-notifiable. Idle-transition call sites pass includeIdleStuck=false.
+		if (opts?.includeIdleStuck === false) return false;
+
+		// Skip when the lead is itself live or compacting; idleFor < threshold
+		// suppresses the spawn-handoff false-positive; siblings / verification /
+		// sign-off explain idleness (no need to notify the user again).
 		if (LIVE_STATUSES.has(session.status)) return false;
 		if (session.isCompacting) return false;
 		const idleFor = Date.now() - (session.lastActivity ?? 0);
@@ -236,4 +243,28 @@ export function needsHumanAttention(
 
 	// Standalone session — today's behaviour: always notify on idle.
 	return true;
+}
+
+export function needsHumanAttention(
+	session: GatewaySession,
+	goal: Goal | undefined,
+	allSessions: GatewaySession[],
+	gateStatusCache: Map<string, GateStatusCacheValue>,
+): boolean {
+	return needsHumanAttentionInternal(session, goal, allSessions, gateStatusCache, { includeIdleStuck: true });
+}
+
+/**
+ * One-shot transition predicate for polling/agent_end beeps. It intentionally
+ * excludes Rule 4 (idle stuck): a team lead merely finishing a turn and going
+ * idle to wait for workers or verification is not something for the user to
+ * hear. Persistent surfaces may still show stuck later via `needsHumanAttention`.
+ */
+export function needsHumanAttentionOnIdleTransition(
+	session: GatewaySession,
+	goal: Goal | undefined,
+	allSessions: GatewaySession[],
+	gateStatusCache: Map<string, GateStatusCacheValue>,
+): boolean {
+	return needsHumanAttentionInternal(session, goal, allSessions, gateStatusCache, { includeIdleStuck: false });
 }

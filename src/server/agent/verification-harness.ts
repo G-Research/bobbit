@@ -31,6 +31,10 @@ import { assembleSystemPrompt } from "./system-prompt.js";
 import { detectPrimaryBranch, parseBaseRef } from "../skills/git.js";
 import type { WorkflowGate, VerifyStep } from "./workflow-store.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
+import type { ToolManager } from "./tool-manager.js";
+import type { McpManager } from "../mcp/mcp-manager.js";
+import type { GrantPolicy } from "./role-store.js";
+import { computeEffectiveAllowedTools, computeToolActivationArgs, tagAllowedTool, writeMcpProxyExtensions, writeToolGuardExtension, type GroupPolicyProvider } from "./tool-activation.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell, GIT_BASH } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
@@ -70,6 +74,67 @@ function clampReviewThinking(level: string | undefined, modelStr: string | undef
 	const modelId = modelStr.slice(slash + 1);
 	const meta = inferMeta(modelId);
 	return clampThinkingLevel(level, { id: modelId, provider, reasoning: meta.reasoning });
+}
+
+export interface VerificationToolActivationDeps {
+	toolManager?: ToolManager;
+	groupPolicyStore?: GroupPolicyProvider;
+	mcpManager?: McpManager | null;
+}
+
+export interface VerificationToolActivationResult {
+	args: string[];
+	env: Record<string, string>;
+	toolManager?: ToolManager;
+	allowedTools?: string[];
+}
+
+/**
+ * Build Pi CLI flags for legacy direct verification sub-sessions using the
+ * same post-Pi-0.70 contract as normal sessions: no unified `--tools`, file
+ * builtins re-registered via `_builtins/extension.ts`, Bobbit extensions kept
+ * active, and policy enforcement delegated to the guard extension.
+ */
+export function buildVerificationToolActivation(
+	subSessionId: string,
+	cwd: string,
+	role: { toolPolicies?: Record<string, string | GrantPolicy> } | undefined,
+	deps: VerificationToolActivationDeps = {},
+): VerificationToolActivationResult {
+	const roleForPolicies = role as { toolPolicies?: Record<string, GrantPolicy> } | undefined;
+	if (!deps.toolManager) {
+		// Without a ToolManager we cannot resolve Bobbit extension paths or emit
+		// the _builtins shim safely. Return no explicit activation flags so
+		// RpcBridge.start() applies its baseline fallback without reintroducing
+		// Pi's unified `--tools` allowlist.
+		return {
+			args: [],
+			env: {},
+			allowedTools: role?.toolPolicies
+				? Object.entries(role.toolPolicies).filter(([, policy]) => policy !== "never").map(([name]) => tagAllowedTool(name).name)
+				: undefined,
+		};
+	}
+
+	const effectiveAllowedTools = computeEffectiveAllowedTools(deps.toolManager, roleForPolicies, deps.groupPolicyStore, deps.mcpManager ?? undefined);
+	const allowedToolNames = effectiveAllowedTools.map(tool => tool.name);
+	const mcpExtensionPaths = deps.mcpManager
+		? writeMcpProxyExtensions(deps.mcpManager, allowedToolNames, roleForPolicies, deps.toolManager, deps.groupPolicyStore)
+		: undefined;
+	const activation = computeToolActivationArgs(effectiveAllowedTools, deps.toolManager, cwd, mcpExtensionPaths);
+	const args = [...activation.args];
+
+	const guardPath = deps.toolManager
+		? writeToolGuardExtension(subSessionId, deps.toolManager, deps.mcpManager ?? undefined, roleForPolicies, deps.groupPolicyStore)
+		: undefined;
+	if (guardPath) args.push("--extension", guardPath);
+
+	return {
+		args,
+		env: activation.env,
+		toolManager: deps.toolManager,
+		allowedTools: allowedToolNames,
+	};
 }
 
 /**
@@ -1537,7 +1602,7 @@ export class VerificationHarness {
 			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
 				if (event.seq == null) event.seq = ++this._verifSeqCounter;
 				if (event.type !== "gate_verification_step_output") {
-					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration();
+					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration?.();
 				}
 			}
 			this._rawBroadcastFn(goalId, event);
@@ -1581,6 +1646,22 @@ export class VerificationHarness {
 			console.warn(`[verification] Goal "${goalId}" not found in any project context — falling back to server-level projectConfigStore. This likely means the gate will run with wrong commands.`);
 		}
 		return this.projectConfigStore;
+	}
+
+	private resolveToolActivationDeps(cwd: string): VerificationToolActivationDeps {
+		let toolManager: ToolManager | undefined;
+		let groupPolicyStore: GroupPolicyProvider | undefined;
+		const project = this.projectContextManager?.getRegistry().findByCwd(cwd);
+		const ctx = project ? this.projectContextManager?.getOrCreate(project.id) : undefined;
+		if (ctx) {
+			toolManager = ctx.toolManager;
+			groupPolicyStore = ctx.toolGroupPolicyStore;
+		}
+		return {
+			toolManager,
+			groupPolicyStore,
+			mcpManager: this.sessionManager?.getMcpManager() ?? undefined,
+		};
 	}
 
 	/**
@@ -3046,15 +3127,17 @@ export class VerificationHarness {
 			goalState: "active",
 		});
 
-		// Derive allowed tools from toolPolicies (include all non-"never" entries)
-		const allowedTools = role.toolPolicies
-			? Object.entries(role.toolPolicies).filter(([, p]) => p !== "never").map(([name]) => name)
-			: [];
+		const toolActivation = buildVerificationToolActivation(
+			subSessionId,
+			cwd,
+			role,
+			this.resolveToolActivationDeps(cwd),
+		);
 		const bridgeOptions: RpcBridgeOptions = {
 			cwd,
-			args: [
-				...(allowedTools.length > 0 ? ["--tools", allowedTools.join(",")] : []),
-			],
+			args: toolActivation.args,
+			env: toolActivation.env,
+			toolManager: toolActivation.toolManager,
 		};
 		if (systemPromptPath) bridgeOptions.systemPromptPath = systemPromptPath;
 

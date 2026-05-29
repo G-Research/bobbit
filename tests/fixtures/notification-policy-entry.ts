@@ -2,11 +2,12 @@
 // fixture can seed sessions/goals/gateStatusCache and exercise the policy
 // without a running gateway.
 
-import { needsHumanAttention, needsImmediateHumanAttention } from "../../src/app/notification-policy.js";
+import { needsHumanAttention, needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "../../src/app/notification-policy.js";
 import { state, type GatewaySession, type Goal } from "../../src/app/state.js";
 
 (window as any).__state = state;
 (window as any).__needsHumanAttention = needsHumanAttention;
+(window as any).__needsHumanAttentionOnIdleTransition = needsHumanAttentionOnIdleTransition;
 (window as any).__needsImmediateHumanAttention = needsImmediateHumanAttention;
 
 interface SeedOpts {
@@ -67,16 +68,26 @@ interface SeedOpts {
 	}
 };
 
-// Convenience: run the policy against a seeded session by id.
-// Returns the OR of both predicates, mirroring how the call sites (api.ts,
-// remote-agent.ts) consume them. Use `__checkSplit` for finer-grained
-// assertions about which rule fired.
+// Convenience: run the persistent attention policy against a seeded session by id.
+// Returns the OR of both persistent predicates. Use `__checkSplit` for
+// finer-grained assertions about which rule fired.
 (window as any).__check = (sessionId: string): boolean => {
 	const session = state.gatewaySessions.find(s => s.id === sessionId);
 	if (!session) throw new Error(`session ${sessionId} not seeded`);
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
 	return needsHumanAttention(session, goal, state.gatewaySessions, state.gateStatusCache)
+		|| needsImmediateHumanAttention(session, state.gateStatusCache);
+};
+
+// Mirrors one-shot streaming→idle beep call sites (api.ts / remote-agent.ts):
+// idle-stuck is intentionally excluded, while complete/signoff/errored still fire.
+(window as any).__checkIdleTransition = (sessionId: string): boolean => {
+	const session = state.gatewaySessions.find(s => s.id === sessionId);
+	if (!session) throw new Error(`session ${sessionId} not seeded`);
+	const goalId = session.teamGoalId || session.goalId;
+	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
+	return needsHumanAttentionOnIdleTransition(session, goal, state.gatewaySessions, state.gateStatusCache)
 		|| needsImmediateHumanAttention(session, state.gateStatusCache);
 };
 
