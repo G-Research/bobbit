@@ -5,7 +5,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import { fixturePrWalkthroughCards, type PrWalkthroughCard, type PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/index.js";
+import type { PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
@@ -96,9 +96,17 @@ import {
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
-import { openPrWalkthroughPanel, prWalkthroughStandaloneHref, type OpenPrWalkthroughInput } from "./pr-walkthrough.js";
+import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
+import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
+
+function prWalkthroughStandaloneHref(sessionId: string, tabId: string): string {
+	const params = new URLSearchParams();
+	if (sessionId) params.set("session", sessionId);
+	params.set("tab", tabId);
+	return `/walkthrough?${params.toString()}`;
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Splash-screen new-session gating
@@ -231,7 +239,7 @@ document.addEventListener("open-pr-walkthrough", (e: Event) => {
 		}
 		return undefined;
 	};
-	openPrWalkthroughPanel(state, activeSessionId() || "", {
+	const input = {
 		baseSha: stringDetail("baseSha", "base", "baseRef", "baseBranch"),
 		headSha: stringDetail("headSha", "head", "headRef", "headBranch"),
 		prNumber: typeof detail.prNumber === "string" || typeof detail.prNumber === "number"
@@ -247,8 +255,11 @@ document.addEventListener("open-pr-walkthrough", (e: Event) => {
 		filesChanged: filesFromDetail(),
 		additions: numberDetail("additions", "insertions", "insertionsVsPrimary"),
 		deletions: numberDetail("deletions", "deletionsVsPrimary"),
-	} satisfies OpenPrWalkthroughInput);
-	renderApp();
+	} satisfies OpenPrWalkthroughInput;
+	void import("./pr-walkthrough.js").then(({ openPrWalkthroughPanel }) => {
+		openPrWalkthroughPanel(state, activeSessionId() || "", input);
+		renderApp();
+	});
 });
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
@@ -2184,20 +2195,14 @@ export function doRenderApp(): void {
 		};
 	};
 
-	const walkthroughCardsForChangeset = (changeset: PrWalkthroughChangesetRef): PrWalkthroughCard[] => {
-		const fixtureCards = fixturePrWalkthroughCards as unknown as PrWalkthroughCard[] | ((changeset: PrWalkthroughChangesetRef) => PrWalkthroughCard[]);
-		return typeof fixtureCards === "function" ? fixtureCards(changeset) : fixtureCards;
-	};
-
 	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind !== "walkthrough") return "";
+		void ensurePrWalkthroughPanel();
 		const changeset = walkthroughChangesetFromTab(tab);
-		const cards = walkthroughCardsForChangeset(changeset);
 		return html`
 			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id}>
 				<pr-walkthrough-panel
 					.changeset=${changeset}
-					.cards=${cards}
 					.persistenceKey=${tab.id}
 				></pr-walkthrough-panel>
 			</div>

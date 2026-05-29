@@ -6,7 +6,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import type { state as appState } from "./state.js";
-import type { PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/index.js";
+import type { PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 
 export type AppState = typeof appState;
 

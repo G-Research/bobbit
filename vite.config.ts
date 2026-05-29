@@ -355,24 +355,28 @@ export default defineConfig(({ mode }) => ({
 		rollupOptions: {
 			output: {
 				/**
-				 * Pin large, slow-changing vendor deps into their own chunks so
-				 * (a) the entry chunk stays small and (b) returning users keep
-				 * cached vendor bundles across deploys when only app code
-				 * changes. Order matters: more specific paths first.
+				 * Pin large, slow-changing vendor deps and stable app seams into
+				 * their own chunks so (a) the entry chunk stays small and (b)
+				 * returning users keep cached vendor bundles across deploys when
+				 * only app code changes. Order matters: more specific paths first.
 				 *
 				 * Anything not matched here falls through to Vite's default
 				 * dependency-graph chunking (lazy provider chunks, dynamic
 				 * imports for pi-ai/qrcode/jszip/highlight.js, etc.).
 				 */
 				manualChunks: (id) => {
-					if (!id.includes("node_modules")) return;
-					if (id.includes("/@sinclair/typebox/")) return "vendor-typebox";
-					if (id.includes("/marked")) return "vendor-marked";
-					if (id.includes("/@mariozechner/mini-lit/")) return "vendor-mini-lit";
-					if (id.includes("/lucide")) return "vendor-lucide";
-					if (id.includes("/sortablejs/")) return "vendor-sortable";
-					if (id.includes("/@recogito/") || id.includes("/@annotorious/") || id.includes("/rbush")) return "vendor-annotator";
-					if (id.includes("/lit-html/") || id.includes("/lit-element/") || id.includes("/@lit/") || /\/lit\//.test(id)) return "vendor-lit";
+					const normalizedId = id.replace(/\\/g, "/");
+					if (normalizedId.endsWith("/src/app/message-reducer.ts")) return "app-message-reducer";
+					if (normalizedId.endsWith("/src/app/panel-workspace.ts")) return "app-panel-workspace";
+					if (normalizedId.endsWith("/src/app/routing.ts")) return "app-routing";
+					if (!normalizedId.includes("node_modules")) return;
+					if (normalizedId.includes("/@sinclair/typebox/")) return "vendor-typebox";
+					if (normalizedId.includes("/marked")) return "vendor-marked";
+					if (normalizedId.includes("/@mariozechner/mini-lit/")) return "vendor-mini-lit";
+					if (normalizedId.includes("/lucide")) return "vendor-lucide";
+					if (normalizedId.includes("/sortablejs/")) return "vendor-sortable";
+					if (normalizedId.includes("/@recogito/") || normalizedId.includes("/@annotorious/") || normalizedId.includes("/rbush")) return "vendor-annotator";
+					if (normalizedId.includes("/lit-html/") || normalizedId.includes("/lit-element/") || normalizedId.includes("/@lit/") || /\/lit\//.test(normalizedId)) return "vendor-lit";
 					return undefined;
 				},
 			},

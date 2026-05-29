@@ -30,7 +30,6 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
-import { openPrWalkthroughPanel, parseWalkthroughPrCommand } from "./pr-walkthrough.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
@@ -833,11 +832,15 @@ export class RemoteAgent {
 			}
 		}
 
-		const walkthroughInput = !attachments?.length && !imageData?.length ? parseWalkthroughPrCommand(text) : null;
-		if (walkthroughInput) {
-			openPrWalkthroughPanel(state, this.gatewaySessionId || state.selectedSessionId || "", walkthroughInput);
-			renderApp();
-			return;
+		const maybeWalkthroughCommand = !attachments?.length && !imageData?.length && /^\/walkthrough-pr(?:\s+.+)?$/i.test(text.trim());
+		if (maybeWalkthroughCommand) {
+			const { openPrWalkthroughPanel, parseWalkthroughPrCommand } = await import("./pr-walkthrough.js");
+			const walkthroughInput = parseWalkthroughPrCommand(text);
+			if (walkthroughInput) {
+				openPrWalkthroughPanel(state, this.gatewaySessionId || state.selectedSessionId || "", walkthroughInput);
+				renderApp();
+				return;
+			}
 		}
 
 		// Stash attachments so we can enrich the echoed user message
