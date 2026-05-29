@@ -9,6 +9,45 @@ const PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-ki
 
 const tid = (id: string) => `[data-testid="${id}"]`;
 
+function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved Walkthrough PR") {
+	return {
+		changesetId: `github:SuuBro/bobbit#${prNumber}:abc1234`,
+		changeset: {
+			baseSha: "base1234",
+			headSha: "abc1234",
+			provider: "github",
+			externalUrl: `https://github.com/SuuBro/bobbit/pull/${prNumber}`,
+			prUrl: `https://github.com/SuuBro/bobbit/pull/${prNumber}`,
+			prNumber,
+			prTitle: title,
+			title: `PR #${prNumber}: ${title}`,
+			filesChanged: 1,
+			additions: 2,
+			deletions: 1,
+		},
+		cards: [{
+			id: "resolved-card",
+			phaseId: "orientation",
+			title: "Resolved logical card",
+			summary: "This card came from the resolver API, not the fixture fallback.",
+			diffBlocks: [{
+				id: "resolved-block",
+				filePath: "src/app/pr-walkthrough.ts",
+				hunks: [{
+					id: "resolved-hunk",
+					header: "@@ -1,1 +1,2 @@",
+					lines: [
+						{ id: "resolved-line-1", side: "context", oldLine: 1, newLine: 1, kind: "context", text: "export const existing = true;" },
+						{ id: "resolved-line-2", side: "new", newLine: 2, kind: "add", text: "export const resolved = true;" },
+					],
+				}],
+			}],
+		}],
+		warnings: [{ code: "test-warning", severity: "info", message: "Resolver warning surfaced." }],
+		export: { provider: "github", available: true },
+	};
+}
+
 function walkthroughPanel(page: Page): Locator {
 	return page.getByTestId("pr-walkthrough-panel");
 }
@@ -387,6 +426,37 @@ test.describe("PR walkthrough panel", () => {
 		await expect(walkthroughPanel(standalone), "standalone tab should render the same walkthrough component").toBeVisible({ timeout: 15_000 });
 		await expectActiveDiffMode(standalone, "split");
 		await standalone.close();
+	});
+
+	test("slash command opens immediately, calls resolver, and applies resolved cards", async ({ page }) => {
+		let releaseResolve!: () => void;
+		const waitForRelease = new Promise<void>((resolve) => { releaseResolve = resolve; });
+		let requestBody: Record<string, unknown> | undefined;
+		await page.route("**/api/pr-walkthrough/resolve", async (route) => {
+			requestBody = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+			await waitForRelease;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify(resolvedWalkthroughPayload("789", "Resolved Real PR")),
+			});
+		});
+
+		await page.setViewportSize({ width: 1920, height: 1080 });
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "/walkthrough-pr 789");
+
+		const root = page.getByTestId("pr-walkthrough-panel-root");
+		await expect(page.locator(PANEL_TAB_SELECTOR).first(), "walkthrough tab should open before the resolver returns").toBeVisible({ timeout: 15_000 });
+		await expect(root, "new resolver-backed tabs should expose loading state while resolving").toHaveAttribute("data-walkthrough-status", "loading");
+		await expect.poll(() => requestBody?.prNumber, { timeout: 5_000 }).toBe("789");
+
+		releaseResolve();
+		await expect(root, "resolved payload should update the existing walkthrough render path").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 10_000 });
+		await expect(page.locator(".goal-preview-panel .goal-tab-pill.goal-tab-pill--active[data-panel-tab-kind='walkthrough']").first()).toHaveAttribute("data-panel-tab-id", /github%3ASuuBro%2Fbobbit%23789%3Aabc1234/);
+		await expect(walkthroughPanel(page).locator(".title"), "header should switch from launch placeholder to resolved PR metadata").toContainText("PR #789: Resolved Real PR");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "cards should come from the resolver response").toContainText("Resolved logical card");
 	});
 
 	test("URL launches expose an external GitHub/PR link in the walkthrough header", async ({ page }) => {
