@@ -7,7 +7,15 @@
 
 import { test, expect } from "./in-process-harness.js";
 import http from "node:http";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { apiFetch } from "./e2e-setup.js";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const PROJECT_ROOT = resolve(__dirname, "..", "..");
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(PROJECT_ROOT, "package.json"), "utf-8")).version;
+const EXPECTED_USER_AGENT = `Bobbit/${PACKAGE_VERSION}`;
 
 const MOCK_MODELS = {
 	data: [
@@ -17,11 +25,49 @@ const MOCK_MODELS = {
 	],
 };
 
+interface RecordedRequest {
+	method?: string;
+	url?: string;
+	headers: http.IncomingHttpHeaders;
+	rawHeaders: string[];
+}
+
 let mockServer: http.Server;
 let mockPort: number;
+let recordedRequests: RecordedRequest[] = [];
+
+function resetRecordedRequests(): void {
+	recordedRequests = [];
+}
+
+function userAgentValues(record: RecordedRequest): string[] {
+	const values: string[] = [];
+	for (let i = 0; i < record.rawHeaders.length; i += 2) {
+		if (record.rawHeaders[i]?.toLowerCase() === "user-agent") {
+			values.push(record.rawHeaders[i + 1] || "");
+		}
+	}
+	return values;
+}
+
+function expectSingleBobbitUserAgent(record: RecordedRequest | undefined): void {
+	expect(record, "mock gateway should have recorded a matching request").toBeTruthy();
+	expect(record!.headers["user-agent"]).toBe(EXPECTED_USER_AGENT);
+	expect(userAgentValues(record!)).toEqual([EXPECTED_USER_AGENT]);
+}
+
+function lastRecordedRequest(path: string): RecordedRequest | undefined {
+	return [...recordedRequests].reverse().find((record) => record.url === path);
+}
 
 test.beforeAll(async () => {
-	mockServer = http.createServer((_req, res) => {
+	mockServer = http.createServer((req, res) => {
+		recordedRequests.push({
+			method: req.method,
+			url: req.url,
+			headers: req.headers,
+			rawHeaders: [...req.rawHeaders],
+		});
 		res.writeHead(200, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(MOCK_MODELS));
 	});
@@ -39,10 +85,12 @@ test.afterAll(async () => {
 
 test.afterEach(async () => {
 	await apiFetch("/api/aigw/configure", { method: "DELETE" });
+	resetRecordedRequests();
 });
 
 test.describe("AI Gateway Configure Flow", () => {
 	test("test connection discovers models without saving", async () => {
+		resetRecordedRequests();
 		const res = await apiFetch("/api/aigw/test", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
@@ -51,6 +99,7 @@ test.describe("AI Gateway Configure Flow", () => {
 		const data = await res.json();
 		expect(data.ok).toBe(true);
 		expect(data.models).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 
 		// Should NOT be configured after test
 		const status = await apiFetch("/api/aigw/status");
@@ -59,6 +108,7 @@ test.describe("AI Gateway Configure Flow", () => {
 	});
 
 	test("configure discovers models and persists config", async () => {
+		resetRecordedRequests();
 		const res = await apiFetch("/api/aigw/configure", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
@@ -67,6 +117,7 @@ test.describe("AI Gateway Configure Flow", () => {
 		const data = await res.json();
 		expect(data.ok).toBe(true);
 		expect(data.models).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 
 		// Verify model IDs — Claude models get prefix stripped (Bedrock API)
 		const ids = data.models.map((m: any) => m.id);
@@ -81,6 +132,7 @@ test.describe("AI Gateway Configure Flow", () => {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
+		resetRecordedRequests();
 
 		const res = await apiFetch("/api/aigw/status");
 		expect(res.status).toBe(200);
@@ -88,6 +140,21 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect(data.configured).toBe(true);
 		expect(data.url).toBe(`http://127.0.0.1:${mockPort}`);
 		expect(data.models).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
+	});
+
+	test("refresh re-discovers models with the Bobbit User-Agent", async () => {
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+		resetRecordedRequests();
+
+		const res = await apiFetch("/api/aigw/refresh", { method: "POST" });
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.models).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 	});
 
 	test("model metadata is inferred correctly", async () => {
@@ -135,12 +202,17 @@ test.describe("AI Gateway Configure Flow", () => {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
+		resetRecordedRequests();
 
-		// Proxy request
-		const res = await apiFetch("/api/aigw/v1/models");
+		// Proxy request with a deliberately wrong incoming User-Agent. The server
+		// must replace it with Bobbit/<version>, not forward the client header.
+		const res = await apiFetch("/api/aigw/v1/models", {
+			headers: { "User-Agent": "WrongClient/9.9" },
+		});
 		expect(res.status).toBe(200);
 		const data = await res.json();
 		expect(data.data).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
 	});
 
 	test("preferences reflect aigw config", async () => {

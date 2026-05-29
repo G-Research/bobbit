@@ -37,6 +37,8 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(PROJECT_ROOT, "package.json"), "utf-8")).version;
+const EXPECTED_USER_AGENT = `Bobbit/${PACKAGE_VERSION}`;
 
 interface SeedOpts {
 	aigwUrl?: string;
@@ -142,16 +144,47 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 	};
 }
 
+interface RecordedRequest {
+	method?: string;
+	url?: string;
+	headers: http.IncomingHttpHeaders;
+	rawHeaders: string[];
+}
+
 interface MockGateway {
 	url: string;
 	hits: () => number;
+	requests: () => RecordedRequest[];
 	close: () => Promise<void>;
+}
+
+function userAgentValues(record: RecordedRequest): string[] {
+	const values: string[] = [];
+	for (let i = 0; i < record.rawHeaders.length; i += 2) {
+		if (record.rawHeaders[i]?.toLowerCase() === "user-agent") {
+			values.push(record.rawHeaders[i + 1] || "");
+		}
+	}
+	return values;
+}
+
+function expectSingleBobbitUserAgent(record: RecordedRequest | undefined): void {
+	expect(record, "mock gateway should have recorded startup discovery").toBeTruthy();
+	expect(record!.headers["user-agent"]).toBe(EXPECTED_USER_AGENT);
+	expect(userAgentValues(record!)).toEqual([EXPECTED_USER_AGENT]);
 }
 
 function startMockAigw(modelIds: string[]): Promise<MockGateway> {
 	let hits = 0;
+	const requests: RecordedRequest[] = [];
 	const server = http.createServer((req, res) => {
 		hits++;
+		requests.push({
+			method: req.method,
+			url: req.url,
+			headers: req.headers,
+			rawHeaders: [...req.rawHeaders],
+		});
 		if (req.url?.endsWith("/v1/models")) {
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({
@@ -168,6 +201,7 @@ function startMockAigw(modelIds: string[]): Promise<MockGateway> {
 			resolve({
 				url: `http://127.0.0.1:${port}`,
 				hits: () => hits,
+				requests: () => [...requests],
 				close: () => new Promise<void>((r) => server.close(() => r())),
 			});
 		});
@@ -193,11 +227,13 @@ test.describe("startupAigwCheck — refresh models.json on startup (E2E)", () =>
 			const data = JSON.parse(readFileSync(gw.modelsJsonPath, "utf-8"));
 			expect(data?.providers?.aigw, "aigw provider must exist after startup refresh").toBeTruthy();
 			expect(data.providers.aigw.headers["x-opencode-session"]).toBe(EXPECTED_HEADER_VALUE);
+			expect(data.providers.aigw.headers["User-Agent"]).toBe(EXPECTED_USER_AGENT);
 
 			const ids = data.providers.aigw.models.map((m: any) => m.id);
 			expect(ids).toContain("openai/gpt-5.2");
 			expect(ids).toContain("us.anthropic.claude-sonnet-4-6"); // Claude prefix stripped
 			expect(mock.hits()).toBeGreaterThan(0);
+			expectSingleBobbitUserAgent(mock.requests().find((record) => record.url === "/v1/models"));
 		} finally {
 			await gw?.shutdown();
 			await mock.close();

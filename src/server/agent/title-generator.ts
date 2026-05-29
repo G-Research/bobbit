@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { discoverAigwModels } from "./aigw-manager.js";
+import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
 import type { PreferencesStore } from "./preferences-store.js";
@@ -206,7 +207,7 @@ export function cleanTitle(raw: string): string {
 async function resolveGatewayModelId(baseUrl: string, strippedId: string): Promise<string> {
 	try {
 		const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-		const res = await fetch(modelsUrl, { signal: AbortSignal.timeout(5000) });
+		const res = await fetch(modelsUrl, { headers: aigwUserAgentHeaders(), signal: AbortSignal.timeout(5000) });
 		if (!res.ok) return strippedId;
 		const data = await res.json() as { data?: Array<{ id: string }> };
 		if (!Array.isArray(data.data)) return strippedId;
@@ -267,7 +268,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 	try {
 		const response = await fetch(url, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
 			body: JSON.stringify(body),
 		});
 
@@ -520,7 +521,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 	try {
 		const response = await fetch(url, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: aigwUserAgentHeaders({ "Content-Type": "application/json" }),
 			body: JSON.stringify(body),
 		});
 

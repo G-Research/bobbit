@@ -135,8 +135,9 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 ## Gate status stale
 
-- `state.gateStatusCache` refreshed via: (1) `refreshGateStatusCache()` on initial load, (2) `refreshGateStatusForGoal()` on WS events `gate_status_changed` / `gate_verification_complete`
-- Dashboard gate polling also syncs to this cache
+- `state.gateStatusCache` is the shared gate count source for sidebar badges and the goal status widget badge. Live updates should route through `invalidateGateStatusForGoal(goalId, reason)`, which debounces per goal and refetches `/api/goals/:id/gates?view=summary`.
+- Count-changing WS events include gate signal/status/reset and verification lifecycle events through step complete; `gate_verification_step_output` is detail-only and must not refresh summaries.
+- The dashboard keeps full gate detail locally but should not write partial entries into `state.gateStatusCache`. See [gate-status-sync.md](gate-status-sync.md) for the source-of-truth and regression-test contract.
 
 ## Context bar / model state
 
@@ -802,15 +803,15 @@ git ls-remote origin | grep -oE 'refs/heads/(session|goal|staff)[^[:space:]]*' |
 
 Full design + bug archaeology in [docs/design/orphan-remote-branch-cleanup.md](design/orphan-remote-branch-cleanup.md). Architecture summary: [docs/internals.md — Remote branch cleanup](internals.md#remote-branch-cleanup).
 
-## `models.json` stale / missing `x-opencode-session` header after gateway upgrade
+## `models.json` stale / missing AI Gateway headers after gateway upgrade
 
-Symptom: a new aigw-side model isn't selectable, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the `x-opencode-session` feature.
+Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose `~/.bobbit/agent/models.json` predates the generated header block.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites `~/.bobbit/agent/models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
 
 `BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
 
-See [docs/internals.md — Startup refresh of models.json](internals.md#startup-refresh-of-modelsjson).
+See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
 
 ## Review/naming model mismatch under AI Gateway
 

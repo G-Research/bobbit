@@ -1414,53 +1414,84 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 
 ---
 
-## AI Gateway per-session header (`x-opencode-session`)
+## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
-When Bobbit talks to an on-prem model through the AI Gateway, the gateway's token caches are keyed per upstream caller. Without a per-session discriminator every Bobbit session would share one cache bucket, so cache hits collapse and the gen-AI team's routing loses its signal. To partition cleanly, every aigw request carries an `x-opencode-session: <bobbit-session-id>` header - or, when no session id is available, **no header at all**. A constant fallback would defeat the whole point: it would re-collapse buckets onto a single key.
+Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. Gateway operators need to identify Bobbit-originated traffic for routing, analytics, and support, while Bobbit sessions still need per-session cache partitioning. Two headers cover those concerns:
 
-### Where it's emitted
+- `User-Agent: Bobbit/<version>` identifies the Bobbit build. The `<version>` comes from Bobbit's current `package.json`, not a duplicated literal.
+- `x-opencode-session: <session-id>` partitions agent inference cache/routing per Bobbit session. It is emitted only when an agent subprocess has `BOBBIT_SESSION_ID` set.
 
-`writeAigwModelsJson` in `src/server/agent/aigw-manager.ts` writes `~/.bobbit/agent/models.json`. The `aigw` provider entry now carries a provider-level `headers` block:
+The canonical user-agent string lives in `src/server/agent/aigw-user-agent.ts` as `BOBBIT_AIGW_USER_AGENT`. The direct AI Gateway request paths covered here attach it through `aigwUserAgentHeaders()`, which removes any incoming `user-agent` key case-insensitively and then writes exactly one `User-Agent` key with the canonical `Bobbit/<version>` value. This keeps the format stable on version bumps and prevents accidental overrides or duplicate user-agent variants.
 
-- Key: `x-opencode-session`.
-- Value: a pi-coding-agent `!cmd` resolver expression that runs `node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`.
+### Covered request paths
 
-Provider-level (not per-model) is deliberate - it covers every `openai-completions` model the aigw exposes without the file having to enumerate them. Claude entries in the same file use `api: "bedrock-converse-stream"`, whose pi-ai 0.67.5 driver does not honour `model.headers`; that's fine, on-prem routing only matters for the openai-completions path.
+The Bobbit AI Gateway user agent is sent only on requests whose target is the configured or tested AI Gateway URL:
 
-### Startup refresh of `models.json`
+| Path | How the header is applied |
+|---|---|
+| Model discovery | `discoverAigwModels()` calls the gateway `/v1/models` endpoint through `httpGet()`, which uses `aigwUserAgentHeaders()`. |
+| `/api/aigw/status` | If a gateway is configured, the route discovers fresh models, so the discovery request carries the header. |
+| `/api/aigw/test` | Tests the submitted URL by running discovery against that URL with the header. |
+| `/api/aigw/configure` | Runs discovery with the header, persists `aigw.url`, and rewrites `models.json`. |
+| `/api/aigw/refresh` | Re-runs the configure flow for the stored gateway URL, so discovery and the generated provider config are refreshed together. |
+| Startup refresh / auto-detect | `startupAigwCheck()` uses discovery for existing gateway refreshes and local gateway probing; reachable configured gateways are rewritten with the current headers. |
+| `/api/aigw/v1/*` proxy | `proxyRequest()` forwards to the configured gateway with `User-Agent: Bobbit/<version>` alongside content headers. |
+| Direct title / goal-summary generation | The gateway title paths in `title-generator.ts` use `aigwUserAgentHeaders()` for both `/v1/models` model-id resolution and `/v1/chat/completions` generation calls. |
+| Agent inference | `writeAigwModelsJson()` writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through the generated `aigw` provider. |
 
-On every gateway startup, `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-runs the aigw setup so `~/.bobbit/agent/models.json` doesn't drift between restarts. When aigw is already configured, it sets the Bedrock env vars and then calls `discoverAigwModels(existingUrl)` followed by `writeAigwModelsJson(existingUrl, models)` - which rewrites the file with the freshly-discovered model list and the provider-level `x-opencode-session` `headers` block, while preserving user `modelOverrides` and any non-aigw providers (the writer already merges these). The practical effect: new gateway-side models, and the header block for users whose `models.json` predates that feature, are picked up automatically without anyone having to re-configure aigw from Settings.
+### Generated `providers.aigw.headers`
 
-If the gateway is unreachable at startup (network error / HTTP failure / timeout), the function logs `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json` and leaves the file untouched - staleness is preferred to wiping a working file with a stub. The `BOBBIT_SKIP_AIGW_DISCOVERY=1` test/CI escape hatch skips only the network call: when aigw is already configured, the Bedrock env vars are still applied and the existing `models.json` is kept as-is. The not-configured branch (auto-probing for a local gateway) is unchanged.
+`writeAigwModelsJson()` writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
 
-### Resolver semantics (pi-coding-agent contract surface)
+```json
+{
+  "providers": {
+    "aigw": {
+      "headers": {
+        "User-Agent": "Bobbit/<version>",
+        "x-opencode-session": "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
+      }
+    }
+  }
+}
+```
 
-The pi-coding-agent CLI evaluates header values via `resolveConfigValue` (in `dist/core/resolve-config-value.js`):
+Provider-level headers are deliberate: they cover every model exposed through `providers.aigw` without duplicating fields on each model entry. The `User-Agent` value is a plain string because it is build-wide. The `x-opencode-session` value remains the existing pi-coding-agent `!cmd` resolver literal; pi-coding-agent executes it inside the agent subprocess, trims stdout, and drops the header when stdout is empty. That preserves the exact old behavior: sessions with `BOBBIT_SESSION_ID` send their session id, while non-session calls do not fall back to a shared constant.
 
-- A plain string `"X"` falls back to `process.env["X"] || "X"` - i.e. it can leak the literal key name. **Unsafe for our requirement.**
-- A `"!cmd"` string runs `cmd` via `child_process.exec` (shell-interpreted) and returns the trimmed stdout, or `undefined` when stdout is empty.
-- `resolveHeaders` (in `dist/core/model-registry.js`) drops any header whose resolved value is falsy.
+Every agent session gets its own subprocess environment with `BOBBIT_SESSION_ID=<sessionId>`, so the shell-resolved header is naturally partitioned per session. The command result is cached inside that subprocess, so only the first inference request in a session pays the resolver cost.
 
-So the `!node -e ...` form gives us exactly "send the header iff `BOBBIT_SESSION_ID` is set to a non-empty value, otherwise omit it." That is the only behaviour we want.
+### Bedrock-routed Claude models
 
-### Per-session env injection
+Claude models exposed by the gateway are stored under `providers.aigw` but routed through `api: "bedrock-converse-stream"` for Bedrock Converse feature parity. Those model entries also get a per-model `baseUrl` pointing at the gateway `/aws` subtree, while the provider `baseUrl` stays on the OpenAI-compatible root for non-Claude models.
 
-Every agent-CLI spawn path (`session-setup.ts`, `session-manager.ts`, the rpc-bridge child spawn) injects `BOBBIT_SESSION_ID=<sessionId>` into the subprocess env. Each Bobbit session owns its own subprocess with its own env, so values are correctly partitioned at the OS level and never leak across sessions.
+pi-ai's Bedrock provider does not normally forward provider-level `headers` into the AWS SDK request. Bobbit applies a narrow compatibility patch before model-completion and agent subprocess startup: `ensurePiAiBedrockHeadersPatch()` injects a middleware hook into pi-ai's Bedrock provider that copies `options.headers` into the outgoing Bedrock request **only when `model.provider === "aigw"`**. The hook is intentionally not global:
 
-### Performance: one shell exec per session, not per request
+- aigw-routed Claude/Bedrock traffic receives `User-Agent: Bobbit/<version>` and the resolved `x-opencode-session` when present.
+- Public Amazon Bedrock providers, Anthropic providers, and other non-aigw providers are left untouched.
+- Existing AWS user-agent middleware is not globally replaced; the Bobbit headers are applied only to the specific aigw Bedrock client request.
 
-`resolveConfigValue` caches `!cmd` results in a module-level `commandResultCache` `Map` keyed by the command string. The first LLM request in a session pays a one-time ~50 ms `node -e` startup; every subsequent request in that same subprocess reuses the cached value. Because each Bobbit session spawns its own agent subprocess, the cache is naturally per-session - no cross-contamination, no repeated process spawns within a session.
+### Startup refresh behavior
 
-### Cross-shell quoting
+On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
 
-`child_process.exec` runs the command through `cmd.exe` on Windows and `/bin/sh` on POSIX. The chosen quoting - outer `"` for the JS argument, inner `'` for the empty-string default - is interpreted identically by both shells (cmd.exe and sh both treat `''` as an empty string literal in this position). The JSON-encoded value in `models.json` is `"!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""`.
+- the current gateway model list,
+- the current canonical `User-Agent: Bobbit/<version>`,
+- the unchanged `x-opencode-session` resolver literal,
+- existing non-aigw providers and user `modelOverrides` preserved.
 
-### Out of scope
+This means users with older `models.json` files pick up the user-agent header after restart or manual refresh without reconfiguring the gateway. If the configured gateway is unreachable, Bobbit logs the startup warning and leaves the existing file untouched rather than replacing a working cached configuration with a partial one. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
 
-- The `/api/aigw/v1/*` passthrough proxy used for UI model-list/test calls - it never carries a session id and isn't on the request path that needs cache routing.
-- The title generator and other one-shot gateway calls - single-call, no cache benefit.
-- Bedrock/Claude routing - driver ignores `model.headers`, and on-prem models don't route to Bedrock anyway.
-- Custom local providers configured outside the aigw block - the `headers` block is scoped to the `aigw` provider entry only.
+### No-leakage boundaries
+
+The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
+
+- `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
+- `writeAigwModelsJson()` writes headers only under `providers.aigw`; non-aigw providers are preserved as-is.
+- `removeAigwModelsJson()` removes the entire `aigw` provider block and leaves no orphan AI Gateway headers on other providers.
+- Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
+- The Bedrock patch exits immediately for any model whose provider is not `aigw`.
+
+These boundaries are why the same Bobbit process can talk to an AI Gateway and public providers without leaking `User-Agent: Bobbit/<version>` to public endpoints unless that request is actually routed through the configured gateway.
 
 ---
 

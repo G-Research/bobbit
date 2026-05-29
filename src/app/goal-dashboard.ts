@@ -6,7 +6,7 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, invalidateGateStatusForGoal, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
@@ -181,6 +181,22 @@ let roleDropdownOpen = false;
 // DASHBOARD EVENT WEBSOCKET
 // ============================================================================
 
+const GATE_SUMMARY_INVALIDATING_EVENTS = new Set([
+	"gate_signal_received",
+	"gate_status_changed",
+	"gate_reset",
+	"gate_verification_started",
+	"gate_verification_phase_started",
+	"gate_verification_step_started",
+	"gate_verification_awaiting_human",
+	"gate_verification_step_complete",
+	"gate_verification_complete",
+]);
+
+function scheduleSharedGateSummaryRefresh(goalId: string | null | undefined, reason: string): void {
+	invalidateGateStatusForGoal(goalId, reason);
+}
+
 function connectDashboardWs(): void {
 	dashboardWsIntentionalClose = false;
 	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -206,10 +222,14 @@ function connectDashboardWs(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "auth_ok") {
 				subscribeToCurrentGoal();
+				scheduleSharedGateSummaryRefresh(currentGoalId, "dashboard-ws-auth-ok");
 				return;
 			}
 			if (typeof msg?.goalId === "string" && msg.goalId !== currentGoalId) return;
-			if (msg?.type === "gate_signal_received" || msg?.type === "gate_status_changed") {
+			if (typeof msg?.goalId === "string" && GATE_SUMMARY_INVALIDATING_EVENTS.has(msg.type)) {
+				scheduleSharedGateSummaryRefresh(msg.goalId, msg.type);
+			}
+			if (msg?.type === "gate_signal_received" || msg?.type === "gate_status_changed" || msg?.type === "gate_reset") {
 				refreshGatesFromWsEvent(msg.goalId);
 			}
 			dispatchVerificationEvent(msg);
@@ -323,6 +343,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		}
 
 		gates = fetchedGates;
+		scheduleSharedGateSummaryRefresh(goalId, "dashboard-load");
 		applyDashboardRouteFocus(goalId);
 
 		if (gitStatusRes && gitStatusRes.ok) {
@@ -564,21 +585,7 @@ function stopAgentPolling(): void {
 
 function applyGateState(goalId: string, newGates: GateState[]): void {
 	gates = newGates;
-	// Sync to sidebar gate status cache
-	const goal = state.goals.find(g => g.id === goalId);
-	if (goal?.workflow?.gates.length) {
-		const passed = newGates.filter((g: any) => g.status === "passed").length;
-		const total = goal.workflow.gates.length;
-		const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
-		const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
-		// Preserve human-sign-off counters from the previous cache entry — the
-		// dashboard refresh path does not know about pending sign-offs; only
-		// `refreshGateStatusCache` / `refreshGateStatusForGoal` in api.ts do.
-		const prev = state.gateStatusCache.get(goalId);
-		const awaitingSignoffCount = prev?.awaitingSignoffCount ?? 0;
-		const awaitingHumanSignoff = prev?.awaitingHumanSignoff ?? false;
-		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
-	}
+	scheduleSharedGateSummaryRefresh(goalId, "dashboard-gates-updated");
 }
 
 function refreshGatesFromWsEvent(goalId: string): void {
