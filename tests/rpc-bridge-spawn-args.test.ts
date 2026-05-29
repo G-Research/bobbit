@@ -73,12 +73,27 @@ describe("buildAgentArgs", () => {
 		}
 	});
 
-	it("accepts all five valid thinking levels", () => {
-		for (const level of ["off", "minimal", "low", "medium", "high"]) {
+	it("accepts every valid thinking level, including xhigh", () => {
+		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) {
 			const args = buildAgentArgs({ initialThinkingLevel: level });
 			const idx = args.indexOf("--thinking");
 			assert.ok(idx >= 0);
 			assert.equal(args[idx + 1], level);
 		}
+	});
+
+	it("spawn-pins Claude Opus 4.8 with xhigh thinking without falling back", () => {
+		const args = buildAgentArgs({
+			initialModel: "anthropic/claude-opus-4-8",
+			initialThinkingLevel: "xhigh",
+		});
+
+		assert.deepEqual(args, [
+			"--mode", "rpc",
+			"--model", "anthropic/claude-opus-4-8",
+			"--thinking", "xhigh",
+		]);
+		assert.ok(!args.includes("anthropic/claude-opus-4-7"), "must not substitute the older Pi default");
+		assert.ok(!args.includes("anthropic/claude-opus-4-6"), "must not substitute Bobbit's archived placeholder");
 	});
 });
