@@ -2106,6 +2106,7 @@ export function doRenderApp(): void {
 				<pr-walkthrough-panel
 					.changeset=${changeset}
 					.cards=${cards}
+					.persistenceKey=${tab.id}
 				></pr-walkthrough-panel>
 			</div>
 		`;

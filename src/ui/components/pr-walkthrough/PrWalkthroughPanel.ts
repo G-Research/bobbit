@@ -16,11 +16,21 @@ interface SideBySidePair {
 	right: PrWalkthroughDiffLine | null;
 }
 
+interface PersistedPrWalkthroughState {
+	activeCardId?: string;
+	diffModeOverride?: PrWalkthroughDiffMode;
+	comments?: PrWalkthroughComment[];
+	decisions?: Record<string, PrWalkthroughDecision>;
+	completedCardIds?: string[];
+	dismissedSuggestionIds?: string[];
+}
+
 @customElement("pr-walkthrough-panel")
 export class PrWalkthroughPanel extends LitElement {
 	@property({ attribute: false }) changeset?: PrWalkthroughChangesetRef;
 	@property({ attribute: false }) cards: PrWalkthroughCard[] = getFixturePrWalkthroughCards();
 	@property({ type: Boolean, reflect: true }) narrow = false;
+	@property({ attribute: "persistence-key" }) persistenceKey = "";
 
 	@state() private _activeCardId = "";
 	@state() private _panelWidth = 1024;
@@ -30,12 +40,14 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _decisions: Record<string, PrWalkthroughDecision> = {};
 	@state() private _completedCardIds: string[] = [];
 	@state() private _editingLineKey?: string;
+	@state() private _editingCardId?: string;
 	@state() private _lineDrafts: Record<string, string> = {};
 	@state() private _cardDrafts: Record<string, string> = {};
 	@state() private _dismissedSuggestionIds: string[] = [];
 	@state() private _copied = false;
 
 	private _resizeObserver?: ResizeObserver;
+	private _loadedPersistenceKey = "";
 
 	static override styles = css`
 		:host {
@@ -371,6 +383,14 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 	}
 
+	protected override updated(changed: PropertyValues<this>): void {
+		if (changed.has("persistenceKey") || changed.has("cards")) {
+			if (this.persistenceKey && this._loadedPersistenceKey !== this.persistenceKey) {
+				this.restorePersistedState();
+			}
+		}
+	}
+
 	private get effectiveChangeset(): PrWalkthroughChangesetRef {
 		return this.changeset ?? fixturePrWalkthroughChangeset;
 	}
@@ -407,7 +427,7 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 
 		return html`
-			<section class="shell" data-testid="pr-walkthrough-panel">
+			<section class="shell" data-testid="pr-walkthrough-panel" data-active-card-id=${active.id} data-diff-mode=${this.effectiveDiffMode}>
 				${this.renderHeader()}
 				<div class="body ${this.isNarrowLayout ? "narrow" : ""}">
 					${this.renderRail()}
@@ -448,14 +468,14 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderLabelledRail(): TemplateResult {
 		return html`
-			<nav class="rail" data-testid="walkthrough-rail" aria-label="PR walkthrough phases">
+			<nav class="rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phases">
 				${PHASES.map(phase => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;
 					const phaseActive = cards.some(card => card.id === this.activeCard?.id);
 					return html`
-						<section class="phase">
-							<button class="phase-button ${phaseActive ? "active" : ""}" type="button" @click=${() => this.selectCard(cards[0].id)}>${phase.label} · ${cards.length}</button>
+						<section class="phase" data-phase-id=${phase.id}>
+							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => this.selectCard(cards[0].id)}>${phase.label} · ${cards.length}</button>
 							${cards.map(card => this.renderRailCardButton(card))}
 						</section>
 					`;
@@ -466,7 +486,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderCollapsedRail(): TemplateResult {
 		return html`
-			<nav class="rail collapsed" data-testid="walkthrough-rail-collapsed" aria-label="PR walkthrough phases">
+			<nav class="rail collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="PR walkthrough phases">
 				${PHASES.map(phase => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;
@@ -477,7 +497,7 @@ export class PrWalkthroughPanel extends LitElement {
 							${cards.map(card => html`
 								<button
 									class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""}"
-									data-testid="walkthrough-card-dot"
+									data-testid="pr-walkthrough-card-dot"
 									type="button"
 									aria-label=${`Open ${phase.label}: ${card.title}`}
 									title=${`${phase.label}: ${card.title}`}
@@ -494,7 +514,7 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderRailCardButton(card: PrWalkthroughCard): TemplateResult {
 		const decision = this._decisions[card.id]?.value;
 		return html`
-			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""}" type="button" @click=${() => this.selectCard(card.id)}>
+			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" @click=${() => this.selectCard(card.id)}>
 				<span class="card-title">${card.title}</span>
 				<span class="card-decision">${decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>
 			</button>
@@ -505,7 +525,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const phase = PHASES.find(item => item.id === card.phaseId)?.label ?? card.phaseId;
 		const dislikeDisabled = cardRequiresCommentForDislike({ comments: this._comments }, card.id);
 		return html`
-			<article class="card">
+			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<section class="card-head">
 					<div class="phase-label">${phase}</div>
 					<h2>${card.title}</h2>
@@ -517,9 +537,9 @@ export class PrWalkthroughPanel extends LitElement {
 				${this.renderCardComments(card)}
 				<div class="actions">
 					<span class="decision-note">${this._decisions[card.id] ? `Current: ${this._decisions[card.id].value}` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
-					<button data-testid="walkthrough-prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}>Prev</button>
-					<button data-testid="walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"}" type="button" ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}>Dislike</button>
-					<button data-testid="walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}>Like</button>
+					<button data-testid="pr-walkthrough-prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}>Prev</button>
+					<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"}" type="button" ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}>Dislike</button>
+					<button data-testid="pr-walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}>Like</button>
 				</div>
 			</article>
 		`;
@@ -527,7 +547,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		return html`
-			<section class="diff-block">
+			<section class="diff-block" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode}>
 				<div class="diff-file-header">${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</div>
 				${this.effectiveDiffMode === "split" ? this.renderSplitDiff(card, block) : this.renderInlineDiff(card, block)}
 			</section>
@@ -536,7 +556,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderSplitDiff(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		return html`
-			<div class="diff-overflow">
+			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="split-grid">
 					${block.hunks.map(hunk => html`
 						<div class="hunk-header">${hunk.header}</div>
@@ -555,7 +575,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderInlineDiff(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		return html`
-			<div class="diff-overflow">
+			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="inline-lines">
 					${block.hunks.map(hunk => html`
 						<div class="hunk-header">${hunk.header}</div>
@@ -573,18 +593,25 @@ export class PrWalkthroughPanel extends LitElement {
 		const lineNo = column === "old" ? line.oldLine : column === "new" ? line.newLine : line.newLine ?? line.oldLine;
 		const prefix = line.kind === "add" ? "+" : line.kind === "del" ? "−" : " ";
 		return html`
-			<button
+			<div
 				class="diff-line ${line.kind}"
-				data-testid="walkthrough-diff-line"
-				type="button"
+				data-testid="pr-walkthrough-diff-line"
+				data-line-id=${line.id}
+				data-line-kind=${line.kind}
+				data-line-side=${line.side}
+				data-old-line=${line.oldLine ?? ""}
+				data-new-line=${line.newLine ?? ""}
+				role="button"
+				tabindex="0"
 				aria-label=${`Comment on ${block.filePath} line ${lineNo ?? "context"}`}
 				@click=${() => this.openLineEditor(card.id, block.id, line.id)}
+				@keydown=${(event: KeyboardEvent) => this.onDiffLineKeydown(event, card.id, block.id, line.id)}
 			>
 				<span class="line-no">${lineNo ?? ""}</span>
 				<span class="prefix">${prefix}</span>
 				<span class="line-text">${line.text}</span>
-				<span class="comment-cue">Comment</span>
-			</button>
+				<button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" @click=${(event: Event) => { event.stopPropagation(); this.openLineEditor(card.id, block.id, line.id); }}>Comment</button>
+			</div>
 		`;
 	}
 
@@ -597,11 +624,11 @@ export class PrWalkthroughPanel extends LitElement {
 			${suggestions.length ? html`<div class="suggestions">${suggestions.map(suggestion => this.renderSuggestion(suggestion))}</div>` : nothing}
 			${comments.length ? html`<div class="line-comments">${comments.map(comment => this.renderComment(comment, "line"))}</div>` : nothing}
 			${this._editingLineKey === key ? html`
-				<div class="line-editor">
-					<textarea data-testid="line-comment-editor" .value=${this._lineDrafts[key] ?? ""} placeholder="Add a line comment…" @input=${(event: InputEvent) => this.updateLineDraft(key, event)}></textarea>
+				<div class="line-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="line" data-card-id=${card.id} data-diff-block-id=${block.id} data-line-id=${line.id}>
+					<textarea data-testid="pr-walkthrough-comment-input" .value=${this._lineDrafts[key] ?? ""} placeholder="Add a line comment…" @input=${(event: InputEvent) => this.updateLineDraft(key, event)}></textarea>
 					<div class="comment-actions">
-						<button type="button" @click=${() => this.saveLineComment(card.id, block.id, line.id)}>Save comment</button>
-						<button type="button" @click=${() => this.closeLineEditor()}>Cancel</button>
+						<button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => this.saveLineComment(card.id, block.id, line.id)}>Save comment</button>
+						<button data-testid="pr-walkthrough-comment-cancel" type="button" @click=${() => this.closeLineEditor()}>Cancel</button>
 					</div>
 				</div>
 			` : nothing}
@@ -610,13 +637,13 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderSuggestion(suggestion: PrWalkthroughSuggestedComment): TemplateResult {
 		return html`
-			<div class="suggestion">
+			<div class="suggestion" data-testid="pr-walkthrough-suggested-comment" data-suggestion-id=${suggestion.id} data-card-id=${suggestion.cardId} data-diff-block-id=${suggestion.diffBlockId} data-line-id=${suggestion.lineId}>
 				<div class="comment-meta">LLM suggested line comment</div>
 				<div class="comment-body">${suggestion.body}</div>
 				<div class="suggestion-actions">
-					<button type="button" @click=${() => this.acceptSuggestion(suggestion, false)}>Accept</button>
-					<button type="button" @click=${() => this.acceptSuggestion(suggestion, true)}>Edit</button>
-					<button class="delete" type="button" @click=${() => this.dismissSuggestion(suggestion.id)}>Delete</button>
+					<button data-testid="pr-walkthrough-suggested-comment-accept" type="button" @click=${() => this.acceptSuggestion(suggestion, false)}>Accept</button>
+					<button data-testid="pr-walkthrough-suggested-comment-edit" type="button" @click=${() => this.acceptSuggestion(suggestion, true)}>Edit</button>
+					<button data-testid="pr-walkthrough-suggested-comment-delete" class="delete" type="button" @click=${() => this.dismissSuggestion(suggestion.id)}>Delete</button>
 				</div>
 			</div>
 		`;
@@ -625,14 +652,22 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderCardComments(card: PrWalkthroughCard): TemplateResult {
 		const key = `card:${card.id}`;
 		const comments = this._comments.filter(comment => comment.cardId === card.id && !comment.diffBlockId && !comment.lineId);
+		const editing = this._editingCardId === card.id;
 		return html`
-			<section class="card-comments">
+			<section class="card-comments" data-testid="pr-walkthrough-card-comments" data-card-id=${card.id}>
 				<h3>Card-level comments</h3>
-				<textarea data-testid="card-comment-editor" .value=${this._cardDrafts[card.id] ?? ""} placeholder="Add a broad concern or note for this card…" @input=${(event: InputEvent) => this.updateCardDraft(card.id, event)}></textarea>
-				<div class="comment-actions">
-					<button type="button" @click=${() => this.saveCardComment(card.id)}>Save card comment</button>
-					${this._cardDrafts[card.id] ? html`<button type="button" @click=${() => this.clearCardDraft(card.id)}>Clear</button>` : nothing}
-				</div>
+				${editing ? html`
+					<div class="line-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="card" data-card-id=${card.id}>
+						<textarea data-testid="pr-walkthrough-comment-input" .value=${this._cardDrafts[card.id] ?? ""} placeholder="Add a broad concern or note for this card…" @input=${(event: InputEvent) => this.updateCardDraft(card.id, event)}></textarea>
+						<div class="comment-actions">
+							<button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => this.saveCardComment(card.id)}>Save card comment</button>
+							<button data-testid="pr-walkthrough-comment-cancel" type="button" @click=${() => this.closeCardEditor(card.id)}>Cancel</button>
+							${this._cardDrafts[card.id] ? html`<button type="button" @click=${() => this.clearCardDraft(card.id)}>Clear</button>` : nothing}
+						</div>
+					</div>
+				` : html`
+					<button data-testid="pr-walkthrough-add-card-comment" type="button" @click=${() => this.openCardEditor(card.id)}>Add card comment</button>
+				`}
 				${comments.length ? html`<div class="line-comments" aria-label=${key}>${comments.map(comment => this.renderComment(comment, "card"))}</div>` : nothing}
 			</section>
 		`;
@@ -640,12 +675,12 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderComment(comment: PrWalkthroughComment, scope: "line" | "card"): TemplateResult {
 		return html`
-			<div class="comment">
+			<div class="comment" data-testid="pr-walkthrough-comment" data-comment-id=${comment.id} data-comment-scope=${scope} data-card-id=${comment.cardId} data-diff-block-id=${comment.diffBlockId ?? ""} data-line-id=${comment.lineId ?? ""}>
 				<div class="comment-meta">${comment.source === "suggested" ? "Accepted suggestion" : scope === "line" ? "Line comment" : "Card comment"}</div>
 				<div class="comment-body">${comment.body}</div>
 				<div class="comment-actions">
-					<button type="button" @click=${() => this.editComment(comment)}>Edit</button>
-					<button class="delete" type="button" @click=${() => this.deleteComment(comment.id)}>Delete</button>
+					<button data-testid="pr-walkthrough-comment-edit" type="button" @click=${() => this.editComment(comment)}>Edit</button>
+					<button data-testid="pr-walkthrough-comment-delete" class="delete" type="button" @click=${() => this.deleteComment(comment.id)}>Delete</button>
 				</div>
 			</div>
 		`;
@@ -654,22 +689,22 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderAudit(card: PrWalkthroughCard): TemplateResult {
 		const draftText = this.buildAuditText();
 		return html`
-			<article class="card">
+			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<section class="card-head">
 					<div class="phase-label">Audit</div>
 					<h2>${card.title}</h2>
 					<p class="summary">${card.summary}</p>
 				</section>
-				<section class="audit">
+				<section class="audit" data-testid="pr-walkthrough-audit">
 					<h3>Draft review</h3>
-					<pre data-testid="walkthrough-audit-draft">${draftText}</pre>
+					<pre data-testid="pr-walkthrough-draft">${draftText}</pre>
 					<div class="comment-actions">
 						<button class="copy-button" type="button" @click=${() => this.copyAudit(draftText)}>${this._copied ? "Copied" : "Copy draft"}</button>
 					</div>
 				</section>
 				<div class="actions">
 					<span class="decision-note">Review draft updates as you revise previous cards.</span>
-					<button data-testid="walkthrough-prev" type="button" @click=${this.goPrev}>Prev</button>
+					<button data-testid="pr-walkthrough-prev" type="button" @click=${this.goPrev}>Prev</button>
 				</div>
 			</article>
 		`;
@@ -682,10 +717,13 @@ export class PrWalkthroughPanel extends LitElement {
 	private selectCard(cardId: string): void {
 		this._activeCardId = cardId;
 		this._editingLineKey = undefined;
+		this._editingCardId = undefined;
+		this.persistState();
 	}
 
 	private setDiffMode(mode: PrWalkthroughDiffMode): void {
 		this._diffModeOverride = mode;
+		this.persistState();
 	}
 
 	private previousCardId(): string | undefined {
@@ -713,6 +751,7 @@ export class PrWalkthroughPanel extends LitElement {
 		};
 		this._completedCardIds = this._completedCardIds.includes(card.id) ? this._completedCardIds : [...this._completedCardIds, card.id];
 		this.emitDraftChange();
+		this.persistState();
 		const next = this.nextCardId(card.id);
 		if (next) {
 			this.selectCard(next);
@@ -769,11 +808,18 @@ export class PrWalkthroughPanel extends LitElement {
 		const key = this.lineKey(cardId, diffBlockId, lineId);
 		const existing = this.commentsForLine(cardId, diffBlockId, lineId)[0];
 		this._lineDrafts = { ...this._lineDrafts, [key]: existing?.body ?? this._lineDrafts[key] ?? "" };
+		this._editingCardId = undefined;
 		this._editingLineKey = key;
 	}
 
 	private closeLineEditor(): void {
 		this._editingLineKey = undefined;
+	}
+
+	private onDiffLineKeydown(event: KeyboardEvent, cardId: string, diffBlockId: string, lineId: string): void {
+		if (event.key !== "Enter" && event.key !== " ") return;
+		event.preventDefault();
+		this.openLineEditor(cardId, diffBlockId, lineId);
 	}
 
 	private updateLineDraft(key: string, event: InputEvent): void {
@@ -792,6 +838,7 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 		this._editingLineKey = undefined;
 		this.emitDraftChange();
+		this.persistState();
 	}
 
 	private updateCardDraft(cardId: string, event: InputEvent): void {
@@ -804,6 +851,16 @@ export class PrWalkthroughPanel extends LitElement {
 		this._cardDrafts = next;
 	}
 
+	private openCardEditor(cardId: string): void {
+		this._editingLineKey = undefined;
+		this._editingCardId = cardId;
+	}
+
+	private closeCardEditor(cardId: string): void {
+		this._editingCardId = undefined;
+		if (!this._cardDrafts[cardId]?.trim()) this.clearCardDraft(cardId);
+	}
+
 	private saveCardComment(cardId: string): void {
 		const body = (this._cardDrafts[cardId] ?? "").trim();
 		if (!body) return;
@@ -814,7 +871,9 @@ export class PrWalkthroughPanel extends LitElement {
 			this._comments = [...this._comments, { id: `custom:${crypto.randomUUID()}`, cardId, body, source: "custom", createdAt: new Date().toISOString() }];
 		}
 		this.clearCardDraft(cardId);
+		this._editingCardId = undefined;
 		this.emitDraftChange();
+		this.persistState();
 	}
 
 	private acceptSuggestion(suggestion: PrWalkthroughSuggestedComment, edit: boolean): void {
@@ -823,11 +882,13 @@ export class PrWalkthroughPanel extends LitElement {
 			this._comments = [...this._comments, { id, cardId: suggestion.cardId, diffBlockId: suggestion.diffBlockId, lineId: suggestion.lineId, body: suggestion.body, source: "suggested", createdAt: new Date().toISOString() }];
 		}
 		this.emitDraftChange();
+		this.persistState();
 		if (edit) this.openLineEditor(suggestion.cardId, suggestion.diffBlockId, suggestion.lineId);
 	}
 
 	private dismissSuggestion(suggestionId: string): void {
 		this._dismissedSuggestionIds = this._dismissedSuggestionIds.includes(suggestionId) ? this._dismissedSuggestionIds : [...this._dismissedSuggestionIds, suggestionId];
+		this.persistState();
 	}
 
 	private editComment(comment: PrWalkthroughComment): void {
@@ -838,6 +899,7 @@ export class PrWalkthroughPanel extends LitElement {
 			return;
 		}
 		this._cardDrafts = { ...this._cardDrafts, [comment.cardId]: comment.body };
+		this._editingCardId = comment.cardId;
 	}
 
 	private deleteComment(commentId: string): void {
@@ -848,6 +910,48 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 		this._decisions = Object.fromEntries(Object.entries(this._decisions).map(([cardId, decision]) => [cardId, { ...decision, commentIds: decision.commentIds.filter(id => id !== commentId) }]));
 		this.emitDraftChange();
+		this.persistState();
+	}
+
+	private persistenceStorageKey(): string {
+		return this.persistenceKey ? `bobbit:pr-walkthrough:${this.persistenceKey}` : "";
+	}
+
+	private restorePersistedState(): void {
+		const key = this.persistenceStorageKey();
+		this._loadedPersistenceKey = this.persistenceKey;
+		if (!key || typeof localStorage === "undefined") return;
+		try {
+			const raw = localStorage.getItem(key);
+			if (!raw) return;
+			const parsed = JSON.parse(raw) as PersistedPrWalkthroughState;
+			if (parsed.activeCardId && this.cards.some(card => card.id === parsed.activeCardId)) this._activeCardId = parsed.activeCardId;
+			if (parsed.diffModeOverride === "split" || parsed.diffModeOverride === "inline") this._diffModeOverride = parsed.diffModeOverride;
+			if (Array.isArray(parsed.comments)) this._comments = parsed.comments.filter(comment => comment && typeof comment.id === "string" && typeof comment.cardId === "string" && typeof comment.body === "string");
+			if (parsed.decisions && typeof parsed.decisions === "object") this._decisions = parsed.decisions;
+			if (Array.isArray(parsed.completedCardIds)) this._completedCardIds = parsed.completedCardIds.filter(id => this.cards.some(card => card.id === id));
+			if (Array.isArray(parsed.dismissedSuggestionIds)) this._dismissedSuggestionIds = parsed.dismissedSuggestionIds.filter(id => typeof id === "string");
+		} catch (err) {
+			console.warn("[pr-walkthrough] failed to restore persisted state", err);
+		}
+	}
+
+	private persistState(): void {
+		const key = this.persistenceStorageKey();
+		if (!key || this._loadedPersistenceKey !== this.persistenceKey || typeof localStorage === "undefined") return;
+		const persisted: PersistedPrWalkthroughState = {
+			activeCardId: this._activeCardId,
+			diffModeOverride: this._diffModeOverride,
+			comments: this._comments,
+			decisions: this._decisions,
+			completedCardIds: this._completedCardIds,
+			dismissedSuggestionIds: this._dismissedSuggestionIds,
+		};
+		try {
+			localStorage.setItem(key, JSON.stringify(persisted));
+		} catch (err) {
+			console.warn("[pr-walkthrough] failed to persist state", err);
+		}
 	}
 
 	private _decisionGlyph(cardId: string): string {

@@ -153,8 +153,9 @@ test.describe("PR walkthrough panel", () => {
 	});
 
 	test("supports line comments, dislike gating, revisions, audit draft, and reload persistence", async ({ page }) => {
-		const firstLineComment = `line-comment-${Date.now()}`;
-		const editedLineComment = `${firstLineComment}-edited`;
+		const timestamp = Date.now();
+		const firstLineComment = `line-comment-${timestamp}`;
+		const editedLineComment = `edited-line-comment-${timestamp + 1}`;
 		const broadConcern = `broad-concern-${Date.now()}`;
 		const revisedConcern = `revised-concern-${Date.now()}`;
 
