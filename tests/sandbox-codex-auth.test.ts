@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { buildDockerRunArgs } from "../src/server/agent/docker-args.js";
+import { PreferencesStore } from "../src/server/agent/preferences-store.js";
 import {
 	buildSandboxAgentAuthJson,
 	ensureSandboxAgentAuthFile,
@@ -145,6 +146,28 @@ describe("sandbox OpenAI Codex auth", () => {
 
 		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("allowed-project"), "utf-8"));
 		assert.deepEqual(written, { "openai-codex": { type: "api_key", key: "codex-key" } });
+	});
+
+	it("mounts preference-backed OpenAI Codex auth when sandbox token policy allows it", () => {
+		const prefs = new PreferencesStore(path.join(root, "state"));
+		prefs.set("providerKey.openai-codex", "pref-codex-key");
+		writeAuthJson({
+			"openai-codex": { type: "api_key", key: "host-codex-key" },
+		});
+
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: path.join(root, "workspace"),
+			projectId: "pref-project",
+			sandboxAgentAuthAllowed: sandboxTokenPolicyAllowsCodexAuth([{ key: "OPENAI_CODEX_AUTH", enabled: true }]),
+			sandboxAgentAuthPrefs: prefs,
+		});
+		const volumes = dockerVolumes(args);
+		const authMount = volumes.find((v) => v.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
+		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
+
+		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("pref-project"), "utf-8"));
+		assert.deepEqual(written, { "openai-codex": { type: "api_key", key: "pref-codex-key" } });
 	});
 
 	it("keeps existing sandbox env-token resolution for Anthropic and OpenAI API keys", async () => {
