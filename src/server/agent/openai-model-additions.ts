@@ -73,6 +73,11 @@ export const OPENAI_MODEL_ADDITIONS: OpenAIAddition[] = [
 		input: ["text", "image"],
 		cost: COST_GPT_55,
 	},
+	// Deliberately no openai-codex/gpt-5.5-pro: Pi 0.77 only ships
+	// openai-codex/gpt-5.5, and live ChatGPT rejects the pro id.
+];
+
+const DEPRECATED_OPENAI_MODEL_ADDITIONS: OpenAIAddition[] = [
 	{
 		id: "gpt-5.5-pro",
 		name: "GPT-5.5 pro",
@@ -256,6 +261,17 @@ export function writeOpenAIModelAdditions(): void {
 	if (!data.providers) data.providers = {};
 
 	let changed = false;
+	for (const model of DEPRECATED_OPENAI_MODEL_ADDITIONS) {
+		const providerBlock = data.providers[model.provider];
+		const models = providerBlock?.models;
+		if (!Array.isArray(models)) continue;
+		const existing = models.find((m: Record<string, unknown>) => m.id === model.id) as Record<string, unknown> | undefined;
+		if (existing) {
+			models.splice(models.indexOf(existing), 1);
+			changed = true;
+		}
+	}
+
 	for (const model of OPENAI_MODEL_ADDITIONS) {
 		const provider = model.provider;
 		const builtIn = getBuiltInModel(provider, model.id);

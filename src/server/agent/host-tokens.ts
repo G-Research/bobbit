@@ -5,8 +5,9 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
-import { globalAuthPath } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 /** Provider keys from auth.json / host env → sandbox env var name + description */
@@ -56,6 +57,8 @@ const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKey
 ];
 
 /** Well-known non-provider tokens that users may want in sandboxes */
+export const SANDBOX_AGENT_AUTH_RELATIVE_PATH = path.join("sandbox-agent-auth", "auth.json");
+
 const TOOL_TOKENS: { envVar: string; label: string; detect: () => boolean }[] = [
 	{
 		envVar: "GITHUB_TOKEN",
@@ -78,18 +81,81 @@ function detectGhCli(): boolean {
 	}
 }
 
-function detectAuthJson(): Record<string, boolean> {
-	const result: Record<string, boolean> = {};
+function readHostAuthJson(): Record<string, any> | null {
 	try {
 		const authPath = globalAuthPath();
-		if (fs.existsSync(authPath)) {
-			const data = JSON.parse(fs.readFileSync(authPath, "utf-8"));
-			for (const key of Object.keys(data)) {
-				result[key] = true;
-			}
+		if (!fs.existsSync(authPath)) return null;
+		const data = JSON.parse(fs.readFileSync(authPath, "utf-8"));
+		return data && typeof data === "object" && !Array.isArray(data) ? data : null;
+	} catch { return null; }
+}
+
+function detectAuthJson(): Record<string, boolean> {
+	const result: Record<string, boolean> = {};
+	const data = readHostAuthJson();
+	if (data) {
+		for (const key of Object.keys(data)) {
+			result[key] = true;
 		}
-	} catch { /* ignore */ }
+	}
 	return result;
+}
+
+function isCredentialObject(value: unknown): value is Record<string, any> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUsableCodexCredential(value: unknown): value is Record<string, any> {
+	if (!isCredentialObject(value)) return false;
+	if (value.type === "oauth" && typeof value.access === "string" && value.access) return true;
+	if (value.type === "api_key" && typeof value.key === "string" && value.key) return true;
+	return false;
+}
+
+export function sandboxAgentAuthPath(): string {
+	return path.join(bobbitStateDir(), SANDBOX_AGENT_AUTH_RELATIVE_PATH);
+}
+
+/**
+ * Build the minimal auth.json content a sandboxed pi-coding-agent needs for
+ * ChatGPT / OpenAI Codex OAuth. Never copies unrelated provider credentials.
+ */
+export function buildSandboxAgentAuthJson(prefs?: PreferencesStore | null): Record<string, any> {
+	const auth: Record<string, any> = {};
+	const storedCodexKey = prefs?.get("providerKey.openai-codex") as string | undefined;
+	if (storedCodexKey) {
+		auth["openai-codex"] = { type: "api_key", key: storedCodexKey };
+		return auth;
+	}
+
+	const hostAuth = readHostAuthJson();
+	if (!hostAuth) return auth;
+
+	const codex = hostAuth["openai-codex"];
+	if (isUsableCodexCredential(codex)) {
+		auth["openai-codex"] = codex;
+		return auth;
+	}
+
+	// Older installs may have ChatGPT OAuth under `openai`. Only OAuth is a
+	// Codex-compatible credential; OpenAI API keys continue to flow via env vars.
+	const openai = hostAuth.openai;
+	if (isCredentialObject(openai) && openai.type === "oauth" && typeof openai.access === "string" && openai.access) {
+		auth["openai-codex"] = openai;
+	}
+	return auth;
+}
+
+export function ensureSandboxAgentAuthFile(prefs?: PreferencesStore | null): string {
+	const authPath = sandboxAgentAuthPath();
+	const next = `${JSON.stringify(buildSandboxAgentAuthJson(prefs), null, 2)}\n`;
+	fs.mkdirSync(path.dirname(authPath), { recursive: true });
+	let current: string | undefined;
+	try { current = fs.readFileSync(authPath, "utf-8"); } catch { /* missing */ }
+	if (current !== next) {
+		fs.writeFileSync(authPath, next, { encoding: "utf-8", mode: 0o600 });
+	}
+	return authPath;
 }
 
 export interface DetectedHostToken {
@@ -153,14 +219,11 @@ export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore |
 		}
 		// Check auth.json
 		try {
-			const authPath = globalAuthPath();
-			if (fs.existsSync(authPath)) {
-				const data = JSON.parse(fs.readFileSync(authPath, "utf-8"));
-				const providerData = data[providerForEnv.provider];
-				if (providerData) {
-					if (providerData.type === "oauth" && providerData.access) return providerData.access;
-					if (providerData.type === "api_key" && providerData.key) return providerData.key;
-				}
+			const data = readHostAuthJson();
+			const providerData = data?.[providerForEnv.provider];
+			if (providerData) {
+				if (providerData.type === "oauth" && providerData.access) return providerData.access;
+				if (providerData.type === "api_key" && providerData.key) return providerData.key;
 			}
 		} catch { /* ignore read errors */ }
 	}

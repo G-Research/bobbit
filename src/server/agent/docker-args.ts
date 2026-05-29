@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
+import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -196,6 +197,12 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	} catch {
 		// models.json doesn't exist — agent will rely on env vars for model discovery
 	}
+
+	// Mount a sanitized auth.json that contains only the OpenAI Codex credential.
+	// Never mount the host agent dir or full auth.json: it may contain unrelated
+	// provider credentials that sandboxed agents must not be able to read.
+	const sandboxAuthJson = ensureSandboxAgentAuthFile();
+	args.push("-v", `${toDockerPath(sandboxAuthJson)}:/home/node/.bobbit/agent/auth.json:ro`);
 
 	// Session prompts directory
 	const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
