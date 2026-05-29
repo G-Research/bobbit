@@ -851,6 +851,8 @@ When only one project is registered, its folder row defaults to expanded so ther
 
 The per-project "+ goal" button on each project row bypasses the popover - the project is already unambiguous. Goal creation is centralized in `startNewGoalFlow(anchorEl)` in `src/app/goal-entry.ts` so every call site (toolbar button, mobile nav, empty-state CTA, `Alt+G` shortcut) stays in sync.
 
+**Goal badges.** `renderGoalBadge()` treats workflow progress as primary: workflow goals show PR status only after the gate summary exists and every gate has passed, so an open PR cannot mask incomplete verification. Non-workflow goals have no gate summary to wait for, so their sidebar badge can fall back to PR status as soon as `state.prStatusCache` has an entry.
+
 #### Staff agents in the sidebar
 
 Staff agents are project-scoped permanent sessions: each staff record carries a `projectId`, lives in that project's `staff.json`, and runs either in the project root/subdirectory or in a project-derived `staff-<name>-<id>` worktree. Each project group in the sidebar renders a dedicated, collapsible **Staff** sub-section between the project's goals and its ungrouped Sessions list. The sub-section is rendered by `renderStaffSidebarSection` in `src/app/sidebar.ts` (the same helper drives desktop and mobile — it branches internally on `isDesktop()`).
@@ -1911,9 +1913,15 @@ All settings in `project.yaml` (Settings → Project → Docker Sandbox):
 ```yaml
 sandbox: "docker"                      # "none" (default) or "docker"
 sandbox_image: "bobbit-agent"          # must be pre-built
-sandbox_credentials: '{"GITHUB_TOKEN": "ghp_..."}'  # env vars for container
+sandbox_tokens:
+  - key: GITHUB_TOKEN
+    enabled: true
+  - key: OPENAI_CODEX_AUTH              # allows generated Codex auth.json
+    enabled: true
 sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 ```
+
+`sandbox_credentials`, `sandbox_github_token`, and `sandbox_host_token_overrides` are legacy fallbacks. New configuration should use structured `sandbox_tokens`, whose secret `value` fields are stored in `SecretsStore` rather than persisted inline in `project.yaml`.
 
 ### Docker image
 
@@ -1921,7 +1929,7 @@ sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 docker build -t bobbit-agent docker/
 ```
 
-Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential. Agent CLI bind-mounted at runtime.
+Auto-built on startup if image missing but `docker/Dockerfile` exists (120s timeout). Includes Node.js 20, git, curl, gh, build-essential, and the pinned `pi-coding-agent` package used by sandboxed agents.
 
 ### How it works
 
@@ -1974,6 +1982,20 @@ Each sandboxed project gets a single 256-bit token shared by all sessions in tha
 **Allowed endpoints:** `/api/health`, `/api/internal/mcp-call`, `/api/internal/verification-result`, `/api/preview/mount`, `/api/sessions` (forced sandboxed), own session CRUD, own goal+team+gates+tasks, `/api/tasks/:id`. Everything else blocked. `bash_bg` blocked at tool and API level.
 
 Full allowlist: see `src/server/auth/sandbox-guard.ts`.
+
+### Sandbox agent auth.json
+
+Sandbox containers need Pi's agent auth path for OpenAI Codex models, but mounting the host `~/.bobbit/agent/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only `~/.bobbit/agent/sessions/` from the host agent directory and writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`.
+
+The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex credentials while another denies them without sharing a stale mount.
+
+Policy rules:
+
+- no `sandbox_tokens` configured: preserve the legacy fallback and include Codex auth when available;
+- `sandbox_tokens` configured: include Codex auth only when an enabled `OPENAI_CODEX_AUTH` or `OPENAI_API_KEY` entry is present;
+- policy denied or no credential found: write `{}` so Pi gets a valid auth path with no secret.
+
+Credential source order is deliberate. `providerKey.openai-codex` from preferences wins first, then sanitized host `openai-codex` auth, then legacy ChatGPT OAuth stored under `openai`. This lets Settings-backed credentials work in Docker while keeping the mounted file minimal (`type`, key/access, refresh, expires only).
 
 ### Resource limits
 
@@ -2620,6 +2642,12 @@ This is strictly better than the pre-fix state: one-off glitches self-heal on th
 ### Team-manager suppression removed
 
 The old `if (teamLeadSession.lastTurnErrored) { suppress }` guard in `team-manager.ts` existed solely because a nudge to an errored team lead would vanish into the queue forever. With implicit unstick + the cap, `SessionManager` is the single source of truth for error-state policy: the nudge either unsticks the lead (≤ 3 errors) or parks (≥ 3). TeamManager no longer second-guesses, which closes the "worker idle → nudge dropped → team stalls" path.
+
+### Prompt dispatch failure recovery
+
+Direct prompts and queued prompts mark the session `streaming` optimistically before calling Pi. If `rpcClient.prompt()` rejects, or resolves `{ success: false, error }`, Bobbit assumes the agent did not accept the text and re-enqueues the same rows at the front of `PromptQueue` in original order. A zero-delay follow-up drain lets Pi finish any abort/cleanup microtasks before Bobbit tries again.
+
+The recovery path deliberately does **not** re-enqueue when the failure is a child-exit path and the session is already `terminated` or `aborting`. In that state the bridge is gone; sandbox recovery, force-abort recovery, or explicit user retry owns the next live process. This prevents a dead child from causing an immediate redispatch loop while still preserving prompts rejected by transient dispatch races.
 
 ### Key files
 

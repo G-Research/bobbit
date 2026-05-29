@@ -89,6 +89,12 @@ Post-spawn helpers still verify the agent state. When the spawn-pinned model mat
 
 The AI Gateway cold-cache fallback remains the documented exception: if Bobbit cannot resolve a concrete gateway model before spawning, it may boot first and select the best-ranked gateway model after discovery completes.
 
+## Verification sub-session tool activation
+
+Verification reviewer, QA, and legacy direct sub-sessions use the same tool-activation contract as normal sessions. Bobbit does not pass Pi's unified `--tools` allowlist for those sub-sessions, because that flag can filter out Bobbit extension and MCP tools as well as Pi builtins.
+
+Instead, verification sub-sessions route through `buildVerificationToolActivation()`, which delegates to `computeToolActivationArgs()` when a `ToolManager` is available. That emits `--no-builtin-tools`, `--no-extensions`, explicit extension paths, the `_builtins` re-registration shim, and the guard extension used for policy enforcement. If no `ToolManager` is available, the legacy direct path emits no explicit activation flags so `RpcBridge.start()` can apply its baseline fallback without reintroducing `--tools`.
+
 ## Persistence, reconnect, restore, and archived sessions
 
 Opus 4.8 persistence uses the existing session-store fields: `modelProvider` and `modelId`. Those fields are the source of truth when live agent state is temporarily unavailable.
@@ -102,6 +108,20 @@ The reconnect and restore contract is:
 - continue-archived clones the Pi JSONL transcript and pre-resolves the copied session's model so the new agent starts on the saved model rather than flashing a placeholder.
 
 The client still has a short-lived placeholder model object for pre-state rendering. The no-flash guarantee is server-owned: every live, restored, and archived path must push or verify the persisted model immediately enough that users see `claude-opus-4-8` instead of an older placeholder or Pi default.
+
+## Sandbox OpenAI Codex auth
+
+Pi `0.77.0` added headless OpenAI Codex login support, so sandboxed agents need a safe way to see Codex credentials without mounting the host agent directory wholesale.
+
+Bobbit never mounts host `~/.bobbit/agent/auth.json` into Docker containers. It mounts only the host sessions directory and `models.json`, then writes a generated, sandbox-scoped auth file under `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` and mounts that file read-only as `/home/node/.bobbit/agent/auth.json`. The scope is normally the project id, which prevents one project's allowed Codex auth file from being reused by another project whose policy denies it.
+
+The generated auth file follows sandbox token policy:
+
+- if `sandbox_tokens` is unset, Bobbit preserves the legacy permissive fallback and may include Codex auth;
+- if `sandbox_tokens` is set, Codex auth is included only when an enabled `OPENAI_CODEX_AUTH` or `OPENAI_API_KEY` entry is present;
+- when policy denies Codex auth, the mounted file is `{}` so Pi sees an expected auth path but no secret.
+
+When Codex auth is allowed, preference-backed credentials win first: `providerKey.openai-codex` becomes an `openai-codex` API-key entry. If no preference key is set, Bobbit copies a sanitized host `openai-codex` credential from auth.json, then falls back to legacy ChatGPT OAuth stored under `openai`. Only the credential fields Pi needs are copied (`type`, API key, OAuth access, refresh, and expires).
 
 ## Transcript compatibility: `active_tools_change`
 
@@ -118,10 +138,11 @@ This keeps archived transcript views, `read_session`, and pre-compaction history
 
 ## Bedrock patch and RPC lifecycle coverage
 
-Two Pi-adjacent compatibility points are intentionally regression-tested:
+Three Pi-adjacent compatibility points are intentionally regression-tested:
 
 - **Bedrock request-header patch.** Bobbit still patches Pi's Bedrock provider so Bedrock traffic can carry Bobbit's request headers. The compatibility test verifies that the installed `amazon-bedrock.js` still has the expected patch anchors, or is already patched, before asserting the Bobbit hook is present. This catches upstream Pi provider rewrites early.
 - **RPC child-exit lifecycle.** Pi `0.76+` rejects pending RPC requests more reliably when the child process exits. Bobbit's bridge test crashes a synthetic Pi child while a prompt is pending and asserts the prompt rejects exactly once, `process_exit` is emitted exactly once, and repeated `stop()` calls are idempotent.
+- **Prompt dispatch recovery.** If a direct prompt or queued prompt is dequeued but the RPC call rejects before the agent accepts it, Bobbit re-enqueues the exact rows at the front of the queue and schedules another drain. If the child has already exited and the session is terminated or aborting, Bobbit does not recover the rows into a dead process; restart/abort recovery owns that path.
 
 These tests are not Opus-specific, but they protect the runtime paths most likely to be disturbed by Pi upgrades.
 
