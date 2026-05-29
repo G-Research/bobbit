@@ -150,15 +150,28 @@ async function expectDashboardGateStatus(page: Page, gateId: string, status: "pe
 		.toHaveAttribute("data-gate-status", status, { timeout: 15_000 });
 }
 
-async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
-	await expect.poll(async () => page.evaluate((id) => {
+async function readGateStatusCache(page: Page, goalId: string): Promise<{ passed: number; total: number; awaitingSignoffCount: number; awaitingHumanSignoff: boolean } | null> {
+	return page.evaluate((id) => {
 		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 		const cached = state?.gateStatusCache?.get?.(id);
-		return cached ? { passed: cached.passed, total: cached.total } : null;
-	}, goalId), {
+		return cached ? {
+			passed: cached.passed,
+			total: cached.total,
+			awaitingSignoffCount: cached.awaitingSignoffCount ?? 0,
+			awaitingHumanSignoff: !!cached.awaitingHumanSignoff,
+		} : null;
+	}, goalId);
+}
+
+async function expectGateStatusCache(page: Page, goalId: string, expected: Partial<{ passed: number; total: number; awaitingSignoffCount: number; awaitingHumanSignoff: boolean }>, message: string): Promise<void> {
+	await expect.poll(async () => readGateStatusCache(page, goalId), {
 		timeout: 15_000,
-		message: `sidebar gate status cache should update to ${passed}/${total}`,
-	}).toEqual({ passed, total });
+		message,
+	}).toMatchObject(expected);
+}
+
+async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
+	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
 
 	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${passed} of ${total} gates passed"]`).first())
 		.toBeVisible({ timeout: 15_000 });
@@ -505,6 +518,8 @@ test.describe("<goal-status-widget>", () => {
 
 			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 10_000 });
+			await pill.click();
+			await expect(page.locator("[data-testid='goal-widget-signoff']"), "widget popover sign-off cards should clear after approve without reload").toHaveCount(0, { timeout: 5_000 });
 
 			await page.reload();
 			await openSession(page, sessionId);
@@ -521,11 +536,12 @@ test.describe("<goal-status-widget>", () => {
 		}
 	});
 
-	test("real workflow-editor-authored human-signoff signal opens review pane and Approve resolves gate", async ({ page }) => {
-		test.setTimeout(60_000);
+	test("real workflow-editor-authored human-signoff signal clears cross-surface awaiting UI after Approve", async ({ page, context }) => {
+		test.setTimeout(75_000);
 		const workflowId = `widget-real-signoff-${Date.now()}`;
 		let goalId: string | undefined;
 		let sessionId: string | undefined;
+		let dashboardPage: Page | undefined;
 		try {
 			await authorSignoffWorkflowViaEditor(page, workflowId);
 
@@ -548,6 +564,13 @@ test.describe("<goal-status-widget>", () => {
 
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "true", { timeout: 15_000 });
 			await expect(page.locator("[data-testid='goal-status-widget-awaiting']")).toBeVisible();
+			await expectGateStatusCache(page, goalId, { awaitingSignoffCount: 1, awaitingHumanSignoff: true }, "shared summary should show the parked sign-off before approval");
+
+			dashboardPage = await context.newPage();
+			await openApp(dashboardPage);
+			await navigateToHash(dashboardPage, `#/goal/${goalId}?tab=gates`);
+			await expect(dashboardPage.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design"]'))
+				.toHaveAttribute("data-gate-status", "running", { timeout: 15_000 });
 
 			await pill.click();
 			const card = page.locator("[data-testid='goal-widget-signoff']").first();
@@ -560,9 +583,16 @@ test.describe("<goal-status-widget>", () => {
 			await expect(page.locator("review-document").getByText("Ready for approval").first()).toBeVisible({ timeout: 5_000 });
 			await reviewPane(page).getByRole("button", { name: /^Approve$/ }).click();
 
-			await waitForGateStatus(goalId, "design", "passed", 20_000);
+			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
+			await expectGateStatusCache(page, goalId, { awaitingSignoffCount: 0, awaitingHumanSignoff: false }, "shared summary should clear awaiting sign-off after approval without reload");
 			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 15_000 });
+			await pill.click();
+			await expect(page.locator("[data-testid='goal-widget-signoff']"), "widget popover sign-off card should clear after approval without reload").toHaveCount(0, { timeout: 5_000 });
+			await waitForGateStatus(goalId, "design", "passed", 20_000);
+			await expectSidebarGateBadge(page, goalId, 1, 1);
+			await expectDashboardGateStatus(dashboardPage, "design", "passed");
 		} finally {
+			if (dashboardPage) await dashboardPage.close().catch(() => { /* ignore */ });
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			if (goalId) await deleteGoal(goalId).catch(() => { /* ignore */ });
 			await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* ignore */ });
@@ -599,6 +629,10 @@ test.describe("<goal-status-widget>", () => {
 			expect(rejectCall.stepName).toBe(STEP_NAME);
 			expect(String(rejectCall.feedback ?? "")).toContain(feedback);
 			await expect(signoffReviewTab(page)).toHaveCount(0, { timeout: 5_000 });
+			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+			await expect(pill).toHaveAttribute("data-awaiting-signoffs", "false", { timeout: 10_000 });
+			await pill.click();
+			await expect(page.locator("[data-testid='goal-widget-signoff']"), "widget popover sign-off cards should clear after reject without reload").toHaveCount(0, { timeout: 5_000 });
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });

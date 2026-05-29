@@ -30,7 +30,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
-import { shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
+import { GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 
@@ -97,6 +97,13 @@ export class GoalStatusWidget extends LitElement {
 		}
 	};
 
+	private _onGateStatusClientEvent = (e: Event) => {
+		const msg = (e as CustomEvent).detail;
+		if (!msg || typeof msg !== "object") return;
+		if (typeof msg.goalId === "string" && msg.goalId !== this.goalId) return;
+		this._handleWsEvent(msg);
+	};
+
 	// Render into light DOM so global styles (Tailwind, the inline keyframe
 	// styles we inject below) apply identically to the rest of the chat header.
 	createRenderRoot() {
@@ -108,6 +115,7 @@ export class GoalStatusWidget extends LitElement {
 		document.addEventListener("click", this._onDocumentClick, true);
 		document.addEventListener("keydown", this._onEscapeKey, true);
 		window.addEventListener("hashchange", this._onHashChange);
+		window.addEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._ensureWidgetStyles();
 		if (this.goalId) {
 			void this._fetchInitial();
@@ -120,6 +128,7 @@ export class GoalStatusWidget extends LitElement {
 		document.removeEventListener("click", this._onDocumentClick, true);
 		document.removeEventListener("keydown", this._onEscapeKey, true);
 		window.removeEventListener("hashchange", this._onHashChange);
+		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._closeToken++;
 		this._removeDropdown();
 		this._disconnectWs();
@@ -341,6 +350,9 @@ export class GoalStatusWidget extends LitElement {
 
 	private _handleWsEvent(msg: any): void {
 		const t = msg?.type;
+		if (t === HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE) {
+			this._removeAwaitingSignoff(msg);
+		}
 		if (shouldRefreshGateStatusForEvent(msg)) {
 			scheduleGateStatusRefreshForGoal(this.goalId);
 		}
@@ -367,6 +379,21 @@ export class GoalStatusWidget extends LitElement {
 			}
 			default:
 				break;
+		}
+	}
+
+	private _removeAwaitingSignoff(msg: any): void {
+		const signalId = typeof msg?.signalId === "string" ? msg.signalId : null;
+		const stepName = typeof msg?.stepName === "string" ? msg.stepName : null;
+		if (!signalId || !stepName) return;
+		const key = `${signalId}::${stepName}`;
+		const filtered = this._awaitingSignoffs.filter(s => signoffKey(s) !== key);
+		if (filtered.length !== this._awaitingSignoffs.length) this._awaitingSignoffs = filtered;
+		if (this._reviewLaunchLoading.has(key)) {
+			const next = new Set(this._reviewLaunchLoading); next.delete(key); this._reviewLaunchLoading = next;
+		}
+		if (this._reviewLaunchErrors.has(key)) {
+			const next = new Map(this._reviewLaunchErrors); next.delete(key); this._reviewLaunchErrors = next;
 		}
 	}
 

@@ -9,7 +9,7 @@ import { state, renderApp, type Goal } from "./state.js";
 import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
-import { shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
+import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -166,6 +166,7 @@ let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; s
 let dashboardWs: WebSocket | null = null;
 let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
+let dashboardGateStatusClientListenerAttached = false;
 
 /** Current dashboard tab */
 let dashboardTab: DashboardTabId = "gates";
@@ -251,6 +252,33 @@ function disconnectDashboardWs(): void {
 	dashboardWs = null;
 }
 
+function handleGateStatusClientEvent(e: Event): void {
+	const msg = (e as CustomEvent).detail;
+	if (!msg || typeof msg !== "object") return;
+	if (typeof msg.goalId === "string" && msg.goalId !== currentGoalId) return;
+	if (shouldRefreshGateStatusForEvent(msg)) {
+		scheduleGateStatusRefreshForGoal(msg.goalId);
+	}
+	if (shouldRefreshGateDetailsForEvent(msg)) {
+		refreshGatesFromWsEvent(msg.goalId);
+	}
+	if (shouldRefreshActiveVerificationsForEvent(msg)) {
+		void fetchActiveVerifications(msg.goalId);
+	}
+}
+
+function connectGateStatusClientEvents(): void {
+	if (dashboardGateStatusClientListenerAttached) return;
+	window.addEventListener(GATE_STATUS_CLIENT_EVENT, handleGateStatusClientEvent);
+	dashboardGateStatusClientListenerAttached = true;
+}
+
+function disconnectGateStatusClientEvents(): void {
+	if (!dashboardGateStatusClientListenerAttached) return;
+	window.removeEventListener(GATE_STATUS_CLIENT_EVENT, handleGateStatusClientEvent);
+	dashboardGateStatusClientListenerAttached = false;
+}
+
 // ============================================================================
 // DATA FETCHING
 // ============================================================================
@@ -285,6 +313,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	renderApp();
 
 	connectDashboardWs();
+	connectGateStatusClientEvents();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
@@ -470,6 +499,7 @@ export function clearDashboardState(): void {
 	stopCostPolling();
 	stopGitStatusPolling();
 	stopSetupStatusPoll();
+	disconnectGateStatusClientEvents();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();

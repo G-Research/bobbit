@@ -1,3 +1,6 @@
+export const GATE_STATUS_CLIENT_EVENT = "bobbit-gate-status-event";
+export const HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE = "gate_verification_signoff_resolved";
+
 const GATE_STATUS_REFRESH_EVENT_TYPES_LIST = [
 	"gate_signal_received",
 	"gate_status_changed",
@@ -8,6 +11,7 @@ const GATE_STATUS_REFRESH_EVENT_TYPES_LIST = [
 	"gate_verification_awaiting_human",
 	"gate_verification_step_complete",
 	"gate_verification_complete",
+	HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE,
 ] as const;
 
 const GATE_DETAIL_REFRESH_EVENT_TYPES_LIST = [
@@ -20,6 +24,24 @@ const GATE_DETAIL_REFRESH_EVENT_TYPES_LIST = [
 export const GATE_STATUS_REFRESH_EVENT_TYPES = new Set<string>(GATE_STATUS_REFRESH_EVENT_TYPES_LIST);
 export const GATE_DETAIL_REFRESH_EVENT_TYPES = new Set<string>(GATE_DETAIL_REFRESH_EVENT_TYPES_LIST);
 export const ACTIVE_VERIFICATION_REFRESH_EVENT_TYPES = GATE_STATUS_REFRESH_EVENT_TYPES;
+
+export interface GateStatusClientEvent {
+	type: string;
+	goalId: string;
+	gateId?: string;
+	signalId?: string;
+	stepName?: string;
+	decision?: "pass" | "fail";
+}
+
+export function dispatchGateStatusClientEvent(detail: GateStatusClientEvent): void {
+	if (typeof window === "undefined" || typeof CustomEvent === "undefined") return;
+	window.dispatchEvent(new CustomEvent(GATE_STATUS_CLIENT_EVENT, { detail }));
+}
+
+export function dispatchHumanSignoffResolved(detail: Omit<GateStatusClientEvent, "type"> & { decision: "pass" | "fail" }): void {
+	dispatchGateStatusClientEvent({ ...detail, type: HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE });
+}
 
 export function gateEventGoalId(event: unknown): string | null {
 	return event && typeof event === "object" && typeof (event as { goalId?: unknown }).goalId === "string"
