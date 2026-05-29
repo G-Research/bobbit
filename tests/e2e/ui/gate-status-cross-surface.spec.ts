@@ -195,6 +195,42 @@ async function expectSidebarPrBadge(page: Page, goalId: string, visible: boolean
 	else await expect(prBadge, "sidebar must not let PR status suppress incomplete/verifying gate progress").toHaveCount(0);
 }
 
+async function expectWorkflowPrSuppressedUntilGateSummary(page: Page, goalId: string): Promise<void> {
+	await page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const goal = state.goals.find((candidate: any) => candidate?.id === id);
+		if (!goal?.workflow?.gates?.length) throw new Error("expected workflow goal in app state");
+		state.gateStatusCache.delete(id);
+		state.prStatusCache.set(id, {
+			number: 655,
+			url: "https://example.test/pull/655",
+			state: "OPEN",
+			reviewDecision: "REVIEW_REQUIRED",
+			mergeable: "MERGEABLE",
+		});
+		(window as any).__bobbitRenderApp?.();
+	}, goalId);
+	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+	await expect(row, "sidebar goal row should be visible before asserting missing-summary fallback").toBeVisible({ timeout: 15_000 });
+	const immediatePrCount = await row.locator('[title="PR #655 open — awaiting review"]').count();
+	expect(immediatePrCount, "workflow goal with no cached gate summary must not fall back to PR status").toBe(0);
+
+	await page.evaluate(({ id, gateId }) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		state.gateStatusCache.set(id, {
+			passed: 0,
+			total: 1,
+			verifying: false,
+			verifyingCount: 0,
+			awaitingSignoffCount: 0,
+			awaitingHumanSignoff: false,
+			runningGateIds: [],
+			gates: [{ gateId, status: "pending", effectiveStatus: "pending", running: false, awaitingSignoffCount: 0, signalCount: 0 }],
+		});
+		(window as any).__bobbitRenderApp?.();
+	}, { id: goalId, gateId: GATE_ID });
+}
+
 async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise<void> {
 	await expect.poll(async () => readSharedGateSummary(page, goalId), {
 		timeout: 15_000,
@@ -344,7 +380,7 @@ test.describe("Gate status cross-surface active verification", () => {
 			await openSession(page, teamLeadId);
 			await expect(page.locator("[data-testid='goal-status-widget-pill']").first()).toBeVisible({ timeout: 15_000 });
 			await expectInitialSharedGateBadge(page, setup.goalId);
-			await setSidebarPrStatus(page, setup.goalId);
+			await expectWorkflowPrSuppressedUntilGateSummary(page, setup.goalId);
 			await expectSidebarGateBadgeLabel(page, setup.goalId, "0 of 1 gates passed");
 			await expectSidebarPrBadge(page, setup.goalId, false);
 			await expectWidgetPillRerendersOnCacheUpdate(page, setup.goalId);

@@ -727,13 +727,15 @@ export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "
 }
 
 /** Render a PR icon or gate status badge next to a goal in the sidebar. */
-function renderGoalBadge(goalId: string) {
-	const gs = state.gateStatusCache.get(goalId);
-	const gateBadge = renderGateProgressBadge(goalId);
-	const pr = state.prStatusCache.get(goalId);
-	// Workflow progress remains the primary status until all gates pass. PR status
-	// may replace it only after completion, or for goals with no gate summary.
-	if (!pr || (gs && gs.passed !== gs.total)) return gateBadge;
+function renderGoalBadge(goal: Goal) {
+	const gs = state.gateStatusCache.get(goal.id);
+	const gateBadge = renderGateProgressBadge(goal.id);
+	const pr = state.prStatusCache.get(goal.id);
+	const hasWorkflow = (goal.workflow?.gates?.length ?? 0) > 0;
+	// Workflow progress is primary. PR status may replace it only once the
+	// workflow summary is cached and all gates have passed; without a summary,
+	// a workflow goal should stay quiet instead of falling back to PR.
+	if (!pr || (hasWorkflow && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return gateBadge;
 
 	let color: string;
 	if (pr.state === "MERGED") color = "#a87fd4";
@@ -925,7 +927,7 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
-				${renderGoalBadge(goal.id)}
+				${renderGoalBadge(goal)}
 				${mobile
 					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
