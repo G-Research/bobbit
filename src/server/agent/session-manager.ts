@@ -1990,6 +1990,12 @@ export class SessionManager {
 		attachments?: unknown[];
 		isSteered?: boolean;
 	}>, reason: string, source: string): void {
+		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
+		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
+			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			return;
+		}
+
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
