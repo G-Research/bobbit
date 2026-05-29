@@ -30,6 +30,7 @@ const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
 
 import { isProposalType, type ProposalType } from "./proposal-registry.js";
 import { state, renderApp, setProjectsIfChanged } from "./state.js";
+import { openPrWalkthroughPanel, parseWalkthroughPrCommand } from "./pr-walkthrough.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
@@ -830,6 +831,13 @@ export class RemoteAgent {
 					?.filter((a: any) => a.type === "image" && a.content)
 					.map((a: any) => ({ type: "image", data: a.content, mimeType: a.mimeType }));
 			}
+		}
+
+		const walkthroughInput = !attachments?.length && !imageData?.length ? parseWalkthroughPrCommand(text) : null;
+		if (walkthroughInput) {
+			openPrWalkthroughPanel(state, this.gatewaySessionId || state.selectedSessionId || "", walkthroughInput);
+			renderApp();
+			return;
 		}
 
 		// Stash attachments so we can enrich the echoed user message
