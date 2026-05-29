@@ -36,7 +36,7 @@ import {
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope } from "./config-scope.js";
-import { gatewayFetch, fetchSandboxStatus, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { dispatchIndexEvent } from "./components/search-status-dot.js";
 import "./components/search-status-dot.js";
@@ -105,6 +105,10 @@ let _listening = false;
 let settingsShowTimestamps = false;
 let settingsShowTimestampsLoaded = false;
 let settingsPlayFinishSound = true;
+let harnessStatusLoaded = false;
+let harnessRestartAvailable = false;
+let harnessRestartState: "idle" | "requesting" | "requested" | "error" = "idle";
+let harnessRestartError = "";
 // Skills-catalog byte budget override. `null` means "use server default" (no preference set).
 let settingsSkillsCatalogBudget: number | null = null;
 
@@ -784,6 +788,56 @@ function resetRebindState(): void {
 
 export function toggleSettings(): void {
 	toggleConfigPage(["settings"], () => setHashRoute("settings"));
+}
+
+function loadHarnessStatus(): void {
+	if (harnessStatusLoaded) return;
+	harnessStatusLoaded = true;
+	fetchHarnessStatus().then(status => {
+		harnessRestartAvailable = status.restartAvailable;
+		renderApp();
+	});
+}
+
+async function requestSettingsRestart(): Promise<void> {
+	if (!harnessRestartAvailable) return;
+	if (harnessRestartState !== "idle" && harnessRestartState !== "error") return;
+	harnessRestartState = "requesting";
+	harnessRestartError = "";
+	renderApp();
+
+	const result = await requestHarnessRestart();
+	if (result.ok) {
+		harnessRestartState = "requested";
+		harnessRestartError = "";
+	} else {
+		harnessRestartState = "error";
+		harnessRestartError = result.error || "Restart request failed";
+	}
+	renderApp();
+}
+
+function renderHarnessRestartControl() {
+	if (!harnessRestartAvailable) return "";
+	const requesting = harnessRestartState === "requesting";
+	const requested = harnessRestartState === "requested";
+	const label = requesting ? "Requesting..." : requested ? "Restart Requested" : "Restart Server";
+	return html`
+		<div class="ml-auto flex items-center gap-2">
+			${harnessRestartState === "error" && harnessRestartError ? html`
+				<span class="text-xs text-destructive max-w-[40vw] sm:max-w-[18rem] truncate" title=${harnessRestartError}>${harnessRestartError}</span>
+			` : ""}
+			<button
+				class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-background text-foreground hover:bg-secondary transition-colors disabled:opacity-60 disabled:pointer-events-none"
+				?disabled=${requesting || requested}
+				@click=${requestSettingsRestart}
+				title="Restart Server"
+			>
+				${requesting ? html`<span class="inline-flex animate-spin">${icon(Loader2, "xs")}</span>` : icon(RotateCcw, "xs")}
+				<span>${label}</span>
+			</button>
+		</div>
+	`;
 }
 
 function handleRebindKeydown(e: KeyboardEvent): void {
@@ -3717,6 +3771,7 @@ function renderMaintenanceTab() {
 export function renderSettingsPage() {
 	// Manage keydown listener lifecycle
 	updateKeydownListener();
+	loadHarnessStatus();
 
 	const currentScope = getActiveScope();
 	const tabs = getTabsForScope(currentScope);
@@ -3727,12 +3782,15 @@ export function renderSettingsPage() {
 		<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 			<!-- Header -->
 			<div class="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
-				<button
-					class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-					@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
-					title="Back"
-				>${icon(ArrowLeft, "sm")}</button>
-				<h1 class="text-lg font-semibold">Settings</h1>
+				<div class="flex items-center gap-3 min-w-0">
+					<button
+						class="p-1.5 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+						@click=${() => { resetRebindState(); cleanupListener(); toggleSettings(); }}
+						title="Back"
+					>${icon(ArrowLeft, "sm")}</button>
+					<h1 class="text-lg font-semibold truncate">Settings</h1>
+				</div>
+				${renderHarnessRestartControl()}
 			</div>
 			<!-- Scope row -->
 			${renderScopeRow(currentScope, tabs)}
