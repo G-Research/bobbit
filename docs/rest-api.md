@@ -474,6 +474,8 @@ There is no `?scope=server` parameter on workflow endpoints — it was removed w
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
+`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`. For AI Gateway models, Bobbit derives this from `/v1/models` `pricing.prompt` and `pricing.completion` metadata and does not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+
 `POST /api/models/test` responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
@@ -494,7 +496,7 @@ Used by the Settings → Models tab per-row Test button. See [AGENTS.md — Debu
 | `POST` | `/api/aigw/refresh` | Re-discover models from configured gateway |
 | `*` | `/api/aigw/v1/*` | Proxy requests to configured AI gateway |
 
-Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session).
+Outbound requests that these endpoints make to the configured/tested AI Gateway carry Bobbit's canonical AI Gateway user agent. Model discovery also consumes `/v1/models` pricing metadata and persists converted costs into generated agent `models.json` entries. See [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) and [AI Gateway model pricing](internals.md#ai-gateway-model-pricing).
 
 ### OAuth
 
