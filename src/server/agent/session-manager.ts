@@ -1662,6 +1662,11 @@ export class SessionManager {
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
+	 *
+	 * Returns whether this exact prompt was dispatched immediately or merely
+	 * queued behind existing/busy work. Callers must not infer that from the
+	 * post-call session status: direct dispatch intentionally marks the session
+	 * streaming before the RPC resolves.
 	 */
 	async enqueuePrompt(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -1674,9 +1679,9 @@ export class SessionManager {
 		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
 		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
 		source?: PromptSource;
-	}): Promise<void> {
+	}): Promise<{ status: "dispatched" | "queued" }> {
 		const session = this.sessions.get(sessionId);
-		if (!session) return;
+		if (!session) return { status: "queued" };
 		session.lastPromptSource = opts?.source ?? "user";
 
 		// modelText is what the model sees; text is the user's verbatim input.
@@ -1724,7 +1729,7 @@ export class SessionManager {
 					isSteered: opts?.isSteered,
 				});
 				this.broadcastQueue(session);
-				return;
+				return { status: "queued" };
 			}
 
 			// Implicit unstick — new intent supersedes the failed turn.
@@ -1749,7 +1754,7 @@ export class SessionManager {
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
 			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered);
-			return;
+			return { status: "dispatched" };
 		}
 
 		// If agent is idle and queue is empty, dispatch directly. Mark streaming
@@ -1758,7 +1763,7 @@ export class SessionManager {
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
-			return;
+			return { status: "dispatched" };
 		}
 
 		// Agent is busy or queue has items — enqueue. Persisted queue holds
@@ -1776,6 +1781,7 @@ export class SessionManager {
 		if (session.status === "idle") {
 			this.drainQueue(session);
 		}
+		return { status: "queued" };
 	}
 
 	/**
