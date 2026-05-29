@@ -30,7 +30,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
-import { GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
+import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 
@@ -101,6 +101,11 @@ export class GoalStatusWidget extends LitElement {
 		const msg = (e as CustomEvent).detail;
 		if (!msg || typeof msg !== "object") return;
 		if (typeof msg.goalId === "string" && msg.goalId !== this.goalId) return;
+		if (msg.type === GATE_STATUS_CACHE_UPDATED_EVENT_TYPE) {
+			this.requestUpdate();
+			this._syncDropdown();
+			return;
+		}
 		this._handleWsEvent(msg);
 	};
 
@@ -629,13 +634,14 @@ export class GoalStatusWidget extends LitElement {
 	private _renderGateRow(gate: GateSummary): TemplateResult {
 		const resetting = this._resetLoading.has(gate.id);
 		const resetError = this._resetErrors.get(gate.id);
+		const effectiveStatus: GateStatus = this._activeGateIds.has(gate.id) ? "running" : gate.status;
 		return html`
-			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${gate.status}>
+			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${effectiveStatus}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
 					${this._renderGateStatusIndicator(gate)}
 					<span class="truncate text-foreground" title=${gate.name}>${gate.name}</span>
 				</div>
-				${gate.status === "passed" ? html`
+				${effectiveStatus === "passed" ? html`
 					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
 						<button
 							type="button"

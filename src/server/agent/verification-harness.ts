@@ -1534,8 +1534,11 @@ export class VerificationHarness {
 		// instance — simpler than scoping per (goal,gate,signal) and equally
 		// effective since the dedupe key includes signalId.
 		this.broadcastFn = (goalId: string, event: any) => {
-			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
-				event.seq = ++this._verifSeqCounter;
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
+				if (event.seq == null) event.seq = ++this._verifSeqCounter;
+				if (event.type !== "gate_verification_step_output") {
+					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration();
+				}
 			}
 			this._rawBroadcastFn(goalId, event);
 		};

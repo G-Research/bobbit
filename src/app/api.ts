@@ -21,6 +21,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
+import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 export { errorFromResponse, errorDetails };
 
 /** Track previous session statuses to detect streaming→idle transitions. */
@@ -831,6 +832,7 @@ function applyGateStatusSummary(goalId: string, summary: GateStatusSummary): boo
 		|| JSON.stringify(prev.runningGateIds ?? []) !== JSON.stringify(next.runningGateIds)
 		|| JSON.stringify(prev.gates ?? []) !== JSON.stringify(next.gates)) {
 		state.gateStatusCache.set(goalId, next);
+		dispatchGateStatusCacheUpdated(goalId);
 		return true;
 	}
 	return false;
@@ -842,13 +844,18 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 	const goalsWithWorkflow = state.goals.filter(g => g.workflow && g.workflow.gates.length > 0);
 	if (goalsWithWorkflow.length === 0) return false;
 
-	const results = await Promise.all(goalsWithWorkflow.map(async (g) => ({
-		goalId: g.id,
-		summary: await fetchGateStatusSummary(g.id),
-	})));
+	const results = await Promise.all(goalsWithWorkflow.map(async (g) => {
+		const token = reserveGateStatusRefreshToken(g.id);
+		return {
+			goalId: g.id,
+			token,
+			summary: await fetchGateStatusSummary(g.id),
+		};
+	}));
 
 	let changed = false;
-	for (const { goalId, summary } of results) {
+	for (const { goalId, token, summary } of results) {
+		if (!isLatestGateStatusRefresh(goalId, token)) continue;
 		changed = applyGateStatusSummary(goalId, summary) || changed;
 	}
 	if (changed && !skipRender) renderApp();
@@ -856,22 +863,35 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 }
 
 const scheduledGateStatusRefreshes = new Map<string, ReturnType<typeof setTimeout>>();
+const gateStatusRefreshTokens = new Map<string, number>();
+
+function reserveGateStatusRefreshToken(goalId: string): number {
+	const next = (gateStatusRefreshTokens.get(goalId) ?? 0) + 1;
+	gateStatusRefreshTokens.set(goalId, next);
+	return next;
+}
+
+function isLatestGateStatusRefresh(goalId: string, token: number): boolean {
+	return gateStatusRefreshTokens.get(goalId) === token;
+}
 
 export function scheduleGateStatusRefreshForGoal(goalId: string | null | undefined, delayMs = 50): void {
 	if (!goalId) return;
+	const token = reserveGateStatusRefreshToken(goalId);
 	const existing = scheduledGateStatusRefreshes.get(goalId);
 	if (existing) clearTimeout(existing);
 	scheduledGateStatusRefreshes.set(goalId, setTimeout(() => {
 		scheduledGateStatusRefreshes.delete(goalId);
-		void refreshGateStatusForGoal(goalId);
+		void refreshGateStatusForGoal(goalId, token);
 	}, delayMs));
 }
 
 /** Refresh gate status cache for a single goal (called from WS event handlers). */
-export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
+export async function refreshGateStatusForGoal(goalId: string, token = reserveGateStatusRefreshToken(goalId)): Promise<void> {
 	const goal = state.goals.find(g => g.id === goalId);
 	if (!goal?.workflow?.gates.length) return;
 	const summary = await fetchGateStatusSummary(goalId);
+	if (!isLatestGateStatusRefresh(goalId, token)) return;
 	if (applyGateStatusSummary(goalId, summary)) renderApp();
 }
 

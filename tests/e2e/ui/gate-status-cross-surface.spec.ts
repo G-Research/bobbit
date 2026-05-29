@@ -182,6 +182,41 @@ async function expectSharedGateBadgesVerifying(page: Page, goalId: string): Prom
 		.toBeVisible({ timeout: 15_000 });
 }
 
+async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string): Promise<void> {
+	await page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		state.gateStatusCache.set(id, {
+			passed: 0,
+			total: 1,
+			verifying: true,
+			verifyingCount: 1,
+			awaitingSignoffCount: 0,
+			awaitingHumanSignoff: false,
+			runningGateIds: ["slow-gate"],
+			gates: [{ gateId: "slow-gate", status: "pending", effectiveStatus: "running", running: true, awaitingSignoffCount: 0 }],
+		});
+		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
+	}, goalId);
+	await expect(page.locator("[data-testid='goal-status-widget-pill']").first().locator(`span[title="${VERIFY_TITLE}"]`).first(), "widget pill must rerender when the shared gate summary cache updates")
+		.toBeVisible({ timeout: 5_000 });
+	await page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		state.gateStatusCache.set(id, {
+			passed: 0,
+			total: 1,
+			verifying: false,
+			verifyingCount: 0,
+			awaitingSignoffCount: 0,
+			awaitingHumanSignoff: false,
+			runningGateIds: [],
+			gates: [{ gateId: "slow-gate", status: "pending", effectiveStatus: "pending", running: false, awaitingSignoffCount: 0 }],
+		});
+		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
+	}, goalId);
+	await expect(page.locator("[data-testid='goal-status-widget-pill']").first().locator(`span[title="${VERIFY_TITLE}"]`).first())
+		.toHaveCount(0, { timeout: 5_000 });
+}
+
 test.describe("Gate status cross-surface active verification", () => {
 	test("active verification state is shared across dashboard, sidebar, widget pill/popover, and reload — GATE_STATUS_CROSS_SURFACE_ACTIVE", async ({ page, context }) => {
 		test.setTimeout(90_000);
@@ -197,6 +232,7 @@ test.describe("Gate status cross-surface active verification", () => {
 			await openSession(page, teamLeadId);
 			await expect(page.locator("[data-testid='goal-status-widget-pill']").first()).toBeVisible({ timeout: 15_000 });
 			await expectInitialSharedGateBadge(page, setup.goalId);
+			await expectWidgetPillRerendersOnCacheUpdate(page, setup.goalId);
 
 			dashboardPage = await context.newPage();
 			await openApp(dashboardPage);

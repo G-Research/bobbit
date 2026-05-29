@@ -1,4 +1,5 @@
 export const GATE_STATUS_CLIENT_EVENT = "bobbit-gate-status-event";
+export const GATE_STATUS_CACHE_UPDATED_EVENT_TYPE = "gate_status_cache_updated";
 export const HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE = "gate_verification_signoff_resolved";
 
 const GATE_STATUS_REFRESH_EVENT_TYPES_LIST = [
@@ -37,6 +38,10 @@ export interface GateStatusClientEvent {
 export function dispatchGateStatusClientEvent(detail: GateStatusClientEvent): void {
 	if (typeof window === "undefined" || typeof CustomEvent === "undefined") return;
 	window.dispatchEvent(new CustomEvent(GATE_STATUS_CLIENT_EVENT, { detail }));
+}
+
+export function dispatchGateStatusCacheUpdated(goalId: string): void {
+	dispatchGateStatusClientEvent({ type: GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, goalId });
 }
 
 export function dispatchHumanSignoffResolved(detail: Omit<GateStatusClientEvent, "type"> & { decision: "pass" | "fail" }): void {

@@ -1957,10 +1957,12 @@ function renderGateChecklist(): TemplateResult {
 				const isExpanded = expandedGateIds.has(wfGate.id);
 				const isFocused = focusedGateId === wfGate.id;
 				const signalCount = gs?.signals?.length ?? 0;
+				const summaryGate = currentGoalId ? state.gateStatusCache.get(currentGoalId)?.gates?.find(gate => gate.gateId === wfGate.id) : undefined;
 
-				// Check if any signal is running
-				const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
-				const effectiveStatus = hasRunning && status !== "passed" ? "running" : status;
+				// Active verification overlays stored pass/fail state. Prefer the server-authoritative
+				// summary so re-signaled passed gates render as running everywhere.
+				const hasRunning = summaryGate?.effectiveStatus === "running" || gs?.signals?.some(s => s.verification.status === "running");
+				const effectiveStatus = hasRunning ? "running" : status;
 
 				let dotClass: string;
 				let dotContent: string;

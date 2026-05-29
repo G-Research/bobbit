@@ -57,6 +57,10 @@ test.describe("authoritative gate status summary", () => {
 				worktree: false,
 			});
 			goalId = goal.id;
+			const beforeSignalGoalsResp = await apiFetch("/api/goals");
+			expect(beforeSignalGoalsResp.status).toBe(200);
+			const beforeSignalGoals = await beforeSignalGoalsResp.json();
+			expect(typeof beforeSignalGoals.generation).toBe("number");
 
 			const signal = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}/signal`, {
 				method: "POST",
@@ -64,6 +68,11 @@ test.describe("authoritative gate status summary", () => {
 			});
 			expect(signal.status, `signal failed: ${await signal.text()}`).toBe(201);
 			await waitForActive(goalId);
+
+			const changedGoalsResp = await apiFetch(`/api/goals?since=${beforeSignalGoals.generation}`);
+			expect(changedGoalsResp.status).toBe(200);
+			const changedGoals = await changedGoalsResp.json();
+			expect(changedGoals.changed, "goal generation must bump when active verification starts so polling sidebars rehydrate summaries without a mounted goal subscriber").not.toBe(false);
 
 			const summaryResp = await apiFetch(`/api/goals/${goalId}/gates?view=summary`);
 			expect(summaryResp.status).toBe(200);
