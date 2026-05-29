@@ -1537,7 +1537,7 @@ export class VerificationHarness {
 			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
 				if (event.seq == null) event.seq = ++this._verifSeqCounter;
 				if (event.type !== "gate_verification_step_output") {
-					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration();
+					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration?.();
 				}
 			}
 			this._rawBroadcastFn(goalId, event);
