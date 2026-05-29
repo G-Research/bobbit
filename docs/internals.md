@@ -1443,6 +1443,26 @@ The Bobbit AI Gateway user agent is sent only on requests whose target is the co
 | Direct title / goal-summary generation | The gateway title paths in `title-generator.ts` use `aigwUserAgentHeaders()` for both `/v1/models` model-id resolution and `/v1/chat/completions` generation calls. |
 | Agent inference | `writeAigwModelsJson()` writes provider-level `providers.aigw.headers`, so pi-coding-agent sends the header on inference traffic routed through the generated `aigw` provider. |
 
+### AI Gateway model pricing
+
+AI Gateway model discovery is Bobbit's source of truth for gateway-backed pricing. `discoverAigwModels()` reads the optional `pricing` object returned by the gateway `/v1/models` response and converts it locally because completion responses include token counts but no cost, and the gateway aggregate endpoints are not reliable for Bobbit usage accounting.
+
+The gateway reports `pricing.prompt` and `pricing.completion` in USD per token. Bobbit converts them to the per-million-token `cost` shape expected by pi-ai:
+
+```ts
+input = pricing.prompt * 1_000_000
+output = pricing.completion * 1_000_000
+cacheRead = pricing.prompt * 0.1 * 1_000_000
+cacheWrite = pricing.prompt * 1.25 * 1_000_000
+```
+
+Missing, incomplete, non-numeric, negative, or non-finite pricing is treated as unknown and safely falls back to `{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }` for that model. Discovery must not call gateway aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`; all cost calculation remains local from `/v1/models` metadata plus token counts.
+
+The converted `cost` values flow through two surfaces:
+
+- `GET /api/models` returns them in each `ApiModel.cost` entry so the UI and server model registry see non-zero AIGW pricing when the gateway provides it.
+- `writeAigwModelsJson()` persists them on generated `providers.aigw.models[]` entries in `~/.bobbit/agent/models.json`, including both OpenAI-compatible models and Claude models routed through Bedrock Converse. Agent subprocesses can then compute usage cost locally from token-count usage data.
+
 ### Generated `providers.aigw.headers`
 
 `writeAigwModelsJson()` writes the AI Gateway provider into `~/.bobbit/agent/models.json` and preserves existing non-aigw providers and user `modelOverrides`. The generated provider-level header block contains both headers:
@@ -1479,6 +1499,7 @@ pi-ai's Bedrock provider does not normally forward provider-level `headers` into
 On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway. A successful refresh rewrites `~/.bobbit/agent/models.json` with:
 
 - the current gateway model list,
+- the current gateway-derived per-model `cost` values when `/v1/models` provides pricing,
 - the current canonical `User-Agent: Bobbit/<version>`,
 - the unchanged `x-opencode-session` resolver literal,
 - existing non-aigw providers and user `modelOverrides` preserved.
