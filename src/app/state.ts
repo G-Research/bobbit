@@ -268,10 +268,25 @@ export const state = {
 	sessionsGeneration: -1,
 	/** Server generation counter for goals — used to skip redundant refreshes */
 	goalsGeneration: -1,
-	/** Gate status cache: goalId → { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff }.
+	/** Gate status cache: goalId → server-authoritative gate summary.
 	 *  `awaitingHumanSignoff` is denormalised (= awaitingSignoffCount > 0) so the
 	 *  notification-policy hot path can do an O(1) check without recounting. */
-	gateStatusCache: new Map<string, { passed: number; total: number; verifying: boolean; verifyingCount: number; awaitingSignoffCount: number; awaitingHumanSignoff: boolean }>(),
+	gateStatusCache: new Map<string, {
+		passed: number;
+		total: number;
+		verifying: boolean;
+		verifyingCount: number;
+		awaitingSignoffCount: number;
+		awaitingHumanSignoff: boolean;
+		runningGateIds?: string[];
+		gates?: Array<{
+			gateId: string;
+			status: "pending" | "passed" | "failed";
+			effectiveStatus?: "pending" | "passed" | "failed" | "running";
+			running?: boolean;
+			awaitingSignoffCount?: number;
+		}>;
+	}>(),
 	/** PR status cache: goalId → { state, url, number, reviewDecision } */
 	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string }>(),
 	sessionsLoading: false,

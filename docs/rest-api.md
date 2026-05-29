@@ -731,29 +731,39 @@ Returns **400** if `projectId` is missing, **404** if the project is not registe
 
 ### Summary views (`?view=summary`)
 
-Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls. Without this parameter, the full response is returned (used by the UI dashboard).
+Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls and gate progress counters. Without this parameter, the full response is returned for detail views.
 
 **Why this exists:** Full gate and task responses include signal history, content bodies, verification output, and task specs — often hundreds of KB. Agent tools call these endpoints frequently, and every byte enters the LLM context window permanently. Summary views strip non-essential data, reducing typical `gate_list` responses from ~436KB to ~500B.
 
 **`GET /api/goals/:id/gates?view=summary`**
 
-Returns status, dependency, and signal count per gate — no signal arrays or content bodies.
+Returns the server-authoritative gate progress summary for counters and status chips. The response is built by `src/server/gate-status-summary.ts` from stored `GateStore` state plus active verification state, so clients do not infer running or human-sign-off state from slim signal rows.
 
 ```json
 {
+  "passed": 0,
+  "total": 1,
+  "verifying": true,
+  "verifyingCount": 1,
+  "awaitingSignoffCount": 0,
+  "awaitingHumanSignoff": false,
+  "runningGateIds": ["implementation"],
   "gates": [{
     "gateId": "implementation",
     "name": "Implementation",
-    "status": "failed",
+    "status": "passed",
+    "effectiveStatus": "running",
+    "running": true,
+    "awaitingSignoffCount": 0,
     "dependsOn": ["design-doc"],
     "signalCount": 22,
-    "updatedAt": 1775853741666,
-    "failedSteps": ["E2E tests"]
-  }]
+    "updatedAt": 1775853741666
+  }],
+  "summary": { "...": "same fields as the top-level summary" }
 }
 ```
 
-Fields: `gateId`, `name`, `status`, `dependsOn`, `signalCount`. Conditional: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps), `awaitingSignoffCount` (number of `human-signoff` verification steps on this gate currently waiting on a human — omitted when zero). The response envelope carries a goal-wide total as `awaitingSignoffCount` alongside `gates[]`. This is the single source of truth for the sidebar's `state.gateStatusCache.awaitingHumanSignoff` flag and rule 2 of the [notification policy](design/notification-policy.md); the bare `/gates` endpoint does **not** include the count.
+Goal-wide fields: `passed`, `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. Per-gate fields: `gateId`, `name`, stored `status`, `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled) and `failedSteps` (if failed — names of non-passed, non-skipped verification steps). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 

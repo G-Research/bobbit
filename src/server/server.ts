@@ -26,6 +26,7 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
+import { buildGateStatusSummary } from "./gate-status-summary.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
@@ -5135,41 +5136,13 @@ async function handleApiRoute(
 			return { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 		});
 		if (url.searchParams.get("view") === "summary") {
-			// Aggregate per-gate awaiting-human-signoff counts so the sidebar's
-			// gate-status poll picks up pending sign-offs without a second fetch.
-			const activeForGoal = verificationHarness.getActiveVerifications(goalId);
-			const awaitingByGate = new Map<string, number>();
-			let awaitingTotal = 0;
-			for (const av of activeForGoal) {
-				let n = 0;
-				for (const s of av.steps) if (s.awaitingHuman) n++;
-				if (n > 0) {
-					awaitingByGate.set(av.gateId, (awaitingByGate.get(av.gateId) ?? 0) + n);
-					awaitingTotal += n;
-				}
-			}
-			const slim = enriched.map(g => {
-				const base: Record<string, unknown> = {
-					gateId: g.gateId,
-					name: g.name,
-					status: g.status,
-					dependsOn: g.dependsOn || [],
-					signalCount: g.signalCount,
-				};
-				if (g.signals.length > 0) base.updatedAt = g.updatedAt;
-				if (g.status === "failed") {
-					const latest = g.signals[g.signals.length - 1];
-					if (latest?.verification?.steps) {
-						base.failedSteps = latest.verification.steps
-							.filter((s: any) => !s.passed && !s.skipped)
-							.map((s: any) => s.name);
-					}
-				}
-				const awaitingForGate = awaitingByGate.get(g.gateId) ?? 0;
-				if (awaitingForGate > 0) base.awaitingSignoffCount = awaitingForGate;
-				return base;
+			const summary = buildGateStatusSummary({
+				workflow: goal.workflow,
+				gates,
+				activeVerifications: verificationHarness.getActiveVerifications(goalId),
 			});
-			json({ gates: slim, awaitingSignoffCount: awaitingTotal });
+			const { gates: summaryGates, ...counts } = summary;
+			json({ gates: summaryGates, ...counts, summary });
 			return;
 		}
 		json({ gates: enriched });

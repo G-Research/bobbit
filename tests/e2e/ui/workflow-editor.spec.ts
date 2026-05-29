@@ -415,9 +415,11 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		const wf = await r.json();
 		expect(wf.gates[1].dependsOn).toEqual(["first"]);
 
+		// Saving reloads the editor and resets transient expansion state; re-open the
+		// second gate before toggling the dependency back off.
 		// Toggle back off — explicit empty dependency list must persist so users can
 		// create root/parallel gates instead of the editor silently linearising them.
-		await expect(page.locator(".wf-gate-card").nth(1)).toHaveClass(/expanded/);
+		await expandGate(page, 1);
 		const chipAfterSave = page.locator(".wf-gate-card").nth(1).locator("[data-testid='wf-dep-chip-first']");
 		await chipAfterSave.click();
 		await expect(chipAfterSave).not.toHaveClass(/wf-dep-toggle-chip--active/);

@@ -49,9 +49,9 @@
     "@bobbit/binaries-win32-x64": "0.9.0"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.75.5",
-    "@earendil-works/pi-ai": "0.75.5",
-    "@earendil-works/pi-coding-agent": "0.75.5",
+    "@earendil-works/pi-agent-core": "0.77.0",
+    "@earendil-works/pi-ai": "0.77.0",
+    "@earendil-works/pi-coding-agent": "0.77.0",
     "@lmstudio/sdk": "^1.5.0",
     "@mariozechner/mini-lit": "^0.2.0",
     "@recogito/text-annotator": "^3.4.9",

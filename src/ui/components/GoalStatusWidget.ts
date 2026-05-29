@@ -18,10 +18,8 @@
  *
  * Data:
  *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
- *   - Live: viewer WebSocket subscription on `gate_signal_received`,
- *     `gate_status_changed`, `gate_verification_step_started`,
- *     `gate_verification_step_complete`, `gate_verification_phase_started`,
- *     `gate_verification_complete`, and the new `gate_verification_awaiting_human`.
+ *   - Live: viewer WebSocket subscription using the centralized gate event
+ *     refresh contract in `app/gate-status-events.ts`.
  *
  * Authz: trusts the gateway token (v1 — no identity model). Sign-off submission
  * records only a server-side timestamp.
@@ -31,10 +29,10 @@ import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
+import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
-
-const GATE_STATUS_CACHE_UPDATED_EVENT = "bobbit-gate-status-cache-updated";
 
 type GateStatus = "pending" | "passed" | "failed" | "running";
 
@@ -84,13 +82,6 @@ export class GoalStatusWidget extends LitElement {
 		if (this._expanded) this._closeDropdown();
 	};
 
-	private _onGateStatusCacheUpdated = (event: Event) => {
-		const detail = (event as CustomEvent<{ goalIds?: string[] }>).detail;
-		if (!this.goalId || (Array.isArray(detail?.goalIds) && !detail.goalIds.includes(this.goalId))) return;
-		this.requestUpdate();
-		this._syncDropdown();
-	};
-
 	private _onDocumentClick = (e: MouseEvent) => {
 		const target = e.target as Node;
 		if (this._expanded && !this._closing && !this.contains(target) && !this._dropdownEl?.contains(target)) {
@@ -106,6 +97,18 @@ export class GoalStatusWidget extends LitElement {
 		}
 	};
 
+	private _onGateStatusClientEvent = (e: Event) => {
+		const msg = (e as CustomEvent).detail;
+		if (!msg || typeof msg !== "object") return;
+		if (typeof msg.goalId === "string" && msg.goalId !== this.goalId) return;
+		if (msg.type === GATE_STATUS_CACHE_UPDATED_EVENT_TYPE) {
+			this.requestUpdate();
+			this._syncDropdown();
+			return;
+		}
+		this._handleWsEvent(msg);
+	};
+
 	// Render into light DOM so global styles (Tailwind, the inline keyframe
 	// styles we inject below) apply identically to the rest of the chat header.
 	createRenderRoot() {
@@ -117,7 +120,7 @@ export class GoalStatusWidget extends LitElement {
 		document.addEventListener("click", this._onDocumentClick, true);
 		document.addEventListener("keydown", this._onEscapeKey, true);
 		window.addEventListener("hashchange", this._onHashChange);
-		window.addEventListener(GATE_STATUS_CACHE_UPDATED_EVENT, this._onGateStatusCacheUpdated);
+		window.addEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._ensureWidgetStyles();
 		if (this.goalId) {
 			void this._fetchInitial();
@@ -130,7 +133,7 @@ export class GoalStatusWidget extends LitElement {
 		document.removeEventListener("click", this._onDocumentClick, true);
 		document.removeEventListener("keydown", this._onEscapeKey, true);
 		window.removeEventListener("hashchange", this._onHashChange);
-		window.removeEventListener(GATE_STATUS_CACHE_UPDATED_EVENT, this._onGateStatusCacheUpdated);
+		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._closeToken++;
 		this._removeDropdown();
 		this._disconnectWs();
@@ -166,6 +169,7 @@ export class GoalStatusWidget extends LitElement {
 
 	private async _fetchInitial(): Promise<void> {
 		this._loading = true;
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const [gatesResp, vActiveResp] = await Promise.all([
 				this._fetch(`/api/goals/${this.goalId}/gates`),
@@ -185,11 +189,11 @@ export class GoalStatusWidget extends LitElement {
 		} catch {
 			// non-fatal — WS events will rehydrate
 		}
-		await this._refreshSharedGateStatus();
 		this._loading = false;
 	}
 
 	private async _refreshGates(): Promise<void> {
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/gates`);
 			if (!resp?.ok) return;
@@ -199,6 +203,7 @@ export class GoalStatusWidget extends LitElement {
 	}
 
 	private async _refreshActive(): Promise<void> {
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/verifications/active`);
 			if (!resp?.ok) return;
@@ -208,27 +213,6 @@ export class GoalStatusWidget extends LitElement {
 				this._activeGateIds = this._extractActiveGateIds(data.verifications);
 			}
 		} catch { /* non-fatal */ }
-	}
-
-	private async _refreshSharedGateStatus(): Promise<void> {
-		if (!this.goalId) return;
-		try {
-			const { refreshGateStatusForGoal } = await import("../../app/api.js");
-			await refreshGateStatusForGoal(this.goalId);
-		} catch { /* non-fatal */ }
-		this.requestUpdate();
-		this._syncDropdown();
-	}
-
-	private async _refreshWidgetState(options: { gates?: boolean; active?: boolean; shared?: boolean } = {}): Promise<void> {
-		const { gates = false, active = false, shared = true } = options;
-		const tasks: Promise<void>[] = [];
-		if (gates) tasks.push(this._refreshGates());
-		if (active) tasks.push(this._refreshActive());
-		if (shared) tasks.push(this._refreshSharedGateStatus());
-		await Promise.all(tasks);
-		this.requestUpdate();
-		this._syncDropdown();
 	}
 
 	private async _fetch(path: string, init?: RequestInit): Promise<Response | null> {
@@ -371,25 +355,24 @@ export class GoalStatusWidget extends LitElement {
 
 	private _handleWsEvent(msg: any): void {
 		const t = msg?.type;
+		if (t === HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE) {
+			this._removeAwaitingSignoff(msg);
+		}
+		if (shouldRefreshGateStatusForEvent(msg)) {
+			scheduleGateStatusRefreshForGoal(this.goalId);
+		}
+		if (shouldRefreshGateDetailsForEvent(msg)) {
+			void this._refreshGates();
+		}
+		if (shouldRefreshActiveVerificationsForEvent(msg)) {
+			void this._refreshActive();
+		}
 		switch (t) {
-			case "gate_signal_received":
-			case "gate_status_changed":
-			case "gate_reset":
-			case "gate_verification_complete":
-			case "gate_verification_phase_started":
-				void this._refreshWidgetState({ gates: true, active: true });
-				break;
-			case "gate_verification_step_started":
-				void this._refreshWidgetState({ active: true });
-				break;
-			case "gate_verification_step_complete":
-				void this._refreshWidgetState({ gates: true, active: true });
-				break;
 			case "gate_verification_awaiting_human": {
 				const signalId = typeof msg.signalId === "string" ? msg.signalId : null;
 				const gateId = typeof msg.gateId === "string" ? msg.gateId : null;
 				const stepName = typeof msg.stepName === "string" ? msg.stepName : null;
-				if (!signalId || !gateId || !stepName) { void this._refreshWidgetState({ active: true }); break; }
+				if (!signalId || !gateId || !stepName) { void this._refreshActive(); break; }
 				const label = typeof msg.label === "string" ? msg.label : stepName;
 				const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
 				// Dedupe — replace any existing entry for the same key.
@@ -397,11 +380,25 @@ export class GoalStatusWidget extends LitElement {
 				const filtered = this._awaitingSignoffs.filter(s => signoffKey(s) !== key);
 				filtered.push({ signalId, gateId, stepName, label, prompt });
 				this._awaitingSignoffs = filtered;
-				void this._refreshSharedGateStatus();
 				break;
 			}
 			default:
 				break;
+		}
+	}
+
+	private _removeAwaitingSignoff(msg: any): void {
+		const signalId = typeof msg?.signalId === "string" ? msg.signalId : null;
+		const stepName = typeof msg?.stepName === "string" ? msg.stepName : null;
+		if (!signalId || !stepName) return;
+		const key = `${signalId}::${stepName}`;
+		const filtered = this._awaitingSignoffs.filter(s => signoffKey(s) !== key);
+		if (filtered.length !== this._awaitingSignoffs.length) this._awaitingSignoffs = filtered;
+		if (this._reviewLaunchLoading.has(key)) {
+			const next = new Set(this._reviewLaunchLoading); next.delete(key); this._reviewLaunchLoading = next;
+		}
+		if (this._reviewLaunchErrors.has(key)) {
+			const next = new Map(this._reviewLaunchErrors); next.delete(key); this._reviewLaunchErrors = next;
 		}
 	}
 
@@ -580,7 +577,7 @@ export class GoalStatusWidget extends LitElement {
 			});
 			if (!resp) throw new Error("Unable to reset gate (network)");
 			if (!resp.ok) throw new Error(await this._resetErrorMessage(resp));
-			await this._refreshWidgetState({ gates: true, active: true });
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
 		} catch (err) {
 			const next = new Map(this._resetErrors);
 			next.set(gate.id, err instanceof Error ? err.message : "Unable to reset gate");
@@ -637,13 +634,14 @@ export class GoalStatusWidget extends LitElement {
 	private _renderGateRow(gate: GateSummary): TemplateResult {
 		const resetting = this._resetLoading.has(gate.id);
 		const resetError = this._resetErrors.get(gate.id);
+		const effectiveStatus: GateStatus = this._activeGateIds.has(gate.id) ? "running" : gate.status;
 		return html`
-			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${gate.status}>
+			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${effectiveStatus}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
 					${this._renderGateStatusIndicator(gate)}
 					<span class="truncate text-foreground" title=${gate.name}>${gate.name}</span>
 				</div>
-				${gate.status === "passed" ? html`
+				${effectiveStatus === "passed" ? html`
 					<div class="goal-widget-gate-actions" data-testid="goal-widget-gate-actions">
 						<button
 							type="button"
