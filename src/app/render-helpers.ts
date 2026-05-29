@@ -731,11 +731,10 @@ function renderGoalBadge(goal: Goal) {
 	const gs = state.gateStatusCache.get(goal.id);
 	const gateBadge = renderGateProgressBadge(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
-	const hasWorkflow = (goal.workflow?.gates?.length ?? 0) > 0;
-	// Workflow progress is primary. PR status may replace it only once the
-	// workflow summary is cached and all gates have passed; without a summary,
-	// a workflow goal should stay quiet instead of falling back to PR.
-	if (!pr || (hasWorkflow && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return gateBadge;
+	// Workflow progress is primary. PR status is only shown after a positive,
+	// fully-passed gate summary exists; before that, do not let PR state mask
+	// incomplete/verifying/uncached workflow progress.
+	if (!pr || !gs || gs.total <= 0 || gs.passed !== gs.total) return gateBadge;
 
 	let color: string;
 	if (pr.state === "MERGED") color = "#a87fd4";
