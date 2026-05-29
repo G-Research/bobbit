@@ -1,0 +1,250 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import {
+	buildGithubReviewPreview,
+	createGithubReviewPayload,
+	submitGithubReview,
+	type PrWalkthroughCard,
+	type PrWalkthroughReviewDraft,
+} from "../src/server/pr-walkthrough/export-mapper.ts";
+import {
+	parseGithubPrReference,
+	parseGithubRemoteUrl,
+	resolveGithubPr,
+} from "../src/server/pr-walkthrough/github-adapter.ts";
+
+const cards: PrWalkthroughCard[] = [
+	{
+		id: "card-1",
+		phaseId: "significant",
+		title: "Review exported comments",
+		summary: "Maps walkthrough line comments to GitHub review rows.",
+		diffBlocks: [
+			{
+				id: "block-1",
+				filePath: "src/example.ts",
+				hunks: [
+					{
+						id: "hunk-1",
+						header: "@@ -10,2 +10,3 @@",
+						lines: [
+							{ id: "line-old", side: "old", oldLine: 10, text: "old value", kind: "del" },
+							{ id: "line-new", side: "new", newLine: 11, text: "new value", kind: "add" },
+							{ id: "line-context", side: "context", oldLine: 12, newLine: 12, text: "context", kind: "context" },
+						],
+					},
+				],
+			},
+			{
+				id: "block-binary",
+				filePath: "assets/logo.png",
+				status: "binary",
+				hunks: [
+					{
+						id: "binary-hunk",
+						header: "Binary files differ",
+						lines: [{ id: "binary-line", side: "new", text: "binary", kind: "add" }],
+					},
+				],
+			},
+		],
+	},
+];
+
+function draft(): PrWalkthroughReviewDraft {
+	return {
+		changeset: {
+			baseSha: "aaaaaaa",
+			headSha: "bbbbbbb",
+			provider: "github",
+			prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			externalUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			prNumber: 42,
+			prTitle: "Complete review export",
+			title: "PR #42: Complete review export",
+		},
+		decisions: {
+			"card-1": { cardId: "card-1", value: "disliked", commentIds: ["c1"], updatedAt: "2026-01-01T00:00:00.000Z" },
+		},
+		comments: [
+			{ id: "c1", cardId: "card-1", diffBlockId: "block-1", lineId: "line-new", body: "Please tighten this new branch.", source: "custom", createdAt: "2026-01-01T00:00:00.000Z" },
+			{ id: "c2", cardId: "card-1", diffBlockId: "block-1", lineId: "line-old", body: "Deleted line note.", source: "custom", createdAt: "2026-01-01T00:00:00.000Z" },
+			{ id: "c3", cardId: "card-1", body: "Card-level concern stays in the review body.", source: "custom", createdAt: "2026-01-01T00:00:00.000Z" },
+			{ id: "c4", cardId: "card-1", diffBlockId: "block-1", lineId: "missing", body: "Missing anchor remains visible.", source: "custom", createdAt: "2026-01-01T00:00:00.000Z" },
+			{ id: "c5", cardId: "card-1", diffBlockId: "block-binary", lineId: "binary-line", body: "Binary cannot be reviewed inline.", source: "custom", createdAt: "2026-01-01T00:00:00.000Z" },
+		],
+		completedCardIds: ["card-1"],
+		updatedAt: "2026-01-01T00:00:00.000Z",
+	};
+}
+
+describe("PR walkthrough GitHub export mapper", () => {
+	it("maps line comments to GitHub preview rows and card comments to the review body", () => {
+		const preview = buildGithubReviewPreview(draft(), cards);
+
+		assert.deepEqual(preview.target, {
+			provider: "github",
+			owner: "SuuBro",
+			repo: "bobbit",
+			prNumber: 42,
+			prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			headSha: "bbbbbbb",
+		});
+		assert.equal(preview.validCommentCount, 2);
+		assert.equal(preview.unmappableCommentCount, 2);
+		assert.match(preview.body, /Card-level concern stays in the review body/);
+		assert.match(preview.body, /Missing anchor remains visible/);
+
+		const newRow = preview.rows.find(row => row.commentId === "c1");
+		assert.ok(newRow);
+		assert.equal(newRow.valid, true);
+		assert.equal(newRow.path, "src/example.ts");
+		assert.equal(newRow.side, "RIGHT");
+		assert.equal(newRow.line, 11);
+
+		const oldRow = preview.rows.find(row => row.commentId === "c2");
+		assert.ok(oldRow);
+		assert.equal(oldRow.valid, true);
+		assert.equal(oldRow.side, "LEFT");
+		assert.equal(oldRow.line, 10);
+
+		const missingRow = preview.rows.find(row => row.commentId === "c4");
+		assert.ok(missingRow);
+		assert.equal(missingRow.valid, false);
+		assert.match(missingRow.reason ?? "", /anchor was not found/);
+
+		const binaryRow = preview.rows.find(row => row.commentId === "c5");
+		assert.ok(binaryRow);
+		assert.equal(binaryRow.valid, false);
+		assert.match(binaryRow.reason ?? "", /no GitHub-reviewable text diff/);
+	});
+
+	it("builds a GitHub review payload from only valid preview rows", () => {
+		const preview = buildGithubReviewPreview(draft(), cards);
+		const payload = createGithubReviewPayload(preview, "REQUEST_CHANGES");
+
+		assert.equal(payload.event, "REQUEST_CHANGES");
+		assert.equal(payload.commit_id, "bbbbbbb");
+		const comments = payload.comments as Array<{ path: string; side: string; line: number; body: string }>;
+		assert.equal(comments.length, 2);
+		assert.deepEqual(comments.map(comment => [comment.path, comment.side, comment.line]), [
+			["src/example.ts", "RIGHT", 11],
+			["src/example.ts", "LEFT", 10],
+		]);
+	});
+
+	it("never submits without explicit confirmation", async () => {
+		const preview = buildGithubReviewPreview(draft(), cards);
+		let calls = 0;
+		const result = await submitGithubReview(preview, { confirm: false, token: "token" }, {
+			fetch: async () => {
+				calls += 1;
+				throw new Error("fetch must not be called");
+			},
+		});
+
+		assert.equal(result.ok, false);
+		assert.equal(result.status, 400);
+		assert.equal(result.submitted, false);
+		assert.equal(calls, 0);
+	});
+
+	it("submits only after confirm=true with credentials", async () => {
+		const preview = buildGithubReviewPreview(draft(), cards);
+		let requestedUrl = "";
+		let requestedBody = "";
+		const result = await submitGithubReview(preview, { confirm: true, token: "token", event: "COMMENT" }, {
+			apiBaseUrl: "https://api.github.test",
+			fetch: async (url, init) => {
+				requestedUrl = url;
+				requestedBody = init?.body ?? "";
+				return response(200, { html_url: "https://github.com/SuuBro/bobbit/pull/42#pullrequestreview-1" });
+			},
+		});
+
+		assert.equal(result.ok, true);
+		assert.equal(result.submitted, true);
+		assert.equal(result.reviewUrl, "https://github.com/SuuBro/bobbit/pull/42#pullrequestreview-1");
+		assert.equal(requestedUrl, "https://api.github.test/repos/SuuBro/bobbit/pulls/42/reviews");
+		const body = JSON.parse(requestedBody) as { comments: unknown[]; event: string };
+		assert.equal(body.event, "COMMENT");
+		assert.equal(body.comments.length, 2);
+	});
+});
+
+describe("PR walkthrough GitHub adapter", () => {
+	it("parses GitHub PR URLs and origin remotes", () => {
+		assert.deepEqual(parseGithubPrReference({ prUrl: "https://github.com/SuuBro/bobbit/pull/1842" }), {
+			owner: "SuuBro",
+			repo: "bobbit",
+			number: 1842,
+			host: "github.com",
+			url: "https://github.com/SuuBro/bobbit/pull/1842",
+		});
+		assert.deepEqual(parseGithubRemoteUrl("git@github.com:SuuBro/bobbit.git"), {
+			host: "github.com",
+			owner: "SuuBro",
+			repo: "bobbit",
+		});
+	});
+
+	it("resolves PR metadata and file patches through the GitHub API adapter", async () => {
+		const calls: string[] = [];
+		const resolved = await resolveGithubPr({
+			prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			token: "token",
+			apiBaseUrl: "https://api.github.test",
+			fetch: async (url) => {
+				calls.push(url);
+				if (url.endsWith("/pulls/42")) {
+					return response(200, {
+						number: 42,
+						title: "Complete review export",
+						html_url: "https://github.com/SuuBro/bobbit/pull/42",
+						base: { sha: "aaaaaaaaaaaa" },
+						head: { sha: "bbbbbbbbbbbb" },
+						changed_files: 1,
+						additions: 1,
+						deletions: 0,
+					});
+				}
+				return response(200, [
+					{
+						filename: "src/example.ts",
+						status: "modified",
+						additions: 1,
+						deletions: 0,
+						changes: 1,
+						blob_url: "https://github.com/SuuBro/bobbit/blob/bbbbbbbbbbbb/src/example.ts",
+						patch: "@@ -1,1 +1,2 @@\n context\n+added",
+					},
+				]);
+			},
+		});
+
+		assert.deepEqual(calls, [
+			"https://api.github.test/repos/SuuBro/bobbit/pulls/42",
+			"https://api.github.test/repos/SuuBro/bobbit/pulls/42/files?per_page=100&page=1",
+		]);
+		assert.equal(resolved.changesetId, "github:SuuBro/bobbit#42:bbbbbbb");
+		assert.equal(resolved.changeset.prTitle, "Complete review export");
+		assert.equal(resolved.export.available, true);
+		assert.equal(resolved.files[0].filePath, "src/example.ts");
+		assert.equal(resolved.files[0].diffBlocks[0].hunks[0].lines[1].newLine, 2);
+	});
+});
+
+function response(status: number, body: unknown) {
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		statusText: status >= 200 && status < 300 ? "OK" : "Error",
+		headers: { get: () => null },
+		async json() {
+			return body;
+		},
+		async text() {
+			return typeof body === "string" ? body : JSON.stringify(body);
+		},
+	};
+}
