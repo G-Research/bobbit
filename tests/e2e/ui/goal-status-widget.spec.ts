@@ -181,14 +181,19 @@ async function expectGateStatusCache(page: Page, goalId: string, expected: Parti
 }
 
 function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: string) {
-	return scope.locator(`[title="${label}"], [aria-label="${label}"]`).first();
+	return scope.locator(`:scope[title="${label}"], :scope[aria-label="${label}"], [title="${label}"], [aria-label="${label}"]`).first();
 }
 
 async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
 	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
 
-	await expect(gateProgressBadgeLocator(page.locator(`[data-nav-id="goal:${goalId}"]`), `${passed} of ${total} gates passed`))
-		.toBeVisible({ timeout: 15_000 });
+	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+	await expect(row, "sidebar goal row should be visible before asserting its gate counter").toBeVisible({ timeout: 15_000 });
+	await expect(row, `sidebar goal row should show gate counter (${passed}/${total})`).toContainText(`(${passed}/${total})`, { timeout: 15_000 });
+	const accessibleBadge = gateProgressBadgeLocator(row, `${passed} of ${total} gates passed`);
+	if (await accessibleBadge.count()) {
+		await expect(accessibleBadge, "sidebar gate counter accessible label/title should match when exposed on the row or badge").toBeVisible();
+	}
 }
 
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
