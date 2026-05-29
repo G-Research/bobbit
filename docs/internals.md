@@ -1199,7 +1199,7 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 ## Archived-session state push on auth
 
-Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame - the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder (`claude-opus-4-6`) until a manual reload.
+Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame - the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder until a manual reload. This is part of the no-flash contract for persisted models such as `anthropic/claude-opus-4-8`.
 
 ### Helper and call sites
 
@@ -1210,7 +1210,7 @@ Loading an archived session needs to show its real model in the footer on first 
 
 The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow, maxTokens, reasoning}` from `inferMeta(archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. Persisted `modelProvider`/`modelId` come from the archived row in the session store.
 
-The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from `tests/e2e/ui/archived-session-model.spec.ts`.
+The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from archived-footer model E2E coverage.
 
 Client-side, the `claude-opus-4-6` placeholder default in `src/app/remote-agent.ts` is unchanged - it only matters before the server `state` frame arrives, which is now immediate.
 
@@ -1361,9 +1361,9 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ## Spawn-time model pinning
 
-Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default (`anthropic/claude-opus-4-7`) and Bobbit then called `setModel` ~13 ms later - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
+Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default and Bobbit then called `setModel` shortly afterward - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
 
-Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single `model_change` event. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
+Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single matching `model_change` event. For the Pi 0.77 / Opus 4.8 upgrade, that means a persisted or selected `anthropic/claude-opus-4-8` session starts on Opus 4.8 rather than flashing an older Pi default. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
 
 ### Bridge options and CLI flags
 
@@ -1409,8 +1409,10 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
-| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection |
+| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection, including Opus 4.8 + `xhigh` |
 | `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
+
+For the Pi 0.77 / Opus 4.8 compatibility contract, see [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md).
 
 ---
 
