@@ -197,7 +197,7 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 					reasoning: meta.reasoning || m.reasoning || false,
 					input: meta.input || ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					authenticated: true, // aigw is always authenticated (no key needed)
 				});
 			}
