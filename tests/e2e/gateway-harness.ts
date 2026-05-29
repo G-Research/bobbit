@@ -162,7 +162,7 @@ function _pushLog(line: string): void {
 	console.error = (...a: unknown[]) => { _pushLog(fmt("error", a)); origError(...a); };
 }
 
-export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ failureContext: void; restoreDefaultProject: void }, { enableMcp: boolean; enableWorktreePool: boolean; enableDevHarnessRestart: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false — opt in with `test.use({ enableMcp: true })`
 	// at the top of a spec file. Playwright groups tests with matching option
 	// values onto the same worker, so each spec file effectively gets its own gateway.
@@ -171,7 +171,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// Worker-scoped option. Default false — opt in via `test.use({ enableWorktreePool: true })`.
 	enableWorktreePool: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool }, use, workerInfo) => {
+	// Worker-scoped option. Default false — opt in via `test.use({ enableDevHarnessRestart: true })`.
+	enableDevHarnessRestart: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Include pid + timestamp so retries don't collide with a previous
 		// worker's teardown that may still hold file handles on Windows.
@@ -215,6 +218,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Set env BEFORE importing server modules. Playwright workers are
 		// separate Node processes, so module singletons are per-worker — no
 		// cross-contamination.
+		const previousDevHarness = process.env.BOBBIT_DEV_HARNESS;
+		if (enableDevHarnessRestart) {
+			process.env.BOBBIT_DEV_HARNESS = "1";
+		} else {
+			delete process.env.BOBBIT_DEV_HARNESS;
+		}
 		process.env.BOBBIT_DIR = bobbitDir;
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
@@ -411,6 +420,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				console.warn(`[gateway-harness] cleanup deferred for ${bobbitDir}: ${msg}`);
 			},
 		});
+		if (previousDevHarness === undefined) delete process.env.BOBBIT_DEV_HARNESS;
+		else process.env.BOBBIT_DEV_HARNESS = previousDevHarness;
 	}, { scope: "worker", auto: true, timeout: 60_000 }],
 
 	restoreDefaultProject: [async ({ gateway }, use) => {

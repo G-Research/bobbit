@@ -16,6 +16,7 @@ declare global {
 			gateStatusCache: Map<string, any>,
 			prStatusCache: Map<string, any>,
 			sessions: any[],
+			goal?: any,
 		) => any;
 		getEmptyState: (archived: boolean, canArchive: boolean, isTeamGoal: boolean) => string;
 		getSetupIndicator: (setupStatus: string | undefined) => string;
@@ -168,12 +169,61 @@ test.describe("SB-09: Goal gate badge", () => {
 });
 
 test.describe("SB-10: PR status badge", () => {
-	test("PR takes priority over gate status", async ({ page }) => {
+	test("non-workflow goal shows PR without a gate summary", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			const prs = new Map([["g1", { state: "OPEN", reviewDecision: null, mergeable: "MERGEABLE", url: "https://pr" }]]);
+			return window.getGoalBadgeInfo("g1", new Map(), prs, []);
+		});
+		expect(result.type).toBe("pr");
+	});
+
+	test("non-workflow goal PR takes priority over stray gate status", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 		const result = await page.evaluate(() => {
 			const gates = new Map([["g1", { passed: 2, total: 5, verifying: false, verifyingCount: 0 }]]);
 			const prs = new Map([["g1", { state: "OPEN", reviewDecision: null, mergeable: "MERGEABLE", url: "https://pr" }]]);
 			return window.getGoalBadgeInfo("g1", gates, prs, []);
+		});
+		expect(result.type).toBe("pr");
+	});
+
+	test("workflow goal hides PR when gate summary is missing", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			const prs = new Map([["g1", { state: "OPEN", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", url: "https://pr" }]]);
+			return window.getGoalBadgeInfo("g1", new Map(), prs, [], { workflowId: "wf", workflow: { gates: [{ id: "gate" }] } });
+		});
+		expect(result.type).toBe("none");
+	});
+
+	test("workflowId-only goal hides PR when gate summary is missing", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			const prs = new Map([["g1", { state: "OPEN", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", url: "https://pr" }]]);
+			return window.getGoalBadgeInfo("g1", new Map(), prs, [], { workflowId: "wf" });
+		});
+		expect(result.type).toBe("none");
+	});
+
+	test("workflow goal hides PR while gates are incomplete", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			const gates = new Map([["g1", { passed: 1, total: 2, verifying: false, verifyingCount: 0 }]]);
+			const prs = new Map([["g1", { state: "OPEN", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", url: "https://pr" }]]);
+			return window.getGoalBadgeInfo("g1", gates, prs, [], { workflowId: "wf", workflow: { gates: [{ id: "a" }, { id: "b" }] } });
+		});
+		expect(result.type).toBe("gate");
+		expect(result.passed).toBe(1);
+		expect(result.total).toBe(2);
+	});
+
+	test("workflow goal shows PR after all gates pass", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+		const result = await page.evaluate(() => {
+			const gates = new Map([["g1", { passed: 2, total: 2, verifying: false, verifyingCount: 0 }]]);
+			const prs = new Map([["g1", { state: "OPEN", reviewDecision: null, mergeable: "MERGEABLE", url: "https://pr" }]]);
+			return window.getGoalBadgeInfo("g1", gates, prs, [], { workflowId: "wf", workflow: { gates: [{ id: "a" }, { id: "b" }] } });
 		});
 		expect(result.type).toBe("pr");
 	});
