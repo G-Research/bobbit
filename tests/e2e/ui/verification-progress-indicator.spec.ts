@@ -22,17 +22,9 @@
  *
  * Marker: GATE_SIGNAL_PROGRESS_INDICATOR
  */
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "../e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
-
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const SCREENSHOT_DIR = resolve(__dirname, "screenshots");
-const SCREENSHOT_PATH = resolve(SCREENSHOT_DIR, "verification-progress-indicator.png");
 
 // Slow phase-0 step (~25s) so the verification stays observably in flight
 // across navigation + reload. Pre-fix the race window itself was 15-30s,
@@ -184,8 +176,6 @@ test.describe("Verification progress indicator (full-stack UI) — GATE_SIGNAL_P
 			//      from the gate-store via /api/goals/.../gates/... and
 			//      /api/goals/.../verifications/active. Pre-fix those
 			//      payloads were empty for ~15-30s.
-			mkdirSync(SCREENSHOT_DIR, { recursive: true });
-			await page.screenshot({ path: SCREENSHOT_PATH, fullPage: false });
 			await page.reload();
 			await expect(
 				page.locator(".wf-checklist-item").filter({ hasText: GATE_NAME }),
