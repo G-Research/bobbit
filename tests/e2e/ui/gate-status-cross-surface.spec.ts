@@ -5,7 +5,7 @@
  * can see a running verification, but shared sidebar/widget badge state remains
  * derived from a stale/incomplete gate summary cache.
  */
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
@@ -132,14 +132,45 @@ async function waitForGatePassed(goalId: string): Promise<void> {
 	}, { timeout: 15_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
 }
 
-function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: string) {
-	return scope.locator(`:scope[title="${label}"], :scope[aria-label="${label}"], [title="${label}"], [aria-label="${label}"]`).first();
+function expectedGateBadge(label: string): { compactText: string; requiresBlink: boolean } | null {
+	const match = label.match(/^(\d+) of (\d+) gates passed(?:\s+—\s+verifying\s+(\d+))?$/);
+	if (!match) return null;
+	const passed = Number(match[1]);
+	const total = Number(match[2]);
+	const verifying = Number(match[3] ?? 0);
+	return {
+		compactText: `(${Math.min(total, passed + verifying)}/${total})`,
+		requiresBlink: verifying > 0,
+	};
+}
+
+async function hasGateProgressBadge(scope: Locator, label: string): Promise<boolean> {
+	const expectedBadge = expectedGateBadge(label);
+	return scope.evaluate((root, expected) => {
+		const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+		const isVisible = (el: Element) => {
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+		};
+		return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
+			if (!isVisible(el)) return false;
+			const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
+			if (titleOrLabel.includes(expected.label)) return true;
+			if (!expected.badge || normalize(el.textContent) !== expected.badge.compactText) return false;
+			return !expected.badge.requiresBlink || el.classList.contains("gate-blink") || !!el.querySelector(".gate-blink");
+		});
+	}, { label, badge: expectedBadge });
+}
+
+async function expectGateProgressBadge(scope: Locator, label: string, message: string): Promise<void> {
+	await expect.poll(async () => hasGateProgressBadge(scope, label), { timeout: 15_000, message }).toBe(true);
 }
 
 async function expectSidebarGateBadgeLabel(page: Page, goalId: string, label: string): Promise<void> {
 	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
 	await expect(row, "sidebar goal row should be visible before asserting its gate badge").toBeVisible({ timeout: 15_000 });
-	await expect(gateProgressBadgeLocator(row, label), "sidebar gate badge should expose the gate progress label/title").toBeVisible({ timeout: 15_000 });
+	await expectGateProgressBadge(row, label, "sidebar goal row should expose a visible gate progress badge for the expected count");
 }
 
 async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise<void> {
@@ -196,11 +227,9 @@ async function expectSharedGateVerifying(page: Page, goalId: string): Promise<vo
 async function expectSharedGateBadgesVerifying(page: Page, goalId: string): Promise<void> {
 	await expectSidebarGateBadgeLabel(page, goalId, VERIFY_TITLE);
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-	await expect(gateProgressBadgeLocator(pill, VERIFY_TITLE), "widget pill shared badge should expose verifying title/label")
-		.toBeVisible({ timeout: 15_000 });
+	await expectGateProgressBadge(pill, VERIFY_TITLE, "widget pill shared badge should expose the verifying gate progress count");
 	await ensureGoalWidgetPopoverOpen(page);
-	await expect(gateProgressBadgeLocator(page.locator("#goal-status-dropdown"), VERIFY_TITLE), "widget popover shared badge should expose verifying title/label")
-		.toBeVisible({ timeout: 15_000 });
+	await expectGateProgressBadge(page.locator("#goal-status-dropdown"), VERIFY_TITLE, "widget popover shared badge should expose the verifying gate progress count");
 }
 
 async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string): Promise<void> {
@@ -218,8 +247,7 @@ async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string
 		});
 		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
 	}, goalId);
-	await expect(gateProgressBadgeLocator(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE), "widget pill must rerender when the shared gate summary cache updates")
-		.toBeVisible({ timeout: 5_000 });
+	await expectGateProgressBadge(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE, "widget pill must rerender when the shared gate summary cache updates");
 	await page.evaluate((id) => {
 		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 		state.gateStatusCache.set(id, {
@@ -234,8 +262,10 @@ async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string
 		});
 		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
 	}, goalId);
-	await expect(gateProgressBadgeLocator(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE))
-		.toHaveCount(0, { timeout: 5_000 });
+	await expect.poll(async () => hasGateProgressBadge(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE), {
+		timeout: 5_000,
+		message: "widget pill should remove the verifying gate progress badge after the shared cache resets",
+	}).toBe(false);
 }
 
 async function expectDashboardPipelineUsesRunningSummaryForPassedGate(page: Page, goalId: string): Promise<void> {

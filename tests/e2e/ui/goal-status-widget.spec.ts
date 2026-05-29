@@ -5,6 +5,7 @@
  * stays compact: `Start Review` opens a review document, and approve/reject
  * decisions are submitted from the review pane.
  */
+import type { Locator } from "@playwright/test";
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
 import { waitForGateStatus } from "../test-utils/signoff-polling.mjs";
@@ -180,8 +181,23 @@ async function expectGateStatusCache(page: Page, goalId: string, expected: Parti
 	}).toMatchObject(expected);
 }
 
-function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: string) {
-	return scope.locator(`:scope[title="${label}"], :scope[aria-label="${label}"], [title="${label}"], [aria-label="${label}"]`).first();
+async function expectGateProgressBadge(scope: Locator, passed: number, total: number, message: string): Promise<void> {
+	const label = `${passed} of ${total} gates passed`;
+	const compactText = `(${passed}/${total})`;
+	await expect.poll(async () => scope.evaluate((root, expected) => {
+		const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+		const isVisible = (el: Element) => {
+			const style = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+		};
+		return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
+			if (!isVisible(el)) return false;
+			const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
+			if (titleOrLabel.includes(expected.label)) return true;
+			return normalize(el.textContent) === expected.compactText;
+		});
+	}, { label, compactText }), { timeout: 15_000, message }).toBe(true);
 }
 
 async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
@@ -189,7 +205,7 @@ async function expectSidebarGateBadge(page: Page, goalId: string, passed: number
 
 	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
 	await expect(row, "sidebar goal row should be visible before asserting its gate badge").toBeVisible({ timeout: 15_000 });
-	await expect(gateProgressBadgeLocator(row, `${passed} of ${total} gates passed`), "sidebar gate badge should expose the gate progress label/title").toBeVisible({ timeout: 15_000 });
+	await expectGateProgressBadge(row, passed, total, "sidebar goal row should expose a visible gate progress badge for the expected count");
 }
 
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
