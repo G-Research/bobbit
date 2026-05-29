@@ -60,6 +60,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files
 	"state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
+	"state/sandbox-agent-auth/",  // scoped sandbox auth mounts (host-tokens.ts)
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
 ];
 
