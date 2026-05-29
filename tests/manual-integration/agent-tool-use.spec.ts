@@ -41,6 +41,7 @@ import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -94,6 +95,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	// Bind to 0.0.0.0 so sandboxed containers can reach the gateway via
 	// host.docker.internal (which is --add-host'd into every sandbox by
 	// docker-args.ts). Without this, scenarios that exercise gateway-callback
