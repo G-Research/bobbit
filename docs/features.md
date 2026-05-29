@@ -90,7 +90,7 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 
 ## PR Walkthrough Panel
 
-The PR walkthrough panel is a side-panel review surface for guided pull-request or changeset review. It launches from `/walkthrough-pr <url|number>` or the Git Status Widget **Walkthrough** action, renders fixture-driven logical cards for the MVP, and persists comments/decisions per walkthrough tab id. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
+The PR walkthrough panel is a side-panel review surface for guided pull-request or changeset review. It launches from `/walkthrough-pr <url|number>`, the Git Status Widget **Walkthrough** action, or PR-link metadata; the same tab can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. The MVP renders fixture-driven logical cards and persists comments/decisions per walkthrough tab id. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
 
 ## Assistant Registry
 

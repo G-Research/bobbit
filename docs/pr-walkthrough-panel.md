@@ -4,17 +4,26 @@ The PR walkthrough panel is Bobbit's guided review surface for pull requests and
 
 The panel is intentionally changeset-oriented rather than GitHub-specific. The MVP renders fixture-generated logical cards, but the core component only needs a changeset reference, cards, diffs, comments, and decisions. GitHub lookup and export belong in adapters around that model.
 
-## Launch paths
+The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html) is the source of truth for UX unless a deviation is explicitly reviewed and accepted. Treat the prose docs as implementation notes around that prototype, not a replacement for it.
 
-Users can open the walkthrough from two places:
+## Launch paths and surfaces
+
+Users can open the walkthrough from these entry points:
 
 - **Slash command** — type `/walkthrough-pr <url|number>` in chat.
   - URLs become external PR changesets.
   - Numbers, with or without `#`, become PR-number changesets.
   - Empty invocations fall back to the fixture changeset.
-- **Git Status Widget** — click **Walkthrough** on the git status widget. The widget emits branch, PR, and summary metadata, and the app opens or focuses the matching walkthrough side-panel tab.
+- **Git Status Widget** — click **Walkthrough** on the git status widget. The widget emits branch, PR, summary, insertion, deletion, and file-count metadata, and the app opens or focuses the matching walkthrough side-panel tab.
+- **PR/GitHub metadata** — when a launch source includes PR URL/number/title metadata, the walkthrough header and toolbar expose a GitHub-style PR link pill that opens the provider URL externally.
 
-Both paths create a side-panel tab with a canonical `walkthrough:<changeset-id>` id. Reopening the same changeset focuses and updates that tab instead of duplicating it.
+Launches create a side-panel tab with a canonical `walkthrough:<changeset-id>` id. Reopening the same changeset focuses and updates that tab instead of duplicating it.
+
+The same walkthrough tab can be reviewed in multiple surfaces:
+
+- the normal Bobbit side panel beside chat;
+- the fullscreen/wide review surface from the side-panel toolbar;
+- a standalone `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` route, opened by the toolbar's new-tab action.
 
 ## Review flow
 
@@ -24,9 +33,9 @@ The walkthrough is organised into five phases:
 2. **Key design choices** — explains the main design decisions the reviewer should understand before scanning code.
 3. **Significant changes** — walks through the most important implementation details and diffs.
 4. **Other + omissions** — calls out smaller changes, known MVP omissions, and follow-up boundaries.
-5. **Audit** — assembles the accumulated decisions and comments into a copyable draft review.
+5. **Audit** — reviews remaining lines as a normal diff-backed card and then shows the final draft review section.
 
-Each non-audit phase contains one or more logical cards. A card is an LLM-synthesised review unit: title, summary, optional rationale/checklist, optional suggested comments, and one or more diff blocks. A single logical card can span multiple files or diff blocks when that better matches the reviewer story.
+Every phase contains one or more logical cards, including Audit. A card is an LLM-synthesised review unit: title, summary, optional rationale/checklist, optional suggested comments, and one or more diff blocks. A single logical card can span multiple files or diff blocks when that better matches the reviewer story. Audit cards use the same line comments, card comments, suggestions, diff expansion, and Like/Dislike controls as other cards; their extra responsibility is to render the copyable draft review after the diff-backed audit content.
 
 ## Navigation rail
 
@@ -45,6 +54,8 @@ Diffs render from the same card/block/hunk model in two modes:
 - **Inline** — a single column. This is the default in narrow layouts.
 
 The user can toggle either mode at any width. Split diffs wrap both sides in one shared horizontal overflow container, so each diff widget has one horizontal scrollbar instead of competing scrollbars per column.
+
+Split mode renders line details for both sides of a paired row. Deleted old-side lines and added new-side lines can each show their own suggestions, saved comments, and active editor below the row; context rows share a single detail area because both columns represent the same logical line.
 
 ## Comments and decisions
 
@@ -76,7 +87,7 @@ If the last supporting comment for a disliked card is deleted, the component cle
 
 ## Audit draft
 
-The Audit phase renders a copyable draft review assembled from current state:
+The Audit phase is a regular diff-backed review card followed by a copyable draft review assembled from current state:
 
 - changeset title and base/head metadata;
 - liked cards under approved context;
@@ -95,13 +106,16 @@ The panel persists interaction state by walkthrough tab id using a browser-stora
 - comments;
 - decisions;
 - completed card ids;
-- dismissed suggestion ids.
+- dismissed suggestion ids;
+- collapsed diff block ids.
 
 Because the persistence key is the side-panel tab id, each walkthrough tab is isolated. Opening `/walkthrough-pr 123` and `/walkthrough-pr 456` creates independent state; comments, decisions, active card, and Dislike enablement do not leak between tabs. Reloading the app restores the active walkthrough tab and its persisted audit state.
 
 ## MVP adapter boundary
 
-The production slice is fixture-driven. `PrWalkthroughPanel` receives `changeset`, `cards`, and `persistenceKey` and does not call GitHub APIs. App-level launch code maps slash-command or Git Status Widget input into a changeset ref and side-panel tab. Fixture cards then stand in for future card synthesis.
+The production slice is fixture-driven. `PrWalkthroughPanel` receives `changeset`, `cards`, and `persistenceKey` and does not call GitHub APIs. App-level launch code maps slash-command, Git Status Widget input, or PR-link metadata into a changeset ref and side-panel tab. Fixture cards then stand in for future card synthesis.
+
+Walkthrough stats prefer explicit changeset values (`filesChanged`, `additions`, `deletions`). If a launch path does not provide them, the panel derives file, addition, and deletion counts from the rendered cards' diff blocks. The Git Status Widget path supplies insertions, deletions, and file counts when available so the header can reflect the real branch summary before server-side card synthesis exists.
 
 Keep future work on the same boundary:
 
@@ -122,6 +136,7 @@ Browser coverage lives in `tests/e2e/ui/pr-walkthrough-panel.spec.ts`. The suite
 - line comments can be created, edited, and deleted;
 - Dislike is gated by comments and invalid disliked decisions are cleared when comments are removed;
 - Prev supports decision revision;
+- Audit is a normal diff-backed card with line/card comments plus a final draft section;
 - Audit draft reflects liked cards, disliked concerns, and queued comments;
 - reload restores persisted state;
 - separate walkthrough tabs keep state isolated;
