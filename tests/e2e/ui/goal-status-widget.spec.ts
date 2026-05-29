@@ -2,7 +2,7 @@
  * Browser E2E for the chat-header `<goal-status-widget>`.
  *
  * Sign-off content must use the review pane as the decision surface. The widget
- * stays compact: `View content` opens a review document, and approve/reject
+ * stays compact: `Start Review` opens a review document, and approve/reject
  * decisions are submitted from the review pane.
  */
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
@@ -387,10 +387,10 @@ async function openSignoffReviewFromWidget(page: Page, goalIdentifier: string): 
 
 	await card.locator("[data-testid='goal-widget-signoff-content-toggle']").click();
 
-	await expect(page.locator("[data-testid='goal-widget-signoff-content']"), "View content must not expand markdown inside the compact widget").toHaveCount(0);
+	await expect(page.locator("[data-testid='goal-widget-signoff-content']"), "Start Review must not expand markdown inside the compact widget").toHaveCount(0);
 
 	const tab = signoffReviewTab(page);
-	await expect(tab, "View content should open a sign-off review tab").toBeVisible({ timeout: 10_000 });
+	await expect(tab, "Start Review should open a sign-off review tab").toBeVisible({ timeout: 10_000 });
 	await expect(tab).toContainText(goalIdentifier);
 	await expect(tab).toContainText(GATE_NAME);
 	await expect(tab).toContainText(STEP_LABEL);
@@ -447,7 +447,7 @@ async function authorSignoffWorkflowViaEditor(page: Page, workflowId: string): P
 }
 
 test.describe("<goal-status-widget>", () => {
-	test("View content opens review pane; approve there posts pass and no inline widget content", async ({ page }) => {
+	test("Start Review opens review pane; approve there posts pass and no inline widget content", async ({ page }) => {
 		const goal = await createGoal({ title: `Goal-Status-Widget ${Date.now()}` });
 		const goalId = goal.id;
 		let sessionId: string | undefined;

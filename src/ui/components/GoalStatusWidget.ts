@@ -12,7 +12,7 @@
  *
  * Popover (click pill):
  *   - Gate list with status icons via `renderGateStatusIcon`.
- *   - Inline sign-off cards: label + substituted prompt (markdown), View content
+ *   - Inline sign-off cards: label + substituted prompt (markdown), Start Review
  *     launcher for the review pane.
  *   - Passed gate View / Reset controls and a top-right Goal Dashboard button.
  *
@@ -688,13 +688,13 @@ export class GoalStatusWidget extends LitElement {
 						<markdown-block .content=${req.prompt}></markdown-block>
 					</div>
 				` : nothing}
-				<div class="flex items-center gap-2 mt-1">
+				<div class="flex items-center justify-end gap-2 mt-1">
 					<button
 						class="goal-widget-button goal-widget-button-neutral"
 						?disabled=${launchLoading}
 						@click=${(e: MouseEvent) => { e.stopPropagation(); void this._openSignoffContentInReviewPane(req); }}
 						data-testid="goal-widget-signoff-content-toggle"
-					>${launchLoading ? icon(Loader2, "xs", "animate-spin") : icon(FileText, "xs")}<span>${launchLoading ? "Opening…" : "View content"}</span></button>
+					>${launchLoading ? icon(Loader2, "xs", "animate-spin") : icon(FileText, "xs")}<span>${launchLoading ? "Opening…" : "Start Review"}</span></button>
 				</div>
 				${launchError ? html`<div style="font-size:11px;color:var(--destructive)" data-testid="goal-widget-signoff-content-error">${launchError}</div>` : nothing}
 			</div>
