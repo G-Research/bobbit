@@ -481,7 +481,9 @@ test.describe("<goal-status-widget>", () => {
 			const gateRows = page.locator("[data-testid='goal-widget-gate']");
 			await expect(gateRows).toHaveCount(3, { timeout: 5_000 });
 			await expect(gateRows.filter({ hasText: "Design Document" })).toHaveAttribute("data-gate-status", "passed");
-			await expect(gateRows.filter({ hasText: GATE_NAME })).toHaveAttribute("data-gate-status", "pending");
+			// The parked human sign-off is an active verification, so the authoritative
+			// widget state should render the gate as running until approval resolves it.
+			await expect(gateRows.filter({ hasText: GATE_NAME })).toHaveAttribute("data-gate-status", "running");
 			const runningDot = gateRows.filter({ hasText: GATE_NAME }).locator("[data-testid='goal-widget-gate-running-dot']");
 			await expect(runningDot).toBeVisible();
 			expect(await runningDot.evaluate((el) => {
