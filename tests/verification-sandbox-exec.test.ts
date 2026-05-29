@@ -43,6 +43,7 @@ function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}
 			branch: opts.branch,
 			enabledOptionalSteps: [],
 		}),
+		bumpGeneration: mock.fn(() => {}),
 	};
 }
 
