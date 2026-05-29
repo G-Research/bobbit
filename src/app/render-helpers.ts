@@ -726,11 +726,15 @@ export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "
 	}
 }
 
-/** Render goal side badges without hiding the gate progress contract. */
-function renderGoalBadge(goalId: string) {
-	const gateBadge = renderGateProgressBadge(goalId);
-	const pr = state.prStatusCache.get(goalId);
-	if (!pr) return gateBadge;
+/** Render a PR icon or gate status badge next to a goal in the sidebar. */
+function renderGoalBadge(goal: Goal) {
+	const gs = state.gateStatusCache.get(goal.id);
+	const gateBadge = renderGateProgressBadge(goal.id);
+	const pr = state.prStatusCache.get(goal.id);
+	// Workflow progress is primary. PR status is only shown after a positive,
+	// fully-passed gate summary exists; before that, do not let PR state mask
+	// incomplete/verifying/uncached workflow progress.
+	if (!pr || !gs || gs.total <= 0 || gs.passed !== gs.total) return gateBadge;
 
 	let color: string;
 	if (pr.state === "MERGED") color = "#a87fd4";
@@ -746,10 +750,10 @@ function renderGoalBadge(goalId: string) {
 	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
 	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
 	const prIcon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
-	const prBadge = pr.url
-		? html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`
-		: html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
-	return html`${gateBadge}${prBadge}`;
+	if (pr.url) {
+		return html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+	}
+	return html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
 }
 
 /**
@@ -922,7 +926,7 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="shrink-0 text-muted-foreground" style="margin-left:-3px;">${icon(GoalIcon, "xs")}</span>
 				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
-				${renderGoalBadge(goal.id)}
+				${renderGoalBadge(goal)}
 				${mobile
 					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">

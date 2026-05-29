@@ -177,6 +177,27 @@ async function expectSidebarGateBadge(page: Page, goalId: string, passed: number
 		.toBeVisible({ timeout: 15_000 });
 }
 
+async function expectSidebarCompleteWorkflowStatus(page: Page, goalId: string, passed: number, total: number): Promise<void> {
+	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
+
+	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+	await expect(row, "sidebar goal row should be visible before asserting complete workflow status").toBeVisible({ timeout: 15_000 });
+	await expect.poll(async () => {
+		const prVisible = await row.locator('[title^="PR "]').first().isVisible().catch(() => false);
+		if (prVisible) return true;
+		return row.evaluate((root, expected) => {
+			const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+			return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
+				const style = window.getComputedStyle(el);
+				const rect = el.getBoundingClientRect();
+				if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return false;
+				const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
+				return titleOrLabel.includes(expected.label) || normalize(el.textContent) === expected.compactText;
+			});
+		}, { label: `${passed} of ${total} gates passed`, compactText: `(${passed}/${total})` });
+	}, { timeout: 15_000, message: "sidebar should show PR status when available after workflow completion, otherwise the completed gate count" }).toBe(true);
+}
+
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
 	await page.evaluate(({ commentText, quoteText }) => {
 		const doc = document.querySelector("review-document") as any;
@@ -591,7 +612,7 @@ test.describe("<goal-status-widget>", () => {
 			await pill.click();
 			await expect(page.locator("[data-testid='goal-widget-signoff']"), "widget popover sign-off card should clear after approval without reload").toHaveCount(0, { timeout: 5_000 });
 			await waitForGateStatus(goalId, "design", "passed", 20_000);
-			await expectSidebarGateBadge(page, goalId, 1, 1);
+			await expectSidebarCompleteWorkflowStatus(page, goalId, 1, 1);
 			await expectDashboardGateStatus(dashboardPage, "design", "passed");
 		} finally {
 			if (dashboardPage) await dashboardPage.close().catch(() => { /* ignore */ });
@@ -848,7 +869,7 @@ test.describe("<goal-status-widget>", () => {
 
 			await openApp(page);
 			await openSession(page, teamLeadId);
-			await expectSidebarGateBadge(page, goalId, 3, 3);
+			await expectSidebarCompleteWorkflowStatus(page, goalId, 3, 3);
 			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
 			await pill.click();
