@@ -125,22 +125,32 @@ async function signalGoalGate(goalId: string, gateId: string, content = `# ${gat
 
 async function ensureGoalWidgetGateVisible(page: Page, gateId: string): Promise<void> {
 	const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`).first();
+	const dropdown = page.locator("#goal-status-dropdown").first();
+	const closingDropdown = page.locator("#goal-status-dropdown.goal-status-closing").first();
+	if (await closingDropdown.isVisible().catch(() => false)) {
+		await expect(closingDropdown).toBeHidden({ timeout: 5_000 });
+	}
 	if (await row.isVisible().catch(() => false)) return;
-	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-	await pill.click();
-	if (!(await row.isVisible().catch(() => false))) await pill.click();
+	if (!(await dropdown.isVisible().catch(() => false))) {
+		const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+		await expect(pill).toBeVisible({ timeout: 10_000 });
+		await pill.click();
+	}
 	await expect(row).toBeVisible({ timeout: 10_000 });
 }
 
 async function clickGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<void> {
-	await ensureGoalWidgetGateVisible(page, gateId);
-	const selector = `[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`;
-	await expect.poll(async () => page.evaluate((sel) => {
-		const action = document.querySelector(sel) as HTMLElement | null;
-		if (!action) return false;
-		action.click();
-		return true;
-	}, selector), { timeout: 10_000 }).toBe(true);
+	const action = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`).first();
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await ensureGoalWidgetGateVisible(page, gateId);
+		if (await action.isVisible().catch(() => false)) {
+			await action.evaluate((el) => (el as HTMLElement).click());
+			return;
+		}
+		await page.locator("#goal-status-dropdown.goal-status-closing").first().waitFor({ state: "hidden", timeout: 5_000 }).catch(() => { /* retry below */ });
+	}
+	await expect(action).toBeVisible({ timeout: 10_000 });
+	await action.evaluate((el) => (el as HTMLElement).click());
 }
 
 async function expectDashboardGateStatus(page: Page, gateId: string, status: "pending" | "passed" | "failed"): Promise<void> {
@@ -170,10 +180,14 @@ async function expectGateStatusCache(page: Page, goalId: string, expected: Parti
 	}).toMatchObject(expected);
 }
 
+function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: string) {
+	return scope.locator(`[title="${label}"], [aria-label="${label}"]`).first();
+}
+
 async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
 	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
 
-	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${passed} of ${total} gates passed"]`).first())
+	await expect(gateProgressBadgeLocator(page.locator(`[data-nav-id="goal:${goalId}"]`), `${passed} of ${total} gates passed`))
 		.toBeVisible({ timeout: 15_000 });
 }
 
@@ -256,7 +270,7 @@ async function expectGoalCounterAndIconVerticallyAligned(page: Page): Promise<vo
 	await expect(pill).toBeVisible({ timeout: 15_000 });
 	const delta = await page.evaluate(() => {
 		const icon = document.querySelector("[data-testid='goal-status-widget-icon']") as HTMLElement | null;
-		const counter = document.querySelector("[data-testid='goal-status-widget-pill'] > span[title*='gates passed']") as HTMLElement | null;
+		const counter = document.querySelector("[data-testid='goal-status-widget-pill'] > span[title*='gates passed'], [data-testid='goal-status-widget-pill'] > span[aria-label*='gates passed']") as HTMLElement | null;
 		if (!icon || !counter) return Number.POSITIVE_INFINITY;
 		const ir = icon.getBoundingClientRect();
 		const cr = counter.getBoundingClientRect();

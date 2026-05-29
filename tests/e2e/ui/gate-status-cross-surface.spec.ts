@@ -132,12 +132,16 @@ async function waitForGatePassed(goalId: string): Promise<void> {
 	}, { timeout: 15_000, message: "first gate signal should pass before re-signal coverage starts" }).toBe("passed");
 }
 
+function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: string) {
+	return scope.locator(`[title="${label}"], [aria-label="${label}"]`).first();
+}
+
 async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise<void> {
 	await expect.poll(async () => readSharedGateSummary(page, goalId), {
 		timeout: 15_000,
 		message: "initial shared gate status cache should expose 0/1 before signalling",
 	}).toMatchObject({ passed: 0, total: 1 });
-	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="0 of 1 gates passed"]`).first())
+	await expect(gateProgressBadgeLocator(page.locator(`[data-nav-id="goal:${goalId}"]`), "0 of 1 gates passed"))
 		.toBeVisible({ timeout: 15_000 });
 }
 
@@ -185,13 +189,13 @@ async function expectSharedGateVerifying(page: Page, goalId: string): Promise<vo
 }
 
 async function expectSharedGateBadgesVerifying(page: Page, goalId: string): Promise<void> {
-	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${VERIFY_TITLE}"]`).first(), "sidebar gate badge should expose verifying title")
+	await expect(gateProgressBadgeLocator(page.locator(`[data-nav-id="goal:${goalId}"]`), VERIFY_TITLE), "sidebar gate badge should expose verifying title/label")
 		.toBeVisible({ timeout: 15_000 });
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-	await expect(pill.locator(`span[title="${VERIFY_TITLE}"]`).first(), "widget pill shared badge should expose verifying title")
+	await expect(gateProgressBadgeLocator(pill, VERIFY_TITLE), "widget pill shared badge should expose verifying title/label")
 		.toBeVisible({ timeout: 15_000 });
 	await ensureGoalWidgetPopoverOpen(page);
-	await expect(page.locator(`#goal-status-dropdown span[title="${VERIFY_TITLE}"]`).first(), "widget popover shared badge should expose verifying title")
+	await expect(gateProgressBadgeLocator(page.locator("#goal-status-dropdown"), VERIFY_TITLE), "widget popover shared badge should expose verifying title/label")
 		.toBeVisible({ timeout: 15_000 });
 }
 
@@ -210,7 +214,7 @@ async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string
 		});
 		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
 	}, goalId);
-	await expect(page.locator("[data-testid='goal-status-widget-pill']").first().locator(`span[title="${VERIFY_TITLE}"]`).first(), "widget pill must rerender when the shared gate summary cache updates")
+	await expect(gateProgressBadgeLocator(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE), "widget pill must rerender when the shared gate summary cache updates")
 		.toBeVisible({ timeout: 5_000 });
 	await page.evaluate((id) => {
 		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
@@ -226,7 +230,7 @@ async function expectWidgetPillRerendersOnCacheUpdate(page: Page, goalId: string
 		});
 		window.dispatchEvent(new CustomEvent("bobbit-gate-status-event", { detail: { type: "gate_status_cache_updated", goalId: id } }));
 	}, goalId);
-	await expect(page.locator("[data-testid='goal-status-widget-pill']").first().locator(`span[title="${VERIFY_TITLE}"]`).first())
+	await expect(gateProgressBadgeLocator(page.locator("[data-testid='goal-status-widget-pill']").first(), VERIFY_TITLE))
 		.toHaveCount(0, { timeout: 5_000 });
 }
 

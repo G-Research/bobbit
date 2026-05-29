@@ -706,11 +706,13 @@ export class GoalStatusWidget extends LitElement {
 		const awaiting = this._awaitingSignoffs.length > 0;
 		const titleParts = [`Goal status: ${passed}/${total} gates passed`];
 		if (awaiting) titleParts.push(`${this._awaitingSignoffs.length} awaiting sign-off`);
+		const label = titleParts.join(" \u2014 ");
 		return html`
 			<button
 				class="goal-status-pill inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-card border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer text-[12px] leading-tight"
 				style="max-width:100%; height:var(--pill-h, auto)"
-				title=${titleParts.join(" \u2014 ")}
+				title=${label}
+				aria-label=${label}
 				data-testid="goal-status-widget-pill"
 				data-awaiting-signoffs=${awaiting ? "true" : "false"}
 				@click=${this._togglePill}
@@ -753,7 +755,8 @@ export class GoalStatusWidget extends LitElement {
 				align-items: center;
 				line-height: 12px;
 			}
-			goal-status-widget .goal-status-pill > span[title*="gates passed"] {
+			goal-status-widget .goal-status-pill > span[title*="gates passed"],
+			goal-status-widget .goal-status-pill > span[aria-label*="gates passed"] {
 				height: 12px;
 				transform: translateY(-0.5px);
 			}
