@@ -34,7 +34,8 @@ import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanel
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
-import { refreshGateStatusForGoal } from "./api.js";
+import { scheduleGateStatusRefreshForGoal } from "./api.js";
+import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { createSystemNotification } from "./custom-messages.js";
 import { clearAnnotations, clearAllAnnotations, isReviewSubmitted, clearReviewSubmitted, initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
@@ -1247,6 +1248,9 @@ export class RemoteAgent {
 	}
 
 	private async handleServerMessage(msg: any) {
+		if (shouldRefreshGateStatusForEvent(msg)) {
+			scheduleGateStatusRefreshForGoal((msg as any).goalId);
+		}
 		switch (msg.type) {
 			case "state":
 				// Canonical-status path (new server). When the server splices
@@ -1508,19 +1512,16 @@ export class RemoteAgent {
 			}
 
 			case "gate_signal_received":
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 
 			case "gate_status_changed": {
 				const gateCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" \u2192 ${(msg as any).status}`, gateCat);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 
 			case "gate_verification_started":
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			case "gate_verification_phase_started":
 			case "gate_verification_step_complete":
@@ -1530,20 +1531,13 @@ export class RemoteAgent {
 				break;
 
 			case "gate_verification_awaiting_human":
-				// A human-signoff step has parked — trigger a gate-status
-				// cache refresh so `awaitingHumanSignoff` flips on for the
-				// goal. Without this, notification-policy Rule 2 (the
-				// read-state-bypassing trigger for pending sign-offs) stays
-				// dormant until a sidebar poll catches up.
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 
 			case "gate_verification_complete": {
 				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
 				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
 				dispatchVerificationEvent(msg);
-				refreshGateStatusForGoal((msg as any).goalId);
 				break;
 			}
 

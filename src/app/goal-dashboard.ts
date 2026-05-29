@@ -6,9 +6,10 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
+import { shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -209,8 +210,14 @@ function connectDashboardWs(): void {
 				return;
 			}
 			if (typeof msg?.goalId === "string" && msg.goalId !== currentGoalId) return;
-			if (msg?.type === "gate_signal_received" || msg?.type === "gate_status_changed") {
+			if (shouldRefreshGateStatusForEvent(msg)) {
+				scheduleGateStatusRefreshForGoal(msg.goalId);
+			}
+			if (shouldRefreshGateDetailsForEvent(msg)) {
 				refreshGatesFromWsEvent(msg.goalId);
+			}
+			if (shouldRefreshActiveVerificationsForEvent(msg)) {
+				void fetchActiveVerifications(msg.goalId);
 			}
 			dispatchVerificationEvent(msg);
 		} catch {
@@ -323,6 +330,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		}
 
 		gates = fetchedGates;
+		await refreshGateStatusForGoal(goalId);
 		applyDashboardRouteFocus(goalId);
 
 		if (gitStatusRes && gitStatusRes.ok) {
@@ -564,21 +572,10 @@ function stopAgentPolling(): void {
 
 function applyGateState(goalId: string, newGates: GateState[]): void {
 	gates = newGates;
-	// Sync to sidebar gate status cache
-	const goal = state.goals.find(g => g.id === goalId);
-	if (goal?.workflow?.gates.length) {
-		const passed = newGates.filter((g: any) => g.status === "passed").length;
-		const total = goal.workflow.gates.length;
-		const verifying = newGates.some((g: any) => g.signals?.some((s: any) => s.verification?.status === "running"));
-		const verifyingCount = newGates.filter((g: any) => g.status !== "passed" && g.signals?.some((s: any) => s.verification?.status === "running")).length;
-		// Preserve human-sign-off counters from the previous cache entry — the
-		// dashboard refresh path does not know about pending sign-offs; only
-		// `refreshGateStatusCache` / `refreshGateStatusForGoal` in api.ts do.
-		const prev = state.gateStatusCache.get(goalId);
-		const awaitingSignoffCount = prev?.awaitingSignoffCount ?? 0;
-		const awaitingHumanSignoff = prev?.awaitingHumanSignoff ?? false;
-		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
-	}
+	// Gate progress/counts are server-authoritative. Keep the dashboard's full
+	// gate rows local, but refresh the shared summary from the same server truth
+	// consumed by sidebar/widget/notification surfaces.
+	scheduleGateStatusRefreshForGoal(goalId, 0);
 }
 
 function refreshGatesFromWsEvent(goalId: string): void {
@@ -1615,10 +1612,16 @@ function setTab(tab: DashboardTabId): void {
 	renderApp();
 }
 
+function currentGateSummaryCounts(): { passed: number; total: number } {
+	const summary = currentGoalId ? state.gateStatusCache.get(currentGoalId) : undefined;
+	if (summary && summary.total > 0) return { passed: summary.passed, total: summary.total };
+	const total = currentGoal?.workflow?.gates.length ?? gates.length;
+	return { passed: gates.filter(g => g.status === "passed").length, total };
+}
+
 function renderTabBar(): TemplateResult {
-	const wfTotal = currentGoal?.workflow?.gates.length ?? 0;
-	const passedCount = gates.filter(g => g.status === "passed").length;
-	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
+	const gateSummary = currentGateSummaryCounts();
+	const gateCountStr = gateSummary.total > 0 ? `${gateSummary.passed}/${gateSummary.total}` : String(gates.length);
 
 	const tabs: Array<{ id: DashboardTabId; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
@@ -1903,8 +1906,9 @@ function renderGateChecklist(): TemplateResult {
 	}
 	for (const g of wfGates) visit(g.id);
 
-	const passedCount = gates.filter(g => g.status === "passed").length;
-	const totalCount = sorted.length;
+	const summaryCounts = currentGateSummaryCounts();
+	const passedCount = summaryCounts.passed;
+	const totalCount = summaryCounts.total || sorted.length;
 	const pct = totalCount > 0 ? Math.round((passedCount / totalCount) * 100) : 0;
 
 	return html`

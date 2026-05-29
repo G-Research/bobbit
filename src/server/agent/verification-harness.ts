@@ -801,6 +801,12 @@ export class VerificationHarness {
 		const resolver = this.pendingSignoffs.get(key);
 		if (!resolver) return false;
 		this.pendingSignoffs.delete(key);
+		const active = this.activeVerifications.get(signalId);
+		const step = active?.steps.find(s => s.name === stepName);
+		if (step?.awaitingHuman) {
+			step.awaitingHuman = false;
+			this._persistActive();
+		}
 		try { resolver(outcome); } catch (err) {
 			console.error(`[verification] resolveSignoff resolver threw for ${key}:`, err);
 		}

@@ -18,10 +18,8 @@
  *
  * Data:
  *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
- *   - Live: viewer WebSocket subscription on `gate_signal_received`,
- *     `gate_status_changed`, `gate_verification_step_started`,
- *     `gate_verification_step_complete`, `gate_verification_phase_started`,
- *     `gate_verification_complete`, and the new `gate_verification_awaiting_human`.
+ *   - Live: viewer WebSocket subscription using the centralized gate event
+ *     refresh contract in `app/gate-status-events.ts`.
  *
  * Authz: trusts the gateway token (v1 — no identity model). Sign-off submission
  * records only a server-side timestamp.
@@ -31,6 +29,8 @@ import { html, LitElement, nothing, render, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { Eye, FileText, Goal as GoalIcon, LayoutDashboard, Loader2, RotateCcw } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
+import { scheduleGateStatusRefreshForGoal } from "../../app/api.js";
+import { shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 
@@ -155,6 +155,7 @@ export class GoalStatusWidget extends LitElement {
 
 	private async _fetchInitial(): Promise<void> {
 		this._loading = true;
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const [gatesResp, vActiveResp] = await Promise.all([
 				this._fetch(`/api/goals/${this.goalId}/gates`),
@@ -178,6 +179,7 @@ export class GoalStatusWidget extends LitElement {
 	}
 
 	private async _refreshGates(): Promise<void> {
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/gates`);
 			if (!resp?.ok) return;
@@ -187,6 +189,7 @@ export class GoalStatusWidget extends LitElement {
 	}
 
 	private async _refreshActive(): Promise<void> {
+		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
 			const resp = await this._fetch(`/api/goals/${this.goalId}/verifications/active`);
 			if (!resp?.ok) return;
@@ -338,20 +341,16 @@ export class GoalStatusWidget extends LitElement {
 
 	private _handleWsEvent(msg: any): void {
 		const t = msg?.type;
+		if (shouldRefreshGateStatusForEvent(msg)) {
+			scheduleGateStatusRefreshForGoal(this.goalId);
+		}
+		if (shouldRefreshGateDetailsForEvent(msg)) {
+			void this._refreshGates();
+		}
+		if (shouldRefreshActiveVerificationsForEvent(msg)) {
+			void this._refreshActive();
+		}
 		switch (t) {
-			case "gate_signal_received":
-			case "gate_status_changed":
-			case "gate_reset":
-			case "gate_verification_complete":
-			case "gate_verification_phase_started":
-				void this._refreshGates();
-				void this._refreshActive();
-				break;
-			case "gate_verification_step_started":
-			case "gate_verification_step_complete":
-				void this._refreshActive();
-				if (t === "gate_verification_step_complete") void this._refreshGates();
-				break;
 			case "gate_verification_awaiting_human": {
 				const signalId = typeof msg.signalId === "string" ? msg.signalId : null;
 				const gateId = typeof msg.gateId === "string" ? msg.gateId : null;
