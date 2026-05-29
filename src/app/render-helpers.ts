@@ -197,7 +197,7 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
 
-	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
+	// Persistent attention predicate — beeps use the idle-transition variant.
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
 
