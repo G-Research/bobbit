@@ -5,7 +5,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
-import type { PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
+import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
@@ -92,11 +92,13 @@ import {
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
+	walkthroughChangesetIdFromPanelTabId,
 	walkthroughPanelTabId,
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
+import { restorePrWalkthroughPanel } from "./pr-walkthrough.js";
 import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
@@ -2199,12 +2201,34 @@ export function doRenderApp(): void {
 		if (tab.kind !== "walkthrough") return "";
 		void ensurePrWalkthroughPanel();
 		const changeset = walkthroughChangesetFromTab(tab);
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const cards = Array.isArray(tabState.cards) ? tabState.cards as PrWalkthroughCard[] : undefined;
+		const status = typeof tabState.status === "string" ? tabState.status : "fixture";
+		const warnings = Array.isArray(tabState.warnings) ? tabState.warnings : [];
+		const error = typeof tabState.error === "string" ? tabState.error : undefined;
+		const exportCapability = tabState.exportCapability;
 		return html`
-			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id}>
-				<pr-walkthrough-panel
-					.changeset=${changeset}
-					.persistenceKey=${tab.id}
-				></pr-walkthrough-panel>
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id} data-walkthrough-status=${status}>
+				${cards ? html`
+					<pr-walkthrough-panel
+						.changeset=${changeset}
+						.cards=${cards}
+						.status=${status}
+						.warnings=${warnings}
+						.error=${error}
+						.exportCapability=${exportCapability}
+						.persistenceKey=${tab.id}
+					></pr-walkthrough-panel>
+				` : html`
+					<pr-walkthrough-panel
+						.changeset=${changeset}
+						.status=${status}
+						.warnings=${warnings}
+						.error=${error}
+						.exportCapability=${exportCapability}
+						.persistenceKey=${tab.id}
+					></pr-walkthrough-panel>
+				`}
 			</div>
 		`;
 	};
@@ -2218,17 +2242,25 @@ export function doRenderApp(): void {
 			: rawTabId;
 		const tabCandidates = [tabId, rawTabId].filter(Boolean);
 		const storedTab = panelTabsForSession(state, sid).find((candidate) => tabCandidates.includes(candidate.id) && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
+		const fallbackTabId = tabId && tabId.startsWith("walkthrough:") ? tabId : "walkthrough:fixture";
+		const fallbackChangesetId = walkthroughChangesetIdFromPanelTabId(fallbackTabId);
 		const tab = storedTab
 			? (tabId && storedTab.id !== tabId ? { ...storedTab, id: tabId } as UnifiedContentTab : storedTab)
 			: {
-				id: tabId && tabId.startsWith("walkthrough:") ? tabId : "walkthrough:fixture",
+				id: fallbackTabId,
 				kind: "walkthrough" as const,
 				title: "PR Walkthrough",
 				label: "Walkthrough",
 				legacyTab: "walkthrough" as const,
-				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough" },
-				state: {},
+				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough", changesetId: fallbackChangesetId },
+				state: { changesetId: fallbackChangesetId },
 			} as UnifiedContentTab;
+		if (storedTab) {
+			restorePrWalkthroughPanel(state, sid, storedTab.id);
+		} else if (fallbackChangesetId && fallbackChangesetId !== "fixture") {
+			setPanelTabsForSession(state, sid, [...panelTabsForSession(state, sid), tab as PanelWorkspaceTab]);
+			restorePrWalkthroughPanel(state, sid, tab.id);
+		}
 		return html`
 			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
 				<div class="flex items-center justify-between gap-3 px-4 py-2 border-b border-border shrink-0" style="background:var(--background);">
