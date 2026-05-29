@@ -188,12 +188,8 @@ async function expectSidebarGateBadge(page: Page, goalId: string, passed: number
 	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
 
 	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-	await expect(row, "sidebar goal row should be visible before asserting its gate counter").toBeVisible({ timeout: 15_000 });
-	await expect(row, `sidebar goal row should show gate counter (${passed}/${total})`).toContainText(`(${passed}/${total})`, { timeout: 15_000 });
-	const accessibleBadge = gateProgressBadgeLocator(row, `${passed} of ${total} gates passed`);
-	if (await accessibleBadge.count()) {
-		await expect(accessibleBadge, "sidebar gate counter accessible label/title should match when exposed on the row or badge").toBeVisible();
-	}
+	await expect(row, "sidebar goal row should be visible before asserting its gate badge").toBeVisible({ timeout: 15_000 });
+	await expect(gateProgressBadgeLocator(row, `${passed} of ${total} gates passed`), "sidebar gate badge should expose the gate progress label/title").toBeVisible({ timeout: 15_000 });
 }
 
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {

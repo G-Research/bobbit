@@ -136,13 +136,10 @@ function gateProgressBadgeLocator(scope: ReturnType<Page["locator"]>, label: str
 	return scope.locator(`:scope[title="${label}"], :scope[aria-label="${label}"], [title="${label}"], [aria-label="${label}"]`).first();
 }
 
-async function expectSidebarGateCounter(page: Page, goalId: string, visibleCounter: string, accessibleLabel?: string): Promise<void> {
+async function expectSidebarGateBadgeLabel(page: Page, goalId: string, label: string): Promise<void> {
 	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-	await expect(row, "sidebar goal row should be visible before asserting its gate counter").toBeVisible({ timeout: 15_000 });
-	await expect(row, `sidebar goal row should show gate counter ${visibleCounter}`).toContainText(visibleCounter, { timeout: 15_000 });
-	if (accessibleLabel && await gateProgressBadgeLocator(row, accessibleLabel).count()) {
-		await expect(gateProgressBadgeLocator(row, accessibleLabel), "sidebar gate counter accessible label/title should match when exposed on the row or badge").toBeVisible();
-	}
+	await expect(row, "sidebar goal row should be visible before asserting its gate badge").toBeVisible({ timeout: 15_000 });
+	await expect(gateProgressBadgeLocator(row, label), "sidebar gate badge should expose the gate progress label/title").toBeVisible({ timeout: 15_000 });
 }
 
 async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise<void> {
@@ -150,7 +147,7 @@ async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise
 		timeout: 15_000,
 		message: "initial shared gate status cache should expose 0/1 before signalling",
 	}).toMatchObject({ passed: 0, total: 1 });
-	await expectSidebarGateCounter(page, goalId, "(0/1)", "0 of 1 gates passed");
+	await expectSidebarGateBadgeLabel(page, goalId, "0 of 1 gates passed");
 }
 
 async function ensureGoalWidgetPopoverOpen(page: Page): Promise<void> {
@@ -197,7 +194,7 @@ async function expectSharedGateVerifying(page: Page, goalId: string): Promise<vo
 }
 
 async function expectSharedGateBadgesVerifying(page: Page, goalId: string): Promise<void> {
-	await expectSidebarGateCounter(page, goalId, "(1/1)", VERIFY_TITLE);
+	await expectSidebarGateBadgeLabel(page, goalId, VERIFY_TITLE);
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(gateProgressBadgeLocator(pill, VERIFY_TITLE), "widget pill shared badge should expose verifying title/label")
 		.toBeVisible({ timeout: 15_000 });
