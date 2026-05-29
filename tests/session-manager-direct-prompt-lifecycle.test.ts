@@ -124,4 +124,32 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(client.sent.at(-2).type, "session_status");
 		assert.equal(client.sent.at(-2).status, "idle");
 	});
+
+	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = mock.fn(() => pending.promise);
+		const { session, client } = putSession(manager, { rpcClient: { prompt } });
+
+		const sendPromise = manager.enqueuePrompt(session.id, "lost with child");
+		assert.equal(prompt.mock.callCount(), 1);
+		assert.equal(session.status, "streaming");
+
+		manager.handleAgentLifecycle(session, { type: "process_exit", code: 17, signal: null });
+		assert.equal(session.status, "terminated");
+
+		pending.reject(new Error("Agent process exited with code 17"));
+		await assert.rejects(() => sendPromise, /Agent process exited with code 17/);
+
+		t.mock.timers.tick(0);
+		assert.equal(prompt.mock.callCount(), 1, "terminated sessions must not redrain rejected prompts");
+		assert.equal(session.status, "terminated", "recovery must not broadcast idle over process_exit termination");
+		assert.equal(session.promptQueue.length, 0, "prompt rejected by a dead child must not be requeued");
+		assert.deepEqual(
+			client.sent.filter((msg) => msg.type === "session_status").map((msg) => msg.status),
+			["streaming", "terminated"],
+		);
+		assert.equal(client.sent.some((msg) => msg.type === "queue_update"), false);
+	});
 });
