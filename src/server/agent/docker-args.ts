@@ -85,6 +85,10 @@ export interface DockerRunConfig {
 	sandboxNetwork?: string;
 	/** Tool manager for resolving builtin tools directory (optional — falls back to TOOLS_DIR only). */
 	toolManager?: ToolManager;
+	/** Whether sandbox policy permits mounting host OpenAI Codex auth into auth.json. */
+	sandboxAgentAuthAllowed?: boolean;
+	/** Scope for the generated auth.json file; defaults to projectId when present. */
+	sandboxAgentAuthScope?: string;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -198,10 +202,13 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		// models.json doesn't exist — agent will rely on env vars for model discovery
 	}
 
-	// Mount a sanitized auth.json that contains only the OpenAI Codex credential.
-	// Never mount the host agent dir or full auth.json: it may contain unrelated
-	// provider credentials that sandboxed agents must not be able to read.
-	const sandboxAuthJson = ensureSandboxAgentAuthFile();
+	// Mount a sandbox-scoped auth.json. When sandbox token policy does not allow
+	// OpenAI/Codex credentials, the file is an empty non-secret object so Pi still
+	// sees the expected path without exposing host auth.
+	const sandboxAuthJson = ensureSandboxAgentAuthFile({
+		includeCodexAuth: config.sandboxAgentAuthAllowed === true,
+		scope: config.sandboxAgentAuthScope || projectId,
+	});
 	args.push("-v", `${toDockerPath(sandboxAuthJson)}:/home/node/.bobbit/agent/auth.json:ro`);
 
 	// Session prompts directory
