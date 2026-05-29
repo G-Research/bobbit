@@ -1747,21 +1747,16 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			session.lastPromptText = prefixedDispatch;
-			session.lastPromptImages = opts?.images;
-			session.streamingStartedAt = Date.now();
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
-			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
+			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered);
 			return;
 		}
 
-		// If agent is idle and queue is empty, dispatch directly
+		// If agent is idle and queue is empty, dispatch directly. Mark streaming
+		// before awaiting rpcClient.prompt(): Pi 0.77 OpenAI/Codex preflight can be
+		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
-			session.lastPromptText = dispatchText;
-			session.lastPromptImages = opts?.images;
-			await session.rpcClient.prompt(dispatchText, opts?.images);
+			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
 			return;
 		}
 
@@ -1969,6 +1964,66 @@ export class SessionManager {
 		return ok;
 	}
 
+	private markPromptDispatchStreaming(session: SessionInfo): void {
+		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
+		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+	}
+
+	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
+		text: string;
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		isSteered?: boolean;
+	}>, reason: string, source: string): void {
+		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
+		// Re-enqueue at front in original order so the next drain re-dispatches
+		// the same batch. Reverse iteration because enqueueAtFront unshifts.
+		for (const r of [...rows].reverse()) {
+			session.promptQueue.enqueueAtFront(r.text, {
+				images: r.images,
+				attachments: r.attachments,
+				isSteered: r.isSteered,
+			});
+		}
+		broadcastStatus(session, "idle");
+		this.broadcastQueue(session);
+		// Schedule a follow-up drain on the next tick so the rows we just
+		// re-enqueued get another chance once the bridge has finished its
+		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
+		// (including the SDK's finally{finishRun()}) run first.
+		setTimeout(() => { this.drainQueue(session); }, 0);
+	}
+
+	private async dispatchDirectPrompt(
+		session: SessionInfo,
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		attachments?: unknown[],
+		isSteered?: boolean,
+	): Promise<void> {
+		session.lastPromptText = text;
+		session.lastPromptImages = images;
+		this.markPromptDispatchStreaming(session);
+
+		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered }];
+		let recovered = false;
+		try {
+			const resp = await session.rpcClient.prompt(text, images);
+			if (resp && (resp as any).success === false) {
+				const reason = (resp as any).error || "unknown";
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
+				recovered = true;
+				throw new Error(reason);
+			}
+		} catch (err) {
+			if (!recovered) {
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, err instanceof Error ? err.message : String(err), "direct prompt");
+			}
+			throw err;
+		}
+	}
+
 	/**
 	 * Called when the agent becomes idle (agent_end) or when a new message is
 	 * enqueued while idle. Dequeue and dispatch the next message if any exist.
@@ -2005,9 +2060,7 @@ export class SessionManager {
 		session.lastPromptImages = next.images;
 
 		// Optimistic status update to prevent double-dispatch race
-		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
-		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+		this.markPromptDispatchStreaming(session);
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -2017,23 +2070,7 @@ export class SessionManager {
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
 
 		const recoverDispatchedRows = (reason: string) => {
-			console.warn(`[session-manager] drainQueue dispatch failed for ${session.id} (${reason}); re-enqueueing ${dispatchedRowsForRecovery.length} row(s) at front`);
-			// Re-enqueue at front in original order so the next drain re-dispatches
-			// the same batch. Reverse iteration because enqueueAtFront unshifts.
-			for (const r of [...dispatchedRowsForRecovery].reverse()) {
-				session.promptQueue.enqueueAtFront(r.text, {
-					images: r.images,
-					attachments: r.attachments,
-					isSteered: r.isSteered,
-				});
-			}
-			broadcastStatus(session, "idle");
-			this.broadcastQueue(session);
-			// Schedule a follow-up drain on the next tick so the rows we just
-			// re-enqueued get another chance once the bridge has finished its
-			// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
-			// (including the SDK's finally{finishRun()}) run first.
-			setTimeout(() => { this.drainQueue(session); }, 0);
+			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
 		};
 
 		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
