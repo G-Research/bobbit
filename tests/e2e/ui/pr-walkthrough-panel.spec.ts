@@ -3,6 +3,8 @@ import { test, expect } from "../gateway-harness.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 const WALKTHROUGH_COMMAND = "/walkthrough-pr 123";
+const WALKTHROUGH_URL = "https://github.com/SuuBro/bobbit/pull/637";
+const WALKTHROUGH_URL_COMMAND = `/walkthrough-pr ${WALKTHROUGH_URL}`;
 const PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='walkthrough']";
 
 const tid = (id: string) => `[data-testid="${id}"]`;
@@ -15,14 +17,9 @@ function activeCard(page: Page): Locator {
 	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-card")}[data-active="true"]`).first();
 }
 
-async function setupWalkthrough(page: Page, viewport: { width: number; height: number } = { width: 1920, height: 1080 }) {
-	await page.setViewportSize(viewport);
-	await openApp(page);
-	await createSessionViaUI(page);
-	await sendMessage(page, WALKTHROUGH_COMMAND);
-
+async function expectWalkthroughOpened(page: Page) {
 	const tab = page.locator(PANEL_TAB_SELECTOR).first();
-	await expect(tab, "slash command should open a walkthrough side-panel tab").toBeVisible({ timeout: 15_000 });
+	await expect(tab, "walkthrough should open a side-panel tab").toBeVisible({ timeout: 15_000 });
 	await expect(tab, "walkthrough tab id should use the canonical walkthrough:<id> shape").toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
 	await expect(tab).toHaveClass(/goal-tab-pill--active/);
 
@@ -30,6 +27,18 @@ async function setupWalkthrough(page: Page, viewport: { width: number; height: n
 	await expect(panel, "walkthrough panel should render as side-panel content, not chat cards").toBeVisible({ timeout: 10_000 });
 	await expect(activeCard(page), "fixture should render an active logical review card").toBeVisible({ timeout: 10_000 });
 	return { tab, panel };
+}
+
+async function setupWalkthrough(
+	page: Page,
+	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
+	command = WALKTHROUGH_COMMAND,
+) {
+	await page.setViewportSize(viewport);
+	await openApp(page);
+	await createSessionViaUI(page);
+	await sendMessage(page, command);
+	return expectWalkthroughOpened(page);
 }
 
 async function expectActiveDiffMode(page: Page, mode: "split" | "inline") {
@@ -52,6 +61,67 @@ async function expectOneHorizontalScrollerPerDiff(page: Page) {
 	}).toBe(1);
 }
 
+async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; title?: RegExp; href?: string | RegExp } = {}) {
+	const header = panel.getByTestId("pr-walkthrough-header");
+	await expect(header, "walkthrough should use the prominent prototype-style review header").toBeVisible({ timeout: 10_000 });
+	await expect(header.getByTestId("pr-walkthrough-pr-title"), "header should expose the PR/title block").toBeVisible();
+	if (expected.pr) await expect(header).toContainText(expected.pr);
+	if (expected.title) await expect(header).toContainText(expected.title);
+
+	await expect(header.getByTestId("pr-walkthrough-stat-files"), "header should show changed file count").toContainText(/\d+\s+files?/i);
+	await expect(header.getByTestId("pr-walkthrough-stat-additions"), "header should show green additions stat").toContainText(/\+\s*[\d,]+/);
+	await expect(header.getByTestId("pr-walkthrough-stat-deletions"), "header should show red deletions stat").toContainText(/-\s*[\d,]+/);
+	await expect(header.getByTestId("pr-walkthrough-progress"), "header should show review progress").toContainText(/\d+\s*\/\s*\d+\s+reviewed/i);
+	await expect(header.getByRole("button", { name: /submit review/i }), "header should reserve the final draft submit control").toBeVisible();
+
+	if (expected.href) {
+		const link = header.getByTestId("pr-walkthrough-pr-link");
+		await expect(link, "header should expose a compact external PR/GitHub link").toBeVisible();
+		await expect(link).toHaveAttribute("href", expected.href);
+		await expect(link).toHaveAttribute("target", "_blank");
+	}
+}
+
+async function expectPrototypeCardHierarchy(page: Page) {
+	const card = activeCard(page);
+	await expect(card.getByTestId("pr-walkthrough-card-phase-tag"), "card should show a compact phase tag above the title").toBeVisible();
+	await expect(card.getByTestId("pr-walkthrough-card-title"), "card should show the logical change title prominently").toBeVisible();
+	await expect(card.getByTestId("pr-walkthrough-card-summary"), "card should include the senior-reviewer narrative summary").toBeVisible();
+	await expect(card.getByTestId("pr-walkthrough-card-comments"), "card should include card-level concern/comment affordances").toBeVisible();
+	await expect(card.getByText(/write your own/i), "card-level comments should always allow a custom concern").toBeVisible();
+}
+
+async function expectCollapsedRailPipsAndDots(panel: Locator) {
+	const collapsedRail = panel.getByTestId("pr-walkthrough-collapsed-rail");
+	await expect(collapsedRail, "narrow panel should show the thin collapsed rail").toBeVisible({ timeout: 10_000 });
+	const pips = collapsedRail.getByTestId("pr-walkthrough-phase-pip");
+	await expect(pips.first(), "collapsed rail should show visible phase pips").toBeVisible();
+	await expect(pips.first(), "phase pips should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
+
+	const dot = collapsedRail.getByTestId("pr-walkthrough-card-dot").nth(1);
+	await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
+	await expect(dot, "card dots should have aria labels for narrow navigation").toHaveAttribute("aria-label", /card|orientation|design|significant|audit/i);
+	await expect(dot, "card dots should expose tooltip text").toHaveAttribute("title", /\S+/);
+	return dot;
+}
+
+async function expectDiffExpandCollapseIfExposed(page: Page) {
+	const diff = activeCard(page).getByTestId("pr-walkthrough-diff-block").first();
+	await expect(diff).toBeVisible();
+	const toggle = diff.getByTestId("pr-walkthrough-diff-toggle").first();
+	if (await toggle.count() === 0) return;
+
+	await expect(toggle, "diff blocks should expose an expand/collapse control when collapsible").toBeVisible();
+	await expect(diff, "collapsible diff blocks should reflect their expanded state for tests and a11y").toHaveAttribute("data-expanded", /true|false/);
+	const before = await diff.getAttribute("data-expanded");
+	await toggle.click();
+	await expect.poll(() => diff.getAttribute("data-expanded"), {
+		timeout: 5_000,
+		message: "clicking the diff header toggle should collapse/expand the diff block",
+	}).not.toBe(before);
+	await toggle.click();
+}
+
 async function activeCardId(page: Page): Promise<string> {
 	await expect(activeCard(page)).toBeVisible();
 	return (await activeCard(page).getAttribute("data-card-id")) || "";
@@ -61,9 +131,16 @@ async function openLineCommentEditor(page: Page) {
 	const line = activeCard(page).getByTestId("pr-walkthrough-diff-line").first();
 	await expect(line, "diff lines should be commentable").toBeVisible({ timeout: 10_000 });
 	await line.hover();
-	await line.click();
 	const add = line.getByTestId("pr-walkthrough-line-comment-button").first();
-	await expect(add, "clicking/hovering a diff line should reveal a line comment affordance").toBeVisible({ timeout: 5_000 });
+	await expect(add, "hovering a diff line should reveal an inline + comment affordance").toBeVisible({ timeout: 5_000 });
+	await expect.poll(async () => add.evaluate((el) => [
+		el.textContent,
+		el.getAttribute("aria-label"),
+		el.getAttribute("title"),
+	].filter(Boolean).join(" ").trim()), {
+		timeout: 5_000,
+		message: "line comment affordance should be visually/textually identifiable as +",
+	}).toMatch(/\+/);
 	await add.click();
 	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toBeVisible({ timeout: 5_000 });
 }
@@ -117,29 +194,27 @@ async function completeRemainingCardsWithLikes(page: Page) {
 }
 
 test.describe("PR walkthrough panel", () => {
-	test("launches from slash command with labelled full-width rail and split diff default", async ({ page }) => {
+	test("launches from slash command with prototype header, labelled full-width rail, and split diff default", async ({ page }) => {
 		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
 
+		await expectPrototypeHeader(panel, { pr: /PR\s*#123/i, title: /walkthrough/i });
+		await expectPrototypeCardHierarchy(page);
 		await expect(panel.getByTestId("pr-walkthrough-labelled-rail"), "wide panel should show labelled phase/card navigation").toBeVisible();
 		await expect(panel.getByTestId("pr-walkthrough-collapsed-rail"), "wide panel should not use the thin collapsed rail").toBeHidden();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" })).toBeVisible();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" })).toBeVisible();
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
+		await expectDiffExpandCollapseIfExposed(page);
 	});
 
-	test("narrow rail collapses to clickable card dots, defaults inline, and can switch back to split", async ({ page }) => {
+	test("narrow rail collapses to pips and clickable card dots, defaults inline, and can switch back to split", async ({ page }) => {
 		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
 
-		await expect(panel.getByTestId("pr-walkthrough-collapsed-rail"), "narrow panel should show thin phase/card-dot rail").toBeVisible({ timeout: 10_000 });
 		await expect(panel.getByTestId("pr-walkthrough-labelled-rail"), "narrow panel should hide labelled rail").toBeHidden();
 		await expectActiveDiffMode(page, "inline");
 
-		const dot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
-		await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
-		await expect(dot, "card dots should have aria labels for narrow navigation").toHaveAttribute("aria-label", /card|orientation|design|significant|audit/i);
-		await expect(dot, "card dots should expose tooltip text").toHaveAttribute("title", /\S+/);
-
+		const dot = await expectCollapsedRailPipsAndDots(panel);
 		const before = await activeCardId(page);
 		await dot.click();
 		await expect.poll(() => activeCardId(page), {
@@ -225,6 +300,80 @@ test.describe("PR walkthrough panel", () => {
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit"), "active walkthrough audit state should restore after reload").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(broadConcern);
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(revisedConcern);
+	});
+
+	test("fullscreen toolbar control promotes the active walkthrough tab to the wide review surface", async ({ page }) => {
+		await setupWalkthrough(page, { width: 1600, height: 900 });
+
+		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
+		await expect(fullscreen, "active walkthrough tabs should expose the same fullscreen toolbar affordance as preview panes").toBeVisible({ timeout: 10_000 });
+		await fullscreen.click();
+
+		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
+		await expect(fullscreenRoot, "fullscreen walkthrough should render inside the preview-pane fullscreen shell").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in fullscreen mode").toBeVisible();
+		await expectActiveDiffMode(page, "split");
+
+		const collapse = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
+		await expect(collapse).toBeVisible();
+		await collapse.click();
+		await expect(page.locator(".goal-split-layout"), "collapsing fullscreen should return to chat + side-panel split layout").toBeVisible({ timeout: 10_000 });
+	});
+
+	test("open-in-new-tab toolbar control renders the same walkthrough in a standalone wide route", async ({ page, context }) => {
+		const { tab } = await setupWalkthrough(page, { width: 1600, height: 900 });
+		const tabId = await tab.getAttribute("data-panel-tab-id");
+
+		const openStandalone = page.locator(`${tid("side-panel-open-in-new-tab")}, ${tid("pr-walkthrough-open-in-new-tab")}, a[title*="Open walkthrough"], button[title*="Open walkthrough"]`).first();
+		await expect(openStandalone, "active walkthrough tabs should expose an open-in-new-tab toolbar affordance").toBeVisible({ timeout: 10_000 });
+		const [standalone] = await Promise.all([
+			context.waitForEvent("page"),
+			openStandalone.click(),
+		]);
+		await standalone.setViewportSize({ width: 1700, height: 1000 });
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(standalone, "standalone URL should preserve walkthrough/tab identity").toHaveURL(/walkthrough|pr-walkthrough/);
+		if (tabId) await expect(standalone.locator(`${tid("pr-walkthrough-panel-root")}[data-panel-tab-id="${tabId}"]`)).toBeVisible({ timeout: 15_000 });
+		await expect(walkthroughPanel(standalone), "standalone tab should render the same walkthrough component").toBeVisible({ timeout: 15_000 });
+		await expectActiveDiffMode(standalone, "split");
+		await standalone.close();
+	});
+
+	test("URL launches expose an external GitHub/PR link in the walkthrough header", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 }, WALKTHROUGH_URL_COMMAND);
+
+		await expectPrototypeHeader(panel, {
+			pr: /#637|PR\s*637/i,
+			title: /bobbit|walkthrough|shrink initial bundle/i,
+			href: WALKTHROUGH_URL,
+		});
+	});
+
+	test("Git Status Widget walkthrough metadata opens a tab with PR title and GitHub link", async ({ page }) => {
+		await page.setViewportSize({ width: 1920, height: 1080 });
+		await openApp(page);
+		await createSessionViaUI(page);
+
+		await page.evaluate(() => {
+			document.dispatchEvent(new CustomEvent("open-pr-walkthrough", {
+				bubbles: true,
+				composed: true,
+				detail: {
+					prNumber: 638,
+					prUrl: "https://github.com/SuuBro/bobbit/pull/638",
+					prTitle: "Widget Launched Walkthrough",
+					baseSha: "fixture-base",
+					headSha: "fixture-head",
+				},
+			}));
+		});
+
+		const { panel } = await expectWalkthroughOpened(page);
+		await expectPrototypeHeader(panel, {
+			pr: /PR\s*#?638/i,
+			title: /Widget Launched Walkthrough/i,
+			href: "https://github.com/SuuBro/bobbit/pull/638",
+		});
 	});
 
 	test("switching walkthrough tabs with no persisted state resets per-card UI state", async ({ page }) => {
