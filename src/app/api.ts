@@ -1869,6 +1869,37 @@ export async function dismissSetup(): Promise<void> {
 }
 
 // ============================================================================
+// HARNESS STATUS API
+// ============================================================================
+
+export interface HarnessStatus {
+	restartAvailable: boolean;
+}
+
+export async function fetchHarnessStatus(): Promise<HarnessStatus> {
+	try {
+		const res = await gatewayFetch("/api/harness-status");
+		if (!res.ok) return { restartAvailable: false };
+		const data = await res.json().catch(() => null);
+		return { restartAvailable: data?.restartAvailable === true };
+	} catch {
+		return { restartAvailable: false };
+	}
+}
+
+export async function requestHarnessRestart(): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await gatewayFetch("/api/harness/restart", { method: "POST" });
+		if (res.ok) return { ok: true };
+		const data = await res.json().catch(() => null);
+		const error = typeof data?.error === "string" ? data.error : `Restart request failed: ${res.status}`;
+		return { ok: false, error };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : "Restart request failed" };
+	}
+}
+
+// ============================================================================
 // SANDBOX STATUS API
 // ============================================================================
 
