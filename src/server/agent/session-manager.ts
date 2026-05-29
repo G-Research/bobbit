@@ -3041,14 +3041,33 @@ export class SessionManager {
 		const fileCtx: SessionFsContext = { sandboxed: ps.sandboxed, projectId: ps.projectId };
 		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
-			if (shouldKeepDespiteOrphan(ps)) {
+			// `agentSessionFile` is set (persistSessionMetadata only records it after a
+			// live getState) but no transcript exists on disk. Pi (>=0.77) creates the
+			// session JSONL lazily on the first assistant flush with an exclusive
+			// `openSync(file, "wx")`, and Bobbit must not pre-create it — so a crash or
+			// server restart in that pre-flush window legitimately leaves the path
+			// recorded with no file. That is NOT an orphan to archive.
+			//
+			// For non-sandboxed sessions this is fully recoverable without any sentinel
+			// file: restoreSession() issues switch_session, which routes through
+			// SessionManager.open -> setSessionFile. Pi handles a missing path by
+			// starting a fresh session on the agent's cwd and creating the file on its
+			// first write (the `wx` open then succeeds). Queued prompts replay normally.
+			// If the worktree/cwd is actually gone, restoreSession() throws below and we
+			// fall back to a dormant (never archived) session. Pinned by
+			// tests/session-manager-no-precreate.test.ts.
+			if (!ps.sandboxed) {
+				console.log(`[session-manager] Session ${ps.id} recorded ${ps.agentSessionFile} but has no transcript yet (pre-flush restart) — restoring live; agent will create the file on first write`);
+				// fall through to restoreSession()
+			} else if (shouldKeepDespiteOrphan(ps)) {
 				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
 				this.addDormantSession(ps);
 				return;
+			} else {
+				console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
+				sessionStore.archive(ps.id);
+				return;
 			}
-			console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
-			sessionStore.archive(ps.id);
-			return;
 		}
 		try {
 			await this.restoreSession(ps);
@@ -4131,21 +4150,14 @@ export class SessionManager {
 				// The session-fs module handles routing reads/checks to the right place.
 				const agentSessionFile = stateResp.data.sessionFile;
 
-				// Proactively ensure the session file exists on disk so the session
-				// survives a crash even if the agent hasn't written to it yet.
-				// The agent will append conversation data later; an empty file is
-				// enough for restoreOneSession() to pass the existence check and
-				// issue switch_session (which handles empty files gracefully).
-				if (!session.sandboxed && agentSessionFile) {
-					try {
-						const dir = path.dirname(agentSessionFile);
-						if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-						if (!fs.existsSync(agentSessionFile)) fs.writeFileSync(agentSessionFile, "");
-					} catch (err) {
-						console.warn(`[session-manager] Could not proactively create session file for ${session.id}: ${err}`);
-					}
-				}
-
+				// NEVER pre-create this file. Pi (>=0.77) creates the session JSONL
+				// lazily on the first assistant flush with an exclusive `openSync(file, "wx")`.
+				// If Bobbit touches the path first, that open throws
+				// `EEXIST: file already exists` and the agent loses every transcript
+				// write for the session. We only record the path; restoreOneSession()
+				// tolerates the file not yet existing (a session that crashed before its
+				// first assistant message has no transcript to restore anyway).
+				// Pinned by tests/session-manager-no-precreate.test.ts.
 				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
 				return; // success
 			} catch (err) {
