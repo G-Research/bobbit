@@ -2,7 +2,7 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
-export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search";
+export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "settings" | "search" | "walkthrough";
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
@@ -18,6 +18,8 @@ export interface AppRoute {
 	settingsScope?: string;
 	settingsTab?: SettingsTabId;
 	searchQuery?: string;
+	walkthroughSessionId?: string;
+	walkthroughTabId?: string;
 	dashboardTab?: DashboardTabId;
 	focusGateId?: string;
 	focusSignalId?: string;
@@ -32,6 +34,15 @@ export function getRouteFromHash(): AppRoute {
 		const qIdx = hash.indexOf("?");
 		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
 		return { view: "search", searchQuery: params?.get("q") || undefined };
+	}
+	if (hash === "#/walkthrough" || hash.startsWith("#/walkthrough?")) {
+		const qIdx = hash.indexOf("?");
+		const params = qIdx >= 0 ? new URLSearchParams(hash.slice(qIdx + 1)) : null;
+		return {
+			view: "walkthrough",
+			walkthroughSessionId: params?.get("session") || undefined,
+			walkthroughTabId: params?.get("tab") || undefined,
+		};
 	}
 	const sessionMatch = hash.match(/^#\/session\/([a-zA-Z0-9_-]+)$/i);
 	if (sessionMatch) {
@@ -147,6 +158,8 @@ export function setHashRoute(view: RouteView, id?: string, replace?: boolean): v
 		newHash = "#/skills";
 	} else if (view === "search") {
 		newHash = id ? `#/search?q=${encodeURIComponent(id)}` : "#/search";
+	} else if (view === "walkthrough") {
+		newHash = id ? `#/walkthrough?${id}` : "#/walkthrough";
 	} else if (view === "settings") {
 		if (id) {
 			// Compound id like "system/models" or "<uuid>/project" → emit as-is

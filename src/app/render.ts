@@ -95,7 +95,7 @@ import {
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
-import { openPrWalkthroughPanel, type OpenPrWalkthroughInput } from "./pr-walkthrough.js";
+import { openPrWalkthroughPanel, prWalkthroughStandaloneHref, type OpenPrWalkthroughInput } from "./pr-walkthrough.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -203,17 +203,26 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 
 document.addEventListener("open-pr-walkthrough", (e: Event) => {
 	const detail = ((e as CustomEvent).detail || {}) as Record<string, unknown>;
+	const stringDetail = (...keys: string[]) => {
+		for (const key of keys) {
+			const value = detail[key];
+			if (typeof value === "string" && value.trim()) return value;
+		}
+		return undefined;
+	};
 	openPrWalkthroughPanel(state, activeSessionId() || "", {
-		baseSha: typeof detail.baseSha === "string" ? detail.baseSha : undefined,
-		headSha: typeof detail.headSha === "string" ? detail.headSha : undefined,
+		baseSha: stringDetail("baseSha", "base", "baseRef", "baseBranch"),
+		headSha: stringDetail("headSha", "head", "headRef", "headBranch"),
 		prNumber: typeof detail.prNumber === "string" || typeof detail.prNumber === "number"
 			? detail.prNumber
 			: typeof detail.number === "string" || typeof detail.number === "number"
 				? detail.number
 				: undefined,
-		url: typeof detail.url === "string" ? detail.url : typeof detail.prUrl === "string" ? detail.prUrl : undefined,
-		title: typeof detail.title === "string" ? detail.title : undefined,
-		provider: typeof detail.provider === "string" ? detail.provider : undefined,
+		url: stringDetail("url", "prUrl"),
+		prUrl: stringDetail("prUrl", "url"),
+		title: stringDetail("title", "prTitle"),
+		prTitle: stringDetail("prTitle", "title"),
+		provider: stringDetail("provider"),
 	} satisfies OpenPrWalkthroughInput);
 	renderApp();
 });
@@ -2049,6 +2058,59 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const walkthroughSourceRecord = (tab: UnifiedContentTab): Record<string, unknown> => ({
+		...((tab.state || {}) as Record<string, unknown>),
+		...((tab.source || {}) as Record<string, unknown>),
+	});
+
+	const walkthroughPrUrl = (tab: UnifiedContentTab): string => {
+		const record = walkthroughSourceRecord(tab);
+		return recordValue(record, "prUrl") || recordValue(record, "externalUrl") || recordValue(record, "url");
+	};
+
+	const walkthroughPrLabel = (tab: UnifiedContentTab): string => {
+		const record = walkthroughSourceRecord(tab);
+		const number = recordValue(record, "prNumber");
+		const title = recordValue(record, "prTitle") || recordValue(record, "title") || tab.title;
+		if (number && title && !/^PR\s+#/i.test(title)) return `PR #${number}: ${title}`;
+		if (number) return title && /^PR\s+#/i.test(title) ? title : `PR #${number}`;
+		return title || "Pull request";
+	};
+
+	const walkthroughPrLink = (tab: UnifiedContentTab) => {
+		const url = walkthroughPrUrl(tab);
+		if (!url) return "";
+		return html`
+			<a
+				href=${url}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="inline-flex items-center gap-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
+				style="max-width: min(34vw, 360px); padding:2px 8px; font-size:11px; line-height:1.35; text-decoration:none;"
+				title=${`Open ${walkthroughPrLabel(tab)} on GitHub`}
+				data-testid="pr-walkthrough-pr-link"
+			>
+				<span class="truncate">${walkthroughPrLabel(tab)}</span>${icon(ExternalLink, "xs")}
+			</a>
+		`;
+	};
+
+	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
+		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
+		return html`
+			${walkthroughPrLink(tab)}
+			<a
+				href=${prWalkthroughStandaloneHref(sid, tab.id)}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="text-muted-foreground hover:text-foreground"
+				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
+				title="Open walkthrough in new tab"
+				data-testid="pr-walkthrough-open-standalone"
+			>${icon(ExternalLink, "sm")}</a>
+		`;
+	};
+
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
 		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
@@ -2112,6 +2174,37 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const standaloneWalkthroughPanel = () => {
+		const route = getRouteFromHash();
+		const sid = route.walkthroughSessionId || workspaceSessionId();
+		const tabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, sid);
+		const tab = panelTabsForSession(state, sid).find((candidate) => candidate.id === tabId && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
+		if (!tab) {
+			return html`
+				<div class="flex-1 min-h-0 flex items-center justify-center p-6 text-center text-sm text-muted-foreground">
+					<div>
+						<div class="font-medium text-foreground mb-1">Walkthrough not found</div>
+						<div>This standalone link points at a walkthrough tab that is not available in this browser.</div>
+					</div>
+				</div>
+			`;
+		}
+		return html`
+			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
+				<div class="flex items-center justify-between gap-3 px-4 py-2 border-b border-border shrink-0" style="background:var(--background);">
+					<div class="min-w-0">
+						<div class="text-xs uppercase tracking-wide text-muted-foreground">PR walkthrough</div>
+						<div class="text-sm font-medium text-foreground truncate" title=${tab.title}>${tab.title}</div>
+					</div>
+					<div class="flex items-center gap-1 shrink-0">
+						${walkthroughPrLink(tab)}
+					</div>
+				</div>
+				${walkthroughPanelContent(tab)}
+			</div>
+		`;
+	};
+
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
@@ -2145,7 +2238,7 @@ export function doRenderApp(): void {
 			activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
 			activeTab = contentTabs.find((tab) => tab.id === activeId) ?? activeTab;
 		}
-		const showPreviewTab = contentTabs.some((tab) => tab.kind === "preview");
+		const activeTabCanFullscreen = activeTab.kind === "preview" || activeTab.kind === "walkthrough";
 
 		return html`
 			<div class="goal-preview-panel flex-1 flex flex-col border-l border-border min-h-0" data-panel-workspace="content">
@@ -2162,8 +2255,9 @@ export function doRenderApp(): void {
 					</div>
 					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
 						${activeTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
-						${showPreviewTab ? html`
-						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen preview${shortcutHint("toggle-sidebar")}`}>
+						${activeTab.kind === "walkthrough" ? walkthroughControlButtons(activeTab) : ""}
+						${activeTabCanFullscreen ? html`
+						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`${activeTab.kind === "walkthrough" ? "Fullscreen walkthrough" : "Fullscreen preview"}${shortcutHint("toggle-sidebar")}`} data-testid=${activeTab.kind === "walkthrough" ? "pr-walkthrough-fullscreen" : "preview-fullscreen"}>
 							${icon(Maximize2, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
@@ -2199,6 +2293,9 @@ export function doRenderApp(): void {
 		}
 		// Goal dashboard route
 		const route = getRouteFromHash();
+		if (route.view === "walkthrough") {
+			return standaloneWalkthroughPanel();
+		}
 		if (route.view === "goal-dashboard" && route.goalId) {
 			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
@@ -2229,22 +2326,29 @@ export function doRenderApp(): void {
 		}
 
 		if (connected && hasUnifiedPanel()) {
-			if (desktop && state.previewPanelFullscreen && state.isPreviewSession) {
+			const fullscreenTabs = unifiedPanelContentTabs();
+			const fullscreenActiveId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+			const fullscreenTab = fullscreenTabs.find((tab) => tab.id === fullscreenActiveId) ?? fullscreenTabs[0];
+			const fullscreenContent = fullscreenTab?.kind === "walkthrough"
+				? walkthroughPanelContent(fullscreenTab)
+				: htmlPreviewContent();
+			if (desktop && state.previewPanelFullscreen && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
 						<!-- Fullscreen preview header -->
 						<div class="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0" style="background:var(--color-background, hsl(var(--background)));">
-							<span class="text-xs font-medium text-muted-foreground">Preview</span>
+							<span class="text-xs font-medium text-muted-foreground">${fullscreenTab.kind === "walkthrough" ? "Walkthrough" : "Preview"}</span>
 							<div class="flex items-center gap-0.5">
-								${state.previewPanelEntry ? previewControlButtons() : ""}
+								${fullscreenTab.kind === "preview" && state.previewPanelEntry ? previewControlButtons() : ""}
+								${fullscreenTab.kind === "walkthrough" ? walkthroughControlButtons(fullscreenTab) : ""}
 								<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 									${icon(PanelRightClose, "sm")}
 								</button>
 							</div>
 						</div>
-						<!-- Preview iframe fills available space -->
-						${htmlPreviewContent()}
+						<!-- Preview content fills available space -->
+						${fullscreenContent}
 						<!-- Compact prompt bar at bottom -->
 						<div class="preview-fullscreen-prompt shrink-0 border-t border-border">
 							${state.chatPanel}
@@ -2303,6 +2407,22 @@ export function doRenderApp(): void {
 
 	if (desktop) {
 		teardownMobileScrollTracking();
+		if (getRouteFromHash().view === "walkthrough") {
+			render(html`
+				<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
+					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5">
+						<div class="flex items-center gap-2 min-w-0">
+							${bobbitIcon}
+							<span class="text-sm font-semibold text-foreground">Bobbit</span>
+							<span class="text-xs text-muted-foreground">Standalone walkthrough</span>
+						</div>
+						<theme-toggle></theme-toggle>
+					</div>
+					<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
+				</div>
+			`, app);
+			return;
+		}
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
 				<div class="flex items-center border-b border-border shrink-0 header-shadow">

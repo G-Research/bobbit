@@ -41,7 +41,9 @@ export interface PanelWorkspaceTab {
 			headSha?: string;
 			provider?: string;
 			externalUrl?: string;
+			prUrl?: string;
 			prNumber?: string;
+			prTitle?: string;
 			[key: string]: unknown;
 		};
 	state?: Record<string, unknown>;
