@@ -1637,6 +1637,7 @@
           this._fetchCommits("behind", "primary");
         }}>${this.behindPrimary} behind</span>
                 ${this.primaryRef}
+                ${!this.prState ? this._renderWalkthroughButton({ marginLeft: true }) : A}
                 ${this._renderMergePrimaryButton()}
             </div>`;
       }
@@ -1647,6 +1648,7 @@
           this._fetchCommits("ahead", "primary");
         }}>${this.aheadOfPrimary} ahead</span>
                 of ${this.primaryRef}
+                ${!this.prState ? this._renderWalkthroughButton({ marginLeft: true }) : A}
                 ${!this.prState ? this._renderAskPrButton() : A}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : A}
             </div>`;
@@ -1724,6 +1726,7 @@
                     </span>
                     ${this._renderReviewBadge()}
                     ${this.prState === "OPEN" && this.prMergeable === "CONFLICTING" ? b2`<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:11px;font-weight:600;color:oklch(0.62 0.14 25);background:oklch(0.62 0.14 25 / 0.12)">Has conflicts</span>` : A}
+                    ${this._renderWalkthroughButton()}
                 </div>
                 ${this.prState === "OPEN" ? b2`
                     <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
@@ -1802,6 +1805,49 @@
         this.dispatchEvent(new CustomEvent("ask-agent-pr", { bubbles: true, composed: true }));
       }}
         >Ask agent to raise PR</button>`;
+    }
+    _renderWalkthroughButton(opts = {}) {
+      return b2`<button
+            style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;${opts.marginLeft ? "margin-left:4px" : ""}"
+            title=${this.prNumber != null ? `Walk through PR #${this.prNumber}` : "Walk through branch changes"}
+            data-testid="git-walkthrough-action"
+            @click=${(e8) => {
+        e8.stopPropagation();
+        this._handleOpenPrWalkthrough();
+      }}
+        >Walkthrough</button>`;
+    }
+    _handleOpenPrWalkthrough() {
+      const detail = {
+        branch: this.branch,
+        base: this.primaryRef,
+        baseBranch: this.primaryBranch,
+        baseRef: this.primaryRef,
+        head: this.headRefName || this.branch,
+        headBranch: this.headRefName || this.branch,
+        ahead: this.ahead,
+        behind: this.behind,
+        aheadOfPrimary: this.aheadOfPrimary,
+        behindPrimary: this.behindPrimary,
+        insertionsVsPrimary: this.insertionsVsPrimary,
+        deletionsVsPrimary: this.deletionsVsPrimary,
+        clean: this.clean,
+        isOnPrimary: this.isOnPrimary,
+        mergedIntoPrimary: this.mergedIntoPrimary,
+        hasUpstream: this.hasUpstream,
+        summary: this.summary
+      };
+      if (this.prNumber != null) detail.prNumber = this.prNumber;
+      if (this.prUrl) detail.prUrl = this.prUrl;
+      if (this.prTitle) detail.prTitle = this.prTitle;
+      if (this.prState) detail.prState = this.prState;
+      if (this.prMergeable) detail.prMergeable = this.prMergeable;
+      if (this.reviewDecision) detail.reviewDecision = this.reviewDecision;
+      this.dispatchEvent(new CustomEvent("open-pr-walkthrough", {
+        bubbles: true,
+        composed: true,
+        detail
+      }));
     }
     _renderSquashPushButton() {
       return b2`<button

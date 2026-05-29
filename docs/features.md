@@ -88,6 +88,10 @@ See [prompt-queue.md](prompt-queue.md) for the full architecture.
 
 Workflows define the gates a goal must pass, their dependency relationships (a DAG), quality criteria, and verification configs. Workflows are **project-scoped only** — they live inline in `project.yaml::workflows` and are designed by the project assistant from the project's actual components and commands. There is no builtin or system-scope layer, and the server does not auto-seed defaults on project creation. Snapshotted into goals at creation (frozen). See [goals-workflows-tasks.md](goals-workflows-tasks.md) and [internals.md — No default workflow scaffold](internals.md#no-default-workflow-scaffold).
 
+## PR Walkthrough Panel
+
+The PR walkthrough panel is a side-panel review surface for guided pull-request or changeset review. It launches from `/walkthrough-pr <url|number>`, the Git Status Widget **Walkthrough** action, or PR-link metadata; the same tab can be reviewed in the side panel, fullscreen/wide mode, or a standalone `/walkthrough?...` route. The MVP renders fixture-driven logical cards and persists comments/decisions per walkthrough tab id. See [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the full behaviour and testing contract.
+
 ## Assistant Registry
 
 A unified registry (`assistant-registry.ts`) maps assistant types to their prompts and display titles. Builtin definitions ship in `defaults/roles/assistant/` (user overrides in `.bobbit/config/roles/assistant/`), falling back to hardcoded defaults:

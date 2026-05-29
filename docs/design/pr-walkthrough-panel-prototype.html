@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head><base href="/preview/0c159c64-f8cb-4b19-b395-d60db8de5061/"><style data-bobbit-preview-theme="snapshot">
+:root {
+	--sidebar-font-scale: 1;
+	--background: oklch(0.935 0.012 148);
+	--foreground: oklch(0.18 0.014 142);
+	--card: oklch(0.945 0.010 146);
+	--card-foreground: oklch(0.18 0.014 142);
+	--popover: oklch(0.95 0.009 146);
+	--popover-foreground: oklch(0.18 0.014 142);
+	--secondary: oklch(0.905 0.015 146);
+	--secondary-foreground: oklch(0.22 0.014 142);
+	--muted: oklch(0.905 0.015 146);
+	--muted-foreground: oklch(0.44 0.014 142);
+	--accent: oklch(0.91 0.018 146);
+	--accent-foreground: oklch(0.36 0.08 148);
+	--border: oklch(0.86 0.014 146);
+	--input: oklch(0.88 0.014 146);
+	--ring: oklch(0.48 0.06 148);
+	--primary: oklch(0.42 0.14 148);
+	--primary-foreground: oklch(0.96 0.008 146);
+	--sidebar: oklch(0.915 0.014 148);
+	--sidebar-foreground: oklch(0.18 0.014 142);
+	--sidebar-primary: oklch(0.42 0.14 148);
+	--sidebar-primary-foreground: oklch(0.96 0.008 146);
+	--sidebar-accent: oklch(0.895 0.016 146);
+	--sidebar-accent-foreground: oklch(0.22 0.014 142);
+	--sidebar-border: oklch(0.86 0.014 146);
+	--session-fade-duration: 120ms;
+	--ansi-black: #3c3c3c;
+	--ansi-red: #c4261e;
+	--ansi-green: #1a7f1a;
+	--ansi-yellow: #a56c00;
+	--ansi-blue: #1a39b0;
+	--ansi-magenta: #a020a0;
+	--ansi-cyan: #0e7d7d;
+	--ansi-white: #6e6e6e;
+	--ansi-bright-black: #5c5c5c;
+	--ansi-bright-red: #d43d2e;
+	--ansi-bright-green: #2a9e2a;
+	--ansi-bright-yellow: #c08000;
+	--ansi-bright-blue: #3355dd;
+	--ansi-bright-magenta: #c040c0;
+	--ansi-bright-cyan: #1a9e9e;
+	--ansi-bright-white: #4a4a4a;
+	--chart-1: oklch(0.52 0.18 250);
+	--chart-2: oklch(0.55 0.16 60);
+	--chart-3: oklch(0.50 0.16 145);
+	--chart-4: oklch(0.50 0.20 305);
+	--chart-5: oklch(0.55 0.20 15);
+	--chart-6: oklch(0.52 0.13 190);
+	--chart-1-foreground: oklch(0.98 0.01 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.98 0.01 145);
+	--chart-4-foreground: oklch(0.98 0.01 305);
+	--chart-5-foreground: oklch(0.98 0.01 15);
+	--chart-6-foreground: oklch(0.98 0.01 190);
+	--positive: oklch(0.55 0.15 145);
+	--positive-foreground: oklch(0.98 0.01 145);
+	--negative: oklch(0.55 0.18 25);
+	--negative-foreground: oklch(0.98 0.01 25);
+	--warning: oklch(0.62 0.15 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.55 0.16 230);
+	--info-foreground: oklch(0.98 0.01 230);
+	--notif-system-bg: rgba(100, 120, 160, 0.12);
+	--notif-system-border: rgba(100, 120, 160, 0.30);
+	--notif-system-text: rgba(130, 150, 190, 0.90);
+	--notif-task-bg: rgba(185, 145, 45, 0.12);
+	--notif-task-border: rgba(185, 145, 45, 0.30);
+	--notif-task-text: rgba(205, 170, 65, 0.90);
+	--notif-team-bg: rgba(145, 105, 195, 0.12);
+	--notif-team-border: rgba(145, 105, 195, 0.30);
+	--notif-team-text: rgba(165, 130, 210, 0.90);
+	--notif-error-bg: rgba(195, 75, 75, 0.12);
+	--notif-error-border: rgba(195, 75, 75, 0.30);
+	--notif-error-text: rgba(215, 100, 100, 0.90);
+	--user-msg-accent: rgba(80, 140, 80, 1);
+	--user-msg-bg: rgba(80, 140, 80, 0.10);
+	--user-msg-bg2: rgba(90, 150, 85, 0.05);
+	--user-msg-shadow: rgba(80, 140, 80, 0.14);
+	--user-msg-shadow2: rgba(80, 140, 80, 0.08);
+}
+.dark {
+	--background: oklch(0.21 0.008 145);
+	--foreground: oklch(0.96 0.008 140);
+	--card: oklch(0.24 0.01 145);
+	--card-foreground: oklch(0.96 0.008 140);
+	--popover: oklch(0.27 0.01 145);
+	--popover-foreground: oklch(0.96 0.008 140);
+	--secondary: oklch(0.27 0.012 145);
+	--secondary-foreground: oklch(0.96 0.008 140);
+	--muted: oklch(0.27 0.012 145);
+	--muted-foreground: oklch(0.65 0.012 140);
+	--accent: oklch(0.32 0.015 145);
+	--accent-foreground: oklch(0.78 0.08 130);
+	--border: oklch(0.30 0.012 145);
+	--input: oklch(0.34 0.012 145);
+	--ring: oklch(0.50 0.06 145);
+	--primary: oklch(0.72 0.12 140);
+	--primary-foreground: oklch(0.18 0.01 145);
+	--sidebar: oklch(0.23 0.01 145);
+	--sidebar-foreground: oklch(0.96 0.008 140);
+	--sidebar-primary: oklch(0.72 0.12 140);
+	--sidebar-primary-foreground: oklch(0.18 0.01 145);
+	--sidebar-accent: oklch(0.27 0.012 145);
+	--sidebar-accent-foreground: oklch(0.96 0.008 140);
+	--sidebar-border: oklch(0.30 0.012 145);
+	--ansi-black: #555;
+	--ansi-red: #f55;
+	--ansi-green: #5f5;
+	--ansi-yellow: #fc5;
+	--ansi-blue: #55f;
+	--ansi-magenta: #f5f;
+	--ansi-cyan: #5dd;
+	--ansi-white: #ccc;
+	--ansi-bright-black: #888;
+	--ansi-bright-red: #f77;
+	--ansi-bright-green: #7f7;
+	--ansi-bright-yellow: #ff7;
+	--ansi-bright-blue: #77f;
+	--ansi-bright-magenta: #f7f;
+	--ansi-bright-cyan: #7ff;
+	--ansi-bright-white: #fff;
+	--chart-1: oklch(0.72 0.14 230);
+	--chart-2: oklch(0.78 0.14 75);
+	--chart-3: oklch(0.72 0.14 145);
+	--chart-4: oklch(0.72 0.16 305);
+	--chart-5: oklch(0.74 0.16 15);
+	--chart-6: oklch(0.72 0.12 190);
+	--chart-1-foreground: oklch(0.18 0.02 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.18 0.02 145);
+	--chart-4-foreground: oklch(0.18 0.02 305);
+	--chart-5-foreground: oklch(0.18 0.02 15);
+	--chart-6-foreground: oklch(0.18 0.02 190);
+	--positive: oklch(0.72 0.14 145);
+	--positive-foreground: oklch(0.18 0.02 145);
+	--negative: oklch(0.72 0.15 25);
+	--negative-foreground: oklch(0.18 0.02 25);
+	--warning: oklch(0.78 0.14 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.72 0.14 230);
+	--info-foreground: oklch(0.18 0.02 230);
+}
+</style><base href="/preview/0c159c64-f8cb-4b19-b395-d60db8de5061/"><style data-bobbit-preview-theme="snapshot">
+:root {
+	--sidebar-font-scale: 1;
+	--background: oklch(0.935 0.012 148);
+	--foreground: oklch(0.18 0.014 142);
+	--card: oklch(0.945 0.010 146);
+	--card-foreground: oklch(0.18 0.014 142);
+	--popover: oklch(0.95 0.009 146);
+	--popover-foreground: oklch(0.18 0.014 142);
+	--secondary: oklch(0.905 0.015 146);
+	--secondary-foreground: oklch(0.22 0.014 142);
+	--muted: oklch(0.905 0.015 146);
+	--muted-foreground: oklch(0.44 0.014 142);
+	--accent: oklch(0.91 0.018 146);
+	--accent-foreground: oklch(0.36 0.08 148);
+	--border: oklch(0.86 0.014 146);
+	--input: oklch(0.88 0.014 146);
+	--ring: oklch(0.48 0.06 148);
+	--primary: oklch(0.42 0.14 148);
+	--primary-foreground: oklch(0.96 0.008 146);
+	--sidebar: oklch(0.915 0.014 148);
+	--sidebar-foreground: oklch(0.18 0.014 142);
+	--sidebar-primary: oklch(0.42 0.14 148);
+	--sidebar-primary-foreground: oklch(0.96 0.008 146);
+	--sidebar-accent: oklch(0.895 0.016 146);
+	--sidebar-accent-foreground: oklch(0.22 0.014 142);
+	--sidebar-border: oklch(0.86 0.014 146);
+	--session-fade-duration: 120ms;
+	--ansi-black: #3c3c3c;
+	--ansi-red: #c4261e;
+	--ansi-green: #1a7f1a;
+	--ansi-yellow: #a56c00;
+	--ansi-blue: #1a39b0;
+	--ansi-magenta: #a020a0;
+	--ansi-cyan: #0e7d7d;
+	--ansi-white: #6e6e6e;
+	--ansi-bright-black: #5c5c5c;
+	--ansi-bright-red: #d43d2e;
+	--ansi-bright-green: #2a9e2a;
+	--ansi-bright-yellow: #c08000;
+	--ansi-bright-blue: #3355dd;
+	--ansi-bright-magenta: #c040c0;
+	--ansi-bright-cyan: #1a9e9e;
+	--ansi-bright-white: #4a4a4a;
+	--chart-1: oklch(0.52 0.18 250);
+	--chart-2: oklch(0.55 0.16 60);
+	--chart-3: oklch(0.50 0.16 145);
+	--chart-4: oklch(0.50 0.20 305);
+	--chart-5: oklch(0.55 0.20 15);
+	--chart-6: oklch(0.52 0.13 190);
+	--chart-1-foreground: oklch(0.98 0.01 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.98 0.01 145);
+	--chart-4-foreground: oklch(0.98 0.01 305);
+	--chart-5-foreground: oklch(0.98 0.01 15);
+	--chart-6-foreground: oklch(0.98 0.01 190);
+	--positive: oklch(0.55 0.15 145);
+	--positive-foreground: oklch(0.98 0.01 145);
+	--negative: oklch(0.55 0.18 25);
+	--negative-foreground: oklch(0.98 0.01 25);
+	--warning: oklch(0.62 0.15 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.55 0.16 230);
+	--info-foreground: oklch(0.98 0.01 230);
+	--notif-system-bg: rgba(100, 120, 160, 0.12);
+	--notif-system-border: rgba(100, 120, 160, 0.30);
+	--notif-system-text: rgba(130, 150, 190, 0.90);
+	--notif-task-bg: rgba(185, 145, 45, 0.12);
+	--notif-task-border: rgba(185, 145, 45, 0.30);
+	--notif-task-text: rgba(205, 170, 65, 0.90);
+	--notif-team-bg: rgba(145, 105, 195, 0.12);
+	--notif-team-border: rgba(145, 105, 195, 0.30);
+	--notif-team-text: rgba(165, 130, 210, 0.90);
+	--notif-error-bg: rgba(195, 75, 75, 0.12);
+	--notif-error-border: rgba(195, 75, 75, 0.30);
+	--notif-error-text: rgba(215, 100, 100, 0.90);
+	--user-msg-accent: rgba(80, 140, 80, 1);
+	--user-msg-bg: rgba(80, 140, 80, 0.10);
+	--user-msg-bg2: rgba(90, 150, 85, 0.05);
+	--user-msg-shadow: rgba(80, 140, 80, 0.14);
+	--user-msg-shadow2: rgba(80, 140, 80, 0.08);
+}
+.dark {
+	--background: oklch(0.21 0.008 145);
+	--foreground: oklch(0.96 0.008 140);
+	--card: oklch(0.24 0.01 145);
+	--card-foreground: oklch(0.96 0.008 140);
+	--popover: oklch(0.27 0.01 145);
+	--popover-foreground: oklch(0.96 0.008 140);
+	--secondary: oklch(0.27 0.012 145);
+	--secondary-foreground: oklch(0.96 0.008 140);
+	--muted: oklch(0.27 0.012 145);
+	--muted-foreground: oklch(0.65 0.012 140);
+	--accent: oklch(0.32 0.015 145);
+	--accent-foreground: oklch(0.78 0.08 130);
+	--border: oklch(0.30 0.012 145);
+	--input: oklch(0.34 0.012 145);
+	--ring: oklch(0.50 0.06 145);
+	--primary: oklch(0.72 0.12 140);
+	--primary-foreground: oklch(0.18 0.01 145);
+	--sidebar: oklch(0.23 0.01 145);
+	--sidebar-foreground: oklch(0.96 0.008 140);
+	--sidebar-primary: oklch(0.72 0.12 140);
+	--sidebar-primary-foreground: oklch(0.18 0.01 145);
+	--sidebar-accent: oklch(0.27 0.012 145);
+	--sidebar-accent-foreground: oklch(0.96 0.008 140);
+	--sidebar-border: oklch(0.30 0.012 145);
+	--ansi-black: #555;
+	--ansi-red: #f55;
+	--ansi-green: #5f5;
+	--ansi-yellow: #fc5;
+	--ansi-blue: #55f;
+	--ansi-magenta: #f5f;
+	--ansi-cyan: #5dd;
+	--ansi-white: #ccc;
+	--ansi-bright-black: #888;
+	--ansi-bright-red: #f77;
+	--ansi-bright-green: #7f7;
+	--ansi-bright-yellow: #ff7;
+	--ansi-bright-blue: #77f;
+	--ansi-bright-magenta: #f7f;
+	--ansi-bright-cyan: #7ff;
+	--ansi-bright-white: #fff;
+	--chart-1: oklch(0.72 0.14 230);
+	--chart-2: oklch(0.78 0.14 75);
+	--chart-3: oklch(0.72 0.14 145);
+	--chart-4: oklch(0.72 0.16 305);
+	--chart-5: oklch(0.74 0.16 15);
+	--chart-6: oklch(0.72 0.12 190);
+	--chart-1-foreground: oklch(0.18 0.02 230);
+	--chart-2-foreground: oklch(0.18 0.02 75);
+	--chart-3-foreground: oklch(0.18 0.02 145);
+	--chart-4-foreground: oklch(0.18 0.02 305);
+	--chart-5-foreground: oklch(0.18 0.02 15);
+	--chart-6-foreground: oklch(0.18 0.02 190);
+	--positive: oklch(0.72 0.14 145);
+	--positive-foreground: oklch(0.18 0.02 145);
+	--negative: oklch(0.72 0.15 25);
+	--negative-foreground: oklch(0.18 0.02 25);
+	--warning: oklch(0.78 0.14 75);
+	--warning-foreground: oklch(0.18 0.02 75);
+	--info: oklch(0.72 0.14 230);
+	--info-foreground: oklch(0.18 0.02 230);
+}
+</style>
+<meta charset="utf-8" />
+<title>PR Walkthrough Preview Pane Mock</title>
+<link rel="stylesheet" href="/src/ui/app.css">
+<style>
+  :root { --positive: oklch(0.55 0.15 145); --negative: oklch(0.55 0.18 25); --warning: oklch(0.62 0.15 75); --info: oklch(0.55 0.16 230); }
+  *{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:var(--background);color:var(--foreground);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;padding:1px 5px;border-radius:4px;background:color-mix(in oklch,var(--muted) 58%,transparent)}.pane{height:100vh;display:grid;grid-template-rows:48px 1fr}.toolbar{display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--border);background:var(--card);min-width:0}.title{min-width:0}.kicker{font:11px ui-monospace,monospace;color:var(--muted-foreground)}.name{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.spacer{flex:1}.pill{font-size:11px;color:var(--muted-foreground);background:color-mix(in oklch,var(--muted) 55%,transparent);padding:2px 8px;border-radius:999px;white-space:nowrap}.stats{display:inline-flex;align-items:center;gap:8px;font-size:11px;white-space:nowrap}.stat-files{color:var(--muted-foreground)}.stat-add{color:var(--positive);font-weight:600}.stat-del{color:var(--negative);font-weight:600}.progress{width:180px;height:6px;display:flex;gap:2px;border-radius:999px;overflow:hidden;background:var(--muted)}.seg{flex:1;background:var(--muted)}.seg.now{background:var(--primary)}.seg.good{background:var(--positive)}.seg.bad{background:var(--negative)}.submit{border:0;border-radius:7px;padding:7px 12px;font:13px system-ui;font-weight:650;background:var(--primary);color:var(--primary-foreground);cursor:pointer}.submit[disabled]{background:var(--muted);color:var(--muted-foreground);cursor:not-allowed}.body{min-height:0;display:grid;grid-template-columns:248px minmax(0,1fr);overflow:hidden}.rail{border-right:1px solid var(--border);background:color-mix(in oklch,var(--card) 62%,var(--background));overflow:auto;padding:12px}.prbox{padding-bottom:12px;margin-bottom:10px;border-bottom:1px solid var(--border)}.prbox .num{font:11px ui-monospace,monospace;color:var(--muted-foreground)}.prbox .prtitle{font-weight:650;line-height:1.25;margin-top:3px}.prbox .meta{margin-top:6px;font-size:11px;color:var(--muted-foreground);display:flex;gap:8px;flex-wrap:wrap}.phase{border-radius:8px;overflow:hidden;margin:3px 0}.phase.active{background:color-mix(in oklch,var(--primary) 8%,transparent)}.phase.done .pip{background:var(--positive);color:white}.phase-head{display:flex;align-items:center;gap:8px;padding:8px;cursor:pointer;font-size:12.5px}.pip{width:20px;height:20px;border-radius:50%;background:var(--muted);color:var(--muted-foreground);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:750;flex:0 0 auto}.phase.active .pip{background:var(--primary);color:var(--primary-foreground)}.phase-head .ptitle{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.phase-head .count{font-size:11px;color:var(--muted-foreground)}.cards{display:none;padding:0 8px 7px 30px}.phase.open .cards{display:block}.cardlink{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:5px;color:var(--muted-foreground);cursor:pointer;font-size:11.5px}.cardlink:hover{background:color-mix(in oklch,var(--muted) 58%,transparent)}.cardlink.current{background:color-mix(in oklch,var(--primary) 10%,transparent);color:var(--foreground)}.dot{width:7px;height:7px;border-radius:50%;background:var(--muted-foreground);opacity:.45;flex:0 0 auto}.cardlink.liked .dot,.card-dot.liked{background:var(--positive);opacity:1}.cardlink.disliked .dot,.card-dot.disliked{background:var(--negative);opacity:1}.cardlink.current .dot,.card-dot.current{background:var(--primary);opacity:1;box-shadow:0 0 0 2px color-mix(in oklch,var(--primary) 22%,transparent)}.cardlink .txt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.badge{font-size:10px;padding:0 5px;border-radius:999px;background:color-mix(in oklch,var(--negative) 16%,transparent);color:var(--negative);font-weight:750}.collapsed-cards{display:none}.card-dot{width:10px;height:10px;border-radius:50%;background:var(--muted-foreground);opacity:.45;border:0;padding:0;cursor:pointer}.card-dot:hover{opacity:1;box-shadow:0 0 0 3px color-mix(in oklch,var(--primary) 18%,transparent)}.workspace{min-width:0;overflow:auto;padding:26px clamp(16px,4vw,54px) 38px}.inner{max-width:1120px;margin:0 auto}.tag{display:inline-block;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:750;color:var(--chart-1);background:color-mix(in oklch,var(--chart-1) 12%,transparent);border-radius:5px;padding:3px 9px}h1{margin:10px 0 5px;font-size:24px;line-height:1.2;letter-spacing:-.015em}.meta2{color:var(--muted-foreground);font-size:12px;margin-bottom:16px}.narr{max-width:850px;line-height:1.65;margin-bottom:18px}.modebar{display:flex;align-items:center;gap:8px;margin:18px 0 8px}.modebar .label{font-size:11px;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:.07em;font-weight:750}.toggle{border:1px solid var(--border);border-radius:7px;overflow:hidden;display:inline-flex;background:var(--card)}.toggle button{border:0;background:transparent;color:var(--muted-foreground);padding:5px 9px;font:12px system-ui;cursor:pointer}.toggle button.active{background:var(--primary);color:var(--primary-foreground)}.narrow-note{display:none;font-size:12px;color:var(--muted-foreground)}.block{border:1px solid var(--border);border-radius:9px;overflow:hidden;background:color-mix(in oklch,var(--card) 98%,var(--background));margin:12px 0}.block-head{display:flex;align-items:center;gap:9px;padding:9px 12px;background:color-mix(in oklch,var(--muted) 42%,transparent);border-bottom:1px solid var(--border);cursor:pointer}.caret{width:12px;color:var(--muted-foreground);transition:transform .15s;font-family:monospace}.block.open .caret{transform:rotate(90deg)}.path{font:12px ui-monospace,monospace;color:var(--muted-foreground)}.path b{color:var(--foreground)}.kind{margin-left:auto;font-size:10px;text-transform:uppercase;letter-spacing:.06em;padding:2px 7px;border-radius:4px;color:var(--chart-1);background:color-mix(in oklch,var(--chart-1) 16%,transparent)}.cmt{font-size:11px;color:var(--negative);background:color-mix(in oklch,var(--negative) 12%,transparent);border-radius:999px;padding:2px 7px;font-weight:750}.block-body{display:none;overflow-x:auto}.block.open .block-body{display:block}.filehead{padding:5px 12px;font:11px ui-monospace,monospace;color:var(--muted-foreground);background:color-mix(in oklch,var(--muted) 52%,transparent);border-bottom:1px solid var(--border);font-weight:650}.hunk{padding:3px 12px;font:11px ui-monospace,monospace;color:var(--info);background:color-mix(in oklch,var(--info) 10%,transparent);border-bottom:1px solid color-mix(in oklch,var(--border) 60%,transparent)}.inline-line,.side-row,.side-cell{font:11.5px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}.inline-line{position:relative;display:flex;cursor:pointer;width:max-content;min-width:100%}.inline-line:hover,.side-cell:hover{background:color-mix(in oklch,var(--primary) 6%,transparent)!important}.ln{flex:0 0 38px;text-align:right;color:color-mix(in oklch,var(--muted-foreground) 62%,transparent);padding-right:8px;user-select:none;position:relative}.sym{width:18px;text-align:center;flex:0 0 18px;user-select:none}.code{white-space:pre;overflow:visible;min-width:0;flex:1;padding-right:10px}.add{background:color-mix(in oklch,var(--positive) 14%,transparent);color:oklch(0.40 0.15 145)}.rem{background:color-mix(in oklch,var(--negative) 14%,transparent);color:oklch(0.42 0.18 25)}.dark .add{color:oklch(0.80 0.14 145)}.dark .rem{color:oklch(0.78 0.16 25)}.commented .ln::before{content:"💬";position:absolute;left:3px;top:0;font-size:10px}.plus{position:absolute;left:8px;top:50%;transform:translateY(-50%);width:18px;height:18px;border:0;border-radius:4px;background:var(--primary);color:var(--primary-foreground);display:none;cursor:pointer;z-index:3}.inline-line:hover .plus,.side-cell:hover .plus{display:block}.side-table{width:100%;min-width:980px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.side-row{display:contents}.side-cell{position:relative;min-width:0;display:flex;cursor:pointer;border-bottom:1px solid color-mix(in oklch,var(--border) 35%,transparent)}.side-cell.left{border-right:1px solid var(--border)}.side-cell.blank{background:color-mix(in oklch,var(--muted) 14%,transparent);cursor:default}.side-cell.blank:hover .plus{display:none}.side-comment{grid-column:1/3}.editor,.saved{padding:11px 12px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:color-mix(in oklch,var(--muted) 28%,transparent)}.editor .where{font:11px ui-monospace,monospace;color:var(--muted-foreground);margin-bottom:8px}.suglabel{font-size:10.5px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;color:var(--muted-foreground);margin-bottom:6px}.chip{display:inline-block;font-size:12px;line-height:1.35;padding:5px 9px;margin:2px 4px 2px 0;border-radius:5px;border:1px solid color-mix(in oklch,var(--warning) 32%,var(--border));background:var(--card);color:var(--foreground);cursor:pointer}.chip:hover{background:color-mix(in oklch,var(--warning) 14%,transparent)}textarea{width:100%;min-height:62px;resize:vertical;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);font:13px/1.45 system-ui;padding:8px 10px;margin-top:8px}.editor-actions{display:flex;gap:7px;margin-top:8px;align-items:center}.saved{background:color-mix(in oklch,var(--card) 96%,var(--background));font-size:13px}.saved-head{color:var(--muted-foreground);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:750;display:flex;gap:8px;margin-bottom:4px}.saved-head b{color:var(--foreground);text-transform:none;letter-spacing:0}.saved button{border:0;background:transparent;color:var(--muted-foreground);cursor:pointer;font-size:11px}.card-concerns{margin:18px 0 0;padding:12px 14px;border-radius:9px;border:1px solid color-mix(in oklch,var(--warning) 22%,var(--border));background:color-mix(in oklch,var(--warning) 5%,transparent)}.card-concerns h3{margin:0 0 8px;font-size:11px;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:.07em}.comment-card{margin-top:10px;padding:10px 12px;border-left:3px solid var(--negative);background:color-mix(in oklch,var(--negative) 5%,transparent);border-radius:0 6px 6px 0;font-size:13px}.controls{display:flex;align-items:center;gap:8px;margin-top:24px;padding-top:18px;border-top:1px solid var(--border);flex-wrap:wrap}.status{color:var(--muted-foreground);font-size:12px;margin-right:auto}.status b{color:var(--foreground)}.btn{border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);padding:8px 14px;font:13px system-ui;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s,box-shadow .15s}.btn:hover{background:color-mix(in oklch,var(--muted) 55%,transparent)}.btn:focus-visible{outline:2px solid var(--ring);outline-offset:2px}.btn[disabled]{opacity:.48;cursor:not-allowed}.btn.small{padding:5px 10px;font-size:12px}.btn.ghost{border-color:transparent;color:var(--muted-foreground);background:transparent}.btn.ghost:hover{background:color-mix(in oklch,var(--muted) 55%,transparent);color:var(--foreground)}.btn.like{background:var(--primary);border-color:var(--primary);color:var(--primary-foreground);box-shadow:0 1px 2px color-mix(in oklch,var(--primary) 30%,transparent)}.btn.like:hover{background:color-mix(in oklch,var(--primary) 88%,var(--foreground));border-color:color-mix(in oklch,var(--primary) 88%,var(--foreground))}
+  /* Danger style: neutral at rest, destructive only on hover/focus, like terminate buttons. */
+  .btn.dislike{background:transparent;color:var(--muted-foreground);border-color:var(--border)}.btn.dislike:not([disabled]):hover,.btn.dislike:not([disabled]):focus-visible{background:color-mix(in oklch,var(--negative) 14%,transparent);border-color:color-mix(in oklch,var(--negative) 55%,var(--border));color:var(--negative)}.btn.save{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+  @media(max-width:900px){.toolbar{gap:8px}.toolbar .pill.ask,.toolbar .progress{display:none}.body{grid-template-columns:38px minmax(0,1fr)}.rail{padding:6px 3px;overflow-y:auto;overflow-x:hidden}.prbox,.phase-head .ptitle,.phase-head .count{display:none}.phase{margin:6px 0;border-radius:8px;padding:2px 0}.phase-head{padding:4px 0;justify-content:center}.phase-head .pip{width:24px;height:24px;font-size:11px}.cards{display:none!important}.collapsed-cards{display:flex;flex-direction:column;align-items:center;gap:6px;padding:5px 0 3px}.workspace{padding:16px 16px 26px}h1{font-size:20px}.narr{font-size:13.5px}.narrow-note{display:inline}.stats{gap:5px}.stat-files{display:none}}
+</style>
+</head>
+<body>
+<div class="pane"><header class="toolbar"><div class="title"><div class="kicker">PR #637 · SuuBro</div><div class="name">Shrink Initial Bundle</div></div><span class="stats"><span class="stat-files">50 files</span><span class="stat-add">+4,650</span><span class="stat-del">-2,353</span></span><span class="pill ask">Ask via Bobbit chat outside this pane</span><span class="spacer"></span><span id="count" class="pill">0 / 6 reviewed</span><div id="progress" class="progress"></div><button id="submit" class="submit" disabled>Submit review</button></header><div class="body"><aside id="rail" class="rail"></aside><main id="workspace" class="workspace"></main></div></div>
+<script>
+const phases=[{id:0,title:'Orientation',cards:[{id:'o',kind:'orient',title:'Why this PR exists',narr:`The entry chunk had grown to <code>1,544 kB raw / 366 kB gz</code>. This PR moves cold-path dependencies and UI slabs behind lazy boundaries, cutting the critical bundle to <code>150 kB gz</code>. Need-to-know: pi-ai re-exported a 553 kB generated model catalog; highlight.js pulled ~195 grammars; proposal panels had accreted ~1500 LOC of cold-path rendering.`}]},{id:1,title:'Key design choices',cards:[{id:'lazy',title:'Lazy-wrapper modules around heavy dependencies',narr:`Instead of scattering dynamic imports, the PR creates small cached lazy wrappers. This card intentionally has <b>multiple code blocks</b>: the wrapper itself and a call-site conversion.`,blocks:[{path:'src/app/pi-ai-lazy.ts',label:'new wrapper',diff:[['file','src/app/pi-ai-lazy.ts'],['hunk','@@ -0,0 +1,15 @@'],['add',1,'/** Lazy wrapper around @earendil-works/pi-ai.'],['add',2,' * Static callers drag the 553 kB generated model catalog into the entry chunk.'],['add',3,' */'],['add',4,'type PiAi = typeof import("@earendil-works/pi-ai");'],['add',5,''],['add',6,'let _piAi: Promise<PiAi> | null = null;'],['add',7,''],['add',8,'export function loadPiAi(): Promise<PiAi> {'],['add',9,'  if (!_piAi) _piAi = import("@earendil-works/pi-ai");'],['add',10,'  return _piAi;'],['add',11,'}']]},{path:'src/ui/utils/proxy-utils.ts',label:'call site',diff:[['file','src/ui/utils/proxy-utils.ts'],['hunk','@@ -31,7 +31,7 @@ export function createStreamFn(...)'],['rem',31,'return streamSimple({ model, messages, tools });'],['add',31,'return (await loadPiAi()).streamSimple({ model, messages, tools });']]}],lineConcerns:{'src/app/pi-ai-lazy.ts:9':['Two concurrent first callers both execute this branch before _piAi is assigned? If not, add a comment explaining JS run-to-completion makes this safe.'],'src/ui/utils/proxy-utils.ts:31':['This function was already async, so the lazy load is cheap. Good call-site choice.']},concerns:['Three new *-lazy.ts files do the same cached-import pattern. Consider a tiny helper to reduce drift.']},{id:'placeholder',title:'Hardcoded PLACEHOLDER_DEFAULT_MODEL literal',narr:`The sync RemoteAgent constructor used to call <code>getModel()</code>, which dragged the pi-ai catalog into the entry chunk. The PR inlines a placeholder object, replaced on WS hydration.`,blocks:[{path:'src/app/remote-agent.ts',label:'model placeholder',diff:[['file','src/app/remote-agent.ts'],['hunk','@@ -8,16 +8,32 @@'],['rem',8,'import { getModel, streamSimple } from "@earendil-works/pi-ai";'],['add',8,'// Static import dropped — see pi-ai-lazy.ts.'],['add',9,'const PLACEHOLDER_DEFAULT_MODEL = {'],['add',10,'  provider: "anthropic",'],['add',11,'  id: "claude-opus-4-6",'],['add',12,'  contextWindow: 0,'],['add',13,'  compat: {'],['add',14,'    supportsEagerToolInputStreaming: false,'],['add',15,'    supportsLongCacheRetention: false,'],['add',16,'  },'],['add',17,'} as const;'],['hunk','@@ -67,7 +83,7 @@ constructor(...)'],['rem',67,'this.model = getModel("anthropic", "claude-opus-4-6");'],['add',83,'this.model = PLACEHOLDER_DEFAULT_MODEL;']]}],lineConcerns:{'src/app/remote-agent.ts:12':['contextWindow: 0 is a lie. Any code reading it before hydration gets nonsense.'],'src/app/remote-agent.ts:13':['Hardcoded compat shape can drift from pi-ai. Add a static type assertion against AnthropicMessagesCompat.']},concerns:['The placeholder approach is pragmatic, but deserves a test proving the hydrated model replaces it before user-visible display.']} ]},{id:2,title:'Significant changes',cards:[{id:'chunks',title:'Manual vendor chunks for cache stability',narr:`Slow-changing libraries get stable <code>vendor-*</code> chunks. This affects caching and future bundle boundaries.`,blocks:[{path:'vite.config.ts',label:'manualChunks',diff:[['file','vite.config.ts'],['hunk','@@ -22,4 +22,30 @@'],['add',24,'output: {'],['add',25,'  manualChunks(id) {'],['add',26,'    if (id.includes("node_modules/@earendil-works/pi-ai")) return "pi-ai";'],['add',27,'    if (id.includes("@sinclair/typebox")) return "vendor-typebox";'],['add',28,'    if (id.includes("node_modules/marked")) return "vendor-marked";'],['add',29,'    if (id.includes("@mariozechner/mini-lit")) return "vendor-minilit";'],['add',30,'    if (id.includes("node_modules/lucide")) return "vendor-lucide";'],['add',31,'    if (/node_modules\\/lit(-html)?/.test(id)) return "vendor-lit";'],['add',32,'    if (id.match(/recogito|annotorious|rbush/)) return "vendor-annotate";'],['add',33,'  },'],['add',34,'},']]}],lineConcerns:{'vite.config.ts:31':['This regex is a little broad. Future transitive paths could match unexpectedly.']},concerns:['Manual chunking is brittle. Add a test asserting no generated JS chunk exceeds the per-chunk budget.']},{id:'budget',title:'Tightened bundle-size budgets',narr:`The regression guard moves from aspirational to pinning: main budget <code>600 → 250 kB gz</code>, per-chunk <code>500 → 200 kB gz</code>, plus raw-size guard to pin Vite warning threshold.`,blocks:[{path:'tests/bundle-size.test.ts',label:'pinning test',diff:[['file','tests/bundle-size.test.ts'],['hunk','@@ -8,8 +8,14 @@'],['rem',8,'const MAIN_BUDGET_GZ = 600 * 1024;'],['rem',9,'const PER_CHUNK_BUDGET_GZ = 500 * 1024;'],['add',8,'const MAIN_BUDGET_GZ = 250 * 1024;'],['add',9,'const PER_CHUNK_BUDGET_GZ = 200 * 1024;'],['add',10,'const MAIN_BUDGET_RAW = 600 * 1024;'],['add',11,''],['add',12,'test("main entry chunk under raw budget", () => {'],['add',13,'  assert.ok(readMainChunk().length <= MAIN_BUDGET_RAW);'],['add',14,'});']]}],lineConcerns:{'tests/bundle-size.test.ts:9':['200 kB per chunk is still generous. Could be 100 kB unless a known vendor chunk needs more headroom.']},concerns:[]} ]},{id:3,title:'Other + omissions',cards:[{id:'omission',title:'No user-flow E2E for first lazy-load paths',narr:`Bundle tests prove JSZip, QRCode, and highlight grammars leave the entry chunk. They do not prove first user activation loads and runs successfully.`,blocks:[{path:'src/ui/utils/attachment-utils.ts',label:'PPTX path',diff:[['file','src/ui/utils/attachment-utils.ts'],['hunk','@@ -120,1 +120,4 @@ processPptx(file)'],['rem',120,'import JSZip from "jszip";'],['add',120,'// Lazy: jszip is 97 kB raw. Only PPTX attachments need it.'],['add',121,'async function loadJSZip() {'],['add',122,'  return (await import("jszip")).default;'],['add',123,'}']]}],lineConcerns:{'src/ui/utils/attachment-utils.ts:122':['Runtime path is untested. Add E2E: upload fixture .pptx, assert extracted text appears, assert jszip chunk loaded.']},concerns:['Same omission likely applies to QR code dialog and long-tail highlight grammars.']} ]},{id:4,title:'Audit',cards:[{id:'audit',title:'Remaining plumbing audit',narr:`Remaining imports, ratchets, docs and generated lockfile changes. Warnings expand as normal diff blocks and can take inline comments too.`,blocks:[{path:'vite.profile.config.ts',label:'warning expanded',diff:[['file','vite.profile.config.ts'],['hunk','@@ -10,4 +10,8 @@'],['rem',10,'const base = await import("./vite.config.js");'],['rem',11,'export default mergeConfig(base.default, profileOverrides);'],['add',10,'// vite.config exports a callback form; mergeConfig rejects functions.'],['add',11,'export default defineConfig(async (env) => {'],['add',12,'  const baseFactory = (await import("./vite.config.js")).default;'],['add',13,'  const base = typeof baseFactory === "function" ? await baseFactory(env) : baseFactory;'],['add',14,'  return mergeConfig(base, profileOverrides);'],['add',15,'});']]},{path:'tests/e2e/ui/pill-overflow-promotion.spec.ts',label:'warning expanded',diff:[['file','tests/e2e/ui/pill-overflow-promotion.spec.ts'],['hunk','@@ -5,0 +6,1 @@'],['add',6,'test.setTimeout(90_000); // was 30s default']]}],lineConcerns:{'tests/e2e/ui/pill-overflow-promotion.spec.ts:6':['This masks slowness rather than fixing it. If accepted, track the underlying stability issue separately.']},concerns:[]} ]}];
+const state={p:0,c:0,open:new Set(),nav:new Set([0,1,2,3,4]),status:{},lineComments:{},cardComments:{},editor:null,cardEditor:false,diffMode:'side',userSetMode:false};for(const p of phases)for(const c of p.cards){state.status[c.id]='pending';state.lineComments[c.id]=[];(c.blocks||[]).forEach((b,i)=>{if(i<2)state.open.add(c.id+':'+b.path)})}function card(){return phases[state.p].cards[state.c]}function allCards(){return phases.flatMap((p,pi)=>p.cards.map((c,ci)=>({p,pi,c,ci})))}function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function tuple(t){return{type:t[0],n:t[1],code:t[2]}}function lineKey(path,n){return path+':'+n}function narrow(){return innerWidth<=900}function effectiveMode(){return state.userSetMode?state.diffMode:(narrow()?'inline':'side')}function commentsFor(id,path,n){return(state.lineComments[id]||[]).filter(x=>x.path==path&&x.line==n)}function cc(id){return(state.lineComments[id]||[]).length+(state.cardComments[id]?1:0)}function isEditor(id,path,n){return state.editor&&state.editor.id==id&&state.editor.path==path&&state.editor.line==n}function render(){renderRail();renderWorkspace();renderSummary()}function renderRail(){let h='<div class="prbox"><div class="num">#637 · SuuBro</div><div class="prtitle">Shrink Initial Bundle</div><div class="meta"><span>50 files</span><span class="stat-add">+4,650</span><span class="stat-del">-2,353</span></div></div>';phases.forEach((p,pi)=>{const done=p.cards.filter(c=>state.status[c.id]!='pending').length;h+=`<div class="phase ${pi==state.p?'active':''} ${done==p.cards.length&&pi!=state.p?'done':''} ${state.nav.has(pi)?'open':''}"><div class="phase-head" title="Phase ${pi}: ${esc(p.title)}" onclick="togNav(${pi})"><span class="pip">${pi}</span><span class="ptitle">${esc(p.title)}</span><span class="count">${done}/${p.cards.length}</span></div><div class="cards">`;p.cards.forEach((c,ci)=>h+=`<div class="cardlink ${state.status[c.id]} ${pi==state.p&&ci==state.c?'current':''}" onclick="goto(${pi},${ci})" title="${esc(c.title)}"><span class="dot"></span><span class="txt">${esc(c.title)}</span>${cc(c.id)?`<span class="badge">${cc(c.id)}</span>`:''}</div>`);h+=`</div><div class="collapsed-cards">`;p.cards.forEach((c,ci)=>h+=`<button class="card-dot ${state.status[c.id]} ${pi==state.p&&ci==state.c?'current':''}" onclick="event.stopPropagation();goto(${pi},${ci})" title="${esc(c.title)}${cc(c.id)?' · '+cc(c.id)+' comment(s)':''}"></button>`);h+='</div></div>'});rail.innerHTML=h}function renderWorkspace(){const c=card(),p=phases[state.p];let h=`<div class="inner"><span class="tag">Phase ${p.id} · ${esc(p.title)}</span><h1>${esc(c.title)}</h1><div class="meta2">Card ${state.c+1} of ${p.cards.length} · ${c.kind==='orient'?'briefing':'logical change set'}</div><div class="narr">${c.narr}</div>`;if(c.blocks){h+=`<div class="modebar"><span class="label">Diff display</span><span class="toggle"><button class="side ${effectiveMode()==='side'?'active':''}" onclick="setMode('side')">Side-by-side</button><button class="${effectiveMode()==='inline'?'active':''}" onclick="setMode('inline')">Inline</button></span><span class="narrow-note">Inline defaults at half-width; side-by-side still available</span></div>`;h+=c.blocks.map(b=>renderBlock(c,b)).join('');h+=renderCardConcerns(c)}h+=`<div class="controls"><span class="status">${cc(c.id)?`<b>${cc(c.id)}</b> comment${cc(c.id)==1?'':'s'} drafted on this card`:'No concerns added yet'}</span><button class="btn ghost" onclick="prev()" ${state.p==0&&state.c==0?'disabled':''}>← Prev</button><button class="btn dislike" onclick="dislike()" ${cc(c.id)==0?'disabled':''}>Dislike${cc(c.id)?' (with '+cc(c.id)+')':''}</button><button class="btn like" onclick="like()">${cc(c.id)?'Like anyway':'Like'} →</button></div></div>`;workspace.innerHTML=h;setTimeout(()=>{const ta=document.getElementById('lineTa');if(ta){ta.focus();lineInput()}},0)}function renderBlock(c,b){const key=c.id+':'+b.path,open=state.open.has(key),n=(state.lineComments[c.id]||[]).filter(x=>x.path==b.path).length;return`<section class="block ${open?'open':''}"><div class="block-head" onclick="togBlock('${esc(key)}')"><span class="caret">▸</span><span class="path"><b>${esc(b.path)}</b> · ${esc(b.label)}</span>${n?`<span class="cmt">💬 ${n}</span>`:''}<span class="kind">${esc(b.label)}</span></div><div class="block-body">${effectiveMode()==='side'?renderSide(c,b):renderInline(c,b)}</div></section>`}function renderSide(c,b){let h=`<div class="filehead">${esc(b.diff[0][1])}</div>`;let lines=b.diff,i=1;while(i<lines.length){if(lines[i][0]==='hunk'){h+=`<div class="hunk">${esc(lines[i][1])}</div><div class="side-table">`;i++;while(i<lines.length&&lines[i][0]!=='hunk'){let cur=tuple(lines[i]);if(cur.type==='rem'&&lines[i+1]&&lines[i+1][0]==='add'){h+=sideRow(c,b,cur,tuple(lines[i+1]));i+=2}else if(cur.type==='rem'){h+=sideRow(c,b,cur,null);i++}else if(cur.type==='add'){h+=sideRow(c,b,null,cur);i++}else{h+=sideRow(c,b,cur,cur);i++}}h+='</div>'}else i++}return h}function sideRow(c,b,l,r){const line=(r&&r.n)||(l&&l.n)||0;let h=`<div class="side-row">${sideCell(c,b,l,'left')}${sideCell(c,b,r,'right')}`;if((l&&commentsFor(c.id,b.path,l.n).length)||(r&&commentsFor(c.id,b.path,r.n).length)||isEditor(c.id,b.path,line))h+=`<div class="side-comment">${renderCommentsAndEditor(c,b,line)}</div>`;return h+'</div>'}function sideCell(c,b,line,side){if(!line)return`<div class="side-cell ${side} blank"></div>`;let cls=line.type==='add'?'add':line.type==='rem'?'rem':'';return`<div class="side-cell ${side} ${cls} ${commentsFor(c.id,b.path,line.n).length?'commented':''}" onclick="openEditor('${c.id}','${esc(b.path)}',${line.n})"><span class="ln">${line.n}</span><span class="sym">${line.type==='add'?'+':line.type==='rem'?'−':' '}</span><span class="code">${esc(line.code)}</span><button class="plus" onclick="event.stopPropagation();openEditor('${c.id}','${esc(b.path)}',${line.n})">+</button></div>`}function renderInline(c,b){let h=`<div class="filehead">${esc(b.diff[0][1])}</div>`;for(let i=1;i<b.diff.length;i++){const x=b.diff[i];if(x[0]==='hunk'){h+=`<div class="hunk">${esc(x[1])}</div>`;continue}const o=tuple(x),cls=o.type==='add'?'add':o.type==='rem'?'rem':'';h+=`<div><div class="inline-line ${cls} ${commentsFor(c.id,b.path,o.n).length?'commented':''}" onclick="openEditor('${c.id}','${esc(b.path)}',${o.n})"><span class="ln">${o.n}</span><span class="sym">${o.type==='add'?'+':o.type==='rem'?'−':' '}</span><span class="code">${esc(o.code)}</span><button class="plus" onclick="event.stopPropagation();openEditor('${c.id}','${esc(b.path)}',${o.n})">+</button></div>${renderCommentsAndEditor(c,b,o.n)}</div>`}return h}function renderCommentsAndEditor(c,b,n){let h='';commentsFor(c.id,b.path,n).forEach(x=>h+=`<div class="saved"><div class="saved-head"><b>You</b><span>anchored to ${esc(b.path)}:${n}</span><span class="spacer"></span><button onclick="editLine('${c.id}','${esc(b.path)}',${n})">edit</button><button onclick="delLine('${c.id}','${esc(b.path)}',${n})">delete</button></div>${esc(x.text)}</div>`);if(isEditor(c.id,b.path,n)){const sugs=(c.lineConcerns||{})[lineKey(b.path,n)]||[];h+=`<div class="editor"><div class="where">Comment anchors to <b>${esc(b.path)}:${n}</b></div>${sugs.length?`<div class="suglabel">LLM-suggested comments for this line</div>${sugs.map((s,i)=>`<span class="chip" onclick="useLineSug(${i})">${esc(s)}</span>`).join('')}`:''}<textarea id="lineTa" placeholder="Or write your own comment…" oninput="lineInput()">${commentsFor(c.id,b.path,n)[0]?.text||''}</textarea><div class="editor-actions"><button class="btn small ghost" onclick="closeEditor()">Cancel</button><span class="spacer"></span><button id="lineSave" class="btn small save" disabled onclick="saveLine()">Save comment</button></div></div>`}return h}function renderCardConcerns(c){let h='<div class="card-concerns"><h3>Card-level concerns</h3>';(c.concerns||[]).forEach((x,i)=>h+=`<span class="chip" onclick="useCardConcern(${i})">${esc(x)}</span>`);h+=`<span class="chip" onclick="openCardEditor()">+ Write your own…</span>`;if(state.cardComments[c.id])h+=`<div class="comment-card"><b>Card-level comment</b><br>${esc(state.cardComments[c.id])}</div>`;if(state.cardEditor)h+=`<textarea id="cardTa" placeholder="A concern about this whole logical change…" oninput="cardInput()"></textarea><div class="editor-actions"><button class="btn small ghost" onclick="closeCardEditor()">Cancel</button><span class="spacer"></span><button id="cardSave" class="btn small save" disabled onclick="saveCardComment()">Save comment</button></div>`;return h+'</div>'}function renderSummary(){let likedN=0,dislikedN=0,reviewed=0;allCards().forEach(({c})=>{if(state.status[c.id]!=='pending')reviewed++;if(state.status[c.id]==='liked')likedN++;if(state.status[c.id]==='disliked')dislikedN++});count.textContent=`${reviewed} / ${allCards().length} reviewed`;progress.innerHTML=allCards().map(({c,pi,ci})=>`<span class="seg ${pi===state.p&&ci===state.c?'now':state.status[c.id]==='liked'?'good':state.status[c.id]==='disliked'?'bad':''}"></span>`).join('');submit.disabled=reviewed<allCards().length;submit.textContent=reviewed<allCards().length?`Submit review (${reviewed}/${allCards().length})`:`Submit review · ${dislikedN?'request changes':'approve'}`}function togNav(i){state.nav.has(i)?state.nav.delete(i):state.nav.add(i);renderRail()}function togBlock(k){state.open.has(k)?state.open.delete(k):state.open.add(k);renderWorkspace()}function setMode(m){state.diffMode=m;state.userSetMode=true;renderWorkspace()}function goto(p,c){state.p=p;state.c=c;state.editor=null;state.cardEditor=false;render()}function advance(){let p=phases[state.p];if(state.c+1<p.cards.length)state.c++;else if(state.p+1<phases.length){state.p++;state.c=0}state.editor=null;state.cardEditor=false}function like(){state.status[card().id]='liked';advance();render()}function dislike(){if(cc(card().id)===0)return;state.status[card().id]='disliked';advance();render()}function prev(){if(state.c>0)state.c--;else if(state.p>0){state.p--;state.c=phases[state.p].cards.length-1}render()}function openEditor(id,path,line){state.editor={id,path,line};renderWorkspace()}function closeEditor(){state.editor=null;renderWorkspace()}function lineInput(){lineSave.disabled=!lineTa.value.trim()}function useLineSug(i){const c=card(),s=(c.lineConcerns||{})[lineKey(state.editor.path,state.editor.line)][i];lineTa.value=s;lineInput()}function saveLine(){const e=state.editor;state.lineComments[e.id]=(state.lineComments[e.id]||[]).filter(x=>!(x.path===e.path&&x.line===e.line));state.lineComments[e.id].push({path:e.path,line:e.line,text:lineTa.value.trim()});state.editor=null;render()}function editLine(id,path,line){openEditor(id,path,line)}function delLine(id,path,line){state.lineComments[id]=state.lineComments[id].filter(x=>!(x.path===path&&x.line===line));render()}function openCardEditor(){state.cardEditor=true;renderWorkspace();setTimeout(()=>cardTa.focus())}function closeCardEditor(){state.cardEditor=false;renderWorkspace()}function cardInput(){cardSave.disabled=!cardTa.value.trim()}function useCardConcern(i){state.cardEditor=true;renderWorkspace();setTimeout(()=>{cardTa.value=card().concerns[i];cardInput();cardTa.focus()},0)}function saveCardComment(){state.cardComments[card().id]=cardTa.value.trim();state.cardEditor=false;render()}addEventListener('resize',()=>renderWorkspace());render();
+</script>
+<script>
+(function() {
+	try {
+		/* Standalone tab (Open-in-new-tab): parent === window, so there is no
+		   host-app document to mirror. The server-injected inline <style data-bobbit-preview-theme>
+		   snapshot defines :root/.dark defaults — early return and let it govern.
+		   Embedded iframes (parent !== window) continue past this guard so live
+		   theme toggles in the host app flow through. */
+		if (parent === window) return;
+		var root = document.documentElement;
+		var parentRoot = parent.document.documentElement;
+		var parentStyles = parent.getComputedStyle(parentRoot);
+
+		function sync() {
+			/* Mirror dark class */
+			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
+
+			/* Mirror data-palette attribute */
+			var palette = parentRoot.getAttribute('data-palette');
+			if (palette) root.setAttribute('data-palette', palette);
+			else root.removeAttribute('data-palette');
+
+			/* Copy all CSS custom properties from the app stylesheet */
+			var vars = [];
+			try {
+				for (var s = 0; s < parent.document.styleSheets.length; s++) {
+					var sheet = parent.document.styleSheets[s];
+					try {
+						var rules = sheet.cssRules || sheet.rules;
+						for (var r = 0; r < rules.length; r++) {
+							var rule = rules[r];
+							if (rule.style) {
+								for (var i = 0; i < rule.style.length; i++) {
+									var name = rule.style[i];
+									if (name.startsWith('--')) vars.push(name);
+								}
+							}
+						}
+					} catch(e) { /* cross-origin sheet, skip */ }
+				}
+			} catch(e) {}
+
+			/* Deduplicate and copy computed values */
+			var seen = {};
+			for (var v = 0; v < vars.length; v++) {
+				if (seen[vars[v]]) continue;
+				seen[vars[v]] = true;
+				var val = parentStyles.getPropertyValue(vars[v]);
+				if (val) root.style.setProperty(vars[v], val);
+			}
+		}
+
+		/* Copy the app font stack */
+		root.style.fontFamily = parentStyles.fontFamily;
+
+		/* Initial sync */
+		sync();
+
+		/* Watch for class/attribute changes on the parent root element */
+		var observer = new MutationObserver(sync);
+		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
+	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
+})();
+</script><script>
+(function() {
+	var startX = 0, startY = 0, captured = false, decided = false;
+	document.addEventListener('touchstart', function(e) {
+		startX = e.touches[0].clientX;
+		startY = e.touches[0].clientY;
+		captured = false;
+		decided = false;
+	}, {passive: true});
+	document.addEventListener('touchmove', function(e) {
+		if (decided && !captured) return;
+		var dx = e.touches[0].clientX - startX;
+		var dy = e.touches[0].clientY - startY;
+		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+			decided = true;
+			captured = Math.abs(dx) > Math.abs(dy);
+			if (captured) parent.postMessage({type:'preview-swipe-start'}, '*');
+		}
+		if (captured) {
+			e.preventDefault();
+			parent.postMessage({type:'preview-swipe-move', dx: dx}, '*');
+		}
+	}, {passive: false});
+	document.addEventListener('touchend', function(e) {
+		if (!captured) return;
+		var dx = e.changedTouches[0].clientX - startX;
+		parent.postMessage({type:'preview-swipe-end', dx: dx}, '*');
+		captured = false;
+		decided = false;
+	}, {passive: true});
+})();
+</script><script>
+(function() {
+	try {
+		/* Standalone tab (Open-in-new-tab): parent === window, so there is no
+		   host-app document to mirror. The server-injected inline <style data-bobbit-preview-theme>
+		   snapshot defines :root/.dark defaults — early return and let it govern.
+		   Embedded iframes (parent !== window) continue past this guard so live
+		   theme toggles in the host app flow through. */
+		if (parent === window) return;
+		var root = document.documentElement;
+		var parentRoot = parent.document.documentElement;
+		var parentStyles = parent.getComputedStyle(parentRoot);
+
+		function sync() {
+			/* Mirror dark class */
+			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
+
+			/* Mirror data-palette attribute */
+			var palette = parentRoot.getAttribute('data-palette');
+			if (palette) root.setAttribute('data-palette', palette);
+			else root.removeAttribute('data-palette');
+
+			/* Copy all CSS custom properties from the app stylesheet */
+			var vars = [];
+			try {
+				for (var s = 0; s < parent.document.styleSheets.length; s++) {
+					var sheet = parent.document.styleSheets[s];
+					try {
+						var rules = sheet.cssRules || sheet.rules;
+						for (var r = 0; r < rules.length; r++) {
+							var rule = rules[r];
+							if (rule.style) {
+								for (var i = 0; i < rule.style.length; i++) {
+									var name = rule.style[i];
+									if (name.startsWith('--')) vars.push(name);
+								}
+							}
+						}
+					} catch(e) { /* cross-origin sheet, skip */ }
+				}
+			} catch(e) {}
+
+			/* Deduplicate and copy computed values */
+			var seen = {};
+			for (var v = 0; v < vars.length; v++) {
+				if (seen[vars[v]]) continue;
+				seen[vars[v]] = true;
+				var val = parentStyles.getPropertyValue(vars[v]);
+				if (val) root.style.setProperty(vars[v], val);
+			}
+		}
+
+		/* Copy the app font stack */
+		root.style.fontFamily = parentStyles.fontFamily;
+
+		/* Initial sync */
+		sync();
+
+		/* Watch for class/attribute changes on the parent root element */
+		var observer = new MutationObserver(sync);
+		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
+	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
+})();
+</script><script>
+(function() {
+	var startX = 0, startY = 0, captured = false, decided = false;
+	document.addEventListener('touchstart', function(e) {
+		startX = e.touches[0].clientX;
+		startY = e.touches[0].clientY;
+		captured = false;
+		decided = false;
+	}, {passive: true});
+	document.addEventListener('touchmove', function(e) {
+		if (decided && !captured) return;
+		var dx = e.touches[0].clientX - startX;
+		var dy = e.touches[0].clientY - startY;
+		if (!decided && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+			decided = true;
+			captured = Math.abs(dx) > Math.abs(dy);
+			if (captured) parent.postMessage({type:'preview-swipe-start'}, '*');
+		}
+		if (captured) {
+			e.preventDefault();
+			parent.postMessage({type:'preview-swipe-move', dx: dx}, '*');
+		}
+	}, {passive: false});
+	document.addEventListener('touchend', function(e) {
+		if (!captured) return;
+		var dx = e.changedTouches[0].clientX - startX;
+		parent.postMessage({type:'preview-swipe-end', dx: dx}, '*');
+		captured = false;
+		decided = false;
+	}, {passive: true});
+})();
+</script></body>
+</html>

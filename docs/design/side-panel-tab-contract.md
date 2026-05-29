@@ -11,9 +11,9 @@ SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-
 
 Bobbit's UI has two main areas: the **chat** (transcript + prompt textarea)
 and a **side pane** that hosts everything else the agent might surface
-alongside the chat — HTML previews, draft proposals, review documents, and
-the staff-agent inbox. Before this contract there were several parallel
-sources of truth for what the side pane was showing:
+alongside the chat — HTML previews, draft proposals, review documents,
+PR walkthroughs, and the staff-agent inbox. Before this contract there
+were several parallel sources of truth for what the side pane was showing:
 
 - `activePanelTabId` (id-keyed)
 - `assistantTab` / `previewPanelTab` (kind-keyed legacy state)
@@ -41,7 +41,7 @@ The side-pane tab strip is a **Chrome-style tab bar that lives next to
 chat**, not above the whole window. Chat is always the main area.
 
 - The strip renders only side-pane tabs (preview / proposal / review /
-  inbox). It never renders a `Chat` pill.
+  walkthrough / inbox). It never renders a `Chat` pill.
 - Chat cannot be reordered, dismissed, or selected from the strip — there
   is no exposed `chat` tab id.
 - If a non-staff session has zero side-pane tabs, the side pane is
@@ -69,6 +69,7 @@ Valid side-pane tab ids (sources of truth in
 | `proposal:<type>` | Active proposal of `<type>` (`goal`, `project`, `role`, `tool`, `staff`). |
 | `proposal:<type>:rev:<N>` | Historical proposal revision. |
 | `review:<encoded-title>` | Review document by title. |
+| `walkthrough:<changeset-id>` | PR / changeset walkthrough. `<changeset-id>` is encoded and derived from the changeset source, e.g. PR number, URL slug, or SHA pair. |
 | `inbox` | Staff-agent inbox. Pinned, no close button, no drag handle. |
 
 `isSidePanelTabId(id)` is the single guard the rest of the app uses.
@@ -251,9 +252,9 @@ may remain the render target if each tab has an immutable restore source" —
 is preserved: each historical tab restores its artifact into the same live
 mount before the iframe renders it.
 
-## 5. Proposal, review, and inbox tabs
+## 5. Proposal, review, walkthrough, and inbox tabs
 
-All three kinds share the id-keyed activation and ordering model with
+All four kinds share the id-keyed activation and ordering model with
 preview.
 
 **Proposal tabs** are minted from the active-proposal slot for a session.
@@ -267,6 +268,16 @@ close cleanly on their own and never touch the active slot.
 **Review tabs** use `review:<encoded-title>` and map 1:1 to entries in
 the session's `reviewDocuments` map. Closing a review tab fires the
 existing review-close behaviour.
+
+**Walkthrough tabs** use `walkthrough:<changeset-id>` and render the PR /
+changeset review surface for that changeset. Slash-command, Git Status
+Widget, and PR-link metadata launch paths upsert the matching tab and take
+focus; reopening the same changeset updates that tab instead of duplicating
+it. The same tab can render in the side panel, fullscreen/wide surface, or
+standalone `/walkthrough?...` route. The walkthrough component persists its
+card decisions, comments, diff mode, and audit state by tab id, so separate
+changesets keep independent review state inside the shared side-panel
+workspace.
 
 **Inbox** is special. For staff-agent sessions it is an always-present,
 pinned side-pane tab:
@@ -290,9 +301,9 @@ pinned side-pane tab:
 - The render path resolves the active id back to a `PanelWorkspaceTab` via
   `findPanelTab(tabs, activeId)` and draws that exact content. No
   kind-based fallback. No second-chance derivation.
-- Agent-driven events (new `preview_open`, new proposal, new review) are
-  allowed to **create or update** a tab and take focus. That is the
-  natural "the agent opened a tab and it took focus" UX.
+- Agent-driven events (new `preview_open`, new proposal, new review, new
+  walkthrough) are allowed to **create or update** a tab and take focus.
+  That is the natural "the agent opened a tab and it took focus" UX.
 - Selection, content arrival, and focus changes **never reorder** existing
   tabs. Order only changes when:
   - The user drags a tab (§ 7), or
@@ -392,8 +403,8 @@ preview tabs:
 
 ## 8. Cross-kind harmony
 
-The point of the contract is that preview, proposal, review, and inbox
-tabs all share the same model:
+The point of the contract is that preview, proposal, review, walkthrough,
+and inbox tabs all share the same model:
 
 - One id-keyed activation authority.
 - One stored order per session.
@@ -402,11 +413,19 @@ tabs all share the same model:
 So:
 
 - A new `preview_open` never removes, reorders, or mutates proposal /
-  review / inbox tabs.
-- A proposal update never reorders preview tabs or mints duplicates.
-- The strip renders in stored order, with pinned tabs pulled to the front
-  by `pinnedFirst`. There is no hidden kind-based bucketing beyond that
-  pin.
+  review / walkthrough / inbox tabs.
+- A proposal update never reorders preview, review, walkthrough, or inbox
+  tabs or mints duplicates.
+- Opening a PR walkthrough appends the tab at the end of the non-pinned
+  tabs, or focuses and updates the existing `walkthrough:<changeset-id>`
+  tab. It does not bucket walkthroughs away from other kinds.
+- User drag reorder persists the mixed-kind order exactly as stored in
+  `panelTabsBySession[sid]`; only pinned Inbox is pulled to the front by
+  `pinnedFirst`.
+- Active selection persists by id in `panelWorkspaceActiveBySession[sid]`,
+  so reload and session switch restore the selected walkthrough just like
+  preview, proposal, and review tabs. Walkthrough-internal persistence is
+  keyed by the same tab id to keep each changeset isolated.
 
 ## 9. Implementation hot spots
 
@@ -414,7 +433,8 @@ So:
 |---|---|
 | [`src/app/panel-workspace.ts`](../../src/app/panel-workspace.ts) | Tab id grammar, normalization, persistence, version ledger, pinned ordering, `nextActivePanelTabId`, `reorderSidePanelTab`. |
 | [`src/app/preview-panel.ts`](../../src/app/preview-panel.ts) | `selectHtmlPreviewTab` (upsert / split / collapse), SSE bootstrap and live update, older-version-rehydration guard. |
-| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, active-content lookup by id only. |
+| [`src/app/pr-walkthrough.ts`](../../src/app/pr-walkthrough.ts) | Slash-command parsing, changeset-derived walkthrough tab id / title, tab upsert, and active-id selection. |
+| [`src/app/render.ts`](../../src/app/render.ts) | Side-pane tab strip rendering (Chrome-style with radial-gradient corner pseudos for active tab), mobile pane bar with pinned Chat pill, SortableJS attach (`ensurePanelSortable`) + X-axis lock raF loop, render suppression during drag, `_proposalOverride` for editable historical proposal tabs, walkthrough panel content, active-content lookup by id only. |
 | [`src/ui/tools/renderers/PreviewRenderer.ts`](../../src/ui/tools/renderers/PreviewRenderer.ts) | Tool-card Open button; chooses between artifact restore, source remount, and recorded-entry select; computes collapse-to-current before invoking `selectHtmlPreviewTab`. |
 | [`src/server/preview/artifacts.ts`](../../src/server/preview/artifacts.ts) | `persistPreviewArtifact`, `restorePreviewArtifact`, `findPreviewArtifactByHash`, `sweepOrphanArtifacts`. |
 | [`src/server/server.ts`](../../src/server/server.ts) (`/api/preview/mount`, `/api/preview/artifacts/:id/restore`, SSE) | Capture artifact on mount; include `artifactId` in mount responses, SSE bootstrap, and live events. |
@@ -479,6 +499,7 @@ preview regression coverage stays green:
 - [`tests/e2e/ui/preview-happy-path.spec.ts`](../../tests/e2e/ui/preview-happy-path.spec.ts)
 - [`tests/e2e/ui/preview-new-tab.spec.ts`](../../tests/e2e/ui/preview-new-tab.spec.ts)
 - [`tests/e2e/ui/preview-refresh.spec.ts`](../../tests/e2e/ui/preview-refresh.spec.ts)
+- [`tests/e2e/ui/pr-walkthrough-panel.spec.ts`](../../tests/e2e/ui/pr-walkthrough-panel.spec.ts)
 
 The v3 snapshot block stays pinned by
 [`tests/e2e/preview-token-cost.spec.ts`](../../tests/e2e/preview-token-cost.spec.ts).

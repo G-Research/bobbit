@@ -40,12 +40,13 @@ Old paths and concepts that are gone:
 ## Side-panel workspace integration
 
 The UI treats the side pane as a Chrome-style tab strip beside the chat
-(never above it). The strip can hold HTML preview, proposal, review, and
-inbox tabs at the same time. Chat is **not** a tab — there is no `chat`
-side-pane id, no Chat pill in the strip, and the side pane hides entirely
-when a non-staff session has no side-pane tabs. The full rules — id
-grammar, focus and ordering, drag reorder, pinned inbox, immutable
-artifact restore, per-filename version assignment — live in
+(never above it). The shared strip can hold HTML preview, proposal,
+review, PR walkthrough, and inbox tabs at the same time. Chat is **not**
+a tab — there is no `chat` side-pane id, no Chat pill in the strip, and
+the side pane hides entirely when a non-staff session has no side-pane
+tabs. The full rules — id grammar, focus and ordering, drag reorder,
+pinned inbox, walkthrough tab identity, immutable artifact restore,
+per-filename version assignment — live in
 [`design/side-panel-tab-contract.md`](./design/side-panel-tab-contract.md).
 
 Preview tab identity in that contract:

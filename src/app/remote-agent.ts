@@ -832,6 +832,17 @@ export class RemoteAgent {
 			}
 		}
 
+		const maybeWalkthroughCommand = !attachments?.length && !imageData?.length && /^\/walkthrough-pr(?:\s+.+)?$/i.test(text.trim());
+		if (maybeWalkthroughCommand) {
+			const { openPrWalkthroughPanel, parseWalkthroughPrCommand } = await import("./pr-walkthrough.js");
+			const walkthroughInput = parseWalkthroughPrCommand(text);
+			if (walkthroughInput) {
+				openPrWalkthroughPanel(state, this.gatewaySessionId || state.selectedSessionId || "", walkthroughInput);
+				renderApp();
+				return;
+			}
+		}
+
 		// Stash attachments so we can enrich the echoed user message
 		this._pendingAttachments = attachments || null;
 		// Skill expansions are server-resolved — only forward if the caller

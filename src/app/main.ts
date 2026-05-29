@@ -46,7 +46,7 @@ function clearDashboardState(): void {
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
-import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
+import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace, panelWorkspaceSessionKey } from "./panel-workspace.js";
 
 // ============================================================================
 // WIRE UP RENDER
@@ -72,6 +72,11 @@ loadPersistedPanelWorkspace(state);
 
 function hasActiveProposalPanel(): boolean {
 	return PROPOSAL_TYPES.some((type) => state.activeProposals[type] != null);
+}
+
+function hasActiveWalkthroughPanel(): boolean {
+	const sid = panelWorkspaceSessionKey(activeSessionId());
+	return activeSidePanelTabIdForSession(state, sid).startsWith("walkthrough:");
 }
 
 // ============================================================================
@@ -190,6 +195,18 @@ async function handleHashChange(): Promise<void> {
 			applyProjectPalette(gdGoal?.projectId);
 			state.appView = "authenticated";
 			loadDashboardData(route.goalId);
+			renderApp();
+			await refreshSessions();
+		} else if (route.view === "walkthrough") {
+			clearDashboardState();
+			if (state.remoteAgent) {
+				state.remoteAgent.disconnect();
+				state.remoteAgent = null;
+				state.connectionStatus = "disconnected";
+			}
+			state.selectedSessionId = null;
+			state.goalDashboardId = null;
+			state.appView = "authenticated";
 			renderApp();
 			await refreshSessions();
 		} else if (route.view === "roles") {
@@ -451,6 +468,10 @@ async function initApp() {
 				loadDashboardData(route.goalId);
 				renderApp();
 				await refreshSessions();
+			} else if (route.view === "walkthrough") {
+				state.appView = "authenticated";
+				renderApp();
+				await refreshSessions();
 			} else if (route.view === "roles") {
 				const { loadRolePageData } = await import("./role-manager-page.js");
 				loadRolePageData();
@@ -562,7 +583,7 @@ async function initApp() {
 		defaultBindings: [{ key: "[", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen);
+			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel());
 			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
@@ -622,7 +643,7 @@ async function initApp() {
 		defaultBindings: [{ key: "]", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel() || hasActiveProposalPanel());
 			if (!hasPanel) return;
 			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 			if (state.previewPanelFullscreen) {
@@ -646,7 +667,8 @@ async function initApp() {
 		defaultBindings: [{ key: "#", ctrlOrMeta: true, shift: false, alt: false }],
 		allowInInput: true,
 		handler: () => {
-			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveProposalPanel());
+			const hasWalkthroughPanel = hasActiveWalkthroughPanel();
+			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasWalkthroughPanel || hasActiveProposalPanel());
 			if (hasPanel) {
 				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
 				if (state.previewPanelFullscreen) {
@@ -654,7 +676,7 @@ async function initApp() {
 					state.previewPanelFullscreen = false;
 					localStorage.setItem(key, "true");
 					sessionStorage.removeItem("bobbit-pre-fullscreen-collapsed");
-				} else if (state.isPreviewSession) {
+				} else if (state.isPreviewSession || hasWalkthroughPanel) {
 					// any non-fullscreen level → 2: jump to fullscreen
 					localStorage.setItem(key, "false");
 					state.previewPanelFullscreen = true;
