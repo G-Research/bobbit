@@ -10,15 +10,26 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { bobbitStateDir } from "./bobbit-dir.js";
 
-const SENTINEL = path.join(bobbitStateDir(), "gateway-restart");
-
-const dir = path.dirname(SENTINEL);
-if (!fs.existsSync(dir)) {
-	fs.mkdirSync(dir, { recursive: true });
+export function restartSentinelPath(): string {
+	return path.join(bobbitStateDir(), "gateway-restart");
 }
 
-// Write a timestamp to change the mtime
-fs.writeFileSync(SENTINEL, Date.now().toString(), "utf-8");
-console.log("[restart-server] Signal sent — harness will rebuild and restart.");
+export function touchGatewayRestartSentinel(now = Date.now()): string {
+	const sentinel = restartSentinelPath();
+	const dir = path.dirname(sentinel);
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+
+	// Write a timestamp to change the mtime
+	fs.writeFileSync(sentinel, now.toString(), "utf-8");
+	return sentinel;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	touchGatewayRestartSentinel();
+	console.log("[restart-server] Signal sent — harness will rebuild and restart.");
+}

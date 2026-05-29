@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, bobbitConfigDir, getProjectRoot } from "./bobbit-dir.js";
+import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer } from "ws";
@@ -2061,6 +2062,23 @@ async function handleApiRoute(
 			if (task) return getTaskManagerForGoal(task.goalId);
 		}
 		throw new Error(`Task "${taskId}" not found in any project`);
+	}
+
+	// GET /api/harness-status — report whether the dev restart harness is active
+	if (url.pathname === "/api/harness-status" && req.method === "GET") {
+		json({ restartAvailable: process.env.BOBBIT_DEV_HARNESS === "1" });
+		return;
+	}
+
+	// POST /api/harness/restart — request a dev harness rebuild/restart
+	if (url.pathname === "/api/harness/restart" && req.method === "POST") {
+		if (process.env.BOBBIT_DEV_HARNESS !== "1") {
+			json({ error: "Restart is only available under the dev harness" }, 403);
+			return;
+		}
+		touchGatewayRestartSentinel();
+		json({ ok: true, restartRequested: true }, 202);
+		return;
 	}
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
