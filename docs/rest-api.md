@@ -980,22 +980,22 @@ Selection metadata is returned with filtered output:
 }
 ```
 
-**`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected `text`.
+**`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json
 {
   "gateId": "implementation",
   "section": "signals",
   "signalsTotal": 22,
-  "signalsShown": 3,
+  "signalsShown": 1,
   "signalsTruncated": true,
   "signals": [
-    { "index": 19, "id": "sig-20", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
+    { "index": 21, "id": "sig-22", "timestamp": 1775812345000, "sessionId": "efed71fb", "commitSha": "abc123", "verdict": "failed", "hasContent": true, "metadataKeys": ["new_regressions"] }
   ],
-  "text": "20: sig-20 failed abc123\n...",
+  "text": "{\"index\":21,\"id\":\"sig-22\",\"timestamp\":1775812345000,\"sessionId\":\"efed71fb\",\"commitSha\":\"abc123\",\"verdict\":\"failed\",\"hasContent\":true,\"metadataKeys\":[\"new_regressions\"]}",
   "selection": {
     "mode": "tail",
     "totalLines": 22,
-    "range": { "from": 20, "to": 22 },
+    "range": { "from": 22, "to": 22 },
     "truncated": false
   }
 }

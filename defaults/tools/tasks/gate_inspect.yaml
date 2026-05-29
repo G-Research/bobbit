@@ -102,7 +102,7 @@ detail_docs: |-
   - `signalsTotal` — total signals in history
   - `signalsShown` — number of summaries returned
   - `signalsTruncated` — whether some summaries were omitted
-  - `text` — deterministic selected text form of the history
+  - `text` — deterministic selected JSON-lines text form of the history
   - `selection` — text-selection metadata
 
   ## When to Use
