@@ -12,6 +12,8 @@ export interface TextSelectionOptions {
 	pattern?: string;
 	context?: number;
 	maxResults?: number;
+	/** Compatibility alias matching gate_inspect/bash_bg-style parameter names. */
+	max_results?: number;
 	lines?: number;
 	from?: number;
 	to?: number;
@@ -28,7 +30,7 @@ export interface TextSelectionMetadata {
 	omittedHint?: string;
 }
 
-export interface TextSelectionResult {
+export interface TextSelectionResult extends TextSelectionMetadata {
 	text: string;
 	selection: TextSelectionMetadata;
 	/** 1-indexed source line numbers included in text; omitted hints are not included. */
@@ -58,7 +60,7 @@ export function countTextLines(text: string): number {
 function assertPositiveInteger(name: string, value: number | undefined): void {
 	if (value === undefined) return;
 	if (!Number.isInteger(value) || value < 1) {
-		throw new TextSelectionError(`${name} must be a positive integer`);
+		throw new TextSelectionError(`${name} must be an integer >= 1`);
 	}
 }
 
@@ -186,13 +188,15 @@ function mergeRanges(ranges: Array<{ from: number; to: number }>): Array<{ from:
 
 export function selectText(text: string, options: TextSelectionOptions = {}): TextSelectionResult {
 	const mode = options.mode ?? "tail";
+	const implicitDefault = options.implicitDefault ?? options.mode === undefined;
+	const maxResultsOption = options.maxResults ?? options.max_results;
 	if (!["full", "grep", "head", "tail", "slice"].includes(mode)) {
 		throw new TextSelectionError(`mode must be one of: full, grep, head, tail, slice`);
 	}
 
 	assertPositiveInteger("lines", options.lines);
 	assertNonNegativeInteger("context", options.context);
-	assertPositiveInteger("max_results", options.maxResults);
+	assertPositiveInteger("max_results", maxResultsOption);
 	assertPositiveInteger("from", options.from);
 	assertPositiveInteger("to", options.to);
 
@@ -241,7 +245,7 @@ export function selectText(text: string, options: TextSelectionOptions = {}): Te
 			throw new TextSelectionError(`Invalid regex pattern: ${err?.message || err}`);
 		}
 		const context = options.context ?? 0;
-		const maxResults = options.maxResults ?? DEFAULT_GREP_MAX_RESULTS;
+		const maxResults = maxResultsOption ?? DEFAULT_GREP_MAX_RESULTS;
 		const matches: number[] = [];
 		for (let i = 0; i < rawLines.length; i++) {
 			regex.lastIndex = 0;
@@ -278,24 +282,26 @@ export function selectText(text: string, options: TextSelectionOptions = {}): Te
 		: undefined;
 
 	let omittedHint: string | undefined;
-	if (mode === "tail" && options.implicitDefault && selectedLineNumbers.length > 0 && totalLines > selectedLineNumbers.length) {
+	if (mode === "tail" && implicitDefault && selectedLineNumbers.length > 0 && totalLines > selectedLineNumbers.length) {
 		const omitted = selectedLineNumbers[0] - 1;
 		omittedHint = `[${omitted} lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=1 to=${omitted}, to inspect more]`;
-		out = `${omittedHint}\n${out}`;
 	}
+
+	const selection: TextSelectionMetadata = {
+		mode,
+		totalLines,
+		range,
+		matchCount,
+		shownMatches,
+		truncated,
+		truncationReason,
+		omittedHint,
+	};
 
 	return {
 		text: out,
-		selection: {
-			mode,
-			totalLines,
-			range,
-			matchCount,
-			shownMatches,
-			truncated,
-			truncationReason,
-			omittedHint,
-		},
+		selection,
 		selectedLineNumbers,
+		...selection,
 	};
 }
