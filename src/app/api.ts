@@ -19,7 +19,7 @@ import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { showFaviconBadge } from "./favicon-badge.js";
 import { clearGoalChildrenFetchedCache } from "./render-helpers.js";
-import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
+import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 export { errorFromResponse, errorDetails };
@@ -151,7 +151,7 @@ export async function refreshSessions(): Promise<void> {
 				if (prev === "streaming" && s.status === "idle" && s.id !== activeId) {
 					const goalId = s.teamGoalId || s.goalId;
 					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-					if (needsHumanAttention(s, goal, newSessions, state.gateStatusCache)
+					if (needsHumanAttentionOnIdleTransition(s, goal, newSessions, state.gateStatusCache)
 						|| needsImmediateHumanAttention(s, state.gateStatusCache)) {
 						RemoteAgent.playNotificationBeep();
 						showFaviconBadge();

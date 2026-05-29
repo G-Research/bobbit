@@ -205,11 +205,31 @@ export default function (pi: ExtensionAPI) {
 				Type.Literal("signals"),
 			]),
 			signal_index: Type.Optional(Type.Number({ description: "0-based, negative from end. Default -1 (latest)." })),
+			mode: Type.Optional(Type.Union([
+				Type.Literal("full"),
+				Type.Literal("grep"),
+				Type.Literal("head"),
+				Type.Literal("tail"),
+				Type.Literal("slice"),
+			], { description: "Retrieval mode. Default is bounded tail." })),
+			pattern: Type.Optional(Type.String({ description: "Regex pattern for mode=grep." })),
+			context: Type.Optional(Type.Number({ description: "Surrounding context lines for mode=grep." })),
+			max_results: Type.Optional(Type.Number({ description: "Maximum matching lines for mode=grep." })),
+			lines: Type.Optional(Type.Number({ description: "Line count for mode=head or mode=tail." })),
+			from: Type.Optional(Type.Number({ description: "1-indexed start line for mode=slice." })),
+			to: Type.Optional(Type.Number({ description: "1-indexed inclusive end line for mode=slice." })),
 		}),
 		async execute(_id, params) {
 			try {
 				const qs = new URLSearchParams({ section: params.section });
 				if (params.signal_index !== undefined) qs.set("signal_index", String(params.signal_index));
+				if (params.mode !== undefined) qs.set("mode", String(params.mode));
+				if (params.pattern !== undefined) qs.set("pattern", String(params.pattern));
+				if (params.context !== undefined) qs.set("context", String(params.context));
+				if (params.max_results !== undefined) qs.set("max_results", String(params.max_results));
+				if (params.lines !== undefined) qs.set("lines", String(params.lines));
+				if (params.from !== undefined) qs.set("from", String(params.from));
+				if (params.to !== undefined) qs.set("to", String(params.to));
 				return ok(await api("GET", `/api/goals/${goalId}/gates/${params.gate_id}/inspect?${qs}`));
 			} catch (e: any) { return err(e.message); }
 		},

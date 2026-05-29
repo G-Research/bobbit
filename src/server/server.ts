@@ -27,6 +27,16 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
+import {
+	MAX_SELECTED_BYTES,
+	MAX_SELECTED_LINES,
+	TextSelectionError,
+	selectText,
+	truncateTextToBudget,
+	type TextSelectionMode,
+	type TextSelectionOptions,
+	type TextSelectionMetadata,
+} from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
 import { recordElapsed } from "./agent/profiling.js";
@@ -152,7 +162,7 @@ import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
@@ -1500,6 +1510,7 @@ export function createGateway(config: GatewayConfig) {
 					}
 				}
 
+				const sandboxTokenEntries = cfg.getSandboxTokens();
 				return {
 					projectId,
 					projectDir,
@@ -1508,6 +1519,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
+					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
 					components,
@@ -1869,6 +1882,72 @@ function mergeSandboxSecrets(updates: Record<string, string>, configStore: impor
 			updates.sandbox_credentials = JSON.stringify(incoming);
 		} catch { /* leave as-is */ }
 	}
+}
+
+function parseGateInspectIntegerParam(params: URLSearchParams, name: string): number | undefined {
+	const raw = params.get(name);
+	if (raw === null || raw === "") return undefined;
+	if (!/^-?\d+$/.test(raw)) throw new TextSelectionError(`${name} must be an integer`);
+	return Number(raw);
+}
+
+function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectionOptions {
+	const rawMode = params.get("mode");
+	let mode: TextSelectionMode | undefined;
+	if (rawMode !== null) {
+		if (!["full", "grep", "head", "tail", "slice"].includes(rawMode)) {
+			throw new TextSelectionError(`mode must be one of: full, grep, head, tail, slice`);
+		}
+		mode = rawMode as TextSelectionMode;
+	}
+	return {
+		mode,
+		implicitDefault: rawMode === null,
+		pattern: params.get("pattern") ?? undefined,
+		context: parseGateInspectIntegerParam(params, "context"),
+		maxResults: parseGateInspectIntegerParam(params, "max_results"),
+		lines: parseGateInspectIntegerParam(params, "lines"),
+		from: parseGateInspectIntegerParam(params, "from"),
+		to: parseGateInspectIntegerParam(params, "to"),
+	};
+}
+
+interface GateInspectOutputStep {
+	output?: string;
+	selection?: TextSelectionMetadata;
+}
+
+function enforceGateInspectAggregateOutputBudget(steps: GateInspectOutputStep[]): { truncated: boolean; truncationReason?: string } {
+	let remainingLines = MAX_SELECTED_LINES;
+	let remainingBytes = MAX_SELECTED_BYTES;
+	let truncated = false;
+	let truncationReason: string | undefined;
+
+	for (const step of steps) {
+		if (typeof step.output !== "string" || step.output.length === 0) continue;
+		if (remainingLines <= 0 || remainingBytes <= 0) {
+			step.output = "";
+			truncated = true;
+			truncationReason = truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
+			if (step.selection) {
+				step.selection = { ...step.selection, truncated: true, truncationReason: truncationReason };
+			}
+			continue;
+		}
+		const capped = truncateTextToBudget(step.output, remainingLines, remainingBytes);
+		step.output = capped.text;
+		remainingLines -= capped.lines;
+		remainingBytes -= capped.bytes;
+		if (capped.truncated) {
+			truncated = true;
+			truncationReason = capped.truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
+			if (step.selection) {
+				step.selection = { ...step.selection, truncated: true, truncationReason };
+			}
+		}
+	}
+
+	return { truncated, truncationReason };
 }
 
 async function handleApiRoute(
@@ -5217,6 +5296,15 @@ async function handleApiRoute(
 			return;
 		}
 
+		let selectionOptions: TextSelectionOptions;
+		try {
+			selectionOptions = parseGateInspectSelectionOptions(url.searchParams);
+			selectText("", selectionOptions);
+		} catch (err) {
+			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+			throw err;
+		}
+
 		const resolveSignal = () => {
 			const idxStr = url.searchParams.get("signal_index");
 			let idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
@@ -5229,12 +5317,20 @@ async function handleApiRoute(
 		if (section === "content") {
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
-			json({
-				gateId, section: "content",
-				signalIndex: resolved.index,
-				signalId: resolved.signal.id,
-				text: resolved.signal.content || null,
-			});
+			try {
+				const rawText = resolved.signal.content || "";
+				const selected = selectText(rawText, selectionOptions);
+				json({
+					gateId, section: "content",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					text: resolved.signal.content ? selected.text : null,
+					selection: selected.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
 
@@ -5242,36 +5338,71 @@ async function handleApiRoute(
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
 			const v = resolved.signal.verification;
-			json({
-				gateId, section: "verification",
-				signalIndex: resolved.index,
-				signalId: resolved.signal.id,
-				steps: v ? v.steps.map(s => ({
-					name: s.name,
-					type: s.type,
-					passed: s.passed,
-					skipped: s.skipped || undefined,
-					duration_ms: s.duration_ms,
-					output: s.output,
-				})) : [],
-			});
+			try {
+				let aggregateTotalLines = 0;
+				const steps = v ? v.steps.map(s => {
+					const rawOutput = typeof s.output === "string" ? s.output : "";
+					const selected = selectText(rawOutput, selectionOptions);
+					aggregateTotalLines += selected.selection.totalLines;
+					return {
+						name: s.name,
+						type: s.type,
+						passed: s.passed,
+						skipped: s.skipped || undefined,
+						duration_ms: s.duration_ms,
+						output: typeof s.output === "string" ? selected.text : undefined,
+						selection: selected.selection,
+					};
+				}) : [];
+				const aggregate = enforceGateInspectAggregateOutputBudget(steps);
+				json({
+					gateId, section: "verification",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					steps,
+					selection: {
+						mode: selectionOptions.mode ?? "tail",
+						totalLines: aggregateTotalLines,
+						truncated: aggregate.truncated,
+						truncationReason: aggregate.truncationReason,
+					},
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
 
 		if (section === "signals") {
-			json({
-				gateId, section: "signals",
-				signals: gate.signals.map((s, i) => ({
-					index: i,
-					id: s.id,
-					timestamp: s.timestamp,
-					sessionId: s.sessionId,
-					commitSha: s.commitSha,
-					verdict: s.verification?.status || "running",
-					hasContent: !!s.content,
-					metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
-				})),
-			});
+			const summaries = gate.signals.map((s, i) => ({
+				index: i,
+				id: s.id,
+				timestamp: s.timestamp,
+				sessionId: s.sessionId,
+				commitSha: s.commitSha,
+				verdict: s.verification?.status || "running",
+				hasContent: !!s.content,
+				metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
+			}));
+			try {
+				const rendered = summaries.map(s => JSON.stringify(s)).join("\n");
+				const selected = selectText(rendered, selectionOptions);
+				const selectedLines = new Set(selected.selectedLineNumbers);
+				const signals = summaries.filter((_, i) => selectedLines.has(i + 1));
+				json({
+					gateId, section: "signals",
+					signals,
+					signalsTotal: summaries.length,
+					signalsShown: signals.length,
+					signalsTruncated: signals.length < summaries.length,
+					text: selected.text,
+					selection: selected.selection,
+				});
+			} catch (err) {
+				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
+				throw err;
+			}
 			return;
 		}
 	}

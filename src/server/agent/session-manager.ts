@@ -1235,11 +1235,19 @@ export class SessionManager {
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get secretsStore from project context if available
-		const secretsStore = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)?.secretsStore ?? null
+		// Get project-scoped config/secrets when available.
+		const projectContext = (opts?.projectId && this.projectContextManager)
+			? this.projectContextManager.getOrCreate(opts.projectId)
 			: null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore, secretsStore);
+		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
+		const secretsStore = projectContext?.secretsStore ?? null;
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
+		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
+		ensureSandboxAgentAuthFile({
+			prefs: this.preferencesStore,
+			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+			scope: opts?.projectId,
+		});
 
 		return true;
 	}
@@ -1661,6 +1669,11 @@ export class SessionManager {
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
+	 *
+	 * Returns whether this exact prompt was dispatched immediately or merely
+	 * queued behind existing/busy work. Callers must not infer that from the
+	 * post-call session status: direct dispatch intentionally marks the session
+	 * streaming before the RPC resolves.
 	 */
 	async enqueuePrompt(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -1977,6 +1990,12 @@ export class SessionManager {
 		attachments?: unknown[];
 		isSteered?: boolean;
 	}>, reason: string, source: string): void {
+		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
+		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
+			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
+			return;
+		}
+
 		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
 		// Re-enqueue at front in original order so the next drain re-dispatches
 		// the same batch. Reverse iteration because enqueueAtFront unshifts.
@@ -5742,7 +5761,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { resolveHostTokenValue } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
@@ -5785,7 +5804,7 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
+export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
 	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
@@ -5817,7 +5836,7 @@ function resolveSandboxTokens(prefs?: import("./preferences-store.js").Preferenc
  * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
  * Used as fallback when sandbox_tokens is not configured.
  */
-function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json

@@ -311,7 +311,7 @@ test.describe("notification policy — four-rule team-lead disjunction (post-rew
 		expect(result).toEqual({ filterable: false, immediate: false });
 	});
 
-	test("Rule 4: idle for >10s with no live siblings → notify", async ({ page }) => {
+	test("Rule 4: idle for >10s with no live siblings → persistent unread notify", async ({ page }) => {
 		const result = await page.evaluate(() => {
 			(window as any).__seed({
 				sessions: [
@@ -322,6 +322,49 @@ test.describe("notification policy — four-rule team-lead disjunction (post-rew
 			return (window as any).__checkSplit("lead");
 		});
 		expect(result.filterable).toBe(true);
+	});
+
+	test("Idle transition: team lead stuck rule does not beep just because the lead went idle", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			(window as any).__seed({
+				sessions: [
+					{ id: "lead", role: "team-lead", goalId: "g1", status: "idle", lastActivity: Date.now() - 60_000 },
+				],
+				goals: [{ id: "g1", state: "in-progress" }],
+			});
+			return {
+				persistent: (window as any).__check("lead"),
+				transition: (window as any).__checkIdleTransition("lead"),
+			};
+		});
+		expect(result).toEqual({ persistent: true, transition: false });
+	});
+
+	test("Idle transition: goal complete still notifies", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			(window as any).__seed({
+				sessions: [
+					{ id: "lead", role: "team-lead", goalId: "g1", status: "idle", lastActivity: Date.now() - 60_000 },
+				],
+				goals: [{ id: "g1", state: "complete" }],
+			});
+			return (window as any).__checkIdleTransition("lead");
+		});
+		expect(result).toBe(true);
+	});
+
+	test("Idle transition: pending sign-off still notifies immediately", async ({ page }) => {
+		const result = await page.evaluate(() => {
+			(window as any).__seed({
+				sessions: [
+					{ id: "lead", role: "team-lead", goalId: "g1", status: "idle", lastActivity: Date.now() - 60_000 },
+				],
+				goals: [{ id: "g1", state: "in-progress" }],
+				gateStatusCache: [{ goalId: "g1", awaitingHumanSignoff: true }],
+			});
+			return (window as any).__checkIdleTransition("lead");
+		});
+		expect(result).toBe(true);
 	});
 
 	test("Rule 4 suppressor — live sibling: lead idle >10s but sibling streaming → silent", async ({ page }) => {

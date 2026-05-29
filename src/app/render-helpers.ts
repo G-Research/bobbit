@@ -197,7 +197,7 @@ export function hasUnseenActivity(session: GatewaySession): boolean {
 	// Currently viewed session is never unseen
 	if (activeSessionId() === session.id) return false;
 
-	// Shared predicate — keeps polling beep, agent_end beep, and unread dot aligned.
+	// Persistent attention predicate — beeps use the idle-transition variant.
 	const goalId = session.teamGoalId || session.goalId;
 	const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
 
@@ -731,10 +731,12 @@ function renderGoalBadge(goal: Goal) {
 	const gs = state.gateStatusCache.get(goal.id);
 	const gateBadge = renderGateProgressBadge(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
+	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
 	// Workflow progress is primary. PR status is only shown after a positive,
 	// fully-passed gate summary exists; before that, do not let PR state mask
-	// incomplete/verifying/uncached workflow progress.
-	if (!pr || !gs || gs.total <= 0 || gs.passed !== gs.total) return gateBadge;
+	// incomplete/verifying/uncached workflow progress. Non-workflow goals have
+	// no gate summary to wait for, so preserve their PR badge fallback.
+	if (!pr || (hasWorkflowGates && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return gateBadge;
 
 	let color: string;
 	if (pr.state === "MERGED") color = "#a87fd4";
