@@ -3,7 +3,13 @@ export interface PrWalkthroughChangesetRef {
 	headSha: string;
 	provider?: string;
 	externalUrl?: string;
+	prUrl?: string;
+	prNumber?: string | number;
+	prTitle?: string;
 	title?: string;
+	filesChanged?: number;
+	additions?: number;
+	deletions?: number;
 }
 
 export type PrWalkthroughPhaseId = "orientation" | "design" | "significant" | "other" | "audit";
@@ -50,6 +56,7 @@ export interface PrWalkthroughCard {
 	rationale?: string;
 	diffBlocks: PrWalkthroughDiffBlock[];
 	suggestedComments?: PrWalkthroughSuggestedComment[];
+	cardSuggestions?: string[];
 	checklist?: string[];
 }
 
