@@ -5,7 +5,6 @@
  * stays compact: `Start Review` opens a review document, and approve/reject
  * decisions are submitted from the review pane.
  */
-import type { Locator } from "@playwright/test";
 import { test, expect, type Page, type Route } from "../gateway-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
 import { waitForGateStatus } from "../test-utils/signoff-polling.mjs";
@@ -126,32 +125,22 @@ async function signalGoalGate(goalId: string, gateId: string, content = `# ${gat
 
 async function ensureGoalWidgetGateVisible(page: Page, gateId: string): Promise<void> {
 	const row = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`).first();
-	const dropdown = page.locator("#goal-status-dropdown").first();
-	const closingDropdown = page.locator("#goal-status-dropdown.goal-status-closing").first();
-	if (await closingDropdown.isVisible().catch(() => false)) {
-		await expect(closingDropdown).toBeHidden({ timeout: 5_000 });
-	}
 	if (await row.isVisible().catch(() => false)) return;
-	if (!(await dropdown.isVisible().catch(() => false))) {
-		const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-		await expect(pill).toBeVisible({ timeout: 10_000 });
-		await pill.click();
-	}
+	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
+	await pill.click();
+	if (!(await row.isVisible().catch(() => false))) await pill.click();
 	await expect(row).toBeVisible({ timeout: 10_000 });
 }
 
 async function clickGoalWidgetGateAction(page: Page, gateId: string, actionTestId: string): Promise<void> {
-	const action = page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`).first();
-	for (let attempt = 0; attempt < 2; attempt++) {
-		await ensureGoalWidgetGateVisible(page, gateId);
-		if (await action.isVisible().catch(() => false)) {
-			await action.evaluate((el) => (el as HTMLElement).click());
-			return;
-		}
-		await page.locator("#goal-status-dropdown.goal-status-closing").first().waitFor({ state: "hidden", timeout: 5_000 }).catch(() => { /* retry below */ });
-	}
-	await expect(action).toBeVisible({ timeout: 10_000 });
-	await action.evaluate((el) => (el as HTMLElement).click());
+	await ensureGoalWidgetGateVisible(page, gateId);
+	const selector = `[data-testid="goal-widget-gate"][data-gate-id="${gateId}"] [data-testid="${actionTestId}"]`;
+	await expect.poll(async () => page.evaluate((sel) => {
+		const action = document.querySelector(sel) as HTMLElement | null;
+		if (!action) return false;
+		action.click();
+		return true;
+	}, selector), { timeout: 10_000 }).toBe(true);
 }
 
 async function expectDashboardGateStatus(page: Page, gateId: string, status: "pending" | "passed" | "failed"): Promise<void> {
@@ -181,52 +170,11 @@ async function expectGateStatusCache(page: Page, goalId: string, expected: Parti
 	}).toMatchObject(expected);
 }
 
-async function expectGateProgressBadge(scope: Locator, passed: number, total: number, message: string): Promise<void> {
-	const label = `${passed} of ${total} gates passed`;
-	const compactText = `(${passed}/${total})`;
-	await expect.poll(async () => scope.evaluate((root, expected) => {
-		const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
-		const isVisible = (el: Element) => {
-			const style = window.getComputedStyle(el);
-			const rect = el.getBoundingClientRect();
-			return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-		};
-		return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
-			if (!isVisible(el)) return false;
-			const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
-			if (titleOrLabel.includes(expected.label)) return true;
-			return normalize(el.textContent) === expected.compactText;
-		});
-	}, { label, compactText }), { timeout: 15_000, message }).toBe(true);
-}
-
 async function expectSidebarGateBadge(page: Page, goalId: string, passed: number, total: number): Promise<void> {
 	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
 
-	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-	await expect(row, "sidebar goal row should be visible before asserting its gate badge").toBeVisible({ timeout: 15_000 });
-	await expectGateProgressBadge(row, passed, total, "sidebar goal row should expose a visible gate progress badge for the expected count");
-}
-
-async function expectSidebarCompleteWorkflowStatus(page: Page, goalId: string, passed: number, total: number): Promise<void> {
-	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
-
-	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-	await expect(row, "sidebar goal row should be visible before asserting complete workflow status").toBeVisible({ timeout: 15_000 });
-	await expect.poll(async () => {
-		const prVisible = await row.locator('[title^="PR "]').first().isVisible().catch(() => false);
-		if (prVisible) return true;
-		return row.evaluate((root, expected) => {
-			const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
-			return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
-				const style = window.getComputedStyle(el);
-				const rect = el.getBoundingClientRect();
-				if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return false;
-				const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
-				return titleOrLabel.includes(expected.label) || normalize(el.textContent) === expected.compactText;
-			});
-		}, { label: `${passed} of ${total} gates passed`, compactText: `(${passed}/${total})` });
-	}, { timeout: 15_000, message: "sidebar should show PR status when available after workflow completion, otherwise the completed gate count" }).toBe(true);
+	await expect(page.locator(`[data-nav-id="goal:${goalId}"] span[title="${passed} of ${total} gates passed"]`).first())
+		.toBeVisible({ timeout: 15_000 });
 }
 
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
@@ -308,7 +256,7 @@ async function expectGoalCounterAndIconVerticallyAligned(page: Page): Promise<vo
 	await expect(pill).toBeVisible({ timeout: 15_000 });
 	const delta = await page.evaluate(() => {
 		const icon = document.querySelector("[data-testid='goal-status-widget-icon']") as HTMLElement | null;
-		const counter = document.querySelector("[data-testid='goal-status-widget-pill'] > span[title*='gates passed'], [data-testid='goal-status-widget-pill'] > span[aria-label*='gates passed']") as HTMLElement | null;
+		const counter = document.querySelector("[data-testid='goal-status-widget-pill'] > span[title*='gates passed']") as HTMLElement | null;
 		if (!icon || !counter) return Number.POSITIVE_INFINITY;
 		const ir = icon.getBoundingClientRect();
 		const cr = counter.getBoundingClientRect();
@@ -643,7 +591,7 @@ test.describe("<goal-status-widget>", () => {
 			await pill.click();
 			await expect(page.locator("[data-testid='goal-widget-signoff']"), "widget popover sign-off card should clear after approval without reload").toHaveCount(0, { timeout: 5_000 });
 			await waitForGateStatus(goalId, "design", "passed", 20_000);
-			await expectSidebarCompleteWorkflowStatus(page, goalId, 1, 1);
+			await expectSidebarGateBadge(page, goalId, 1, 1);
 			await expectDashboardGateStatus(dashboardPage, "design", "passed");
 		} finally {
 			if (dashboardPage) await dashboardPage.close().catch(() => { /* ignore */ });
@@ -900,7 +848,7 @@ test.describe("<goal-status-widget>", () => {
 
 			await openApp(page);
 			await openSession(page, teamLeadId);
-			await expectSidebarCompleteWorkflowStatus(page, goalId, 3, 3);
+			await expectSidebarGateBadge(page, goalId, 3, 3);
 			const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
 			await pill.click();

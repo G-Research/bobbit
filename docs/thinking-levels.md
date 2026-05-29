@@ -1,10 +1,10 @@
 # Per-model thinking-level capabilities
 
 The "thinking level" picker controls how much reasoning effort the underlying
-model spends before answering. Not every model supports every level — Opus 4.8
+model spends before answering. Not every model supports every level — Opus 4.7
 exposes an extra `xhigh` step, plain `gpt-4` exposes none — and the set of
-levels has to stay consistent across UI selectors, REST endpoints, the
-WebSocket boundary, and the verification harness.
+levels has to stay consistent across ~10 UI selectors, several REST endpoints,
+the WebSocket boundary, and the verification harness.
 
 Rather than scattering hardcoded `["off","minimal","low","medium","high"]`
 arrays around the codebase, all capability questions go through one shared
@@ -28,10 +28,10 @@ was duplicated in roughly ten places:
   editor callback type).
 
 Adding `xhigh` upstream would have meant editing all of them. Worse, the
-duplication had already drifted: picking an xhigh-capable Opus model in
-Bobbit silently capped the user at `high` because the server's value table
-never knew `xhigh` existed, and the settings page offered `minimal` on models
-that don't support it.
+duplication had already drifted: picking Opus 4.7 in Bobbit silently capped
+the user at `high` because the server's value table never knew `xhigh`
+existed, and the settings page offered `minimal` on models that don't
+support it.
 
 The shared module collapses every capability decision to one function and
 one clamping rule. When upstream model metadata includes a per-model
@@ -45,8 +45,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 ```
 
 Ranked low→high. `off` is always supported (the model just doesn't reason).
-`xhigh` is the recent addition for Opus 4.6+ (including Opus 4.8) and certain
-gpt-5.1/5.2 models.
+`xhigh` is the recent addition for Opus 4.6+ and certain gpt-5.1/5.2 models.
 
 The canonical `ThinkingLevel` type, the `ModelLike` shape consumed by
 capability detection, and the helpers below all live in
@@ -76,9 +75,8 @@ model:
 The fallback families currently qualify:
 
 - **Anthropic Claude Opus 4.6 and later** — matched by
-  `/claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i`, so `claude-opus-4-6`,
-  `claude-opus-4-8`, dotted `claude-opus-4.8`, and any future `-4-10`+
-  light up without a code change.
+  `/claude-opus-4-(?:[6-9]|\d{2,})\b/i`, so `claude-opus-4-6`, `-4-7`, and
+  any future `-4-10`+ light up without a code change.
 - **OpenAI gpt-5.1-codex-max and any gpt-5.2\* / gpt-5.4\* / gpt-5.5\*** —
   matched by `/^gpt-5\.1-codex-max\b/i` and
   `/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i`. `gpt-5.2-codex`, `gpt-5.4-mini`, and
@@ -87,11 +85,9 @@ The fallback families currently qualify:
 ### Why the regex tolerates 4-10+ but not 4-5
 
 The `[6-9]|\d{2,}` branch lets the matcher accept `4-6` through `4-9` and
-anything with two or more digits (`4-10`, `4-11`, …). Both hyphenated and
-dotted separators are accepted because providers and gateways may expose
-`claude-opus-4-8` or `claude-opus-4.8`. `4-5` and earlier are deliberately
-excluded — Anthropic's earlier Opus 4 generations did not support `xhigh` and
-we don't want a false positive on them.
+anything with two or more digits (`4-10`, `4-11`, …). `4-5` and earlier are
+deliberately excluded — Anthropic's earlier Opus 4 generations did not
+support `xhigh` and we don't want a false positive on them.
 
 ### Provider guard — fail closed on id collisions
 
@@ -228,9 +224,9 @@ Three layers pin the behaviour:
 
 | Test | What it pins |
 |---|---|
-| `tests/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7/4.8, dotted Opus ids, AIGW-routed Opus ids, Sonnet 4.6, gpt-5/5.1/5.1-codex-max/5.2, non-reasoning models, clamping behaviour, and the cross-provider-collision pin (an `openai`-provider model with a `claude-*` id does not light up xhigh). |
-| `tests/thinking-levels-per-model.{html,spec.ts}` | Fixture-based browser tests that exercise a minimal HTML page mirroring the selector logic. The HTML mirror is annotated to stay in sync with the canonical module. |
-| `tests/e2e/ui/thinking-levels.spec.ts` | Gateway-connected E2E specs that switch model in the footer, assert dropdown options change, persist `xhigh` across reload on xhigh-capable Opus, and verify the clamp-on-model-switch flow end to end. |
+| `tests/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7, Sonnet 4.6, gpt-5/5.1/5.1-codex-max/5.2, non-reasoning models, clamping behaviour, and the cross-provider-collision pin (an `openai`-provider model with a `claude-*` id does not light up xhigh). |
+| `tests/thinking-levels-per-model.{html,spec.ts}` | Ten fixture-based browser tests that exercise a minimal HTML page mirroring the selector logic. The HTML mirror is annotated to stay in sync with the canonical module. |
+| `tests/e2e/ui/thinking-levels.spec.ts` | Three gateway-connected E2E specs that switch model in the footer, assert dropdown options change, persist `xhigh` across reload on Opus 4.7, and verify the clamp-on-model-switch flow end to end. |
 
 The unit suite is the authoritative spec — if a behaviour isn't pinned
 there, the rule isn't real. The fixture and E2E layers prevent regressions
@@ -256,6 +252,3 @@ in the wiring between the shared module and the UI / server boundary.
 - [Spawn-time model pinning](internals.md#spawn-time-model-pinning) — how
   `resolveInitialThinkingLevel` injects the level into the agent CLI args at
   spawn so there's no boot-time race.
-- [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — package,
-  ranking, xhigh, spawn, transcript, and regression-test notes for the Pi
-  upgrade.

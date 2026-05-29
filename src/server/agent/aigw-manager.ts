@@ -23,6 +23,13 @@ import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
+export interface AigwModelCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
 export interface AigwModel {
 	id: string;
 	name: string;
@@ -31,6 +38,7 @@ export interface AigwModel {
 	input: ("text" | "image")[];
 	contextWindow: number;
 	maxTokens: number;
+	cost?: AigwModelCost;
 	compat?: Record<string, unknown>;
 }
 
@@ -57,6 +65,40 @@ const DEFAULT_META: ModelMeta = {
 	reasoning: false,
 	input: ["text"],
 };
+
+function zeroAigwCost(): AigwModelCost {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+
+function normalizeCostValue(value: number): number {
+	if (!Number.isFinite(value) || value < 0) return 0;
+	return Math.round(value * 1_000_000_000_000) / 1_000_000_000_000;
+}
+
+function normalizeAigwPricing(pricing: unknown): AigwModelCost {
+	if (!pricing || typeof pricing !== "object") return zeroAigwCost();
+
+	const record = pricing as Record<string, unknown>;
+	const prompt = record.prompt;
+	const completion = record.completion;
+	if (
+		typeof prompt !== "number" ||
+		typeof completion !== "number" ||
+		!Number.isFinite(prompt) ||
+		!Number.isFinite(completion) ||
+		prompt < 0 ||
+		completion < 0
+	) {
+		return zeroAigwCost();
+	}
+
+	return {
+		input: normalizeCostValue(prompt * 1_000_000),
+		output: normalizeCostValue(completion * 1_000_000),
+		cacheRead: normalizeCostValue(prompt * 0.1 * 1_000_000),
+		cacheWrite: normalizeCostValue(prompt * 1.25 * 1_000_000),
+	};
+}
 
 /**
  * Infer model metadata from the model ID.
@@ -347,6 +389,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
 		},
 		models: models.map(m => {
+			const cost = m.cost ?? zeroAigwCost();
 			if (isClaudeModel(m.id)) {
 				return {
 					id: bedrockModelId(m.id),
@@ -355,6 +398,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 					maxTokens: m.maxTokens,
 					reasoning: m.reasoning,
 					input: m.input,
+					cost,
 					api: "bedrock-converse-stream",
 					// Per-model Bedrock endpoint override — provider baseUrl is the
 					// OpenAI-compatible /v1 root; Bedrock Converse lives under /aws.
@@ -369,6 +413,7 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 				maxTokens: m.maxTokens,
 				reasoning: m.reasoning,
 				input: m.input,
+				cost,
 				compat: { ...openaiCompat, ...(m.compat || {}) },
 			};
 		}),
@@ -668,6 +713,7 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 			input: meta.input,
 			contextWindow: Math.max(ctxFromGw || 0, meta.contextWindow),
 			maxTokens: Math.max(maxTokFromGw || 0, meta.maxTokens),
+			cost: normalizeAigwPricing(m.pricing),
 			...(meta.compat ? { compat: meta.compat } : {}),
 		};
 	});

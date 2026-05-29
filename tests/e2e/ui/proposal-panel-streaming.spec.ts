@@ -12,11 +12,10 @@ async function startStreamingProposal(
 	page: import("@playwright/test").Page,
 	type: "goal" | "role" | "tool" | "staff" | "setup" | "workflow" | "project",
 	n: number,
-	intervalMs?: number,
 ) {
 	await openApp(page);
 	await createSessionViaUI(page);
-	await sendMessage(page, `STAY_BUSY:propose_${type}:${n}${intervalMs ? `:${intervalMs}` : ""}`);
+	await sendMessage(page, `STAY_BUSY:propose_${type}:${n}`);
 }
 
 test.describe("Proposal panel streaming UX @quarantine", () => {
@@ -38,22 +37,18 @@ test.describe("Proposal panel streaming UX @quarantine", () => {
 	});
 
 	test("PPS-03: scrollTop preserved when user scrolls up mid-stream", async ({ page }) => {
-		await startStreamingProposal(page, "goal", 40, 120);
+		await startStreamingProposal(page, "goal", 12);
 
 		// Wait for the spec preview container to appear with content.
 		const preview = page.locator(".goal-preview-panel .overflow-y-auto").last();
 		await expect(preview).toBeVisible({ timeout: 15_000 });
 
-		// Wait until the preview is scrollable while the stream is still active.
-		// The slow fixture cadence prevents the test from racing past all deltas
-		// before it can simulate the user's scroll-up intent.
+		// Wait until preview has scrollable content (a few deltas in).
 		await page.waitForFunction(() => {
 			const els = document.querySelectorAll(".goal-preview-panel .overflow-y-auto");
 			const el = els[els.length - 1] as HTMLElement | undefined;
-			return !!el
-				&& el.scrollHeight - el.clientHeight > 60
-				&& !!document.querySelector('[data-testid="proposal-streaming-badge"]');
-		}, null, { timeout: 20_000 });
+			return !!el && el.scrollHeight - el.clientHeight > 60;
+		}, null, { timeout: 15_000 });
 
 		// User scrolls up via wheel + manual scrollTop (mirrors real interaction).
 		await preview.evaluate((el) => {
@@ -69,10 +64,10 @@ test.describe("Proposal panel streaming UX @quarantine", () => {
 			(seed) => {
 				const els = document.querySelectorAll(".goal-preview-panel .overflow-y-auto");
 				const el = els[els.length - 1] as HTMLElement | undefined;
-				return !!el && el.scrollHeight > seed;
+				return !!el && el.scrollHeight > seed + 30;
 			},
 			initialHeight,
-			{ timeout: 15_000 },
+			{ timeout: 10_000 },
 		);
 
 		// scrollTop should remain near 20 (within tolerance), not snapped to bottom.

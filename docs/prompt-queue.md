@@ -146,9 +146,7 @@ On successful retry (turn completes without error), `lastTurnErrored` is cleared
 
 ### Dispatch failure
 
-If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order, the optimistic `"streaming"` status is reverted to `"idle"`, and a follow-up drain is scheduled on the next tick.
-
-The exception is a child-exit path where the session is already `terminated` or `aborting`. Bobbit does not re-enqueue into a dead bridge; sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
+If `rpcClient.prompt()` fails during `drainQueue()`, the optimistic `"streaming"` status is reverted to `"idle"` and broadcast to clients.
 
 ## Abort and force-kill recovery
 
