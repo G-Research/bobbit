@@ -62,7 +62,9 @@ export class BgProcessPill extends LitElement {
 		this.style.display = 'inline-flex';
 		this.style.alignItems = 'center';
 		this.style.position = 'relative';
-		this.style.top = '1px';
+		this.style.height = 'var(--pill-h, auto)';
+		this.style.lineHeight = '1';
+		this.style.verticalAlign = 'middle';
 		document.addEventListener("click", this._onDocumentClick, true);
 		document.addEventListener("keydown", this._onEscapeKey, true);
 	}
@@ -281,7 +283,7 @@ export class BgProcessPill extends LitElement {
 		const statusIndicator = this._statusIndicator();
 
 		return html`
-			<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight" style="max-width:200px; height:var(--pill-h, auto)">
+			<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight" style="box-sizing:border-box; max-width:200px; height:var(--pill-h, auto)">
 				<button
 					class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer rounded-l-full"
 					@click=${this._toggle}
