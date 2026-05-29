@@ -258,6 +258,25 @@ describe("SessionStore", () => {
 			assert.equal(store2.get("s2")!.title, "Second");
 		});
 
+		it("persists Opus 4.8 model selection to disk and reloads without fallback", () => {
+			const store1 = freshStore();
+			store1.put(makeSession({
+				id: "opus48-session",
+				modelProvider: "anthropic",
+				modelId: "claude-opus-4-8",
+			}));
+			store1.flush();
+
+			const store2 = freshStore();
+			const reloaded = store2.get("opus48-session");
+			assert.ok(reloaded);
+			assert.equal(reloaded.modelProvider, "anthropic");
+			assert.equal(reloaded.modelId, "claude-opus-4-8");
+			assert.notEqual(reloaded.modelId, "claude-opus-4-7");
+			assert.notEqual(reloaded.modelId, "claude-opus-4-6");
+			assert.notEqual(reloaded.modelId, "claude-opus-4");
+		});
+
 		it("remove persists deletion", () => {
 			const store1 = freshStore();
 			store1.put(makeSession());
