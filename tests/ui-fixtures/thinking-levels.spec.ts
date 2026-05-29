@@ -10,7 +10,10 @@ const BUNDLE = path.join(BUNDLE_DIR, "thinking-levels-bundle.js");
 const SETTINGS_SRC = path.resolve("src/app/settings-page.ts");
 const THINKING_SRC = path.resolve("src/shared/thinking-levels.ts");
 
-const OPUS_47 = "anthropic/claude-opus-4-7-20251101";
+const OPUS_48 = "anthropic/claude-opus-4-8-20260528";
+const OPUS_48_DOTTED = "anthropic/claude-opus-4.8-20260528";
+const AIGW_OPUS_48 = "aigw/claude-opus-4-8-20260528";
+const AIGW_OPUS_48_DOTTED = "aigw/claude-opus-4.8-20260528";
 const OPUS_45 = "anthropic/claude-opus-4-5-20250920";
 const GPT_4O = "openai/gpt-4o";
 
@@ -92,8 +95,8 @@ test.describe("Per-model thinking-level dropdown fixture", () => {
 		await loadFixture(page);
 	});
 
-	test("Opus 4.7 exposes Extra high; selection persists across reload", async ({ page }) => {
-		await renderWithPrefs(page, { "default.sessionModel": OPUS_47 });
+	test("Opus 4.8 exposes Extra high; selection persists across reload", async ({ page }) => {
+		await renderWithPrefs(page, { "default.sessionModel": OPUS_48 });
 
 		await openThinkingDropdown(page);
 		const menu = dropdownItems(page, "Extra high");
@@ -113,9 +116,24 @@ test.describe("Per-model thinking-level dropdown fixture", () => {
 		await expect.poll(() => readThinkingLabel(page), { timeout: 10_000 }).toBe("Extra high");
 	});
 
+	for (const [label, model] of [
+		["dotted Opus 4.8", OPUS_48_DOTTED],
+		["AIGW-routed Opus 4.8", AIGW_OPUS_48],
+		["AIGW-routed dotted Opus 4.8", AIGW_OPUS_48_DOTTED],
+	] as const) {
+		test(`${label} exposes Extra high`, async ({ page }) => {
+			await renderWithPrefs(page, { "default.sessionModel": model });
+
+			await openThinkingDropdown(page);
+			const menu = dropdownItems(page, "Extra high");
+			await expect(menu).toBeVisible({ timeout: 5_000 });
+			await expect(menu.getByText("Extra high", { exact: true })).toBeVisible();
+		});
+	}
+
 	test("Switching to Opus 4.5 clamps xhigh down to High and persists", async ({ page }) => {
 		await renderWithPrefs(page, {
-			"default.sessionModel": OPUS_47,
+			"default.sessionModel": OPUS_48,
 			"default.sessionThinkingLevel": "xhigh",
 		});
 		await expect.poll(() => readThinkingLabel(page), { timeout: 10_000 }).toBe("Extra high");

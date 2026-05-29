@@ -9,6 +9,10 @@ type Prefs = Record<string, string | null>;
 const PREFS_KEY = "bobbit-thinking-levels-fixture-prefs";
 
 const DEFAULT_MODELS = [
+	{ id: "claude-opus-4-8-20260528", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "Claude Opus 4.8" },
+	{ id: "claude-opus-4.8-20260528", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "Claude Opus 4.8 dotted" },
+	{ id: "claude-opus-4-8-20260528", provider: "aigw", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "AIGW Claude Opus 4.8" },
+	{ id: "claude-opus-4.8-20260528", provider: "aigw", api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "AIGW Claude Opus 4.8 dotted" },
 	{ id: "claude-opus-4-7-20251101", provider: "anthropic", api: "anthropic-messages", contextWindow: 200_000, maxTokens: 8192, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "Claude Opus 4.7" },
 	{ id: "claude-opus-4-5-20250920", provider: "anthropic", api: "anthropic-messages", contextWindow: 200_000, maxTokens: 8192, reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "Claude Opus 4.5" },
 	{ id: "gpt-4o", provider: "openai", api: "openai-responses", contextWindow: 128_000, maxTokens: 16_000, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, authenticated: true, name: "GPT-4o" },

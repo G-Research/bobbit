@@ -41,6 +41,19 @@ describe("transcript-reader / parseJsonl", () => {
 		const out = parseJsonl(text);
 		assert.equal(out.length, 1);
 	});
+
+	it("ignores Pi active_tools_change entries interleaved with messages", () => {
+		const text = [
+			{ type: "message", id: "m1", message: { role: "user", content: "before tools changed" } },
+			{ type: "active_tools_change", activeToolNames: ["bash", "read"], reason: "exclude-tools update" },
+			{ type: "message", id: "m2", message: { role: "assistant", content: [{ type: "text", text: "after tools changed" }] } },
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+
+		const out = parseJsonl(text);
+		assert.equal(out.length, 2);
+		assert.deepEqual(out.map((m) => m.role), ["user", "assistant"]);
+		assert.deepEqual(out.map((m) => m.index), [0, 1]);
+	});
 });
 
 describe("transcript-reader / resolveOffset", () => {
@@ -196,5 +209,21 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal((noPattern as ReadTranscriptEnvelope).matchCount, undefined);
 		const withPattern = await readTranscript({ pattern: "x" }, reader(sample));
 		assert.equal(typeof withPattern.matchCount, "number");
+	});
+
+	it("ignores active_tools_change entries when reading transcript totals and windows", async () => {
+		const text = [
+			{ type: "active_tools_change", activeToolNames: ["read"] },
+			{ type: "message", message: { role: "user", content: "first" } },
+			{ type: "active_tools_change", activeToolNames: ["read", "bash"] },
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "second" }] } },
+			{ type: "active_tools_change", activeToolNames: [] },
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+
+		const env = await readTranscript({ offset: -1, limit: 1 }, reader(text));
+		assert.equal(env.total, 2);
+		assert.equal(env.returned, 1);
+		assert.equal(env.offsetStart, 1);
+		assert.equal(env.messages[0].role, "assistant");
 	});
 });

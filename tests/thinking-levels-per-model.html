@@ -22,6 +22,8 @@
 <div class="row">
   <label>Model:</label>
   <select id="model-select">
+    <option value="anthropic|claude-opus-4-8-20260528|1">Anthropic Claude Opus 4-8 (reasoning)</option>
+    <option value="anthropic|claude-opus-4.8-20260528|1">Anthropic Claude Opus 4.8 dotted (reasoning)</option>
     <option value="anthropic|claude-opus-4-7-20251101|1">Anthropic Claude Opus 4-7 (reasoning)</option>
     <option value="anthropic|claude-opus-4-6-20251015|1">Anthropic Claude Opus 4-6 (reasoning)</option>
     <option value="anthropic|claude-opus-4-5-20250920|1">Anthropic Claude Opus 4-5 (reasoning)</option>
@@ -34,6 +36,8 @@
     <option value="openai|gpt-5.1-codex-max|1">OpenAI gpt-5.1-codex-max (reasoning)</option>
     <option value="openai|gpt-5|1">OpenAI gpt-5 (reasoning)</option>
     <option value="openai|gpt-4o|0">OpenAI gpt-4o (non-reasoning)</option>
+    <option value="aigw|claude-opus-4-8-20260528|1">AIGW Claude Opus 4-8 (reasoning)</option>
+    <option value="aigw|claude-opus-4.8-20260528|1">AIGW Claude Opus 4.8 dotted (reasoning)</option>
   </select>
 </div>
 <div class="row">
@@ -57,7 +61,7 @@ function supportsXHigh(m) {
   // Provider guard must fail closed on cross-provider id collisions —
   // mirrors the canonical `providerMatches` helper in src/shared/thinking-levels.ts.
   const anthropicProviderOk = !provider || provider === "anthropic" || provider === "aigw";
-  if (anthropicProviderOk && /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id)) return true;
+  if (anthropicProviderOk && /claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i.test(id)) return true;
   const openaiProviderOk = !provider || provider === "openai" || provider === "aigw";
   if (openaiProviderOk && (/^gpt-5\.1-codex-max\b/i.test(id) || /^gpt-5\.(?:2|4|5)(?:\b|[-.])/i.test(id))) return true;
   return false;

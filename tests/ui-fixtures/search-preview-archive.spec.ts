@@ -103,13 +103,15 @@ test.describe("Archived session footer fixture", () => {
 		}
 	});
 
-	test("persisted archived model renders in a read-only footer", async ({ page }) => {
-		await renderArchived(page, { modelId: "claude-sonnet-4-20250514" });
+	test("persisted archived Opus 4.8 model renders in a read-only footer without fallback", async ({ page }) => {
+		await renderArchived(page, { modelId: "claude-opus-4-8" });
 
 		const footerModel = page.locator('[data-testid="footer-model-id"]');
 		await expect(footerModel).toBeVisible({ timeout: 10_000 });
-		await expect(footerModel).toHaveText("claude-sonnet-4-20250514");
+		await expect(footerModel).toHaveText("claude-opus-4-8");
+		await expect(footerModel).not.toHaveText("claude-opus-4-7");
 		await expect(footerModel).not.toHaveText("claude-opus-4-6");
+		await expect(footerModel).not.toHaveText(/^claude-opus-4$/);
 		await expect(page.locator("message-editor")).toHaveCount(0);
 		await expect(page.getByRole("button", { name: /Continue in New Session/i })).toBeVisible();
 	});
