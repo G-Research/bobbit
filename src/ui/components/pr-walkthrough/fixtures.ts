@@ -3,9 +3,15 @@ import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "./types.js";
 export const fixturePrWalkthroughChangeset: PrWalkthroughChangesetRef = {
 	baseSha: "9f4c2a1",
 	headSha: "c7b8e32",
-	provider: "fixture",
+	provider: "github",
 	externalUrl: "https://github.com/SuuBro/bobbit/pull/1842",
-	title: "Productionise PR walkthrough panel",
+	prUrl: "https://github.com/SuuBro/bobbit/pull/1842",
+	prNumber: 1842,
+	prTitle: "Productionise PR walkthrough panel",
+	title: "PR #1842: Productionise PR walkthrough panel",
+	filesChanged: 50,
+	additions: 4650,
+	deletions: 2353,
 };
 
 export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
@@ -17,6 +23,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Introduces the review surface as a side-panel component with its own local interaction state rather than embedding review cards in chat messages.",
 			rationale: "The walkthrough can later be opened from GitHub, git status, or any two SHAs without coupling the core model to a provider.",
 			checklist: ["Panel owns review navigation", "Events expose draft state", "No nested prompt composer"],
+			cardSuggestions: ["Confirm that the outer Bobbit chat remains the only place for reviewer questions.", "The side-panel launch path should preserve one canonical walkthrough tab per changeset."],
 			diffBlocks: [
 				{
 					id: "orientation-panel",
@@ -53,6 +60,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Defines PR walkthrough cards, hunks, comments, decisions, and draft review helpers without GitHub-specific fields in the core state.",
 			rationale: "Provider adapters can map GitHub, local diffs, or future review sources into the same card shape.",
 			checklist: ["Comments anchor by card/block/line", "Draft helper clones state", "Width helper centralises diff defaults"],
+			cardSuggestions: ["Provider metadata stays optional, which keeps local SHA walkthroughs first-class."],
 			diffBlocks: [
 				{
 					id: "types-model",
@@ -90,6 +98,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Adds a labelled rail for wide panels and a pip/dot rail for constrained side-panel widths.",
 			rationale: "The same review flow must remain usable in the half-width preview panel and full-width review surfaces.",
 			checklist: ["Phase buttons jump to first card", "Collapsed dots remain buttons", "Tooltips name each card"],
+			cardSuggestions: ["The collapsed rail must stay usable at preview-pane width, not just full-screen."],
 			diffBlocks: [
 				{
 					id: "navigation-rail",
@@ -117,6 +126,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Renders split and inline diff views from the same hunk model, defaulting split on wide panels and inline on narrow panels.",
 			rationale: "Split mode keeps old/new columns aligned while a single overflow container prevents duelling horizontal scrollbars.",
 			checklist: ["Split mode uses one overflow wrapper", "Inline mode remains available", "Changed and context lines are commentable"],
+			cardSuggestions: ["Keep split overflow on one shared scroller so reviewers do not fight duelling horizontal scrollbars."],
 			diffBlocks: [
 				{
 					id: "diff-renderer",
@@ -155,6 +165,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Adds custom and suggested comments anchored to logical card, diff block, and line IDs, with editing and deletion reflected in draft state.",
 			rationale: "Stable logical anchors are easier to map onto generated cards than raw line numbers alone.",
 			checklist: ["Dislike waits for a comment", "Suggested comments can be accepted", "Card-level concerns are always available"],
+			cardSuggestions: ["Dislike gating should be pinned because deleting the final supporting comment must clear the decision."],
 			diffBlocks: [
 				{
 					id: "comment-state",
@@ -209,6 +220,7 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 			summary: "Keeps card synthesis fixture-driven and leaves provider launch, persistence, and GitHub submission as app-level or future adapter work.",
 			rationale: "A production-quality component can be integrated incrementally without leaking fixture assumptions into the app shell.",
 			checklist: ["No GitHub API calls in the component", "Fixture shape matches public model", "Audit remains copy-only"],
+			cardSuggestions: ["Fixture cards are acceptable for MVP, but the model should stay ready for generated logical cards."],
 			diffBlocks: [
 				{
 					id: "fixture-source",
