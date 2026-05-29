@@ -13,7 +13,7 @@
  *  STAY_BUSY:<ms>           Emit one Bash tool_execution_start, tick <ms>,
  *                           then tool_execution_end. Default for prompts
  *                           with no other trigger is busyMs=10.
- *  STAY_BUSY:propose_<type>:<n>[:<intervalMs>]
+ *  STAY_BUSY:propose_<type>:<n>
  *                           Emit N message_update deltas streaming a
  *                           propose_<type> tool_use, then message_end +
  *                           tool_execution_* lifecycle. Stable block id
@@ -554,17 +554,13 @@ export class MockAgentCore {
 			return;
 		}
 
-		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>[:<intervalMs>].
+		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>.
 		// Emits N message_update deltas (each with a single tool_use whose input
 		// grows on each delta), then message_end + tool_execution_* + agent_end.
 		// Block id is stable so RemoteAgent's _processedProposalIds dedup engages.
-		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)(?::(\d+))?/);
+		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)/);
 		if (proposeStreamMatch) {
-			await this._handleStreamingProposal(
-				proposeStreamMatch[1],
-				parseInt(proposeStreamMatch[2], 10),
-				proposeStreamMatch[3] ? parseInt(proposeStreamMatch[3], 10) : undefined,
-			);
+			await this._handleStreamingProposal(proposeStreamMatch[1], parseInt(proposeStreamMatch[2], 10));
 			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
 				this.currentAbortController = null;
 				return;
@@ -1592,7 +1588,7 @@ export class MockAgentCore {
 
 	/** Stream a propose_<type> tool_use across N message_update deltas, then
 	 *  emit message_end + tool_execution_start/end. */
-	async _handleStreamingProposal(type, n, intervalMs = 60) {
+	async _handleStreamingProposal(type, n) {
 		const toolId = `tool_propose_${type}_${Date.now()}`;
 		const toolName = `propose_${type}`;
 		// Per-type input shape — keep the title/name field stable after first delta.
@@ -1630,7 +1626,7 @@ export class MockAgentCore {
 				],
 			};
 			this.emit({ type: "message_update", message: assistantMsg });
-			await this.tick(intervalMs);
+			await this.tick(60);
 		}
 
 		if (this.currentAbortController?.signal.aborted) return;

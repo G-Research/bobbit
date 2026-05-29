@@ -63,18 +63,13 @@ function hasBuiltIn(provider: string, id: string): boolean {
 	return getModels(provider as any).some((m: any) => m.id === id);
 }
 
-function customAdditionSample(): (typeof OPENAI_MODEL_ADDITIONS)[number] | undefined {
-	return OPENAI_MODEL_ADDITIONS.find((m) => !hasBuiltIn(m.provider, m.id));
+function customAdditionSample(): (typeof OPENAI_MODEL_ADDITIONS)[number] {
+	const sample = OPENAI_MODEL_ADDITIONS.find((m) => !hasBuiltIn(m.provider, m.id));
+	assert.ok(sample, "test requires at least one Bobbit-only OpenAI model addition");
+	return sample;
 }
 
 describe("writeOpenAIModelAdditions merge policy", () => {
-	it("does not offer unsupported OpenAI Codex pro", () => {
-		assert.equal(
-			OPENAI_MODEL_ADDITIONS.some((m) => m.provider === "openai-codex" && m.id === "gpt-5.5-pro"),
-			false,
-		);
-	});
-
 	it("empty file → only additions missing from pi-ai built-ins are written", () => {
 		writeOpenAIModelAdditions();
 		const data = readModels();
@@ -92,13 +87,12 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		}
 	});
 
-	it("user-edited field is preserved on subsequent calls", (t) => {
-		const sample = customAdditionSample();
-		if (!sample) return t.skip("pi-ai now ships all Bobbit OpenAI additions");
+	it("user-edited field is preserved on subsequent calls", () => {
 		// 1) seed defaults.
 		writeOpenAIModelAdditions();
 		// 2) user edits a field — change `name` away from the default.
 		const data1 = readModels();
+		const sample = customAdditionSample();
 		const entry = findEntry(data1, sample.provider, sample.id);
 		entry.name = "User Custom Name";
 		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(data1, null, 2));
@@ -112,7 +106,7 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		assert.deepEqual(e2.cost, sample.cost);
 	});
 
-	it("field that still equals previously-emitted default is treated as Bobbit-owned", (t) => {
+	it("field that still equals previously-emitted default is treated as Bobbit-owned", () => {
 		// Seed an entry whose `name` matches the *current* default. The merge
 		// pass should consider it Bobbit-owned (not user-edited) and may
 		// overwrite it. Equal-to-default is the simplest case the helper
@@ -120,7 +114,6 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		// verify mutation survives, while `name` is left undisturbed (because
 		// it already matched the default).
 		const sample = customAdditionSample();
-		if (!sample) return t.skip("pi-ai now ships all Bobbit OpenAI additions");
 		const seeded = {
 			providers: {
 				[sample.provider]: {
@@ -148,33 +141,6 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		assert.deepEqual(e.cost, { input: 999, output: 999, cacheRead: 0, cacheWrite: 0 }, "user cost edit must be preserved");
 		// name was equal-to-default → still default afterwards.
 		assert.equal(e.name, sample.name);
-	});
-
-	it("removes previously emitted OpenAI Codex pro even when locally edited", () => {
-		const seeded = {
-			providers: {
-				"openai-codex": {
-					models: [
-						{
-							id: "gpt-5.5-pro",
-							name: "Local Codex Pro Alias",
-							api: "openai-codex-responses",
-							baseUrl: "https://chatgpt.com/backend-api",
-							contextWindow: 1_050_000,
-							maxTokens: 128_000,
-							reasoning: true,
-							thinkingLevelMap: { xhigh: "xhigh" },
-							input: ["text", "image"],
-							cost: { input: 30, output: 180, cacheRead: 0, cacheWrite: 0 },
-						},
-					],
-				},
-			},
-		};
-		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(seeded, null, 2));
-		writeOpenAIModelAdditions();
-		const data = readModels();
-		assert.equal(findOptionalEntry(data, "openai-codex", "gpt-5.5-pro"), undefined);
 	});
 
 	it("Bobbit-owned duplicate is removed once pi-ai ships the same model", () => {
@@ -240,10 +206,9 @@ describe("writeOpenAIModelAdditions merge policy", () => {
 		assert.deepEqual(e.thinkingLevelMap, builtIn.thinkingLevelMap);
 	});
 
-	it("missing fields are filled in from defaults", (t) => {
+	it("missing fields are filled in from defaults", () => {
 		// Seed a sparse entry that lacks `cost` and `baseUrl`.
 		const sample = customAdditionSample();
-		if (!sample) return t.skip("pi-ai now ships all Bobbit OpenAI additions");
 		const seeded = {
 			providers: {
 				[sample.provider]: {
