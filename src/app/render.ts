@@ -204,10 +204,30 @@ window.addEventListener("bobbit-open-review-document", (e: Event) => {
 
 document.addEventListener("open-pr-walkthrough", (e: Event) => {
 	const detail = ((e as CustomEvent).detail || {}) as Record<string, unknown>;
+	const eventSource = (typeof (e as Event).composedPath === "function" ? (e as Event).composedPath()[0] : e.target) as Record<string, unknown> | null;
 	const stringDetail = (...keys: string[]) => {
 		for (const key of keys) {
 			const value = detail[key];
 			if (typeof value === "string" && value.trim()) return value;
+		}
+		return undefined;
+	};
+	const numberDetail = (...keys: string[]) => {
+		for (const key of keys) {
+			const value = detail[key];
+			if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
+		}
+		return undefined;
+	};
+	const filesFromDetail = () => {
+		const explicit = numberDetail("filesChanged", "fileCount", "changedFiles");
+		if (explicit != null) return explicit;
+		for (const source of [detail, eventSource]) {
+			if (!source) continue;
+			for (const key of ["statusFiles", "status"]) {
+				const value = source[key];
+				if (Array.isArray(value)) return value.length;
+			}
 		}
 		return undefined;
 	};
@@ -224,6 +244,9 @@ document.addEventListener("open-pr-walkthrough", (e: Event) => {
 		title: stringDetail("title", "prTitle"),
 		prTitle: stringDetail("prTitle", "title"),
 		provider: stringDetail("provider"),
+		filesChanged: filesFromDetail(),
+		additions: numberDetail("additions", "insertions", "insertionsVsPrimary"),
+		deletions: numberDetail("deletions", "deletionsVsPrimary"),
 	} satisfies OpenPrWalkthroughInput);
 	renderApp();
 });
@@ -2155,6 +2178,9 @@ export function doRenderApp(): void {
 			prNumber: typeof source.prNumber === "string" || typeof source.prNumber === "number" ? source.prNumber : undefined,
 			prTitle: typeof source.prTitle === "string" ? source.prTitle : undefined,
 			title: typeof source.title === "string" ? source.title : tab.title,
+			filesChanged: typeof source.filesChanged === "number" ? source.filesChanged : undefined,
+			additions: typeof source.additions === "number" ? source.additions : undefined,
+			deletions: typeof source.deletions === "number" ? source.deletions : undefined,
 		};
 	};
 
