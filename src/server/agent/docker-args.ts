@@ -27,6 +27,7 @@ import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
+import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -87,6 +88,8 @@ export interface DockerRunConfig {
 	toolManager?: ToolManager;
 	/** Whether sandbox policy permits mounting host OpenAI Codex auth into auth.json. */
 	sandboxAgentAuthAllowed?: boolean;
+	/** Preferences store used to include preference-backed OpenAI Codex credentials when policy allows. */
+	sandboxAgentAuthPrefs?: PreferencesStore | null;
 	/** Scope for the generated auth.json file; defaults to projectId when present. */
 	sandboxAgentAuthScope?: string;
 }
@@ -206,6 +209,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	// OpenAI/Codex credentials, the file is an empty non-secret object so Pi still
 	// sees the expected path without exposing host auth.
 	const sandboxAuthJson = ensureSandboxAgentAuthFile({
+		prefs: config.sandboxAgentAuthPrefs,
 		includeCodexAuth: config.sandboxAgentAuthAllowed === true,
 		scope: config.sandboxAgentAuthScope || projectId,
 	});

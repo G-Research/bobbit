@@ -1510,6 +1510,7 @@ export function createGateway(config: GatewayConfig) {
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
 					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
 					components,
