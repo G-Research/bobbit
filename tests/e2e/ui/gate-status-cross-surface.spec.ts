@@ -173,6 +173,28 @@ async function expectSidebarGateBadgeLabel(page: Page, goalId: string, label: st
 	await expectGateProgressBadge(row, label, "sidebar goal row should expose a visible gate progress badge for the expected count");
 }
 
+async function setSidebarPrStatus(page: Page, goalId: string): Promise<void> {
+	await page.evaluate((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		state.prStatusCache.set(id, {
+			number: 655,
+			url: "https://example.test/pull/655",
+			state: "OPEN",
+			reviewDecision: "REVIEW_REQUIRED",
+			mergeable: "MERGEABLE",
+		});
+		(window as any).__bobbitRenderApp?.();
+	}, goalId);
+}
+
+async function expectSidebarPrBadge(page: Page, goalId: string, visible: boolean): Promise<void> {
+	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+	await expect(row, "sidebar goal row should be visible before asserting its PR badge").toBeVisible({ timeout: 15_000 });
+	const prBadge = row.locator('[title="PR #655 open — awaiting review"]');
+	if (visible) await expect(prBadge, "sidebar may show the PR icon after all workflow gates pass").toBeVisible({ timeout: 5_000 });
+	else await expect(prBadge, "sidebar must not let PR status suppress incomplete/verifying gate progress").toHaveCount(0);
+}
+
 async function expectInitialSharedGateBadge(page: Page, goalId: string): Promise<void> {
 	await expect.poll(async () => readSharedGateSummary(page, goalId), {
 		timeout: 15_000,
@@ -300,6 +322,8 @@ test.describe("Gate status cross-surface active verification", () => {
 			await waitForGatePassed(setup.goalId);
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await openDashboardGates(page, setup.goalId);
+			await setSidebarPrStatus(page, setup.goalId);
+			await expectSidebarPrBadge(page, setup.goalId, true);
 			await expectDashboardPipelineUsesRunningSummaryForPassedGate(page, setup.goalId);
 		} finally {
 			await cleanupSlowWorkflowGoal(setup, undefined);
@@ -320,6 +344,9 @@ test.describe("Gate status cross-surface active verification", () => {
 			await openSession(page, teamLeadId);
 			await expect(page.locator("[data-testid='goal-status-widget-pill']").first()).toBeVisible({ timeout: 15_000 });
 			await expectInitialSharedGateBadge(page, setup.goalId);
+			await setSidebarPrStatus(page, setup.goalId);
+			await expectSidebarGateBadgeLabel(page, setup.goalId, "0 of 1 gates passed");
+			await expectSidebarPrBadge(page, setup.goalId, false);
 			await expectWidgetPillRerendersOnCacheUpdate(page, setup.goalId);
 
 			dashboardPage = await context.newPage();
@@ -341,6 +368,7 @@ test.describe("Gate status cross-surface active verification", () => {
 
 			await expectSharedGateVerifying(page, setup.goalId);
 			await expectSharedGateBadgesVerifying(page, setup.goalId);
+			await expectSidebarPrBadge(page, setup.goalId, false);
 		} finally {
 			if (dashboardPage) await dashboardPage.close().catch(() => { /* best-effort */ });
 			await cleanupSlowWorkflowGoal(setup, teamLeadId);
