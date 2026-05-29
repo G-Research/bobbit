@@ -314,7 +314,17 @@ async function postSignoffDecision(source: Extract<ReviewSource, { kind: "verifi
 		} catch { /* keep status message */ }
 		throw new Error(message);
 	}
-	const { refreshGateStatusForGoal } = await import("./api.js");
+	const [{ refreshGateStatusForGoal }, { dispatchHumanSignoffResolved }] = await Promise.all([
+		import("./api.js"),
+		import("./gate-status-events.js"),
+	]);
+	dispatchHumanSignoffResolved({
+		goalId: source.goalId,
+		gateId: source.gateId,
+		signalId: source.signalId,
+		stepName: source.stepName,
+		decision: body.decision as "pass" | "fail",
+	});
 	await refreshGateStatusForGoal(source.goalId);
 }
 

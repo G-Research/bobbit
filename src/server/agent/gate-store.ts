@@ -75,7 +75,7 @@ export class GateStore {
 	private readonly storeFile: string;
 	private gates: Map<string, GateState> = new Map();
 
-	/** Optional callback invoked when any gate status changes (for bumping goal generation). */
+	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
 
 	constructor(stateDir: string) {
@@ -151,6 +151,7 @@ export class GateStore {
 		gate.signals.push(signal);
 		gate.updatedAt = Date.now();
 		this.save();
+		this.onStatusChange?.(signal.goalId, signal.gateId);
 	}
 
 	updateGateStatus(goalId: string, gateId: string, status: GateStatus): void {

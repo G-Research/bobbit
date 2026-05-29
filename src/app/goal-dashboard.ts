@@ -6,9 +6,10 @@ import "../ui/components/CostPopover.js";
 import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal } from "./state.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, invalidateGateStatusForGoal, type GateState, type GateSignal } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeam, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, type GateState, type GateSignal } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
+import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt, terminateSession } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -165,6 +166,7 @@ let dashboardModalStep: { gateId: string; signalId: string; stepIndex: number; s
 let dashboardWs: WebSocket | null = null;
 let dashboardWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let dashboardWsIntentionalClose = false;
+let dashboardGateStatusClientListenerAttached = false;
 
 /** Current dashboard tab */
 let dashboardTab: DashboardTabId = "gates";
@@ -180,22 +182,6 @@ let roleDropdownOpen = false;
 // ============================================================================
 // DASHBOARD EVENT WEBSOCKET
 // ============================================================================
-
-const GATE_SUMMARY_INVALIDATING_EVENTS = new Set([
-	"gate_signal_received",
-	"gate_status_changed",
-	"gate_reset",
-	"gate_verification_started",
-	"gate_verification_phase_started",
-	"gate_verification_step_started",
-	"gate_verification_awaiting_human",
-	"gate_verification_step_complete",
-	"gate_verification_complete",
-]);
-
-function scheduleSharedGateSummaryRefresh(goalId: string | null | undefined, reason: string): void {
-	invalidateGateStatusForGoal(goalId, reason);
-}
 
 function connectDashboardWs(): void {
 	dashboardWsIntentionalClose = false;
@@ -222,15 +208,17 @@ function connectDashboardWs(): void {
 			const msg = JSON.parse(event.data as string);
 			if (msg?.type === "auth_ok") {
 				subscribeToCurrentGoal();
-				scheduleSharedGateSummaryRefresh(currentGoalId, "dashboard-ws-auth-ok");
 				return;
 			}
 			if (typeof msg?.goalId === "string" && msg.goalId !== currentGoalId) return;
-			if (typeof msg?.goalId === "string" && GATE_SUMMARY_INVALIDATING_EVENTS.has(msg.type)) {
-				scheduleSharedGateSummaryRefresh(msg.goalId, msg.type);
+			if (shouldRefreshGateStatusForEvent(msg)) {
+				scheduleGateStatusRefreshForGoal(msg.goalId);
 			}
-			if (msg?.type === "gate_signal_received" || msg?.type === "gate_status_changed" || msg?.type === "gate_reset") {
+			if (shouldRefreshGateDetailsForEvent(msg)) {
 				refreshGatesFromWsEvent(msg.goalId);
+			}
+			if (shouldRefreshActiveVerificationsForEvent(msg)) {
+				void fetchActiveVerifications(msg.goalId);
 			}
 			dispatchVerificationEvent(msg);
 		} catch {
@@ -262,6 +250,33 @@ function disconnectDashboardWs(): void {
 		dashboardWs.close();
 	}
 	dashboardWs = null;
+}
+
+function handleGateStatusClientEvent(e: Event): void {
+	const msg = (e as CustomEvent).detail;
+	if (!msg || typeof msg !== "object") return;
+	if (typeof msg.goalId === "string" && msg.goalId !== currentGoalId) return;
+	if (shouldRefreshGateStatusForEvent(msg)) {
+		scheduleGateStatusRefreshForGoal(msg.goalId);
+	}
+	if (shouldRefreshGateDetailsForEvent(msg)) {
+		refreshGatesFromWsEvent(msg.goalId);
+	}
+	if (shouldRefreshActiveVerificationsForEvent(msg)) {
+		void fetchActiveVerifications(msg.goalId);
+	}
+}
+
+function connectGateStatusClientEvents(): void {
+	if (dashboardGateStatusClientListenerAttached) return;
+	window.addEventListener(GATE_STATUS_CLIENT_EVENT, handleGateStatusClientEvent);
+	dashboardGateStatusClientListenerAttached = true;
+}
+
+function disconnectGateStatusClientEvents(): void {
+	if (!dashboardGateStatusClientListenerAttached) return;
+	window.removeEventListener(GATE_STATUS_CLIENT_EVENT, handleGateStatusClientEvent);
+	dashboardGateStatusClientListenerAttached = false;
 }
 
 // ============================================================================
@@ -298,6 +313,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 	renderApp();
 
 	connectDashboardWs();
+	connectGateStatusClientEvents();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	document.addEventListener("gate-verification-event", handleLiveVerificationEvent);
 	startAgentPolling(goalId);
@@ -343,7 +359,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 		}
 
 		gates = fetchedGates;
-		scheduleSharedGateSummaryRefresh(goalId, "dashboard-load");
+		await refreshGateStatusForGoal(goalId);
 		applyDashboardRouteFocus(goalId);
 
 		if (gitStatusRes && gitStatusRes.ok) {
@@ -483,6 +499,7 @@ export function clearDashboardState(): void {
 	stopCostPolling();
 	stopGitStatusPolling();
 	stopSetupStatusPoll();
+	disconnectGateStatusClientEvents();
 	document.removeEventListener("gate-verification-event", handleLiveVerificationEvent);
 	liveVerifications = new Map();
 	expandedLiveStepKeys = new Set();
@@ -585,7 +602,10 @@ function stopAgentPolling(): void {
 
 function applyGateState(goalId: string, newGates: GateState[]): void {
 	gates = newGates;
-	scheduleSharedGateSummaryRefresh(goalId, "dashboard-gates-updated");
+	// Gate progress/counts are server-authoritative. Keep the dashboard's full
+	// gate rows local, but refresh the shared summary from the same server truth
+	// consumed by sidebar/widget/notification surfaces.
+	scheduleGateStatusRefreshForGoal(goalId, 0);
 }
 
 function refreshGatesFromWsEvent(goalId: string): void {
@@ -1023,10 +1043,35 @@ interface GatePipelineNode {
 	dependsOn: string[];
 }
 
+type DashboardSummaryGate = {
+	gateId: string;
+	status: "pending" | "passed" | "failed";
+	effectiveStatus?: "pending" | "passed" | "failed" | "running";
+	running?: boolean;
+	signalCount?: number;
+};
+
+function currentGateSummaryMap(): Map<string, DashboardSummaryGate> {
+	const summary = currentGoalId ? state.gateStatusCache.get(currentGoalId) : undefined;
+	return new Map(((summary?.gates ?? []) as DashboardSummaryGate[]).map(gate => [gate.gateId, gate]));
+}
+
+function effectiveGateStatus(
+	gs: GateState | undefined,
+	summaryGate: DashboardSummaryGate | undefined,
+): GatePipelineNode["status"] {
+	if (summaryGate?.effectiveStatus) return summaryGate.effectiveStatus;
+	if (summaryGate?.running) return "running";
+	const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
+	if (hasRunning) return "running";
+	return gs?.status ?? summaryGate?.status ?? "pending";
+}
+
 /** Compute dependency depth for each workflow gate via BFS from roots. */
 function computeGateDepthLevels(
 	wfGates: Array<{ id: string; name: string; dependsOn: string[] }>,
 	statusMap: Map<string, GateState>,
+	summaryMap: Map<string, DashboardSummaryGate>,
 ): GatePipelineNode[][] {
 	const depthMap = new Map<string, number>();
 	const gateMap = new Map(wfGates.map(g => [g.id, g]));
@@ -1055,15 +1100,12 @@ function computeGateDepthLevels(
 		for (const g of wfGates) {
 			if (depthMap.get(g.id) === d) {
 				const gs = statusMap.get(g.id);
-				// Determine if any signal is currently running
-				const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
-				let status: GatePipelineNode["status"] = gs?.status ?? "pending";
-				if (hasRunning && status !== "passed") status = "running";
+				const summaryGate = summaryMap.get(g.id);
 				nodesAtDepth.push({
 					id: g.id,
 					name: g.name,
-					status,
-					signalCount: gs?.signals?.length ?? 0,
+					status: effectiveGateStatus(gs, summaryGate),
+					signalCount: summaryGate?.signalCount ?? gs?.signals?.length ?? 0,
 					dependsOn: g.dependsOn,
 				});
 			}
@@ -1510,7 +1552,8 @@ function renderGatePipeline(): TemplateResult {
 	if (!wfGates || wfGates.length === 0) return html``;
 
 	const statusMap = getGateStatusMap();
-	const levels = computeGateDepthLevels(wfGates, statusMap);
+	const summaryMap = currentGateSummaryMap();
+	const levels = computeGateDepthLevels(wfGates, statusMap, summaryMap);
 
 	return html`
 		<div class="phase-pipeline">
@@ -1622,10 +1665,16 @@ function setTab(tab: DashboardTabId): void {
 	renderApp();
 }
 
+function currentGateSummaryCounts(): { passed: number; total: number } {
+	const summary = currentGoalId ? state.gateStatusCache.get(currentGoalId) : undefined;
+	if (summary && summary.total > 0) return { passed: summary.passed, total: summary.total };
+	const total = currentGoal?.workflow?.gates.length ?? gates.length;
+	return { passed: gates.filter(g => g.status === "passed").length, total };
+}
+
 function renderTabBar(): TemplateResult {
-	const wfTotal = currentGoal?.workflow?.gates.length ?? 0;
-	const passedCount = gates.filter(g => g.status === "passed").length;
-	const gateCountStr = wfTotal > 0 ? `${passedCount}/${wfTotal}` : String(gates.length);
+	const gateSummary = currentGateSummaryCounts();
+	const gateCountStr = gateSummary.total > 0 ? `${gateSummary.passed}/${gateSummary.total}` : String(gates.length);
 
 	const tabs: Array<{ id: DashboardTabId; label: string; icon: TemplateResult; countStr: string }> = [
 		{ id: "spec", label: "Spec", icon: svgDoc, countStr: "" },
@@ -1910,8 +1959,9 @@ function renderGateChecklist(): TemplateResult {
 	}
 	for (const g of wfGates) visit(g.id);
 
-	const passedCount = gates.filter(g => g.status === "passed").length;
-	const totalCount = sorted.length;
+	const summaryCounts = currentGateSummaryCounts();
+	const passedCount = summaryCounts.passed;
+	const totalCount = summaryCounts.total || sorted.length;
 	const pct = totalCount > 0 ? Math.round((passedCount / totalCount) * 100) : 0;
 
 	return html`
@@ -1930,10 +1980,12 @@ function renderGateChecklist(): TemplateResult {
 				const isExpanded = expandedGateIds.has(wfGate.id);
 				const isFocused = focusedGateId === wfGate.id;
 				const signalCount = gs?.signals?.length ?? 0;
+				const summaryGate = currentGoalId ? state.gateStatusCache.get(currentGoalId)?.gates?.find(gate => gate.gateId === wfGate.id) : undefined;
 
-				// Check if any signal is running
-				const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
-				const effectiveStatus = hasRunning && status !== "passed" ? "running" : status;
+				// Active verification overlays stored pass/fail state. Prefer the server-authoritative
+				// summary so re-signaled passed gates render as running everywhere.
+				const effectiveStatus = effectiveGateStatus(gs, summaryGate);
+				const hasRunning = effectiveStatus === "running";
 
 				let dotClass: string;
 				let dotContent: string;
