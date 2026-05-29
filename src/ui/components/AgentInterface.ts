@@ -2386,8 +2386,8 @@ export class AgentInterface extends LitElement {
 				}
 			</style>
 			${hidden.length > 0 ? html`
-				<div class="relative" style="display:inline-flex;align-items:center;position:relative;top:1px;flex-shrink:0">
-					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight whitespace-nowrap" data-more-btn style="height:var(--pill-h, auto)">
+				<div class="relative" style="display:inline-flex;align-items:center;position:relative;flex-shrink:0;height:var(--pill-h, auto);line-height:1;vertical-align:middle">
+					<span class="inline-flex items-center rounded-full bg-card border border-border text-[12px] leading-tight whitespace-nowrap" data-more-btn style="box-sizing:border-box;height:var(--pill-h, auto)">
 						<button
 							class="inline-flex items-center gap-1 px-1.5 py-0.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer font-mono rounded-l-full whitespace-nowrap"
 							@click=${this._toggleMore}

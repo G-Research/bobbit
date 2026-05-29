@@ -109,8 +109,9 @@ read-filter semantics:
 | `needsHumanAttention`           | yes             | 1, 4          |
 | `needsImmediateHumanAttention`  | no (bypass)     | 2, 3          |
 
-A team-lead session surfaces the unread dot, the polling beep, or the
-active-session beep when **any** of the following hold:
+A team-lead session surfaces persistent unread state when **any** of the
+following hold. Polling and active-session beeps use the same policy but exclude
+the idle-stuck rule so routine mid-workflow waits stay silent:
 
 | # | Rule | Read filter | Notes |
 |---|---|---|---|
@@ -120,9 +121,9 @@ active-session beep when **any** of the following hold:
 | 4 | Idle for ≥ `STUCK_IDLE_THRESHOLD_MS` (10s) with no live siblings, no in-flight verification, no awaiting sign-off | yes | Closes spawn-handoff false-positive — sub-second flickers between delegate handoffs no longer trip the dot |
 
 Rules are independent triggers (OR semantics). Rule 4 explicitly suppresses
-on `awaitingHumanSignoff` so it doesn't double-count with rule 2. The
-predicate is pure and consumed by three call sites — `api.ts` (polling
-beep), `remote-agent.ts` (active-session `agent_end`), and
+on `awaitingHumanSignoff` so it doesn't double-count with rule 2. The policy is
+pure and consumed by three call sites — `api.ts` (polling beep),
+`remote-agent.ts` (active-session `agent_end`), and
 `render-helpers.ts::hasUnseenActivity` (sidebar dot). See
 [notification-policy.md](notification-policy.md) for the full call-site
 inventory and the team-lead idle-nudge backoff that sits alongside it.

@@ -34,7 +34,7 @@ import { openPrWalkthroughPanel, parseWalkthroughPrCommand } from "./pr-walkthro
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { clearPersistedReviewDocuments, openMarkdownReviewDocument, removePersistedReviewDocument, restorePersistedReviewDocuments } from "./review-sources.js";
 import { showFaviconBadge } from "./favicon-badge.js";
-import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
+import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal } from "./api.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
@@ -2056,7 +2056,7 @@ export class RemoteAgent {
 					if (sess) {
 						const goalId = sess.teamGoalId || sess.goalId;
 						const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
-						if (needsHumanAttention(sess, goal, state.gatewaySessions, state.gateStatusCache)
+						if (needsHumanAttentionOnIdleTransition(sess, goal, state.gatewaySessions, state.gateStatusCache)
 							|| needsImmediateHumanAttention(sess, state.gateStatusCache)) {
 							RemoteAgent.playNotificationBeep();
 							showFaviconBadge();

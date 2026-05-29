@@ -152,7 +152,7 @@ import { archiveProjectBobbitDir, ArchiveError } from "./agent/bobbit-archive.js
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import { resolveProjectForRequest } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { detectHostTokens, resolveHostTokenValue } from "./agent/host-tokens.js";
+import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
@@ -1500,6 +1500,7 @@ export function createGateway(config: GatewayConfig) {
 					}
 				}
 
+				const sandboxTokenEntries = cfg.getSandboxTokens();
 				return {
 					projectId,
 					projectDir,
@@ -1508,6 +1509,8 @@ export function createGateway(config: GatewayConfig) {
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
+					sandboxAgentAuthAllowed: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+					sandboxAgentAuthPrefs: preferencesStore,
 					githubToken,
 					toolManager: ctx.toolManager,
 					components,
@@ -6299,8 +6302,8 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
-			await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
+			const result = await sessionManager.enqueuePrompt(body.sessionId, message);
+			json({ ok: true, status: result.status });
 		} catch (err) {
 			jsonError(500, err);
 		}

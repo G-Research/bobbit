@@ -72,13 +72,21 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expect(page.locator(".wf-edit-container")).toBeVisible({ timeout: 10_000 });
 	}
 
+	function gateCard(page: import("@playwright/test").Page, index: number): import("@playwright/test").Locator {
+		return page.locator(".wf-edit-container .wf-artifacts-list > .wf-gate-card").nth(index);
+	}
+
 	async function expandGate(page: import("@playwright/test").Page, index: number): Promise<void> {
-		const card = page.locator(".wf-gate-card").nth(index);
-		const cls = await card.getAttribute("class");
-		if (!cls?.includes("expanded")) {
-			await card.locator(".wf-gate-header .wf-gate-name").click();
+		const card = gateCard(page, index);
+		await expect(card).toBeVisible({ timeout: 10_000 });
+		await card.scrollIntoViewIfNeeded();
+		const isExpanded = await card.evaluate((el) => el.classList.contains("expanded"));
+		if (!isExpanded) {
+			const chevron = card.locator(".wf-gate-header .wf-gate-chevron");
+			await expect(chevron).toBeVisible();
+			await chevron.click();
 		}
-		await expect(card).toHaveClass(/expanded/);
+		await expect(card).toHaveClass(/(?:^|\s)expanded(?:\s|$)/, { timeout: 5_000 });
 	}
 
 	async function expandFirstGate(page: import("@playwright/test").Page): Promise<void> {
@@ -403,8 +411,9 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		await expandGate(page, 1);
 
 		// Toggle the "first" chip ON inside the second gate's body.
-		await expect(page.locator(".wf-gate-card").nth(1)).toHaveClass(/expanded/);
-		const chipInsideSecond = page.locator(".wf-gate-card").nth(1).locator("[data-testid='wf-dep-chip-first']");
+		const secondGate = gateCard(page, 1);
+		await expect(secondGate).toHaveClass(/(?:^|\s)expanded(?:\s|$)/);
+		const chipInsideSecond = secondGate.locator("[data-testid='wf-dep-chip-first']");
 		await expect(chipInsideSecond).toBeVisible();
 		await chipInsideSecond.click();
 		await expect(chipInsideSecond).toHaveClass(/wf-dep-toggle-chip--active/);
@@ -420,7 +429,9 @@ test.describe("Workflow editor UI/YAML parity @smoke", () => {
 		// Toggle back off — explicit empty dependency list must persist so users can
 		// create root/parallel gates instead of the editor silently linearising them.
 		await expandGate(page, 1);
-		const chipAfterSave = page.locator(".wf-gate-card").nth(1).locator("[data-testid='wf-dep-chip-first']");
+		const secondGateAfterSave = gateCard(page, 1);
+		await expect(secondGateAfterSave).toHaveClass(/(?:^|\s)expanded(?:\s|$)/);
+		const chipAfterSave = secondGateAfterSave.locator("[data-testid='wf-dep-chip-first']");
 		await chipAfterSave.click();
 		await expect(chipAfterSave).not.toHaveClass(/wf-dep-toggle-chip--active/);
 		await clickSaveAndWait(page, wfId);
