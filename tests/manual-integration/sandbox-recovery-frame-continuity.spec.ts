@@ -41,6 +41,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import WebSocket from "ws";
+import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -62,6 +63,7 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+	seedManualTestModelPreferences(dir);
 	const proc = spawn(process.execPath, [
 		SERVER_CLI, "--host", "127.0.0.1", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
