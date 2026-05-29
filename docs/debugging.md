@@ -135,8 +135,8 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 ## Gate status stale
 
-- `state.gateStatusCache` refreshed via: (1) `refreshGateStatusCache()` on initial load, (2) `refreshGateStatusForGoal()` on WS events `gate_status_changed` / `gate_verification_complete`
-- Dashboard gate polling also syncs to this cache
+- `state.gateStatusCache` is the server-authoritative summary from `/api/goals/:id/gates?view=summary`; it refreshes on initial load and targeted gate lifecycle events via `shouldRefreshGateStatusForEvent()` in `src/app/gate-status-events.ts`.
+- Dashboard rows and pipeline nodes should prefer each summary gate's `effectiveStatus` over stored gate status so re-signaled passed gates render as `running` while verification is active.
 
 ## Context bar / model state
 

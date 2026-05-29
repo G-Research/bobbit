@@ -1043,10 +1043,35 @@ interface GatePipelineNode {
 	dependsOn: string[];
 }
 
+type DashboardSummaryGate = {
+	gateId: string;
+	status: "pending" | "passed" | "failed";
+	effectiveStatus?: "pending" | "passed" | "failed" | "running";
+	running?: boolean;
+	signalCount?: number;
+};
+
+function currentGateSummaryMap(): Map<string, DashboardSummaryGate> {
+	const summary = currentGoalId ? state.gateStatusCache.get(currentGoalId) : undefined;
+	return new Map(((summary?.gates ?? []) as DashboardSummaryGate[]).map(gate => [gate.gateId, gate]));
+}
+
+function effectiveGateStatus(
+	gs: GateState | undefined,
+	summaryGate: DashboardSummaryGate | undefined,
+): GatePipelineNode["status"] {
+	if (summaryGate?.effectiveStatus) return summaryGate.effectiveStatus;
+	if (summaryGate?.running) return "running";
+	const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
+	if (hasRunning) return "running";
+	return gs?.status ?? summaryGate?.status ?? "pending";
+}
+
 /** Compute dependency depth for each workflow gate via BFS from roots. */
 function computeGateDepthLevels(
 	wfGates: Array<{ id: string; name: string; dependsOn: string[] }>,
 	statusMap: Map<string, GateState>,
+	summaryMap: Map<string, DashboardSummaryGate>,
 ): GatePipelineNode[][] {
 	const depthMap = new Map<string, number>();
 	const gateMap = new Map(wfGates.map(g => [g.id, g]));
@@ -1075,15 +1100,12 @@ function computeGateDepthLevels(
 		for (const g of wfGates) {
 			if (depthMap.get(g.id) === d) {
 				const gs = statusMap.get(g.id);
-				// Determine if any signal is currently running
-				const hasRunning = gs?.signals?.some(s => s.verification.status === "running");
-				let status: GatePipelineNode["status"] = gs?.status ?? "pending";
-				if (hasRunning && status !== "passed") status = "running";
+				const summaryGate = summaryMap.get(g.id);
 				nodesAtDepth.push({
 					id: g.id,
 					name: g.name,
-					status,
-					signalCount: gs?.signals?.length ?? 0,
+					status: effectiveGateStatus(gs, summaryGate),
+					signalCount: summaryGate?.signalCount ?? gs?.signals?.length ?? 0,
 					dependsOn: g.dependsOn,
 				});
 			}
@@ -1530,7 +1552,8 @@ function renderGatePipeline(): TemplateResult {
 	if (!wfGates || wfGates.length === 0) return html``;
 
 	const statusMap = getGateStatusMap();
-	const levels = computeGateDepthLevels(wfGates, statusMap);
+	const summaryMap = currentGateSummaryMap();
+	const levels = computeGateDepthLevels(wfGates, statusMap, summaryMap);
 
 	return html`
 		<div class="phase-pipeline">
@@ -1961,8 +1984,8 @@ function renderGateChecklist(): TemplateResult {
 
 				// Active verification overlays stored pass/fail state. Prefer the server-authoritative
 				// summary so re-signaled passed gates render as running everywhere.
-				const hasRunning = summaryGate?.effectiveStatus === "running" || gs?.signals?.some(s => s.verification.status === "running");
-				const effectiveStatus = hasRunning ? "running" : status;
+				const effectiveStatus = effectiveGateStatus(gs, summaryGate);
+				const hasRunning = effectiveStatus === "running";
 
 				let dotClass: string;
 				let dotContent: string;
