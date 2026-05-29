@@ -6299,8 +6299,8 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
-			await sessionManager.enqueuePrompt(body.sessionId, message);
-			json({ ok: true, status: session.status === "idle" ? "dispatched" : "queued" });
+			const result = await sessionManager.enqueuePrompt(body.sessionId, message);
+			json({ ok: true, status: result.status });
 		} catch (err) {
 			jsonError(500, err);
 		}
