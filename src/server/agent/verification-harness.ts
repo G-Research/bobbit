@@ -801,6 +801,12 @@ export class VerificationHarness {
 		const resolver = this.pendingSignoffs.get(key);
 		if (!resolver) return false;
 		this.pendingSignoffs.delete(key);
+		const active = this.activeVerifications.get(signalId);
+		const step = active?.steps.find(s => s.name === stepName);
+		if (step?.awaitingHuman) {
+			step.awaitingHuman = false;
+			this._persistActive();
+		}
 		try { resolver(outcome); } catch (err) {
 			console.error(`[verification] resolveSignoff resolver threw for ${key}:`, err);
 		}
@@ -1528,8 +1534,11 @@ export class VerificationHarness {
 		// instance — simpler than scoping per (goal,gate,signal) and equally
 		// effective since the dedupe key includes signalId.
 		this.broadcastFn = (goalId: string, event: any) => {
-			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_") && event.seq == null) {
-				event.seq = ++this._verifSeqCounter;
+			if (event && typeof event === "object" && typeof event.type === "string" && event.type.startsWith("gate_verification_")) {
+				if (event.seq == null) event.seq = ++this._verifSeqCounter;
+				if (event.type !== "gate_verification_step_output") {
+					this.projectContextManager?.getContextForGoal(goalId)?.goalStore.bumpGeneration();
+				}
 			}
 			this._rawBroadcastFn(goalId, event);
 		};

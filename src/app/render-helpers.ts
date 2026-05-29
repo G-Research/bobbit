@@ -682,9 +682,11 @@ export function renderGateProgressBadge(goalId: string): TemplateResult | string
 	const color = !hasTeam ? "#6b7280" : allPassed ? "#22c55e" : anyAgentWorking ? "#3b82f6" : "#7a8ea8";
 	const baseStyle = `font-size:0.75em;color:${color};font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
 	if (gs.verifying && gs.verifyingCount > 0) {
-		// Verifying state is always blue — override the base color which may be muted when agents are idle
+		// Verifying state is always blue — override the base color which may be muted when agents are idle.
+		// Clamp the animated numerator because an already-passed gate can be re-signaled
+		// and running while the stored pass count is still true in server history.
 		const verifyStyle = `font-size:0.75em;color:#3b82f6;font-weight:600;letter-spacing:-0.02em;white-space:nowrap;`;
-		const displayed = gs.passed + gs.verifyingCount;
+		const displayed = Math.min(gs.total, gs.passed + gs.verifyingCount);
 		return html`<span class="shrink-0" style="${verifyStyle}" title="${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})</span></span>`;
 	}
 	if (!allPassed && hasTeam) {
