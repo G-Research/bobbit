@@ -24,10 +24,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { bobbitDir, globalAgentDir } from "../bobbit-dir.js";
-import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import { TOOLS_DIR } from "./tool-manager.js";
-import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -86,12 +84,6 @@ export interface DockerRunConfig {
 	sandboxNetwork?: string;
 	/** Tool manager for resolving builtin tools directory (optional — falls back to TOOLS_DIR only). */
 	toolManager?: ToolManager;
-	/** Whether sandbox policy permits mounting host OpenAI Codex auth into auth.json. */
-	sandboxAgentAuthAllowed?: boolean;
-	/** Preferences store used to include preference-backed OpenAI Codex credentials when policy allows. */
-	sandboxAgentAuthPrefs?: PreferencesStore | null;
-	/** Scope for the generated auth.json file; defaults to projectId when present. */
-	sandboxAgentAuthScope?: string;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -204,16 +196,6 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	} catch {
 		// models.json doesn't exist — agent will rely on env vars for model discovery
 	}
-
-	// Mount a sandbox-scoped auth.json. When sandbox token policy does not allow
-	// OpenAI/Codex credentials, the file is an empty non-secret object so Pi still
-	// sees the expected path without exposing host auth.
-	const sandboxAuthJson = ensureSandboxAgentAuthFile({
-		prefs: config.sandboxAgentAuthPrefs,
-		includeCodexAuth: config.sandboxAgentAuthAllowed === true,
-		scope: config.sandboxAgentAuthScope || projectId,
-	});
-	args.push("-v", `${toDockerPath(sandboxAuthJson)}:/home/node/.bobbit/agent/auth.json:ro`);
 
 	// Session prompts directory
 	const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");

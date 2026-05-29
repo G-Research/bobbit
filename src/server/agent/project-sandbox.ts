@@ -21,7 +21,6 @@ import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs } from "./docker-args.js";
-import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
@@ -155,8 +154,6 @@ export interface ProjectSandboxOptions {
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
-	sandboxAgentAuthAllowed?: boolean;
-	sandboxAgentAuthPrefs?: PreferencesStore | null;
 	githubToken?: string;      // for git push/PR inside container
 	/** Tool manager for resolving builtin tools directory in Docker mounts. */
 	toolManager?: ToolManager;
@@ -699,7 +696,7 @@ export class ProjectSandbox {
 	}
 
 	private async _createContainer(): Promise<void> {
-		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, githubToken } = this.options;
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
@@ -730,8 +727,6 @@ export class ProjectSandbox {
 			pidsLimit: "0",  // unlimited — long-lived container runs many agents
 			sandboxMounts,
 			sandboxCredentials,
-			sandboxAgentAuthAllowed,
-			sandboxAgentAuthPrefs,
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
 		});

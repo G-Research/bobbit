@@ -1235,19 +1235,11 @@ export class SessionManager {
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get project-scoped config/secrets when available.
-		const projectContext = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)
+		// Get secretsStore from project context if available
+		const secretsStore = (opts?.projectId && this.projectContextManager)
+			? this.projectContextManager.getOrCreate(opts.projectId)?.secretsStore ?? null
 			: null;
-		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
-		const secretsStore = projectContext?.secretsStore ?? null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
-		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
-		ensureSandboxAgentAuthFile({
-			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
-			scope: opts?.projectId,
-		});
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore, secretsStore);
 
 		return true;
 	}
@@ -1669,11 +1661,6 @@ export class SessionManager {
 	 * Enqueue a prompt. If the agent is idle and queue was empty,
 	 * dispatch immediately. Otherwise add to queue and broadcast.
 	 * If the agent is idle but queue has items, enqueue and drain.
-	 *
-	 * Returns whether this exact prompt was dispatched immediately or merely
-	 * queued behind existing/busy work. Callers must not infer that from the
-	 * post-call session status: direct dispatch intentionally marks the session
-	 * streaming before the RPC resolves.
 	 */
 	async enqueuePrompt(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
@@ -1686,9 +1673,9 @@ export class SessionManager {
 		/** Provenance of this prompt. Defaults to "user". Read by TeamManager
 		 *  on agent_start to decide whether to reset idle-nudge backoff counters. */
 		source?: PromptSource;
-	}): Promise<{ status: "dispatched" | "queued" }> {
+	}): Promise<void> {
 		const session = this.sessions.get(sessionId);
-		if (!session) return { status: "queued" };
+		if (!session) return;
 		session.lastPromptSource = opts?.source ?? "user";
 
 		// modelText is what the model sees; text is the user's verbatim input.
@@ -1736,7 +1723,7 @@ export class SessionManager {
 					isSteered: opts?.isSteered,
 				});
 				this.broadcastQueue(session);
-				return { status: "queued" };
+				return;
 			}
 
 			// Implicit unstick — new intent supersedes the failed turn.
@@ -1760,17 +1747,22 @@ export class SessionManager {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered);
-			return { status: "dispatched" };
+			session.lastPromptText = prefixedDispatch;
+			session.lastPromptImages = opts?.images;
+			session.streamingStartedAt = Date.now();
+			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			await session.rpcClient.prompt(prefixedDispatch, opts?.images);
+			return;
 		}
 
-		// If agent is idle and queue is empty, dispatch directly. Mark streaming
-		// before awaiting rpcClient.prompt(): Pi 0.77 OpenAI/Codex preflight can be
-		// slow, and clients/API polling must see the turn as in-flight immediately.
+		// If agent is idle and queue is empty, dispatch directly
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered);
-			return { status: "dispatched" };
+			session.lastPromptText = dispatchText;
+			session.lastPromptImages = opts?.images;
+			await session.rpcClient.prompt(dispatchText, opts?.images);
+			return;
 		}
 
 		// Agent is busy or queue has items — enqueue. Persisted queue holds
@@ -1788,7 +1780,6 @@ export class SessionManager {
 		if (session.status === "idle") {
 			this.drainQueue(session);
 		}
-		return { status: "queued" };
 	}
 
 	/**
@@ -1978,72 +1969,6 @@ export class SessionManager {
 		return ok;
 	}
 
-	private markPromptDispatchStreaming(session: SessionInfo): void {
-		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
-		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
-		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
-	}
-
-	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
-		text: string;
-		images?: Array<{ type: "image"; data: string; mimeType: string }>;
-		attachments?: unknown[];
-		isSteered?: boolean;
-	}>, reason: string, source: string): void {
-		const processExited = /(?:agent process exited|process_exit)/i.test(reason);
-		if (session.status === "terminated" || (session.status === "aborting" && processExited)) {
-			console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); not recovering ${rows.length} row(s) because session is ${session.status}`);
-			return;
-		}
-
-		console.warn(`[session-manager] ${source} dispatch failed for ${session.id} (${reason}); re-enqueueing ${rows.length} row(s) at front`);
-		// Re-enqueue at front in original order so the next drain re-dispatches
-		// the same batch. Reverse iteration because enqueueAtFront unshifts.
-		for (const r of [...rows].reverse()) {
-			session.promptQueue.enqueueAtFront(r.text, {
-				images: r.images,
-				attachments: r.attachments,
-				isSteered: r.isSteered,
-			});
-		}
-		broadcastStatus(session, "idle");
-		this.broadcastQueue(session);
-		// Schedule a follow-up drain on the next tick so the rows we just
-		// re-enqueued get another chance once the bridge has finished its
-		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
-		// (including the SDK's finally{finishRun()}) run first.
-		setTimeout(() => { this.drainQueue(session); }, 0);
-	}
-
-	private async dispatchDirectPrompt(
-		session: SessionInfo,
-		text: string,
-		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		attachments?: unknown[],
-		isSteered?: boolean,
-	): Promise<void> {
-		session.lastPromptText = text;
-		session.lastPromptImages = images;
-		this.markPromptDispatchStreaming(session);
-
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered }];
-		let recovered = false;
-		try {
-			const resp = await session.rpcClient.prompt(text, images);
-			if (resp && (resp as any).success === false) {
-				const reason = (resp as any).error || "unknown";
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt");
-				recovered = true;
-				throw new Error(reason);
-			}
-		} catch (err) {
-			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, err instanceof Error ? err.message : String(err), "direct prompt");
-			}
-			throw err;
-		}
-	}
-
 	/**
 	 * Called when the agent becomes idle (agent_end) or when a new message is
 	 * enqueued while idle. Dequeue and dispatch the next message if any exist.
@@ -2080,7 +2005,9 @@ export class SessionManager {
 		session.lastPromptImages = next.images;
 
 		// Optimistic status update to prevent double-dispatch race
-		this.markPromptDispatchStreaming(session);
+		session.streamingStartedAt = session.streamingStartedAt ?? Date.now();
+		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 
 		// Snapshot the rows we're about to dispatch so we can re-enqueue them
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
@@ -2090,7 +2017,23 @@ export class SessionManager {
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered }];
 
 		const recoverDispatchedRows = (reason: string) => {
-			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "drainQueue");
+			console.warn(`[session-manager] drainQueue dispatch failed for ${session.id} (${reason}); re-enqueueing ${dispatchedRowsForRecovery.length} row(s) at front`);
+			// Re-enqueue at front in original order so the next drain re-dispatches
+			// the same batch. Reverse iteration because enqueueAtFront unshifts.
+			for (const r of [...dispatchedRowsForRecovery].reverse()) {
+				session.promptQueue.enqueueAtFront(r.text, {
+					images: r.images,
+					attachments: r.attachments,
+					isSteered: r.isSteered,
+				});
+			}
+			broadcastStatus(session, "idle");
+			this.broadcastQueue(session);
+			// Schedule a follow-up drain on the next tick so the rows we just
+			// re-enqueued get another chance once the bridge has finished its
+			// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
+			// (including the SDK's finally{finishRun()}) run first.
+			setTimeout(() => { this.drainQueue(session); }, 0);
 		};
 
 		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
@@ -5761,7 +5704,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
+import { resolveHostTokenValue } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
@@ -5804,7 +5747,7 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
+function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null): Record<string, string> {
 	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
@@ -5836,7 +5779,7 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
  * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
  * Used as fallback when sandbox_tokens is not configured.
  */
-export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
+function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json

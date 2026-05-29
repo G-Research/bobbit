@@ -41,7 +41,6 @@ import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
-import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
@@ -95,7 +94,6 @@ async function freePort(): Promise<number> {
 
 async function startGW(dir: string, port: number): Promise<GW> {
 	mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
-	seedManualTestModelPreferences(dir);
 	// Bind to 0.0.0.0 so sandboxed containers can reach the gateway via
 	// host.docker.internal (which is --add-host'd into every sandbox by
 	// docker-args.ts). Without this, scenarios that exercise gateway-callback
@@ -105,15 +103,7 @@ async function startGW(dir: string, port: number): Promise<GW> {
 		SERVER_CLI, "--host", "0.0.0.0", "--port", String(port),
 		"--no-tls", "--auth", "--cwd", dir,
 	], {
-		env: {
-			...process.env,
-			BOBBIT_DIR: join(dir, ".bobbit"),
-			NODE_ENV: "test",
-			// The tool-use canary is about the prompted agent turn. Title generation
-			// is a separate LLM call that can race/noise manual runs, especially when
-			// MANUAL_TEST_MODEL points at a slower non-default provider.
-			BOBBIT_SKIP_TITLE_GEN: "1",
-		},
+		env: { ...process.env, BOBBIT_DIR: join(dir, ".bobbit"), NODE_ENV: "test" },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	let stderr = "";
@@ -200,54 +190,9 @@ async function getSession(gw: GW, id: string) { return (await api(gw, `/api/sess
 function appUrl(gw: GW) { return `${gw.base}/?token=${gw.token}`; }
 function sessionUrl(gw: GW, id: string) { return `${gw.base}/?token=${gw.token}#/session/${id}`; }
 
-async function waitForConnectedEditor(page: Page, id: string) {
-	await page.waitForSelector("message-editor textarea", { timeout: 30_000 });
-	await page.waitForFunction((sessionId) => {
-		const editor = document.querySelector("message-editor") as any;
-		return editor?.sessionId === sessionId;
-	}, id, { timeout: 30_000 });
-}
-
-async function sendPromptViaUi(page: Page, text: string) {
-	const textarea = page.locator("message-editor textarea").last();
-	await textarea.fill(text);
-	await expect(textarea, "composer should contain the prompt before sending").toHaveValue(text);
-	await textarea.press("Enter");
-	await expect(textarea, "composer should clear after the UI accepts the send").toHaveValue("", { timeout: 5_000 });
-}
-
-async function waitForTurnStartedOrRendered(page: Page, gw: GW, id: string, beforeToolCards: number, beforeAssistantMessages: number, timeoutMs: number) {
-	const startedDeadline = Date.now() + timeoutMs;
-	let lastStatus = "unknown";
-	while (Date.now() < startedDeadline) {
-		const info = await getSession(gw, id).catch(() => undefined);
-		lastStatus = info?.status || lastStatus;
-		if (info && info.status !== "idle") return;
-		const toolCards = await page.locator("div[data-tool-name]").count().catch(() => beforeToolCards);
-		if (toolCards > beforeToolCards) return;
-		const assistantMessages = await page.locator("assistant-message").count().catch(() => beforeAssistantMessages);
-		if (assistantMessages > beforeAssistantMessages) return;
-		await page.waitForTimeout(1_000);
-	}
-	throw new Error(`Session ${id} did not start or render an agent turn within ${timeoutMs}ms after prompt submission (last status: ${lastStatus})`);
-}
-
-async function dumpToolCardDiagnostics(page: Page, gw: GW, id: string, label: string) {
-	const info = await getSession(gw, id).catch((err) => ({ error: String(err) }));
-	const cards = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>("div[data-tool-name]"))
-		.map(c => ({
-			name: c.getAttribute("data-tool-name") || "?",
-			text: (c.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
-		})));
-	const body = await page.locator("body").innerText().catch(() => "");
-	console.log(`[${label}] session=${JSON.stringify(info)} toolCards=${cards.length}`);
-	for (const c of cards) console.log(`  [${c.name}] ${c.text}`);
-	console.log(`[${label}] body=${body.replace(/\s+/g, " ").slice(0, 1200)}`);
-}
-
 async function interruptAndSend(page: Page, gw: GW, id: string, text: string, idleTimeoutMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await waitForConnectedEditor(page, id);
+	await page.waitForSelector("textarea", { timeout: 30_000 });
 	const sessInfo = await getSession(gw, id);
 	if (sessInfo.status === "streaming") {
 		const stopBtn = page.locator('button[title="Stop streaming"]');
@@ -255,23 +200,21 @@ async function interruptAndSend(page: Page, gw: GW, id: string, text: string, id
 		await stopBtn.click();
 		await pollIdle(gw, id, 15_000);
 	}
-	const toolCountBefore = await page.locator("div[data-tool-name]").count().catch(() => 0);
-	const assistantCountBefore = await page.locator("assistant-message").count().catch(() => 0);
-	await sendPromptViaUi(page, text);
-	await waitForTurnStartedOrRendered(page, gw, id, toolCountBefore, assistantCountBefore, Math.min(idleTimeoutMs, 120_000));
+	await page.fill("textarea", text);
+	await page.press("textarea", "Enter");
+	await page.waitForTimeout(1_500);
 	await pollIdle(gw, id, idleTimeoutMs);
 	await page.waitForTimeout(2_000);
 }
 
 async function browserSend(page: Page, gw: GW, id: string, text: string, idleMs = 120_000) {
 	await page.goto(sessionUrl(gw, id));
-	await waitForConnectedEditor(page, id);
+	await page.waitForSelector("textarea", { timeout: 30_000 });
 	try { await page.waitForSelector('[class*="tool"], [class*="Tool"], details, pre', { timeout: 8_000 }); } catch {}
 	await page.waitForTimeout(500);
-	const toolCountBefore = await page.locator("div[data-tool-name]").count().catch(() => 0);
-	const assistantCountBefore = await page.locator("assistant-message").count().catch(() => 0);
-	await sendPromptViaUi(page, text);
-	await waitForTurnStartedOrRendered(page, gw, id, toolCountBefore, assistantCountBefore, Math.min(idleMs, 120_000));
+	await page.fill("textarea", text);
+	await page.press("textarea", "Enter");
+	await page.waitForTimeout(1_500);
 	await pollIdle(gw, id, idleMs);
 	await page.waitForTimeout(2_000);
 }
@@ -518,17 +461,12 @@ test.describe.serial("Agent tool use", () => {
 		const sentinel = `HELLO_${nonce}`;
 
 		await browserSend(page, gw, id,
-			`This is a deterministic tool-use canary. You must call the available tool named "bash" exactly once. ` +
-			`Set its command argument to exactly: echo ${sentinel} > marker.txt && cat marker.txt. ` +
-			`Do not answer from reasoning alone and do not use any other tool. After the bash tool result returns, reply with the sentinel ${sentinel}.`,
+			`Run the bash tool exactly once with the command: echo ${sentinel} > marker.txt && cat marker.txt`,
 			240_000);
 		await takeScreenshot(page, `tooluse-1-bash-${nonce}.png`);
 
 		// Positive: bash card with the command text + sentinel.
 		const bashCardCount = await countToolCardsByName(page, "bash", "marker.txt", sentinel);
-		if (bashCardCount === 0) {
-			await dumpToolCardDiagnostics(page, gw, id, `tooluse-1 ${sentinel}`);
-		}
 		expect(bashCardCount, "expected bash tool card with marker.txt + sentinel").toBeGreaterThan(0);
 
 		// Negative: no OTHER tool (write/read/edit/...) achieved the same effect.
