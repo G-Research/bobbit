@@ -375,18 +375,18 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	protected override willUpdate(changed: PropertyValues<this>): void {
+		if (changed.has("persistenceKey")) {
+			this.restorePersistedState();
+			return;
+		}
+		if (changed.has("cards") && this.persistenceKey && this._loadedPersistenceKey !== this.persistenceKey) {
+			this.restorePersistedState();
+			return;
+		}
 		if (changed.has("cards") || !this._activeCardId) {
 			const firstCard = this.reviewCards[0] ?? this.cards[0];
 			if (firstCard && !this.cards.some(card => card.id === this._activeCardId)) {
 				this._activeCardId = firstCard.id;
-			}
-		}
-	}
-
-	protected override updated(changed: PropertyValues<this>): void {
-		if (changed.has("persistenceKey") || changed.has("cards")) {
-			if (this.persistenceKey && this._loadedPersistenceKey !== this.persistenceKey) {
-				this.restorePersistedState();
 			}
 		}
 	}
@@ -409,6 +409,48 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private get activeCard(): PrWalkthroughCard | undefined {
 		return this.cards.find(card => card.id === this._activeCardId) ?? this.reviewCards[0] ?? this.cards[0];
+	}
+
+	private firstAvailableCardId(): string {
+		return (this.reviewCards[0] ?? this.cards[0])?.id ?? "";
+	}
+
+	private resetInteractionState(): void {
+		this._activeCardId = this.firstAvailableCardId();
+		this._diffModeOverride = undefined;
+		this._comments = [];
+		this._decisions = {};
+		this._completedCardIds = [];
+		this._editingLineKey = undefined;
+		this._editingCardId = undefined;
+		this._lineDrafts = {};
+		this._cardDrafts = {};
+		this._dismissedSuggestionIds = [];
+		this._copied = false;
+	}
+
+	private reconcileDecisionCommentInvariants(): void {
+		const cardIds = new Set(this.cards.map(card => card.id));
+		const completed = new Set(this._completedCardIds.filter(id => cardIds.has(id)));
+		const decisions: Record<string, PrWalkthroughDecision> = {};
+		for (const [cardId, decision] of Object.entries(this._decisions)) {
+			if (!cardIds.has(cardId)) {
+				completed.delete(cardId);
+				continue;
+			}
+			if (decision.value === "disliked") {
+				const commentIds = this._comments.filter(comment => comment.cardId === cardId && comment.body.trim()).map(comment => comment.id);
+				if (commentIds.length === 0) {
+					completed.delete(cardId);
+					continue;
+				}
+				decisions[cardId] = { ...decision, commentIds };
+				continue;
+			}
+			decisions[cardId] = { ...decision, commentIds: [] };
+		}
+		this._decisions = decisions;
+		this._completedCardIds = [...completed];
 	}
 
 	private get currentDraft(): PrWalkthroughReviewDraft {
@@ -908,7 +950,7 @@ export class PrWalkthroughPanel extends LitElement {
 		if (deleted?.source === "suggested" && deleted.id.startsWith("suggested:")) {
 			this._dismissedSuggestionIds = [...this._dismissedSuggestionIds, deleted.id.slice("suggested:".length)];
 		}
-		this._decisions = Object.fromEntries(Object.entries(this._decisions).map(([cardId, decision]) => [cardId, { ...decision, commentIds: decision.commentIds.filter(id => id !== commentId) }]));
+		this.reconcileDecisionCommentInvariants();
 		this.emitDraftChange();
 		this.persistState();
 	}
@@ -918,6 +960,7 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private restorePersistedState(): void {
+		this.resetInteractionState();
 		const key = this.persistenceStorageKey();
 		this._loadedPersistenceKey = this.persistenceKey;
 		if (!key || typeof localStorage === "undefined") return;
@@ -931,6 +974,7 @@ export class PrWalkthroughPanel extends LitElement {
 			if (parsed.decisions && typeof parsed.decisions === "object") this._decisions = parsed.decisions;
 			if (Array.isArray(parsed.completedCardIds)) this._completedCardIds = parsed.completedCardIds.filter(id => this.cards.some(card => card.id === id));
 			if (Array.isArray(parsed.dismissedSuggestionIds)) this._dismissedSuggestionIds = parsed.dismissedSuggestionIds.filter(id => typeof id === "string");
+			this.reconcileDecisionCommentInvariants();
 		} catch (err) {
 			console.warn("[pr-walkthrough] failed to restore persisted state", err);
 		}

@@ -178,6 +178,22 @@ test.describe("PR walkthrough panel", () => {
 			message: "Dislike should record the concern and advance to the next card",
 		}).not.toBe(firstCard);
 
+		await panel.getByTestId("pr-walkthrough-prev").click();
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "Prev should return to the disliked card so its concerns can be revised",
+		}).toBe(firstCard);
+		await deleteComment(page, broadConcern);
+		await expect(dislike, "Deleting the last supporting comment should clear the disliked decision and disable Dislike").toBeDisabled();
+		await expect(activeCard(page).locator(".decision-note"), "A disliked card without comments must not remain completed").not.toContainText("Current: disliked");
+		await createCardComment(page, broadConcern);
+		await expect(dislike).toBeEnabled();
+		await dislike.click();
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "Dislike should be available again after adding a replacement concern",
+		}).not.toBe(firstCard);
+
 		const secondCard = await activeCardId(page);
 		await panel.getByTestId("pr-walkthrough-like").click();
 		await expect.poll(() => activeCardId(page), {
@@ -209,6 +225,30 @@ test.describe("PR walkthrough panel", () => {
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit"), "active walkthrough audit state should restore after reload").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(broadConcern);
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(revisedConcern);
+	});
+
+	test("switching walkthrough tabs with no persisted state resets per-card UI state", async ({ page }) => {
+		const leakedConcern = `should-not-leak-${Date.now()}`;
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		const firstCard = await activeCardId(page);
+
+		await createCardComment(page, leakedConcern);
+		await panel.getByTestId("pr-walkthrough-like").click();
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "first walkthrough should move away from the initial card before opening another PR",
+		}).not.toBe(firstCard);
+
+		await sendMessage(page, "/walkthrough-pr 456");
+		const activeTab = page.locator(".goal-preview-panel .goal-tab-pill.goal-tab-pill--active[data-panel-tab-kind='walkthrough']").first();
+		await expect(activeTab, "second walkthrough tab should become active").toHaveAttribute("data-panel-tab-id", /456/, { timeout: 10_000 });
+		await expect(walkthroughPanel(page).locator(".title"), "second tab should render its own changeset metadata").toContainText("PR #456");
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "new walkthrough tab without localStorage should start at the first card",
+		}).toBe(firstCard);
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: leakedConcern }), "comments from PR #123 must not leak into PR #456").toBeHidden();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-dislike").first(), "leaked comments must not enable Dislike on the new tab").toBeDisabled();
 	});
 
 	test("accepts, edits, and deletes suggested line comments when fixture suggestions are present", async ({ page }) => {
