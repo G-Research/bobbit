@@ -62,10 +62,10 @@ When the agent posts an `ask_user_choices` widget, that's new transcript activit
 
 The sign-off bit lives on `state.gateStatusCache.<goalId>.awaitingHumanSignoff`, denormalised from `awaitingSignoffCount > 0`. Two pieces had to line up:
 
-- **Server.** `GET /api/goals/:id/gates?view=summary` walks `verificationHarness.getActiveVerifications(goalId)` and stamps `awaitingSignoffCount` per gate plus a goal-wide total. The bare `/gates` endpoint does **not** include the count.
-- **Client.** `refreshGateStatusCache` in `src/app/api.ts` fetches the `?view=summary` shape. `remote-agent.ts` has a WS handler for the new `gate_verification_awaiting_human` event that calls `refreshGateStatusForGoal()`, so parking refreshes the cache immediately. Resolution clears it via the existing `gate_verification_step_complete` handler that already refreshes.
+- **Server.** `GET /api/goals/:id/gates?view=summary` uses the shared gate-status summary builder to stamp `awaitingSignoffCount` per gate plus a goal-wide total from active verifications. The bare `/gates` endpoint does **not** include the count.
+- **Client.** `refreshGateStatusCache` in `src/app/api.ts` fetches the `?view=summary` shape. `src/app/gate-status-events.ts` centralizes the WS/custom event types that refresh the cache when a sign-off parks, resolves, or completes.
 
-Without both, rule 2 stays dormant. Pinned by the e2e test that signals a sign-off and asserts the dot lights.
+Without both, rule 2 stays dormant. Pinned by the widget/sign-off E2E coverage.
 
 Full design and implementation details: [design/human-signoff-gates.md](human-signoff-gates.md).
 

@@ -133,21 +133,10 @@ inventory and the team-lead idle-nudge backoff that sits alongside it.
 goal id. Two pieces had to line up for the bit to actually reach the
 predicate:
 
-- **Server.** `GET /api/goals/:id/gates?view=summary` aggregates
-  `awaitingSignoffCount` per gate plus a goal-wide total by walking
-  `verificationHarness.getActiveVerifications(goalId)`. The bare `/gates`
-  endpoint does not include the count — only the summary view (which
-  sidebar polling already used) carries it. The cache-refresh fetch in
-  `src/app/api.ts` uses `?view=summary`.
-- **Client.** `src/app/remote-agent.ts` handles the new
-  `gate_verification_awaiting_human` WS event by calling
-  `refreshGateStatusForGoal()` so the cache picks up the bit on park.
-  Resolution clears it via the existing `gate_verification_step_complete`
-  handler that already refreshes the cache.
+- **Server.** `GET /api/goals/:id/gates?view=summary` uses the shared gate-status summary builder to aggregate `awaitingSignoffCount` per gate plus a goal-wide total from active verifications. The bare `/gates` endpoint does not include the count.
+- **Client.** `src/app/gate-status-events.ts` centralizes the lifecycle events that refresh `state.gateStatusCache` through `src/app/api.ts`. Parking refreshes on `gate_verification_awaiting_human`; resolution refreshes on the sign-off resolved custom event and subsequent verification-step/completion events.
 
-Without both, the policy data path is dead — rule 2 stays dormant
-indefinitely. That was the regression that the implementation gate's gap
-analysis caught and signal #8 fixed (`a75ca58`).
+Without both, the policy data path is dead — rule 2 stays dormant indefinitely.
 
 ## Key files
 
@@ -156,14 +145,14 @@ analysis caught and signal #8 fixed (`a75ca58`).
 | `src/server/agent/verification-harness.ts` | `human-signoff` branch in `verifyGateSignal`; `pendingSignoffs` map; `resolveSignoff()`; resume path; cancellation drain |
 | `src/server/agent/workflow-validator.ts` | Validates `human-signoff` step requires `prompt` + `label` |
 | `src/server/agent/workflow-store.ts` · `project-config-store.ts` · `gate-store.ts` | `VerifyStep.type` / `GateSignalStep.type` discriminant additions |
-| `src/server/server.ts` | `POST /api/goals/:id/gates/:gateId/signoff` handler; `awaitingSignoffCount` aggregation on `?view=summary` |
+| `src/server/server.ts` · `src/server/gate-status-summary.ts` | `POST /api/goals/:id/gates/:gateId/signoff` handler; authoritative summary aggregation for `?view=summary` |
 | `src/server/auth/sandbox-guard.ts` | Blocks sandboxed agents from POSTing to `/signoff` |
 | `src/ui/components/GoalStatusWidget.ts` | The pill + popover + pending sign-off launcher that opens submitted content in the review pane |
 | `src/app/lazy-widgets.ts` | `ensureGoalStatusWidget()` lazy loader |
 | `src/ui/components/AgentInterface.ts` | Mounts `<goal-status-widget>` next to `<git-status-widget>` for any session with a `goalId` / `teamGoalId` |
 | `src/app/render-helpers.ts` | `renderGateProgressBadge` and `renderGateStatusIcon` — shared visual vocabulary between sidebar, widget, and dashboard |
 | `src/app/notification-policy.ts` | `needsHumanAttention` + `needsImmediateHumanAttention` predicates |
-| `src/app/api.ts` · `src/app/remote-agent.ts` | Cache refresh wiring (`?view=summary` fetch + WS handler for `gate_verification_awaiting_human`) |
+| `src/app/api.ts` · `src/app/gate-status-events.ts` · `src/app/remote-agent.ts` | Cache refresh wiring (`?view=summary` fetch + centralized gate lifecycle event matching) |
 | `src/app/state.ts` | `gateStatusCache` value shape — `awaitingHumanSignoff: boolean`; review document/source state |
 
 ## Pinning tests
