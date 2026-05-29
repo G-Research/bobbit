@@ -229,27 +229,6 @@ async function expectSidebarCompleteWorkflowStatus(page: Page, goalId: string, p
 	}, { timeout: 15_000, message: "sidebar should show PR status when available after workflow completion, otherwise the completed gate count" }).toBe(true);
 }
 
-async function expectSidebarCompleteWorkflowStatus(page: Page, goalId: string, passed: number, total: number): Promise<void> {
-	await expectGateStatusCache(page, goalId, { passed, total }, `sidebar gate status cache should update to ${passed}/${total}`);
-
-	const row = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
-	await expect(row, "sidebar goal row should be visible before asserting complete workflow status").toBeVisible({ timeout: 15_000 });
-	await expect.poll(async () => {
-		const prVisible = await row.locator('[title^="PR "]').first().isVisible().catch(() => false);
-		if (prVisible) return true;
-		return row.evaluate((root, expected) => {
-			const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
-			return Array.from(root.querySelectorAll("span[title], span[aria-label], span.shrink-0, span.gate-wave")).some((el) => {
-				const style = window.getComputedStyle(el);
-				const rect = el.getBoundingClientRect();
-				if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) return false;
-				const titleOrLabel = [normalize(el.getAttribute("title")), normalize(el.getAttribute("aria-label"))];
-				return titleOrLabel.includes(expected.label) || normalize(el.textContent) === expected.compactText;
-			});
-		}, { label: `${passed} of ${total} gates passed`, compactText: `(${passed}/${total})` });
-	}, { timeout: 15_000, message: "sidebar should show PR status when available after workflow completion, otherwise the completed gate count" }).toBe(true);
-}
-
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
 	await page.evaluate(({ commentText, quoteText }) => {
 		const doc = document.querySelector("review-document") as any;
