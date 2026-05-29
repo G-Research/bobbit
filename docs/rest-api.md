@@ -25,6 +25,17 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 
+### Dev harness
+
+These endpoints expose restart support only for gateways launched through `npm run dev:harness`. The harness marks the child gateway with `BOBBIT_DEV_HARNESS=1`; ordinary `npm start` and `npm run dev` runs do not set it.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/harness-status` | Returns `{ restartAvailable: boolean }`. The Settings page uses this to decide whether to render the **Restart Server** button. |
+| `POST` | `/api/harness/restart` | Requests a harness rebuild/restart. Returns `202 { ok: true, restartRequested: true }` under the dev harness, and `403 { error: "Restart is only available under the dev harness" }` otherwise. |
+
+`POST /api/harness/restart` is gated on the server, not just hidden by the UI. On success it touches `.bobbit/state/gateway-restart`, the same sentinel used by `npm run restart-server`; the harness observes that file change, rebuilds the server, and relaunches the gateway.
+
 ### Sessions
 
 | Method | Path | Description |
