@@ -164,39 +164,6 @@ async function expectSidebarGateBadge(page: Page, goalId: string, passed: number
 		.toBeVisible({ timeout: 15_000 });
 }
 
-async function resetGoalGate(goalId: string, gateId: string): Promise<any> {
-	const res = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/reset`, {
-		method: "POST",
-		body: JSON.stringify({ reason: "browser E2E gate reset sync coverage" }),
-	});
-	const text = await res.text();
-	expect(res.status, `reset ${gateId} failed: ${res.status} ${text}`).toBe(200);
-	return text ? JSON.parse(text) : null;
-}
-
-async function ensureGoalWidgetPopoverOpen(page: Page): Promise<void> {
-	const dropdown = page.locator("#goal-status-dropdown").first();
-	if (await dropdown.isVisible().catch(() => false)) return;
-	await page.locator("[data-testid='goal-status-widget-pill']").first().click();
-	await expect(dropdown).toBeVisible({ timeout: 10_000 });
-}
-
-async function expectWidgetGateSummary(page: Page, passed: number, total: number): Promise<void> {
-	const title = `${passed} of ${total} gates passed`;
-	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
-	await expect(pill).toBeVisible({ timeout: 15_000 });
-	await expect(pill, "widget-local pill title should match gate truth").toHaveAttribute("title", new RegExp(`Goal status: ${passed}/${total} gates passed`), { timeout: 15_000 });
-	await expect(pill.locator(`span[title="${title}"]`).first(), "widget pill shared badge should match sidebar badge").toBeVisible({ timeout: 15_000 });
-
-	await ensureGoalWidgetPopoverOpen(page);
-	await expect(page.locator(`#goal-status-dropdown span[title="${title}"]`).first(), "widget popover shared badge should match sidebar badge").toBeVisible({ timeout: 15_000 });
-}
-
-async function expectDashboardGateCount(page: Page, passed: number, total: number): Promise<void> {
-	await expect(page.locator(".wf-checklist-count").first()).toHaveText(`${passed}/${total} passed`, { timeout: 15_000 });
-	await expect(page.locator(".wf-progress-label").first()).toHaveText(`${passed}/${total} gates passed`, { timeout: 15_000 });
-}
-
 async function addInlineAnnotationToActiveReview(page: Page, comment: string): Promise<void> {
 	await page.evaluate(({ commentText, quoteText }) => {
 		const doc = document.querySelector("review-document") as any;
@@ -803,86 +770,6 @@ test.describe("<goal-status-widget>", () => {
 			await expect(page.locator(`[data-testid="goal-dashboard-signal-entry"][data-signal-id="${signalId}"]`)).toHaveAttribute("data-focused", "true", { timeout: 10_000 });
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => { /* ignore */ });
-			await deleteGoal(goalId).catch(() => { /* ignore */ });
-		}
-	});
-
-	test("API gate_reset keeps sidebar badge, widget pill/popover, dashboard, and reload truth in sync", async ({ page, context }) => {
-		test.setTimeout(60_000);
-		const goal = await createGoal({
-			title: `Goal-Status-Widget Reset Sync ${Date.now()}`,
-			workflowId: "test-fast",
-			worktree: false,
-			team: true,
-			autoStartTeam: false,
-		});
-		const goalId = goal.id;
-		let teamLeadId: string | undefined;
-		let dashboardPage: Page | undefined;
-		try {
-			teamLeadId = await startTeam(goalId);
-			await waitForSessionStatus(teamLeadId, "idle", 30_000);
-
-			await signalGoalGate(goalId, "design-doc", "# Design Doc\n\nInitial pass for cross-surface reset sync.");
-			await waitForGateStatus(goalId, "design-doc", "passed", 20_000);
-			await signalGoalGate(goalId, "implementation", "# Implementation\n\nInitial downstream pass.");
-			await waitForGateStatus(goalId, "implementation", "passed", 20_000);
-			await signalGoalGate(goalId, "ready-to-merge", "# Ready\n\nInitial transitive pass.");
-			await waitForGateStatus(goalId, "ready-to-merge", "passed", 20_000);
-
-			dashboardPage = await context.newPage();
-			await openApp(dashboardPage);
-			await navigateToHash(dashboardPage, `#/goal/${goalId}?tab=gates`);
-			await expectDashboardGateCount(dashboardPage, 3, 3);
-			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await expectDashboardGateStatus(dashboardPage, gateId, "passed");
-			}
-
-			await openApp(page);
-			await openSession(page, teamLeadId);
-			await expectSidebarGateBadge(page, goalId, 3, 3);
-			await expectWidgetGateSummary(page, 3, 3);
-			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await ensureGoalWidgetGateVisible(page, gateId);
-				await expect(page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`))
-					.toHaveAttribute("data-gate-status", "passed", { timeout: 10_000 });
-			}
-
-			const resetBody = await resetGoalGate(goalId, "design-doc");
-			expect(resetBody.affectedGateIds).toEqual(expect.arrayContaining(["design-doc", "implementation", "ready-to-merge"]));
-			expect(resetBody.changedGateIds).toEqual(expect.arrayContaining(["design-doc", "implementation", "ready-to-merge"]));
-
-			await expectSidebarGateBadge(page, goalId, 0, 3);
-			await expectWidgetGateSummary(page, 0, 3);
-			await expectDashboardGateCount(dashboardPage, 0, 3);
-			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await waitForGateStatus(goalId, gateId, "pending", 20_000);
-				await ensureGoalWidgetGateVisible(page, gateId);
-				await expect(page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`))
-					.toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
-				await expectDashboardGateStatus(dashboardPage, gateId, "pending");
-			}
-
-			await page.reload();
-			await openSession(page, teamLeadId);
-			await expectSidebarGateBadge(page, goalId, 0, 3);
-			await expectWidgetGateSummary(page, 0, 3);
-			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await ensureGoalWidgetGateVisible(page, gateId);
-				await expect(page.locator(`[data-testid="goal-widget-gate"][data-gate-id="${gateId}"]`))
-					.toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
-			}
-
-			await dashboardPage.reload();
-			await navigateToHash(dashboardPage, `#/goal/${goalId}?tab=gates`);
-			await expectDashboardGateCount(dashboardPage, 0, 3);
-			for (const gateId of ["design-doc", "implementation", "ready-to-merge"]) {
-				await expectDashboardGateStatus(dashboardPage, gateId, "pending");
-			}
-		} finally {
-			if (dashboardPage) await dashboardPage.close().catch(() => { /* ignore */ });
-			if (teamLeadId) await deleteSession(teamLeadId).catch(() => { /* ignore */ });
-			await teardownTeam(goalId).catch(() => { /* ignore */ });
 			await deleteGoal(goalId).catch(() => { /* ignore */ });
 		}
 	});

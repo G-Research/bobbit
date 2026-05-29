@@ -767,61 +767,6 @@ async function fetchGoalGatesWithSignoffCount(goalId: string): Promise<{ gates: 
 	}
 }
 
-export const GATE_STATUS_CACHE_UPDATED_EVENT = "bobbit-gate-status-cache-updated";
-
-function emitGateStatusCacheUpdated(goalIds: string[]): void {
-	if (goalIds.length === 0 || typeof window === "undefined") return;
-	window.dispatchEvent(new CustomEvent(GATE_STATUS_CACHE_UPDATED_EVENT, { detail: { goalIds } }));
-}
-
-type GateStatusSummary = {
-	passed: number;
-	total: number;
-	verifying: boolean;
-	verifyingCount: number;
-	awaitingSignoffCount: number;
-	awaitingHumanSignoff: boolean;
-};
-
-const GATE_STATUS_INVALIDATION_DEBOUNCE_MS = 75;
-const _gateStatusInvalidateTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const _gateStatusInFlight = new Set<string>();
-const _gateStatusTrailing = new Set<string>();
-
-function deriveGateStatusSummary(goalId: string, gates: GateState[], awaitingSignoffCount: number): GateStatusSummary | null {
-	const goal = state.goals.find(g => g.id === goalId);
-	if (!goal?.workflow?.gates.length) return null;
-	const passed = gates.filter(gs => gs.status === "passed").length;
-	const total = goal.workflow.gates.length;
-	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
-	const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some((s: any) => s.verification?.status === "running")).length;
-	const awaitingHumanSignoff = awaitingSignoffCount > 0;
-	return { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff };
-}
-
-function applyGateStatusSummary(goalId: string, next: GateStatusSummary | null, skipRender = false): boolean {
-	if (!next) return false;
-	const prev = state.gateStatusCache.get(goalId);
-	if (prev
-		&& prev.passed === next.passed
-		&& prev.total === next.total
-		&& prev.verifying === next.verifying
-		&& prev.verifyingCount === next.verifyingCount
-		&& prev.awaitingSignoffCount === next.awaitingSignoffCount
-		&& prev.awaitingHumanSignoff === next.awaitingHumanSignoff) {
-		return false;
-	}
-	state.gateStatusCache.set(goalId, next);
-	emitGateStatusCacheUpdated([goalId]);
-	if (!skipRender) renderApp();
-	return true;
-}
-
-async function refreshGateStatusForGoalInternal(goalId: string, skipRender = false): Promise<boolean> {
-	const { gates, awaitingSignoffCount } = await fetchGoalGatesWithSignoffCount(goalId);
-	return applyGateStatusSummary(goalId, deriveGateStatusSummary(goalId, gates, awaitingSignoffCount), skipRender);
-}
-
 /** Fetch gate statuses for all goals with workflows and update the cache.
  *  Returns true if any data changed. When skipRender is true, the caller is responsible for renderApp(). */
 async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
@@ -831,52 +776,54 @@ async function refreshGateStatusCache(skipRender = false): Promise<boolean> {
 	const results = await Promise.all(
 		goalsWithWorkflow.map(async (g) => {
 			const { gates, awaitingSignoffCount } = await fetchGoalGatesWithSignoffCount(g.id);
-			return { goalId: g.id, summary: deriveGateStatusSummary(g.id, gates, awaitingSignoffCount) };
+			const passed = gates.filter(gs => gs.status === "passed").length;
+			const total = g.workflow!.gates.length;
+			const verifying = gates.some(gs => gs.signals?.some(s => s.verification?.status === "running"));
+			const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some(s => s.verification?.status === "running")).length;
+			return { goalId: g.id, passed, total, verifying, verifyingCount, awaitingSignoffCount };
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, summary } of results) {
-		changed = applyGateStatusSummary(goalId, summary, true) || changed;
+	for (const { goalId, passed, total, verifying, verifyingCount, awaitingSignoffCount } of results) {
+		const awaitingHumanSignoff = awaitingSignoffCount > 0;
+		const prev = state.gateStatusCache.get(goalId);
+		if (!prev
+			|| prev.passed !== passed
+			|| prev.total !== total
+			|| prev.verifying !== verifying
+			|| prev.verifyingCount !== verifyingCount
+			|| prev.awaitingSignoffCount !== awaitingSignoffCount
+			|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
+			state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
+			changed = true;
+		}
 	}
 	if (changed && !skipRender) renderApp();
 	return changed;
 }
 
-/** Refresh gate status cache for a single goal immediately. */
+/** Refresh gate status cache for a single goal (called from WS event handlers). */
 export async function refreshGateStatusForGoal(goalId: string): Promise<void> {
-	await refreshGateStatusForGoalInternal(goalId);
-}
-
-async function runInvalidatedGateStatusRefresh(goalId: string): Promise<void> {
-	if (_gateStatusInFlight.has(goalId)) {
-		_gateStatusTrailing.add(goalId);
-		return;
+	const goal = state.goals.find(g => g.id === goalId);
+	if (!goal?.workflow?.gates.length) return;
+	const { gates, awaitingSignoffCount } = await fetchGoalGatesWithSignoffCount(goalId);
+	const passed = gates.filter(gs => gs.status === "passed").length;
+	const total = goal.workflow.gates.length;
+	const verifying = gates.some(gs => gs.signals?.some((s: any) => s.verification?.status === "running"));
+	const verifyingCount = gates.filter(gs => gs.status !== "passed" && gs.signals?.some((s: any) => s.verification?.status === "running")).length;
+	const awaitingHumanSignoff = awaitingSignoffCount > 0;
+	const prev = state.gateStatusCache.get(goalId);
+	if (!prev
+		|| prev.passed !== passed
+		|| prev.total !== total
+		|| prev.verifying !== verifying
+		|| prev.verifyingCount !== verifyingCount
+		|| prev.awaitingSignoffCount !== awaitingSignoffCount
+		|| prev.awaitingHumanSignoff !== awaitingHumanSignoff) {
+		state.gateStatusCache.set(goalId, { passed, total, verifying, verifyingCount, awaitingSignoffCount, awaitingHumanSignoff });
+		renderApp();
 	}
-	_gateStatusInFlight.add(goalId);
-	try {
-		await refreshGateStatusForGoalInternal(goalId);
-	} finally {
-		_gateStatusInFlight.delete(goalId);
-		if (_gateStatusTrailing.delete(goalId)) {
-			invalidateGateStatusForGoal(goalId, "trailing");
-		}
-	}
-}
-
-/** Schedule a debounced per-goal gate status summary refresh from live events. */
-export function invalidateGateStatusForGoal(goalId: string | null | undefined, _reason = "gate-summary-invalidated"): void {
-	if (!goalId) return;
-	if (_gateStatusInFlight.has(goalId)) {
-		_gateStatusTrailing.add(goalId);
-		return;
-	}
-	const existing = _gateStatusInvalidateTimers.get(goalId);
-	if (existing) clearTimeout(existing);
-	_gateStatusInvalidateTimers.set(goalId, setTimeout(() => {
-		_gateStatusInvalidateTimers.delete(goalId);
-		void runInvalidatedGateStatusRefresh(goalId);
-	}, GATE_STATUS_INVALIDATION_DEBOUNCE_MS));
 }
 
 /** Fetch PR status for all goals with branches and update the cache.

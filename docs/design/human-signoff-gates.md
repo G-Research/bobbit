@@ -139,16 +139,15 @@ predicate:
   endpoint does not include the count — only the summary view (which
   sidebar polling already used) carries it. The cache-refresh fetch in
   `src/app/api.ts` uses `?view=summary`.
-- **Client.** `src/app/remote-agent.ts` handles
-  `gate_verification_awaiting_human` and the other count-changing gate
-  lifecycle events by calling the shared per-goal summary invalidator, so the
-  cache picks up the bit on park. Resolution clears it through the immediate
-  review-pane refresh after `/signoff` plus the follow-up
-  `gate_verification_step_complete` invalidation.
+- **Client.** `src/app/remote-agent.ts` handles the new
+  `gate_verification_awaiting_human` WS event by calling
+  `refreshGateStatusForGoal()` so the cache picks up the bit on park.
+  Resolution clears it via the existing `gate_verification_step_complete`
+  handler that already refreshes the cache.
 
 Without both, the policy data path is dead — rule 2 stays dormant
-indefinitely. See [gate-status-sync.md](../gate-status-sync.md) for the current
-cross-surface cache contract.
+indefinitely. That was the regression that the implementation gate's gap
+analysis caught and signal #8 fixed (`a75ca58`).
 
 ## Key files
 
@@ -164,7 +163,7 @@ cross-surface cache contract.
 | `src/ui/components/AgentInterface.ts` | Mounts `<goal-status-widget>` next to `<git-status-widget>` for any session with a `goalId` / `teamGoalId` |
 | `src/app/render-helpers.ts` | `renderGateProgressBadge` and `renderGateStatusIcon` — shared visual vocabulary between sidebar, widget, and dashboard |
 | `src/app/notification-policy.ts` | `needsHumanAttention` + `needsImmediateHumanAttention` predicates |
-| `src/app/api.ts` · `src/app/remote-agent.ts` | Shared summary refresh, debounced gate status invalidation, and WS handlers for count-changing gate events |
+| `src/app/api.ts` · `src/app/remote-agent.ts` | Cache refresh wiring (`?view=summary` fetch + WS handler for `gate_verification_awaiting_human`) |
 | `src/app/state.ts` | `gateStatusCache` value shape — `awaitingHumanSignoff: boolean`; review document/source state |
 
 ## Pinning tests
