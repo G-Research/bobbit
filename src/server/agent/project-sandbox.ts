@@ -154,6 +154,7 @@ export interface ProjectSandboxOptions {
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
+	sandboxAgentAuthAllowed?: boolean;
 	githubToken?: string;      // for git push/PR inside container
 	/** Tool manager for resolving builtin tools directory in Docker mounts. */
 	toolManager?: ToolManager;
@@ -696,7 +697,7 @@ export class ProjectSandbox {
 	}
 
 	private async _createContainer(): Promise<void> {
-		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, githubToken } = this.options;
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, githubToken } = this.options;
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
@@ -727,6 +728,7 @@ export class ProjectSandbox {
 			pidsLimit: "0",  // unlimited — long-lived container runs many agents
 			sandboxMounts,
 			sandboxCredentials,
+			sandboxAgentAuthAllowed,
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
 		});

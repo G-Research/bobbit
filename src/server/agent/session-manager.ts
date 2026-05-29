@@ -1235,12 +1235,19 @@ export class SessionManager {
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get secretsStore from project context if available
-		const secretsStore = (opts?.projectId && this.projectContextManager)
-			? this.projectContextManager.getOrCreate(opts.projectId)?.secretsStore ?? null
+		// Get project-scoped config/secrets when available.
+		const projectContext = (opts?.projectId && this.projectContextManager)
+			? this.projectContextManager.getOrCreate(opts.projectId)
 			: null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, this.projectConfigStore, secretsStore);
-		ensureSandboxAgentAuthFile(this.preferencesStore);
+		const projectConfigStore = projectContext?.projectConfigStore ?? this.projectConfigStore;
+		const secretsStore = projectContext?.secretsStore ?? null;
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore);
+		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
+		ensureSandboxAgentAuthFile({
+			prefs: this.preferencesStore,
+			includeCodexAuth: sandboxTokenEntries.length === 0 || sandboxTokenPolicyAllowsCodexAuth(sandboxTokenEntries),
+			scope: opts?.projectId,
+		});
 
 		return true;
 	}
@@ -5748,7 +5755,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, resolveHostTokenValue } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

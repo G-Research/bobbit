@@ -10,6 +10,7 @@ import {
 	ensureSandboxAgentAuthFile,
 	resolveHostTokenValue,
 	sandboxAgentAuthPath,
+	sandboxTokenPolicyAllowsCodexAuth,
 } from "../src/server/agent/host-tokens.js";
 
 const previousEnv: Record<string, string | undefined> = {};
@@ -60,38 +61,90 @@ describe("sandbox OpenAI Codex auth", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("writes a minimal sandbox auth.json with only the OpenAI Codex credential", () => {
+	it("writes empty sandbox auth.json when OpenAI/Codex is not allowed", () => {
 		writeAuthJson({
 			"openai-codex": { type: "oauth", access: "codex-access", refresh: "codex-refresh" },
 			anthropic: { type: "oauth", access: "anthropic-access" },
 			openai: { type: "api_key", key: "sk-openai" },
 		});
 
-		const auth = buildSandboxAgentAuthJson();
-		assert.deepEqual(Object.keys(auth), ["openai-codex"]);
-		assert.equal(auth["openai-codex"].access, "codex-access");
+		const auth = buildSandboxAgentAuthJson({ includeCodexAuth: false });
+		assert.deepEqual(auth, {});
 
-		const file = ensureSandboxAgentAuthFile();
-		assert.equal(file, sandboxAgentAuthPath());
-		const written = JSON.parse(readFileSync(file, "utf-8"));
-		assert.deepEqual(Object.keys(written), ["openai-codex"]);
+		const file = ensureSandboxAgentAuthFile({ includeCodexAuth: false, scope: "excluded-project" });
+		assert.equal(file, sandboxAgentAuthPath("excluded-project"));
+		const written = readFileSync(file, "utf-8");
+		assert.equal(written.includes("codex-access"), false);
+		assert.deepEqual(JSON.parse(written), {});
 	});
 
-	it("mounts sanitized sandbox auth.json, never the host auth.json or full agent dir", () => {
+	it("writes a minimal sandbox auth.json with only allowed OpenAI Codex fields", () => {
+		writeAuthJson({
+			"openai-codex": {
+				type: "oauth",
+				access: "codex-access",
+				refresh: "codex-refresh",
+				expires: 12345,
+				accountId: "must-not-copy",
+				profile: { email: "user@example.test" },
+			},
+			anthropic: { type: "oauth", access: "anthropic-access" },
+			openai: { type: "api_key", key: "sk-openai" },
+		});
+
+		const auth = buildSandboxAgentAuthJson({ includeCodexAuth: true });
+		assert.deepEqual(auth, {
+			"openai-codex": { type: "oauth", access: "codex-access", refresh: "codex-refresh", expires: 12345 },
+		});
+
+		const file = ensureSandboxAgentAuthFile({ includeCodexAuth: true, scope: "allowed-project" });
+		assert.equal(file, sandboxAgentAuthPath("allowed-project"));
+		const written = JSON.parse(readFileSync(file, "utf-8"));
+		assert.deepEqual(written, auth);
+	});
+
+	it("mounts empty auth.json when sandbox token policy excludes OpenAI/Codex", () => {
 		writeAuthJson({
 			"openai-codex": { type: "oauth", access: "codex-access" },
 			anthropic: { type: "oauth", access: "anthropic-access" },
 		});
 
-		const args = buildDockerRunArgs({ image: "test", workspaceDir: path.join(root, "workspace") });
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: path.join(root, "workspace"),
+			projectId: "excluded-project",
+			sandboxAgentAuthAllowed: sandboxTokenPolicyAllowsCodexAuth([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }]),
+		});
 		const volumes = dockerVolumes(args);
 		const authMount = volumes.find((v) => v.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
 		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
-		assert.ok(!authMount.startsWith(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
+		assert.ok(!authMount.includes(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
 		assert.ok(!volumes.some((v) => v === `${agentDir}:/home/node/.bobbit/agent` || v === `${agentDir}:/home/node/.bobbit/agent:ro`));
 
-		const written = JSON.parse(readFileSync(sandboxAgentAuthPath(), "utf-8"));
-		assert.deepEqual(Object.keys(written), ["openai-codex"]);
+		const written = readFileSync(sandboxAgentAuthPath("excluded-project"), "utf-8");
+		assert.equal(written.includes("codex-access"), false);
+		assert.deepEqual(JSON.parse(written), {});
+	});
+
+	it("mounts scoped sanitized auth.json when sandbox token policy allows OpenAI Codex", () => {
+		writeAuthJson({
+			"openai-codex": { type: "api_key", key: "codex-key", extra: "must-not-copy" },
+			anthropic: { type: "oauth", access: "anthropic-access" },
+		});
+
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: path.join(root, "workspace"),
+			projectId: "allowed-project",
+			sandboxAgentAuthAllowed: sandboxTokenPolicyAllowsCodexAuth([{ key: "OPENAI_CODEX_AUTH", enabled: true }]),
+		});
+		const volumes = dockerVolumes(args);
+		const authMount = volumes.find((v) => v.endsWith(":/home/node/.bobbit/agent/auth.json:ro"));
+		assert.ok(authMount, "sandbox auth.json should be mounted read-only");
+		assert.ok(!authMount.includes(path.join(agentDir, "auth.json")), "must not mount the full host auth.json");
+
+		const written = JSON.parse(readFileSync(sandboxAgentAuthPath("allowed-project"), "utf-8"));
+		assert.deepEqual(written, { "openai-codex": { type: "api_key", key: "codex-key" } });
 	});
 
 	it("keeps existing sandbox env-token resolution for Anthropic and OpenAI API keys", async () => {
