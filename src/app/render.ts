@@ -5,6 +5,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
+import { fixturePrWalkthroughCards, type PrWalkthroughCard, type PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/index.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
 import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
@@ -94,6 +95,7 @@ import {
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import { openPrWalkthroughPanel, type OpenPrWalkthroughInput } from "./pr-walkthrough.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -197,6 +199,23 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
 window.addEventListener("bobbit-open-review-document", (e: Event) => {
 	const doc = openReviewDocumentFromEvent((e as CustomEvent).detail, activeSessionId() || "");
 	if (!doc) showHeaderToast("Could not open review document");
+});
+
+document.addEventListener("open-pr-walkthrough", (e: Event) => {
+	const detail = ((e as CustomEvent).detail || {}) as Record<string, unknown>;
+	openPrWalkthroughPanel(state, activeSessionId() || "", {
+		baseSha: typeof detail.baseSha === "string" ? detail.baseSha : undefined,
+		headSha: typeof detail.headSha === "string" ? detail.headSha : undefined,
+		prNumber: typeof detail.prNumber === "string" || typeof detail.prNumber === "number"
+			? detail.prNumber
+			: typeof detail.number === "string" || typeof detail.number === "number"
+				? detail.number
+				: undefined,
+		url: typeof detail.url === "string" ? detail.url : typeof detail.prUrl === "string" ? detail.prUrl : undefined,
+		title: typeof detail.title === "string" ? detail.title : undefined,
+		provider: typeof detail.provider === "string" ? detail.provider : undefined,
+	} satisfies OpenPrWalkthroughInput);
+	renderApp();
 });
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
@@ -2059,6 +2078,39 @@ export function doRenderApp(): void {
 		return lazyProposalPanels.proposalPanelContent(tab, currentAssistantProposalType);
 	};
 
+	const walkthroughChangesetFromTab = (tab: UnifiedContentTab): PrWalkthroughChangesetRef => {
+		const source = (tab.source || {}) as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const stored = tabState.changeset;
+		if (stored && typeof stored === "object") return stored as PrWalkthroughChangesetRef;
+		return {
+			baseSha: typeof source.baseSha === "string" && source.baseSha ? source.baseSha : "fixture-base",
+			headSha: typeof source.headSha === "string" && source.headSha ? source.headSha : "fixture-head",
+			provider: typeof source.provider === "string" ? source.provider : undefined,
+			externalUrl: typeof source.externalUrl === "string" ? source.externalUrl : undefined,
+			title: typeof source.title === "string" ? source.title : tab.title,
+		};
+	};
+
+	const walkthroughCardsForChangeset = (changeset: PrWalkthroughChangesetRef): PrWalkthroughCard[] => {
+		const fixtureCards = fixturePrWalkthroughCards as unknown as PrWalkthroughCard[] | ((changeset: PrWalkthroughChangesetRef) => PrWalkthroughCard[]);
+		return typeof fixtureCards === "function" ? fixtureCards(changeset) : fixtureCards;
+	};
+
+	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "walkthrough") return "";
+		const changeset = walkthroughChangesetFromTab(tab);
+		const cards = walkthroughCardsForChangeset(changeset);
+		return html`
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id}>
+				<pr-walkthrough-panel
+					.changeset=${changeset}
+					.cards=${cards}
+				></pr-walkthrough-panel>
+			</div>
+		`;
+	};
+
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
@@ -2072,6 +2124,7 @@ export function doRenderApp(): void {
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
 			return proposalPanelContent(tab);
 		}
+		if (tab.kind === "walkthrough") return walkthroughPanelContent(tab);
 		return "";
 	};
 
