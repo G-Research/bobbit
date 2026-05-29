@@ -13,7 +13,7 @@
  *   - "minimal"/"low"/"medium"/"high" are supported iff the model has
  *     `reasoning === true`.
  *   - Fallback heuristic: "xhigh" is supported by:
- *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, -4-7, …)
+ *       • Anthropic Claude Opus 4.6+ (claude-opus-4-6, claude-opus-4.8, …)
  *       • OpenAI gpt-5.1-codex-max
  *       • OpenAI gpt-5.2* / gpt-5.4* / gpt-5.5*
  *
@@ -93,12 +93,12 @@ function providerMatches(provider: string, canonical: "anthropic" | "openai"): b
 
 /**
  * Does the given model's id/provider indicate Anthropic Opus 4.6 or later?
- * Matches `claude-opus-4-N` where N is 6..9 or any 2+ digit number, so
- * future 4.10+ revisions work without a code change.
+ * Matches `claude-opus-4-N` and `claude-opus-4.N` where N is 6..9 or any
+ * 2+ digit number, so future 4.10+ revisions work without a code change.
  */
 function isOpusXHigh(id: string, provider: string): boolean {
 	if (!providerMatches(provider, "anthropic")) return false;
-	return /claude-opus-4-(?:[6-9]|\d{2,})\b/i.test(id);
+	return /claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i.test(id);
 }
 
 /**
