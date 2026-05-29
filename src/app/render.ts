@@ -92,6 +92,7 @@ import {
 	reviewPanelTabId,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
+	walkthroughPanelTabId,
 	setPanelTabsForSession,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
@@ -2097,17 +2098,17 @@ export function doRenderApp(): void {
 
 	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
 		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
+		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
 		return html`
 			${walkthroughPrLink(tab)}
-			<a
-				href=${prWalkthroughStandaloneHref(sid, tab.id)}
-				target="_blank"
-				rel="noopener noreferrer"
+			<button
+				type="button"
 				class="text-muted-foreground hover:text-foreground"
 				style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;"
 				title="Open walkthrough in new tab"
-				data-testid="pr-walkthrough-open-standalone"
-			>${icon(ExternalLink, "sm")}</a>
+				data-testid="pr-walkthrough-open-in-new-tab"
+				@click=${() => window.open(`${window.location.origin}${standaloneUrl}`, "_blank", "noopener")}
+			>${icon(ExternalLink, "sm")}</button>
 		`;
 	};
 
@@ -2149,7 +2150,10 @@ export function doRenderApp(): void {
 			baseSha: typeof source.baseSha === "string" && source.baseSha ? source.baseSha : "fixture-base",
 			headSha: typeof source.headSha === "string" && source.headSha ? source.headSha : "fixture-head",
 			provider: typeof source.provider === "string" ? source.provider : undefined,
-			externalUrl: typeof source.externalUrl === "string" ? source.externalUrl : undefined,
+			externalUrl: typeof source.externalUrl === "string" ? source.externalUrl : typeof source.prUrl === "string" ? source.prUrl : undefined,
+			prUrl: typeof source.prUrl === "string" ? source.prUrl : typeof source.externalUrl === "string" ? source.externalUrl : undefined,
+			prNumber: typeof source.prNumber === "string" || typeof source.prNumber === "number" ? source.prNumber : undefined,
+			prTitle: typeof source.prTitle === "string" ? source.prTitle : undefined,
 			title: typeof source.title === "string" ? source.title : tab.title,
 		};
 	};
@@ -2177,18 +2181,23 @@ export function doRenderApp(): void {
 	const standaloneWalkthroughPanel = () => {
 		const route = getRouteFromHash();
 		const sid = route.walkthroughSessionId || workspaceSessionId();
-		const tabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, sid);
-		const tab = panelTabsForSession(state, sid).find((candidate) => candidate.id === tabId && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
-		if (!tab) {
-			return html`
-				<div class="flex-1 min-h-0 flex items-center justify-center p-6 text-center text-sm text-muted-foreground">
-					<div>
-						<div class="font-medium text-foreground mb-1">Walkthrough not found</div>
-						<div>This standalone link points at a walkthrough tab that is not available in this browser.</div>
-					</div>
-				</div>
-			`;
-		}
+		const rawTabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, sid);
+		const tabId = rawTabId && rawTabId.startsWith("walkthrough:") && !rawTabId.includes("%")
+			? walkthroughPanelTabId(rawTabId.slice("walkthrough:".length))
+			: rawTabId;
+		const tabCandidates = [tabId, rawTabId].filter(Boolean);
+		const storedTab = panelTabsForSession(state, sid).find((candidate) => tabCandidates.includes(candidate.id) && candidate.kind === "walkthrough") as UnifiedContentTab | undefined;
+		const tab = storedTab
+			? (tabId && storedTab.id !== tabId ? { ...storedTab, id: tabId } as UnifiedContentTab : storedTab)
+			: {
+				id: tabId && tabId.startsWith("walkthrough:") ? tabId : "walkthrough:fixture",
+				kind: "walkthrough" as const,
+				title: "PR Walkthrough",
+				label: "Walkthrough",
+				legacyTab: "walkthrough" as const,
+				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough" },
+				state: {},
+			} as UnifiedContentTab;
 		return html`
 			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
 				<div class="flex items-center justify-between gap-3 px-4 py-2 border-b border-border shrink-0" style="background:var(--background);">

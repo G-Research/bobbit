@@ -138,7 +138,7 @@ export function prWalkthroughStandaloneHref(sessionId: string, tabId: string): s
 	const params = new URLSearchParams();
 	if (sessionId) params.set("session", sessionId);
 	params.set("tab", tabId);
-	return `#/walkthrough?${params.toString()}`;
+	return `/walkthrough?${params.toString()}`;
 }
 
 export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): PanelWorkspaceTab {

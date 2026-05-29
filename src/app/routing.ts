@@ -29,6 +29,15 @@ const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "comm
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
 export function getRouteFromHash(): AppRoute {
+	const path = window.location.pathname || "";
+	if (path === "/walkthrough" || path.endsWith("/walkthrough")) {
+		const params = new URLSearchParams(window.location.search || "");
+		return {
+			view: "walkthrough",
+			walkthroughSessionId: params.get("session") || undefined,
+			walkthroughTabId: params.get("tab") || undefined,
+		};
+	}
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");

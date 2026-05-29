@@ -613,15 +613,15 @@ export class PrWalkthroughPanel extends LitElement {
 			? `Submit review (${completed}/${this.reviewCards.length})`
 			: this.currentDraftHasConcerns ? "Submit review · request changes" : "Submit review · approve";
 		return html`
-			<header class="header" data-testid="pr-walkthrough-review-header">
-				<div class="title-wrap">
+			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
+				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
 					<div class="kicker">${identity.kicker}</div>
 					<h1 class="title" title=${identity.title}>${identity.title}</h1>
 				</div>
 				<span class="stats" data-testid="pr-walkthrough-pr-stats">
-					<span class="stat-files">${stats.files} files</span>
-					<span class="stat-add">+${this.formatNumber(stats.additions)}</span>
-					<span class="stat-del">-${this.formatNumber(stats.deletions)}</span>
+					<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
+					<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
+					<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
 				</span>
 				<span class="header-pill ask">Ask via Bobbit chat outside this pane</span>
 				${identity.url ? html`
@@ -720,10 +720,10 @@ export class PrWalkthroughPanel extends LitElement {
 			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<div class="inner">
 					<section class="card-head">
-						<div class="phase-label">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
-						<h2>${card.title}</h2>
+						<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
+						<h2 data-testid="pr-walkthrough-card-title">${card.title}</h2>
 						<div class="meta2">Card ${cardIndex + 1} of ${phaseCards.length} · logical change set</div>
-						<p class="summary">${card.summary}</p>
+						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
 					</section>
@@ -754,7 +754,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const collapsed = this._collapsedDiffBlockIds.includes(block.id);
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
 		return html`
-			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode}>
+			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode} data-expanded=${collapsed ? "false" : "true"}>
 				<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
 					<span class="caret">▸</span>
 					<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
