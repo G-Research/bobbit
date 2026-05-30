@@ -79,6 +79,7 @@ import {
 	isHistoricalProposalTab,
 	isLivePreviewTab,
 	isPinnedPanelTab,
+	markPreviewContentDismissed,
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
 	normalizeSidePanelTabs,
@@ -1773,6 +1774,7 @@ export function doRenderApp(): void {
 			}
 		}
 		if (tab.kind === "preview") {
+			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
 				state.isPreviewSession = false;

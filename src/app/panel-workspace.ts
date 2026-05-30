@@ -58,6 +58,7 @@ export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
 const PANEL_TABS_STORAGE_KEY = "bobbit-panel-tabs-by-session";
 const PANEL_ACTIVE_STORAGE_KEY = "bobbit-panel-active-by-session";
 const PANEL_VERSIONS_STORAGE_KEY = "bobbit-preview-versions-by-session";
+const PREVIEW_DISMISSED_STORAGE_KEY = "bobbit-preview-dismissed-by-session";
 
 function hasLocalStorage(): boolean {
 	try { return typeof localStorage !== "undefined"; } catch { return false; }
@@ -76,6 +77,30 @@ function safeReadObject(key: string): Record<string, unknown> | undefined {
 function safeWriteObject(key: string, value: unknown): void {
 	if (!hasLocalStorage()) return;
 	try { localStorage.setItem(key, JSON.stringify(value || {})); } catch { /* quota/SSR */ }
+}
+
+function previewDismissFingerprint(entry: string | undefined | null, contentHash: string | undefined | null): string {
+	const hash = normalizePreviewContentHash(contentHash);
+	return hash ? `${previewEntryLabel(entry)}\n${hash}` : "";
+}
+
+export function markPreviewContentDismissed(sessionId: string | null | undefined, entry: string | undefined | null, contentHash: string | undefined | null): void {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const fingerprint = previewDismissFingerprint(entry, contentHash);
+	if (!fingerprint) return;
+	const store = safeReadObject(PREVIEW_DISMISSED_STORAGE_KEY) ?? {};
+	const list = Array.isArray(store[sid]) ? store[sid].filter((value): value is string => typeof value === "string") : [];
+	if (!list.includes(fingerprint)) store[sid] = [...list, fingerprint].slice(-50);
+	safeWriteObject(PREVIEW_DISMISSED_STORAGE_KEY, store);
+}
+
+export function isPreviewContentDismissed(sessionId: string | null | undefined, entry: string | undefined | null, contentHash: string | undefined | null): boolean {
+	const sid = panelWorkspaceSessionKey(sessionId);
+	const fingerprint = previewDismissFingerprint(entry, contentHash);
+	if (!fingerprint) return false;
+	const store = safeReadObject(PREVIEW_DISMISSED_STORAGE_KEY);
+	const list = store && Array.isArray(store[sid]) ? store[sid] : [];
+	return list.includes(fingerprint);
 }
 
 export function loadPersistedPanelWorkspace(stateLike: any): void {
