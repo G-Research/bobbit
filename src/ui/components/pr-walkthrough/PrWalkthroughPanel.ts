@@ -482,8 +482,10 @@ export class PrWalkthroughPanel extends LitElement {
 		.collapsed-phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
 		.phase-pip { width: 24px; height: 24px; padding: 0; border: 0; font-size: 11px; font-weight: 800; }
 		.phase-pip.complete { background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.card-dot { width: 10px; height: 10px; border: 0; }
-		.card-dot.disliked { background: var(--negative, red); opacity: 1; }
+		.card-dot { width: 10px; height: 10px; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; }
+		.card-dot.complete { background: color-mix(in oklch, var(--positive, var(--primary, Highlight)) 22%, transparent); border-color: var(--positive, var(--primary, Highlight)); }
+		.card-dot.active { background: var(--primary, Highlight); border-color: var(--primary, Highlight); }
+		.card-dot.disliked { background: var(--negative, red); border-color: var(--negative, red); opacity: 1; }
 		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
 		.inner { max-width: 1120px; margin: 0 auto; }
 		.card { display: block; max-width: none; }
