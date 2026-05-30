@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
@@ -97,6 +98,7 @@ export type PrWalkthroughRouteDeps = {
 	sessionManager?: WalkthroughSessionManagerLike;
 	broadcast?: (event: Record<string, unknown>) => void;
 	walkthroughAgentManager?: WalkthroughAgentManager;
+	sandboxScope?: SandboxScope;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -149,6 +151,11 @@ export async function handlePrWalkthroughApiRoute(
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
 				fail(400, "Invalid YAML submit request");
+				return true;
+			}
+			const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+			if (deps.sandboxScope && (!sessionId || !deps.sandboxScope.sessionIds.has(sessionId))) {
+				fail(403, "Forbidden: PR walkthrough YAML submit session is outside sandbox scope", { code: "SANDBOX_SESSION_OUT_OF_SCOPE" });
 				return true;
 			}
 			const manager = getWalkthroughAgentManager(deps);

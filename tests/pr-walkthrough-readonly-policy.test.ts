@@ -74,8 +74,12 @@ describe("PR walkthrough readonly command policy", () => {
 
 	it("blocks filesystem escapes, writes, and shell metacharacter bypasses", () => {
 		blocked("cat /etc/passwd", /absolute paths/);
-		blocked("cat C:\\Windows\\win.ini", /absolute paths/);
+		blocked(String.raw`cat C:\Windows\win.ini`, /absolute paths/);
+		blocked("cat C:/Windows/win.ini", /absolute paths/);
+		blocked(String.raw`cat \\server\share\secret`, /absolute paths/);
 		blocked("cat ../package.json", /parent-directory/);
+		blocked(String.raw`cat ..\package.json`, /parent-directory/);
+		blocked(String.raw`cat src\..\secret`, /parent-directory/);
 		blocked("cat ~/secret", /home-directory/);
 		blocked("cat $HOME/.ssh/config", /environment-variable/);
 		blocked("find .. -name '*.ts'", /parent-directory/);

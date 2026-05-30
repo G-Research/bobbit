@@ -328,9 +328,9 @@ export class WalkthroughAgentManager {
 	}
 
 	private shouldReuse(job: PrWalkthroughJobRecord): boolean {
-		if (job.status === "ready" || job.status === "error") return true;
 		const session = this.getSession(job.childSessionId);
-		return !session || (session.status !== "terminated" && session.status !== "archived" && session.archived !== true);
+		if (!session || session.status === "terminated" || session.status === "archived" || session.archived === true) return false;
+		return job.status === "ready" || job.status === "error" || job.status === "starting" || job.status === "waiting_for_yaml" || job.status === "validation_failed";
 	}
 
 	private applySessionMetadata(session: SessionLike, job: PrWalkthroughJobRecord): void {

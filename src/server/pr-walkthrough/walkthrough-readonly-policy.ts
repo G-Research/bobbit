@@ -48,17 +48,11 @@ function tokenize(command: string): { ok: true; argv: string[] } | { ok: false; 
 	const argv: string[] = [];
 	let current = "";
 	let quote: "'" | '"' | undefined;
-	let escaped = false;
 
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
-		if (escaped) {
-			current += ch;
-			escaped = false;
-			continue;
-		}
 		if (ch === "\\") {
-			escaped = true;
+			current += ch;
 			continue;
 		}
 		if (quote) {
@@ -80,7 +74,6 @@ function tokenize(command: string): { ok: true; argv: string[] } | { ok: false; 
 		current += ch;
 	}
 
-	if (escaped) current += "\\";
 	if (quote) return { ok: false, reason: "unterminated quoted string" };
 	if (current.length > 0) argv.push(current);
 	return { ok: true, argv };
