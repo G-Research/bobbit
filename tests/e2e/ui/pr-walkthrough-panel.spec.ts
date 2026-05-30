@@ -425,10 +425,16 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
 		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
-		await expect(toggles.first()).toContainText(/Show 4 lines above/i);
-		await expect(toggles.nth(1)).toContainText(/Show 4 lines below/i);
+		await expect(toggles.first(), "context controls should be icon-only").toHaveText("");
+		await expect(toggles.first()).toHaveAttribute("data-context-direction", "above");
+		await expect(toggles.first()).toHaveAttribute("title", /Show 4 more lines above/i);
+		await expect(toggles.nth(1)).toHaveAttribute("data-context-direction", "below");
+		await expect(toggles.nth(1)).toHaveAttribute("title", /Show 4 more lines below/i);
 		await toggles.first().click();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding context should reveal the full hunk").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding above context should reveal leading lines").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "trailing context should remain hidden until expanded below").toBeHidden();
+		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="below"]`).click();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "expanding below context should reveal trailing lines").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-context-toggle")).toBeHidden();
 	});
 

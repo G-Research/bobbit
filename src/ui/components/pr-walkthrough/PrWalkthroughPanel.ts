@@ -14,6 +14,7 @@ const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [
 ];
 
 const DEFAULT_DIFF_CONTEXT_LINES = 3;
+const DIFF_CONTEXT_EXPAND_LINES = 20;
 
 interface SideBySidePair {
 	left: PrWalkthroughDiffLine | null;
@@ -22,8 +23,13 @@ interface SideBySidePair {
 
 interface DiffContextEntry {
 	kind: "context";
-	label: string;
+	start: number;
+	end: number;
+	gapStart: number;
+	gapEnd: number;
 	hiddenCount: number;
+	canExpandAbove: boolean;
+	canExpandBelow: boolean;
 }
 
 interface DiffLineEntry {
@@ -32,6 +38,13 @@ interface DiffLineEntry {
 }
 
 type DiffRenderEntry = DiffContextEntry | DiffLineEntry;
+
+type DiffContextDirection = "above" | "below";
+
+interface DiffContextExpansion {
+	above?: number;
+	below?: number;
+}
 
 type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
 
@@ -119,7 +132,7 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _cardDrafts: Record<string, string> = {};
 	@state() private _dismissedSuggestionIds: string[] = [];
 	@state() private _collapsedDiffBlockIds: string[] = [];
-	@state() private _expandedContextHunkIds: string[] = [];
+	@state() private _contextExpansions: Record<string, DiffContextExpansion> = {};
 	@state() private _copied = false;
 	@state() private _exportPreviewOpen = false;
 	@state() private _exportPreviewLoading = false;
@@ -524,8 +537,10 @@ export class PrWalkthroughPanel extends LitElement {
 		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.context-toggle { width: 100%; min-width: max-content; padding: 5px 12px; border: 0; border-radius: 0; background: color-mix(in oklch, var(--primary, Highlight) 12%, transparent); color: var(--primary, Highlight); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
+		.context-controls { width: 100%; min-width: max-content; display: flex; align-items: center; gap: 10px; padding: 5px 12px; background: color-mix(in oklch, var(--primary, Highlight) 12%, transparent); }
+		.context-toggle { width: 22px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
 		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 18%, transparent); }
+		.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
 		.diff-block.closed .diff-file-header-row { border-bottom: 0; }
 		.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
@@ -654,6 +669,7 @@ export class PrWalkthroughPanel extends LitElement {
 		this._cardDrafts = {};
 		this._dismissedSuggestionIds = [];
 		this._collapsedDiffBlockIds = [];
+		this._contextExpansions = {};
 		this._copied = false;
 		this._exportPreviewOpen = false;
 		this._exportPreviewLoading = false;
@@ -1077,16 +1093,28 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private diffRenderEntriesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): DiffRenderEntry[] {
-		if (this._expandedContextHunkIds.includes(this.contextHunkKey(card.id, block.id, hunk.id))) return [{ kind: "lines", lines: hunk.lines }];
 		const importantIndexes = hunk.lines
 			.map((line, index) => this.isImportantDiffLine(card, block, line) ? index : -1)
 			.filter(index => index >= 0);
 		if (importantIndexes.length === 0) return [{ kind: "lines", lines: hunk.lines }];
-		const visible = new Set<number>();
+
+		const baseVisible = new Set<number>();
 		for (const index of importantIndexes) {
 			const start = Math.max(0, index - DEFAULT_DIFF_CONTEXT_LINES);
 			const end = Math.min(hunk.lines.length - 1, index + DEFAULT_DIFF_CONTEXT_LINES);
-			for (let lineIndex = start; lineIndex <= end; lineIndex += 1) visible.add(lineIndex);
+			for (let lineIndex = start; lineIndex <= end; lineIndex += 1) baseVisible.add(lineIndex);
+		}
+
+		const visible = new Set(baseVisible);
+		const baseGaps = this.hiddenContextRanges(baseVisible, hunk.lines.length);
+		for (const gap of baseGaps) {
+			const key = this.contextGapKey(card.id, block.id, hunk.id, gap.start, gap.end);
+			const expansion = this._contextExpansions[key] ?? {};
+			const hiddenCount = gap.end - gap.start + 1;
+			const belowCount = Math.min(expansion.below ?? 0, hiddenCount);
+			const aboveCount = Math.min(expansion.above ?? 0, Math.max(0, hiddenCount - belowCount));
+			for (let index = gap.start; index < gap.start + belowCount; index += 1) visible.add(index);
+			for (let index = gap.end - aboveCount + 1; index <= gap.end; index += 1) visible.add(index);
 		}
 
 		const entries: DiffRenderEntry[] = [];
@@ -1103,15 +1131,35 @@ export class PrWalkthroughPanel extends LitElement {
 			}
 			const start = index;
 			while (index < hunk.lines.length && !visible.has(index)) index += 1;
-			const hiddenCount = index - start;
-			const label = start === 0
-				? `Show ${hiddenCount} line${hiddenCount === 1 ? "" : "s"} above`
-				: index === hunk.lines.length
-					? `Show ${hiddenCount} line${hiddenCount === 1 ? "" : "s"} below`
-					: `Show ${hiddenCount} hidden context line${hiddenCount === 1 ? "" : "s"}`;
-			entries.push({ kind: "context", label, hiddenCount });
+			const end = index - 1;
+			const baseGap = baseGaps.find(gap => start >= gap.start && end <= gap.end) ?? { start, end };
+			entries.push({
+				kind: "context",
+				start,
+				end,
+				gapStart: baseGap.start,
+				gapEnd: baseGap.end,
+				hiddenCount: end - start + 1,
+				canExpandAbove: baseGap.end < hunk.lines.length - 1,
+				canExpandBelow: baseGap.start > 0,
+			});
 		}
 		return entries;
+	}
+
+	private hiddenContextRanges(visible: Set<number>, totalLines: number): Array<{ start: number; end: number }> {
+		const ranges: Array<{ start: number; end: number }> = [];
+		let index = 0;
+		while (index < totalLines) {
+			if (visible.has(index)) {
+				index += 1;
+				continue;
+			}
+			const start = index;
+			while (index < totalLines && !visible.has(index)) index += 1;
+			ranges.push({ start, end: index - 1 });
+		}
+		return ranges;
 	}
 
 	private isImportantDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine): boolean {
@@ -1121,22 +1169,35 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
+		const aboveCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
+		const belowCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
 		return html`
-			<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" type="button" aria-label=${`${entry.label} in ${block.filePath}`} @click=${() => this.toggleHunkContext(card.id, block.id, hunk.id)}>
-				${entry.label}
-			</button>
+			<div class="context-controls" data-testid="pr-walkthrough-context-controls">
+				${entry.canExpandBelow ? html`
+					<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="below" type="button" title=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below`} aria-label=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "below")}>
+						<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
+					</button>
+				` : nothing}
+				${entry.canExpandAbove ? html`
+					<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="above" type="button" title=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above`} aria-label=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "above")}>
+						<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
+					</button>
+				` : nothing}
+			</div>
 		`;
 	}
 
-	private toggleHunkContext(cardId: string, blockId: string, hunkId: string): void {
-		const key = this.contextHunkKey(cardId, blockId, hunkId);
-		this._expandedContextHunkIds = this._expandedContextHunkIds.includes(key)
-			? this._expandedContextHunkIds.filter(item => item !== key)
-			: [...this._expandedContextHunkIds, key];
+	private expandHunkContext(cardId: string, blockId: string, hunkId: string, entry: DiffContextEntry, direction: DiffContextDirection): void {
+		const key = this.contextGapKey(cardId, blockId, hunkId, entry.gapStart, entry.gapEnd);
+		const current = this._contextExpansions[key] ?? {};
+		this._contextExpansions = {
+			...this._contextExpansions,
+			[key]: { ...current, [direction]: (current[direction] ?? 0) + DIFF_CONTEXT_EXPAND_LINES },
+		};
 	}
 
-	private contextHunkKey(cardId: string, blockId: string, hunkId: string): string {
-		return `${cardId}::${blockId}::${hunkId}`;
+	private contextGapKey(cardId: string, blockId: string, hunkId: string, start: number, end: number): string {
+		return `${cardId}::${blockId}::${hunkId}::${start}-${end}`;
 	}
 
 	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
