@@ -113,6 +113,12 @@ export interface SessionSetupPlan {
 	goalId?: string;
 	assistantType?: string;
 	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	readOnly?: boolean;
+	walkthroughJobId?: string;
+	walkthroughChangesetId?: string;
+	walkthroughTargetKey?: string;
 	taskId?: string;
 	worktreePath?: string;
 	repoPath?: string;
@@ -597,6 +603,12 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
 		delegateOf: plan.delegateOf,
+		parentSessionId: plan.parentSessionId,
+		childKind: plan.childKind,
+		readOnly: plan.readOnly,
+		walkthroughJobId: plan.walkthroughJobId,
+		walkthroughChangesetId: plan.walkthroughChangesetId,
+		walkthroughTargetKey: plan.walkthroughTargetKey,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
 	});
@@ -968,6 +980,12 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		assistantType: plan.assistantType,
 		taskId: plan.taskId,
 		delegateOf: plan.delegateOf,
+		parentSessionId: plan.parentSessionId,
+		childKind: plan.childKind,
+		readOnly: plan.readOnly,
+		walkthroughJobId: plan.walkthroughJobId,
+		walkthroughChangesetId: plan.walkthroughChangesetId,
+		walkthroughTargetKey: plan.walkthroughTargetKey,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
