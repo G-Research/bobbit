@@ -98,6 +98,19 @@ export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "a
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 
 /**
+ * Upper bound on the number of consecutive immediate (tick-0) redrains that
+ * `recoverPromptDispatch` will schedule after a dispatch is rejected. The
+ * tick-0 retry exists for a one-microtask race (agent_end's synchronous
+ * drainQueue prompt() loses to the SDK's not-yet-run finishRun(), so the agent
+ * reports "Agent is already processing"); one macrotask later the redrain
+ * succeeds. When the agent is genuinely mid-turn, every redrain hits the same
+ * busy guard and reschedules itself — an unbounded setTimeout(0) spin that
+ * floods the logs for the whole turn. After this many failed immediate retries
+ * we stop scheduling and leave the rows queued for the next agent_end drain.
+ */
+const MAX_RECOVER_DRAIN_RETRIES = 2;
+
+/**
  * Returns true only for rpc events that represent genuine new user-visible
  * activity (a message, tool call, or end-of-turn). Lifecycle frames the
  * agent CLI emits automatically on resume (agent_start, agent_idle,
@@ -213,6 +226,11 @@ export interface SessionInfo {
 	lastTurnErrorMessage?: string;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
 	transientRetryAttempts?: number;
+	/** Number of consecutive immediate (tick-0) redrains scheduled by
+	 * recoverPromptDispatch after a rejected dispatch. Bounded by
+	 * MAX_RECOVER_DRAIN_RETRIES to stop a busy-guard spin loop. Reset to 0 on a
+	 * successful dispatch and at each agent_end before the queue drains. */
+	recoverDrainAttempts?: number;
 	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
 	consecutiveErrorTurns?: number;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
@@ -2012,6 +2030,20 @@ export class SessionManager {
 		// re-enqueued get another chance once the bridge has finished its
 		// abort/finishRun bookkeeping. setTimeout(0) lets pending microtasks
 		// (including the SDK's finally{finishRun()}) run first.
+		//
+		// Bound the immediate retries: when the agent is genuinely mid-turn the
+		// redrain keeps losing to the "Agent is already processing" busy guard
+		// and would reschedule itself forever (a tick-0 spin that floods the
+		// logs). After MAX_RECOVER_DRAIN_RETRIES we stop — the rows stay queued
+		// and the next agent_end's drainQueue (with a freshly reset counter)
+		// delivers them once the turn actually ends.
+		const attempts = (session.recoverDrainAttempts ?? 0) + 1;
+		if (attempts > MAX_RECOVER_DRAIN_RETRIES) {
+			session.recoverDrainAttempts = 0;
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${reason}); deferring ${rows.length} row(s) to the next agent_end drain`);
+			return;
+		}
+		session.recoverDrainAttempts = attempts;
 		setTimeout(() => { this.drainQueue(session); }, 0);
 	}
 
@@ -2102,6 +2134,10 @@ export class SessionManager {
 				// the dequeued rows so a future drain can redispatch them.
 				if (resp && resp.success === false) {
 					recoverDispatchedRows(resp.error || "unknown");
+				} else {
+					// Dispatch landed — clear the busy-guard retry budget so a
+					// future recovery starts fresh.
+					session.recoverDrainAttempts = 0;
 				}
 			})
 			.catch((err: any) => {
@@ -2253,6 +2289,9 @@ export class SessionManager {
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
 				session.transientRetryAttempts = 0;
+				// Fresh budget for the one-microtask drainQueue→finishRun race on
+				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
+				session.recoverDrainAttempts = 0;
 				this.drainQueue(session);
 			} else {
 				// Auto-retry transient model/streaming glitches (e.g. malformed
@@ -5687,7 +5726,9 @@ export class SessionManager {
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
-			// Drain any queued messages (steered first, then normal)
+			// Drain any queued messages (steered first, then normal). Fresh
+			// retry budget — the old process (and its busy guard) is gone.
+			session.recoverDrainAttempts = 0;
 			this.drainQueue(session);
 		} catch (err) {
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
