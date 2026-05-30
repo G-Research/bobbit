@@ -1,5 +1,7 @@
+import { icon } from "@mariozechner/mini-lit";
 import { css, html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { PanelLeftClose, PanelLeftOpen } from "lucide";
 import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
 import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "./fixtures.js";
 import { gatewayFetch } from "../../../app/gateway-fetch.js";
@@ -124,6 +126,8 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _activeCardId = "";
 	@state() private _panelWidth = 1024;
 	@state() private _observedNarrow = false;
+	@state() private _railCollapsed = false;
+	@state() private _railWidth = 240;
 	@state() private _diffModeOverride?: PrWalkthroughDiffMode;
 	@state() private _comments: PrWalkthroughComment[] = [];
 	@state() private _decisions: Record<string, PrWalkthroughDecision> = {};
@@ -264,13 +268,14 @@ export class PrWalkthroughPanel extends LitElement {
 
 		.body {
 			display: grid;
-			grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+			grid-template-columns: var(--walkthrough-rail-width, 240px) minmax(0, 1fr);
 			min-height: 0;
 		}
 
 		.body.narrow { grid-template-columns: 38px minmax(0, 1fr); }
 
 		.rail {
+			position: relative;
 			overflow: auto;
 			padding: 12px;
 			border-right: 1px solid var(--border, ButtonBorder);
@@ -337,6 +342,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.content {
 			overflow: auto;
 			min-width: 0;
+			box-sizing: border-box;
 			padding: 16px;
 		}
 
@@ -511,16 +517,16 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail:not(.collapsed) { display: flex; flex-direction: column; gap: 6px; padding: 6px 6px 6px 8px; overflow-x: hidden; }
 		.phase { width: 100%; display: grid; gap: 5px; margin: 0; padding: 0 0 5px; border-radius: 6px; }
 		.phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
-		.rail:not(.collapsed) .phase:first-child::before { content: none; display: none; }
-		.phase-button { width: 100%; min-height: 13px; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
+		.rail:not(.collapsed) .phase:first-of-type::before { content: none; display: none; }
+		.phase-button { width: 100%; min-height: 13px; display: flex; align-items: center; gap: 4px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
 		.phase-button::after { content: none; }
 		.phase-button.active { color: var(--muted-foreground, GrayText); background: transparent; }
 		.phase-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
-		.rail:not(.collapsed) .phase-pip { width: 24px; height: 13px; padding: 0; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
+		.rail:not(.collapsed) .phase-pip { width: 10px; height: 13px; padding: 0; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0; }
 		.rail:not(.collapsed) .phase-pip.active, .rail:not(.collapsed) .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
 		.phase-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground, GrayText); font-size: 0.8333em; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
 		.phase-count { display: none; }
-		.phase-cards { display: grid; gap: 5px; padding: 0 0 0 44px; }
+		.phase-cards { display: grid; gap: 5px; padding: 0 0 0 8px; }
 		.card-button { width: 100%; min-height: 16px; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); font-size: 13px; font-weight: 400; text-align: left; }
 		.card-button::before { content: none; }
 		.card-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
@@ -533,6 +539,11 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail:not(.collapsed) .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
 		.card-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
 		.card-decision { display: none; }
+		.rail-toggle { margin-top: auto; align-self: flex-end; padding: 8px; display: flex; align-items: center; gap: 0.375rem; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground, GrayText); transition: color 120ms ease, background 120ms ease; }
+		.rail-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--secondary, var(--muted-foreground, GrayText)) 50%, transparent); }
+		.rail-toggle svg { width: 16px; height: 16px; }
+		.walkthrough-rail-resize-handle { position: absolute; top: 0; right: -2px; width: 6px; height: 100%; z-index: 5; cursor: col-resize; background: transparent; transition: background 120ms ease; touch-action: none; }
+		.walkthrough-rail-resize-handle:hover, .walkthrough-rail-resize-handle:active { background: color-mix(in oklch, var(--primary, Highlight) 25%, transparent); }
 		.rail.collapsed { gap: 6px; padding: 6px 3px; overflow-x: hidden; }
 		.collapsed-phase { width: 100%; display: grid; justify-items: center; gap: 5px; padding: 0 0 5px; border-radius: 6px; }
 		.collapsed-phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
@@ -546,6 +557,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
 		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
 		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
+		.rail.collapsed .rail-toggle { align-self: center; margin-bottom: 8px; padding: 8px; }
+		.rail.collapsed .walkthrough-rail-resize-handle { display: none; }
 		.content { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); padding: 14px var(--walkthrough-content-x) 0; }
 		.inner { width: 100%; max-width: none; min-height: 100%; margin: 0; display: flex; flex-direction: column; }
 		.card { display: flex; flex-direction: column; max-width: none; min-height: 100%; }
@@ -658,6 +671,14 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private get isNarrowLayout(): boolean {
 		return this.narrow || this._observedNarrow;
+	}
+
+	private get isRailCollapsed(): boolean {
+		return this.isNarrowLayout || this._railCollapsed;
+	}
+
+	private get railWidth(): number {
+		return Math.max(150, Math.min(360, Math.round(this._railWidth)));
 	}
 
 	private get effectiveDiffMode(): PrWalkthroughDiffMode {
@@ -803,7 +824,7 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<section class="shell" data-testid="pr-walkthrough-panel" data-active-card-id=${activeCardId} data-diff-mode=${this.effectiveDiffMode} data-status=${this.status}>
 				${this.renderHeader()}
-				<div class="body ${this.isNarrowLayout ? "narrow" : ""}">
+				<div class="body ${this.isRailCollapsed ? "narrow" : ""}" style=${`--walkthrough-rail-width: ${this.railWidth}px;`}>
 					${this.renderRail()}
 					<main class="content">${this.renderMainContent(active)}</main>
 				</div>
@@ -852,15 +873,16 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderRail(): TemplateResult {
 		if (!this.cards.length && (this.status === "loading" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
-		return this.isNarrowLayout ? this.renderCollapsedRail() : this.renderLabelledRail();
+		return this.isRailCollapsed ? this.renderCollapsedRail() : this.renderLabelledRail();
 	}
 
 	private renderPlaceholderRail(): TemplateResult {
 		return html`
-			<nav class="rail ${this.isNarrowLayout ? "collapsed" : ""}" data-testid=${this.isNarrowLayout ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
-				${this.isNarrowLayout ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
+			<nav class="rail ${this.isRailCollapsed ? "collapsed" : ""}" data-testid=${this.isRailCollapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
+				${this.isRailCollapsed ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
 					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
 				`}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
@@ -868,6 +890,7 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderLabelledRail(): TemplateResult {
 		return html`
 			<nav class="rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phases">
+				<div class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" title="Drag to resize walkthrough sidebar" @pointerdown=${this.onRailResizePointerDown} @dblclick=${this.resetRailWidth}></div>
 				${PHASES.map((phase, index) => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;
@@ -882,6 +905,7 @@ export class PrWalkthroughPanel extends LitElement {
 						</section>
 					`;
 				})}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
@@ -913,9 +937,54 @@ export class PrWalkthroughPanel extends LitElement {
 						</div>
 					`;
 				})}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
+
+	private renderRailControls(): TemplateResult {
+		const collapsed = this.isRailCollapsed;
+		return html`
+			<button class="rail-toggle" data-testid="pr-walkthrough-rail-toggle" type="button" title=${collapsed ? "Expand walkthrough sidebar" : "Collapse walkthrough sidebar"} @click=${this.toggleRailCollapsed}>
+				${collapsed ? icon(PanelLeftOpen, "sm") : icon(PanelLeftClose, "sm")}
+			</button>
+		`;
+	}
+
+	private toggleRailCollapsed = (): void => {
+		if (this.isNarrowLayout) return;
+		this._railCollapsed = !this._railCollapsed;
+	};
+
+	private resetRailWidth = (event?: Event): void => {
+		event?.preventDefault();
+		this._railWidth = 240;
+	};
+
+	private onRailResizePointerDown = (event: PointerEvent): void => {
+		event.preventDefault();
+		if (this.isRailCollapsed) return;
+		const handle = event.currentTarget as HTMLElement;
+		const startX = event.clientX;
+		const startWidth = this.railWidth;
+		try { handle.setPointerCapture(event.pointerId); } catch {}
+		document.body.style.cursor = "col-resize";
+		document.body.style.userSelect = "none";
+		const onMove = (moveEvent: PointerEvent) => {
+			this._railWidth = Math.max(150, Math.min(360, Math.round(startWidth + moveEvent.clientX - startX)));
+		};
+		const onUp = (upEvent: PointerEvent) => {
+			handle.removeEventListener("pointermove", onMove);
+			handle.removeEventListener("pointerup", onUp);
+			handle.removeEventListener("pointercancel", onUp);
+			try { handle.releasePointerCapture(upEvent.pointerId); } catch {}
+			document.body.style.cursor = "";
+			document.body.style.userSelect = "";
+		};
+		handle.addEventListener("pointermove", onMove);
+		handle.addEventListener("pointerup", onUp);
+		handle.addEventListener("pointercancel", onUp);
+	};
 
 	private renderRailCardButton(card: PrWalkthroughCard): TemplateResult {
 		const decision = this._decisions[card.id]?.value;

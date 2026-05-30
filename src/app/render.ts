@@ -8,7 +8,7 @@ import { repeat } from "lit/directives/repeat.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -2299,7 +2299,7 @@ export function doRenderApp(): void {
 						${activeTab.kind === "walkthrough" ? walkthroughControlButtons(activeTab) : ""}
 						${activeTabCanFullscreen ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`${activeTab.kind === "walkthrough" ? "Fullscreen walkthrough" : "Fullscreen preview"}${shortcutHint("toggle-sidebar")}`} data-testid=${activeTab.kind === "walkthrough" ? "pr-walkthrough-fullscreen" : "preview-fullscreen"}>
-							${icon(Maximize2, "sm")}
+							${icon(PanelRightOpen, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 							${icon(PanelRightClose, "sm")}

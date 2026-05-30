@@ -355,11 +355,40 @@ test.describe("PR walkthrough panel", () => {
 			return { dotWidth: dotStyle.width, dotBackground: dotStyle.backgroundColor, titleWeight: titleStyle.fontWeight };
 		}), { message: "expanded card rows should mirror collapsed status dots with sidebar-session typography" }).toMatchObject({ dotWidth: "14px", dotBackground: /rgba\(0, 0, 0, 0\)|transparent/i, titleWeight: "400" });
 		await expect.poll(() => labelledRail.evaluate(root => {
-			const phaseName = (root.querySelector('[data-testid="pr-walkthrough-phase-button"] .phase-name') as HTMLElement).getBoundingClientRect();
+			const phaseCards = root.querySelector(".phase-cards") as HTMLElement;
 			const cardDot = (root.querySelector('[data-testid="pr-walkthrough-card-step"] .card-dot') as HTMLElement).getBoundingClientRect();
 			const cardTitle = (root.querySelector('[data-testid="pr-walkthrough-card-step"] .card-title') as HTMLElement).getBoundingClientRect();
-			return cardDot.x > phaseName.x && cardTitle.x > phaseName.x;
-		}), { message: "expanded card dots and titles should be indented relative to phase titles" }).toBe(true);
+			return { paddingLeft: getComputedStyle(phaseCards).paddingLeft, titleAfterDot: cardTitle.x > cardDot.x };
+		}), { message: "expanded card dots and titles should use the reduced sidebar indentation" }).toMatchObject({ paddingLeft: "8px", titleAfterDot: true });
+		const railToggle = panel.getByTestId("pr-walkthrough-rail-toggle");
+		await expect(railToggle, "expanded walkthrough sidebar should expose a bottom collapse button").toBeVisible();
+		await expect(railToggle).toHaveAttribute("title", /Collapse walkthrough sidebar/);
+		await expect(railToggle.locator("svg"), "walkthrough sidebar toggle should use the main sidebar panel icon").toBeVisible();
+		await expect(railToggle, "walkthrough sidebar toggle should use the main sidebar button padding").toHaveCSS("padding", "8px");
+		const railResize = panel.getByTestId("pr-walkthrough-rail-resize");
+		await expect(railResize, "expanded walkthrough sidebar should expose a resize handle").toBeVisible();
+		const railBeforeResize = await labelledRail.boundingBox();
+		const resizeBox = await railResize.boundingBox();
+		if (!railBeforeResize || !resizeBox) throw new Error("walkthrough rail resize geometry was unavailable");
+		await page.mouse.move(resizeBox.x + resizeBox.width / 2, resizeBox.y + 20);
+		await page.mouse.down();
+		await page.mouse.move(resizeBox.x + resizeBox.width / 2 + 64, resizeBox.y + 20);
+		await page.mouse.up();
+		await expect.poll(async () => {
+			const box = await labelledRail.boundingBox();
+			return box ? Math.round(box.width - railBeforeResize.width) : 0;
+		}, { message: "dragging the walkthrough sidebar handle should resize the labelled rail" }).toBeGreaterThan(40);
+		await railResize.dblclick();
+		await expect.poll(async () => {
+			const box = await labelledRail.boundingBox();
+			return box ? Math.round(box.width) : 0;
+		}, { message: "double-clicking the walkthrough sidebar resize handle should reset the rail width" }).toBe(240);
+		await railToggle.click();
+		const collapsedRail = panel.getByTestId("pr-walkthrough-collapsed-rail");
+		await expect(collapsedRail, "walkthrough sidebar collapse button should switch to the compact rail").toBeVisible();
+		await expect(collapsedRail.getByTestId("pr-walkthrough-rail-toggle")).toHaveAttribute("title", /Expand walkthrough sidebar/);
+		await collapsedRail.getByTestId("pr-walkthrough-rail-toggle").click();
+		await expect(panel.getByTestId("pr-walkthrough-labelled-rail"), "walkthrough sidebar expand button should restore the labelled rail").toBeVisible();
 		await expect.poll(async () => {
 			const [contentBox, innerBox] = await Promise.all([panel.locator(".content").boundingBox(), panel.locator(".inner").boundingBox()]);
 			if (!contentBox || !innerBox) return false;
