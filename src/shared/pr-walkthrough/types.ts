@@ -6,6 +6,7 @@ export interface PrWalkthroughChangesetRef {
 	prUrl?: string;
 	prNumber?: string | number;
 	prTitle?: string;
+	prBody?: string;
 	title?: string;
 	filesChanged?: number;
 	additions?: number;

@@ -45,6 +45,7 @@ export interface GithubWalkthroughChangesetRef {
 	prUrl: string;
 	prNumber: number;
 	prTitle: string;
+	prBody?: string;
 	title: string;
 	filesChanged?: number;
 	additions?: number;
@@ -129,6 +130,7 @@ export interface ParsedGithubPrReference {
 interface GithubApiPullRequest {
 	number: number;
 	title: string;
+	body?: string | null;
 	html_url: string;
 	base: { sha: string };
 	head: { sha: string };
@@ -287,6 +289,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 			prUrl,
 			prNumber: pr.number,
 			prTitle: pr.title,
+			prBody: cleanString(pr.body),
 			title: `PR #${pr.number}: ${pr.title}`,
 			filesChanged: pr.changed_files,
 			additions: pr.additions,

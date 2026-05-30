@@ -54,6 +54,41 @@ describe("PR walkthrough card synthesis", () => {
 		assert.ok(cards.some(card => card.diffBlocks.some(diffBlock => diffBlock.id === "a")));
 	});
 
+	it("builds phase 0 from PR context and testing details, not walkthrough mechanics", async () => {
+		const cards = await synthesiseWalkthroughCards({
+			...changeset(),
+			prTitle: "Fix walkthrough panel defaults",
+			prBody: [
+				"## Why",
+				"The walkthrough panel opened against local refs and confused reviewers after merge.",
+				"## Context",
+				"GitHub remains the source of truth for PR diff scope and metadata.",
+				"## Testing strategy",
+				"Run typecheck plus targeted walkthrough browser coverage.",
+			].join("\n"),
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
+
+		const orientation = cards[0];
+		assert.equal(orientation.phaseId, "orientation");
+		assert.match(orientation.summary, /Why this PR was raised: The walkthrough panel opened against local refs/);
+		assert.match(orientation.rationale ?? "", /Context to understand the PR: GitHub remains the source of truth/);
+		assert.ok(orientation.checklist?.some(item => /Testing strategy: Run typecheck plus targeted walkthrough browser coverage/.test(item)));
+		assert.doesNotMatch(`${orientation.summary} ${orientation.rationale}`, /confirming scope|review generated cards|walkthrough process/i);
+	});
+
+	it("validates LLM orientation cards without requiring diff blocks", () => {
+		const cards = validateSynthesisedCards({
+			cards: [
+				{ phaseId: "orientation", title: "PR context", summary: "Why: fixes review context", diffBlockIds: [], checklist: ["Testing strategy: npm test"] },
+				{ phaseId: "significant", title: "Check resolver", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
+			],
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
+
+		assert.equal(cards.length, 2);
+		assert.equal(cards[0].phaseId, "orientation");
+		assert.deepEqual(cards[0].diffBlocks, []);
+	});
+
 	it("validates LLM card schema and drops suggested comments with bad anchors", () => {
 		const files = [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])];
 		const cards = validateSynthesisedCards({

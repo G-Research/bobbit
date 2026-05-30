@@ -53,6 +53,7 @@ type WalkthroughChangeset = {
 	prUrl?: string;
 	prNumber?: string | number;
 	prTitle?: string;
+	prBody?: string;
 	title?: string;
 	filesChanged?: number;
 	additions?: number;
@@ -230,6 +231,7 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 				prUrl: gh?.url,
 				prNumber: number,
 				prTitle,
+				prBody: stringValue(body.prBody),
 				externalUrl: gh?.url,
 				title,
 			},
@@ -373,7 +375,7 @@ export async function createModelBackedSynthesisAdapter(deps: PrWalkthroughRoute
 	};
 }
 
-const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
+const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. The orientation card is special: it should explain PR context for reviewers (why the PR was raised, context/background needed to understand it, testing strategy, and useful PR-description details) and may use an empty diffBlockIds array. Do not make orientation a summary of the walkthrough process. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
 
 async function resolveSynthesisModelPref(deps: PrWalkthroughRouteDeps, sessionId: string | undefined): Promise<string | undefined> {
 	if (sessionId && deps.resolveSessionModel) {
@@ -545,14 +547,15 @@ function applyNameStatus(blocks: DiffBlock[], nameStatus: string): void {
 }
 
 function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlock[], warnings: WalkthroughWarning[]): WalkthroughCard[] {
+	const prContext = stringValue(changeset.prBody);
 	const cards: WalkthroughCard[] = [{
 		id: "orientation-summary",
 		phaseId: "orientation",
-		title: changeset.title ? `Review ${changeset.title}` : "Review changeset",
-		summary: `${changeset.filesChanged ?? files.length} files changed with ${changeset.additions ?? 0} additions and ${changeset.deletions ?? 0} deletions.`,
-		rationale: warnings.length ? `${warnings.length} warnings need reviewer attention.` : "Generated from the resolved changeset.",
-		diffBlocks: files.slice(0, 1),
-		checklist: ["Confirm scope", "Check generated warnings", "Review changed files"],
+		title: "PR context",
+		summary: `Why this PR was raised: ${prContext ? prContext.replace(/\s+/g, " ").slice(0, 220) : changeset.prTitle ?? changeset.title ?? "No PR description was available."}`,
+		rationale: warnings.length ? `${warnings.length} warnings need reviewer attention.` : "Use this phase to understand the PR background, reviewer context, and testing strategy before inspecting hunks.",
+		diffBlocks: [],
+		checklist: ["Identify why the PR exists", "Note context needed for review", "Confirm the stated testing strategy"],
 	}];
 	if (files.length > 0) {
 		const reviewBlocks = files.filter(file => file.status !== "binary");

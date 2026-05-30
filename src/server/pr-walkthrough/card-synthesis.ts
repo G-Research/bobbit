@@ -58,6 +58,7 @@ type PrWalkthroughChangesetRef = {
 	prUrl?: string;
 	prNumber?: string | number;
 	prTitle?: string;
+	prBody?: string;
 	title?: string;
 	filesChanged?: number;
 	additions?: number;
@@ -172,7 +173,7 @@ export function validateSynthesisedCards(raw: unknown, files: WalkthroughParsedF
 
 		const blockIds = unique(candidateBlockIds(candidate)).filter(blockId => !usedBlockIds.has(blockId));
 		const diffBlocks = blockIds.map(id => blockById.get(id)).filter((block): block is PrWalkthroughDiffBlock => Boolean(block));
-		if (diffBlocks.length === 0) continue;
+		if (diffBlocks.length === 0 && phaseId !== "orientation") continue;
 		for (const block of diffBlocks) usedBlockIds.add(block.id);
 
 		const id = stableCardId(`${phaseId}-${title}`, seen);
@@ -231,22 +232,21 @@ function buildOrientationCard(
 	files: WalkthroughParsedFile[],
 	warnings: WalkthroughWarning[],
 ): PrWalkthroughCard {
-	const title = changeset.title ?? changeset.prTitle ?? "Review changeset";
-	const stats = [
-		formatCount(changeset.filesChanged ?? files.length, "file"),
-		changeset.additions !== undefined ? `${changeset.additions} additions` : undefined,
-		changeset.deletions !== undefined ? `${changeset.deletions} deletions` : undefined,
-	].filter(Boolean).join(", ");
-	const range = `${shortRef(changeset.baseSha)}..${shortRef(changeset.headSha)}`;
-	const warningSummary = warnings.length > 0 ? ` ${warnings.length} warning${warnings.length === 1 ? "" : "s"} need attention before export.` : "";
+	const prTitle = changeset.prTitle ?? changeset.title ?? "this PR";
+	const prBody = stringValue(changeset.prBody);
+	const changedAreas = summarizeChangedAreas(files);
+	const why = compactText(extractPrSection(prBody, ["why", "motivation", "problem", "summary"]) || firstParagraph(prBody) || prTitle);
+	const context = compactText(extractPrSection(prBody, ["context", "background", "notes", "implementation"]) || (changedAreas ? `Main changed areas: ${changedAreas}.` : "No additional PR context was provided."));
+	const testing = compactText(extractPrSection(prBody, ["test", "tests", "testing", "validation", "test plan"]) || "No testing strategy was specified in the PR description.");
+	const warningSummary = warnings.length > 0 ? ` ${warnings.length} warning${warnings.length === 1 ? "" : "s"} need reviewer attention.` : "";
 	return {
 		id: "orientation-summary",
 		phaseId: "orientation",
-		title,
-		summary: `Review ${range}${stats ? ` across ${stats}` : ""}.${warningSummary}`,
-		rationale: "Start by confirming scope, refs, provider metadata, and any ingestion warnings before inspecting individual hunks.",
+		title: "PR context",
+		summary: `Why this PR was raised: ${why}${warningSummary}`,
+		rationale: `Context to understand the PR: ${context}`,
 		diffBlocks: [],
-		checklist: ["Confirm base/head refs", "Scan warnings", "Review generated cards in order"],
+		checklist: [`Testing strategy: ${testing}`, ...warnings.slice(0, 2).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message)],
 		cardSuggestions: warnings.slice(0, 3).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message),
 	};
 }
@@ -476,8 +476,45 @@ function formatCount(count: number, singular: string): string {
 	return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
-function shortRef(ref: string | undefined): string {
-	return ref ? ref.slice(0, 12) : "unknown";
+function summarizeChangedAreas(files: WalkthroughParsedFile[]): string {
+	return unique(files.map(file => file.filePath.split(/[\\/]/)[0]).filter(Boolean)).slice(0, 5).join(", ");
+}
+
+function extractPrSection(body: string | undefined, names: string[]): string | undefined {
+	if (!body) return undefined;
+	const lines = body.split(/\r?\n/);
+	for (let index = 0; index < lines.length; index += 1) {
+		const heading = normalizeHeading(lines[index]);
+		if (!heading || !names.some(name => heading.includes(name))) continue;
+		const section: string[] = [];
+		for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+			if (normalizeHeading(lines[cursor])) break;
+			section.push(lines[cursor]);
+		}
+		const text = compactText(section.join("\n"));
+		if (text) return text;
+	}
+	return undefined;
+}
+
+function normalizeHeading(line: string): string | undefined {
+	const cleaned = line.trim().replace(/^#{1,6}\s*/, "").replace(/[*_`:-]+$/g, "").trim().toLowerCase();
+	if (!cleaned || cleaned.length > 80) return undefined;
+	return /^(why|motivation|problem|summary|context|background|notes|implementation|test|tests|testing|validation|test plan)\b/.test(cleaned) ? cleaned : undefined;
+}
+
+function firstParagraph(body: string | undefined): string | undefined {
+	return body?.split(/\n\s*\n/).map(part => compactText(part)).find(Boolean);
+}
+
+function compactText(value: string | undefined, maxLength = 220): string {
+	const compact = (value ?? "")
+		.replace(/<!--.*?-->/gs, " ")
+		.replace(/```[\s\S]*?```/g, " ")
+		.replace(/^[-*+]\s+/gm, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return compact.length > maxLength ? `${compact.slice(0, maxLength - 1).trimEnd()}…` : compact;
 }
 
 function stringValue(value: unknown): string | undefined {

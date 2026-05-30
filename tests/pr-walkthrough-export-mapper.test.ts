@@ -294,6 +294,7 @@ describe("PR walkthrough GitHub adapter", () => {
 					return response(200, {
 						number: 42,
 						title: "Complete review export",
+						body: "## Why\nExport reviews back to GitHub.\n\n## Testing\nRun mapper tests.",
 						html_url: "https://github.com/SuuBro/bobbit/pull/42",
 						base: { sha: "aaaaaaaaaaaa" },
 						head: { sha: "bbbbbbbbbbbb" },
@@ -322,6 +323,7 @@ describe("PR walkthrough GitHub adapter", () => {
 		]);
 		assert.equal(resolved.changesetId, "github:SuuBro/bobbit#42:bbbbbbb");
 		assert.equal(resolved.changeset.prTitle, "Complete review export");
+		assert.match(resolved.changeset.prBody ?? "", /Export reviews back to GitHub/);
 		assert.equal(resolved.export.available, true);
 		assert.equal(resolved.files[0].filePath, "src/example.ts");
 		assert.equal(resolved.files[0].diffBlocks[0].hunks[0].lines[1].newLine, 2);

@@ -53,6 +53,7 @@ export interface OpenPrWalkthroughInput {
 	prUrl?: string;
 	title?: string;
 	prTitle?: string;
+	prBody?: string;
 	provider?: string;
 	filesChanged?: number;
 	additions?: number;
@@ -136,6 +137,7 @@ function normalizeInput(state: AppState, input: OpenPrWalkthroughInput): OpenPrW
 		prUrl: url,
 		prNumber: normalizePrNumber(merged.prNumber) || normalizePrNumber(urlMetadata.prNumber),
 		prTitle: cleanString(merged.prTitle) || cleanString(merged.title),
+		prBody: cleanString(merged.prBody),
 		title: cleanString(merged.title) || cleanString(merged.prTitle),
 		provider: cleanString(merged.provider) || urlMetadata.provider || (url ? "external-pr" : undefined),
 		filesChanged: finiteNonNegativeNumber(merged.filesChanged),
@@ -182,6 +184,7 @@ export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWal
 		prUrl: externalUrl,
 		prNumber,
 		prTitle: cleanString(input.prTitle),
+		prBody: cleanString(input.prBody),
 		title: titleForInput(input),
 		filesChanged: finiteNonNegativeNumber(input.filesChanged),
 		additions: finiteNonNegativeNumber(input.additions),
@@ -215,6 +218,7 @@ function resolveRequestForInput(sessionId: string, input: OpenPrWalkthroughInput
 		prUrl,
 		prNumber,
 		prTitle: cleanString(input.prTitle),
+		prBody: cleanString(input.prBody),
 		title: cleanString(input.title),
 		provider,
 		fixture: !shouldResolveInput(input) || undefined,
@@ -302,6 +306,7 @@ function patchWalkthroughTab(
 					prUrl: changeset.prUrl || changeset.externalUrl,
 					prNumber: changeset.prNumber,
 					prTitle: changeset.prTitle,
+					prBody: changeset.prBody,
 					filesChanged: changeset.filesChanged,
 					additions: changeset.additions,
 					deletions: changeset.deletions,
@@ -417,6 +422,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		prUrl,
 		prNumber,
 		prTitle,
+		prBody: changeset.prBody,
 		filesChanged: changeset.filesChanged,
 		additions: changeset.additions,
 		deletions: changeset.deletions,
@@ -436,6 +442,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 			prUrl,
 			prNumber,
 			prTitle,
+			prBody: changeset.prBody,
 			baseSha: changeset.baseSha,
 			headSha: changeset.headSha,
 			filesChanged: changeset.filesChanged,
