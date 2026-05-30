@@ -480,8 +480,9 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed { gap: 8px; padding: 6px 3px; overflow-x: hidden; }
 		.collapsed-phase { width: 100%; padding: 2px 0 5px; border-radius: 8px; }
 		.collapsed-phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
-		.phase-pip { width: 24px; height: 24px; padding: 0; border: 0; font-size: 11px; font-weight: 800; }
-		.phase-pip.complete { background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
+		.phase-pip { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; color: var(--foreground, CanvasText); font-size: 11px; font-weight: 800; }
+		.phase-pip.active { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
+		.phase-pip.complete { border-color: var(--positive, var(--primary, Highlight)); background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
 		.card-dot { width: 10px; height: 10px; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; }
 		.card-dot.complete { background: color-mix(in oklch, var(--positive, var(--primary, Highlight)) 22%, transparent); border-color: var(--positive, var(--primary, Highlight)); }
 		.card-dot.active { background: var(--primary, Highlight); border-color: var(--primary, Highlight); }

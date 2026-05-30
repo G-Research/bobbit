@@ -151,6 +151,12 @@ async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	const pips = collapsedRail.getByTestId("pr-walkthrough-phase-pip");
 	await expect(pips.first(), "collapsed rail should show visible phase pips").toBeVisible();
 	await expect(pips.first(), "phase pips should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
+	const unreviewedPip = pips.nth(1);
+	await expect(unreviewedPip, "unreviewed collapsed rail phases should be visible unfilled circles").toBeVisible();
+	await expect.poll(() => unreviewedPip.evaluate(el => {
+		const style = getComputedStyle(el as HTMLElement);
+		return { borderWidth: style.borderTopWidth, background: style.backgroundColor };
+	}), { message: "unreviewed phase pips should have a visible outline and transparent fill" }).toMatchObject({ borderWidth: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
 
 	const dot = collapsedRail.getByTestId("pr-walkthrough-card-dot").nth(1);
 	await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
