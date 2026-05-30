@@ -8,7 +8,7 @@ import path from "node:path";
 
 let tempDir = "";
 
-const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
+const { WalkthroughAgentStore, rotateSubmissionProofForRestoredJob, verifySubmissionProof } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
 const { WalkthroughAgentManager } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { handlePrWalkthroughApiRoute } = await import("../src/server/pr-walkthrough/routes.ts");
 const { getWalkthrough } = await import("../src/server/pr-walkthrough/walkthrough-store.ts");
@@ -219,6 +219,61 @@ describe("WalkthroughAgentManager", () => {
 		const second = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 		assert.equal(second.created, false);
 		assert.equal(second.childSessionId, first.childSessionId);
+	});
+
+	it("launch spawn-pins the walkthrough child to the parent session model", async () => {
+		const sessionManager = makeSessionManager();
+		const seenOpts: Record<string, unknown>[] = [];
+		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
+		sessionManager.createSession = async (...args: Parameters<typeof sessionManager.createSession>) => {
+			seenOpts.push(args[4] ?? {});
+			return originalCreateSession(...args);
+		};
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store: new WalkthroughAgentStore(tempDir),
+			resolveSessionModel: sessionId => sessionId === "parent" ? { provider: "anthropic", modelId: "claude-opus-4-1" } : undefined,
+		});
+
+		await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		assert.equal(seenOpts[0].initialModel, "anthropic/claude-opus-4-1");
+	});
+
+	it("restored non-ready jobs rotate a scoped submit proof for tool env registration", async () => {
+		const store = new WalkthroughAgentStore(tempDir);
+		store.create({
+			jobId: "job-restore",
+			parentSessionId: "parent",
+			childSessionId: "child-restore",
+			cwd: tempDir,
+			target: { provider: "github", canonicalKey: "github:acme/widgets#42", owner: "acme", repo: "widgets", number: 42 },
+			changesetId: "github:acme/widgets#42",
+			tabId: "walkthrough:github:acme/widgets#42",
+			status: "waiting_for_yaml",
+			title: "PR #42 Walkthrough",
+		});
+
+		const env = rotateSubmissionProofForRestoredJob(tempDir, "child-restore", "job-restore");
+
+		assert.equal(env?.BOBBIT_SESSION_ID, "child-restore");
+		assert.equal(env?.BOBBIT_WALKTHROUGH_JOB_ID, "job-restore");
+		assert.equal(typeof env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF, "string");
+		const restored = store.get("job-restore");
+		assert.equal(verifySubmissionProof(env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF, restored!), true);
+		assert.equal((restored as any).submissionProof, undefined);
+
+		const sessionManager = makeSessionManager();
+		sessionManager.sessions.set("child-restore", { id: "child-restore", cwd: tempDir, status: "idle", env });
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
+		const duplicate = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		assert.equal(duplicate.created, false);
+		assert.equal(duplicate.childSessionId, "child-restore");
+		const retry = await manager.submitYaml({ sessionId: "child-restore", jobId: "job-restore", yaml: "schema_version: 1\n", submissionProof: env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF });
+		assert.equal(retry.ok, false);
+		assert.equal(retry.status, "validation_failed");
 	});
 
 	it("concurrent duplicate launches share one child job", async () => {

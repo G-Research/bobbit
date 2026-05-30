@@ -61,6 +61,7 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
+import { rotateSubmissionProofForRestoredJob } from "../pr-walkthrough/walkthrough-agent-store.js";
 
 import type { SandboxManager } from "./sandbox-manager.js";
 import { WorktreePool } from "./worktree-pool.js";
@@ -3119,6 +3120,16 @@ export class SessionManager {
 		});
 	}
 
+	private restoreWalkthroughSubmitEnv(ps: PersistedSession, env: Record<string, string>): void {
+		if (ps.childKind !== "pr-walkthrough" || !ps.walkthroughJobId) return;
+		try {
+			const scopedEnv = rotateSubmissionProofForRestoredJob(bobbitStateDir(), ps.id, ps.walkthroughJobId);
+			if (scopedEnv) Object.assign(env, scopedEnv);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to rotate PR walkthrough submit proof for ${ps.id}:`, err);
+		}
+	}
+
 	private async restoreSession(ps: PersistedSession): Promise<void> {
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
@@ -3126,6 +3137,7 @@ export class SessionManager {
 
 		// Restore env vars needed by extensions
 		bridgeOptions.env = { BOBBIT_SESSION_ID: ps.id };
+		this.restoreWalkthroughSubmitEnv(ps, bridgeOptions.env);
 		if (ps.goalId) {
 			bridgeOptions.env.BOBBIT_GOAL_ID = ps.goalId;
 		}
