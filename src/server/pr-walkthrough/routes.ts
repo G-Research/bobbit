@@ -2,6 +2,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
@@ -28,7 +29,7 @@ type DiffLine = {
 };
 
 type DiffHunk = { id: string; header: string; lines: DiffLine[] };
-type DiffBlock = { id: string; filePath: string; oldPath?: string; status?: string; hunks: DiffHunk[] };
+type DiffBlock = { id: string; filePath: string; oldPath?: string; status?: string; hunks: DiffHunk[]; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
 type WalkthroughCard = {
 	id: string;
 	phaseId: "orientation" | "design" | "significant" | "other" | "audit";
@@ -69,6 +70,7 @@ type WalkthroughExportCapability = {
 	available: boolean;
 	reason?: string;
 	previewOnly?: boolean;
+	[key: string]: unknown;
 };
 
 type StoredWalkthrough = {
@@ -81,6 +83,14 @@ export type PrWalkthroughRouteDeps = {
 	defaultCwd: string;
 	readBody: JsonReader;
 };
+
+type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
+let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
+let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
+
+export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughLlmAdapter | undefined): void {
+	synthesisAdapterForTesting = adapter;
+}
 
 export async function handlePrWalkthroughApiRoute(
 	url: URL,
@@ -146,7 +156,7 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const result = await submitExport(changesetId, stored.payload, body);
-			json(result, result.ok ? 200 : 400);
+			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
 			return true;
 		}
 
@@ -166,8 +176,9 @@ export async function handlePrWalkthroughApiRoute(
 		return true;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		const status = /not found|unknown|invalid|missing|required/i.test(message) ? 400 : 500;
-		fail(status, message);
+		const typed = typedRouteError(err);
+		const status = typed?.status ?? (/not found|unknown|invalid|missing|required/i.test(message) ? 400 : 500);
+		fail(status, message, typed?.extra);
 		return true;
 	}
 }
@@ -230,12 +241,7 @@ async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha:
 	const warnings = Array.isArray(resolved?.warnings) ? resolved.warnings : [];
 	const changesetId = typeof resolved?.changesetId === "string" ? resolved.changesetId : changesetIdForLocal(changeset?.baseSha ?? baseSha, changeset?.headSha ?? headSha);
 	let cards = Array.isArray(resolved?.cards) ? resolved.cards : undefined;
-	if (!cards) {
-		const synthesisModule = await optionalPrModule("card-synthesis");
-		const synthesize = synthesisModule?.synthesiseWalkthroughCards ?? synthesisModule?.synthesizeWalkthroughCards;
-		if (typeof synthesize === "function") cards = await synthesize(changeset, files, { warnings });
-	}
-	cards ??= synthesizeFallbackCards(changeset, files, warnings);
+	cards ??= await synthesizeCardsForResolver(changeset, files, warnings);
 	return {
 		changesetId,
 		changeset,
@@ -251,12 +257,17 @@ async function tryResolveGithubWithDelegation(input: Record<string, unknown>): P
 	const resolveGithubPr = module?.resolveGithubPr;
 	if (typeof resolveGithubPr !== "function") return undefined;
 	const resolved = await resolveGithubPr(input);
+	return normalizeGithubResolvedWalkthrough(resolved);
+}
+
+export async function normalizeGithubResolvedWalkthrough(resolved: any): Promise<WalkthroughResolveResult | undefined> {
 	if (isResolveResult(resolved)) return resolved;
 	if (!resolved?.changeset) return undefined;
 	const warnings = Array.isArray(resolved.warnings) ? resolved.warnings : [];
+	const files = Array.isArray(resolved.files) ? resolved.files : [];
 	const cards = Array.isArray(resolved.cards)
 		? resolved.cards
-		: synthesizeFallbackCards(resolved.changeset, Array.isArray(resolved.files) ? resolved.files : [], warnings);
+		: await synthesizeCardsForResolver(resolved.changeset, files, warnings);
 	return {
 		changesetId: typeof resolved.changesetId === "string" ? resolved.changesetId : changesetIdForLocal(resolved.changeset.baseSha, resolved.changeset.headSha),
 		changeset: resolved.changeset,
@@ -265,6 +276,44 @@ async function tryResolveGithubWithDelegation(input: Record<string, unknown>): P
 		limits: resolved.limits,
 		export: resolved.export,
 	};
+}
+
+async function synthesizeCardsForResolver(changeset: WalkthroughChangeset, files: any[], warnings: WalkthroughWarning[]): Promise<WalkthroughCard[]> {
+	const synthesisModule = await optionalPrModule("card-synthesis");
+	const synthesize = synthesisModule?.synthesiseWalkthroughCards ?? synthesisModule?.synthesizeWalkthroughCards;
+	if (typeof synthesize === "function") {
+		const llm = await resolveConfiguredSynthesisAdapter();
+		const cards = await synthesize(changeset, files, { warnings, ...(llm ? { allowLlm: true, llm } : {}) });
+		if (Array.isArray(cards) && cards.length > 0) return cards;
+	}
+	return synthesizeFallbackCards(changeset, flattenDiffBlocks(files), warnings);
+}
+
+async function resolveConfiguredSynthesisAdapter(): Promise<WalkthroughLlmAdapter | undefined> {
+	if (synthesisAdapterForTesting) return synthesisAdapterForTesting;
+	if (configuredSynthesisAdapter !== undefined) return configuredSynthesisAdapter ?? undefined;
+	const modulePath = stringValue(process.env.BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER);
+	if (!modulePath) {
+		configuredSynthesisAdapter = null;
+		return undefined;
+	}
+	const module = await import(path.isAbsolute(modulePath) ? pathToFileURL(modulePath).href : modulePath);
+	const adapter = module.default ?? module.synthesiseWalkthroughCards ?? module.synthesizeWalkthroughCards ?? module.synthesise;
+	configuredSynthesisAdapter = typeof adapter === "function" ? adapter : null;
+	return configuredSynthesisAdapter ?? undefined;
+}
+
+function flattenDiffBlocks(files: any[]): DiffBlock[] {
+	const blocks: DiffBlock[] = [];
+	for (const file of files) {
+		if (Array.isArray(file?.diffBlocks)) blocks.push(...file.diffBlocks.filter(isDiffBlock));
+		else if (isDiffBlock(file)) blocks.push(file);
+	}
+	return blocks;
+}
+
+function isDiffBlock(value: any): value is DiffBlock {
+	return typeof value?.id === "string" && typeof value?.filePath === "string" && Array.isArray(value?.hunks);
 }
 
 async function resolveLocalFallback(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult> {
@@ -475,16 +524,21 @@ function mapComment(comment: any, cards: WalkthroughCard[]): Record<string, unkn
 }
 
 async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any): Promise<Record<string, unknown>> {
+	void changesetId;
 	if (payload.export?.provider !== "github" || payload.export.available !== true) {
 		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
 	}
 	const module = await optionalPrModule("export-mapper");
+	const buildGithubReviewPreview = module?.buildGithubReviewPreview;
 	const submitGithubReview = module?.submitGithubReview;
-	if (typeof submitGithubReview === "function") {
-		return submitGithubReview({ changesetId, draft: body.draft, event: body.event, cards: payload.cards, changeset: payload.changeset }, { confirm: true });
+	if (typeof buildGithubReviewPreview === "function" && typeof submitGithubReview === "function") {
+		const preview = buildGithubReviewPreview(body.draft, payload.cards, payload.changeset);
+		return submitGithubReview(preview, { confirm: true, event: body.event });
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }
+
+export const submitExportForTesting = submitExport;
 
 async function storeWalkthrough(payload: WalkthroughResolveResult): Promise<void> {
 	const module = await optionalPrModule("walkthrough-store");
@@ -523,6 +577,20 @@ function storeDir(): string {
 
 function storePath(changesetId: string): string {
 	return path.join(storeDir(), `${Buffer.from(changesetId).toString("base64url")}.json`);
+}
+
+function typedRouteError(err: unknown): { status: number; extra: Record<string, unknown> } | undefined {
+	if (!err || typeof err !== "object") return undefined;
+	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown };
+	const status = typeof candidate.status === "number" && candidate.status >= 400 && candidate.status < 600 ? candidate.status : undefined;
+	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings)) return undefined;
+	return {
+		status: status ?? 500,
+		extra: {
+			...(typeof candidate.code === "string" ? { code: candidate.code } : {}),
+			...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings } : {}),
+		},
+	};
 }
 
 async function optionalPrModule(name: string): Promise<any | undefined> {

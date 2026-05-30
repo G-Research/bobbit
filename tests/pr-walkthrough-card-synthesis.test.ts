@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { synthesiseWalkthroughCards, validateSynthesisedCards } from "../src/server/pr-walkthrough/card-synthesis.ts";
+import { normalizeGithubResolvedWalkthrough, setPrWalkthroughSynthesisAdapterForTesting } from "../src/server/pr-walkthrough/routes.ts";
 import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../src/server/pr-walkthrough/walkthrough-store.ts";
 
 const tempDirs: string[] = [];
@@ -76,6 +77,53 @@ describe("PR walkthrough card synthesis", () => {
 		assert.deepEqual(cards[0].diffBlocks.map(diffBlock => diffBlock.id), ["a"]);
 		assert.equal(cards[0].suggestedComments?.length, 1);
 		assert.equal(cards[0].suggestedComments?.[0]?.body, "Valid anchor");
+	});
+
+	it("normalizes adapter-style GitHub files into real diff blocks for resolver synthesis", async () => {
+		const result = await normalizeGithubResolvedWalkthrough({
+			changesetId: "github:SuuBro/bobbit#42:abcdef1",
+			changeset: { ...changeset(), provider: "github", prUrl: "https://github.com/SuuBro/bobbit/pull/42", prNumber: 42 },
+			files: [file("src/a.ts", "modified", [block("adapter-block", "src/a.ts", 2)])],
+			warnings: [],
+			export: { provider: "github", available: false },
+		});
+
+		assert.ok(result);
+		const diffBlocks = result.cards.flatMap(card => card.diffBlocks);
+		assert.ok(diffBlocks.some(diffBlock => diffBlock.id === "adapter-block" && Array.isArray(diffBlock.hunks)));
+		assert.equal(diffBlocks.some(diffBlock => (diffBlock as any).diffBlocks), false);
+	});
+
+	it("resolver synthesis invokes configured LLM adapter and falls back when it returns invalid output", async () => {
+		let calls = 0;
+		setPrWalkthroughSynthesisAdapterForTesting(() => {
+			calls += 1;
+			return { cards: [{ phaseId: "significant", title: "LLM card", summary: "Validated output", diffBlockIds: ["llm-block"] }] };
+		});
+		try {
+			const result = await normalizeGithubResolvedWalkthrough({
+				changesetId: "github:SuuBro/bobbit#42:abcdef1",
+				changeset: { ...changeset(), provider: "github", prUrl: "https://github.com/SuuBro/bobbit/pull/42", prNumber: 42 },
+				files: [file("src/llm.ts", "modified", [block("llm-block", "src/llm.ts", 2)])],
+				warnings: [],
+				export: { provider: "github", available: false },
+			});
+			assert.equal(calls, 1);
+			assert.equal(result?.cards[0]?.title, "LLM card");
+
+			setPrWalkthroughSynthesisAdapterForTesting(() => ({ cards: [{ phaseId: "bad", title: "Bad", summary: "Bad", diffBlockIds: ["llm-block"] }] }));
+			const fallback = await normalizeGithubResolvedWalkthrough({
+				changesetId: "github:SuuBro/bobbit#42:abcdef1",
+				changeset: { ...changeset(), provider: "github", prUrl: "https://github.com/SuuBro/bobbit/pull/42", prNumber: 42 },
+				files: [file("src/llm.ts", "modified", [block("llm-block", "src/llm.ts", 2)])],
+				warnings: [],
+				export: { provider: "github", available: false },
+			});
+			assert.ok(fallback?.cards.some(card => card.phaseId === "orientation"));
+			assert.ok(fallback?.cards.some(card => card.diffBlocks.some(diffBlock => diffBlock.id === "llm-block")));
+		} finally {
+			setPrWalkthroughSynthesisAdapterForTesting(undefined);
+		}
 	});
 
 	it("reserves unassigned blocks for audit coverage without duplicating earlier cards", async () => {

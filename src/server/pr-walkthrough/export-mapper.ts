@@ -232,7 +232,7 @@ export async function submitGithubReview(
 	}
 
 	const payload = createGithubReviewPayload(preview, confirmation.event ?? "COMMENT");
-	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? "https://api.github.com";
+	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? "https://api.github.com";
 	const url = `${apiBaseUrl}/repos/${encodeURIComponent(preview.target.owner)}/${encodeURIComponent(preview.target.repo)}/pulls/${preview.target.prNumber}/reviews`;
 	const response = await (options.fetch ?? fetch)(url, {
 		method: "POST",

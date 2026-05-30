@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,6 +43,23 @@ async function resolveLocal(fixture: GitFixture): Promise<any> {
 	});
 	expect(resp.status).toBe(200);
 	return resp.json();
+}
+
+async function startMockGithubApi(status: number, body: unknown, headers: Record<string, string> = {}): Promise<{ baseUrl: string; requests: Array<{ url?: string; authorization?: string }>; close: () => Promise<void> }> {
+	const requests: Array<{ url?: string; authorization?: string }> = [];
+	const server = createServer((req, res) => {
+		requests.push({ url: req.url, authorization: req.headers.authorization });
+		res.writeHead(status, { "Content-Type": "application/json", ...headers });
+		res.end(JSON.stringify(body));
+	});
+	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	if (!address || typeof address !== "object") throw new Error("mock GitHub API did not bind a TCP port");
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}`,
+		requests,
+		close: () => new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())),
+	};
 }
 
 function firstLineAnchor(result: any): { cardId: string; diffBlockId: string; lineId: string } {
@@ -147,6 +165,49 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.cards[0].phaseId).toBe("orientation");
 		} finally {
 			fixture.cleanup();
+		}
+	});
+
+	test("GitHub PR resolve rejects untrusted hosts with typed errors", async () => {
+		const previousToken = process.env.GITHUB_TOKEN;
+		process.env.GITHUB_TOKEN = "must-not-leak";
+		try {
+			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+				method: "POST",
+				body: JSON.stringify({ prUrl: "https://evil.example/acme/widgets/pull/42" }),
+			});
+			expect(resp.status).toBe(400);
+			const body = await resp.json();
+			expect(body.code).toBe("untrusted_github_host");
+			expect(body.error).toContain("Untrusted GitHub PR host");
+		} finally {
+			if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+			else process.env.GITHUB_TOKEN = previousToken;
+		}
+	});
+
+	test("GitHub adapter auth and permission errors preserve status, code, and warnings", async () => {
+		const mock = await startMockGithubApi(403, { message: "Forbidden" }, { "x-ratelimit-remaining": "5" });
+		const previousApiBase = process.env.BOBBIT_GITHUB_API_BASE_URL;
+		const previousToken = process.env.GITHUB_TOKEN;
+		process.env.BOBBIT_GITHUB_API_BASE_URL = mock.baseUrl;
+		process.env.GITHUB_TOKEN = "mock-token";
+		try {
+			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+				method: "POST",
+				body: JSON.stringify({ prUrl: "https://github.com/acme/widgets/pull/42" }),
+			});
+			expect(resp.status).toBe(403);
+			const body = await resp.json();
+			expect(body.code).toBe("github_permission_denied");
+			expect(body.warnings.some((warning: any) => warning.code === "github_permission_denied")).toBe(true);
+			expect(mock.requests[0]?.authorization).toBe("Bearer mock-token");
+		} finally {
+			await mock.close();
+			if (previousApiBase === undefined) delete process.env.BOBBIT_GITHUB_API_BASE_URL;
+			else process.env.BOBBIT_GITHUB_API_BASE_URL = previousApiBase;
+			if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+			else process.env.GITHUB_TOKEN = previousToken;
 		}
 	});
 

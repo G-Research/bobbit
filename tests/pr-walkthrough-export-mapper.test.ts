@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -8,10 +9,12 @@ import {
 	type PrWalkthroughReviewDraft,
 } from "../src/server/pr-walkthrough/export-mapper.ts";
 import {
+	GithubPrAdapterError,
 	parseGithubPrReference,
 	parseGithubRemoteUrl,
 	resolveGithubPr,
 } from "../src/server/pr-walkthrough/github-adapter.ts";
+import { submitExportForTesting } from "../src/server/pr-walkthrough/routes.ts";
 
 const cards: PrWalkthroughCard[] = [
 	{
@@ -170,9 +173,61 @@ describe("PR walkthrough GitHub export mapper", () => {
 		assert.equal(body.event, "COMMENT");
 		assert.equal(body.comments.length, 2);
 	});
+
+	it("route submit builds a preview before mocked GitHub submission", async () => {
+		const server = await startMockGithubReviewServer();
+		const previousToken = process.env.GITHUB_TOKEN;
+		const previousApiBase = process.env.BOBBIT_GITHUB_API_BASE_URL;
+		process.env.GITHUB_TOKEN = "route-token";
+		process.env.BOBBIT_GITHUB_API_BASE_URL = server.baseUrl;
+		try {
+			const result = await submitExportForTesting("github:SuuBro/bobbit#42:bbbbbbb", {
+				changesetId: "github:SuuBro/bobbit#42:bbbbbbb",
+				changeset: draft().changeset,
+				cards,
+				warnings: [],
+				export: { provider: "github", available: true },
+			}, { draft: draft(), event: "REQUEST_CHANGES" });
+
+			assert.equal(result.ok, true);
+			assert.equal(result.submitted, true);
+			assert.equal(server.requests.length, 1);
+			assert.equal(server.requests[0]?.url, "/repos/SuuBro/bobbit/pulls/42/reviews");
+			assert.equal(server.requests[0]?.authorization, "Bearer route-token");
+			assert.equal(server.requests[0]?.body.event, "REQUEST_CHANGES");
+			assert.equal(server.requests[0]?.body.comments.length, 2);
+		} finally {
+			await server.close();
+			if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+			else process.env.GITHUB_TOKEN = previousToken;
+			if (previousApiBase === undefined) delete process.env.BOBBIT_GITHUB_API_BASE_URL;
+			else process.env.BOBBIT_GITHUB_API_BASE_URL = previousApiBase;
+		}
+	});
 });
 
 describe("PR walkthrough GitHub adapter", () => {
+	it("rejects untrusted PR URL hosts before adding credentials or fetching", async () => {
+		assert.throws(
+			() => parseGithubPrReference({ prUrl: "https://evil.example/SuuBro/bobbit/pull/1842" }),
+			(error: unknown) => error instanceof GithubPrAdapterError && error.status === 400 && error.code === "untrusted_github_host",
+		);
+
+		let calls = 0;
+		await assert.rejects(
+			resolveGithubPr({
+				prUrl: "https://evil.example/SuuBro/bobbit/pull/1842",
+				token: "secret-token",
+				fetch: async () => {
+					calls += 1;
+					throw new Error("fetch must not be called for untrusted hosts");
+				},
+			}),
+			(error: unknown) => error instanceof GithubPrAdapterError && error.code === "untrusted_github_host",
+		);
+		assert.equal(calls, 0);
+	});
+
 	it("parses GitHub PR URLs and origin remotes", () => {
 		assert.deepEqual(parseGithubPrReference({ prUrl: "https://github.com/SuuBro/bobbit/pull/1842" }), {
 			owner: "SuuBro",
@@ -231,8 +286,34 @@ describe("PR walkthrough GitHub adapter", () => {
 		assert.equal(resolved.export.available, true);
 		assert.equal(resolved.files[0].filePath, "src/example.ts");
 		assert.equal(resolved.files[0].diffBlocks[0].hunks[0].lines[1].newLine, 2);
+		assert.equal(resolved.files[0].diffBlocks[0].externalUrl, "https://github.com/SuuBro/bobbit/blob/bbbbbbbbbbbb/src/example.ts");
 	});
 });
+
+async function startMockGithubReviewServer(): Promise<{ baseUrl: string; requests: Array<{ url?: string; authorization?: string; body: any }>; close: () => Promise<void> }> {
+	const requests: Array<{ url?: string; authorization?: string; body: any }> = [];
+	const server = createServer((req, res) => {
+		const chunks: Buffer[] = [];
+		req.on("data", chunk => chunks.push(Buffer.from(chunk)));
+		req.on("end", () => {
+			requests.push({
+				url: req.url,
+				authorization: req.headers.authorization,
+				body: JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}"),
+			});
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ html_url: "https://github.com/SuuBro/bobbit/pull/42#pullrequestreview-route" }));
+		});
+	});
+	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	assert.ok(address && typeof address === "object");
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}`,
+		requests,
+		close: () => new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())),
+	};
+}
 
 function response(status: number, body: unknown) {
 	return {

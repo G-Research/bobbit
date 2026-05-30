@@ -31,6 +31,7 @@ const realChangeset = {
 const diffBlock = {
 	id: "src-app-pr-walkthrough-ts",
 	filePath: "src/app/pr-walkthrough.ts",
+	externalUrl: "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts",
 	hunks: [{
 		id: "src-app-pr-walkthrough-ts:h0",
 		header: "@@ -120,6 +120,12 @@ export async function resolvePrWalkthrough",
@@ -259,6 +260,7 @@ test.describe("real PR walkthrough browser UX", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "resolved cards should replace the fixture fallback").toContainText("Resolved changeset overview", { timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-title")).toContainText("Real-ish walkthrough cards");
 		await expect(activeCard(page)).toContainText("src/app/pr-walkthrough.ts");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-external-file-link").first()).toHaveAttribute("href", "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts");
 		await expect(activeCard(page)).toContainText("gatewayFetch('/api/pr-walkthrough/resolve'");
 		await expect.poll(() => state.resolveCalls.length, { timeout: 5_000 }).toBe(1);
 		expect(JSON.stringify(state.resolveCalls[0])).toContain(REAL_PR_URL);

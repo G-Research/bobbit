@@ -504,8 +504,11 @@ export class PrWalkthroughPanel extends LitElement {
 		.body.narrow .narrow-note { display: inline; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.diff-file-header { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--border, ButtonBorder); font: inherit; color: inherit; text-align: left; cursor: pointer; }
-		.diff-block.closed .diff-file-header { border-bottom: 0; }
+		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
+		.diff-block.closed .diff-file-header-row { border-bottom: 0; }
+		.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+		.diff-external-link { display: inline-flex; align-items: center; flex: 0 0 auto; padding: 0 12px; border-left: 1px solid var(--border, ButtonBorder); font-size: 11px; font-weight: 800; color: var(--primary, Highlight); text-decoration: none; }
+		.diff-external-link:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); text-decoration: underline; }
 		.caret { width: 12px; color: var(--muted-foreground, GrayText); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
 		.diff-block.open .caret { transform: rotate(90deg); }
 		.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
@@ -975,12 +978,15 @@ export class PrWalkthroughPanel extends LitElement {
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
 		return html`
 			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode} data-expanded=${collapsed ? "false" : "true"}>
-				<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
-					<span class="caret">▸</span>
-					<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
-					${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
-					<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
-				</button>
+				<div class="diff-file-header-row">
+					<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
+						<span class="caret">▸</span>
+						<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
+						${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
+						<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
+					</button>
+					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link">Open file</a>` : nothing}
+				</div>
 				${collapsed ? nothing : this.effectiveDiffMode === "split" ? this.renderSplitDiff(card, block) : this.renderInlineDiff(card, block)}
 			</section>
 		`;
@@ -1018,6 +1024,11 @@ export class PrWalkthroughPanel extends LitElement {
 				</div>
 			</div>
 		`;
+	}
+
+	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
+		const linked = block as PrWalkthroughDiffBlock & { externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
+		return linked.externalUrl || linked.blobUrl || linked.rawUrl || linked.contentsUrl;
 	}
 
 	private renderDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine | null, column: "old" | "new" | "inline"): TemplateResult {

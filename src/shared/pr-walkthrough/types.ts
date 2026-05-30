@@ -38,6 +38,10 @@ export interface PrWalkthroughDiffBlock {
 	filePath: string;
 	oldPath?: string;
 	hunks: PrWalkthroughHunk[];
+	externalUrl?: string;
+	blobUrl?: string;
+	rawUrl?: string;
+	contentsUrl?: string;
 }
 
 export interface PrWalkthroughSuggestedComment {

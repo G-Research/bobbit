@@ -23,6 +23,10 @@ export interface GithubDiffBlock {
 	filePath: string;
 	oldPath?: string;
 	hunks: GithubDiffHunk[];
+	externalUrl?: string;
+	blobUrl?: string;
+	rawUrl?: string;
+	contentsUrl?: string;
 }
 
 export interface GithubWalkthroughChangesetRef {
@@ -178,6 +182,11 @@ export function parseGithubPrReference(input: { prUrl?: string; prNumber?: strin
 		throw new GithubPrAdapterError(`Invalid GitHub PR URL: ${prUrl}`, { status: 400, code: "invalid_github_pr_url" });
 	}
 
+	const host = normalizeHost(parsed.hostname);
+	if (!isTrustedGithubHost(host)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host" });
+	}
+
 	const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
 	if (!match) {
 		throw new GithubPrAdapterError(`URL is not a GitHub pull request: ${prUrl}`, { status: 400, code: "not_github_pull_request" });
@@ -187,7 +196,7 @@ export function parseGithubPrReference(input: { prUrl?: string; prNumber?: strin
 		owner: decodeURIComponent(match[1]),
 		repo: stripGitSuffix(decodeURIComponent(match[2])),
 		number: Number(match[3]),
-		host: parsed.hostname,
+		host,
 		url: prUrl,
 	};
 }
@@ -213,8 +222,12 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	const inferred = parsed.owner && parsed.repo ? undefined : await inferGithubRepository(options.cwd);
 	const owner = parsed.owner ?? inferred?.owner;
 	const repo = parsed.repo ?? inferred?.repo;
-	const host = parsed.host ?? inferred?.host ?? "github.com";
+	const host = normalizeHost(parsed.host ?? inferred?.host ?? "github.com");
 	const number = parsed.number;
+
+	if (!isTrustedGithubHost(host)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host" });
+	}
 
 	if (!owner || !repo) {
 		throw new GithubPrAdapterError("A GitHub PR number requires a GitHub origin remote to infer owner/repo", {
@@ -235,7 +248,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		});
 	}
 
-	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? apiBaseUrlForHost(host);
+	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
 	const fetchImpl = options.fetch ?? fetch;
 	const headers = githubHeaders(token);
 	const prApiUrl = `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;
@@ -330,7 +343,7 @@ async function fetchGithubJson<T>(
 		if (warning) warnings.push(warning);
 		throw new GithubPrAdapterError(`GitHub API request failed (${response.status}): ${message || response.statusText}`, {
 			status: response.status,
-			code: response.status === 404 ? "github_pr_not_found" : "github_api_error",
+			code: response.status === 404 ? "github_pr_not_found" : warning?.code ?? "github_api_error",
 			warnings,
 		});
 	}
@@ -351,7 +364,16 @@ async function enrichFilesWithDiffs(input: {
 			? await readLocalPatchForFile(input.cwd, input.baseSha, input.headSha, file).catch(() => cleanString(file.patch))
 			: cleanString(file.patch);
 		const status = normalizeGithubFileStatus(file.status, patch);
-		const block = parsePatchToDiffBlock({ filePath: file.filename, oldPath: file.previous_filename, patch, status });
+		const block = parsePatchToDiffBlock({
+			filePath: file.filename,
+			oldPath: file.previous_filename,
+			patch,
+			status,
+			externalUrl: file.blob_url,
+			blobUrl: file.blob_url,
+			rawUrl: file.raw_url,
+			contentsUrl: file.contents_url,
+		});
 		if (!patch) {
 			input.warnings.push({
 				code: status === "binary" ? "github_binary_file" : "github_file_without_patch",
@@ -399,7 +421,7 @@ async function readLocalPatchForFile(cwd: string | undefined, baseSha: string, h
 	return extractPatchBody(stdout) || undefined;
 }
 
-function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"] }): GithubDiffBlock {
+function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"]; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string }): GithubDiffBlock {
 	const blockId = stableBlockId(input.filePath, input.oldPath);
 	const hunks: GithubDiffHunk[] = [];
 	const lines = (input.patch ?? "").split(/\r?\n/);
@@ -431,7 +453,16 @@ function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patc
 			newLine += 1;
 		}
 	}
-	return { id: blockId, filePath: input.filePath, oldPath: input.oldPath, hunks };
+	return {
+		id: blockId,
+		filePath: input.filePath,
+		oldPath: input.oldPath,
+		hunks,
+		externalUrl: input.externalUrl,
+		blobUrl: input.blobUrl,
+		rawUrl: input.rawUrl,
+		contentsUrl: input.contentsUrl,
+	};
 }
 
 function extractPatchBody(diff: string): string {
@@ -476,6 +507,22 @@ function githubHeaders(token: string | undefined): Record<string, string> {
 
 function apiBaseUrlForHost(host: string): string {
 	return host.toLowerCase() === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
+}
+
+function normalizeHost(host: string | undefined): string {
+	return (host ?? "github.com").trim().replace(/\.$/, "").toLowerCase();
+}
+
+function isTrustedGithubHost(host: string): boolean {
+	const trusted = new Set(["github.com", ...trustedGithubHostAllowlist()]);
+	return trusted.has(normalizeHost(host));
+}
+
+function trustedGithubHostAllowlist(): string[] {
+	return (process.env.BOBBIT_GITHUB_TRUSTED_HOSTS ?? "")
+		.split(",")
+		.map(host => normalizeHost(host))
+		.filter(Boolean);
 }
 
 function changesetIdForGithub(owner: string, repo: string, number: number, headSha?: string): string {
