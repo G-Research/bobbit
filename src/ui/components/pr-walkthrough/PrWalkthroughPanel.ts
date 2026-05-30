@@ -515,6 +515,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.diff-path b { color: var(--foreground, CanvasText); }
 		.diff-kind { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; color: var(--chart-1, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 16%, transparent); }
+		.diff-status { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 999px; color: var(--chart-2, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 14%, transparent); border: 1px solid color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 26%, var(--border, ButtonBorder)); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
@@ -977,6 +978,17 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
+	private diffStatusLabel(block: PrWalkthroughDiffBlock): string {
+		const status = block.status;
+		if (status === "added") return "Added";
+		if (status === "modified") return "Modified";
+		if (status === "deleted") return "Deleted";
+		if (status === "renamed") return "Renamed";
+		if (status === "copied") return "Copied";
+		if (status === "binary") return "Binary";
+		return "";
+	}
+
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		const collapsed = this._collapsedDiffBlockIds.includes(block.id);
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
@@ -985,6 +997,7 @@ export class PrWalkthroughPanel extends LitElement {
 				<div class="diff-file-header-row">
 					<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
 						<span class="caret">▸</span>
+						${this.diffStatusLabel(block) ? html`<span class="diff-status" data-testid="pr-walkthrough-diff-status">${this.diffStatusLabel(block)}</span>` : nothing}
 						<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
 						${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
 						<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
@@ -1307,7 +1320,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const record = data as Record<string, unknown>;
 		return {
 			ok: typeof record.ok === "boolean" ? record.ok : true,
-			url: typeof record.url === "string" ? record.url : undefined,
+			url: typeof record.url === "string" ? record.url : typeof record.reviewUrl === "string" ? record.reviewUrl : undefined,
 			message: typeof record.message === "string" ? record.message : "GitHub review submitted.",
 			error: typeof record.error === "string" ? record.error : undefined,
 		};

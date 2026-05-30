@@ -1,3 +1,4 @@
+import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
 import { execFileSafe } from "../exec-file-safe.js";
 
@@ -19,10 +20,16 @@ export interface GithubDiffHunk {
 	lines: GithubDiffLine[];
 }
 
+export type GithubWalkthroughFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "binary";
+
 export interface GithubDiffBlock {
 	id: string;
 	filePath: string;
 	oldPath?: string;
+	status?: GithubWalkthroughFileStatus;
+	isBinary?: boolean;
+	isGenerated?: boolean;
+	isTruncated?: boolean;
 	hunks: GithubDiffHunk[];
 	externalUrl?: string;
 	blobUrl?: string;
@@ -49,7 +56,7 @@ export interface GithubWalkthroughChangesetRef {
 export interface GithubWalkthroughFile {
 	filePath: string;
 	oldPath?: string;
-	status: "added" | "modified" | "deleted" | "renamed" | "copied" | "binary";
+	status: GithubWalkthroughFileStatus;
 	additions: number;
 	deletions: number;
 	changes: number;
@@ -57,6 +64,10 @@ export interface GithubWalkthroughFile {
 	blobUrl?: string;
 	rawUrl?: string;
 	contentsUrl?: string;
+	isBinary?: boolean;
+	isGenerated?: boolean;
+	isTruncated?: boolean;
+	warnings?: GithubWalkthroughWarning[];
 	diffBlocks: GithubDiffBlock[];
 }
 
@@ -103,6 +114,8 @@ export interface ResolveGithubPrOptions {
 	fetch?: FetchLike;
 	apiBaseUrl?: string;
 	maxFiles?: number;
+	maxPatchBytes?: number;
+	maxLinesPerFile?: number;
 }
 
 export interface ParsedGithubPrReference {
@@ -156,6 +169,9 @@ type FetchLike = (url: string, init?: {
 	body?: string;
 	signal?: AbortSignal;
 }) => Promise<FetchResponseLike>;
+
+const DEFAULT_MAX_PATCH_BYTES = 1_000_000;
+const DEFAULT_MAX_LINES_PER_FILE = 2_000;
 
 export class GithubPrAdapterError extends Error {
 	readonly status: number;
@@ -255,7 +271,15 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	const prApiUrl = `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;
 	const pr = await fetchGithubJson<GithubApiPullRequest>(fetchImpl, prApiUrl, headers, warnings);
 	const files = await fetchGithubFiles(fetchImpl, prApiUrl, headers, options.maxFiles ?? 300, warnings);
-	const resolvedFiles = await enrichFilesWithDiffs({ cwd: options.cwd, baseSha: pr.base.sha, headSha: pr.head.sha, files, warnings });
+	const resolvedFiles = await enrichFilesWithDiffs({
+		cwd: options.cwd,
+		baseSha: pr.base.sha,
+		headSha: pr.head.sha,
+		files,
+		warnings,
+		maxPatchBytes: options.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES,
+		maxLinesPerFile: options.maxLinesPerFile ?? DEFAULT_MAX_LINES_PER_FILE,
+	});
 	const prUrl = safeGithubUrl(pr.html_url) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
 	const changesetId = changesetIdForGithub(owner, repo, number, pr.head.sha);
 	const exportAvailable = Boolean(token);
@@ -362,32 +386,44 @@ async function enrichFilesWithDiffs(input: {
 	headSha: string;
 	files: GithubApiChangedFile[];
 	warnings: GithubWalkthroughWarning[];
+	maxPatchBytes: number;
+	maxLinesPerFile: number;
 }): Promise<GithubWalkthroughFile[]> {
 	const localDiffAvailable = await hasLocalCommit(input.cwd, input.baseSha) && await hasLocalCommit(input.cwd, input.headSha);
 	const enriched: GithubWalkthroughFile[] = [];
 	for (const file of input.files) {
-		const patch = localDiffAvailable
+		const rawPatch = localDiffAvailable
 			? await readLocalPatchForFile(input.cwd, input.baseSha, input.headSha, file).catch(() => cleanString(file.patch))
 			: cleanString(file.patch);
-		const status = normalizeGithubFileStatus(file.status, patch);
+		const normalized = normalizeGithubPatch(rawPatch, input.maxPatchBytes);
+		const patch = normalized.patch;
+		const status = normalizeGithubFileStatus(file.status);
+		const isGenerated = isLikelyGeneratedPath(file.filename) || Boolean(file.previous_filename && isLikelyGeneratedPath(file.previous_filename));
 		const block = parsePatchToDiffBlock({
 			filePath: file.filename,
 			oldPath: file.previous_filename,
 			patch,
 			status,
+			isGenerated,
+			maxLinesPerFile: input.maxLinesPerFile,
 			externalUrl: safeGithubUrl(file.blob_url),
 			blobUrl: safeGithubUrl(file.blob_url),
 			rawUrl: safeGithubUrl(file.raw_url),
 			contentsUrl: safeGithubUrl(file.contents_url),
 		});
-		if (!patch) {
-			input.warnings.push({
-				code: status === "binary" ? "github_binary_file" : "github_file_without_patch",
-				severity: status === "binary" ? "warning" : "info",
-				message: status === "binary" ? "Binary file has no reviewable text diff." : "GitHub did not provide a text patch for this file.",
-				filePath: file.filename,
-			});
-		}
+		const likelyTruncated = isPatchLikelyTruncated(file, block, patch);
+		if (normalized.truncated || likelyTruncated || block.truncated) block.isTruncated = true;
+		const fileWarnings = githubFileWarnings(file, {
+			status,
+			isGenerated,
+			patch,
+			block,
+			patchByteTruncated: normalized.truncated,
+			patchLikelyTruncated: likelyTruncated,
+			maxPatchBytes: input.maxPatchBytes,
+			maxLinesPerFile: input.maxLinesPerFile,
+		});
+		input.warnings.push(...fileWarnings);
 		enriched.push({
 			filePath: file.filename,
 			oldPath: file.previous_filename,
@@ -399,6 +435,10 @@ async function enrichFilesWithDiffs(input: {
 			blobUrl: safeGithubUrl(file.blob_url),
 			rawUrl: safeGithubUrl(file.raw_url),
 			contentsUrl: safeGithubUrl(file.contents_url),
+			isBinary: status === "binary",
+			isGenerated,
+			isTruncated: block.isTruncated === true,
+			warnings: fileWarnings,
 			diffBlocks: block.hunks.length > 0 ? [block] : [],
 		});
 	}
@@ -427,13 +467,15 @@ async function readLocalPatchForFile(cwd: string | undefined, baseSha: string, h
 	return extractPatchBody(stdout) || undefined;
 }
 
-function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"]; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string }): GithubDiffBlock {
+function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patch?: string; status: GithubWalkthroughFile["status"]; isGenerated?: boolean; maxLinesPerFile?: number; externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string }): GithubDiffBlock & { truncated?: boolean } {
 	const blockId = stableBlockId(input.filePath, input.oldPath);
 	const hunks: GithubDiffHunk[] = [];
 	const lines = (input.patch ?? "").split(/\r?\n/);
 	let current: GithubDiffHunk | undefined;
 	let oldLine = 0;
 	let newLine = 0;
+	let diffLineCount = 0;
+	let truncated = false;
 	for (const rawLine of lines) {
 		const hunkMatch = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$/.exec(rawLine);
 		if (hunkMatch) {
@@ -446,6 +488,19 @@ function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patc
 		if (!current || rawLine === "" || rawLine.startsWith("\\ No newline")) continue;
 		const prefix = rawLine[0];
 		const text = rawLine.slice(1);
+		if (prefix === "+" || prefix === "-" || prefix === " ") {
+			if (input.maxLinesPerFile !== undefined && diffLineCount >= input.maxLinesPerFile) {
+				truncated = true;
+				if (prefix === "+") newLine += 1;
+				else if (prefix === "-") oldLine += 1;
+				else {
+					oldLine += 1;
+					newLine += 1;
+				}
+				continue;
+			}
+			diffLineCount += 1;
+		}
 		const lineIndex = current.lines.length;
 		if (prefix === "+") {
 			current.lines.push({ id: `${current.id}:l${lineIndex}`, side: "new", newLine, kind: "add", text });
@@ -463,12 +518,85 @@ function parsePatchToDiffBlock(input: { filePath: string; oldPath?: string; patc
 		id: blockId,
 		filePath: input.filePath,
 		oldPath: input.oldPath,
+		status: input.status,
+		isBinary: input.status === "binary",
+		isGenerated: input.isGenerated,
+		isTruncated: truncated,
 		hunks,
 		externalUrl: input.externalUrl,
 		blobUrl: input.blobUrl,
 		rawUrl: input.rawUrl,
 		contentsUrl: input.contentsUrl,
+		...(truncated ? { truncated } : {}),
 	};
+}
+
+function normalizeGithubPatch(patch: string | undefined, maxPatchBytes: number): { patch?: string; truncated: boolean } {
+	if (!patch) return { patch, truncated: false };
+	const bytes = Buffer.byteLength(patch, "utf8");
+	if (bytes <= maxPatchBytes) return { patch, truncated: false };
+	return {
+		patch: Buffer.from(patch, "utf8").subarray(0, maxPatchBytes).toString("utf8"),
+		truncated: true,
+	};
+}
+
+function githubFileWarnings(file: GithubApiChangedFile, input: {
+	status: GithubWalkthroughFileStatus;
+	isGenerated: boolean;
+	patch?: string;
+	block: GithubDiffBlock & { truncated?: boolean };
+	patchByteTruncated: boolean;
+	patchLikelyTruncated: boolean;
+	maxPatchBytes: number;
+	maxLinesPerFile: number;
+}): GithubWalkthroughWarning[] {
+	const warnings: GithubWalkthroughWarning[] = [];
+	if (input.isGenerated) {
+		warnings.push({ code: "github_generated_file", severity: "info", message: `${file.filename} looks generated and may be low-signal for review.`, filePath: file.filename });
+	}
+	if (!input.patch) {
+		warnings.push({
+			code: input.status === "binary" ? "github_binary_file" : "github_patch_unavailable",
+			severity: input.status === "binary" ? "warning" : "warning",
+			message: input.status === "binary" ? "Binary file has no reviewable text diff." : "GitHub did not provide a text patch for this file; it may be too large or truncated.",
+			filePath: file.filename,
+		});
+	}
+	if (input.patchByteTruncated) {
+		warnings.push({ code: "github_patch_truncated", severity: "warning", message: `${file.filename} patch exceeded ${input.maxPatchBytes} bytes and was truncated.`, filePath: file.filename });
+	}
+	if (input.block.truncated) {
+		warnings.push({ code: "github_file_lines_truncated", severity: "warning", message: `${file.filename} was truncated after ${input.maxLinesPerFile} diff lines.`, filePath: file.filename });
+	}
+	if (!input.patchByteTruncated && !input.block.truncated && input.patchLikelyTruncated) {
+		warnings.push({ code: "github_patch_truncated", severity: "warning", message: `${file.filename} patch appears truncated compared with GitHub changed-line counts.`, filePath: file.filename });
+	}
+	return dedupeGithubWarnings(warnings);
+}
+
+function isPatchLikelyTruncated(file: GithubApiChangedFile, block: GithubDiffBlock, patch?: string): boolean {
+	if (!patch) return (file.changes ?? ((file.additions ?? 0) + (file.deletions ?? 0))) > 0;
+	const expectedAdditions = file.additions ?? 0;
+	const expectedDeletions = file.deletions ?? 0;
+	if (expectedAdditions === 0 && expectedDeletions === 0) return false;
+	let additions = 0;
+	let deletions = 0;
+	for (const line of block.hunks.flatMap(hunk => hunk.lines)) {
+		if (line.kind === "add") additions += 1;
+		else if (line.kind === "del") deletions += 1;
+	}
+	return additions < expectedAdditions || deletions < expectedDeletions;
+}
+
+function dedupeGithubWarnings(warnings: GithubWalkthroughWarning[]): GithubWalkthroughWarning[] {
+	const seen = new Set<string>();
+	return warnings.filter(warning => {
+		const key = `${warning.code}:${warning.filePath ?? ""}:${warning.message}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 }
 
 function extractPatchBody(diff: string): string {
@@ -477,17 +605,18 @@ function extractPatchBody(diff: string): string {
 	return firstHunk >= 0 ? lines.slice(firstHunk).join("\n") : "";
 }
 
-function normalizeGithubFileStatus(status: string, patch?: string): GithubWalkthroughFile["status"] {
-	if (!patch && /binary/i.test(status)) return "binary";
+function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["status"] {
+	if (/binary/i.test(status)) return "binary";
 	switch (status) {
 		case "added": return "added";
-		case "removed": return "deleted";
+		case "removed":
+		case "deleted": return "deleted";
 		case "renamed": return "renamed";
 		case "copied": return "copied";
 		case "modified":
 		case "changed":
 		default:
-			return patch ? "modified" : "binary";
+			return "modified";
 	}
 }
 

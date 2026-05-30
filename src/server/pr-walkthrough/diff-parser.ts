@@ -8,6 +8,7 @@ export interface ParsedWalkthroughDiffFile extends PrWalkthroughDiffBlock {
 	isBinary: boolean;
 	isGenerated: boolean;
 	truncated: boolean;
+	isTruncated?: boolean;
 	warnings: WalkthroughWarning[];
 	additions: number;
 	deletions: number;
@@ -125,6 +126,7 @@ function createFileFromDiffGit(line: string, index: number, generatedPathMatcher
 		isBinary: false,
 		isGenerated: generatedPathMatcher?.(filePath) ?? false,
 		truncated: false,
+		isTruncated: false,
 		warnings: [],
 		additions: 0,
 		deletions: 0,
@@ -188,6 +190,7 @@ function appendDiffLine(file: MutableDiffFile, rawLine: string, maxLinesPerFile:
 	if (maxLinesPerFile !== undefined && file.lineCount >= maxLinesPerFile) {
 		if (!file.truncated) {
 			file.truncated = true;
+			file.isTruncated = true;
 			file.warnings.push({ code: "file-lines-truncated", severity: "warning", message: `${file.filePath} was truncated after ${maxLinesPerFile} diff lines.`, filePath: file.filePath });
 		}
 		advanceCounters(file, rawLine);

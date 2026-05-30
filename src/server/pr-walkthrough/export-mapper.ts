@@ -36,6 +36,8 @@ export interface PrWalkthroughDiffBlock {
 	oldPath?: string;
 	hunks: PrWalkthroughHunk[];
 	status?: string;
+	isBinary?: boolean;
+	isTruncated?: boolean;
 }
 
 export interface PrWalkthroughCard {
@@ -395,7 +397,7 @@ function normalizePrNumber(value: string | number | undefined): number | undefin
 }
 
 function isUnreviewableBlock(block: PrWalkthroughDiffBlock): boolean {
-	return /^(binary|truncated)$/i.test(block.status ?? "") || block.hunks.length === 0;
+	return block.isBinary === true || block.isTruncated === true || /^(binary|truncated)$/i.test(block.status ?? "") || block.hunks.length === 0;
 }
 
 function reviewUrlFromResponse(value: unknown): string | undefined {

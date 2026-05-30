@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { execFileSafe } from "../exec-file-safe.js";
 import type { PrWalkthroughChangesetRef, WalkthroughLimits, WalkthroughWarning } from "../../shared/pr-walkthrough/types.js";
 import { changesetIdForLocal } from "../../shared/pr-walkthrough/ids.js";
+import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 import { parseUnifiedDiff, type ParsedWalkthroughDiffFile } from "./diff-parser.js";
 
 export interface ResolveLocalChangesetRequest {
@@ -107,20 +108,7 @@ export function parseNameStatus(raw: string): NameStatusRecord[] {
 	});
 }
 
-export function isLikelyGeneratedPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-	return normalized.startsWith("dist/")
-		|| normalized.includes("/dist/")
-		|| normalized.includes("/generated/")
-		|| normalized.includes("__snapshots__/")
-		|| normalized.endsWith(".snap")
-		|| normalized.endsWith("package-lock.json")
-		|| normalized.endsWith("pnpm-lock.yaml")
-		|| normalized.endsWith("yarn.lock")
-		|| normalized.endsWith("bun.lockb")
-		|| normalized.endsWith(".min.js")
-		|| normalized.endsWith(".min.css");
-}
+export { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
 
 async function verifyCommit(cwd: string, ref: string, label: string): Promise<string> {
 	try {

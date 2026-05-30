@@ -289,6 +289,45 @@ describe("PR walkthrough GitHub adapter", () => {
 		assert.equal(resolved.files[0].diffBlocks[0].externalUrl, "https://github.com/SuuBro/bobbit/blob/bbbbbbbbbbbb/src/example.ts");
 	});
 
+	it("marks generated and truncated GitHub patches with warnings and block status", async () => {
+		const longPatch = ["@@ -1,1 +1,10 @@", " context", ...Array.from({ length: 10 }, (_, index) => `+generated ${index}`)].join("\n");
+		const resolved = await resolveGithubPr({
+			prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			token: "token",
+			apiBaseUrl: "https://api.github.test",
+			maxLinesPerFile: 3,
+			fetch: async (url) => {
+				if (url.endsWith("/pulls/42")) {
+					return response(200, {
+						number: 42,
+						title: "Generated bundle",
+						html_url: "https://github.com/SuuBro/bobbit/pull/42",
+						base: { sha: "aaaaaaaaaaaa" },
+						head: { sha: "bbbbbbbbbbbb" },
+						changed_files: 1,
+					});
+				}
+				return response(200, [{
+					filename: "dist/generated.bundle.js",
+					status: "added",
+					additions: 10,
+					deletions: 0,
+					changes: 10,
+					patch: longPatch,
+				}]);
+			},
+		});
+
+		const file = resolved.files[0];
+		assert.equal(file.isGenerated, true);
+		assert.equal(file.isTruncated, true);
+		assert.equal(file.status, "added");
+		assert.equal(file.diffBlocks[0].status, "added");
+		assert.equal(file.diffBlocks[0].isGenerated, true);
+		assert.ok(resolved.warnings.some(warning => warning.code === "github_generated_file" && warning.filePath === "dist/generated.bundle.js"));
+		assert.ok(resolved.warnings.some(warning => /truncated/i.test(warning.code) && warning.filePath === "dist/generated.bundle.js"));
+	});
+
 	it("warns when GitHub changed-file pagination lands exactly on the max-files boundary", async () => {
 		const resolved = await resolveGithubPr({
 			prUrl: "https://github.com/SuuBro/bobbit/pull/42",

@@ -31,6 +31,7 @@ const realChangeset = {
 const diffBlock = {
 	id: "src-app-pr-walkthrough-ts",
 	filePath: "src/app/pr-walkthrough.ts",
+	status: "modified",
 	externalUrl: "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts",
 	hunks: [{
 		id: "src-app-pr-walkthrough-ts:h0",
@@ -46,6 +47,8 @@ const diffBlock = {
 const persistedBlock = {
 	id: "src-server-store-ts",
 	filePath: "src/server/pr-walkthrough/walkthrough-store.ts",
+	oldPath: "src/server/pr-walkthrough/store.ts",
+	status: "renamed",
 	hunks: [{
 		id: "src-server-store-ts:h0",
 		header: "@@ -30,7 +30,11 @@ export async function saveWalkthroughState",
@@ -260,6 +263,7 @@ test.describe("real PR walkthrough browser UX", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "resolved cards should replace the fixture fallback").toContainText("Resolved changeset overview", { timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-title")).toContainText("Real-ish walkthrough cards");
 		await expect(activeCard(page)).toContainText("src/app/pr-walkthrough.ts");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status").first()).toContainText("Modified");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-external-file-link").first()).toHaveAttribute("href", "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts");
 		await expect(activeCard(page)).toContainText("gatewayFetch('/api/pr-walkthrough/resolve'");
 		await expect.poll(() => state.resolveCalls.length, { timeout: 5_000 }).toBe(1);
@@ -300,6 +304,7 @@ test.describe("real PR walkthrough browser UX", () => {
 		await saveLineComment(page, "Persisted line comment from browser test");
 		await walkthroughPanel(page).getByTestId("pr-walkthrough-dislike").first().click();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title")).toContainText("Persist walkthrough state");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status").filter({ hasText: "Renamed" }).first(), "renamed file status should be explicit in diff headers").toBeVisible();
 		await saveCardComment(page, "Card-level export concern from browser test");
 		await walkthroughPanel(page).getByTestId("pr-walkthrough-like").first().click();
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit")).toBeVisible({ timeout: 10_000 });

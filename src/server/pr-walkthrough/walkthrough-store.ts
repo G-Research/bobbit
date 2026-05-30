@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { bobbitStateDir } from "../bobbit-dir.js";
+
 // The shared PR walkthrough model is produced by the upstream model task. Keep this
 // import pointed at that contract while retaining local structural types so this
 // module can be validated independently when the shared file is not present yet.
@@ -69,6 +71,22 @@ interface StoredWalkthroughFile {
 }
 
 const STORE_DIR = "pr-walkthrough";
+
+export function storeWalkthrough(payload: WalkthroughStorePayload, stateDir = bobbitStateDir()): StoredWalkthroughPayload {
+	return new WalkthroughStore(stateDir).save(payload);
+}
+
+export function saveWalkthrough(payload: WalkthroughStorePayload, stateDir = bobbitStateDir()): StoredWalkthroughPayload {
+	return storeWalkthrough(payload, stateDir);
+}
+
+export function loadWalkthrough(changesetId: string, stateDir = bobbitStateDir()): StoredWalkthroughPayload | null {
+	return new WalkthroughStore(stateDir).get(changesetId);
+}
+
+export function getWalkthrough(changesetId: string, stateDir = bobbitStateDir()): StoredWalkthroughPayload | null {
+	return loadWalkthrough(changesetId, stateDir);
+}
 
 export class WalkthroughStore {
 	private readonly rootDir: string;

@@ -17,6 +17,7 @@ export type PrWalkthroughPhaseId = "orientation" | "design" | "significant" | "o
 export type PrWalkthroughDiffLineSide = "old" | "new" | "context";
 export type PrWalkthroughDiffLineKind = "context" | "add" | "del";
 export type PrWalkthroughDiffMode = "split" | "inline";
+export type PrWalkthroughDiffBlockStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "binary";
 
 export interface PrWalkthroughDiffLine {
 	id: string;
@@ -37,6 +38,10 @@ export interface PrWalkthroughDiffBlock {
 	id: string;
 	filePath: string;
 	oldPath?: string;
+	status?: PrWalkthroughDiffBlockStatus;
+	isBinary?: boolean;
+	isGenerated?: boolean;
+	isTruncated?: boolean;
 	hunks: PrWalkthroughHunk[];
 }
 
