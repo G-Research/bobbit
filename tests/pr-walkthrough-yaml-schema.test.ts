@@ -117,6 +117,23 @@ describe("PR walkthrough YAML schema", () => {
 		assert.ok(payload.warnings.some(warning => warning.code === "existing"));
 	});
 
+	it("preserves authoritative resolved changeset SHAs over YAML SHAs", () => {
+		const validation = validatePrWalkthroughYaml(validYaml());
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, {
+			changeset: {
+				baseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				headSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+			files: diffBlocks(),
+		});
+
+		assert.equal(payload.changeset.baseSha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+		assert.equal(payload.changeset.headSha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+	});
+
 	it("preserves unmapped hunk and anchor references as warnings and card suggestions", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);
