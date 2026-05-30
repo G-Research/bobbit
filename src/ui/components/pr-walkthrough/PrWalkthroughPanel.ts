@@ -483,10 +483,10 @@ export class PrWalkthroughPanel extends LitElement {
 		.phase-pip { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; color: var(--foreground, CanvasText); font-size: 11px; font-weight: 800; }
 		.phase-pip.active { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
 		.phase-pip.complete { border-color: var(--positive, var(--primary, Highlight)); background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.card-dot { width: 11px; height: 11px; border: 2px solid color-mix(in oklch, var(--foreground, CanvasText) 55%, transparent); background: transparent; opacity: 0.85; }
-		.card-dot.complete { background: transparent; border-color: var(--foreground, CanvasText); opacity: 1; }
-		.card-dot.active { background: var(--primary, Highlight); border-color: var(--primary, Highlight); opacity: 1; }
-		.card-dot.disliked { background: transparent; border-color: var(--negative, red); opacity: 1; }
+		.card-dot { width: 13px; height: 13px; display: inline-flex; align-items: center; justify-content: center; border: 2px solid color-mix(in oklch, var(--foreground, CanvasText) 72%, transparent); background: transparent; color: var(--foreground, CanvasText); opacity: 0.95; font-size: 8px; line-height: 1; font-weight: 900; }
+		.card-dot.liked { background: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		.card-dot.disliked { background: var(--negative, red); border-color: var(--negative, red); color: var(--negative-foreground, HighlightText); opacity: 1; }
+		.card-dot.active:not(.liked):not(.disliked) { border-color: var(--primary, Highlight); box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; }
 		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
 		.inner { max-width: 1120px; margin: 0 auto; }
 		.card { display: block; max-width: none; }
@@ -830,13 +830,13 @@ export class PrWalkthroughPanel extends LitElement {
 							<button class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-testid="pr-walkthrough-phase-pip" type="button" aria-label=${`Open ${phase.label}`} title=${phase.label} @click=${() => this.selectCard(cards[0].id)}>${index}</button>
 							${cards.map(card => html`
 								<button
-									class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${this._decisions[card.id]?.value === "disliked" ? "disliked" : ""}"
+									class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${this._decisions[card.id]?.value === "liked" ? "liked" : ""} ${this._decisions[card.id]?.value === "disliked" ? "disliked" : ""}"
 									data-testid="pr-walkthrough-card-dot"
 									type="button"
 									aria-label=${`Open ${phase.label} card: ${card.title}`}
 									title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
 									@click=${() => this.selectCard(card.id)}
-								></button>
+								>${this._decisions[card.id]?.value === "liked" ? "♥" : this._decisions[card.id]?.value === "disliked" ? "×" : ""}</button>
 							`)}
 						</div>
 					`;

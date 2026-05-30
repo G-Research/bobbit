@@ -164,8 +164,8 @@ async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	await expect(dot, "card dots should expose tooltip text").toHaveAttribute("title", /\S+/);
 	await expect.poll(() => dot.evaluate(el => {
 		const style = getComputedStyle(el as HTMLElement);
-		return { borderWidth: style.borderTopWidth, background: style.backgroundColor };
-	}), { message: "collapsed rail card dots should render as visible hollow circles" }).toMatchObject({ borderWidth: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
+		return { borderWidth: style.borderTopWidth, background: style.backgroundColor, text: (el.textContent || "").trim() };
+	}), { message: "unreviewed collapsed rail card dots should render as visible hollow circles" }).toMatchObject({ borderWidth: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i, text: "" });
 	return dot;
 }
 
@@ -311,6 +311,24 @@ test.describe("PR walkthrough panel", () => {
 		await panel.getByRole("button", { name: /^Split$/ }).click();
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
+	});
+
+	test("collapsed rail card dots encode liked and disliked review decisions", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
+		await panel.getByTestId("pr-walkthrough-like").first().click();
+		const likedDot = panel.getByTestId("pr-walkthrough-card-dot").first();
+		await expect(likedDot, "liked cards should show a heart icon").toHaveText("♥");
+		await expect(likedDot, "liked cards should use primary styling").toHaveClass(/liked/);
+
+		await createCardComment(page, `collapsed-dislike-${Date.now()}`);
+		await panel.getByTestId("pr-walkthrough-dislike").first().click();
+		const dislikedDot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
+		await expect(dislikedDot, "disliked cards should show a cross icon").toHaveText("×");
+		await expect(dislikedDot, "disliked cards should use danger styling").toHaveClass(/disliked/);
+
+		const pendingDot = panel.getByTestId("pr-walkthrough-card-dot").nth(2);
+		await expect(pendingDot, "pending cards should stay hollow").toHaveText("");
+		await expect(pendingDot).not.toHaveClass(/liked|disliked/);
 	});
 
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {
