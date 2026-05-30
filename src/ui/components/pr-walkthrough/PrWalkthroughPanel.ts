@@ -171,9 +171,6 @@ export class PrWalkthroughPanel extends LitElement {
 		.progress-fill { height: 100%; border-radius: inherit; background: var(--primary, Highlight); transition: width 160ms ease; }
 		.submit-button { border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
 		.submit-button:disabled { background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); opacity: 1; }
-		.status-pill { border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 12%, transparent); color: var(--info, var(--primary, Highlight)); }
-		.status-pill.error { background: color-mix(in oklch, var(--negative, red) 12%, transparent); color: var(--negative, red); }
-
 		.banner-stack { display: grid; gap: 8px; margin: 0 auto 14px; max-width: 1120px; }
 		.banner { padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); color: var(--foreground, CanvasText); }
 		.banner strong { display: block; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -778,7 +775,6 @@ export class PrWalkthroughPanel extends LitElement {
 					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 					<div class="progress-track"><div class="progress-fill" style="width: ${percent}%"></div></div>
 				</div>
-				${this.status !== "fixture" ? html`<span class="status-pill ${this.status === "error" ? "error" : ""}">${this.status}</span>` : nothing}
 				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}>${submitLabel}</button>
 			</header>
 		`;
