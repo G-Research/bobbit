@@ -426,8 +426,9 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-31"]`), "near trailing context should remain visible by default").toBeVisible();
 		const hunkHeaders = activeCard(page).getByTestId("pr-walkthrough-hunk-header");
-		await expect(hunkHeaders, "hunk bars should appear only above visible diff sections, not as trailing context rows").toHaveCount(1);
+		await expect(hunkHeaders, "context controls should bracket the visible diff context instead of stacking above it").toHaveCount(2);
 		const hunkHeader = hunkHeaders.first();
+		const trailingContextHeader = hunkHeaders.nth(1);
 		const hunkSignature = hunkHeader.locator(".hunk-signature");
 		await expect(hunkSignature, "context controls should show the signature that will be revealed next, not the fallback hunk header").toContainText("function contextFixture() {");
 		await expect(hunkSignature, "hunk range counts should be hidden from the visible signature").not.toContainText("@@");
@@ -437,10 +438,20 @@ test.describe("PR walkthrough panel", () => {
 		await expect(toggles.first()).toHaveAttribute("title", /Show 20 more lines above/i);
 		await expect(toggles.nth(1)).toHaveAttribute("data-context-direction", "below");
 		await expect(toggles.nth(1)).toHaveAttribute("title", /Show 20 more lines below/i);
+		await expect(trailingContextHeader.locator(".hunk-signature"), "the trailing context control row should not show duplicate code/signature text").toHaveText("");
 		await expect.poll(async () => {
 			const [headerBox, toggleBox] = await Promise.all([hunkHeader.boundingBox(), toggles.first().boundingBox()]);
 			return headerBox && toggleBox ? toggleBox.y >= headerBox.y && toggleBox.y + toggleBox.height <= headerBox.y + headerBox.height : false;
 		}, { message: "context buttons should sit inside the hunk signature contrast bar" }).toBe(true);
+		await expect.poll(async () => {
+			const [aboveBox, firstLineBox, lastLineBox, belowBox] = await Promise.all([
+				toggles.first().boundingBox(),
+				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`).boundingBox(),
+				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-31"]`).boundingBox(),
+				toggles.nth(1).boundingBox(),
+			]);
+			return aboveBox && firstLineBox && lastLineBox && belowBox ? aboveBox.y < firstLineBox.y && belowBox.y > lastLineBox.y : false;
+		}, { message: "above/below context controls should bracket the visible diff context" }).toBe(true);
 		await expect.poll(async () => {
 			const [cellBox, toggleBox] = await Promise.all([hunkHeader.locator(".hunk-context-cell").boundingBox(), toggles.first().boundingBox()]);
 			return cellBox && toggleBox ? toggleBox.width >= cellBox.width - 8 && toggleBox.width < cellBox.width : false;
@@ -460,6 +471,8 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-55"]`), "trailing context should remain hidden until expanded below").toBeHidden();
 		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="below"]`).click();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-51"]`), "expanding below context should reveal the next 20 trailing lines").toBeVisible();
+		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="below"]`).click();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-55"]`), "repeated expansion should reveal context through the end of the file hunk").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-hunk-header"), "top/bottom file edges without controls should not render empty blue bars").toHaveCount(1);
 	});
 
