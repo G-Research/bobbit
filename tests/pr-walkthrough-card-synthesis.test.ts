@@ -76,6 +76,24 @@ describe("PR walkthrough card synthesis", () => {
 		assert.doesNotMatch(`${orientation.summary} ${orientation.rationale}`, /confirming scope|review generated cards|walkthrough process/i);
 	});
 
+	it("keeps deterministic PR-context phase 0 even when LLM synthesis returns walkthrough instructions", async () => {
+		const cards = await synthesiseWalkthroughCards({
+			...changeset(),
+			prBody: "## Why\nFix a confusing PR review scope.\n\n## Testing\nRun targeted walkthrough tests.",
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])], {
+			allowLlm: true,
+			llm: () => ({ cards: [
+				{ phaseId: "orientation", title: "Confirm scope", summary: "Start by confirming refs and reviewing cards in order.", diffBlockIds: [] },
+				{ phaseId: "significant", title: "Review code", summary: "Check implementation.", diffBlockIds: ["a"] },
+			] }),
+		});
+
+		assert.equal(cards[0].title, "PR context");
+		assert.match(cards[0].summary, /Why this PR was raised: Fix a confusing PR review scope/);
+		assert.doesNotMatch(`${cards[0].summary} ${cards[0].rationale}`, /confirming refs|reviewing cards/i);
+		assert.equal(cards[1]?.title, "Review code");
+	});
+
 	it("validates LLM orientation cards without requiring diff blocks", () => {
 		const cards = validateSynthesisedCards({
 			cards: [
@@ -147,7 +165,8 @@ describe("PR walkthrough card synthesis", () => {
 		});
 
 		assert.equal(completionCalls, 1);
-		assert.equal(result.cards[0]?.title, "Model card");
+		assert.equal(result.cards[0]?.phaseId, "orientation");
+		assert.equal(result.cards[1]?.title, "Model card");
 	});
 
 	it("resolver synthesis invokes configured LLM adapter and falls back when it returns invalid output", async () => {
@@ -165,7 +184,8 @@ describe("PR walkthrough card synthesis", () => {
 				export: { provider: "github", available: false },
 			});
 			assert.equal(calls, 1);
-			assert.equal(result?.cards[0]?.title, "LLM card");
+			assert.equal(result?.cards[0]?.phaseId, "orientation");
+			assert.equal(result?.cards[1]?.title, "LLM card");
 
 			setPrWalkthroughSynthesisAdapterForTesting(() => ({ cards: [{ phaseId: "bad", title: "Bad", summary: "Bad", diffBlockIds: ["llm-block"] }] }));
 			const fallback = await normalizeGithubResolvedWalkthrough({

@@ -553,9 +553,9 @@ function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlo
 		phaseId: "orientation",
 		title: "PR context",
 		summary: `Why this PR was raised: ${prContext ? prContext.replace(/\s+/g, " ").slice(0, 220) : changeset.prTitle ?? changeset.title ?? "No PR description was available."}`,
-		rationale: warnings.length ? `${warnings.length} warnings need reviewer attention.` : "Use this phase to understand the PR background, reviewer context, and testing strategy before inspecting hunks.",
+		rationale: `Context to understand the PR: ${changeset.prTitle ?? changeset.title ?? "No additional PR context was provided."}`,
 		diffBlocks: [],
-		checklist: ["Identify why the PR exists", "Note context needed for review", "Confirm the stated testing strategy"],
+		checklist: ["Testing strategy: No testing strategy was specified in the PR description.", ...warnings.slice(0, 2).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message)],
 	}];
 	if (files.length > 0) {
 		const reviewBlocks = files.filter(file => file.status !== "binary");

@@ -148,7 +148,10 @@ export async function synthesiseWalkthroughCards(
 ): Promise<PrWalkthroughCard[]> {
 	const warnings = options.warnings ?? collectFileWarnings(files);
 	const llmCards = await tryLlmSynthesis(changeset, files, warnings, options);
-	if (llmCards.length > 0) return limitCards(llmCards, options.maxCards);
+	if (llmCards.length > 0) {
+		const orientation = buildOrientationCard(changeset, files, warnings);
+		return limitCards([orientation, ...llmCards.filter(card => card.phaseId !== "orientation")], options.maxCards);
+	}
 	return limitCards(buildFallbackCards(changeset, files, warnings), options.maxCards);
 }
 
