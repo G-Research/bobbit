@@ -65,6 +65,7 @@ export interface PrWalkthroughJobRecord {
 	warnings?: WalkthroughWarning[];
 	error?: PrWalkthroughJobError;
 	reminderCount?: number;
+	submissionProofHash?: string;
 }
 
 type StoredJobFile = Partial<PrWalkthroughJobRecord> & Record<string, unknown>;
@@ -185,6 +186,7 @@ function parseStoredJob(raw: StoredJobFile, expectedJobId?: string): PrWalkthrou
 		warnings: Array.isArray(raw.warnings) ? raw.warnings as WalkthroughWarning[] : undefined,
 		error: isRecord(raw.error) ? raw.error as PrWalkthroughJobError : undefined,
 		reminderCount: typeof raw.reminderCount === "number" ? raw.reminderCount : undefined,
+		submissionProofHash: typeof raw.submissionProofHash === "string" ? raw.submissionProofHash : undefined,
 	});
 }
 

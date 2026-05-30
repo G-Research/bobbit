@@ -172,7 +172,8 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const manager = getWalkthroughAgentManager(deps);
-			const result = await manager.submitYaml(body as SubmitWalkthroughYamlRequest);
+			const submissionProof = headerValue(req, "x-bobbit-walkthrough-submit-proof");
+			const result = await manager.submitYaml({ ...(body as SubmitWalkthroughYamlRequest), submissionProof });
 			json(result);
 			return true;
 		}
@@ -886,6 +887,12 @@ function slug(value: string): string {
 
 function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function headerValue(req: http.IncomingMessage, name: string): string | undefined {
+	const value = req.headers[name.toLowerCase()];
+	if (Array.isArray(value)) return stringValue(value[0]);
+	return stringValue(value);
 }
 
 function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string): { owner: string; repo: string; number: string | number; url: string } | undefined {

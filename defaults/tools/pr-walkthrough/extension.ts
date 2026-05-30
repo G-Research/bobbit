@@ -146,7 +146,8 @@ function formatGatewayResponse(data: unknown): string {
 const extension: ExtensionFactory = (pi) => {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	const jobId = process.env.BOBBIT_WALKTHROUGH_JOB_ID;
-	if (!sessionId || !jobId) return;
+	const submissionProof = process.env.BOBBIT_WALKTHROUGH_SUBMIT_PROOF;
+	if (!sessionId || !jobId || !submissionProof) return;
 
 	pi.registerTool({
 		name: "readonly_bash",
@@ -276,7 +277,7 @@ const extension: ExtensionFactory = (pi) => {
 			try {
 				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/submit-yaml`, {
 					method: "POST",
-					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Bobbit-Walkthrough-Submit-Proof": submissionProof },
 					body: JSON.stringify({ sessionId, jobId, yaml }),
 				});
 				const text = await response.text();
