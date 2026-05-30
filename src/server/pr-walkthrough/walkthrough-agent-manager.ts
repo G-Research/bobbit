@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { resolveGithubPr, GithubPrAdapterError } from "./github-adapter.js";
@@ -107,6 +107,7 @@ export type SubmitWalkthroughYamlRequest = {
 	sessionId: string;
 	jobId: string;
 	yaml: string;
+	submissionProof?: string;
 };
 
 export type SubmitWalkthroughYamlResponse =
@@ -174,6 +175,7 @@ export class WalkthroughAgentManager {
 		const childSessionId = `prw-session-${randomUUID()}`;
 		const changesetId = changesetIdForTarget(target);
 		const title = titleForTarget(target);
+		const submissionProof = createSubmissionProof();
 		let job = this.store.create({
 			jobId,
 			parentSessionId,
@@ -185,6 +187,7 @@ export class WalkthroughAgentManager {
 			tabId: `walkthrough:${changesetId}`,
 			status: "starting",
 			title,
+			submissionProofHash: hashSubmissionProof(jobId, childSessionId, submissionProof),
 		});
 		this.broadcastJob(job);
 
@@ -226,6 +229,7 @@ export class WalkthroughAgentManager {
 					env: {
 						BOBBIT_SESSION_ID: childSessionId,
 						BOBBIT_WALKTHROUGH_JOB_ID: jobId,
+						BOBBIT_WALKTHROUGH_SUBMIT_PROOF: submissionProof,
 					},
 				},
 			);
@@ -245,12 +249,13 @@ export class WalkthroughAgentManager {
 			const typed = classifyDiffResolutionError(error);
 			job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
 			this.broadcastJob(job);
+			await this.notifyChildOfError(child, typed, "launch preflight");
 			return { ...responseFromJob(job), created: true };
 		}
 
 		job = this.store.update(jobId, { status: "waiting_for_yaml" }) ?? job;
 		this.broadcastJob(job);
-		this.attachIdleReminder(childSessionId, jobId, child.rpcClient);
+		this.attachRuntimeListeners(childSessionId, jobId, child.rpcClient);
 
 		try {
 			const prompt = buildKickoffPrompt(job);
@@ -270,6 +275,7 @@ export class WalkthroughAgentManager {
 				const typed = classifyAgentError(error, "PROMPT_DISPATCH_FAILED");
 				job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
 				this.broadcastJob(job);
+				await this.notifyChildOfError(child, typed, "kickoff prompt dispatch");
 			}
 		}
 
@@ -277,11 +283,11 @@ export class WalkthroughAgentManager {
 	}
 
 	getJob(jobId: string): PrWalkthroughJobRecord | null {
-		return this.store.get(jobId);
+		return publicJob(this.store.get(jobId));
 	}
 
 	getJobForSession(childSessionId: string): PrWalkthroughJobRecord | null {
-		return this.store.getByChildSession(childSessionId);
+		return publicJob(this.store.getByChildSession(childSessionId));
 	}
 
 	async submitYaml(input: SubmitWalkthroughYamlRequest): Promise<SubmitWalkthroughYamlResponse> {
@@ -293,11 +299,14 @@ export class WalkthroughAgentManager {
 		if (job.childSessionId !== input.sessionId) {
 			throw routeError(403, "Session is not allowed to submit YAML for this walkthrough job", { code: "WALKTHROUGH_JOB_SESSION_MISMATCH" });
 		}
+		if (!verifySubmissionProof(input.submissionProof, job)) {
+			throw routeError(403, "PR walkthrough YAML submissions must come from the scoped walkthrough tool runtime.", { code: "WALKTHROUGH_SUBMIT_PROOF_REQUIRED", retryable: false });
+		}
 		if (job.status === "ready") {
 			throw routeError(409, "This PR walkthrough has already accepted a YAML submission. The published payload will not be mutated by follow-up tool calls.", {
 				code: "WALKTHROUGH_ALREADY_READY",
 				retryable: false,
-				job,
+				job: publicJob(job),
 			});
 		}
 
@@ -309,7 +318,7 @@ export class WalkthroughAgentManager {
 				error: { code: "YAML_SCHEMA_INVALID", message: validation.summary.message, retryable: true },
 			}) ?? job;
 			this.broadcastJob(updated);
-			return { ok: false, status: "validation_failed", retryable: true, validation: validation.summary, job: updated };
+			return { ok: false, status: "validation_failed", retryable: true, validation: validation.summary, job: publicJob(updated) ?? updated };
 		}
 
 		let payload: WalkthroughStorePayload;
@@ -323,12 +332,12 @@ export class WalkthroughAgentManager {
 					error: { code: "YAML_SCHEMA_INVALID", message: error.summary.message, retryable: true },
 				}) ?? job;
 				this.broadcastJob(updated);
-				return { ok: false, status: "validation_failed", retryable: true, validation: error.summary, job: updated };
+				return { ok: false, status: "validation_failed", retryable: true, validation: error.summary, job: publicJob(updated) ?? updated };
 			}
 			const typed = classifyDiffResolutionError(error);
 			const updated = this.store.update(job.jobId, { status: "error", error: typed }) ?? job;
 			this.broadcastJob(updated);
-			throw routeError(statusForJobError(typed), typed.message, { code: typed.code, retryable: typed.retryable, job: updated });
+			throw routeError(statusForJobError(typed), typed.message, { code: typed.code, retryable: typed.retryable, job: publicJob(updated) });
 		}
 		const stored = saveWalkthrough(payload, this.stateDir);
 		const warnings = [...(validation.warnings ?? []), ...(payload.warnings ?? [])];
@@ -344,7 +353,7 @@ export class WalkthroughAgentManager {
 		return {
 			ok: true,
 			status: "ready",
-			job: updated,
+			job: publicJob(updated) ?? updated,
 			changesetId: updated.changesetId,
 			warnings,
 			message: "PR walkthrough YAML accepted and published. Stay available for follow-up questions in this session.",
@@ -355,7 +364,7 @@ export class WalkthroughAgentManager {
 		for (const job of this.store.list()) {
 			if (job.status === "ready" || job.status === "error") continue;
 			const session = this.deps.sessionManager?.getSession?.(job.childSessionId);
-			if (session) this.attachIdleReminder(job.childSessionId, job.jobId, session.rpcClient);
+			if (session) this.attachRuntimeListeners(job.childSessionId, job.jobId, session.rpcClient);
 		}
 	}
 
@@ -478,6 +487,7 @@ export class WalkthroughAgentManager {
 	private shouldReuse(job: PrWalkthroughJobRecord): boolean {
 		const session = this.getSession(job.childSessionId);
 		if (!session || session.status === "terminated" || session.status === "archived" || session.archived === true) return false;
+		if ((job.status === "starting" || job.status === "waiting_for_yaml" || job.status === "validation_failed") && !job.submissionProofHash) return false;
 		return job.status === "ready" || job.status === "error" || job.status === "starting" || job.status === "waiting_for_yaml" || job.status === "validation_failed";
 	}
 
@@ -499,13 +509,27 @@ export class WalkthroughAgentManager {
 		this.deps.sessionManager?.updateSessionMeta?.(job.childSessionId, updates);
 	}
 
-	private attachIdleReminder(sessionId: string, jobId: string, rpcClient: RpcLike | undefined): void {
+	private attachRuntimeListeners(sessionId: string, jobId: string, rpcClient: RpcLike | undefined): void {
 		if (!rpcClient?.onEvent || this.reminderUnsubscribers.has(jobId)) return;
 		const unsubscribe = rpcClient.onEvent((event) => {
+			const runtimeFailure = runtimeFailureMessage(event);
+			if (runtimeFailure) {
+				void this.markRuntimeFailure(sessionId, jobId, runtimeFailure);
+				return;
+			}
 			if (!isRecord(event) || event.type !== "agent_end") return;
 			void this.remindIfNeeded(sessionId, jobId);
 		});
 		this.reminderUnsubscribers.set(jobId, unsubscribe);
+	}
+
+	private async markRuntimeFailure(sessionId: string, jobId: string, message: string): Promise<void> {
+		const job = this.store.get(jobId);
+		if (!job || job.status === "ready" || job.status === "error") return;
+		const error = { code: "AGENT_RUNTIME_FAILED", message: `PR walkthrough agent failed before publishing YAML: ${message}`, retryable: true };
+		const updated = this.store.update(jobId, { status: "error", error }) ?? job;
+		this.broadcastJob(updated);
+		await this.notifyChildOfError(this.getSession(sessionId), error, "agent runtime");
 	}
 
 	private async remindIfNeeded(sessionId: string, jobId: string): Promise<void> {
@@ -518,8 +542,31 @@ export class WalkthroughAgentManager {
 		await this.deps.sessionManager?.enqueuePrompt?.(sessionId, prompt, { isSteered: true, source: "system" });
 	}
 
+	private async notifyChildOfError(session: SessionLike | PersistedSessionLike | undefined, error: PrWalkthroughJobError, phase: string): Promise<void> {
+		if (!session?.id) return;
+		const prompt = [
+			`PR walkthrough ${phase} failed before the walkthrough could be published.`,
+			`Error (${error.code}): ${error.message}`,
+			error.retryable === false ? "This error is not retryable from the current session." : "Fix the issue, then relaunch or prompt this walkthrough session to retry when available.",
+		].join("\n");
+		const enqueuePrompt = this.deps.sessionManager?.enqueuePrompt;
+		if (enqueuePrompt) {
+			try {
+				const result = await enqueuePrompt(session.id, prompt, { isSteered: true, source: "system" });
+				if (!isFailureResult(result)) return;
+			} catch {
+				// Fall through to the direct RPC prompt path below.
+			}
+		}
+		try {
+			await ("rpcClient" in session ? session.rpcClient?.prompt?.(prompt) : undefined);
+		} catch {
+			// Best-effort transcript surfacing only; the panel state remains authoritative.
+		}
+	}
+
 	private broadcastJob(job: PrWalkthroughJobRecord): void {
-		this.deps.broadcast?.({ type: "pr_walkthrough_job_updated", job });
+		this.deps.broadcast?.({ type: "pr_walkthrough_job_updated", job: publicJob(job) ?? job });
 	}
 }
 
@@ -564,8 +611,14 @@ function responseFromJob(job: PrWalkthroughJobRecord): Omit<LaunchWalkthroughRes
 		tabId: job.tabId,
 		status: job.status,
 		title: job.title,
-		job,
+		job: publicJob(job) ?? job,
 	};
+}
+
+function publicJob(job: PrWalkthroughJobRecord | null): PrWalkthroughJobRecord | null {
+	if (!job) return null;
+	const { submissionProofHash: _submissionProofHash, ...safeJob } = job;
+	return safeJob as PrWalkthroughJobRecord;
 }
 
 const REQUIRED_YAML_SCHEMA_PROMPT = `Required submit_pr_walkthrough_yaml YAML shape (submit exactly one YAML document; preserve these keys and enum values):
@@ -783,6 +836,40 @@ function statusForJobError(error: PrWalkthroughJobError): number {
 		case "GITHUB_NOT_FOUND_OR_PRIVATE": return 404;
 		default: return 502;
 	}
+}
+
+function createSubmissionProof(): string {
+	return randomBytes(32).toString("base64url");
+}
+
+function hashSubmissionProof(jobId: string, sessionId: string, proof: string): string {
+	return createHash("sha256").update(`${jobId}\0${sessionId}\0${proof}`).digest("hex");
+}
+
+function verifySubmissionProof(proof: string | undefined, job: PrWalkthroughJobRecord): boolean {
+	if (!proof || !job.submissionProofHash) return false;
+	const expected = Buffer.from(job.submissionProofHash, "hex");
+	const actual = Buffer.from(hashSubmissionProof(job.jobId, job.childSessionId, proof), "hex");
+	return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function runtimeFailureMessage(event: unknown): string | undefined {
+	if (!isRecord(event)) return undefined;
+	if (event.type === "message_end" && isRecord(event.message) && event.message.role === "assistant" && event.message.stopReason === "error") {
+		return stringValue(event.message.errorMessage) ?? "assistant message ended with an error";
+	}
+	if (event.type === "process_exit") {
+		const code = stringValue(event.code) ?? stringValue(event.exitCode) ?? (typeof event.code === "number" ? String(event.code) : undefined) ?? (typeof event.exitCode === "number" ? String(event.exitCode) : undefined);
+		const signal = stringValue(event.signal);
+		return code || signal ? `agent process exited (${[code ? `code ${code}` : undefined, signal ? `signal ${signal}` : undefined].filter(Boolean).join(", ")})` : "agent process exited before publishing YAML";
+	}
+	if (event.type === "agent_error" || event.type === "runtime_error" || event.type === "model_error") {
+		return stringValue(event.message) ?? stringValue(event.error) ?? `${event.type}`;
+	}
+	if (event.type === "agent_end" && (event.error || event.success === false || event.failed === true)) {
+		return stringValue(event.message) ?? stringValue(event.error) ?? "agent ended with an error";
+	}
+	return undefined;
 }
 
 function isRecoverablePromptDispatchError(error: unknown): boolean {

@@ -43,10 +43,12 @@ describe("PR walkthrough tool metadata", () => {
 		const source = readToolText("extension.ts");
 		assert.match(source, /const sessionId = process\.env\.BOBBIT_SESSION_ID/);
 		assert.match(source, /const jobId = process\.env\.BOBBIT_WALKTHROUGH_JOB_ID/);
-		assert.match(source, /if \(!sessionId \|\| !jobId\) return/);
+		assert.match(source, /const submissionProof = process\.env\.BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
+		assert.match(source, /if \(!sessionId \|\| !jobId \|\| !submissionProof\) return/);
 		assert.match(source, /name:\s*"readonly_bash"/);
 		assert.match(source, /name:\s*"submit_pr_walkthrough_yaml"/);
 		assert.match(source, /\/api\/internal\/pr-walkthrough\/submit-yaml/);
+		assert.match(source, /X-Bobbit-Walkthrough-Submit-Proof/);
 		assert.match(source, /JSON\.stringify\(\{ sessionId, jobId, yaml \}\)/);
 	});
 

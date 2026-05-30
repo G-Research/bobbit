@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,16 @@ function makeResponse(): MockResponse {
 	};
 }
 
+function submitProof(sessionManager: ReturnType<typeof makeSessionManager>, childSessionId: string): string {
+	const proof = sessionManager.sessions.get(childSessionId)?.env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF;
+	assert.equal(typeof proof, "string");
+	return proof;
+}
+
+function submitProofHash(jobId: string, childSessionId: string, proof: string): string {
+	return createHash("sha256").update(`${jobId}\0${childSessionId}\0${proof}`).digest("hex");
+}
+
 function makeSessionManager() {
 	const sessions = new Map<string, any>();
 	const prompts: string[] = [];
@@ -50,6 +61,7 @@ function makeSessionManager() {
 				sandboxed: opts?.sandboxed,
 				rolePrompt: opts?.rolePrompt,
 				allowedTools: opts?.allowedTools,
+				env: opts?.env,
 				rpcClient: {
 					prompt: async (text: string) => { prompts.push(text); return { success: true }; },
 					onEvent: (handler: (event: unknown) => void) => { listeners.push(handler); return () => undefined; },
@@ -168,9 +180,9 @@ function yamlReviewChunkFor(fixture: { hunkHeader: string; filePath: string }): 
 	};
 }
 
-async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}) {
+async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
 	const res = makeResponse();
-	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method } as any, res as any, {
+	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method, headers } as any, res as any, {
 		defaultCwd: tempDir,
 		readBody: async () => body,
 		walkthroughAgentManager: manager,
@@ -278,7 +290,48 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(launch.status, "error");
 		assert.equal(launch.job.error?.code, "GITHUB_RATE_LIMITED");
 		assert.equal(launch.job.error?.retryable, true);
-		assert.equal(sessionManager.prompts.length, 0, "kickoff prompt should not be sent for inaccessible PRs");
+		assert.equal(sessionManager.prompts.length, 1, "child transcript should receive a launch failure notice");
+		assert.match(sessionManager.prompts[0], /launch preflight failed|GITHUB_RATE_LIMITED|rate limit/i);
+		assert.doesNotMatch(sessionManager.prompts[0], /schema_version: 1/, "kickoff schema prompt should not be sent for inaccessible PRs");
+	});
+
+	it("launch kickoff failures are surfaced in the child transcript", async () => {
+		const sessionManager = makeSessionManager();
+		sessionManager.enqueuePrompt = () => ({ success: false, error: "dispatch exploded" });
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		assert.equal(launch.status, "error");
+		assert.equal(launch.job.error?.code, "PROMPT_DISPATCH_FAILED");
+		assert.match(sessionManager.prompts.at(-1) ?? "", /kickoff prompt dispatch failed|PROMPT_DISPATCH_FAILED|dispatch exploded/i);
+	});
+
+	it("runtime failures before YAML transition the job to AGENT_RUNTIME_FAILED", async () => {
+		const sessionManager = makeSessionManager();
+		const events: Record<string, unknown>[] = [];
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store: new WalkthroughAgentStore(tempDir),
+			broadcast: event => events.push(event),
+		});
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const promptCountAfterLaunch = sessionManager.prompts.length;
+
+		sessionManager.sessions.get(launch.childSessionId).emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "model stream crashed" } });
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		const job = manager.getJob(launch.jobId);
+		assert.equal(job?.status, "error");
+		assert.equal(job?.error?.code, "AGENT_RUNTIME_FAILED");
+		assert.match(job?.error?.message ?? "", /model stream crashed/);
+		assert.ok(sessionManager.sessions.has(launch.childSessionId), "child session is preserved for diagnostics");
+		assert.ok(events.some(event => (event as any).job?.error?.code === "AGENT_RUNTIME_FAILED"));
+
+		sessionManager.sessions.get(launch.childSessionId).emit({ type: "agent_end" });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.equal(sessionManager.prompts.length, promptCountAfterLaunch + 1, "runtime error notice is sent but idle reminder is not");
 	});
 
 	it("retry after pre-child createSession failure creates a fresh child job", async () => {
@@ -315,7 +368,7 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 
-		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: "schema_version: 1\n" });
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: "schema_version: 1\n", submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, false);
 		assert.equal(result.status, "validation_failed");
 		const job = manager.getJob(launch.jobId);
@@ -330,11 +383,11 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
-		const first = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) });
+		const first = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(first.ok, true);
 		const publishedAt = manager.getJob(launch.jobId)?.payloadUpdatedAt;
 		await assert.rejects(
-			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }),
+			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
 			/already accepted a YAML submission/,
 		);
 		const job = manager.getJob(launch.jobId);
@@ -362,6 +415,7 @@ describe("WalkthroughAgentManager", () => {
 			sessionId: launch.childSessionId,
 			jobId: launch.jobId,
 			yaml: validYaml(42, { baseSha: "ccccccc", headSha: authoritativeHead.slice(0, 7) }),
+			submissionProof: submitProof(sessionManager, launch.childSessionId),
 		});
 		assert.equal(mismatch.ok, false);
 		assert.equal(mismatch.status, "validation_failed");
@@ -372,6 +426,7 @@ describe("WalkthroughAgentManager", () => {
 			sessionId: launch.childSessionId,
 			jobId: launch.jobId,
 			yaml: validYaml(42, { baseSha: authoritativeBase.slice(0, 7), headSha: authoritativeHead.slice(0, 7) }),
+			submissionProof: submitProof(sessionManager, launch.childSessionId),
 		});
 		assert.equal(accepted.ok, true);
 		const stored = getWalkthrough(launch.changesetId, tempDir);
@@ -385,7 +440,7 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
-		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) });
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, true);
 		assert.equal(result.status, "ready");
 		assert.equal(sessionManager.sessions.get(launch.childSessionId).status, "idle");
@@ -407,6 +462,7 @@ describe("WalkthroughAgentManager", () => {
 			sessionId: launch.childSessionId,
 			jobId: launch.jobId,
 			yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha, ...chunk }),
+			submissionProof: submitProof(sessionManager, launch.childSessionId),
 		});
 
 		assert.equal(result.ok, true);
@@ -431,7 +487,7 @@ describe("WalkthroughAgentManager", () => {
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 
 		await assert.rejects(
-			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml() }),
+			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
 			/GitHub API rate limit exceeded/,
 		);
 		const job = manager.getJob(launch.jobId);
@@ -445,7 +501,7 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 
-		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(43) });
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(43), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, false);
 		assert.equal(result.status, "validation_failed");
 		assert.match(result.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n"), /pr number 42|URL https:\/\/github\.com\/acme\/widgets\/pull\/42/);
@@ -459,6 +515,7 @@ describe("WalkthroughAgentManager", () => {
 			validateYaml: () => { throw Object.assign(new Error("already ready"), { status: 409, extra: { code: "WALKTHROUGH_ALREADY_READY", retryable: false, job: { jobId: "job-1" } } }); },
 		});
 		const store = (manager as any).store as WalkthroughAgentStore;
+		const proof = "scoped-proof";
 		store.create({
 			jobId: "job-1",
 			parentSessionId: "parent",
@@ -469,9 +526,10 @@ describe("WalkthroughAgentManager", () => {
 			tabId: "walkthrough:github:acme/widgets#42",
 			status: "waiting_for_yaml",
 			title: "PR #42 Walkthrough",
+			submissionProofHash: submitProofHash("job-1", "child", proof),
 		});
 
-		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: "child", jobId: "job-1", yaml: validYaml() });
+		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: "child", jobId: "job-1", yaml: validYaml() }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
 		assert.equal(result.status, 409);
 		assert.equal(result.body.code, "WALKTHROUGH_ALREADY_READY");
 		assert.equal(result.body.retryable, false);
@@ -526,20 +584,28 @@ describe("WalkthroughAgentManager", () => {
 		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(launch.status, 201);
 		assert.equal(launch.body.status, "waiting_for_yaml");
+		assert.equal(launch.body.job.submissionProofHash, undefined);
 
 		const job = await callRoute(manager, "GET", `/api/pr-walkthrough/jobs/${encodeURIComponent(launch.body.jobId)}`);
 		assert.equal(job.status, 200);
 		assert.equal(job.body.job.childSessionId, launch.body.childSessionId);
+		assert.equal(job.body.job.submissionProofHash, undefined);
 
 		const session = await callRoute(manager, "GET", `/api/pr-walkthrough/session/${encodeURIComponent(launch.body.childSessionId)}`);
 		assert.equal(session.status, 200);
 		assert.equal(session.body.job.jobId, launch.body.jobId);
+		const proof = submitProof(sessionManager, launch.body.childSessionId);
 
-		const invalid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" });
+		const missingProof = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" });
+		assert.equal(missingProof.status, 403);
+		assert.equal(missingProof.body.code, "WALKTHROUGH_SUBMIT_PROOF_REQUIRED");
+		assert.equal(manager.getJob(launch.body.jobId)?.status, "waiting_for_yaml");
+
+		const invalid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: "schema_version: 1\n" }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
 		assert.equal(invalid.status, 200);
 		assert.equal(invalid.body.ok, false);
 
-		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) });
+		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
 		assert.equal(valid.status, 200);
 		assert.equal(valid.body.ok, true);
 	});
@@ -567,7 +633,7 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 		await assert.rejects(
-			() => manager.submitYaml({ sessionId: "other-session", jobId: launch.jobId, yaml: validYaml() }),
+			() => manager.submitYaml({ sessionId: "other-session", jobId: launch.jobId, yaml: validYaml(), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
 			/error|not allowed/i,
 		);
 	});
