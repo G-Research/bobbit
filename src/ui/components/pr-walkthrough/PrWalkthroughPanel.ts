@@ -530,7 +530,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed .phase-pip { width: 24px; height: 13px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
 		.rail.collapsed .phase-pip.active, .rail.collapsed .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
 		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
-		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: currentColor; stroke: none; }
+		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 		.rail.collapsed .card-dot.liked { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); opacity: 1; }
 		.rail.collapsed .card-dot.disliked { background-color: transparent; border-color: var(--negative, #dc2626); color: var(--negative, #dc2626); opacity: 1; }
 		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
@@ -897,7 +897,7 @@ export class PrWalkthroughPanel extends LitElement {
 										aria-label=${`Open ${phase.label} card: ${card.title}`}
 										title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
 										@click=${() => this.selectCard(card.id)}
-									>${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 10v12h4V10H5Zm15.8.72A3 3 0 0 0 18.5 9H14l.75-3.04.03-.24c0-.31-.13-.61-.35-.83L13.41 3.9 7.83 9.49A2 2 0 0 0 7.25 10.9V20a2 2 0 0 0 2 2h7.75a2 2 0 0 0 1.9-1.37l2.05-6.15a3 3 0 0 0-.15-3.76Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 14V2h-4v12h4ZM3.2 13.28A3 3 0 0 0 5.5 15H10l-.75 3.04-.03.24c0 .31.13.61.35.83l1.02.99 5.58-5.59a2 2 0 0 0 .58-1.41V4a2 2 0 0 0-2-2H7a2 2 0 0 0-1.9 1.37L3.05 9.52a3 3 0 0 0 .15 3.76Z"></path></svg>` : nothing}</button>
+									>${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</button>
 								`;
 							})}
 						</div>
