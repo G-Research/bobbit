@@ -43,6 +43,10 @@ export interface PrWalkthroughDiffBlock {
 	isGenerated?: boolean;
 	isTruncated?: boolean;
 	hunks: PrWalkthroughHunk[];
+	externalUrl?: string;
+	blobUrl?: string;
+	rawUrl?: string;
+	contentsUrl?: string;
 }
 
 export interface PrWalkthroughSuggestedComment {
@@ -98,24 +102,83 @@ export interface PrWalkthroughDraftState {
 	completedCardIds: string[];
 }
 
-export function buildPrWalkthroughDraft(state: PrWalkthroughDraftState): PrWalkthroughReviewDraft {
-	return {
-		changeset: state.changeset ?? {
-			baseSha: "fixture-base",
-			headSha: "fixture-head",
-			title: "Fixture PR walkthrough",
-		},
-		decisions: { ...state.decisions },
-		comments: state.comments.map(comment => ({ ...comment })),
-		completedCardIds: [...state.completedCardIds],
-		updatedAt: new Date().toISOString(),
-	};
+export type WalkthroughWarningSeverity = "info" | "warning" | "error";
+
+export interface WalkthroughWarning {
+	code: string;
+	severity: WalkthroughWarningSeverity;
+	message: string;
+	filePath?: string;
 }
 
-export function cardRequiresCommentForDislike(state: Pick<PrWalkthroughDraftState, "comments">, cardId: string): boolean {
-	return !state.comments.some(comment => comment.cardId === cardId && comment.body.trim().length > 0);
+export interface WalkthroughLimits {
+	maxFiles: number;
+	maxDiffBytes: number;
+	maxLinesPerFile: number;
+	truncatedFiles?: string[];
+	omittedFiles?: string[];
 }
 
-export function defaultDiffModeForWidth(width: number): PrWalkthroughDiffMode {
-	return width >= 760 ? "split" : "inline";
+export interface WalkthroughExportCapability {
+	provider: "github" | string;
+	available: boolean;
+	reason?: string;
+	previewUrl?: string;
+	submitUrl?: string;
+}
+
+export interface WalkthroughResolveRequest {
+	sessionId?: string;
+	cwd?: string;
+	baseSha?: string;
+	headSha?: string;
+	prUrl?: string;
+	prNumber?: string | number;
+	provider?: "github" | "local" | string;
+	fixture?: boolean;
+}
+
+export interface WalkthroughResolveResult {
+	changesetId: string;
+	changeset: PrWalkthroughChangesetRef;
+	cards: PrWalkthroughCard[];
+	warnings: WalkthroughWarning[];
+	limits?: WalkthroughLimits;
+	export?: WalkthroughExportCapability;
+}
+
+export interface WalkthroughExportPreviewRow {
+	commentId: string;
+	cardId: string;
+	path?: string;
+	side?: "LEFT" | "RIGHT";
+	line?: number;
+	body: string;
+	valid: boolean;
+	reason?: string;
+}
+
+export interface WalkthroughExportPreview {
+	provider: "github" | string;
+	changesetId: string;
+	body: string;
+	comments: WalkthroughExportPreviewRow[];
+	warnings: WalkthroughWarning[];
+	canSubmit: boolean;
+}
+
+export interface WalkthroughExportRequest {
+	draft: PrWalkthroughReviewDraft;
+	confirm?: boolean;
+	event?: "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+}
+
+export interface WalkthroughExportResult {
+	ok: boolean;
+	provider: "github" | string;
+	submitted?: boolean;
+	reviewUrl?: string;
+	preview?: WalkthroughExportPreview;
+	warnings?: WalkthroughWarning[];
+	error?: string;
 }

@@ -2,6 +2,8 @@ import { css, html, LitElement, nothing, type PropertyValues, type TemplateResul
 import { customElement, property, state } from "lit/decorators.js";
 import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
 import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "./fixtures.js";
+import { gatewayFetch } from "../../../app/gateway-fetch.js";
+import { safeExternalUrl } from "../../../shared/pr-walkthrough/url-safety.js";
 
 const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [
 	{ id: "orientation", label: "Orientation" },
@@ -16,7 +18,58 @@ interface SideBySidePair {
 	right: PrWalkthroughDiffLine | null;
 }
 
+type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
+
+type WalkthroughWarningSeverity = "info" | "warning" | "error";
+
+interface WalkthroughWarning {
+	code: string;
+	severity: WalkthroughWarningSeverity;
+	message: string;
+	filePath?: string;
+}
+
+interface WalkthroughExportCapability {
+	provider?: string;
+	available?: boolean;
+	canSubmit?: boolean;
+	enabled?: boolean;
+	reason?: string;
+	message?: string;
+}
+
+interface WalkthroughExportPreviewRow {
+	path?: string;
+	filePath?: string;
+	side?: string;
+	line?: number;
+	body?: string;
+	valid?: boolean;
+	reason?: string;
+	kind?: string;
+}
+
+interface WalkthroughExportPreview {
+	body?: string;
+	reviewBody?: string;
+	rows?: WalkthroughExportPreviewRow[];
+	comments?: WalkthroughExportPreviewRow[];
+	warnings?: WalkthroughWarning[];
+	validCount?: number;
+	invalidCount?: number;
+	canSubmit?: boolean;
+}
+
+interface WalkthroughExportResult {
+	ok?: boolean;
+	url?: string;
+	message?: string;
+	error?: string;
+}
+
 interface PersistedPrWalkthroughState {
+	schemaVersion?: number;
+	cardsChecksum?: string;
 	activeCardId?: string;
 	diffModeOverride?: PrWalkthroughDiffMode;
 	comments?: PrWalkthroughComment[];
@@ -30,6 +83,11 @@ interface PersistedPrWalkthroughState {
 export class PrWalkthroughPanel extends LitElement {
 	@property({ attribute: false }) changeset?: PrWalkthroughChangesetRef;
 	@property({ attribute: false }) cards: PrWalkthroughCard[] = getFixturePrWalkthroughCards();
+	@property({ attribute: false }) status: PrWalkthroughStatus = "fixture";
+	@property({ attribute: false }) warnings: WalkthroughWarning[] = [];
+	@property({ attribute: false }) error?: string;
+	@property({ attribute: false }) exportCapability?: WalkthroughExportCapability;
+	@property({ attribute: "changeset-id" }) changesetId = "";
 	@property({ type: Boolean, reflect: true }) narrow = false;
 	@property({ attribute: "persistence-key" }) persistenceKey = "";
 
@@ -47,6 +105,12 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _dismissedSuggestionIds: string[] = [];
 	@state() private _collapsedDiffBlockIds: string[] = [];
 	@state() private _copied = false;
+	@state() private _exportPreviewOpen = false;
+	@state() private _exportPreviewLoading = false;
+	@state() private _exportPreview?: WalkthroughExportPreview;
+	@state() private _exportError = "";
+	@state() private _exportSubmitting = false;
+	@state() private _exportResult?: WalkthroughExportResult;
 
 	private _resizeObserver?: ResizeObserver;
 	private _loadedPersistenceKey = "";
@@ -104,6 +168,41 @@ export class PrWalkthroughPanel extends LitElement {
 		.progress-fill { height: 100%; border-radius: inherit; background: var(--primary, Highlight); transition: width 160ms ease; }
 		.submit-button { border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
 		.submit-button:disabled { background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); opacity: 1; }
+		.status-pill { border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 12%, transparent); color: var(--info, var(--primary, Highlight)); }
+		.status-pill.error { background: color-mix(in oklch, var(--negative, red) 12%, transparent); color: var(--negative, red); }
+
+		.banner-stack { display: grid; gap: 8px; margin: 0 auto 14px; max-width: 1120px; }
+		.banner { padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); color: var(--foreground, CanvasText); }
+		.banner strong { display: block; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+		.banner.info { border-color: color-mix(in oklch, var(--info, var(--primary, Highlight)) 28%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 7%, transparent); }
+		.banner.warning { border-color: color-mix(in oklch, var(--warning, orange) 34%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--warning, orange) 8%, transparent); }
+		.banner.error { border-color: color-mix(in oklch, var(--negative, red) 32%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, red) 7%, transparent); }
+		.banner .file { margin-top: 3px; color: var(--muted-foreground, GrayText); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+		.state-card { max-width: 760px; margin: 32px auto; padding: 24px; border: 1px solid var(--border, ButtonBorder); border-radius: 16px; background: var(--card, Canvas); box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground, CanvasText) 7%, transparent); }
+		.state-card h2 { margin: 0 0 8px; font-size: 20px; }
+		.state-card p { margin: 0; color: var(--muted-foreground, GrayText); }
+		.skeleton { display: grid; gap: 12px; }
+		.skeleton-line { height: 12px; border-radius: 999px; background: linear-gradient(90deg, color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent), color-mix(in oklch, var(--muted-foreground, GrayText) 20%, transparent), color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent)); background-size: 220% 100%; animation: pr-walkthrough-pulse 1.4s ease-in-out infinite; }
+		.skeleton-line.short { width: 45%; }
+		.skeleton-line.medium { width: 72%; }
+		.skeleton-box { height: 180px; border-radius: 12px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent); animation: pr-walkthrough-pulse 1.4s ease-in-out infinite; }
+		@keyframes pr-walkthrough-pulse { from { background-position: 0 0; } to { background-position: -220% 0; } }
+
+		.export-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--background, Canvas) 72%, transparent); backdrop-filter: blur(2px); }
+		.export-dialog { width: min(920px, 96vw); max-height: min(780px, 92vh); display: grid; grid-template-rows: auto 1fr auto; border: 1px solid var(--border, ButtonBorder); border-radius: 16px; background: var(--background, Canvas); box-shadow: 0 20px 80px color-mix(in oklch, var(--foreground, CanvasText) 20%, transparent); overflow: hidden; }
+		.export-head, .export-actions { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border, ButtonBorder); background: var(--card, Canvas); }
+		.export-head h2 { margin: 0; font-size: 16px; }
+		.export-actions { justify-content: flex-end; border-top: 1px solid var(--border, ButtonBorder); border-bottom: 0; }
+		.export-body { overflow: auto; padding: 16px; display: grid; gap: 14px; }
+		.export-body pre { margin: 0; max-height: 220px; overflow: auto; padding: 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); white-space: pre-wrap; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+		.export-summary { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted-foreground, GrayText); }
+		.export-row { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); }
+		.export-row.invalid { border-color: color-mix(in oklch, var(--negative, red) 32%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, red) 6%, transparent); }
+		.export-row .anchor { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
+		.export-row .reason { color: var(--negative, red); font-size: 12px; }
+		.export-actions button { padding: 8px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 8px; background: var(--card, Canvas); color: inherit; }
+		.export-actions .primary { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); font-weight: 700; }
 
 		.mode-toggle {
 			display: inline-flex;
@@ -406,13 +505,17 @@ export class PrWalkthroughPanel extends LitElement {
 		.body.narrow .narrow-note { display: inline; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.diff-file-header { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--border, ButtonBorder); font: inherit; color: inherit; text-align: left; cursor: pointer; }
-		.diff-block.closed .diff-file-header { border-bottom: 0; }
+		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
+		.diff-block.closed .diff-file-header-row { border-bottom: 0; }
+		.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+		.diff-external-link { display: inline-flex; align-items: center; flex: 0 0 auto; padding: 0 12px; border-left: 1px solid var(--border, ButtonBorder); font-size: 11px; font-weight: 800; color: var(--primary, Highlight); text-decoration: none; }
+		.diff-external-link:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); text-decoration: underline; }
 		.caret { width: 12px; color: var(--muted-foreground, GrayText); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
 		.diff-block.open .caret { transform: rotate(90deg); }
 		.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.diff-path b { color: var(--foreground, CanvasText); }
 		.diff-kind { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; color: var(--chart-1, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 16%, transparent); }
+		.diff-status { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 999px; color: var(--chart-2, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 14%, transparent); border: 1px solid color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 26%, var(--border, ButtonBorder)); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
@@ -461,9 +564,14 @@ export class PrWalkthroughPanel extends LitElement {
 			this.restorePersistedState();
 			return;
 		}
-		if (changed.has("cards") && this.persistenceKey && this._loadedPersistenceKey !== this.persistenceKey) {
+		if (changed.has("cards") && this.persistenceKey) {
 			this.restorePersistedState();
 			return;
+		}
+		if (changed.has("status") && (this.status === "loading" || this.status === "error")) {
+			this._exportPreviewOpen = false;
+			this._exportPreview = undefined;
+			this._exportError = "";
 		}
 		if (changed.has("cards") || !this._activeCardId) {
 			const firstCard = this.reviewCards[0] ?? this.cards[0];
@@ -510,6 +618,12 @@ export class PrWalkthroughPanel extends LitElement {
 		this._dismissedSuggestionIds = [];
 		this._collapsedDiffBlockIds = [];
 		this._copied = false;
+		this._exportPreviewOpen = false;
+		this._exportPreviewLoading = false;
+		this._exportPreview = undefined;
+		this._exportError = "";
+		this._exportSubmitting = false;
+		this._exportResult = undefined;
 	}
 
 	private reconcileDecisionCommentInvariants(): void {
@@ -549,9 +663,30 @@ export class PrWalkthroughPanel extends LitElement {
 		return Object.values(this._decisions).some(decision => decision.value === "disliked") || this._comments.length > 0;
 	}
 
+	private get canUseExportApi(): boolean {
+		if (!this.exportCapability) return false;
+		if (this.exportCapability.available === false || this.exportCapability.enabled === false || this.exportCapability.canSubmit === false) return false;
+		return true;
+	}
+
+	private get exportUnavailableReason(): string {
+		return this.exportCapability?.reason || this.exportCapability?.message || "GitHub export is not available for this walkthrough. You can copy the draft review instead.";
+	}
+
+	private get apiChangesetId(): string {
+		if (this.changesetId.trim()) return this.changesetId.trim();
+		const key = this.persistenceKey.replace(/^walkthrough:/, "").trim();
+		if (key) {
+			try { return decodeURIComponent(key); }
+			catch { return key; }
+		}
+		const changeset = this.effectiveChangeset;
+		return `${changeset.baseSha}..${changeset.headSha}`;
+	}
+
 	private get prIdentity(): { kicker: string; title: string; linkLabel: string; url: string } {
 		const changeset = this.effectiveChangeset;
-		const url = changeset.prUrl || changeset.externalUrl || "";
+		const url = safeExternalUrl(changeset.prUrl) || safeExternalUrl(changeset.externalUrl) || "";
 		const urlNumber = url ? /\/pull\/(\d+)(?:\/|$)/i.exec(url)?.[1] : undefined;
 		const titleNumber = changeset.title ? /^PR\s+#(\d+)/i.exec(changeset.title)?.[1] : undefined;
 		const number = changeset.prNumber != null && String(changeset.prNumber).trim() ? String(changeset.prNumber) : urlNumber ?? titleNumber;
@@ -588,17 +723,15 @@ export class PrWalkthroughPanel extends LitElement {
 
 	override render(): TemplateResult {
 		const active = this.activeCard;
-		if (!active) {
-			return html`<section class="shell" data-testid="pr-walkthrough-panel"><div class="empty">No walkthrough cards are available.</div></section>`;
-		}
-
+		const activeCardId = this.status === "ready" && !this.cards.length ? "empty" : active?.id ?? this.status;
 		return html`
-			<section class="shell" data-testid="pr-walkthrough-panel" data-active-card-id=${active.id} data-diff-mode=${this.effectiveDiffMode}>
+			<section class="shell" data-testid="pr-walkthrough-panel" data-active-card-id=${activeCardId} data-diff-mode=${this.effectiveDiffMode} data-status=${this.status}>
 				${this.renderHeader()}
 				<div class="body ${this.isNarrowLayout ? "narrow" : ""}">
 					${this.renderRail()}
-					<main class="content">${this.renderCard(active)}</main>
+					<main class="content">${this.renderMainContent(active)}</main>
 				</div>
+				${this._exportPreviewOpen ? this.renderExportDialog() : nothing}
 			</section>
 		`;
 	}
@@ -612,6 +745,9 @@ export class PrWalkthroughPanel extends LitElement {
 		const submitLabel = completed < this.reviewCards.length
 			? `Submit review (${completed}/${this.reviewCards.length})`
 			: this.currentDraftHasConcerns ? "Submit review · request changes" : "Submit review · approve";
+		const submitTitle = completed < this.reviewCards.length
+			? "Review every non-audit card before export."
+			: this.canUseExportApi ? "Preview GitHub review comments before submitting." : this.exportUnavailableReason;
 		return html`
 			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
 				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
@@ -632,13 +768,32 @@ export class PrWalkthroughPanel extends LitElement {
 					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 					<div class="progress-track"><div class="progress-fill" style="width: ${percent}%"></div></div>
 				</div>
-				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" ?disabled=${completed < this.reviewCards.length}>${submitLabel}</button>
+				${this.status !== "fixture" ? html`<span class="status-pill ${this.status === "error" ? "error" : ""}">${this.status}</span>` : nothing}
+				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}>${submitLabel}</button>
 			</header>
 		`;
 	}
 
 	private renderRail(): TemplateResult {
+		if (!this.cards.length && (this.status === "loading" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
 		return this.isNarrowLayout ? this.renderCollapsedRail() : this.renderLabelledRail();
+	}
+
+	private renderPlaceholderRail(): TemplateResult {
+		const identity = this.prIdentity;
+		const stats = this.changesetStats;
+		return html`
+			<nav class="rail ${this.isNarrowLayout ? "collapsed" : ""}" data-testid=${this.isNarrowLayout ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
+				${this.isNarrowLayout ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
+					<div class="rail-prbox">
+						<div class="num">${identity.kicker}</div>
+						<div class="prtitle">${identity.title}</div>
+						<div class="meta"><span>${stats.files} files</span><span class="stat-add">+${this.formatNumber(stats.additions)}</span><span class="stat-del">-${this.formatNumber(stats.deletions)}</span></div>
+					</div>
+					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
+				`}
+			</nav>
+		`;
 	}
 
 	private renderLabelledRail(): TemplateResult {
@@ -709,6 +864,78 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
+	private renderMainContent(active: PrWalkthroughCard | undefined): TemplateResult {
+		if (this.status === "loading" && active) return html`${this.renderWarningBanners()}${this.renderLoadingState()}${this.renderCard(active)}`;
+		if (this.status === "loading") return html`${this.renderWarningBanners()}${this.renderLoadingState()}`;
+		if (this.status === "error" && active) return html`${this.renderWarningBanners()}${this.renderErrorState()}${this.renderCard(active)}`;
+		if (this.status === "error") return html`${this.renderWarningBanners()}${this.renderErrorState()}`;
+		if (this.status === "ready" && this.cards.length === 0) return html`${this.renderWarningBanners()}${this.renderEmptyState()}`;
+		if (!active) return html`${this.renderWarningBanners()}<div class="state-card" data-testid="pr-walkthrough-empty-state"><h2>No walkthrough cards are available.</h2><p>There are no logical review cards for this changeset.</p></div>`;
+		return html`${this.renderWarningBanners()}${this.renderCard(active)}`;
+	}
+
+	private renderWarningBanners(extraWarnings: WalkthroughWarning[] = []): TemplateResult | typeof nothing {
+		const warnings = [...this.warnings, ...extraWarnings].filter(warning => warning && warning.message);
+		if (!warnings.length) return nothing;
+		return html`
+			<div class="banner-stack" data-testid="pr-walkthrough-warning-list">
+				${warnings.map(warning => html`
+					<div class="banner ${warning.severity}" data-testid="pr-walkthrough-warning" data-warning-code=${warning.code}>
+						<strong>${warning.severity === "error" ? "Error" : warning.severity === "warning" ? "Warning" : "Notice"}${warning.code ? ` · ${warning.code}` : ""}</strong>
+						<div>${warning.message}</div>
+						${warning.filePath ? html`<div class="file">${warning.filePath}</div>` : nothing}
+					</div>
+				`)}
+			</div>
+		`;
+	}
+
+	private renderLoadingState(): TemplateResult {
+		return html`
+			<section class="state-card" data-testid="pr-walkthrough-loading" aria-live="polite">
+				<span data-testid="pr-walkthrough-loading-state" hidden></span>
+				<h2>Resolving walkthrough…</h2>
+				<p>Loading PR metadata, changed files, diff hunks, and logical review cards.</p>
+				<div class="skeleton" aria-hidden="true">
+					<div class="skeleton-line short"></div>
+					<div class="skeleton-line medium"></div>
+					<div class="skeleton-box"></div>
+				</div>
+			</section>
+		`;
+	}
+
+	private retryWalkthroughResolve(): void {
+		this.dispatchEvent(new CustomEvent("open-pr-walkthrough", {
+			bubbles: true,
+			composed: true,
+			detail: { ...(this.changeset || {}), changesetId: this.changesetId || undefined },
+		}));
+	}
+
+	private renderErrorState(): TemplateResult {
+		const message = this.error || "Unable to resolve this walkthrough.";
+		const isAuth = /auth|permission|rate|token/i.test(message);
+		return html`
+			<section class="state-card" data-testid="pr-walkthrough-error" role="alert">
+				<span data-testid="pr-walkthrough-error-state" hidden></span>
+				<h2>${/not found/i.test(message) ? "Pull request not found" : "Walkthrough unavailable"}</h2>
+				<p>${message}</p>
+				${isAuth ? html`<p>Check GitHub credentials or repository permissions, then retry from the walkthrough command.</p>` : nothing}
+				<button type="button" class="copy-button" @click=${this.retryWalkthroughResolve}>Retry</button>
+			</section>
+		`;
+	}
+
+	private renderEmptyState(): TemplateResult {
+		return html`
+			<section class="state-card" data-testid="pr-walkthrough-empty-state">
+				<h2>No changed files</h2>
+				<p>This changeset resolved successfully but there are no diff hunks to review. Use Submit review to preview or copy a draft summary without publishing anything.</p>
+			</section>
+		`;
+	}
+
 	private renderCard(card: PrWalkthroughCard): TemplateResult {
 		const phaseIndex = PHASES.findIndex(item => item.id === card.phaseId);
 		const phase = PHASES[phaseIndex]?.label ?? card.phaseId;
@@ -751,17 +978,32 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
+	private diffStatusLabel(block: PrWalkthroughDiffBlock): string {
+		const status = block.status;
+		if (status === "added") return "Added";
+		if (status === "modified") return "Modified";
+		if (status === "deleted") return "Deleted";
+		if (status === "renamed") return "Renamed";
+		if (status === "copied") return "Copied";
+		if (status === "binary") return "Binary";
+		return "";
+	}
+
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		const collapsed = this._collapsedDiffBlockIds.includes(block.id);
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
 		return html`
 			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode} data-expanded=${collapsed ? "false" : "true"}>
-				<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
-					<span class="caret">▸</span>
-					<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
-					${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
-					<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
-				</button>
+				<div class="diff-file-header-row">
+					<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
+						<span class="caret">▸</span>
+						${this.diffStatusLabel(block) ? html`<span class="diff-status" data-testid="pr-walkthrough-diff-status">${this.diffStatusLabel(block)}</span>` : nothing}
+						<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
+						${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
+						<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
+					</button>
+					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link">Open file</a>` : nothing}
+				</div>
 				${collapsed ? nothing : this.effectiveDiffMode === "split" ? this.renderSplitDiff(card, block) : this.renderInlineDiff(card, block)}
 			</section>
 		`;
@@ -799,6 +1041,11 @@ export class PrWalkthroughPanel extends LitElement {
 				</div>
 			</div>
 		`;
+	}
+
+	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
+		const linked = block as PrWalkthroughDiffBlock & { externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
+		return safeExternalUrl(linked.externalUrl) || safeExternalUrl(linked.blobUrl) || safeExternalUrl(linked.rawUrl) || safeExternalUrl(linked.contentsUrl);
 	}
 
 	private renderDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine | null, column: "old" | "new" | "inline"): TemplateResult {
@@ -918,6 +1165,220 @@ export class PrWalkthroughPanel extends LitElement {
 				</div>
 			</section>
 		`;
+	}
+
+	private openExportPreview = (): void => {
+		this._exportPreviewOpen = true;
+		this._exportResult = undefined;
+		this._exportError = "";
+		if (this.canUseExportApi) {
+			void this.loadExportPreview();
+			return;
+		}
+		this._exportPreview = this.buildLocalExportPreview();
+	};
+
+	private closeExportPreview = (): void => {
+		this._exportPreviewOpen = false;
+		this._exportPreviewLoading = false;
+		this._exportSubmitting = false;
+	};
+
+	private async loadExportPreview(): Promise<void> {
+		this._exportPreviewLoading = true;
+		this._exportError = "";
+		try {
+			const res = await gatewayFetch(`/api/pr-walkthrough/${encodeURIComponent(this.apiChangesetId)}/export/preview`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(this.currentDraft),
+			});
+			const data = await this.readJsonResponse(res);
+			if (!res.ok) throw new Error(this.errorMessageFromResponse(data, `Preview failed (${res.status})`));
+			this._exportPreview = this.normalizeExportPreview(data);
+		} catch (err) {
+			this._exportError = err instanceof Error ? err.message : "Failed to build export preview.";
+			this._exportPreview = this.buildLocalExportPreview();
+		} finally {
+			this._exportPreviewLoading = false;
+		}
+	}
+
+	private renderExportDialog(): TemplateResult {
+		const preview = this._exportPreview;
+		const rows = this.previewRows(preview);
+		const validRows = rows.filter(row => row.valid !== false);
+		const invalidRows = rows.length - validRows.length;
+		const canSubmit = this.canUseExportApi && !this._exportPreviewLoading && !this._exportSubmitting && !!preview && (preview.canSubmit !== false);
+		const body = preview?.body || preview?.reviewBody || this.buildAuditText();
+		const reviewUrl = safeExternalUrl(this._exportResult?.url);
+		return html`
+			<div class="export-backdrop" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview">
+				<section class="export-dialog">
+					<header class="export-head">
+						<h2>Review export preview</h2>
+						<span class="header-spacer"></span>
+						<button class="copy-button" type="button" @click=${() => this.copyAudit(body)}>${this._copied ? "Copied" : "Copy draft"}</button>
+					</header>
+					<div class="export-body">
+						${!this.canUseExportApi ? html`<div class="banner info" data-testid="pr-walkthrough-export-unavailable"><strong>Export unavailable</strong><div>${this.exportUnavailableReason}</div></div>` : nothing}
+						${this._exportError ? html`<div class="banner error" data-testid="pr-walkthrough-export-error"><strong>Export preview failed</strong><div>${this._exportError}</div></div>` : nothing}
+						${this._exportResult ? html`<div class="banner ${this._exportResult.ok === false ? "error" : "info"}" data-testid="pr-walkthrough-export-result"><strong>${this._exportResult.ok === false ? "Submission failed" : "Submitted"}</strong><div>${this._exportResult.message || this._exportResult.error || "GitHub review submitted."}</div>${reviewUrl ? html`<div><a href=${reviewUrl} target="_blank" rel="noopener noreferrer">Open review ↗</a></div>` : nothing}</div>` : nothing}
+						${this._exportPreviewLoading ? this.renderLoadingState() : html`
+							<div class="export-summary" data-testid="pr-walkthrough-export-summary">
+								<span>${validRows.length} mapped comment${validRows.length === 1 ? "" : "s"}</span>
+								<span>${invalidRows} unmappable</span>
+								<span>${this.currentDraftHasConcerns ? "Request changes" : "Approve"}</span>
+							</div>
+							${this.renderWarningBanners(preview?.warnings ?? [])}
+							<section>
+								<h3>Review body</h3>
+								<pre data-testid="pr-walkthrough-export-body">${body}</pre>
+							</section>
+							<section>
+								<h3>Line comments</h3>
+								${rows.length ? rows.map(row => this.renderExportRow(row)) : html`<div class="empty">No line comments are queued.</div>`}
+							</section>
+						`}
+					</div>
+					<footer class="export-actions">
+						<button type="button" @click=${this.closeExportPreview}>Close</button>
+						<button class="primary" type="button" data-testid="pr-walkthrough-export-submit" ?disabled=${!canSubmit} title=${canSubmit ? "Submit this review to GitHub." : "Preview must be ready and GitHub export must be available."} @click=${this.submitExportReview}>${this._exportSubmitting ? "Submitting…" : "Confirm submit to GitHub"}</button>
+					</footer>
+				</section>
+			</div>
+		`;
+	}
+
+	private renderExportRow(row: WalkthroughExportPreviewRow): TemplateResult {
+		const path = row.path || row.filePath || "Unmapped comment";
+		const anchor = row.line != null ? `${path}:${row.line}` : path;
+		return html`
+			<div class="export-row ${row.valid === false ? "invalid" : ""}" data-testid="pr-walkthrough-export-row" data-valid=${row.valid === false ? "false" : "true"}>
+				<div class="anchor">${row.kind || "line"} · ${anchor}${row.side ? ` · ${row.side}` : ""}</div>
+				<div>${row.body || "No comment body."}</div>
+				${row.valid === false && row.reason ? html`<div class="reason">${row.reason}</div>` : nothing}
+			</div>
+		`;
+	}
+
+	private async submitExportReview(): Promise<void> {
+		if (!this.canUseExportApi || !this._exportPreview || this._exportSubmitting) return;
+		this._exportSubmitting = true;
+		this._exportError = "";
+		this._exportResult = undefined;
+		try {
+			const res = await gatewayFetch(`/api/pr-walkthrough/${encodeURIComponent(this.apiChangesetId)}/export/submit`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ draft: this.currentDraft, confirm: true, event: this.currentDraftHasConcerns ? "REQUEST_CHANGES" : "APPROVE" }),
+			});
+			const data = await this.readJsonResponse(res);
+			if (!res.ok) throw new Error(this.errorMessageFromResponse(data, `Submit failed (${res.status})`));
+			this._exportResult = this.normalizeExportResult(data);
+		} catch (err) {
+			this._exportResult = { ok: false, error: err instanceof Error ? err.message : "Failed to submit GitHub review." };
+		} finally {
+			this._exportSubmitting = false;
+		}
+	}
+
+	private async readJsonResponse(res: Response): Promise<unknown> {
+		try {
+			return await res.json();
+		} catch {
+			return null;
+		}
+	}
+
+	private errorMessageFromResponse(data: unknown, fallback: string): string {
+		if (data && typeof data === "object") {
+			const record = data as Record<string, unknown>;
+			const message = record.message || record.error || record.reason;
+			if (typeof message === "string" && message.trim()) return message.trim();
+		}
+		return fallback;
+	}
+
+	private normalizeExportPreview(data: unknown): WalkthroughExportPreview {
+		if (!data || typeof data !== "object") return this.buildLocalExportPreview();
+		const record = data as Record<string, unknown>;
+		return {
+			body: typeof record.body === "string" ? record.body : undefined,
+			reviewBody: typeof record.reviewBody === "string" ? record.reviewBody : undefined,
+			rows: Array.isArray(record.rows) ? record.rows.map(row => this.normalizeExportRow(row)) : undefined,
+			comments: Array.isArray(record.comments) ? record.comments.map(row => this.normalizeExportRow(row)) : undefined,
+			warnings: Array.isArray(record.warnings) ? record.warnings.map(warning => this.normalizeWarning(warning)).filter((warning): warning is WalkthroughWarning => !!warning) : undefined,
+			validCount: typeof record.validCount === "number" ? record.validCount : undefined,
+			invalidCount: typeof record.invalidCount === "number" ? record.invalidCount : undefined,
+			canSubmit: typeof record.canSubmit === "boolean" ? record.canSubmit : undefined,
+		};
+	}
+
+	private normalizeExportResult(data: unknown): WalkthroughExportResult {
+		if (!data || typeof data !== "object") return { ok: true, message: "GitHub review submitted." };
+		const record = data as Record<string, unknown>;
+		return {
+			ok: typeof record.ok === "boolean" ? record.ok : true,
+			url: typeof record.url === "string" ? record.url : typeof record.reviewUrl === "string" ? record.reviewUrl : undefined,
+			message: typeof record.message === "string" ? record.message : "GitHub review submitted.",
+			error: typeof record.error === "string" ? record.error : undefined,
+		};
+	}
+
+	private normalizeWarning(data: unknown): WalkthroughWarning | undefined {
+		if (!data || typeof data !== "object") return undefined;
+		const record = data as Record<string, unknown>;
+		const message = typeof record.message === "string" ? record.message : "Walkthrough warning";
+		const severity = record.severity === "error" || record.severity === "info" || record.severity === "warning" ? record.severity : "warning";
+		return {
+			code: typeof record.code === "string" ? record.code : "warning",
+			severity,
+			message,
+			filePath: typeof record.filePath === "string" ? record.filePath : undefined,
+		};
+	}
+
+	private normalizeExportRow(data: unknown): WalkthroughExportPreviewRow {
+		if (!data || typeof data !== "object") return { valid: false, reason: "Invalid preview row" };
+		const record = data as Record<string, unknown>;
+		return {
+			path: typeof record.path === "string" ? record.path : undefined,
+			filePath: typeof record.filePath === "string" ? record.filePath : undefined,
+			side: typeof record.side === "string" ? record.side : undefined,
+			line: typeof record.line === "number" ? record.line : undefined,
+			body: typeof record.body === "string" ? record.body : undefined,
+			valid: typeof record.valid === "boolean" ? record.valid : undefined,
+			reason: typeof record.reason === "string" ? record.reason : undefined,
+			kind: typeof record.kind === "string" ? record.kind : undefined,
+		};
+	}
+
+	private previewRows(preview: WalkthroughExportPreview | undefined): WalkthroughExportPreviewRow[] {
+		return preview?.rows ?? preview?.comments ?? [];
+	}
+
+	private buildLocalExportPreview(): WalkthroughExportPreview {
+		const draft = this.currentDraft;
+		const rows: WalkthroughExportPreviewRow[] = draft.comments
+			.filter(comment => comment.diffBlockId && comment.lineId)
+			.map(comment => {
+				const anchor = this.findLineAnchor(comment);
+				const valid = anchor.filePath !== "Card-level" && typeof anchor.line === "number";
+				return {
+					path: anchor.filePath,
+					line: typeof anchor.line === "number" ? anchor.line : undefined,
+					body: comment.body,
+					valid,
+					reason: valid ? undefined : "This comment does not map to a changed GitHub line.",
+				};
+			});
+		return {
+			body: this.buildAuditText(),
+			rows,
+			warnings: this.canUseExportApi ? [] : [{ code: "export-unavailable", severity: "info", message: this.exportUnavailableReason }],
+			canSubmit: false,
+		};
 	}
 
 	private cardsForPhase(phaseId: PrWalkthroughPhaseId): PrWalkthroughCard[] {
@@ -1143,6 +1604,10 @@ export class PrWalkthroughPanel extends LitElement {
 		return this.persistenceKey ? `bobbit:pr-walkthrough:${this.persistenceKey}` : "";
 	}
 
+	private cardsChecksum(): string {
+		return this.cards.map(card => `${card.id}:${card.phaseId}:${card.diffBlocks.map(block => `${block.id}:${block.filePath}:${block.hunks.length}`).join("|")}`).join(";");
+	}
+
 	private restorePersistedState(): void {
 		this.resetInteractionState();
 		const key = this.persistenceStorageKey();
@@ -1152,6 +1617,7 @@ export class PrWalkthroughPanel extends LitElement {
 			const raw = localStorage.getItem(key);
 			if (!raw) return;
 			const parsed = JSON.parse(raw) as PersistedPrWalkthroughState;
+			if (this.status !== "fixture" && parsed.cardsChecksum !== this.cardsChecksum()) return;
 			if (parsed.activeCardId && this.cards.some(card => card.id === parsed.activeCardId)) this._activeCardId = parsed.activeCardId;
 			if (parsed.diffModeOverride === "split" || parsed.diffModeOverride === "inline") this._diffModeOverride = parsed.diffModeOverride;
 			if (Array.isArray(parsed.comments)) this._comments = parsed.comments.filter(comment => comment && typeof comment.id === "string" && typeof comment.cardId === "string" && typeof comment.body === "string");
@@ -1169,6 +1635,8 @@ export class PrWalkthroughPanel extends LitElement {
 		const key = this.persistenceStorageKey();
 		if (!key || this._loadedPersistenceKey !== this.persistenceKey || typeof localStorage === "undefined") return;
 		const persisted: PersistedPrWalkthroughState = {
+			schemaVersion: 2,
+			cardsChecksum: this.cardsChecksum(),
 			activeCardId: this._activeCardId,
 			diffModeOverride: this._diffModeOverride,
 			comments: this._comments,

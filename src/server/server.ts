@@ -145,6 +145,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
+import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
@@ -1992,6 +1993,21 @@ async function handleApiRoute(
 		const e = err instanceof Error ? err : new Error(String(err));
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
+
+	if (await handlePrWalkthroughApiRoute(url, req, res, {
+		defaultCwd: config.defaultCwd,
+		readBody,
+		resolveSessionCwd: (sessionId: string) => {
+			const live = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
+		},
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+		preferencesStore,
+	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
 
