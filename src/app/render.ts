@@ -2110,45 +2110,6 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const walkthroughSourceRecord = (tab: UnifiedContentTab): Record<string, unknown> => ({
-		...((tab.state || {}) as Record<string, unknown>),
-		...((tab.source || {}) as Record<string, unknown>),
-	});
-
-	const walkthroughPrUrl = (tab: UnifiedContentTab): string => {
-		const record = walkthroughSourceRecord(tab);
-		return recordValue(record, "prUrl") || recordValue(record, "externalUrl") || recordValue(record, "url");
-	};
-
-	const walkthroughPrLabel = (tab: UnifiedContentTab): string => {
-		const record = walkthroughSourceRecord(tab);
-		const number = recordValue(record, "prNumber");
-		const title = recordValue(record, "prTitle") || recordValue(record, "title") || tab.title;
-		if (number && title && !/^PR\s+#/i.test(title)) return `PR #${number}: ${title}`;
-		if (number) return title && /^PR\s+#/i.test(title) ? title : `PR #${number}`;
-		return title || "Pull request";
-	};
-
-	const githubLogo = () => html`<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style="width:14px;height:14px;fill:currentColor;flex:0 0 auto"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>`;
-
-	const walkthroughPrLink = (tab: UnifiedContentTab) => {
-		const url = walkthroughPrUrl(tab);
-		if (!url) return "";
-		return html`
-			<a
-				href=${url}
-				target="_blank"
-				rel="noopener noreferrer"
-				class="inline-flex items-center gap-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
-				style="max-width: min(34vw, 360px); padding:2px 8px; font-size:11px; line-height:1.35; text-decoration:none;"
-				title=${`Open ${walkthroughPrLabel(tab)} on GitHub`}
-				data-testid="pr-walkthrough-pr-link"
-			>
-				${githubLogo()}<span class="truncate">Open on GitHub</span>${icon(ExternalLink, "xs")}
-			</a>
-		`;
-	};
-
 	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
 		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
 		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
@@ -2280,15 +2241,6 @@ export function doRenderApp(): void {
 		}
 		return html`
 			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-				<div class="flex items-center justify-between gap-3 px-4 py-2 border-b border-border shrink-0" style="background:var(--background);">
-					<div class="min-w-0">
-						<div class="text-xs uppercase tracking-wide text-muted-foreground">PR walkthrough</div>
-						<div class="text-sm font-medium text-foreground truncate" title=${tab.title}>${tab.title}</div>
-					</div>
-					<div class="flex items-center gap-1 shrink-0">
-						${walkthroughPrLink(tab)}
-					</div>
-				</div>
 				${walkthroughPanelContent(tab)}
 			</div>
 		`;
@@ -2499,11 +2451,11 @@ export function doRenderApp(): void {
 		if (getRouteFromHash().view === "walkthrough") {
 			render(html`
 				<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
-					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5">
+					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5" data-testid="pr-walkthrough-standalone-topbar">
 						<div class="flex items-center gap-2 min-w-0">
 							${bobbitIcon}
 							<span class="text-sm font-semibold text-foreground">Bobbit</span>
-							<span class="text-xs text-muted-foreground">Standalone walkthrough</span>
+							<span class="text-xs text-muted-foreground">PR Walkthrough</span>
 						</div>
 						<theme-toggle></theme-toggle>
 					</div>

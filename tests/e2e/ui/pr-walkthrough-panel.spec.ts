@@ -162,7 +162,11 @@ async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; ti
 		await expect(link).toHaveAttribute("href", expected.href);
 		await expect(link).toHaveAttribute("target", "_blank");
 		await expect(link.locator("svg"), "GitHub links should include the GitHub mark").toBeVisible();
-		await expect(link, "half-pane GitHub links should use compact action text").toContainText(/Open on GitHub/i);
+		await expect(link, "GitHub links should always use compact action text").toContainText(/^Open on GitHub$/i);
+		await expect.poll(async () => {
+			const [titleBox, linkBox] = await Promise.all([header.locator(".title").boundingBox(), link.boundingBox()]);
+			return titleBox && linkBox ? linkBox.y - (titleBox.y + titleBox.height) : -1;
+		}, { message: "GitHub link row should have breathing room beneath the PR title" }).toBeGreaterThanOrEqual(3);
 	}
 }
 
@@ -719,6 +723,9 @@ test.describe("PR walkthrough panel", () => {
 		await standalone.waitForLoadState("domcontentloaded");
 		await expect(standalone, "standalone URL should preserve walkthrough/tab identity").toHaveURL(/walkthrough|pr-walkthrough/);
 		if (tabId) await expect(standalone.locator(`${tid("pr-walkthrough-panel-root")}[data-panel-tab-id="${tabId}"]`)).toBeVisible({ timeout: 15_000 });
+		await expect(standalone.getByTestId("pr-walkthrough-standalone-topbar"), "standalone route should use PR Walkthrough chrome").toContainText("PR Walkthrough");
+		await expect(standalone.getByTestId("pr-walkthrough-standalone-topbar"), "standalone route should not expose the old standalone label").not.toContainText("Standalone walkthrough");
+		await expect(standalone.getByTestId("pr-walkthrough-standalone").locator(":scope > .border-b"), "standalone route should not add a duplicate title bar above the walkthrough header").toHaveCount(0);
 		await expect(walkthroughPanel(standalone), "standalone tab should render the same walkthrough component").toBeVisible({ timeout: 15_000 });
 		await expectActiveDiffMode(standalone, "split");
 		await standalone.close();
