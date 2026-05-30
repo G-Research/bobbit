@@ -26,6 +26,9 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(text, /extension:\s*extension\.ts/);
 		assert.match(text, /read-only/i);
 		assert.match(text, /Blocks writes/i);
+		assert.match(text, /cross-PR\/cross-repo GitHub reads/i);
+		assert.match(text, /must match that launched PR/i);
+		assert.match(text, /`--repo`\/`-R`, and `--hostname` are rejected/i);
 		assert.match(text, /recursive searches from `\.`\/the repository root/i);
 		assert.match(text, /hidden\/ignore override flags/i);
 		assert.match(text, /tail -f/i);
@@ -49,6 +52,9 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /const sessionId = process\.env\.BOBBIT_SESSION_ID/);
 		assert.match(source, /const jobId = process\.env\.BOBBIT_WALKTHROUGH_JOB_ID/);
 		assert.match(source, /const submissionProof = process\.env\.BOBBIT_WALKTHROUGH_SUBMIT_PROOF/);
+		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_OWNER/);
+		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_REPO/);
+		assert.match(source, /BOBBIT_WALKTHROUGH_TARGET_NUMBER/);
 		assert.match(source, /if \(!sessionId \|\| !jobId \|\| !submissionProof\) return/);
 		assert.match(source, /name:\s*"readonly_bash"/);
 		assert.match(source, /name:\s*"submit_pr_walkthrough_yaml"/);
@@ -61,6 +67,8 @@ describe("PR walkthrough tool metadata", () => {
 		const source = readToolText("extension.ts");
 		assert.match(source, /walkthrough-readonly-policy/);
 		assert.match(source, /evaluateWalkthroughReadonlyCommand/);
+		assert.match(source, /getReadonlyPolicyOptions/);
+		assert.match(source, /evaluate\(command, policyOptions\)/);
 		assert.match(source, /Command blocked by PR walkthrough read-only policy/);
 		assert.match(source, /Use read-only PR\/diff inspection instead/);
 		assert.match(source, /truncateTail/);

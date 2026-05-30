@@ -1,15 +1,19 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { evaluateWalkthroughReadonlyCommand } from "../src/server/pr-walkthrough/walkthrough-readonly-policy.ts";
+import { evaluateWalkthroughReadonlyCommand, type WalkthroughReadonlyPolicyOptions } from "../src/server/pr-walkthrough/walkthrough-readonly-policy.ts";
 
-function allowed(command: string): void {
-	const decision = evaluateWalkthroughReadonlyCommand(command);
+const launchedGithubTarget: WalkthroughReadonlyPolicyOptions = {
+	githubTarget: { provider: "github", owner: "owner", repo: "repo", number: 123 },
+};
+
+function allowed(command: string, options?: WalkthroughReadonlyPolicyOptions): void {
+	const decision = evaluateWalkthroughReadonlyCommand(command, options);
 	assert.equal(decision.allowed, true, command + " should be allowed");
 }
 
-function blocked(command: string, reasonPattern?: RegExp): void {
-	const decision = evaluateWalkthroughReadonlyCommand(command);
+function blocked(command: string, reasonPattern?: RegExp, options?: WalkthroughReadonlyPolicyOptions): void {
+	const decision = evaluateWalkthroughReadonlyCommand(command, options);
 	assert.equal(decision.allowed, false, command + " should be blocked");
 	if (!decision.allowed && reasonPattern) assert.match(decision.reason, reasonPattern);
 }
@@ -24,10 +28,33 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("gh api repos/owner/repo/pulls/123 --method GET --jq .title");
 	});
 
+	it("scopes GitHub reads to the launched PR target when known", () => {
+		allowed("gh pr view 123 --json title,body,headRefOid,baseRefOid", launchedGithubTarget);
+		allowed("gh pr diff 123 --patch", launchedGithubTarget);
+		allowed("gh api repos/owner/repo/pulls/123", launchedGithubTarget);
+		allowed("gh api repos/OWNER/Repo/pulls/123/files --paginate", launchedGithubTarget);
+		allowed("gh api --method GET repos/owner/repo/pulls/123/commits", launchedGithubTarget);
+
+		blocked("gh pr view 124 --json title", /launched PR #123/, launchedGithubTarget);
+		blocked("gh pr diff 124 --patch", /launched PR #123/, launchedGithubTarget);
+		blocked("gh pr view --json title", /must explicitly target launched PR #123/, launchedGithubTarget);
+		blocked("gh pr view feature-branch --json title", /URL and branch arguments are not allowed/, launchedGithubTarget);
+		blocked("gh pr view https://github.com/owner/repo/pull/123 --json title", /URL arguments are not allowed/, launchedGithubTarget);
+		blocked("gh pr view 123 --repo owner/repo", /--repo\/-R is not allowed/, launchedGithubTarget);
+		blocked("gh pr view 123 -R owner/repo", /--repo\/-R is not allowed/, launchedGithubTarget);
+		blocked("gh pr view 123 --hostname github.com", /--hostname is not allowed/, launchedGithubTarget);
+		blocked("gh api repos/owner/repo/pulls/124", /may only read repos\/owner\/repo\/pulls\/123/, launchedGithubTarget);
+		blocked("gh api repos/other/repo/pulls/123", /may only read repos\/owner\/repo\/pulls\/123/, launchedGithubTarget);
+		blocked("gh api repos/owner/other/pulls/123/files", /may only read repos\/owner\/repo\/pulls\/123/, launchedGithubTarget);
+		blocked("gh api https://api.github.com/repos/owner/repo/pulls/123", /URL arguments are not allowed/, launchedGithubTarget);
+	});
+
 	it("blocks mutating GitHub commands and write-capable API calls", () => {
 		blocked("gh pr review 123 --approve", /not a read-only PR command/);
 		blocked("gh pr comment 123 --body ok", /not a read-only PR command/);
 		blocked("gh pr merge 123", /not a read-only PR command/);
+		blocked("gh pr view 123 --hostname github.com", /--hostname is not allowed/);
+		blocked("gh api repos/owner/repo/pulls/123 --hostname github.com", /--hostname is not allowed/);
 		blocked("gh api --method POST repos/owner/repo/pulls/123/comments", /GET/);
 		blocked("gh api repos/owner/repo/pulls/123 --method PATCH -f title=x", /GET/);
 		blocked("gh api repos/owner/repo/pulls/123/files -X PATCH", /GET/);

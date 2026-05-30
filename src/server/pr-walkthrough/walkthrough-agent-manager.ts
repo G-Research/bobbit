@@ -204,6 +204,7 @@ export class WalkthroughAgentManager {
 			return { ...responseFromJob(job), created: true };
 		}
 
+		const targetEnv = walkthroughTargetEnv(target);
 		let child: SessionLike;
 		try {
 			child = await this.deps.sessionManager.createSession(
@@ -230,6 +231,7 @@ export class WalkthroughAgentManager {
 						BOBBIT_SESSION_ID: childSessionId,
 						BOBBIT_WALKTHROUGH_JOB_ID: jobId,
 						BOBBIT_WALKTHROUGH_SUBMIT_PROOF: submissionProof,
+						...targetEnv,
 					},
 				},
 			);
@@ -589,6 +591,16 @@ export function canonicalizeTarget(input: LaunchWalkthroughRequest): PrWalkthrou
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };
 	}
 	throw routeError(400, "A GitHub PR URL/number or local baseSha/headSha is required", { code: "INVALID_TARGET" });
+}
+
+function walkthroughTargetEnv(target: PrWalkthroughTarget): Record<string, string> {
+	if (target.provider !== "github" || !target.owner || !target.repo || target.number === undefined) return {};
+	return {
+		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
+		BOBBIT_WALKTHROUGH_TARGET_OWNER: target.owner,
+		BOBBIT_WALKTHROUGH_TARGET_REPO: target.repo,
+		BOBBIT_WALKTHROUGH_TARGET_NUMBER: String(target.number),
+	};
 }
 
 function changesetIdForTarget(target: PrWalkthroughTarget): string {
