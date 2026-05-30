@@ -476,7 +476,10 @@ export class PrWalkthroughPanel extends LitElement {
 			background: linear-gradient(transparent, var(--background, Canvas) 30%);
 		}
 		.actions button { padding: 9px 14px; border-color: var(--border, ButtonBorder); background: var(--card, Canvas); }
-		.actions .decision-icon { width: 15px; height: 15px; margin-right: 6px; vertical-align: -2px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+		.actions .decision-icon, .actions .nav-icon { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+		.actions .decision-icon { margin-right: 6px; vertical-align: -2px; }
+		.actions .nav-icon.prev-icon { margin-right: 6px; }
+		.actions .nav-icon.next-icon { margin-left: 6px; }
 		.actions button:hover:not(:disabled), .actions button:focus-visible:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); }
 		.actions .like {
 			border-color: var(--primary, Highlight);
@@ -1015,9 +1018,9 @@ export class PrWalkthroughPanel extends LitElement {
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
 						<span class="decision-note">${this._decisions[card.id] ? html`Current: <b>${this._decisions[card.id].value}</b>` : commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
-						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}>← Prev</button>
+						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}><svg class="nav-icon prev-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 18-6-6 6-6"></path></svg>Prev</button>
 						<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"}" type="button" ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>Dislike${commentCount ? ` (${commentCount})` : ""}</button>
-						<button data-testid="pr-walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>Like →</button>
+						<button data-testid="pr-walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>Like<svg class="nav-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg></button>
 					</div>
 				</div>
 			</article>
