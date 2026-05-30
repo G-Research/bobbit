@@ -11,6 +11,17 @@ export interface WalkthroughReadonlyBlock {
 
 export type WalkthroughReadonlyDecision = WalkthroughReadonlyAllow | WalkthroughReadonlyBlock;
 
+export interface WalkthroughReadonlyGithubTarget {
+	provider?: string;
+	owner?: string;
+	repo?: string;
+	number?: number;
+}
+
+export interface WalkthroughReadonlyPolicyOptions {
+	githubTarget?: WalkthroughReadonlyGithubTarget;
+}
+
 const MAX_COMMAND_CHARS = 12_000;
 
 const BLOCKED_EXECUTABLES = new Set([
@@ -44,7 +55,8 @@ const RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS = new Set([
 ]);
 
 const GH_API_BODY_FLAGS = new Set(["-f", "--field", "-F", "--raw-field", "--input"]);
-const GH_API_VALUE_FLAGS = new Set(["--jq", "-q", "--header", "-H", "--hostname"]);
+const GH_API_VALUE_FLAGS = new Set(["--jq", "-q", "--header", "-H"]);
+const GH_PR_VALUE_FLAGS = new Set(["--json", "--jq", "-q", "--template", "--color"]);
 
 function basename(token: string): string {
 	const normalized = token.replace(/\\/g, "/");
@@ -254,11 +266,84 @@ function isGhApiBodyFlag(token: string): boolean {
 	return /^-[fF].+/.test(token);
 }
 
-function allowGh(argv: string[]): WalkthroughReadonlyDecision {
+function completeGithubTarget(options?: WalkthroughReadonlyPolicyOptions): { owner: string; repo: string; number: number } | undefined {
+	const target = options?.githubTarget;
+	if (!target || target.provider !== "github") return undefined;
+	if (!target.owner || !target.repo || typeof target.number !== "number" || !Number.isInteger(target.number)) return undefined;
+	return { owner: target.owner.toLowerCase(), repo: target.repo.toLowerCase(), number: target.number };
+}
+
+function ghDisallowedFlagReason(token: string): string | undefined {
+	const flag = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+	if (flag === "--hostname") return "--hostname is not allowed for PR walkthrough GitHub commands";
+	if (flag === "--repo" || flag === "-R" || token.startsWith("-R")) return "--repo/-R is not allowed; walkthrough GitHub reads are scoped to the launched PR";
+	return undefined;
+}
+
+function ghUrlArgumentReason(token: string): string | undefined {
+	return /^https?:\/\//i.test(token) ? "URL arguments are not allowed; use the launched PR number and repository-scoped API endpoint" : undefined;
+}
+
+function ghPrOptionConsumesValue(token: string): boolean {
+	if (optionHasInlineValue(token)) return false;
+	return GH_PR_VALUE_FLAGS.has(token);
+}
+
+function extractGhPrSubject(argv: string[]): string | undefined {
+	for (let i = 3; i < argv.length; i++) {
+		const token = argv[i];
+		if (token === "--") return argv[i + 1];
+		if (token.startsWith("-") && ghPrOptionConsumesValue(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		return token;
+	}
+	return undefined;
+}
+
+function validateGhPrSubject(subcommand: string, subject: string | undefined, target: ReturnType<typeof completeGithubTarget>, argv: string[]): WalkthroughReadonlyDecision | undefined {
+	if (!target) return undefined;
+	if (!subject) return block(`gh pr ${subcommand} must explicitly target launched PR #${target.number}`, argv);
+	if (!/^\d+$/.test(subject)) return block(`gh pr ${subcommand} is restricted to launched PR #${target.number}; URL and branch arguments are not allowed`, argv);
+	if (Number(subject) !== target.number) return block(`gh pr ${subcommand} may only read launched PR #${target.number}`, argv);
+	return undefined;
+}
+
+function validateGhApiEndpointTarget(endpoint: string, target: ReturnType<typeof completeGithubTarget>, argv: string[]): WalkthroughReadonlyDecision | undefined {
+	if (!target) return undefined;
+	const normalized = endpoint.replace(/^\/+/, "");
+	const match = normalized.match(/^repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)(?:\/(?:files|commits))?$/);
+	if (!match) return undefined;
+	const [, owner, repo, numberText] = match;
+	if (owner.toLowerCase() !== target.owner || repo.toLowerCase() !== target.repo || Number(numberText) !== target.number) {
+		return block(`gh api may only read repos/${target.owner}/${target.repo}/pulls/${target.number} for the launched PR`, argv);
+	}
+	return undefined;
+}
+
+function validateGhCommonArgs(argv: string[]): WalkthroughReadonlyDecision | undefined {
+	for (const token of argv.slice(1)) {
+		const flagReason = ghDisallowedFlagReason(token);
+		if (flagReason) return block(flagReason, argv);
+		const urlReason = ghUrlArgumentReason(token);
+		if (urlReason) return block(urlReason, argv);
+	}
+	return undefined;
+}
+
+function allowGh(argv: string[], options?: WalkthroughReadonlyPolicyOptions): WalkthroughReadonlyDecision {
 	const common = commonArgumentPolicy(argv);
 	if (common) return common;
+	const ghCommon = validateGhCommonArgs(argv);
+	if (ghCommon) return ghCommon;
+	const target = completeGithubTarget(options);
 	const [, first, second] = argv;
-	if (first === "pr" && second && GH_PR_READ_ALLOWED.has(second)) return { allowed: true, argv };
+	if (first === "pr" && second && GH_PR_READ_ALLOWED.has(second)) {
+		const targetDecision = validateGhPrSubject(second, extractGhPrSubject(argv), target, argv);
+		return targetDecision ?? { allowed: true, argv };
+	}
 	if (first === "pr") return block(`gh pr ${second ?? ""}`.trim() + " is not a read-only PR command", argv);
 
 	if (first !== "api") return block("only gh pr view, gh pr diff, and selected read-only gh api calls are allowed", argv);
@@ -290,7 +375,10 @@ function allowGh(argv: string[]): WalkthroughReadonlyDecision {
 
 	if (!endpoint) return block("gh api endpoint is required", argv);
 	const normalized = endpoint.replace(/^\/+/, "");
-	if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+(?:\/(?:files|commits))?$/.test(normalized)) return { allowed: true, argv };
+	if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+(?:\/(?:files|commits))?$/.test(normalized)) {
+		const targetDecision = validateGhApiEndpointTarget(endpoint, target, argv);
+		return targetDecision ?? { allowed: true, argv };
+	}
 	return block("gh api is limited to read-only pull request metadata, files, and commits endpoints", argv);
 }
 
@@ -382,7 +470,7 @@ function longLivedReadFlagReason(commandName: string, token: string): string | u
 	return undefined;
 }
 
-export function evaluateWalkthroughReadonlyCommand(command: string): WalkthroughReadonlyDecision {
+export function evaluateWalkthroughReadonlyCommand(command: string, options: WalkthroughReadonlyPolicyOptions = {}): WalkthroughReadonlyDecision {
 	const trimmed = command.trim();
 	if (!trimmed) return block("empty command");
 	const syntaxReason = hasForbiddenShellSyntax(trimmed);
@@ -398,7 +486,7 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 
 	const cmd = basename(argv[0]);
 	if (BLOCKED_EXECUTABLES.has(cmd)) return block(`${cmd} is not permitted in read-only PR walkthrough sessions`, argv);
-	if (cmd === "gh") return allowGh(argv);
+	if (cmd === "gh") return allowGh(argv, options);
 	if (cmd === "git") return allowGit(argv);
 	if (cmd === "find") return allowFind(argv);
 	if (cmd === "sed") return allowSed(argv);
@@ -417,8 +505,8 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	return block(`${cmd} is not on the PR walkthrough read-only command allowlist`, argv);
 }
 
-export function assertWalkthroughReadonlyCommand(command: string): string[] {
-	const decision = evaluateWalkthroughReadonlyCommand(command);
+export function assertWalkthroughReadonlyCommand(command: string, options: WalkthroughReadonlyPolicyOptions = {}): string[] {
+	const decision = evaluateWalkthroughReadonlyCommand(command, options);
 	if (!decision.allowed) throw new Error(decision.reason);
 	return decision.argv;
 }

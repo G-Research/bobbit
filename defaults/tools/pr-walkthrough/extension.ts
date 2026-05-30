@@ -13,6 +13,7 @@ const MAX_TIMEOUT_SECONDS = 300;
 const TRUSTED_COMMANDS = new Set(["gh", "git", "rg", "grep", "find", "ls", "cat", "head", "tail", "pwd", "sed"]);
 
 type PolicyDecision = { allowed: true; argv: string[] } | { allowed: false; reason: string; argv?: string[] };
+type PolicyOptions = { githubTarget?: { provider: "github"; owner: string; repo: string; number: number } };
 
 export interface TrustedExecutableResolutionOptions {
 	cwd?: string;
@@ -22,7 +23,7 @@ export interface TrustedExecutableResolutionOptions {
 	pathDelimiter?: string;
 }
 
-async function loadPolicy(): Promise<(command: string) => PolicyDecision> {
+async function loadPolicy(): Promise<(command: string, options?: PolicyOptions) => PolicyDecision> {
 	try {
 		const mod = await import("../../../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
 		return mod.evaluateWalkthroughReadonlyCommand;
@@ -30,6 +31,18 @@ async function loadPolicy(): Promise<(command: string) => PolicyDecision> {
 		const mod = await import("../../../pr-walkthrough/walkthrough-readonly-policy.js");
 		return mod.evaluateWalkthroughReadonlyCommand;
 	}
+}
+
+function getReadonlyPolicyOptions(): PolicyOptions {
+	const provider = process.env.BOBBIT_WALKTHROUGH_TARGET_PROVIDER;
+	const owner = process.env.BOBBIT_WALKTHROUGH_TARGET_OWNER;
+	const repo = process.env.BOBBIT_WALKTHROUGH_TARGET_REPO;
+	const numberText = process.env.BOBBIT_WALKTHROUGH_TARGET_NUMBER;
+	const number = numberText ? Number(numberText) : Number.NaN;
+	if (provider === "github" && owner && repo && Number.isInteger(number)) {
+		return { githubTarget: { provider: "github", owner, repo, number } };
+	}
+	return {};
 }
 
 function getSanitizedEnv(): NodeJS.ProcessEnv {
@@ -153,7 +166,7 @@ const extension: ExtensionFactory = (pi) => {
 		name: "readonly_bash",
 		label: "Read-only Bash",
 		description: "Run a strictly read-only shell command for PR walkthrough analysis.",
-		promptSnippet: "Run gh/git/search/read-only shell commands. Mutating commands, tests, builds, installs, servers, GitHub review/comment actions, hidden/ignore override flags, recursive root searches, and repo-local binary spoofing are blocked.",
+		promptSnippet: "Run gh/git/search/read-only shell commands. GitHub PR reads are scoped to the launched PR when known; mutating commands, tests, builds, installs, servers, GitHub review/comment actions, hidden/ignore override flags, recursive root searches, and repo-local binary spoofing are blocked.",
 		parameters: Type.Object({
 			command: Type.String(),
 			timeout: Type.Optional(Type.Number({ description: "Seconds. Default 300; finite non-negative values only; values above 300 are clamped." })),
@@ -164,14 +177,15 @@ const extension: ExtensionFactory = (pi) => {
 			if (!timeoutResult.ok) return toolText(`readonly_bash blocked invalid timeout: ${timeoutResult.reason}.`, true);
 			if (abortSignal?.aborted) return toolText("readonly_bash interrupted before start.", true);
 
-			let evaluate: (command: string) => PolicyDecision;
+			let evaluate: (command: string, options?: PolicyOptions) => PolicyDecision;
 			try {
 				evaluate = await loadPolicy();
 			} catch (err: any) {
 				return toolText(`readonly_bash policy failed to load: ${err?.message || err}`, true);
 			}
 
-			const decision = evaluate(command);
+			const policyOptions = getReadonlyPolicyOptions();
+			const decision = evaluate(command, policyOptions);
 			if (!decision.allowed) {
 				return toolText(`Command blocked by PR walkthrough read-only policy: ${decision.reason}. Use read-only PR/diff inspection instead.`, true, { policy: decision });
 			}
