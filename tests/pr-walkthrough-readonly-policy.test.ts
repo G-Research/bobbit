@@ -35,6 +35,7 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git diff origin/master...HEAD");
 		allowed("git show --stat HEAD");
 		allowed("git log --oneline -5");
+		allowed("git log -1 --format=%H");
 		allowed("git rev-parse HEAD");
 		allowed("git status --short");
 		allowed("git status --porcelain=v2 --branch");
@@ -72,7 +73,11 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("pwd");
 	});
 
-	it("blocks filesystem escapes, writes, and shell metacharacter bypasses", () => {
+	it("blocks filesystem escapes, writes, env expansion, and shell metacharacter bypasses", () => {
+		blocked("git log -1 --format=$OPENAI_API_KEY", /environment-variable expansion/);
+		blocked("git log -1 --format=%SECRET%", /environment-variable expansion/);
+		blocked("gh pr view 123 --json $OPENAI_API_KEY", /environment-variable expansion/);
+		blocked("rg token %SECRET% src", /environment-variable expansion/);
 		blocked("cat /etc/passwd", /absolute paths/);
 		blocked(String.raw`cat C:\Windows\win.ini`, /absolute paths/);
 		blocked("cat C:/Windows/win.ini", /absolute paths/);
