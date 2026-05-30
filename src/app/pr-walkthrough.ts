@@ -13,7 +13,7 @@ import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/compone
 
 export type AppState = typeof appState;
 
-export type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
+export type PrWalkthroughStatus = "fixture" | "loading" | "waiting_for_yaml" | "validation_failed" | "ready" | "error";
 
 export interface WalkthroughWarning {
 	code: string;
@@ -30,6 +30,56 @@ interface WalkthroughResolveResult {
 	limits?: unknown;
 	export?: unknown;
 	exportCapability?: unknown;
+}
+
+interface WalkthroughValidationIssue {
+	path?: string;
+	message?: string;
+	[key: string]: unknown;
+}
+
+interface WalkthroughValidationSummary {
+	message?: string;
+	errors?: WalkthroughValidationIssue[];
+	issues?: WalkthroughValidationIssue[];
+	[key: string]: unknown;
+}
+
+interface WalkthroughJobError {
+	code?: string;
+	message?: string;
+	retryable?: boolean;
+	[key: string]: unknown;
+}
+
+interface WalkthroughJobTarget {
+	provider?: string;
+	prUrl?: string;
+	url?: string;
+	owner?: string;
+	repo?: string;
+	number?: string | number;
+	baseSha?: string;
+	headSha?: string;
+	canonicalKey?: string;
+	[key: string]: unknown;
+}
+
+interface WalkthroughJobRecord {
+	jobId: string;
+	parentSessionId?: string;
+	childSessionId: string;
+	changesetId: string;
+	tabId?: string;
+	status: PrWalkthroughStatus | "starting";
+	title?: string;
+	target?: WalkthroughJobTarget;
+	lastValidationError?: WalkthroughValidationSummary;
+	warnings?: WalkthroughWarning[];
+	error?: WalkthroughJobError;
+	submittedAt?: string;
+	payloadUpdatedAt?: string;
+	[key: string]: unknown;
 }
 
 interface WalkthroughApiError extends Error {
@@ -101,15 +151,6 @@ function prMetadataFromUrl(value: string): Pick<OpenPrWalkthroughInput, "prNumbe
 	}
 }
 
-function urlSlug(value: string): string {
-	try {
-		const url = new URL(value);
-		return `${url.host}${url.pathname}`.replace(/\/+$/, "") || value;
-	} catch {
-		return value;
-	}
-}
-
 function mergeSessionPrMetadata(state: AppState, input: OpenPrWalkthroughInput): OpenPrWalkthroughInput {
 	const chatPanel = (state as any)?.chatPanel as Record<string, unknown> | null | undefined;
 	const inputNumber = normalizePrNumber(input.prNumber);
@@ -146,14 +187,6 @@ function normalizeInput(state: AppState, input: OpenPrWalkthroughInput): OpenPrW
 	};
 }
 
-function changesetIdForInput(input: OpenPrWalkthroughInput, baseSha: string, headSha: string): string {
-	const url = cleanString(input.prUrl) || cleanString(input.url);
-	if (url) return `url:${urlSlug(url)}`;
-	const prNumber = normalizePrNumber(input.prNumber);
-	if (prNumber) return `pr:${prNumber}`;
-	return `${baseSha}..${headSha}`;
-}
-
 function titleForInput(input: OpenPrWalkthroughInput): string {
 	const explicit = cleanString(input.prTitle) || cleanString(input.title);
 	const prNumber = normalizePrNumber(input.prNumber);
@@ -167,10 +200,6 @@ function titleForInput(input: OpenPrWalkthroughInput): string {
 function labelForPrNumber(value: unknown): string | undefined {
 	const prNumber = normalizePrNumber(value);
 	return prNumber ? `PR: #${prNumber}` : undefined;
-}
-
-function labelForInput(input: OpenPrWalkthroughInput): string {
-	return labelForPrNumber(input.prNumber) || (input.url || input.prUrl ? "PR" : "Walkthrough");
 }
 
 export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWalkthroughChangesetRef {
@@ -266,6 +295,125 @@ async function fetchWalkthroughJson(path: string, options?: RequestInit): Promis
 	return body;
 }
 
+function isJobStatus(value: unknown): value is WalkthroughJobRecord["status"] {
+	return value === "starting" || value === "waiting_for_yaml" || value === "validation_failed" || value === "ready" || value === "error";
+}
+
+function jobRecordFromResponse(value: unknown): WalkthroughJobRecord | undefined {
+	const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+	const candidate = (record?.job && typeof record.job === "object" ? record.job : record) as Record<string, unknown> | undefined;
+	if (!candidate) return undefined;
+	const jobId = typeof candidate.jobId === "string" ? candidate.jobId : "";
+	const childSessionId = typeof candidate.childSessionId === "string" ? candidate.childSessionId : "";
+	const changesetId = typeof candidate.changesetId === "string" ? candidate.changesetId : "";
+	const status = isJobStatus(candidate.status) ? candidate.status : undefined;
+	if (!jobId || !childSessionId || !changesetId || !status) return undefined;
+	return candidate as unknown as WalkthroughJobRecord;
+}
+
+function validationMessage(summary: WalkthroughValidationSummary | undefined): string | undefined {
+	if (!summary || typeof summary !== "object") return undefined;
+	if (typeof summary.message === "string" && summary.message.trim()) return summary.message.trim();
+	const issues = Array.isArray(summary.errors) ? summary.errors : Array.isArray(summary.issues) ? summary.issues : [];
+	const first = issues.find((issue) => issue && typeof issue.message === "string" && issue.message.trim());
+	return first?.message?.trim();
+}
+
+function targetChangesetFromJob(job: WalkthroughJobRecord): PrWalkthroughChangesetRef {
+	const target = job.target || {};
+	const prNumber = normalizePrNumber(target.number);
+	const prUrl = cleanString(target.prUrl) || cleanString(target.url);
+	const prTitle = cleanString((job as Record<string, unknown>).prTitle) || cleanString(target.title);
+	return {
+		baseSha: cleanString(target.baseSha) || "pending-base",
+		headSha: cleanString(target.headSha) || "pending-head",
+		provider: cleanString(target.provider) || (prUrl ? "github" : undefined),
+		externalUrl: prUrl,
+		prUrl,
+		prNumber,
+		prTitle,
+		title: cleanString(job.title) || titleForInput({ prNumber, prUrl, prTitle }),
+	};
+}
+
+function labelForJob(job: WalkthroughJobRecord): string {
+	return labelForPrNumber(job.target?.number) || (job.target?.prUrl ? "PR" : "Walkthrough");
+}
+
+export function upsertPrWalkthroughJobPanel(
+	state: AppState,
+	job: WalkthroughJobRecord,
+	options: { select?: boolean; fullscreenOnReady?: boolean } = {},
+): PanelWorkspaceTab {
+	const sessionId = job.childSessionId;
+	const changeset = targetChangesetFromJob(job);
+	const changesetId = job.changesetId;
+	const tabId = job.tabId || walkthroughPanelTabId(changesetId);
+	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
+	const target = job.target || {};
+	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);
+	const tab: PanelWorkspaceTab = {
+		id: tabId,
+		kind: "walkthrough",
+		title: cleanString(job.title) || changeset.title || "PR Walkthrough",
+		label: labelForJob(job),
+		legacyTab: "walkthrough",
+		source: {
+			type: "walkthrough",
+			sessionId,
+			changesetId,
+			title: cleanString(job.title) || changeset.title,
+			baseSha: changeset.baseSha,
+			headSha: changeset.headSha,
+			provider: changeset.provider,
+			externalUrl: changeset.externalUrl,
+			prUrl: changeset.prUrl,
+			prNumber: changeset.prNumber,
+			prTitle: changeset.prTitle,
+			jobId: job.jobId,
+			targetKey: cleanString(target.canonicalKey),
+		} as PanelWorkspaceTab["source"],
+		state: {
+			status,
+			jobId: job.jobId,
+			changesetId,
+			changeset,
+			warnings: job.warnings || [],
+			lastValidationError: job.lastValidationError,
+			validationError: job.lastValidationError,
+			error: errorMessage,
+			errorCode: job.error?.code,
+			retryable: job.error?.retryable,
+			prUrl: changeset.prUrl,
+			prNumber: changeset.prNumber,
+			prTitle: changeset.prTitle,
+			baseSha: changeset.baseSha,
+			headSha: changeset.headSha,
+			fullscreenOnReady: status === "ready" || undefined,
+		},
+	};
+
+	const existing = panelTabsForSession(state, sessionId);
+	const next = existing.some((candidate) => candidate.id === tabId)
+		? existing.map((candidate) => candidate.id === tabId
+			? {
+				...candidate,
+				...tab,
+				source: { ...(candidate.source as Record<string, unknown>), ...(tab.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
+				state: { ...(candidate.state || {}), ...(tab.state || {}) },
+			}
+			: candidate)
+		: [...existing, tab];
+	setPanelTabsForSession(state, sessionId, next);
+	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
+	if (status === "ready") {
+		setActivePanelTabIdForSession(state, sessionId, tabId);
+		if (options.fullscreenOnReady || (state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+		restorePrWalkthroughPanel(state, sessionId, tabId);
+	}
+	return tab;
+}
+
 function patchWalkthroughTab(
 	state: AppState,
 	sessionId: string,
@@ -320,6 +468,10 @@ function patchWalkthroughTab(
 	if (replaced) {
 		setPanelTabsForSession(state, sessionId, deduped);
 		if (nextTabId !== tabId) setActivePanelTabIdForSession(state, sessionId, nextTabId);
+		if (patch.status === "ready") {
+			setActivePanelTabIdForSession(state, sessionId, nextTabId);
+			if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+		}
 	}
 	return updatedTabId;
 }
@@ -365,6 +517,8 @@ export function restorePrWalkthroughPanel(state: AppState, sessionId: string, ta
 	if (!tab || tab.kind !== "walkthrough") return;
 	const tabState = (tab.state || {}) as Record<string, unknown>;
 	if (Array.isArray(tabState.cards) || tabState.status === "loading") return;
+	if (tabState.status === "waiting_for_yaml" || tabState.status === "validation_failed") return;
+	if (tabState.status === "error" && tabState.jobId) return;
 	const changesetId = typeof tabState.changesetId === "string" && tabState.changesetId
 		? tabState.changesetId
 		: walkthroughChangesetIdFromPanelTabId(tab.id);
@@ -400,74 +554,72 @@ export function restorePrWalkthroughPanel(state: AppState, sessionId: string, ta
 		});
 }
 
-export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): PanelWorkspaceTab {
+function launchRequestForInput(sessionId: string, input: OpenPrWalkthroughInput): Record<string, unknown> {
+	return resolveRequestForInput(sessionId, input);
+}
+
+async function focusWalkthroughChildSession(childSessionId: string): Promise<void> {
+	try {
+		const [{ refreshSessions }, { connectToSession }] = await Promise.all([
+			import("./api.js"),
+			import("./session-manager.js"),
+		]);
+		await refreshSessions();
+		await connectToSession(childSessionId, true, { readOnly: true });
+	} catch {
+		// The launch already created the child tab state. Session polling will make
+		// the child visible if an immediate focus attempt races session refresh.
+	}
+}
+
+export async function launchPrWalkthroughAgent(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): Promise<PanelWorkspaceTab | undefined> {
 	const input = normalizeInput(state, rawInput);
-	const changeset = changesetRefForWalkthrough(input);
-	const changesetId = changesetIdForInput(input, changeset.baseSha, changeset.headSha);
-	const tabId = walkthroughPanelTabId(changesetId);
-	const prNumber = normalizePrNumber(input.prNumber);
-	const prUrl = cleanString(input.prUrl) || cleanString(input.url) || changeset.externalUrl;
-	const prTitle = cleanString(input.prTitle) || cleanString(input.title);
-	const title = changeset.title || titleForInput(input);
-	const shouldResolve = shouldResolveInput(input);
-	const source = {
-		type: "walkthrough" as const,
-		sessionId,
-		changesetId,
-		title,
-		baseSha: changeset.baseSha,
-		headSha: changeset.headSha,
-		provider: changeset.provider,
-		externalUrl: changeset.externalUrl,
-		prUrl,
-		prNumber,
-		prTitle,
-		prBody: changeset.prBody,
-		filesChanged: changeset.filesChanged,
-		additions: changeset.additions,
-		deletions: changeset.deletions,
-	};
-	const tab: PanelWorkspaceTab = {
-		id: tabId,
-		kind: "walkthrough",
-		title,
-		label: labelForInput(input),
-		legacyTab: "walkthrough",
-		source,
-		state: {
-			status: shouldResolve ? "loading" : "fixture",
-			changesetId,
-			changeset,
-			warnings: [],
-			prUrl,
-			prNumber,
-			prTitle,
-			prBody: changeset.prBody,
-			baseSha: changeset.baseSha,
-			headSha: changeset.headSha,
-			filesChanged: changeset.filesChanged,
-			additions: changeset.additions,
-			deletions: changeset.deletions,
-		},
-	};
+	try {
+		const data = await fetchWalkthroughJson("/api/pr-walkthrough/launch", {
+			method: "POST",
+			body: JSON.stringify(launchRequestForInput(sessionId, input)),
+		});
+		const job = jobRecordFromResponse(data);
+		if (!job) throw new Error("PR walkthrough launch returned an invalid response");
+		const tab = upsertPrWalkthroughJobPanel(state, job, { select: true, fullscreenOnReady: job.status === "ready" });
+		renderApp();
+		void focusWalkthroughChildSession(job.childSessionId);
+		return tab;
+	} catch (error) {
+		const err = error as WalkthroughApiError;
+		console.error("[pr-walkthrough] launch failed", err);
+		try {
+			const { showHeaderToast } = await import("./render.js");
+			showHeaderToast(err.message || "Failed to launch PR walkthrough agent");
+		} catch { /* best-effort toast */ }
+		renderApp();
+		return undefined;
+	}
+}
 
-	const existing = panelTabsForSession(state, sessionId);
-	const next = existing.some((candidate) => candidate.id === tabId)
-		? existing.map((candidate) => candidate.id === tabId
-			? {
-				...candidate,
-				...tab,
-				source: { ...(candidate.source as Record<string, unknown>), ...source } as PanelWorkspaceTab["source"],
-				state: { ...(candidate.state || {}), ...(tab.state || {}) },
-			}
-			: candidate)
-		: [...existing, tab];
+export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): Promise<PanelWorkspaceTab | undefined> {
+	return launchPrWalkthroughAgent(state, sessionId, rawInput);
+}
 
-	setPanelTabsForSession(state, sessionId, next);
-	setActivePanelTabIdForSession(state, sessionId, tabId);
-	(state as any).previewPanelTab = "walkthrough";
-	(state as any).previewPanelActiveTab = "walkthrough";
-	if ((state as any).assistantType) (state as any).assistantTab = "preview";
-	if (shouldResolve) void resolvePrWalkthrough(state, sessionId, tabId, input);
-	return tab;
+const jobRestoreInFlight = new Set<string>();
+const jobRestoreLastAttempt = new Map<string, number>();
+
+export function restorePrWalkthroughJobForSession(state: AppState, childSessionId: string): void {
+	if (!childSessionId) return;
+	const now = Date.now();
+	const last = jobRestoreLastAttempt.get(childSessionId) || 0;
+	if (jobRestoreInFlight.has(childSessionId) || now - last < 2_000) return;
+	jobRestoreInFlight.add(childSessionId);
+	jobRestoreLastAttempt.set(childSessionId, now);
+	void fetchWalkthroughJson(`/api/pr-walkthrough/session/${encodeURIComponent(childSessionId)}`)
+		.then((data) => {
+			const job = jobRecordFromResponse(data);
+			if (!job) return;
+			upsertPrWalkthroughJobPanel(state, job, { select: (state as any).selectedSessionId === childSessionId, fullscreenOnReady: job.status === "ready" });
+		})
+		.catch(() => { /* older server or no job for this session */ })
+		.finally(() => {
+			jobRestoreInFlight.delete(childSessionId);
+			renderApp();
+		});
 }
