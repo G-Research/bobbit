@@ -462,27 +462,27 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 
 		/* Prototype-density overrides for the production walkthrough surface. */
-		.phase { border-radius: 8px; overflow: hidden; margin: 3px 0; }
-		.phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
-		.phase.complete .phase-index { background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.phase-button { display: flex; align-items: center; gap: 8px; border: 0; border-radius: 8px; }
-		.phase-index { width: 20px; height: 20px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); font-size: 10px; font-weight: 800; }
-		.phase.active .phase-index { background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
-		.phase-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-		.phase-count { font-size: 11px; color: var(--muted-foreground, GrayText); }
-		.phase-cards { display: grid; gap: 1px; padding: 0 8px 7px 30px; }
+		.phase { display: grid; gap: 2px; margin: 8px 0 3px; }
+		.phase-button { display: flex; align-items: center; gap: 6px; padding: 5px 8px 3px; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+		.phase-button::after { content: ""; height: 1px; flex: 1 1 auto; min-width: 10px; background: var(--border, ButtonBorder); opacity: 0.7; }
+		.phase-button.active { color: var(--muted-foreground, GrayText); background: transparent; }
+		.phase-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
+		.phase-index { flex: 0 0 auto; color: inherit; font-size: 9px; font-weight: 900; opacity: 0.75; }
+		.phase-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.phase-count { order: 3; flex: 0 0 auto; color: inherit; font-size: 9px; letter-spacing: 0.04em; opacity: 0.7; }
+		.phase-cards { display: grid; gap: 1px; padding: 0 8px 5px 14px; }
 		.card-button { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 5px; font-size: 11.5px; }
 		.card-button::before { content: none; }
 		.card-dot-rail { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; background: var(--muted-foreground, GrayText); opacity: 0.45; }
 		.card-button.complete .card-dot-rail { background: var(--positive, var(--primary, Highlight)); opacity: 1; }
 		.card-button.disliked .card-dot-rail { background: var(--negative, red); opacity: 1; }
 		.card-button.active .card-dot-rail { background: var(--primary, Highlight); opacity: 1; box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 22%, transparent); }
-		.rail.collapsed { gap: 8px; padding: 6px 3px; overflow-x: hidden; }
-		.collapsed-phase { width: 100%; padding: 2px 0 5px; border-radius: 8px; }
-		.collapsed-phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
-		.phase-pip { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; color: var(--foreground, CanvasText); font-size: 11px; font-weight: 800; }
-		.phase-pip.active { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
-		.phase-pip.complete { border-color: var(--positive, var(--primary, Highlight)); background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
+		.rail.collapsed { gap: 6px; padding: 6px 3px; overflow-x: hidden; }
+		.collapsed-phase { width: 100%; display: grid; justify-items: center; gap: 5px; padding: 0 0 5px; border-radius: 6px; }
+		.collapsed-phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
+		.collapsed-phase.active { background: transparent; }
+		.rail.collapsed .phase-pip { width: 24px; height: 13px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
+		.rail.collapsed .phase-pip.active, .rail.collapsed .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
 		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
 		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); }
 		.rail.collapsed .card-dot.liked .dot-icon { transform: translate(-50%, -47%); }

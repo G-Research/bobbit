@@ -153,11 +153,12 @@ async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	await expect(pips.first(), "collapsed rail should show visible phase pips").toBeVisible();
 	await expect(pips.first(), "phase pips should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
 	const unreviewedPip = pips.nth(1);
-	await expect(unreviewedPip, "unreviewed collapsed rail phases should be visible unfilled circles").toBeVisible();
+	await expect(unreviewedPip, "collapsed rail phases should render as compact muted headers").toBeVisible();
 	await expect.poll(() => unreviewedPip.evaluate(el => {
 		const style = getComputedStyle(el as HTMLElement);
-		return { borderWidth: style.borderTopWidth, background: style.backgroundColor };
-	}), { message: "unreviewed phase pips should have a visible outline and transparent fill" }).toMatchObject({ borderWidth: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
+		const divider = getComputedStyle(el.parentElement as HTMLElement, "::before");
+		return { borderWidth: style.borderTopWidth, background: style.backgroundColor, dividerHeight: divider.height };
+	}), { message: "phase headers should use dividers instead of status-filled pips" }).toMatchObject({ borderWidth: "0px", background: /rgba\(0, 0, 0, 0\)|transparent/i, dividerHeight: /[1-9]/ });
 
 	const dot = collapsedRail.getByTestId("pr-walkthrough-card-dot").nth(1);
 	await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
@@ -288,8 +289,14 @@ test.describe("PR walkthrough panel", () => {
 		await expect(labelledRail, "wide panel should show labelled phase/card navigation").toBeVisible();
 		await expect(labelledRail, "sidebar should not duplicate the header PR headline").not.toContainText(/PR\s*#123/i);
 		await expect(panel.getByTestId("pr-walkthrough-collapsed-rail"), "wide panel should not use the thin collapsed rail").toBeHidden();
-		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" })).toBeVisible();
+		const orientationPhase = panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" });
+		await expect(orientationPhase).toBeVisible();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" })).toBeVisible();
+		await expect.poll(() => orientationPhase.evaluate(el => {
+			const style = getComputedStyle(el as HTMLElement);
+			const rule = getComputedStyle(el as HTMLElement, "::after");
+			return { textTransform: style.textTransform, ruleHeight: rule.height, background: style.backgroundColor };
+		}), { message: "phase navigation should use dense muted section headers with divider rules, not selection fills" }).toMatchObject({ textTransform: "uppercase", ruleHeight: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
 		await expect.poll(async () => {
 			const [contentBox, innerBox] = await Promise.all([panel.locator(".content").boundingBox(), panel.locator(".inner").boundingBox()]);
 			if (!contentBox || !innerBox) return false;
