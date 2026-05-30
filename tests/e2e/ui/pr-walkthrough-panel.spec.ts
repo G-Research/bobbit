@@ -142,6 +142,17 @@ async function expectPrototypeCardHierarchy(page: Page) {
 	await expect(card.getByTestId("pr-walkthrough-card-title"), "card should show the logical change title prominently").toBeVisible();
 	await expect(card.getByTestId("pr-walkthrough-card-summary"), "card should include the senior-reviewer narrative summary").toBeVisible();
 	await expect(card, "card should not spend space on redundant ordinal metadata").not.toContainText(/Card \d+ of \d+ · logical change set/i);
+	const chooser = card.getByTestId("pr-walkthrough-diff-mode-chooser");
+	if (await chooser.count()) {
+		await expect(chooser, "diff mode chooser should sit in the card header").toBeVisible();
+		await expect(chooser.getByTestId("diff-mode-split"), "split mode should be icon-only with tooltip").toHaveAttribute("title", "Split diff");
+		await expect(chooser.getByTestId("diff-mode-inline"), "inline mode should be icon-only with tooltip").toHaveAttribute("title", "Inline diff");
+		await expect(chooser, "diff mode chooser should not render text labels").not.toContainText(/Split|Inline|Diff display/i);
+		await expect.poll(async () => {
+			const [phaseBox, chooserBox] = await Promise.all([card.getByTestId("pr-walkthrough-card-phase-tag").boundingBox(), chooser.boundingBox()]);
+			return phaseBox && chooserBox ? chooserBox.x > phaseBox.x + phaseBox.width : false;
+		}, { message: "diff mode chooser should sit to the far right of the phase pill row" }).toBe(true);
+	}
 	await expect(card.getByTestId("pr-walkthrough-card-comments"), "card should include card-level concern/comment affordances").toBeVisible();
 	await expect(card.getByText(/write your own/i), "card-level comments should always allow a custom concern").toBeVisible();
 }
@@ -325,7 +336,7 @@ test.describe("PR walkthrough panel", () => {
 			message: "clicking a collapsed card dot should change the active card",
 		}).not.toBe(before);
 
-		await panel.getByRole("button", { name: /^Split$/ }).click();
+		await panel.getByTestId("diff-mode-split").click();
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
 	});

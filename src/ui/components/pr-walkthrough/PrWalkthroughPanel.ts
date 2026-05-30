@@ -510,16 +510,15 @@ export class PrWalkthroughPanel extends LitElement {
 		.inner { width: 100%; max-width: none; margin: 0; }
 		.card { display: block; max-width: none; }
 		.card-head { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
-		.phase-label { display: inline-block; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+		.card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+		.phase-label { display: inline-block; min-width: 0; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
-		.modebar { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; flex-wrap: wrap; }
-		.modebar .label { font-size: 11px; color: var(--muted-foreground, GrayText); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 800; }
+		.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
 		.modebar .mode-toggle { overflow: hidden; border-radius: 7px; }
-		.modebar .mode-toggle button { border-radius: 0; font-size: 12px; }
+		.modebar .mode-toggle button { width: 28px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 0; color: var(--muted-foreground, GrayText); }
 		.modebar .mode-toggle button.active { background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
-		.narrow-note { display: none; font-size: 12px; color: var(--muted-foreground, GrayText); }
-		.body.narrow .narrow-note { display: inline; }
+		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
 		.context-toggle { width: 100%; min-width: max-content; padding: 5px 12px; border: 0; border-radius: 0; background: color-mix(in oklch, var(--primary, Highlight) 12%, transparent); color: var(--primary, Highlight); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
@@ -970,22 +969,15 @@ export class PrWalkthroughPanel extends LitElement {
 			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<div class="inner">
 					<section class="card-head">
-						<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
+						<div class="card-top">
+							<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
+							${card.diffBlocks.length ? this.renderDiffModeChooser() : nothing}
+						</div>
 						<h2 data-testid="pr-walkthrough-card-title">${card.title}</h2>
 						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
 					</section>
-					${card.diffBlocks.length ? html`
-						<div class="modebar">
-							<span class="label">Diff display</span>
-							<span class="mode-toggle" aria-label="Diff mode">
-								<button id="diff-mode-split" data-testid="diff-mode-split" class=${this.effectiveDiffMode === "split" ? "active" : ""} type="button" aria-pressed=${this.effectiveDiffMode === "split"} @click=${() => this.setDiffMode("split")}>Split</button>
-								<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" aria-pressed=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}>Inline</button>
-							</span>
-							<span class="narrow-note">Inline defaults at half-width; split remains available.</span>
-						</div>
-					` : nothing}
 					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
 					${this.renderCardComments(card)}
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
@@ -997,6 +989,17 @@ export class PrWalkthroughPanel extends LitElement {
 					</div>
 				</div>
 			</article>
+		`;
+	}
+
+	private renderDiffModeChooser(): TemplateResult {
+		return html`
+			<div class="modebar" data-testid="pr-walkthrough-diff-mode-chooser">
+				<span class="mode-toggle" role="radiogroup" aria-label="Diff display mode">
+					<button id="diff-mode-split" data-testid="diff-mode-split" class=${this.effectiveDiffMode === "split" ? "active" : ""} type="button" role="radio" aria-label="Split diff" title="Split diff" aria-checked=${this.effectiveDiffMode === "split"} @click=${() => this.setDiffMode("split")}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2" y="3" width="5" height="10" rx="1"></rect><rect x="9" y="3" width="5" height="10" rx="1"></rect></svg></button>
+					<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path></svg></button>
+				</span>
+			</div>
 		`;
 	}
 
