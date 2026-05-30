@@ -27,6 +27,7 @@ const BLOCKED_EXECUTABLES = new Set([
 const GIT_ALLOWED = new Set(["diff", "show", "log", "rev-parse", "status"]);
 const SEARCH_READ_ALLOWED = new Set(["rg", "grep", "ls", "cat", "head", "tail", "pwd"]);
 const GH_PR_READ_ALLOWED = new Set(["view", "diff"]);
+const GENERIC_WRITE_OR_ESCAPE_FLAGS = new Set(["--output", "--output-file", "--pathspec-from-file", "--git-dir", "--work-tree", "-C"]);
 
 function basename(token: string): string {
 	const normalized = token.replace(/\\/g, "/");
@@ -89,7 +90,32 @@ function block(reason: string, argv?: string[]): WalkthroughReadonlyBlock {
 	return { allowed: false, reason, argv };
 }
 
+function unsafeTokenReason(token: string): string | undefined {
+	if (!token) return undefined;
+	if (token.includes("\0")) return "NUL bytes are not allowed in command arguments";
+	if (token.startsWith("~")) return "home-directory paths are not allowed; use repo-relative paths";
+	if (token.startsWith("$") || token.startsWith("%")) return "environment-variable paths are not allowed; use repo-relative paths";
+	if (/^(?:[A-Za-z]:|[\\/])/.test(token)) return "absolute paths are not allowed; use repo-relative paths";
+	if (token === ".." || /^[.][.][\\/]/.test(token) || /[\\/][.][.](?:[\\/]|$)/.test(token)) return "parent-directory path traversal is not allowed";
+	if (token.startsWith(":/")) return "git pathspec root escapes are not allowed";
+	if (token.startsWith(":(")) return "git pathspec magic is not allowed";
+	return undefined;
+}
+
+function commonArgumentPolicy(argv: string[]): WalkthroughReadonlyDecision | undefined {
+	for (const token of argv.slice(1)) {
+		if (GENERIC_WRITE_OR_ESCAPE_FLAGS.has(token) || token.startsWith("--output=") || token.startsWith("--output-file=") || token.startsWith("--pathspec-from-file=") || token.startsWith("--git-dir=") || token.startsWith("--work-tree=")) {
+			return block(`${token.split("=")[0]} is not allowed in read-only PR walkthrough sessions`, argv);
+		}
+		const reason = unsafeTokenReason(token);
+		if (reason) return block(reason, argv);
+	}
+	return undefined;
+}
+
 function allowGh(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv);
+	if (common) return common;
 	const [, first, second] = argv;
 	if (first === "pr" && second && GH_PR_READ_ALLOWED.has(second)) return { allowed: true, argv };
 	if (first === "pr") return block(`gh pr ${second ?? ""}`.trim() + " is not a read-only PR command", argv);
@@ -130,8 +156,13 @@ function allowGh(argv: string[]): WalkthroughReadonlyDecision {
 }
 
 function allowGit(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv);
+	if (common) return common;
 	const sub = argv[1];
 	if (!sub || !GIT_ALLOWED.has(sub)) return block(`git ${sub ?? ""}`.trim() + " is not allowed in PR walkthrough sessions", argv);
+	if (argv.slice(2).some(arg => arg === "--no-index" || arg === "--ext-diff" || arg === "--external-diff" || arg === "--textconv" || arg === "--output" || arg.startsWith("--output="))) {
+		return block("git diff/show/log output, external diff, and arbitrary filesystem comparison flags are not allowed", argv);
+	}
 	if (sub === "status") {
 		const allowedStatusArgs = new Set(["--short", "-s", "--porcelain", "--porcelain=v1", "--porcelain=v2", "--branch", "-b", "--ignored", "--untracked-files", "-uno", "--ahead-behind"]);
 		for (const arg of argv.slice(2)) {
@@ -144,6 +175,8 @@ function allowGit(argv: string[]): WalkthroughReadonlyDecision {
 }
 
 function allowFind(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv);
+	if (common) return common;
 	const blocked = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"]);
 	for (const token of argv.slice(1)) {
 		if (blocked.has(token)) return block(`find action ${token} can mutate or write files`, argv);
@@ -152,6 +185,8 @@ function allowFind(argv: string[]): WalkthroughReadonlyDecision {
 }
 
 function allowSed(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv);
+	if (common) return common;
 	let hasNoPrint = false;
 	let script: string | undefined;
 	for (const token of argv.slice(1)) {
@@ -186,7 +221,11 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	if (cmd === "git") return allowGit(argv);
 	if (cmd === "find") return allowFind(argv);
 	if (cmd === "sed") return allowSed(argv);
-	if (SEARCH_READ_ALLOWED.has(cmd)) return { allowed: true, argv };
+	if (SEARCH_READ_ALLOWED.has(cmd)) {
+		const common = commonArgumentPolicy(argv);
+		if (common) return common;
+		return { allowed: true, argv };
+	}
 
 	return block(`${cmd} is not on the PR walkthrough read-only command allowlist`, argv);
 }

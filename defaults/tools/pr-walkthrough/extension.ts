@@ -2,10 +2,6 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
-import { tmpdir } from "node:os";
-import { randomBytes } from "node:crypto";
-import { createWriteStream } from "node:fs";
 import { getGatewayToken, getGatewayUrl } from "../_shared/gateway.ts";
 
 const MAX_BYTES = 50 * 1024;
@@ -111,10 +107,8 @@ const extension: ExtensionFactory = (pi) => {
 
 				const chunks: string[] = [];
 				let outputBytes = 0;
-				let totalBytes = 0;
-				let tempFilePath: string | undefined;
-				let tempFileStream: fs.WriteStream | undefined;
 				let timedOut = false;
+				let truncatedByStreaming = false;
 
 				const timer = setTimeout(() => {
 					timedOut = true;
@@ -134,22 +128,18 @@ const extension: ExtensionFactory = (pi) => {
 				}
 
 				const handleData = (data: Buffer) => {
-					totalBytes += data.length;
 					const text = stripAnsiCodes(data.toString("utf-8")).replace(/\r/g, "");
-					if (totalBytes > MAX_BYTES && !tempFilePath) {
-						const id = randomBytes(8).toString("hex");
-						tempFilePath = path.join(tmpdir(), `bobbit-readonly-bash-${id}.log`);
-						tempFileStream = createWriteStream(tempFilePath);
-						for (const chunk of chunks) tempFileStream.write(chunk);
-					}
-					if (tempFileStream) tempFileStream.write(text);
 					chunks.push(text);
 					outputBytes += text.length;
 					while (outputBytes > MAX_BYTES * 2 && chunks.length > 1) {
 						const removed = chunks.shift()!;
 						outputBytes -= removed.length;
+						truncatedByStreaming = true;
 					}
-					if (onUpdate) onUpdate({ content: [{ type: "text" as const, text }], details: {} });
+					if (onUpdate) {
+						const updateText = text.length > 8192 ? `${text.slice(0, 8192)}\n[update truncated]` : text;
+						onUpdate({ content: [{ type: "text" as const, text: updateText }], details: { truncated: text.length > 8192 } });
+					}
 				};
 
 				child.stdout?.on("data", handleData);
@@ -159,22 +149,20 @@ const extension: ExtensionFactory = (pi) => {
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
 					child.stdout?.destroy();
 					child.stderr?.destroy();
-					if (tempFileStream) tempFileStream.end();
 
 					let output = chunks.join("");
 					const truncated = truncateTail(output);
 					output = truncated.content;
 					if (timedOut) output += `\n\nCommand timed out after ${timeoutSec}s`;
 					output += `\n\nExit code: ${code ?? "unknown"}`;
-					if (truncated.truncated) output = `[Output truncated to last ${MAX_LINES} lines / ${MAX_BYTES} bytes]\n` + output;
-					if (tempFilePath) output += `\nFull output saved to: ${tempFilePath}`;
+					const wasTruncated = truncated.truncated || truncatedByStreaming;
+					if (wasTruncated) output = `[Output truncated to last ${MAX_LINES} lines / ${MAX_BYTES} bytes]\n` + output;
 
-					resolve(toolText(output, false, { exitCode: code, truncated: truncated.truncated, tempFilePath, policy: decision }));
+					resolve(toolText(output, false, { exitCode: code, truncated: wasTruncated, policy: decision }));
 				});
 				child.on("error", (err) => {
 					clearTimeout(timer);
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
-					if (tempFileStream) tempFileStream.end();
 					resolve(toolText(`readonly_bash failed: ${err.message}`, true, { policy: decision }));
 				});
 			});

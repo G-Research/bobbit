@@ -9,7 +9,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
-import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest } from "./walkthrough-agent-manager.js";
+import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -86,6 +86,7 @@ type StoredWalkthrough = {
 
 export type PrWalkthroughRouteDeps = {
 	defaultCwd: string;
+	stateDir?: string;
 	readBody: JsonReader;
 	resolveSessionCwd?: (sessionId: string) => string | undefined | Promise<string | undefined>;
 	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
@@ -93,6 +94,8 @@ export type PrWalkthroughRouteDeps = {
 	getAvailableModels?: (preferencesStore: { get(key: string): unknown }) => Promise<ApiModel[]>;
 	completeModelText?: typeof defaultCompleteModelText;
 	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
+	sessionManager?: WalkthroughSessionManagerLike;
+	broadcast?: (event: Record<string, unknown>) => void;
 	walkthroughAgentManager?: WalkthroughAgentManager;
 };
 
@@ -112,8 +115,11 @@ function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAg
 	if (!manager) {
 		manager = new WalkthroughAgentManager({
 			defaultCwd: deps.defaultCwd,
+			stateDir: deps.stateDir,
 			resolveSessionCwd: deps.resolveSessionCwd,
 			resolveSessionModel: deps.resolveSessionModel,
+			sessionManager: deps.sessionManager,
+			broadcast: deps.broadcast,
 		});
 		agentManagersByDeps.set(deps, manager);
 	}

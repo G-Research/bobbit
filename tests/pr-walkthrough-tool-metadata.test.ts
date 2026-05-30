@@ -47,11 +47,13 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /JSON\.stringify\(\{ sessionId, jobId, yaml \}\)/);
 	});
 
-	it("readonly_bash extension calls the central policy and returns blocking errors", () => {
+	it("readonly_bash extension calls the central policy and returns bounded inline output", () => {
 		const source = readToolText("extension.ts");
 		assert.match(source, /walkthrough-readonly-policy/);
 		assert.match(source, /evaluateWalkthroughReadonlyCommand/);
 		assert.match(source, /Command blocked by PR walkthrough read-only policy/);
 		assert.match(source, /Use read-only PR\/diff inspection instead/);
+		assert.match(source, /truncateTail/);
+		assert.doesNotMatch(source, /createWriteStream|tmpdir|tempFilePath|Full output saved to/);
 	});
 });

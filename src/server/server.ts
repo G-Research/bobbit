@@ -1997,6 +1997,8 @@ async function handleApiRoute(
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
 		defaultCwd: config.defaultCwd,
 		readBody,
+		sessionManager,
+		broadcast: broadcastToAll,
 		resolveSessionCwd: (sessionId: string) => {
 			const live = sessionManager.getSession(sessionId);
 			const persisted = sessionManager.getPersistedSession(sessionId);
