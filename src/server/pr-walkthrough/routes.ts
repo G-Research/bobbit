@@ -475,13 +475,13 @@ function mapComment(comment: any, cards: WalkthroughCard[]): Record<string, unkn
 }
 
 async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any): Promise<Record<string, unknown>> {
+	if (payload.export?.provider !== "github" || payload.export.available !== true) {
+		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
+	}
 	const module = await optionalPrModule("export-mapper");
 	const submitGithubReview = module?.submitGithubReview;
 	if (typeof submitGithubReview === "function") {
 		return submitGithubReview({ changesetId, draft: body.draft, event: body.event, cards: payload.cards, changeset: payload.changeset }, { confirm: true });
-	}
-	if (payload.export?.provider !== "github" || payload.export.available !== true) {
-		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }

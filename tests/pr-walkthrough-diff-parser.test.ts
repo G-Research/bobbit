@@ -121,7 +121,7 @@ describe("resolveLocalChangeset", () => {
 			const headSha = git(cwd, "rev-parse", "HEAD");
 
 			const result = await resolveLocalChangeset({ cwd, baseSha, headSha, limits: { maxLinesPerFile: 100, maxFiles: 10 } });
-			assert.equal(result.changesetId, `${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`);
+			assert.equal(result.changesetId, `${baseSha.slice(0, 7)}..${headSha.slice(0, 7)}`);
 			assert.equal(result.changeset.provider, "local");
 			assert.equal(result.changeset.filesChanged, 2);
 			assert.ok(result.changeset.additions && result.changeset.additions >= 2);

@@ -199,17 +199,7 @@ function buildFallbackCards(
 ): PrWalkthroughCard[] {
 	const weighted = flattenWeightedBlocks(files);
 	const cards: PrWalkthroughCard[] = [buildOrientationCard(changeset, files, warnings)];
-	if (weighted.length === 0) {
-		cards.push({
-			id: "audit-empty-diff",
-			phaseId: "audit",
-			title: "No diff blocks to audit",
-			summary: "The resolved changeset did not include reviewable hunks. Confirm the base/head refs and any truncation warnings before submitting a review.",
-			diffBlocks: [],
-			checklist: ["Verify the changeset refs", "Confirm no files were omitted unexpectedly"],
-		});
-		return cards;
-	}
+	if (weighted.length === 0) return cards;
 
 	const special = weighted.filter(block => block.category !== "normal");
 	const normal = weighted.filter(block => block.category === "normal");
@@ -336,7 +326,7 @@ function groupByTopLevel(blocks: WeightedBlock[]): BlockGroup[] {
 function flattenWeightedBlocks(files: WalkthroughParsedFile[]): WeightedBlock[] {
 	const weighted: WeightedBlock[] = [];
 	for (const file of files) {
-		for (const block of file.diffBlocks ?? []) {
+		for (const block of blocksForFile(file)) {
 			weighted.push({
 				block,
 				file,
@@ -350,7 +340,13 @@ function flattenWeightedBlocks(files: WalkthroughParsedFile[]): WeightedBlock[] 
 }
 
 function flattenBlocks(files: WalkthroughParsedFile[]): PrWalkthroughDiffBlock[] {
-	return files.flatMap(file => file.diffBlocks ?? []);
+	return files.flatMap(file => blocksForFile(file));
+}
+
+function blocksForFile(file: WalkthroughParsedFile): PrWalkthroughDiffBlock[] {
+	if (Array.isArray(file.diffBlocks)) return file.diffBlocks;
+	const maybeBlock = file as WalkthroughParsedFile & Partial<PrWalkthroughDiffBlock>;
+	return typeof maybeBlock.id === "string" && Array.isArray(maybeBlock.hunks) ? [maybeBlock as PrWalkthroughDiffBlock] : [];
 }
 
 function blockWeight(block: PrWalkthroughDiffBlock): number {

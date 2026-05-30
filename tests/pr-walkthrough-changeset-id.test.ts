@@ -16,11 +16,11 @@ const HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98";
 
 describe("PR walkthrough stable ids", () => {
 	it("uses readable short SHA ids for local changesets", () => {
-		assert.equal(changesetIdForLocal(BASE_SHA, HEAD_SHA), "01234567..fedcba98");
+		assert.equal(changesetIdForLocal(BASE_SHA, HEAD_SHA), "0123456..fedcba9");
 	});
 
 	it("uses readable GitHub ids without storage sanitisation", () => {
-		assert.equal(changesetIdForGithub("SuuBro", "bobbit", 1842, HEAD_SHA), "github:SuuBro/bobbit#1842:fedcba98");
+		assert.equal(changesetIdForGithub("SuuBro", "bobbit", 1842, HEAD_SHA), "github:SuuBro/bobbit#1842:fedcba9");
 		assert.equal(changesetIdForGithub("SuuBro", "bobbit", "1842"), "github:SuuBro/bobbit#1842:unknown");
 	});
 

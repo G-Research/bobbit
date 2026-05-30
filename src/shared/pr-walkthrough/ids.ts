@@ -1,4 +1,4 @@
-const SHORT_SHA_LENGTH = 8;
+const SHORT_SHA_LENGTH = 7;
 
 export function shortSha(value: string | undefined, length = SHORT_SHA_LENGTH): string {
 	const trimmed = (value ?? "").trim();
