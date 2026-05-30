@@ -8,6 +8,7 @@ import { getGatewayToken, getGatewayUrl } from "../_shared/gateway.ts";
 const MAX_BYTES = 50 * 1024;
 const MAX_LINES = 2000;
 const DEFAULT_TIMEOUT = 300;
+const MAX_TIMEOUT_SECONDS = 300;
 
 const TRUSTED_COMMANDS = new Set(["gh", "git", "rg", "grep", "find", "ls", "cat", "head", "tail", "pwd", "sed"]);
 
@@ -128,6 +129,13 @@ function toolText(text: string, isError = false, details?: unknown) {
 	return { content: [{ type: "text" as const, text }], isError, details };
 }
 
+export function normalizeReadonlyTimeout(timeout: unknown): { ok: true; seconds: number; clamped: boolean } | { ok: false; reason: string } {
+	if (timeout === undefined || timeout === null) return { ok: true, seconds: DEFAULT_TIMEOUT, clamped: false };
+	if (typeof timeout !== "number" || !Number.isFinite(timeout)) return { ok: false, reason: "timeout must be a finite number of seconds" };
+	if (timeout < 0) return { ok: false, reason: "timeout must be zero or greater" };
+	return { ok: true, seconds: Math.min(timeout, MAX_TIMEOUT_SECONDS), clamped: timeout > MAX_TIMEOUT_SECONDS };
+}
+
 function formatGatewayResponse(data: unknown): string {
 	if (data && typeof data === "object" && "message" in data && typeof (data as any).message === "string") {
 		return `${(data as any).message}\n\n${JSON.stringify(data, null, 2)}`;
@@ -147,10 +155,14 @@ const extension: ExtensionFactory = (pi) => {
 		promptSnippet: "Run gh/git/search/read-only shell commands. Mutating commands, tests, builds, installs, servers, GitHub review/comment actions, hidden/ignore override flags, recursive root searches, and repo-local binary spoofing are blocked.",
 		parameters: Type.Object({
 			command: Type.String(),
-			timeout: Type.Optional(Type.Number({ description: "Seconds. Default 300." })),
+			timeout: Type.Optional(Type.Number({ description: "Seconds. Default 300; finite non-negative values only; values above 300 are clamped." })),
 			description: Type.Optional(Type.String({ description: "Short label (3-6 words)." })),
 		}),
 		async execute(_toolCallId, { command, timeout }, abortSignal, onUpdate) {
+			const timeoutResult = normalizeReadonlyTimeout(timeout);
+			if (!timeoutResult.ok) return toolText(`readonly_bash blocked invalid timeout: ${timeoutResult.reason}.`, true);
+			if (abortSignal?.aborted) return toolText("readonly_bash interrupted before start.", true);
+
 			let evaluate: (command: string) => PolicyDecision;
 			try {
 				evaluate = await loadPolicy();
@@ -169,9 +181,10 @@ const extension: ExtensionFactory = (pi) => {
 			} catch (err: any) {
 				return toolText(`readonly_bash blocked executable resolution: ${err?.message || err}`, true, { policy: decision });
 			}
+			if (abortSignal?.aborted) return toolText("readonly_bash interrupted before start.", true, { policy: decision });
 
 			return new Promise((resolve) => {
-				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
+				const timeoutSec = timeoutResult.seconds;
 				const args = decision.argv.slice(1);
 				const child = spawn(executablePath, args, {
 					detached: true,
@@ -184,6 +197,7 @@ const extension: ExtensionFactory = (pi) => {
 				const chunks: string[] = [];
 				let outputBytes = 0;
 				let timedOut = false;
+				let aborted = false;
 				let truncatedByStreaming = false;
 
 				const timer = setTimeout(() => {
@@ -192,15 +206,12 @@ const extension: ExtensionFactory = (pi) => {
 				}, timeoutSec * 1000);
 
 				const abortHandler = () => {
+					aborted = true;
 					if (child.pid) killProcessTree(child.pid);
 				};
 				if (abortSignal) {
-					if (abortSignal.aborted) {
-						clearTimeout(timer);
-						resolve(toolText("", false, { truncated: false, policy: decision }));
-						return;
-					}
 					abortSignal.addEventListener("abort", abortHandler, { once: true });
+					if (abortSignal.aborted) abortHandler();
 				}
 
 				const handleData = (data: Buffer) => {
@@ -230,11 +241,12 @@ const extension: ExtensionFactory = (pi) => {
 					const truncated = truncateTail(output);
 					output = truncated.content;
 					if (timedOut) output += `\n\nCommand timed out after ${timeoutSec}s`;
+					if (aborted) output += "\n\nCommand interrupted; subprocess tree was killed";
 					output += `\n\nExit code: ${code ?? "unknown"}`;
 					const wasTruncated = truncated.truncated || truncatedByStreaming;
 					if (wasTruncated) output = `[Output truncated to last ${MAX_LINES} lines / ${MAX_BYTES} bytes]\n` + output;
 
-					resolve(toolText(output, false, { exitCode: code, truncated: wasTruncated, policy: decision, executablePath }));
+					resolve(toolText(output, false, { exitCode: code, truncated: wasTruncated, policy: decision, executablePath, timeoutClamped: timeoutResult.clamped, timeoutSec }));
 				});
 				child.on("error", (err) => {
 					clearTimeout(timer);
