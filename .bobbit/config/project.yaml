@@ -1744,6 +1744,51 @@ workflows:
               ".[0].url" | grep -q .
     createdAt: 1774734770196
     updatedAt: 1774734770196
+  human-signoff-test:
+    id: human-signoff-test
+    name: Human Sign-off Test
+    description: Minimal workflow for exercising the human sign-off gate end-to-end.
+    gates:
+      - id: design-doc
+        name: Design Doc
+        verify:
+          - name: Content present
+            type: command
+            run: sleep 60 && echo ok
+            phase: 0
+      - id: human-approval
+        name: Human Approval
+        content: true
+        depends_on:
+          - design-doc
+        verify:
+          - name: design-approval
+            type: human-signoff
+            prompt: |-
+              The design doc for {{branch}} has been signalled.
+
+              Review it and approve or reject before implementation begins.
+              Reject with feedback if anything needs to change.
+            phase: 0
+            label: Approve to proceed
+      - id: implementation
+        name: Implementation
+        depends_on:
+          - human-approval
+        verify:
+          - name: Quick check
+            type: command
+            run: sleep 60 && echo ok
+            phase: 0
+      - id: ready-to-merge
+        name: Ready to Merge
+        depends_on:
+          - implementation
+        verify:
+          - name: All gates passed
+            type: command
+            run: sleep 60 && echo ok
+            phase: 0
 config_directories:
   - path: C:\tmp\.bobbit
     types:
