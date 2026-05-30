@@ -127,7 +127,7 @@ Add `walkthroughAgent` metadata to persisted session info through `SessionManage
 }
 ```
 
-If a generic `parentSessionId` is too large for the first implementation, use `delegateOf` only as a visual compatibility shim and add explicit `childKind: "pr-walkthrough"`; however, the intended implementation should update sidebar nesting to understand `parentSessionId` so walkthroughs are not semantically delegates.
+This implementation must add a first-class `parentSessionId` / `childKind: "pr-walkthrough"` relationship for visible child sessions. `delegateOf` and `createDelegateSession()` are explicitly out of scope for PR walkthrough launch, sidebar nesting, lifecycle, cleanup, and persistence. Existing delegate rendering may be used only as a visual reference when implementing the new generic child-session renderer.
 
 ## Launch API
 
@@ -301,11 +301,11 @@ Add a first-class child relationship to session metadata and rendering:
 - Server session metadata: `parentSessionId?: string`, `childKind?: "pr-walkthrough" | ...`.
 - REST `/api/sessions` response should include these fields near `delegateOf`, `teamGoalId`, and `teamLeadSessionId`.
 - `src/app/render-helpers.ts` should render `parentSessionId` children beneath the parent row with the same indentation as delegate children.
-- Existing delegate rendering can be generalized from `renderLiveDelegates(parentSessionId)` to `renderLiveChildSessions(parentSessionId)` where child sessions are `delegateOf === parentSessionId || parentSessionId === parentSessionId`.
+- Add a new `renderLiveChildSessions(parentSessionId)` path that filters sessions by `session.parentSessionId === parentSessionId`. Existing delegate rendering can call shared row components, but PR walkthrough children must not set or depend on `delegateOf`.
 - Walkthrough child rows should show review accessory/read-only tooltip and should not be filtered out as hidden delegates.
 - Launching/focusing should auto-expand the parent and make switching easy. The launch response gives `childSessionId`; `src/app/pr-walkthrough.ts` can call the existing session selection flow used by sidebar rows.
 
-If implementing generic `parentSessionId` would delay delivery, use `delegateOf` for row nesting in the first pass but include `childKind: "pr-walkthrough"` everywhere and avoid delegate APIs/lifecycle. A follow-up should migrate the row renderer to `parentSessionId`.
+
 
 ## YAML submission tool
 
@@ -460,7 +460,7 @@ Prompt-only restrictions are insufficient. Enforce with both allowlisted tools a
 The walkthrough session should receive an explicit `allowedTools` list:
 
 - read/search/navigation: `read`, `grep`, `find`, `ls`, `read_session` only if needed;
-- shell: `bash` only through a guarded read-only wrapper, or a new `readonly_bash` tool;
+- shell: dedicated `readonly_bash` only; do not register unrestricted `bash` for walkthrough sessions;
 - web/GitHub read APIs if already available: `web_fetch`, `web_search`, `mcp_describe`, selected read-only GitHub MCP operations if configured;
 - required: `submit_pr_walkthrough_yaml`.
 
@@ -518,6 +518,19 @@ Persist three layers:
 2. Job status through `walkthrough-agent-store.ts`.
 3. Final renderable payload through `walkthrough-store.ts`.
 
+Detailed ownership:
+
+| Persisted state | Store/source of truth | Restore path |
+| --- | --- | --- |
+| Child relationship and read-only identity | Session store fields `parentSessionId`, `childKind`, `readOnly`, `walkthroughJobId` | `GET /api/sessions` and sidebar render |
+| Waiting/error/validation/ready lifecycle | `walkthrough-agent-store.ts` job record | `/api/pr-walkthrough/session/:childSessionId` |
+| Latest validation error details | Job record `lastValidationError` | Child panel job restore and chat tool result |
+| Final cards, parsed diff blocks, warnings, export capability | Existing `walkthrough-store.ts` payload | `GET /api/pr-walkthrough/:changesetId` |
+| Original PR body | Final payload `changeset.prBody` plus Orientation card metadata | Existing payload restore |
+| Active tab, fullscreen-on-ready intent | Panel workspace state plus job/session UI metadata | Session switch/job restore |
+| Comments, decisions, completed cards, diff mode | Existing browser draft state keyed by walkthrough tab/checksum | Existing panel local storage restore |
+| Agent transcript and follow-up context | Existing session transcript store | Normal child session restore |
+
 Reload cases:
 
 - Child exists, no YAML yet: UI selects child and calls `GET /api/pr-walkthrough/session/:childSessionId`; panel restores `waiting_for_yaml`.
@@ -555,7 +568,7 @@ The specific component is loaded through `ensurePrWalkthroughPanel()` and uses `
 
 ### Sidebar rendering
 
-Update `src/app/render-helpers.ts` and session types to render `parentSessionId` children. If using transitional `delegateOf`, special-case `childKind: "pr-walkthrough"` so the row label/accessory/read-only affordance are correct and notification policy treats it as user-visible.
+Update `src/app/render-helpers.ts` and session types to render `parentSessionId` children. PR walkthrough sessions must use `parentSessionId` and `childKind: "pr-walkthrough"`; they must not use `delegateOf` or delegate lifecycle APIs. The row label/accessory/read-only affordance and notification policy should treat them as user-visible child sessions.
 
 ## Server changes by file
 
@@ -598,13 +611,31 @@ Update `src/app/render-helpers.ts` and session types to render `parentSessionId`
 
 ## Failure behavior
 
-- **Child creation fails before session exists:** launcher gets `502`, no panel is opened.
-- **Child exists but prompt/model fails:** persist job `error`, show child row and error panel.
-- **GitHub auth/rate limit/private PR:** agent reports in chat; if submitted as error YAML is not allowed, manager can set job `error` via explicit server-side failure path. Panel shows actionable auth guidance.
-- **Invalid YAML:** tool returns retryable errors, panel remains waiting with validation banner.
-- **Large PR/truncation:** submission can succeed with `warnings` and `limits`; panel shows warnings in Orientation/Audit.
-- **Policy violation:** blocked tool/command result is visible in chat; manager does not fail the job unless the agent cannot recover.
-- **Duplicate launch:** return existing active job and focus child; do not replay first prompt.
+- **Child creation fails before session exists:** launcher gets `502 AGENT_CREATE_FAILED`; no panel is opened. The launcher notice includes the target and retry guidance.
+- **Child exists but prompt/model fails:** persist job `error`, keep the child row visible, write a chat/system error into the child transcript when possible, and show the error panel. The same child is reused after the user retries from the child unless the session is terminated.
+- **Model unavailable before first prompt:** create the child/session record first when practical, then transition `starting` to `error` with code `MODEL_UNAVAILABLE`, provider/model name when safe, and guidance to select another model or retry. If session creation itself fails, return `502` to the launcher.
+- **Agent startup/runtime crash:** transition `waiting_for_yaml` to `error` with code `AGENT_RUNTIME_FAILED`, keep transcript/panel available, and allow the user to prompt/retry in the same child after the runtime recovers.
+- **Prompt dispatch failure:** transition `starting` to `error` with code `PROMPT_DISPATCH_FAILED`; the child remains visible and retrying launch focuses the existing child and resends the first prompt after clearing the error.
+- **GitHub auth/rate limit/private PR:** use explicit error codes (`GITHUB_AUTH_REQUIRED`, `GITHUB_FORBIDDEN`, `GITHUB_RATE_LIMITED`, `GITHUB_NOT_FOUND_OR_PRIVATE`). The panel must state whether a token is missing, permissions are insufficient, the PR may be private, or the reset time from GitHub rate-limit headers when available. These errors are retryable in the same child after auth/permission/rate-limit changes.
+- **Invalid YAML:** tool returns retryable field errors, transitions or remains `validation_failed`, and keeps the panel unpopulated with a validation banner. A later valid tool call transitions to `ready`.
+- **Large PR/truncation:** submission can succeed with `warnings` and `limits`; panel shows warnings in Orientation/Audit and the agent explains prioritization in chat.
+- **Policy violation:** blocked tool/command result is visible in chat; manager does not fail the job unless the agent cannot recover. Repeated policy violations can trigger a reminder prompt that restates allowed read-only operations.
+- **Duplicate launch:** return existing active job and focus child; do not replay first prompt unless the job is `error` and the user explicitly retries.
+
+Status transitions and retry semantics:
+
+| From | Event | To | Retry/reuse behavior |
+| --- | --- | --- | --- |
+| `starting` | session and first prompt created | `waiting_for_yaml` | Existing child is active. |
+| `starting` | session creation fails before child exists | no job / launch `502` | User retries launch; no child to reuse. |
+| `starting` | model unavailable or prompt dispatch fails after child persisted | `error` | Reuse existing child; retry can resend prompt after config/auth fix. |
+| `waiting_for_yaml` | invalid YAML tool call | `validation_failed` | Same child; agent retries tool call. |
+| `validation_failed` | another invalid YAML tool call | `validation_failed` | Update latest summary and reminder context. |
+| `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, fullscreen review, keep agent alive. |
+| `waiting_for_yaml` or `validation_failed` | agent idle without successful tool call | same status | Enqueue rate-limited reminder; no cards rendered. |
+| any non-terminal state | GitHub auth/private/rate-limit prevents required metadata/diff | `error` | Same child is reused after credentials or rate limit recover. |
+| `error` | duplicate launch of same parent/target | `error` or `waiting_for_yaml` after explicit retry | Focus existing child; do not create duplicate. |
+| `ready` | duplicate launch of same parent/target | `ready` | Focus existing child and existing panel. |
 
 ## Migration plan
 
@@ -633,6 +664,8 @@ Unit tests:
 API E2E:
 
 - `POST /api/pr-walkthrough/launch` creates a child session, returns `childSessionId`, and persists a waiting job.
+- Private PR, missing token, forbidden token, not-found/private ambiguity, and GitHub rate-limit responses produce structured job errors with actionable messages and retryability.
+- Model unavailable, prompt dispatch failure, and agent runtime failure transition to deterministic `error` states without losing the child when one was persisted.
 - Duplicate launch from same parent/target returns the existing child.
 - Same target from a different parent creates a separate child.
 - Invalid `submit_pr_walkthrough_yaml` returns structured errors and leaves job/panel unpopulated.
@@ -648,7 +681,7 @@ Browser E2E:
 - Agent progress chat text is visible while panel waits.
 - Validation failure appears in chat and panel banner; cards do not render.
 - Valid submission renders final cards and automatically enters fullscreen walkthrough review mode.
-- Reload preserves child nesting, waiting/validation/ready state, and active fullscreen state when applicable.
+- Reload preserves child nesting, waiting/validation/ready state, auth/rate-limit/model error states, and active fullscreen state when applicable.
 - Duplicate launch focuses the existing child.
 - Export preview remains explicit user-confirmed flow.
 
@@ -661,16 +694,16 @@ Regression tests:
 ## Risks and mitigations
 
 - **Tool leaks through extensions:** pass explicit `allowedTools`, keep `tool-guard-extension.ts`, and add regression tests that intentionally attempt forbidden tools.
-- **Shell command parsing bypasses:** prefer a dedicated `readonly_bash` extension with argv parsing over trying to sanitize arbitrary shell strings. If plain `bash` is used, block metacharacters and inline interpreters aggressively.
-- **Sidebar relationship ambiguity:** introduce `parentSessionId`/`childKind` rather than overloading `delegateOf`; if a transitional shim is used, document and test it.
+- **Shell command parsing bypasses:** use the dedicated `readonly_bash` extension with argv parsing and reject shell metacharacters/inline interpreters before execution; unrestricted `bash` must not be registered for walkthrough sessions.
+- **Sidebar relationship ambiguity:** implement `parentSessionId`/`childKind` as mandatory session metadata and add tests proving PR walkthrough rows do not depend on `delegateOf`.
 - **Large PRs exceed YAML/tool limits:** enforce byte limits, instruct prioritization, and allow warnings/omissions rather than failing the whole job.
 - **Stale diff mapping:** re-fetch diff at submission and compare `base_sha/head_sha` to launch metadata; warn or reject on mismatch depending on severity.
 - **Model finishes in prose:** idle reminder must be driven by missing successful tool call, not by chat content.
 - **User loses child on reload:** persist job metadata before sending the first prompt and restore panel tabs from session/job metadata.
 
-## Open decisions
+## Resolved implementation choices
 
-1. Whether to implement generic `parentSessionId` immediately or ship a `delegateOf + childKind` sidebar compatibility shim first.
-2. Whether to expose `readonly_bash` as a new tool or wrap existing `bash` with session-specific command policy.
-3. Whether raw submitted YAML should be persisted long-term for debugging/audit, and if so whether to store it separately from sanitized final payloads.
-4. Whether GitHub diff fetching for mapping should happen at launch, submission, or both. Best default: launch fetch for prompt context hints, submission fetch for authoritative hunk mapping.
+1. Implement generic `parentSessionId` / `childKind` session nesting immediately. Do not use `delegateOf`, `createDelegateSession()`, delegate cleanup, or delegate hidden-session semantics for PR walkthroughs.
+2. Expose a dedicated `readonly_bash` tool for walkthrough sessions instead of registering unrestricted `bash`. The tool parses argv, applies `walkthrough-readonly-policy.ts`, and rejects shell metacharacters/inline interpreters before execution.
+3. Do not persist raw invalid YAML. Persist the latest validation summary, a content hash for diagnostics, and the final sanitized YAML-derived payload. If raw successful YAML is needed for debugging, store it in a separate sanitized job artifact behind an explicit debug flag, never in `walkthrough-store.ts`.
+4. Fetch lightweight PR metadata at launch for prompt context and error surfacing; fetch the authoritative diff again at YAML submission for hunk mapping and `base_sha`/`head_sha` validation.
