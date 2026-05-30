@@ -41,6 +41,16 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git status --porcelain=v2 --branch");
 	});
 
+	it("blocks path-qualified executables before command allowlisting", () => {
+		blocked("./git status", /path-qualified executables/);
+		blocked("../git status", /path-qualified executables/);
+		blocked("subdir/git status", /path-qualified executables/);
+		blocked(String.raw`.\git status`, /path-qualified executables/);
+		blocked(String.raw`C:\tmp\git.exe status`, /path-qualified executables/);
+		blocked("tools/rg walkthrough src/server", /path-qualified executables/);
+		blocked(String.raw`tools\rg walkthrough src/server`, /path-qualified executables/);
+	});
+
 	it("blocks mutating git commands and git filesystem escape flags", () => {
 		blocked("git checkout master", /not allowed/);
 		blocked("git switch feature", /not allowed/);

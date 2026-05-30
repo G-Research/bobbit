@@ -35,6 +35,17 @@ function basename(token: string): string {
 	return last.endsWith(".cmd") || last.endsWith(".bat") ? last.slice(0, -4) : last;
 }
 
+function executableTokenReason(token: string): string | undefined {
+	if (token.includes("\0")) return "NUL bytes are not allowed in executable names";
+	if (/[\\/]/.test(token) || /^[A-Za-z]:/.test(token)) {
+		return "path-qualified executables are not allowed; use trusted command names such as git, gh, rg, or cat";
+	}
+	if (token.startsWith("~") || token.startsWith("$") || token.startsWith("%")) {
+		return "dynamic executable paths are not allowed; use trusted command names such as git, gh, rg, or cat";
+	}
+	return undefined;
+}
+
 function hasForbiddenShellSyntax(command: string): string | undefined {
 	if (command.length > MAX_COMMAND_CHARS) return `command exceeds ${MAX_COMMAND_CHARS} characters`;
 	if (/\r|\n/.test(command)) return "multi-line commands and heredocs are not allowed";
@@ -210,6 +221,9 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	if (!parsed.ok) return block(parsed.reason);
 	const argv = parsed.argv;
 	if (argv.length === 0) return block("empty command");
+
+	const executableReason = executableTokenReason(argv[0]);
+	if (executableReason) return block(executableReason, argv);
 
 	const cmd = basename(argv[0]);
 	if (BLOCKED_EXECUTABLES.has(cmd)) return block(`${cmd} is not permitted in read-only PR walkthrough sessions`, argv);
