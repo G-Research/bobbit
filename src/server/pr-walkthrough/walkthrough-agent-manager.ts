@@ -217,14 +217,24 @@ export class WalkthroughAgentManager {
 		this.attachIdleReminder(childSessionId, jobId, child.rpcClient);
 
 		try {
-			const result = child.rpcClient?.prompt
-				? await child.rpcClient.prompt(buildKickoffPrompt(job))
-				: await this.deps.sessionManager.enqueuePrompt?.(childSessionId, buildKickoffPrompt(job), { source: "system" });
+			const prompt = buildKickoffPrompt(job);
+			const result = this.deps.sessionManager.enqueuePrompt
+				? await this.deps.sessionManager.enqueuePrompt(childSessionId, prompt, { source: "system" })
+				: await child.rpcClient?.prompt?.(prompt);
 			if (isFailureResult(result)) throw new Error(result.error);
 		} catch (error) {
-			const typed = classifyAgentError(error, "PROMPT_DISPATCH_FAILED");
-			job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
-			this.broadcastJob(job);
+			if (isRecoverablePromptDispatchError(error)) {
+				// SessionManager re-enqueues transient bridge rejections (most commonly
+				// "Agent is already processing") and drains them on the next tick. Keep
+				// the child in the waiting state rather than showing a terminal launch
+				// error while the kickoff prompt is still queued for delivery.
+				job = this.store.update(jobId, { status: "waiting_for_yaml" }) ?? job;
+				this.broadcastJob(job);
+			} else {
+				const typed = classifyAgentError(error, "PROMPT_DISPATCH_FAILED");
+				job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
+				this.broadcastJob(job);
+			}
 		}
 
 		return { ...responseFromJob(job), created: true };
@@ -451,6 +461,11 @@ function classifyAgentError(error: unknown, fallbackCode: string): PrWalkthrough
 	const message = error instanceof Error ? error.message : String(error);
 	const code = /model|api key|provider|unavailable/i.test(message) ? "MODEL_UNAVAILABLE" : fallbackCode;
 	return { code, message, retryable: true };
+}
+
+function isRecoverablePromptDispatchError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /agent is already processing|re-?enqueue|dispatch.*queued|queued.*drain/i.test(message);
 }
 
 function routeError(status: number, message: string, extra?: Record<string, unknown>): Error & { status?: number; extra?: Record<string, unknown> } {
