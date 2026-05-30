@@ -400,7 +400,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-line.add { background: color-mix(in oklch, var(--positive, var(--chart-2, var(--primary, Highlight))) 15%, transparent); }
 		.diff-line.del { background: color-mix(in oklch, var(--negative, var(--chart-5, var(--primary, Highlight))) 13%, transparent); }
 		.line-no, .prefix, .comment-cue { padding: 3px 6px; color: var(--muted-foreground, GrayText); user-select: none; }
-		.line-text { min-width: 0; padding: 3px 8px; overflow: hidden; white-space: pre; }
+		.line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 		.comment-cue { opacity: 0; font-family: inherit; }
 		.diff-line:hover .comment-cue, .diff-line:focus-visible .comment-cue { opacity: 1; }
 		.line-comments, .line-editor, .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border, ButtonBorder); background: color-mix(in oklch, var(--card, Canvas) 88%, var(--background, Canvas)); }
