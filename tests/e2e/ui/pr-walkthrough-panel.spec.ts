@@ -162,6 +162,10 @@ async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
 	await expect(dot, "card dots should have aria labels for narrow navigation").toHaveAttribute("aria-label", /card|orientation|design|significant|audit/i);
 	await expect(dot, "card dots should expose tooltip text").toHaveAttribute("title", /\S+/);
+	await expect.poll(() => dot.evaluate(el => {
+		const style = getComputedStyle(el as HTMLElement);
+		return { borderWidth: style.borderTopWidth, background: style.backgroundColor };
+	}), { message: "collapsed rail card dots should render as visible hollow circles" }).toMatchObject({ borderWidth: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
 	return dot;
 }
 

@@ -483,10 +483,10 @@ export class PrWalkthroughPanel extends LitElement {
 		.phase-pip { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; color: var(--foreground, CanvasText); font-size: 11px; font-weight: 800; }
 		.phase-pip.active { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
 		.phase-pip.complete { border-color: var(--positive, var(--primary, Highlight)); background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.card-dot { width: 10px; height: 10px; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; }
-		.card-dot.complete { background: color-mix(in oklch, var(--positive, var(--primary, Highlight)) 22%, transparent); border-color: var(--positive, var(--primary, Highlight)); }
-		.card-dot.active { background: var(--primary, Highlight); border-color: var(--primary, Highlight); }
-		.card-dot.disliked { background: var(--negative, red); border-color: var(--negative, red); opacity: 1; }
+		.card-dot { width: 11px; height: 11px; border: 2px solid color-mix(in oklch, var(--foreground, CanvasText) 55%, transparent); background: transparent; opacity: 0.85; }
+		.card-dot.complete { background: transparent; border-color: var(--foreground, CanvasText); opacity: 1; }
+		.card-dot.active { background: var(--primary, Highlight); border-color: var(--primary, Highlight); opacity: 1; }
+		.card-dot.disliked { background: transparent; border-color: var(--negative, red); opacity: 1; }
 		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
 		.inner { max-width: 1120px; margin: 0 auto; }
 		.card { display: block; max-width: none; }
