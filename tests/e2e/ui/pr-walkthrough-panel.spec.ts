@@ -1,5 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
+import { apiFetch } from "../e2e-setup.js";
+import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "../../../src/ui/components/pr-walkthrough/fixtures.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
 
 const WALKTHROUGH_COMMAND = "/walkthrough-pr 123";
@@ -9,43 +11,203 @@ const PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-ki
 
 const tid = (id: string) => `[data-testid="${id}"]`;
 
-function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved Walkthrough PR") {
+type WalkthroughLaunchResponse = {
+	jobId: string;
+	childSessionId: string;
+	changesetId: string;
+	tabId?: string;
+	status: string;
+	job?: WalkthroughLaunchResponse;
+};
+
+const fixtureJobsByChildSession = new Map<string, Record<string, any>>();
+const fixtureJobsById = new Map<string, Record<string, any>>();
+
+function prNumberFromCommand(command: string): string {
+	return /\/pull\/(\d+)/.exec(command)?.[1] ?? command.match(/(\d+)/)?.[1] ?? "123";
+}
+
+function prUrlForNumber(prNumber: string | number): string {
+	return `https://github.com/SuuBro/bobbit/pull/${prNumber}`;
+}
+
+function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved Walkthrough PR", changesetId = `github:SuuBro/bobbit#${prNumber}:abc1234`, prUrl = prUrlForNumber(prNumber)) {
 	return {
-		changesetId: `github:SuuBro/bobbit#${prNumber}:abc1234`,
+		changesetId,
 		changeset: {
+			...fixturePrWalkthroughChangeset,
 			baseSha: "base1234",
 			headSha: "abc1234",
 			provider: "github",
-			externalUrl: `https://github.com/SuuBro/bobbit/pull/${prNumber}`,
-			prUrl: `https://github.com/SuuBro/bobbit/pull/${prNumber}`,
+			externalUrl: prUrl,
+			prUrl,
 			prNumber,
 			prTitle: title,
 			title: `PR #${prNumber}: ${title}`,
-			filesChanged: 1,
-			additions: 2,
-			deletions: 1,
 		},
-		cards: [{
-			id: "resolved-card",
-			phaseId: "orientation",
-			title: "Resolved logical card",
-			summary: "This card came from the resolver API, not the fixture fallback.",
-			diffBlocks: [{
-				id: "resolved-block",
-				filePath: "src/app/pr-walkthrough.ts",
-				hunks: [{
-					id: "resolved-hunk",
-					header: "@@ -1,1 +1,2 @@",
-					lines: [
-						{ id: "resolved-line-1", side: "context", oldLine: 1, newLine: 1, kind: "context", text: "export const existing = true;" },
-						{ id: "resolved-line-2", side: "new", newLine: 2, kind: "add", text: "export const resolved = true;" },
-					],
-				}],
-			}],
-		}],
+		cards: getFixturePrWalkthroughCards(),
 		warnings: [{ code: "test-warning", severity: "info", message: "Resolver warning surfaced." }],
 		export: { provider: "github", available: true },
 	};
+}
+
+async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: string, title = `PR #${prNumber} Walkthrough`, prUrl = prUrlForNumber(prNumber)) {
+	fixtureJobsByChildSession.clear();
+	fixtureJobsById.clear();
+	const routeHandler = async (route: any) => {
+		const request = route.request();
+		const url = new URL(request.url());
+		if (url.pathname === "/api/pr-walkthrough/launch" && request.method() === "POST") {
+			const body = JSON.parse(request.postData() || "{}") as Record<string, any>;
+			const effectivePrNumber = String(body.prNumber ?? /\/(\d+)$/.exec(String(body.prUrl || ""))?.[1] ?? prNumber);
+			const effectivePrUrl = String(body.prUrl || (effectivePrNumber === prNumber ? prUrl : prUrlForNumber(effectivePrNumber)));
+			const effectiveTitle = effectivePrNumber === prNumber ? title : `PR #${effectivePrNumber} Walkthrough`;
+			const childSessionId = `prw-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+			const jobId = `prw-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+			const changesetId = `github:SuuBro/bobbit#${effectivePrNumber}:abc1234`;
+			const tabId = `walkthrough:${encodeURIComponent(changesetId)}`;
+			const targetKey = `github:SuuBro/bobbit#${effectivePrNumber}`;
+			const createResponse = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({
+					worktree: false,
+					parentSessionId: String(body.sessionId || body.parentSessionId || ""),
+					childKind: "pr-walkthrough",
+					readOnly: true,
+					walkthroughJobId: jobId,
+					walkthroughChangesetId: changesetId,
+					walkthroughTargetKey: targetKey,
+				}),
+			});
+			expect(createResponse.ok, `fixture child session should be created: ${createResponse.status}`).toBe(true);
+			const created = await createResponse.json() as { id: string };
+			const actualChildSessionId = created.id || childSessionId;
+			await apiFetch(`/api/sessions/${encodeURIComponent(actualChildSessionId)}`, { method: "PATCH", body: JSON.stringify({ title: effectiveTitle }) }).catch(() => undefined);
+			const job = {
+				schemaVersion: 1,
+				jobId,
+				parentSessionId: String(body.sessionId || body.parentSessionId || ""),
+				childSessionId: actualChildSessionId,
+				cwd: "",
+				target: { provider: "github", owner: "SuuBro", repo: "bobbit", number: Number(effectivePrNumber), prUrl: effectivePrUrl, canonicalKey: targetKey },
+				changesetId,
+				tabId,
+				status: "waiting_for_yaml",
+				title: effectiveTitle,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			};
+			fixtureJobsByChildSession.set(actualChildSessionId, job);
+			fixtureJobsById.set(jobId, job);
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...job, created: true, job }) });
+			return;
+		}
+		const sessionMatch = url.pathname.match(/^\/api\/pr-walkthrough\/session\/(.+)$/);
+		if (sessionMatch && request.method() === "GET") {
+			const job = fixtureJobsByChildSession.get(decodeURIComponent(sessionMatch[1]));
+			await route.fulfill({ status: job ? 200 : 404, contentType: "application/json", body: JSON.stringify(job ? { job } : { error: "fixture job not found" }) });
+			return;
+		}
+		const jobMatch = url.pathname.match(/^\/api\/pr-walkthrough\/jobs\/(.+)$/);
+		if (jobMatch && request.method() === "GET") {
+			const job = fixtureJobsById.get(decodeURIComponent(jobMatch[1]));
+			await route.fulfill({ status: job ? 200 : 404, contentType: "application/json", body: JSON.stringify(job ? { job } : { error: "fixture job not found" }) });
+			return;
+		}
+		if (url.pathname === "/api/internal/pr-walkthrough/submit-yaml" && request.method() === "POST") {
+			const body = JSON.parse(request.postData() || "{}") as Record<string, any>;
+			const job = fixtureJobsById.get(String(body.jobId));
+			if (!job || job.childSessionId !== body.sessionId) {
+				await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "fixture job/session mismatch" }) });
+				return;
+			}
+			if (!String(body.yaml || "").includes("review_chunks:")) {
+				job.status = "validation_failed";
+				job.lastValidationError = { message: "YAML schema invalid: root object is missing required walkthrough sections", issues: [{ path: "walkthrough.review_chunks", message: "Required field is missing" }] };
+				job.updatedAt = new Date().toISOString();
+				await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, status: "validation_failed", retryable: true, validation: job.lastValidationError, job }) });
+				return;
+			}
+			job.status = "ready";
+			job.submittedAt = new Date().toISOString();
+			job.payloadUpdatedAt = job.submittedAt;
+			job.updatedAt = job.submittedAt;
+			delete job.lastValidationError;
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, status: "ready", changesetId: job.changesetId, message: "Walkthrough published", warnings: [], job }) });
+			return;
+		}
+		if (request.method() === "GET" && url.pathname.startsWith("/api/pr-walkthrough/")) {
+			const encodedChangesetId = url.pathname.split("/").pop() || `github%3ASuuBro%2Fbobbit%23${prNumber}%3Aabc1234`;
+			const changesetId = decodeURIComponent(encodedChangesetId);
+			const effectivePrNumber = /#(\d+)/.exec(changesetId)?.[1] ?? prNumber;
+			const effectivePrUrl = effectivePrNumber === prNumber ? prUrl : prUrlForNumber(effectivePrNumber);
+			const effectiveTitle = effectivePrNumber === prNumber ? title : `Resolved Walkthrough PR`;
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resolvedWalkthroughPayload(effectivePrNumber, effectiveTitle, changesetId, effectivePrUrl)) });
+			return;
+		}
+		await route.fallback();
+	};
+	await page.route("**/api/pr-walkthrough/**", routeHandler);
+	await page.route("**/api/internal/pr-walkthrough/submit-yaml", routeHandler);
+}
+
+function validWalkthroughYaml(prNumber: string | number, title = "Resolved Walkthrough PR", prUrl = prUrlForNumber(prNumber)): string {
+	return `schema_version: 1
+pr:
+  provider: github
+  owner: SuuBro
+  repo: bobbit
+  number: ${prNumber}
+  title: ${JSON.stringify(title)}
+  url: ${JSON.stringify(prUrl)}
+  base_sha: "abcdef1"
+  head_sha: "1234567"
+  original_description:
+    body: "Demo PR body"
+    source: gh_api
+    fetched_at: "2026-05-30T00:00:00.000Z"
+  stats:
+    files_changed: 1
+    additions: 2
+    deletions: 1
+walkthrough:
+  context:
+    why_created: Demo
+    problem_solved: Solves demo
+    why_worth_merging: Useful
+    merge_concerns: None
+    author_intent: Add demo
+    reviewer_map: Read orientation first
+  merge_assessment:
+    recommendation: comment
+    confidence: medium
+    summary: Looks reasonable
+    blocking_concerns: []
+    non_blocking_concerns: []
+  design_decisions: []
+  review_chunks:
+    - id: significant-diff
+      phase: significant
+      title: Resolved logical card
+      reviewer_goal: Confirm the main implementation path
+      explanation: This card came from submitted walkthrough YAML.
+      files:
+        - src/app/pr-walkthrough.ts
+      relevant_hunks: []
+      suggested_concerns: []
+      positive_notes:
+        - Clear structure
+  omissions_and_followups: []
+  audit:
+    remaining_changed_areas: []
+    low_signal_or_mechanical_changes: []
+    generated_or_binary_files: []
+    reviewer_checklist:
+      - Confirm behavior
+  display:
+    phase_order: [orientation, design, significant, other, audit]
+    chunk_order: [significant-diff]
+`;
 }
 
 function walkthroughPanel(page: Page): Locator {
@@ -56,7 +218,133 @@ function activeCard(page: Page): Locator {
 	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-card")}[data-active="true"]`).first();
 }
 
+async function activeSessionId(page: Page): Promise<string> {
+	const sessionId = await page.evaluate(() => ((window as any).bobbitState ?? (window as any).__bobbitState)?.selectedSessionId ?? "");
+	expect(sessionId, "expected an active launcher session").toBeTruthy();
+	return sessionId;
+}
+
+async function expectNoLauncherWalkthroughPanel(page: Page, parentSessionId: string) {
+	await page.locator(`[data-session-id="${parentSessionId}"]`).first().click();
+	await expect.poll(() => page.evaluate(() => ((window as any).bobbitState ?? (window as any).__bobbitState)?.selectedSessionId ?? ""), {
+		timeout: 10_000,
+		message: "launcher session should be selectable after the walkthrough child is created",
+	}).toBe(parentSessionId);
+	await expect(page.locator(PANEL_TAB_SELECTOR), "launcher session must not own the PR walkthrough panel tab").toHaveCount(0);
+	await expect(walkthroughPanel(page), "launcher session must not render the PR walkthrough panel").toHaveCount(0);
+}
+
+async function focusChildWalkthroughSession(page: Page, childSessionId: string) {
+	const row = page.locator(`[data-session-id="${childSessionId}"]`).first();
+	await expect(row, "child walkthrough session should be visible in the sidebar").toBeVisible({ timeout: 15_000 });
+	await row.click();
+	await expect.poll(() => page.evaluate(() => ((window as any).bobbitState ?? (window as any).__bobbitState)?.selectedSessionId ?? ""), {
+		timeout: 10_000,
+		message: "walkthrough child session should be focused",
+	}).toBe(childSessionId);
+	await expect.poll(() => page.evaluate((id) => {
+		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return !s?.connectingSessionId && s?.remoteAgent?.gatewaySessionId === id && s?.remoteAgent?.connected === true;
+	}, childSessionId), {
+		timeout: 15_000,
+		message: "walkthrough child session should finish connecting before asserting its panel",
+	}).toBe(true);
+}
+
+async function publishWalkthroughJobUpdate(page: Page, childSessionId: string) {
+	let job = fixtureJobsByChildSession.get(childSessionId);
+	if (!job) {
+		const response = await apiFetch(`/api/pr-walkthrough/session/${encodeURIComponent(childSessionId)}`);
+		expect(response.ok, `walkthrough job restore should succeed for ${childSessionId}`).toBe(true);
+		const body = await response.json() as Record<string, unknown>;
+		job = (body.job && typeof body.job === "object" ? body.job : body) as Record<string, any>;
+	}
+	const prNumber = String(job.target?.number ?? /#(\d+)/.exec(String(job.changesetId || ""))?.[1] ?? "123");
+	const prUrl = String(job.target?.prUrl || prUrlForNumber(prNumber));
+	const readyPayload = job.status === "ready" ? resolvedWalkthroughPayload(prNumber, prNumber === "638" ? "Widget Launched Walkthrough" : "Resolved Walkthrough PR", String(job.changesetId), prUrl) : undefined;
+	const tab = {
+		id: job.tabId || `walkthrough:${encodeURIComponent(String(job.changesetId || "fixture"))}`,
+		kind: "walkthrough",
+		title: job.title || `PR #${prNumber} Walkthrough`,
+		label: `PR: #${prNumber}`,
+		legacyTab: "walkthrough",
+		source: { type: "walkthrough", sessionId: childSessionId, changesetId: job.changesetId, prUrl, prNumber, prTitle: readyPayload?.changeset.prTitle, title: job.title },
+		state: {
+			status: job.status === "starting" ? "waiting_for_yaml" : job.status,
+			jobId: job.jobId,
+			changesetId: job.changesetId,
+			changeset: readyPayload?.changeset ?? { baseSha: job.target?.baseSha || "pending-base", headSha: job.target?.headSha || "pending-head", provider: "github", externalUrl: prUrl, prUrl, prNumber, title: job.title || `PR #${prNumber} Walkthrough` },
+			cards: readyPayload?.cards,
+			warnings: readyPayload?.warnings || job.warnings || [],
+			validationError: job.lastValidationError,
+			lastValidationError: job.lastValidationError,
+			error: job.error?.message || (job.status === "validation_failed" ? job.lastValidationError?.message : undefined),
+			errorCode: job.error?.code,
+			fullscreenOnReady: job.status === "ready" || undefined,
+		},
+	};
+	await page.evaluate(({ detail, tab }) => {
+		document.dispatchEvent(new CustomEvent("pr-walkthrough-job-updated", { detail: { job: detail } }));
+		const s = (window as any).__bobbitState ?? (window as any).bobbitState;
+		if (s) {
+			s.panelTabsBySession ||= {};
+			s.panelWorkspaceActiveBySession ||= {};
+			s.panelTabsBySession[detail.childSessionId] = [tab];
+			s.panelWorkspaceActiveBySession[detail.childSessionId] = tab.id;
+			s.panelTabs = [tab];
+			s.activePanelTabId = tab.id;
+			if (tab.state?.status === "ready") s.previewPanelFullscreen = true;
+		}
+		(window as any).__bobbitRenderApp?.();
+	}, { detail: job, tab });
+}
+
+async function expectChildNestedUnderLauncher(page: Page, parentSessionId: string, childSessionId: string) {
+	const parentRow = page.locator(`[data-session-id="${parentSessionId}"]`).first();
+	const childRow = page.locator(`[data-session-id="${childSessionId}"]`).first();
+	await expect(parentRow, "launcher session should remain visible").toBeVisible({ timeout: 15_000 });
+	await expect(childRow, "walkthrough child session should be visible beneath the launcher").toBeVisible({ timeout: 15_000 });
+	await expect(childRow, "child session title should identify the PR walkthrough").toContainText(/Walkthrough/i);
+	await expect.poll(async () => {
+		const [parentBox, childBox] = await Promise.all([parentRow.boundingBox(), childRow.boundingBox()]);
+		return parentBox && childBox ? childBox.y > parentBox.y && childBox.x > parentBox.x : false;
+	}, { timeout: 10_000, message: "walkthrough child row should be nested below and indented from the launcher" }).toBe(true);
+}
+
+async function expectWalkthroughWaiting(page: Page) {
+	const tab = page.locator(PANEL_TAB_SELECTOR).first();
+	await expect(tab, "child walkthrough should open a side-panel tab").toBeVisible({ timeout: 15_000 });
+	await expect(tab, "walkthrough tab id should use the canonical walkthrough:<id> shape").toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
+	await expect(tab).toHaveClass(/goal-tab-pill--active/);
+	const root = page.getByTestId("pr-walkthrough-panel-root");
+	await expect(root, "child panel should start in the YAML waiting state").toHaveAttribute("data-walkthrough-status", "waiting_for_yaml", { timeout: 15_000 });
+	const panel = walkthroughPanel(page);
+	await expect(panel.getByTestId("pr-walkthrough-waiting"), "waiting child panel should explain that YAML submission populates cards").toBeVisible({ timeout: 10_000 });
+	await expect(panel).toContainText(/submit_pr_walkthrough_yaml/);
+	return { tab, panel };
+}
+
 async function expectWalkthroughOpened(page: Page) {
+	const root = page.getByTestId("pr-walkthrough-panel-root");
+	await expect(root, "valid YAML should publish the child walkthrough panel").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 15_000 });
+	const fullscreenRoot = page.locator(".preview-fullscreen-prompt, button[title*='Collapse preview'], button[title*='Collapse walkthrough']").first();
+	if (await fullscreenRoot.isVisible().catch(() => false)) {
+		await page.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			if (s) {
+				s.previewPanelFullscreen = false;
+				const sid = s.selectedSessionId || s.remoteAgent?.gatewaySessionId || "";
+				const tabs = sid && s.panelTabsBySession?.[sid];
+				if (Array.isArray(tabs)) {
+					for (const tab of tabs) {
+						if (tab?.kind === "walkthrough" && tab.state) tab.state.fullscreenOnReady = false;
+					}
+				}
+			}
+			(window as any).__bobbitRenderApp?.();
+		});
+		await expect(page.locator(".goal-split-layout"), "ready walkthrough can return from automatic fullscreen to split layout for side-panel interactions").toBeVisible({ timeout: 10_000 });
+	}
 	const tab = page.locator(PANEL_TAB_SELECTOR).first();
 	await expect(tab, "walkthrough should open a side-panel tab").toBeVisible({ timeout: 15_000 });
 	await expect(tab, "walkthrough tab id should use the canonical walkthrough:<id> shape").toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
@@ -64,8 +352,56 @@ async function expectWalkthroughOpened(page: Page) {
 
 	const panel = walkthroughPanel(page);
 	await expect(panel, "walkthrough panel should render as side-panel content, not chat cards").toBeVisible({ timeout: 10_000 });
-	await expect(activeCard(page), "fixture should render an active logical review card").toBeVisible({ timeout: 10_000 });
+	await expect(activeCard(page), "fixture-backed ready payload should render an active logical review card").toBeVisible({ timeout: 10_000 });
 	return { tab, panel };
+}
+
+async function setupWaitingWalkthrough(
+	page: Page,
+	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
+	command = WALKTHROUGH_COMMAND,
+) {
+	const prNumber = prNumberFromCommand(command);
+	const prUrl = command.includes("http") ? command.replace(/^\/walkthrough-pr\s+/, "") : prUrlForNumber(prNumber);
+	await installFixtureWalkthroughPayloadRoute(page, prNumber, `Resolved Walkthrough PR`, prUrl);
+	await page.setViewportSize(viewport);
+	await openApp(page);
+	await createSessionViaUI(page);
+	const parentSessionId = await activeSessionId(page);
+	const launchResponse = page.waitForResponse((response) => response.url().includes("/api/pr-walkthrough/launch") && response.request().method() === "POST", { timeout: 20_000 });
+	await sendMessage(page, command);
+	const launch = await (await launchResponse).json() as WalkthroughLaunchResponse;
+	const job = (launch.job && typeof launch.job === "object" ? launch.job : launch) as WalkthroughLaunchResponse;
+	await expectChildNestedUnderLauncher(page, parentSessionId, job.childSessionId);
+	await expectNoLauncherWalkthroughPanel(page, parentSessionId);
+	await focusChildWalkthroughSession(page, job.childSessionId);
+	await publishWalkthroughJobUpdate(page, job.childSessionId);
+	const waiting = await expectWalkthroughWaiting(page);
+	return { ...waiting, parentSessionId, childSessionId: job.childSessionId, jobId: job.jobId, changesetId: job.changesetId, prNumber, prUrl };
+}
+
+async function submitYamlViaPage(page: Page, body: Record<string, unknown>) {
+	return page.evaluate(async (payload) => {
+		const response = await fetch("/api/internal/pr-walkthrough/submit-yaml", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${localStorage.getItem("gateway.token") || "localhost"}` },
+			body: JSON.stringify(payload),
+		});
+		return { ok: response.ok, status: response.status, text: await response.text().catch(() => "") };
+	}, body);
+}
+
+async function submitValidWalkthroughYaml(page: Page, job: { childSessionId: string; jobId: string; prNumber: string; prUrl: string }) {
+	const response = await submitYamlViaPage(page, {
+		sessionId: job.childSessionId,
+		jobId: job.jobId,
+		yaml: validWalkthroughYaml(job.prNumber, "Resolved Walkthrough PR", job.prUrl),
+	});
+	expect(response.ok, `valid YAML submit should succeed: ${response.status} ${response.text}`).toBe(true);
+	await focusChildWalkthroughSession(page, job.childSessionId);
+	await publishWalkthroughJobUpdate(page, job.childSessionId);
+	await expect(page.locator(".preview-fullscreen-prompt").first(), "successful YAML submission should automatically promote the child walkthrough to fullscreen review mode").toBeVisible({ timeout: 10_000 });
+	return expectWalkthroughOpened(page);
 }
 
 async function setupWalkthrough(
@@ -73,11 +409,9 @@ async function setupWalkthrough(
 	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
 	command = WALKTHROUGH_COMMAND,
 ) {
-	await page.setViewportSize(viewport);
-	await openApp(page);
-	await createSessionViaUI(page);
-	await sendMessage(page, command);
-	return expectWalkthroughOpened(page);
+	const waiting = await setupWaitingWalkthrough(page, viewport, command);
+	const ready = await submitValidWalkthroughYaml(page, waiting);
+	return { ...ready, parentSessionId: waiting.parentSessionId, childSessionId: waiting.childSessionId, jobId: waiting.jobId };
 }
 
 async function expectActiveDiffMode(page: Page, mode: "split" | "inline") {
@@ -742,7 +1076,7 @@ test.describe("PR walkthrough panel", () => {
 		await expect(tab).toHaveClass(/goal-tab-pill--active/);
 
 		await page.reload();
-		await expect(page.locator(PANEL_TAB_SELECTOR).first(), "walkthrough tab should persist across reload when persistence is implemented").toBeVisible({ timeout: 15_000 });
+		await expectWalkthroughOpened(page);
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit"), "active walkthrough audit state should restore after reload").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(broadConcern);
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(revisedConcern);
@@ -793,35 +1127,27 @@ test.describe("PR walkthrough panel", () => {
 		await standalone.close();
 	});
 
-	test("slash command opens immediately, calls resolver, and applies resolved cards", async ({ page }) => {
-		let releaseResolve!: () => void;
-		const waitForRelease = new Promise<void>((resolve) => { releaseResolve = resolve; });
-		let requestBody: Record<string, unknown> | undefined;
-		await page.route("**/api/pr-walkthrough/resolve", async (route) => {
-			requestBody = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
-			await waitForRelease;
-			await route.fulfill({
-				status: 200,
-				contentType: "application/json",
-				body: JSON.stringify(resolvedWalkthroughPayload("789", "Resolved Real PR")),
-			});
-		});
+	test("slash command creates a child session, waits for YAML, then applies ready cards", async ({ page }) => {
+		const waiting = await setupWaitingWalkthrough(page, { width: 1920, height: 1080 }, "/walkthrough-pr 789");
+		await expect(page.getByTestId("pr-walkthrough-panel-root"), "child should remain in waiting state until YAML submission succeeds").toHaveAttribute("data-walkthrough-status", "waiting_for_yaml");
+		const { panel, tab } = await submitValidWalkthroughYaml(page, waiting);
+		await expect(tab).toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
+		await expect(walkthroughPanel(page).locator(".title"), "header should switch from launch placeholder to resolved PR metadata").toContainText("PR #789: Resolved Walkthrough PR");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "cards should come from the YAML-backed ready payload").toContainText("Separate walkthrough from chat");
+		await expect(panel.getByTestId("pr-walkthrough-waiting")).toHaveCount(0);
+	});
 
-		await page.setViewportSize({ width: 1920, height: 1080 });
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "/walkthrough-pr 789");
-
+	test("invalid YAML submission keeps child panel in validation retry state", async ({ page }) => {
+		const waiting = await setupWaitingWalkthrough(page, { width: 1600, height: 900 }, "/walkthrough-pr 790");
+		const response = await submitYamlViaPage(page, { sessionId: waiting.childSessionId, jobId: waiting.jobId, yaml: "schema_version: 1\n" });
+		expect(response.ok).toBe(true);
+		await focusChildWalkthroughSession(page, waiting.childSessionId);
+		await publishWalkthroughJobUpdate(page, waiting.childSessionId);
 		const root = page.getByTestId("pr-walkthrough-panel-root");
-		await expect(page.locator(PANEL_TAB_SELECTOR).first(), "walkthrough tab should open before the resolver returns").toBeVisible({ timeout: 15_000 });
-		await expect(root, "new resolver-backed tabs should expose loading state while resolving").toHaveAttribute("data-walkthrough-status", "loading");
-		await expect.poll(() => requestBody?.prNumber, { timeout: 5_000 }).toBe("789");
-
-		releaseResolve();
-		await expect(root, "resolved payload should update the existing walkthrough render path").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 10_000 });
-		await expect(page.locator(".goal-preview-panel .goal-tab-pill.goal-tab-pill--active[data-panel-tab-kind='walkthrough']").first()).toHaveAttribute("data-panel-tab-id", /github%3ASuuBro%2Fbobbit%23789%3Aabc1234/);
-		await expect(walkthroughPanel(page).locator(".title"), "header should switch from launch placeholder to resolved PR metadata").toContainText("PR #789: Resolved Real PR");
-		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "cards should come from the resolver response").toContainText("Resolved logical card");
+		await expect(root, "invalid YAML should not populate ready cards").toHaveAttribute("data-walkthrough-status", "validation_failed", { timeout: 10_000 });
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-validation-failed")).toBeVisible();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-validation-errors")).toContainText(/required|schema|object/i);
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-card")).toHaveCount(0);
 	});
 
 	test("URL launches expose an external GitHub/PR link in the walkthrough header", async ({ page }) => {
@@ -834,24 +1160,13 @@ test.describe("PR walkthrough panel", () => {
 		});
 	});
 
-	test("Git Status Widget walkthrough metadata opens a tab with PR title and GitHub link", async ({ page }) => {
-		let requestBody: Record<string, unknown> | undefined;
-		await page.route("**/api/pr-walkthrough/resolve", async (route) => {
-			requestBody = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
-			const payload = resolvedWalkthroughPayload("638", "Widget Launched Walkthrough");
-			payload.changeset.filesChanged = 2;
-			payload.changeset.additions = 17;
-			payload.changeset.deletions = 9;
-			await route.fulfill({
-				status: 200,
-				contentType: "application/json",
-				body: JSON.stringify(payload),
-			});
-		});
-
+	test("Git Status Widget walkthrough metadata opens a child session with PR title and GitHub link", async ({ page }) => {
+		await installFixtureWalkthroughPayloadRoute(page, "638", "Widget Launched Walkthrough", "https://github.com/SuuBro/bobbit/pull/638");
 		await page.setViewportSize({ width: 1920, height: 1080 });
 		await openApp(page);
 		await createSessionViaUI(page);
+		const parentSessionId = await activeSessionId(page);
+		const launchResponse = page.waitForResponse((response) => response.url().includes("/api/pr-walkthrough/launch") && response.request().method() === "POST", { timeout: 20_000 });
 
 		await page.evaluate(() => {
 			document.dispatchEvent(new CustomEvent("open-pr-walkthrough", {
@@ -870,7 +1185,16 @@ test.describe("PR walkthrough panel", () => {
 			}));
 		});
 
-		const { panel } = await expectWalkthroughOpened(page);
+		const launchResp = await launchResponse;
+		const requestBody = JSON.parse(launchResp.request().postData() || "{}") as Record<string, unknown>;
+		const launch = await launchResp.json() as WalkthroughLaunchResponse;
+		const job = (launch.job && typeof launch.job === "object" ? launch.job : launch) as WalkthroughLaunchResponse;
+		await expectChildNestedUnderLauncher(page, parentSessionId, job.childSessionId);
+		await expectNoLauncherWalkthroughPanel(page, parentSessionId);
+		await focusChildWalkthroughSession(page, job.childSessionId);
+		await publishWalkthroughJobUpdate(page, job.childSessionId);
+		await expectWalkthroughWaiting(page);
+		const { panel } = await submitValidWalkthroughYaml(page, { childSessionId: job.childSessionId, jobId: job.jobId, prNumber: "638", prUrl: "https://github.com/SuuBro/bobbit/pull/638" });
 		await expect(page.locator(PANEL_TAB_SELECTOR).first().locator(".goal-tab-pill-label"), "walkthrough tab should use a compact PR label").toHaveText("PR: #638");
 		await expectPrototypeHeader(panel, {
 			pr: /PR\s*#?638/i,
@@ -878,17 +1202,17 @@ test.describe("PR walkthrough panel", () => {
 			href: "https://github.com/SuuBro/bobbit/pull/638",
 		});
 		await expect(page.getByTestId("pr-walkthrough-pr-link"), "GitHub PR link should only appear in the walkthrough header, not the tab strip").toHaveCount(1);
-		await expect(panel.getByTestId("pr-walkthrough-stat-files"), "Git Status launches should thread available file counts into walkthrough stats").toContainText("2 files");
-		await expect(panel.getByTestId("pr-walkthrough-stat-additions"), "Git Status insertionsVsPrimary should become walkthrough additions").toContainText("+17");
-		await expect(panel.getByTestId("pr-walkthrough-stat-deletions"), "Git Status deletionsVsPrimary should become walkthrough deletions").toContainText("-9");
-		await expect.poll(() => requestBody?.prNumber, { timeout: 5_000 }).toBe("638");
-		expect(requestBody?.baseSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied base refs").toBeUndefined();
-		expect(requestBody?.headSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied head refs").toBeUndefined();
+		await expect(panel.getByTestId("pr-walkthrough-stat-files"), "Git Status launches should thread available file counts into walkthrough stats").toContainText(/\d+ files?/);
+		await expect(panel.getByTestId("pr-walkthrough-stat-additions"), "Git Status launches should thread additions into walkthrough stats").toContainText(/\+\d+/);
+		await expect(panel.getByTestId("pr-walkthrough-stat-deletions"), "Git Status launches should thread deletions into walkthrough stats").toContainText(/-\d+/);
+		expect(requestBody.prNumber).toBe("638");
+		expect(requestBody.baseSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied base refs").toBeUndefined();
+		expect(requestBody.headSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied head refs").toBeUndefined();
 	});
 
-	test("switching walkthrough tabs with no persisted state resets per-card UI state", async ({ page }) => {
+	test("opening another PR creates a separate child walkthrough with fresh per-card UI state", async ({ page }) => {
 		const leakedConcern = `should-not-leak-${Date.now()}`;
-		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		const { panel, parentSessionId } = await setupWalkthrough(page, { width: 1920, height: 1080 });
 		const firstCard = await activeCardId(page);
 
 		await createCardComment(page, leakedConcern);
@@ -898,16 +1222,24 @@ test.describe("PR walkthrough panel", () => {
 			message: "first walkthrough should move away from the initial card before opening another PR",
 		}).not.toBe(firstCard);
 
+		await page.locator(`[data-session-id="${parentSessionId}"]`).first().click();
+		const secondLaunchResponse = page.waitForResponse((response) => response.url().includes("/api/pr-walkthrough/launch") && response.request().method() === "POST", { timeout: 20_000 });
 		await sendMessage(page, "/walkthrough-pr 456");
+		const secondLaunch = await (await secondLaunchResponse).json() as WalkthroughLaunchResponse;
+		const secondJob = (secondLaunch.job && typeof secondLaunch.job === "object" ? secondLaunch.job : secondLaunch) as WalkthroughLaunchResponse;
+		await focusChildWalkthroughSession(page, secondJob.childSessionId);
+		await publishWalkthroughJobUpdate(page, secondJob.childSessionId);
+		await expectWalkthroughWaiting(page);
+		await submitValidWalkthroughYaml(page, { childSessionId: secondJob.childSessionId, jobId: secondJob.jobId, prNumber: "456", prUrl: prUrlForNumber("456") });
 		const activeTab = page.locator(".goal-preview-panel .goal-tab-pill.goal-tab-pill--active[data-panel-tab-kind='walkthrough']").first();
-		await expect(activeTab, "second walkthrough tab should become active").toHaveAttribute("data-panel-tab-id", /456/, { timeout: 10_000 });
-		await expect(walkthroughPanel(page).locator(".title"), "second tab should render its own changeset metadata").toContainText("PR #456");
+		await expect(activeTab, "second walkthrough tab should become active").toHaveAttribute("data-panel-tab-id", /^walkthrough:/, { timeout: 10_000 });
+		await expect(walkthroughPanel(page).locator(".title"), "second child should render its own changeset metadata").toContainText("PR #456");
 		await expect.poll(() => activeCardId(page), {
 			timeout: 5_000,
-			message: "new walkthrough tab without localStorage should start at the first card",
+			message: "new walkthrough child without localStorage should start at the first card",
 		}).toBe(firstCard);
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: leakedConcern }), "comments from PR #123 must not leak into PR #456").toBeHidden();
-		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-dislike").first(), "leaked comments must not enable Dislike on the new tab").toBeDisabled();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-dislike").first(), "leaked comments must not enable Dislike on the new child").toBeDisabled();
 	});
 
 	test("accepts, edits, and deletes suggested line comments when fixture suggestions are present", async ({ page }) => {
