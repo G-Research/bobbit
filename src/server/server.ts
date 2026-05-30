@@ -2009,6 +2009,7 @@ async function handleApiRoute(
 			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 		},
 		preferencesStore,
+		sandboxScope,
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────

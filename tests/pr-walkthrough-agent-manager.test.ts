@@ -120,12 +120,13 @@ walkthrough:
 `;
 }
 
-async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown) {
+async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}) {
 	const res = makeResponse();
 	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method } as any, res as any, {
 		defaultCwd: tempDir,
 		readBody: async () => body,
 		walkthroughAgentManager: manager,
+		...extraDeps,
 	});
 	assert.equal(handled, true);
 	return { status: res.status, body: JSON.parse(res.body ?? "{}") };
@@ -158,6 +159,35 @@ describe("WalkthroughAgentManager", () => {
 		const second = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 		assert.equal(second.created, false);
 		assert.equal(second.childSessionId, first.childSessionId);
+	});
+
+	it("retry after pre-child createSession failure creates a fresh child job", async () => {
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
+		let failOnce = true;
+		sessionManager.createSession = async (...args: Parameters<typeof sessionManager.createSession>) => {
+			if (failOnce) {
+				failOnce = false;
+				throw new Error("create failed before child persisted");
+			}
+			return originalCreateSession(...args);
+		};
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
+
+		await assert.rejects(
+			() => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			/create failed before child persisted/,
+		);
+		const failedJob = store.findByParentAndTarget("parent", "github:acme/widgets#42");
+		assert.equal(failedJob?.status, "error");
+		assert.equal(sessionManager.sessions.has(failedJob!.childSessionId), false);
+
+		const retry = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		assert.equal(retry.created, true);
+		assert.equal(retry.status, "waiting_for_yaml");
+		assert.notEqual(retry.childSessionId, failedJob?.childSessionId);
+		assert.ok(sessionManager.sessions.has(retry.childSessionId));
 	});
 
 	it("internal submit stores validation failures without publishing cards", async () => {
@@ -242,6 +272,24 @@ describe("WalkthroughAgentManager", () => {
 		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml() });
 		assert.equal(valid.status, 200);
 		assert.equal(valid.body.ok, true);
+	});
+
+	it("sandbox submit-yaml rejects child sessions outside the caller scope", async () => {
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		const result = await callRoute(
+			manager,
+			"POST",
+			"/api/internal/pr-walkthrough/submit-yaml",
+			{ sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml() },
+			{ sandboxScope: { projectId: "project-1", sessionIds: new Set(["other-session"]), goalIds: new Set() } },
+		);
+
+		assert.equal(result.status, 403);
+		assert.equal(result.body.code, "SANDBOX_SESSION_OUT_OF_SCOPE");
+		assert.equal(manager.getJob(launch.body.jobId)?.status, "waiting_for_yaml");
 	});
 
 	it("submit-yaml rejects a different child session for the same job", async () => {
