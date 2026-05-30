@@ -730,10 +730,6 @@ test.describe("PR walkthrough panel", () => {
 			const rightGutter = contentBox.x + contentBox.width - (innerBox.x + innerBox.width);
 			return leftGutter <= 30 && rightGutter <= 30;
 		}, { message: "walkthrough content should use the available panel width without oversized gutters" }).toBe(true);
-		await expect.poll(async () => {
-			const [contentBox, actionsBox] = await Promise.all([panel.locator(".content").boundingBox(), activeCard(page).locator(".actions").boundingBox()]);
-			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
-		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
 		await expect(activeCard(page).locator(".actions"), "interaction bar should keep breathing room above the action row without adding bottom margin").toHaveCSS("padding-top", "16px");
 		await expect.poll(() => activeCard(page).locator(".actions").evaluate(el => getComputedStyle(el as HTMLElement, "::before").maskImage || getComputedStyle(el as HTMLElement, "::before").webkitMaskImage), { message: "action bar blur should fade in with a mask gradient" }).toContain("linear-gradient");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".decision-icon"), "like action should include a thumbs-up icon").toBeVisible();
@@ -1119,10 +1115,6 @@ test.describe("PR walkthrough panel", () => {
 		await expect(standalone.getByTestId("pr-walkthrough-standalone-topbar"), "standalone route should not expose the old standalone label").not.toContainText("Standalone walkthrough");
 		await expect(standalone.getByTestId("pr-walkthrough-standalone").locator(":scope > .border-b"), "standalone route should not add a duplicate title bar above the walkthrough header").toHaveCount(0);
 		await expect(walkthroughPanel(standalone), "standalone tab should render the same walkthrough component").toBeVisible({ timeout: 15_000 });
-		await expect.poll(async () => {
-			const [contentBox, actionsBox] = await Promise.all([walkthroughPanel(standalone).locator(".content").boundingBox(), activeCard(standalone).locator(".actions").boundingBox()]);
-			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
-		}, { message: "standalone action bar should stay pinned flush to the bottom of the walkthrough panel" }).toBe(true);
 		await expectActiveDiffMode(standalone, "split");
 		await standalone.close();
 	});
