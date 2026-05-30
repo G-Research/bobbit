@@ -352,6 +352,40 @@ test.describe("PR walkthrough panel", () => {
 		await expect(pendingDot).not.toHaveClass(/liked|disliked/);
 	});
 
+	test("diff hunks default to compact GitHub-like context and can expand on demand", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
+		await page.evaluate(async () => {
+			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
+			const lines = Array.from({ length: 15 }, (_, index) => ({
+				id: `ctx-${index + 1}`,
+				side: index === 7 ? "new" : "context",
+				oldLine: index === 7 ? undefined : index + 1,
+				newLine: index + 1,
+				kind: index === 7 ? "add" : "context",
+				text: index === 7 ? "added focal line" : `context ${index + 1}`,
+			}));
+			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Long context fixture", filesChanged: 1, additions: 1, deletions: 0 };
+			walkthrough.cards = [{
+				id: "long-context-card",
+				phaseId: "significant",
+				title: "Long context hunk",
+				summary: "This card verifies compact diff context.",
+				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,15 +1,15 @@", lines }] }],
+			}];
+			walkthrough.status = "ready";
+			await walkthrough.updateComplete;
+		});
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title")).toContainText("Long context hunk");
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
+		const toggle = activeCard(page).getByTestId("pr-walkthrough-context-toggle").first();
+		await expect(toggle).toContainText(/Show 8 more context lines/i);
+		await toggle.click();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding context should reveal the full hunk").toBeVisible();
+		await expect(toggle).toContainText(/Show 3-line context/i);
+	});
+
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {
 		const body = `right-side-split-comment-${Date.now()}`;
 		await setupWalkthrough(page, { width: 1920, height: 1080 });
