@@ -305,6 +305,8 @@ test.describe("PR walkthrough panel", () => {
 			return leftGutter <= 30 && rightGutter <= 30;
 		}, { message: "walkthrough content should use the available panel width without oversized gutters" }).toBe(true);
 		await expectActiveDiffMode(page, "split");
+		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
 		await expectOneHorizontalScrollerPerDiff(page);
 		await expectDiffExpandCollapseIfExposed(page);
 	});
@@ -379,11 +381,12 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
-		const toggle = activeCard(page).getByTestId("pr-walkthrough-context-toggle").first();
-		await expect(toggle).toContainText(/Show 8 more context lines/i);
-		await toggle.click();
+		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
+		await expect(toggles.first()).toContainText(/Show 4 lines above/i);
+		await expect(toggles.nth(1)).toContainText(/Show 4 lines below/i);
+		await toggles.first().click();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding context should reveal the full hunk").toBeVisible();
-		await expect(toggle).toContainText(/Show 3-line context/i);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-context-toggle")).toBeHidden();
 	});
 
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {

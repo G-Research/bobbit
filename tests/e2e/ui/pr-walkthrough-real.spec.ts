@@ -263,8 +263,13 @@ test.describe("real PR walkthrough browser UX", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "resolved cards should replace the fixture fallback").toContainText("Resolved changeset overview", { timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-title")).toContainText("Real-ish walkthrough cards");
 		await expect(activeCard(page)).toContainText("src/app/pr-walkthrough.ts");
-		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status").first()).toContainText("Modified");
-		await expect(activeCard(page).getByTestId("pr-walkthrough-external-file-link").first()).toHaveAttribute("href", "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts");
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status"), "diff headers should not show file-status lozenges").toHaveCount(0);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
+		const fileLink = activeCard(page).getByTestId("pr-walkthrough-external-file-link").first();
+		await expect(fileLink).toHaveAttribute("href", "https://github.com/SuuBro/bobbit/blob/2222222/src/app/pr-walkthrough.ts");
+		await expect(fileLink).toHaveAttribute("title", "Open file");
+		await expect(fileLink.locator("svg"), "open-file action should be icon-only").toBeVisible();
+		await expect(fileLink).not.toContainText(/Open file/i);
 		await expect(activeCard(page)).toContainText("gatewayFetch('/api/pr-walkthrough/resolve'");
 		await expect.poll(() => state.resolveCalls.length, { timeout: 5_000 }).toBe(1);
 		expect(JSON.stringify(state.resolveCalls[0])).toContain(REAL_PR_URL);
@@ -304,7 +309,7 @@ test.describe("real PR walkthrough browser UX", () => {
 		await saveLineComment(page, "Persisted line comment from browser test");
 		await walkthroughPanel(page).getByTestId("pr-walkthrough-dislike").first().click();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title")).toContainText("Persist walkthrough state");
-		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status").filter({ hasText: "Renamed" }).first(), "renamed file status should be explicit in diff headers").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-status"), "diff headers should not show file-status lozenges").toHaveCount(0);
 		await saveCardComment(page, "Card-level export concern from browser test");
 		await walkthroughPanel(page).getByTestId("pr-walkthrough-like").first().click();
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit")).toBeVisible({ timeout: 10_000 });

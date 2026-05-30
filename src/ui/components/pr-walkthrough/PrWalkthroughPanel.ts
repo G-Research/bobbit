@@ -20,6 +20,19 @@ interface SideBySidePair {
 	right: PrWalkthroughDiffLine | null;
 }
 
+interface DiffContextEntry {
+	kind: "context";
+	label: string;
+	hiddenCount: number;
+}
+
+interface DiffLineEntry {
+	kind: "lines";
+	lines: PrWalkthroughDiffLine[];
+}
+
+type DiffRenderEntry = DiffContextEntry | DiffLineEntry;
+
 type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
 
 type WalkthroughWarningSeverity = "info" | "warning" | "error";
@@ -509,19 +522,21 @@ export class PrWalkthroughPanel extends LitElement {
 		.body.narrow .narrow-note { display: inline; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.context-toggle { width: 100%; min-width: max-content; padding: 5px 12px; border: 0; border-radius: 0; background: color-mix(in oklch, var(--muted-foreground, GrayText) 7%, transparent); color: var(--muted-foreground, GrayText); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
-		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 9%, transparent); }
+		.context-toggle { width: 100%; min-width: max-content; padding: 5px 12px; border: 0; border-radius: 0; background: color-mix(in oklch, var(--primary, Highlight) 12%, transparent); color: var(--primary, Highlight); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
+		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 18%, transparent); }
 		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
 		.diff-block.closed .diff-file-header-row { border-bottom: 0; }
 		.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
-		.diff-external-link { display: inline-flex; align-items: center; flex: 0 0 auto; padding: 0 12px; border-left: 1px solid var(--border, ButtonBorder); font-size: 11px; font-weight: 800; color: var(--primary, Highlight); text-decoration: none; }
-		.diff-external-link:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); text-decoration: underline; }
+		.diff-external-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; padding: 0; border-left: 1px solid var(--border, ButtonBorder); color: var(--muted-foreground, GrayText); text-decoration: none; }
+		.diff-external-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); }
+		.diff-external-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.caret { width: 12px; color: var(--muted-foreground, GrayText); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
 		.diff-block.open .caret { transform: rotate(90deg); }
 		.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.diff-path b { color: var(--foreground, CanvasText); }
-		.diff-kind { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; color: var(--chart-1, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 16%, transparent); }
-		.diff-status { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 999px; color: var(--chart-2, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 14%, transparent); border: 1px solid color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 26%, var(--border, ButtonBorder)); }
+		.diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
+		.diff-add-count { color: var(--positive, green); }
+		.diff-del-count { color: var(--negative, red); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
@@ -529,6 +544,12 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-line:hover, .diff-line:focus-visible { background: color-mix(in oklch, var(--primary, Highlight) 6%, transparent); }
 		.diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary, Highlight); font-size: 8px; }
 		.line-no { position: relative; text-align: right; }
+		.tok-keyword { color: var(--chart-4, var(--primary, Highlight)); }
+		.tok-string { color: var(--chart-2, var(--positive, green)); }
+		.tok-number { color: var(--chart-3, var(--info, Highlight)); }
+		.tok-comment { color: var(--muted-foreground, GrayText); font-style: italic; }
+		.tok-property { color: var(--chart-1, var(--primary, Highlight)); }
+		.tok-function { color: var(--chart-6, var(--primary, Highlight)); }
 		.comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); line-height: 18px; font-weight: 800; }
 		.diff-line.editing .comment-cue, .diff-line.commented .comment-cue { opacity: 1; }
 		.editor-anchor { margin-bottom: 2px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
@@ -979,31 +1000,32 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
-	private diffStatusLabel(block: PrWalkthroughDiffBlock): string {
-		const status = block.status;
-		if (status === "added") return "Added";
-		if (status === "modified") return "Modified";
-		if (status === "deleted") return "Deleted";
-		if (status === "renamed") return "Renamed";
-		if (status === "copied") return "Copied";
-		if (status === "binary") return "Binary";
-		return "";
+	private diffBlockLineStats(block: PrWalkthroughDiffBlock): { additions: number; deletions: number } {
+		let additions = 0;
+		let deletions = 0;
+		for (const hunk of block.hunks) {
+			for (const line of hunk.lines) {
+				if (line.kind === "add") additions += 1;
+				else if (line.kind === "del") deletions += 1;
+			}
+		}
+		return { additions, deletions };
 	}
 
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		const collapsed = this._collapsedDiffBlockIds.includes(block.id);
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
+		const stats = this.diffBlockLineStats(block);
 		return html`
 			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode} data-expanded=${collapsed ? "false" : "true"}>
 				<div class="diff-file-header-row">
 					<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
 						<span class="caret">▸</span>
-						${this.diffStatusLabel(block) ? html`<span class="diff-status" data-testid="pr-walkthrough-diff-status">${this.diffStatusLabel(block)}</span>` : nothing}
 						<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
 						${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
-						<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
+						<span class="diff-counts" data-testid="pr-walkthrough-diff-counts" aria-label=${`${stats.additions} additions, ${stats.deletions} deletions`}><span class="diff-add-count" data-testid="pr-walkthrough-diff-additions">+${stats.additions}</span><span class="diff-del-count" data-testid="pr-walkthrough-diff-deletions">-${stats.deletions}</span></span>
 					</button>
-					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link">Open file</a>` : nothing}
+					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link" title="Open file" aria-label=${`Open ${block.filePath}`}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a>` : nothing}
 				</div>
 				${collapsed ? nothing : this.effectiveDiffMode === "split" ? this.renderSplitDiff(card, block) : this.renderInlineDiff(card, block)}
 			</section>
@@ -1014,12 +1036,11 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="split-grid">
-					${block.hunks.map(hunk => {
-						const lines = this.visibleLinesForHunk(card, block, hunk);
-						return html`
-							<div class="hunk-header">${hunk.header}</div>
-							${this.renderContextToggle(card, block, hunk, lines.length)}
-							${this.buildSideBySidePairs(lines).map(pair => html`
+					${block.hunks.map(hunk => html`
+						<div class="hunk-header">${hunk.header}</div>
+						${this.diffRenderEntriesForHunk(card, block, hunk).map(entry => entry.kind === "context"
+							? this.renderContextToggle(card, block, hunk, entry)
+							: html`${this.buildSideBySidePairs(entry.lines).map(pair => html`
 								<div class="split-row">
 									${this.renderDiffLine(card, block, pair.left, "old")}
 									${this.renderDiffLine(card, block, pair.right, "new")}
@@ -1027,9 +1048,8 @@ export class PrWalkthroughPanel extends LitElement {
 								${pair.left?.id === pair.right?.id
 									? this.renderLineDetails(card, block, pair.left)
 									: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
-							`)}
-						`;
-					})}
+							`)}`)}
+					`)}
 				</div>
 			</div>
 		`;
@@ -1039,32 +1059,53 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="inline-lines">
-					${block.hunks.map(hunk => {
-						const lines = this.visibleLinesForHunk(card, block, hunk);
-						return html`
-							<div class="hunk-header">${hunk.header}</div>
-							${this.renderContextToggle(card, block, hunk, lines.length)}
-							${lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
-						`;
-					})}
+					${block.hunks.map(hunk => html`
+						<div class="hunk-header">${hunk.header}</div>
+						${this.diffRenderEntriesForHunk(card, block, hunk).map(entry => entry.kind === "context"
+							? this.renderContextToggle(card, block, hunk, entry)
+							: html`${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}`)}
+					`)}
 				</div>
 			</div>
 		`;
 	}
 
-	private visibleLinesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): PrWalkthroughDiffLine[] {
-		if (this._expandedContextHunkIds.includes(this.contextHunkKey(card.id, block.id, hunk.id))) return hunk.lines;
+	private diffRenderEntriesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): DiffRenderEntry[] {
+		if (this._expandedContextHunkIds.includes(this.contextHunkKey(card.id, block.id, hunk.id))) return [{ kind: "lines", lines: hunk.lines }];
 		const importantIndexes = hunk.lines
 			.map((line, index) => this.isImportantDiffLine(card, block, line) ? index : -1)
 			.filter(index => index >= 0);
-		if (importantIndexes.length === 0) return hunk.lines;
+		if (importantIndexes.length === 0) return [{ kind: "lines", lines: hunk.lines }];
 		const visible = new Set<number>();
 		for (const index of importantIndexes) {
 			const start = Math.max(0, index - DEFAULT_DIFF_CONTEXT_LINES);
 			const end = Math.min(hunk.lines.length - 1, index + DEFAULT_DIFF_CONTEXT_LINES);
 			for (let lineIndex = start; lineIndex <= end; lineIndex += 1) visible.add(lineIndex);
 		}
-		return hunk.lines.filter((_, index) => visible.has(index));
+
+		const entries: DiffRenderEntry[] = [];
+		let index = 0;
+		while (index < hunk.lines.length) {
+			if (visible.has(index)) {
+				const lines: PrWalkthroughDiffLine[] = [];
+				while (index < hunk.lines.length && visible.has(index)) {
+					lines.push(hunk.lines[index]!);
+					index += 1;
+				}
+				entries.push({ kind: "lines", lines });
+				continue;
+			}
+			const start = index;
+			while (index < hunk.lines.length && !visible.has(index)) index += 1;
+			const hiddenCount = index - start;
+			const label = start === 0
+				? `Show ${hiddenCount} line${hiddenCount === 1 ? "" : "s"} above`
+				: index === hunk.lines.length
+					? `Show ${hiddenCount} line${hiddenCount === 1 ? "" : "s"} below`
+					: `Show ${hiddenCount} hidden context line${hiddenCount === 1 ? "" : "s"}`;
+			entries.push({ kind: "context", label, hiddenCount });
+		}
+		return entries;
 	}
 
 	private isImportantDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine): boolean {
@@ -1073,13 +1114,10 @@ export class PrWalkthroughPanel extends LitElement {
 		return this._editingLineKey === key || this.commentsForLine(card.id, block.id, line.id).length > 0 || this.pendingSuggestionsForLine(card, block.id, line.id).length > 0;
 	}
 
-	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], visibleLineCount: number): TemplateResult | typeof nothing {
-		const hidden = hunk.lines.length - visibleLineCount;
-		if (hidden <= 0 && !this._expandedContextHunkIds.includes(this.contextHunkKey(card.id, block.id, hunk.id))) return nothing;
-		const expanded = this._expandedContextHunkIds.includes(this.contextHunkKey(card.id, block.id, hunk.id));
+	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
 		return html`
-			<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" type="button" @click=${() => this.toggleHunkContext(card.id, block.id, hunk.id)}>
-				${expanded ? `Show ${DEFAULT_DIFF_CONTEXT_LINES}-line context` : `Show ${hidden} more context line${hidden === 1 ? "" : "s"}`}
+			<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" type="button" aria-label=${`${entry.label} in ${block.filePath}`} @click=${() => this.toggleHunkContext(card.id, block.id, hunk.id)}>
+				${entry.label}
 			</button>
 		`;
 	}
@@ -1098,6 +1136,32 @@ export class PrWalkthroughPanel extends LitElement {
 	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
 		const linked = block as PrWalkthroughDiffBlock & { externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
 		return safeExternalUrl(linked.externalUrl) || safeExternalUrl(linked.blobUrl) || safeExternalUrl(linked.rawUrl) || safeExternalUrl(linked.contentsUrl);
+	}
+
+	private renderHighlightedLine(text: string): TemplateResult[] {
+		const tokenPattern = /(\/\/.*$|`(?:\\.|[^`])*`|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\b(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\()|\b[A-Za-z_$][\w$]*(?=\??\s*:))/g;
+		const parts: TemplateResult[] = [];
+		let lastIndex = 0;
+		for (const match of text.matchAll(tokenPattern)) {
+			const index = match.index ?? 0;
+			if (index > lastIndex) parts.push(html`${text.slice(lastIndex, index)}`);
+			const token = match[0];
+			const className = token.startsWith("//")
+				? "tok-comment"
+				: token.startsWith("\"") || token.startsWith("'") || token.startsWith("`")
+					? "tok-string"
+					: /^\d/.test(token)
+						? "tok-number"
+						: /^(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)$/.test(token)
+							? "tok-keyword"
+							: text.slice(index + token.length).match(/^\s*\(/)
+								? "tok-function"
+								: "tok-property";
+			parts.push(html`<span class=${className}>${token}</span>`);
+			lastIndex = index + token.length;
+		}
+		if (lastIndex < text.length) parts.push(html`${text.slice(lastIndex)}`);
+		return parts;
 	}
 
 	private renderDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine | null, column: "old" | "new" | "inline"): TemplateResult {
@@ -1125,7 +1189,7 @@ export class PrWalkthroughPanel extends LitElement {
 			>
 				<span class="line-no">${lineNo ?? ""}</span>
 				<span class="prefix">${prefix}</span>
-				<span class="line-text">${line.text}</span>
+				<span class="line-text">${this.renderHighlightedLine(line.text)}</span>
 				<button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" aria-label="Add line comment" @click=${(event: Event) => { event.stopPropagation(); this.openLineEditor(card.id, block.id, line.id); }}>+</button>
 			</div>
 		`;
