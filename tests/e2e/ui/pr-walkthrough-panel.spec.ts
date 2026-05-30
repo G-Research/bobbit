@@ -345,6 +345,10 @@ test.describe("PR walkthrough panel", () => {
 			const rightGutter = contentBox.x + contentBox.width - (innerBox.x + innerBox.width);
 			return leftGutter <= 30 && rightGutter <= 30;
 		}, { message: "walkthrough content should use the available panel width without oversized gutters" }).toBe(true);
+		await expect.poll(async () => {
+			const [contentBox, actionsBox] = await Promise.all([panel.locator(".content").boundingBox(), activeCard(page).locator(".actions").boundingBox()]);
+			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
+		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
 		await expectActiveDiffMode(page, "split");
 		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);

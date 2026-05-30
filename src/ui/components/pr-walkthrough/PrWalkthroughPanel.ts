@@ -535,9 +535,9 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
 		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
 		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
-		.content { padding: 14px clamp(12px, 1.6vw, 24px) 24px; }
-		.inner { width: 100%; max-width: none; margin: 0; }
-		.card { display: block; max-width: none; }
+		.content { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); padding: 14px var(--walkthrough-content-x) 0; }
+		.inner { width: 100%; max-width: none; min-height: 100%; margin: 0; display: flex; flex-direction: column; }
+		.card { display: block; max-width: none; min-height: 100%; }
 		.card-head { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
 		.card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 		.phase-label { display: inline-block; min-width: 0; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -589,7 +589,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.chip { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid color-mix(in oklch, var(--warning, orange) 32%, var(--border, ButtonBorder)); border-radius: 7px; background: var(--card, Canvas); color: var(--foreground, CanvasText); font-size: 12px; line-height: 1.35; }
 		.chip:hover { background: color-mix(in oklch, var(--warning, orange) 14%, transparent); }
 		.card-comment-card { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--negative, red); background: color-mix(in oklch, var(--negative, red) 5%, transparent); border-radius: 0 6px 6px 0; }
-		.actions { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border, ButtonBorder); }
+		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 12px var(--walkthrough-content-x); border-top: 1px solid var(--border, ButtonBorder); background: color-mix(in oklch, var(--background, Canvas) 94%, transparent); backdrop-filter: blur(8px); }
 		.actions .prev { border-color: transparent; color: var(--muted-foreground, GrayText); background: transparent; }
 
 		@media (max-width: 760px) {
