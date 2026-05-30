@@ -116,8 +116,15 @@ async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; ti
 		const [filesBox, additionsBox] = await Promise.all([fileStat.boundingBox(), addStat.boundingBox()]);
 		return filesBox && additionsBox ? additionsBox.x > filesBox.x && Math.abs(additionsBox.y - filesBox.y) < 6 : false;
 	}, { message: "line-change counts should sit to the right of the file count" }).toBe(true);
-	await expect(header.getByTestId("pr-walkthrough-progress"), "header should show review progress").toContainText(/\d+\s*\/\s*\d+\s+reviewed/i);
-	await expect(header.getByRole("button", { name: /submit review/i }), "header should reserve the final draft submit control").toBeVisible();
+	const progress = header.getByTestId("pr-walkthrough-progress");
+	await expect(progress, "header should show review progress").toContainText(/\d+\s*\/\s*\d+\s+reviewed/i);
+	await expect.poll(async () => {
+		const [trackBox, labelBox] = await Promise.all([progress.locator(".progress-track").boundingBox(), progress.locator(".progress-label").boundingBox()]);
+		return trackBox && labelBox ? labelBox.y > trackBox.y : false;
+	}, { message: "reviewed count should sit beneath the progress bar" }).toBe(true);
+	const submit = header.getByRole("button", { name: /^submit$/i });
+	await expect(submit, "header should reserve the final draft submit control").toBeVisible();
+	await expect(submit.locator("svg"), "submit control should include an icon").toBeVisible();
 
 	if (expected.href) {
 		const link = header.getByTestId("pr-walkthrough-pr-link");

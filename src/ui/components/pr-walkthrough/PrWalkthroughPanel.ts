@@ -165,11 +165,12 @@ export class PrWalkthroughPanel extends LitElement {
 		.pr-link { display: inline-flex; align-items: center; gap: 5px; max-width: min(32vw, 300px); padding: 2px 8px; border: 1px solid var(--border, ButtonBorder); border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 8%, transparent); color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.35; text-decoration: none; white-space: nowrap; }
 		.pr-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 25%, var(--border, ButtonBorder)); }
 		.pr-link span { overflow: hidden; text-overflow: ellipsis; }
-		.progress-wrap { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+		.progress-wrap { display: inline-grid; align-items: center; justify-items: stretch; gap: 4px; min-width: 0; }
 		.progress-label { color: var(--muted-foreground, GrayText); font-size: 11px; white-space: nowrap; }
-		.progress-track { width: 150px; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); }
+		.progress-track { width: 100%; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); }
 		.progress-fill { height: 100%; border-radius: inherit; background: var(--primary, Highlight); transition: width 160ms ease; }
-		.submit-button { border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
+		.submit-button { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
+		.submit-icon { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.submit-button:disabled { background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); opacity: 1; }
 		.banner-stack { display: grid; gap: 8px; margin: 0 auto 14px; max-width: 1120px; }
 		.banner { padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); color: var(--foreground, CanvasText); }
@@ -745,9 +746,6 @@ export class PrWalkthroughPanel extends LitElement {
 		const percent = Math.round((completed / total) * 100);
 		const identity = this.prIdentity;
 		const stats = this.changesetStats;
-		const submitLabel = completed < this.reviewCards.length
-			? `Submit review (${completed}/${this.reviewCards.length})`
-			: this.currentDraftHasConcerns ? "Submit review · request changes" : "Submit review · approve";
 		const submitTitle = completed < this.reviewCards.length
 			? "Review every non-audit card before export."
 			: this.canUseExportApi ? "Preview GitHub review comments before submitting." : this.exportUnavailableReason;
@@ -772,10 +770,10 @@ export class PrWalkthroughPanel extends LitElement {
 				</div>
 				<span class="header-spacer"></span>
 				<div class="progress-wrap" aria-label="Walkthrough progress" data-testid="pr-walkthrough-progress">
-					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 					<div class="progress-track"><div class="progress-fill" style="width: ${percent}%"></div></div>
+					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 				</div>
-				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}>${submitLabel}</button>
+				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}><svg class="submit-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg><span>Submit</span></button>
 			</header>
 		`;
 	}
