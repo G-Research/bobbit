@@ -192,13 +192,22 @@ function shouldResolveInput(input: OpenPrWalkthroughInput): boolean {
 }
 
 function resolveRequestForInput(sessionId: string, input: OpenPrWalkthroughInput): Record<string, unknown> {
+	const prUrl = cleanString(input.prUrl) || cleanString(input.url);
+	const prNumber = normalizePrNumber(input.prNumber);
+	const provider = cleanString(input.provider);
+	const shouldUseGithubPrDiff = Boolean(prUrl || prNumber || provider === "github" || provider === "external-pr");
 	return {
 		sessionId: sessionId || undefined,
-		baseSha: cleanString(input.baseSha),
-		headSha: cleanString(input.headSha),
-		prUrl: cleanString(input.prUrl) || cleanString(input.url),
-		prNumber: normalizePrNumber(input.prNumber),
-		provider: cleanString(input.provider),
+		// PR walkthroughs should resolve through the GitHub PR API by default so the
+		// diff matches GitHub's PR view, including already-merged PRs. Local refs are
+		// only sent for explicit local changeset walkthroughs.
+		baseSha: shouldUseGithubPrDiff ? undefined : cleanString(input.baseSha),
+		headSha: shouldUseGithubPrDiff ? undefined : cleanString(input.headSha),
+		prUrl,
+		prNumber,
+		prTitle: cleanString(input.prTitle),
+		title: cleanString(input.title),
+		provider,
 		fixture: !shouldResolveInput(input) || undefined,
 	};
 }

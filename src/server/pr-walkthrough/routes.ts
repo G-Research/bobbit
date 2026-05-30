@@ -203,13 +203,24 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	const headSha = stringValue(body.headSha);
 	const prUrl = stringValue(body.prUrl);
 	const prNumber = typeof body.prNumber === "number" || typeof body.prNumber === "string" ? body.prNumber : undefined;
+	const prTitle = stringValue(body.prTitle) || stringValue(body.title);
 	const wantsGithub = Boolean(prUrl || prNumber || body.provider === "github");
+
+	if (wantsGithub && (!baseSha || !headSha)) {
+		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
+		if (delegated) return delegated;
+		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
+	}
 
 	if (wantsGithub && baseSha && headSha) {
 		const local = await resolveLocalWithDelegation(cwd, baseSha, headSha, deps, context);
 		const gh = parseGithubRef(prUrl, prNumber, cwd);
 		const head = shortSha(local.changeset.headSha);
-		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${prNumber ?? "unknown"}:${head}`;
+		const number = prNumber ?? gh?.number;
+		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${number ?? "unknown"}:${head}`;
+		const title = prTitle
+			? (number != null && !/^PR\s+#/i.test(prTitle) ? `PR #${number}: ${prTitle}` : prTitle)
+			: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title;
 		return {
 			...local,
 			changesetId,
@@ -217,18 +228,13 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 				...local.changeset,
 				provider: "github",
 				prUrl: gh?.url,
-				prNumber: prNumber ?? gh?.number,
+				prNumber: number,
+				prTitle,
 				externalUrl: gh?.url,
-				title: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title,
+				title,
 			},
 			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
 		};
-	}
-
-	if (wantsGithub) {
-		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
-		if (delegated) return delegated;
-		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
 	}
 
 	if (!baseSha || !headSha) throw new Error("baseSha and headSha are required for local walkthrough resolution");

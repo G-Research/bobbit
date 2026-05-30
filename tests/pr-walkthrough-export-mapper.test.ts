@@ -1,4 +1,7 @@
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -243,6 +246,42 @@ describe("PR walkthrough GitHub adapter", () => {
 		});
 	});
 
+	it("uses gh auth token when environment tokens are not configured", async () => {
+		await withGithubAuthEnv(fakeGhBin("gh-cli-token"), async () => {
+			let authorization: string | undefined;
+			const resolved = await resolveGithubPr({
+				prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+				apiBaseUrl: "https://api.github.test",
+				fetch: async (_url, init) => {
+					authorization = init?.headers?.Authorization;
+					return githubPrOrFilesResponse(_url);
+				},
+			});
+
+			assert.equal(authorization, "Bearer gh-cli-token");
+			assert.equal(resolved.export.available, true);
+			assert.equal(resolved.warnings.some(warning => warning.code === "github_unauthenticated"), false);
+		});
+	});
+
+	it("uses unauthenticated GitHub API silently when no env or gh token is available", async () => {
+		await withGithubAuthEnv(fakeGhBin(undefined, 1), async () => {
+			let authorization: string | undefined;
+			const resolved = await resolveGithubPr({
+				prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+				apiBaseUrl: "https://api.github.test",
+				fetch: async (_url, init) => {
+					authorization = init?.headers?.Authorization;
+					return githubPrOrFilesResponse(_url);
+				},
+			});
+
+			assert.equal(authorization, undefined);
+			assert.equal(resolved.export.available, false);
+			assert.equal(resolved.warnings.some(warning => warning.code === "github_unauthenticated"), false);
+		});
+	});
+
 	it("resolves PR metadata and file patches through the GitHub API adapter", async () => {
 		const calls: string[] = [];
 		const resolved = await resolveGithubPr({
@@ -381,6 +420,69 @@ async function startMockGithubReviewServer(): Promise<{ baseUrl: string; request
 		requests,
 		close: () => new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())),
 	};
+}
+
+function fakeGhBin(token: string | undefined, exitCode = 0): string {
+	const dir = mkdtempSync(join(tmpdir(), "bobbit-fake-gh-"));
+	const posixScript = exitCode === 0
+		? `#!/bin/sh\nprintf '%s\\n' '${token ?? ""}'\n`
+		: `#!/bin/sh\necho 'not logged in' >&2\nexit ${exitCode}\n`;
+	writeFileSync(join(dir, "gh"), posixScript, "utf8");
+	chmodSync(join(dir, "gh"), 0o755);
+	const cmdScript = exitCode === 0
+		? `@echo off\r\necho ${token ?? ""}\r\n`
+		: `@echo off\r\necho not logged in 1>&2\r\nexit /b ${exitCode}\r\n`;
+	writeFileSync(join(dir, "gh.cmd"), cmdScript, "utf8");
+	return dir;
+}
+
+async function withGithubAuthEnv(fakeGhDir: string, fn: () => Promise<void>): Promise<void> {
+	const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === "path") ?? "PATH";
+	const previous = {
+		GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+		GH_TOKEN: process.env.GH_TOKEN,
+		BOBBIT_GH_COMMAND: process.env.BOBBIT_GH_COMMAND,
+		PATH: process.env[pathKey],
+	};
+	delete process.env.GITHUB_TOKEN;
+	delete process.env.GH_TOKEN;
+	process.env.BOBBIT_GH_COMMAND = join(fakeGhDir, process.platform === "win32" ? "gh.cmd" : "gh");
+	process.env[pathKey] = `${fakeGhDir}${delimiter}${previous.PATH ?? ""}`;
+	try {
+		await fn();
+	} finally {
+		if (previous.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
+		else process.env.GITHUB_TOKEN = previous.GITHUB_TOKEN;
+		if (previous.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+		else process.env.GH_TOKEN = previous.GH_TOKEN;
+		if (previous.BOBBIT_GH_COMMAND === undefined) delete process.env.BOBBIT_GH_COMMAND;
+		else process.env.BOBBIT_GH_COMMAND = previous.BOBBIT_GH_COMMAND;
+		if (previous.PATH === undefined) delete process.env[pathKey];
+		else process.env[pathKey] = previous.PATH;
+	}
+}
+
+function githubPrOrFilesResponse(url: string) {
+	if (url.endsWith("/pulls/42")) {
+		return response(200, {
+			number: 42,
+			title: "Complete review export",
+			html_url: "https://github.com/SuuBro/bobbit/pull/42",
+			base: { sha: "aaaaaaaaaaaa" },
+			head: { sha: "bbbbbbbbbbbb" },
+			changed_files: 1,
+			additions: 1,
+			deletions: 0,
+		});
+	}
+	return response(200, [{
+		filename: "src/example.ts",
+		status: "modified",
+		additions: 1,
+		deletions: 0,
+		changes: 1,
+		patch: "@@ -1,1 +1,2 @@\n context\n+added",
+	}]);
 }
 
 function response(status: number, body: unknown) {

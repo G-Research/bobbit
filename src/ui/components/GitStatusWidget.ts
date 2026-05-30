@@ -34,6 +34,7 @@ export class GitStatusWidget extends LitElement {
     @property() sessionId = '';
     @property() goalId = '';
     @property() token = '';
+    @property({ type: Boolean }) hideWalkthrough = false;
 
     // PR status properties
     @property() prState?: string; // "OPEN" | "MERGED" | "CLOSED"
@@ -501,6 +502,7 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderWalkthroughButton(opts: { marginLeft?: boolean } = {}) {
+        if (this.hideWalkthrough) return nothing;
         return html`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;${opts.marginLeft ? 'margin-left:4px' : ''}"
             title=${this.prNumber != null ? `Walk through PR #${this.prNumber}` : 'Walk through branch changes'}

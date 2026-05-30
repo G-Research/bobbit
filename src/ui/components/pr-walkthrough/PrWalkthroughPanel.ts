@@ -244,11 +244,6 @@ export class PrWalkthroughPanel extends LitElement {
 			border-right: 1px solid var(--border, ButtonBorder);
 			background: color-mix(in oklch, var(--card, Canvas) 62%, var(--background, Canvas));
 		}
-		.rail-prbox { padding-bottom: 12px; margin-bottom: 10px; border-bottom: 1px solid var(--border, ButtonBorder); }
-		.rail-prbox .num { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
-		.rail-prbox .prtitle { margin-top: 3px; font-weight: 700; line-height: 1.25; }
-		.rail-prbox .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--muted-foreground, GrayText); }
-
 		.phase { display: grid; gap: 6px; margin-bottom: 14px; }
 		.phase-button {
 			width: 100%;
@@ -780,16 +775,9 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderPlaceholderRail(): TemplateResult {
-		const identity = this.prIdentity;
-		const stats = this.changesetStats;
 		return html`
 			<nav class="rail ${this.isNarrowLayout ? "collapsed" : ""}" data-testid=${this.isNarrowLayout ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
 				${this.isNarrowLayout ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
-					<div class="rail-prbox">
-						<div class="num">${identity.kicker}</div>
-						<div class="prtitle">${identity.title}</div>
-						<div class="meta"><span>${stats.files} files</span><span class="stat-add">+${this.formatNumber(stats.additions)}</span><span class="stat-del">-${this.formatNumber(stats.deletions)}</span></div>
-					</div>
 					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
 				`}
 			</nav>
@@ -797,15 +785,8 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderLabelledRail(): TemplateResult {
-		const identity = this.prIdentity;
-		const stats = this.changesetStats;
 		return html`
 			<nav class="rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phases">
-				<div class="rail-prbox">
-					<div class="num">${identity.kicker}</div>
-					<div class="prtitle">${identity.title}</div>
-					<div class="meta"><span>${stats.files} files</span><span class="stat-add">+${this.formatNumber(stats.additions)}</span><span class="stat-del">-${this.formatNumber(stats.deletions)}</span></div>
-				</div>
 				${PHASES.map((phase, index) => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;

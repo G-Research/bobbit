@@ -257,7 +257,9 @@ test.describe("PR walkthrough panel", () => {
 
 		await expectPrototypeHeader(panel, { pr: /PR\s*#123/i, title: /walkthrough/i });
 		await expectPrototypeCardHierarchy(page);
-		await expect(panel.getByTestId("pr-walkthrough-labelled-rail"), "wide panel should show labelled phase/card navigation").toBeVisible();
+		const labelledRail = panel.getByTestId("pr-walkthrough-labelled-rail");
+		await expect(labelledRail, "wide panel should show labelled phase/card navigation").toBeVisible();
+		await expect(labelledRail, "sidebar should not duplicate the header PR headline").not.toContainText(/PR\s*#123/i);
 		await expect(panel.getByTestId("pr-walkthrough-collapsed-rail"), "wide panel should not use the thin collapsed rail").toBeHidden();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" })).toBeVisible();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" })).toBeVisible();
@@ -470,6 +472,20 @@ test.describe("PR walkthrough panel", () => {
 	});
 
 	test("Git Status Widget walkthrough metadata opens a tab with PR title and GitHub link", async ({ page }) => {
+		let requestBody: Record<string, unknown> | undefined;
+		await page.route("**/api/pr-walkthrough/resolve", async (route) => {
+			requestBody = JSON.parse(route.request().postData() || "{}") as Record<string, unknown>;
+			const payload = resolvedWalkthroughPayload("638", "Widget Launched Walkthrough");
+			payload.changeset.filesChanged = 2;
+			payload.changeset.additions = 17;
+			payload.changeset.deletions = 9;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify(payload),
+			});
+		});
+
 		await page.setViewportSize({ width: 1920, height: 1080 });
 		await openApp(page);
 		await createSessionViaUI(page);
@@ -500,6 +516,9 @@ test.describe("PR walkthrough panel", () => {
 		await expect(panel.getByTestId("pr-walkthrough-stat-files"), "Git Status launches should thread available file counts into walkthrough stats").toContainText("2 files");
 		await expect(panel.getByTestId("pr-walkthrough-stat-additions"), "Git Status insertionsVsPrimary should become walkthrough additions").toContainText("+17");
 		await expect(panel.getByTestId("pr-walkthrough-stat-deletions"), "Git Status deletionsVsPrimary should become walkthrough deletions").toContainText("-9");
+		await expect.poll(() => requestBody?.prNumber, { timeout: 5_000 }).toBe("638");
+		expect(requestBody?.baseSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied base refs").toBeUndefined();
+		expect(requestBody?.headSha, "PR walkthroughs should use GitHub's PR diff by default, not locally supplied head refs").toBeUndefined();
 	});
 
 	test("switching walkthrough tabs with no persisted state resets per-card UI state", async ({ page }) => {

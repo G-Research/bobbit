@@ -1519,6 +1519,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}
+						.hideWalkthrough=${true}
 						.prState=${prStatus?.state}
 						.prUrl=${prStatus?.url}
 						.prNumber=${prStatus?.number}
