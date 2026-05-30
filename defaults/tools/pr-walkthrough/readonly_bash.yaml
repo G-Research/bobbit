@@ -1,0 +1,10 @@
+name: readonly_bash
+description: "Run a strictly read-only shell command for PR walkthrough analysis. Blocks writes, tests, builds, installs, servers, mutating git, and GitHub review/comment actions."
+summary: "Run read-only PR analysis commands"
+params: [command, description?, timeout?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Executes only allowlisted read-only commands for PR walkthrough sessions: gh PR reads, git diff/show/log/status, and file search/read commands. Use this instead of bash. Mutating commands are rejected by policy.
