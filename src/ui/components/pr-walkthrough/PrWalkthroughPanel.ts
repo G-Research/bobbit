@@ -387,12 +387,13 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 		.hunk-context-cell {
 			min-height: 34px;
+			padding: 3px;
 			display: inline-flex;
 			flex-direction: column;
-			align-items: center;
+			align-items: stretch;
 			justify-content: center;
-			gap: 0;
-			background: color-mix(in oklch, var(--primary, Highlight) 22%, transparent);
+			gap: 2px;
+			background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent);
 		}
 		.hunk-signature { min-width: 0; padding: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.split-grid { min-width: 820px; }
@@ -548,7 +549,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.context-toggle { width: 22px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
+		.context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent); color: var(--muted-foreground, GrayText); }
 		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 18%, transparent); }
 		.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
@@ -1130,6 +1131,41 @@ export class PrWalkthroughPanel extends LitElement {
 		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
 	}
 
+	private contextSignatureForGap(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): string {
+		const fallback = this.hunkSignature(hunk.header);
+		const start = entry.canExpandBelow ? entry.start : Math.max(entry.start, entry.end - DIFF_CONTEXT_EXPAND_LINES + 1);
+		const end = entry.canExpandBelow ? Math.min(entry.end, entry.start + DIFF_CONTEXT_EXPAND_LINES - 1) : entry.end;
+		const lines = hunk.lines.slice(start, end + 1).map(line => line.text);
+		const candidate = entry.canExpandBelow ? this.firstSignatureLikeLine(lines) : this.lastSignatureLikeLine(lines);
+		return candidate ?? fallback;
+	}
+
+	private firstSignatureLikeLine(lines: string[]): string | undefined {
+		for (const line of lines) {
+			const signature = this.signatureLikeLine(line);
+			if (signature) return signature;
+		}
+		return undefined;
+	}
+
+	private lastSignatureLikeLine(lines: string[]): string | undefined {
+		for (let index = lines.length - 1; index >= 0; index -= 1) {
+			const signature = this.signatureLikeLine(lines[index] ?? "");
+			if (signature) return signature;
+		}
+		return undefined;
+	}
+
+	private signatureLikeLine(line: string): string | undefined {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.length > 180) return undefined;
+		if (/^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\b/.test(trimmed)) return trimmed;
+		if (/^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s*)?\(?[^=]*\)?\s*=>/.test(trimmed)) return trimmed;
+		if (/^[\w$.]+\s*\([^)]*\)\s*=>\s*\{?$/.test(trimmed)) return trimmed;
+		if (/^[\w$.]+\s*\([^)]*\)\s*[,;]?\s*$/.test(trimmed)) return trimmed;
+		return undefined;
+	}
+
 	private diffRenderEntriesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): DiffRenderEntry[] {
 		const importantIndexes = hunk.lines
 			.map((line, index) => this.isImportantDiffLine(card, block, line) ? index : -1)
@@ -1207,7 +1243,7 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
-		return this.renderHunkHeader(hunk.header, this.renderContextButtons(card, block, hunk, entry));
+		return this.renderHunkHeader(this.contextSignatureForGap(hunk, entry), this.renderContextButtons(card, block, hunk, entry));
 	}
 
 	private renderContextButtons(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {

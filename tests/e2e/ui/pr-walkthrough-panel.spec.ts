@@ -401,13 +401,14 @@ test.describe("PR walkthrough panel", () => {
 		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
 		await page.evaluate(async () => {
 			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
-			const lines = Array.from({ length: 15 }, (_, index) => ({
+			const focalIndex = 27;
+			const lines = Array.from({ length: 55 }, (_, index) => ({
 				id: `ctx-${index + 1}`,
-				side: index === 7 ? "new" : "context",
-				oldLine: index === 7 ? undefined : index + 1,
+				side: index === focalIndex ? "new" : "context",
+				oldLine: index === focalIndex ? undefined : index + 1,
 				newLine: index + 1,
-				kind: index === 7 ? "add" : "context",
-				text: index === 7 ? "added focal line" : `context ${index + 1}`,
+				kind: index === focalIndex ? "add" : "context",
+				text: index === focalIndex ? "added focal line" : index === 23 ? "function contextFixture() {" : `context ${index + 1}`,
 			}));
 			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Long context fixture", filesChanged: 1, additions: 1, deletions: 0 };
 			walkthrough.cards = [{
@@ -415,42 +416,48 @@ test.describe("PR walkthrough panel", () => {
 				phaseId: "significant",
 				title: "Long context hunk",
 				summary: "This card verifies compact diff context.",
-				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,15 +1,15 @@ function contextFixture() {", lines }] }],
+				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,55 +1,55 @@ function fallbackSignature() {", lines }] }],
 			}];
 			walkthrough.status = "ready";
 			await walkthrough.updateComplete;
 		});
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title")).toContainText("Long context hunk");
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`), "near context should remain visible by default").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-31"]`), "near trailing context should remain visible by default").toBeVisible();
 		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
 		const hunkSignature = hunkHeader.locator(".hunk-signature");
-		await expect(hunkSignature, "context controls should share the hunk signature bar").toContainText("function contextFixture() {");
+		await expect(hunkSignature, "context controls should show the signature that will be revealed next, not the fallback hunk header").toContainText("function contextFixture() {");
 		await expect(hunkSignature, "hunk range counts should be hidden from the visible signature").not.toContainText("@@");
 		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
 		await expect(toggles.first(), "context controls should be icon-only").toHaveText("");
 		await expect(toggles.first()).toHaveAttribute("data-context-direction", "above");
-		await expect(toggles.first()).toHaveAttribute("title", /Show 4 more lines above/i);
+		await expect(toggles.first()).toHaveAttribute("title", /Show 20 more lines above/i);
 		await expect(toggles.nth(1)).toHaveAttribute("data-context-direction", "below");
-		await expect(toggles.nth(1)).toHaveAttribute("title", /Show 4 more lines below/i);
+		await expect(toggles.nth(1)).toHaveAttribute("title", /Show 20 more lines below/i);
 		await expect.poll(async () => {
 			const [headerBox, toggleBox] = await Promise.all([hunkHeader.boundingBox(), toggles.first().boundingBox()]);
 			return headerBox && toggleBox ? toggleBox.y >= headerBox.y && toggleBox.y + toggleBox.height <= headerBox.y + headerBox.height : false;
 		}, { message: "context buttons should sit inside the hunk signature contrast bar" }).toBe(true);
 		await expect.poll(async () => {
+			const [cellBox, toggleBox] = await Promise.all([hunkHeader.locator(".hunk-context-cell").boundingBox(), toggles.first().boundingBox()]);
+			return cellBox && toggleBox ? toggleBox.width >= cellBox.width - 8 && toggleBox.width < cellBox.width : false;
+		}, { message: "context buttons should span the line-number/sign gutter with a small margin" }).toBe(true);
+		await expect.poll(async () => {
 			const [signatureBox, textBox] = await Promise.all([
 				hunkSignature.boundingBox(),
-				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"] .line-text`).boundingBox(),
+				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"] .line-text`).boundingBox(),
 			]);
 			return signatureBox && textBox ? Math.abs(signatureBox.x - textBox.x) <= 1 : false;
 		}, { message: "hunk signature should align with diff code text, not line numbers" }).toBe(true);
 		await toggles.first().click();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding above context should reveal leading lines").toBeVisible();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "trailing context should remain hidden until expanded below").toBeHidden();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "expanding above context should reveal the next 20 leading lines").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "remaining leading context should stay hidden until expanded again").toBeHidden();
+		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="above"]`).click();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "repeated expansion should reveal context back to the start of the file hunk").toBeVisible();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-55"]`), "trailing context should remain hidden until expanded below").toBeHidden();
 		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="below"]`).click();
-		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "expanding below context should reveal trailing lines").toBeVisible();
-		await expect(activeCard(page).getByTestId("pr-walkthrough-context-toggle")).toBeHidden();
+		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-51"]`), "expanding below context should reveal the next 20 trailing lines").toBeVisible();
 	});
 
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {
