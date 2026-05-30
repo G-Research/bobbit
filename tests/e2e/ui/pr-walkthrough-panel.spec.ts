@@ -351,6 +351,8 @@ test.describe("PR walkthrough panel", () => {
 		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator("svg"), "like action should include a thumbs-up icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator("svg"), "dislike action should include a thumbs-down icon").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action label should stay stable even when comments exist").toContainText(/^Like\s*→$/);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action should never say Like anyway").not.toContainText(/Like anyway/i);
 		await expectActiveDiffMode(page, "split");
 		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
@@ -383,7 +385,8 @@ test.describe("PR walkthrough panel", () => {
 		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
 		await panel.getByTestId("pr-walkthrough-like").first().click();
 		const likedDot = panel.getByTestId("pr-walkthrough-card-dot").first();
-		await expect(likedDot.locator("svg"), "liked cards should show a heart icon").toBeVisible();
+		await expect(likedDot.locator("svg"), "liked cards should show a thumbs-up icon").toBeVisible();
+		await expect(likedDot.locator("svg path").first()).toHaveAttribute("d", /M5 10v12h4V10H5/);
 		await expect(likedDot, "liked cards should use primary styling").toHaveClass(/liked/);
 		await likedDot.click();
 		await expect.poll(() => likedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected liked dots should keep the active glow" }).not.toBe("none");
@@ -393,7 +396,8 @@ test.describe("PR walkthrough panel", () => {
 		await createCardComment(page, `collapsed-dislike-${Date.now()}`);
 		await panel.getByTestId("pr-walkthrough-dislike").first().click();
 		const dislikedDot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
-		await expect(dislikedDot.locator("svg"), "disliked cards should show a cross icon").toBeVisible();
+		await expect(dislikedDot.locator("svg"), "disliked cards should show a thumbs-down icon").toBeVisible();
+		await expect(dislikedDot.locator("svg path").first()).toHaveAttribute("d", /M19 14V2h-4v12h4/);
 		await expect(dislikedDot, "disliked cards should use danger styling").toHaveClass(/disliked/);
 		await dislikedDot.click();
 		await expect.poll(() => dislikedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected disliked dots should keep the active glow" }).not.toBe("none");
