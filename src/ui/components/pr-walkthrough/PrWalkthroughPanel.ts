@@ -515,9 +515,9 @@ export class PrWalkthroughPanel extends LitElement {
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
 		.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
-		.modebar .mode-toggle { overflow: hidden; border-radius: 7px; }
-		.modebar .mode-toggle button { width: 28px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 0; color: var(--muted-foreground, GrayText); }
-		.modebar .mode-toggle button.active { background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
+		.modebar .mode-toggle { gap: 2px; padding: 2px; border-radius: 7px; background: color-mix(in oklch, var(--background, Canvas) 62%, transparent); }
+		.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); }
+		.modebar .mode-toggle button.active { background: color-mix(in oklch, var(--primary, Highlight) 22%, transparent); color: var(--primary, Highlight); outline: 1px solid color-mix(in oklch, var(--primary, Highlight) 42%, var(--border, ButtonBorder)); }
 		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
@@ -997,7 +997,7 @@ export class PrWalkthroughPanel extends LitElement {
 			<div class="modebar" data-testid="pr-walkthrough-diff-mode-chooser">
 				<span class="mode-toggle" role="radiogroup" aria-label="Diff display mode">
 					<button id="diff-mode-split" data-testid="diff-mode-split" class=${this.effectiveDiffMode === "split" ? "active" : ""} type="button" role="radio" aria-label="Split diff" title="Split diff" aria-checked=${this.effectiveDiffMode === "split"} @click=${() => this.setDiffMode("split")}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2" y="3" width="5" height="10" rx="1"></rect><rect x="9" y="3" width="5" height="10" rx="1"></rect></svg></button>
-					<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path></svg></button>
+					<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}><svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h4"></path><path d="M13 6h8"></path><path d="M5 12h4"></path><path d="M13 12h8"></path><path d="M5 18h4M7 16v4"></path><path d="M13 18h8"></path></svg></button>
 				</span>
 			</div>
 		`;
