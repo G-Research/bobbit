@@ -582,7 +582,6 @@ export class PrWalkthroughPanel extends LitElement {
 		.tok-function { color: var(--chart-6, var(--primary, Highlight)); }
 		.comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); line-height: 18px; font-weight: 800; }
 		.diff-line.editing .comment-cue, .diff-line.commented .comment-cue { opacity: 1; }
-		.editor-anchor { margin-bottom: 2px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.card-comments { margin: 18px 0 0; border-color: color-mix(in oklch, var(--warning, orange) 22%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--warning, orange) 5%, transparent); }
 		.card-comments h3 { font-size: 11px; color: var(--muted-foreground, GrayText); text-transform: uppercase; letter-spacing: 0.07em; }
 		.card-comment-chips { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -1406,7 +1405,6 @@ export class PrWalkthroughPanel extends LitElement {
 			${comments.length ? html`<div class="line-comments">${comments.map(comment => this.renderComment(comment, "line"))}</div>` : nothing}
 			${this._editingLineKey === key ? html`
 				<div class="line-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="line" data-card-id=${card.id} data-diff-block-id=${block.id} data-line-id=${line.id}>
-					<div class="editor-anchor">Comment anchors to <b>${block.filePath}:${line.newLine ?? line.oldLine ?? line.id}</b></div>
 					<textarea data-testid="pr-walkthrough-comment-input" .value=${this._lineDrafts[key] ?? ""} placeholder="Or write your own comment…" @input=${(event: InputEvent) => this.updateLineDraft(key, event)}></textarea>
 					<div class="comment-actions">
 						<button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => this.saveLineComment(card.id, block.id, line.id)}>Save comment</button>
