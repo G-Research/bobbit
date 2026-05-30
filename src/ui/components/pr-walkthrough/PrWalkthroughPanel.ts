@@ -496,7 +496,6 @@ export class PrWalkthroughPanel extends LitElement {
 		.card-head { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
 		.phase-label { display: inline-block; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
-		.meta2 { color: var(--muted-foreground, GrayText); font-size: 12px; margin-bottom: 16px; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
 		.modebar { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; flex-wrap: wrap; }
 		.modebar .label { font-size: 11px; color: var(--muted-foreground, GrayText); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 800; }
@@ -939,8 +938,6 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderCard(card: PrWalkthroughCard): TemplateResult {
 		const phaseIndex = PHASES.findIndex(item => item.id === card.phaseId);
 		const phase = PHASES[phaseIndex]?.label ?? card.phaseId;
-		const phaseCards = this.cardsForPhase(card.phaseId);
-		const cardIndex = phaseCards.findIndex(item => item.id === card.id);
 		const dislikeDisabled = cardRequiresCommentForDislike({ comments: this._comments }, card.id);
 		const commentCount = this.commentCountForCard(card.id);
 		return html`
@@ -949,7 +946,6 @@ export class PrWalkthroughPanel extends LitElement {
 					<section class="card-head">
 						<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
 						<h2 data-testid="pr-walkthrough-card-title">${card.title}</h2>
-						<div class="meta2">Card ${cardIndex + 1} of ${phaseCards.length} · logical change set</div>
 						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
