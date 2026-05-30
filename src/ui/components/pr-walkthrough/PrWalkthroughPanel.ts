@@ -378,12 +378,23 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 		.diff-overflow { overflow-x: auto; overflow-y: hidden; }
 		.hunk-header {
-			padding: 6px 10px;
+			display: grid;
+			grid-template-columns: 104px minmax(0, 1fr);
 			min-width: max-content;
 			font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-			color: var(--info, var(--primary, Highlight));
+			color: var(--muted-foreground, GrayText);
 			background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent);
 		}
+		.hunk-context-cell {
+			min-height: 34px;
+			display: inline-flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 0;
+			background: color-mix(in oklch, var(--primary, Highlight) 22%, transparent);
+		}
+		.hunk-signature { min-width: 0; padding: 8px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.split-grid { min-width: 820px; }
 		.split-row {
 			display: grid;
@@ -537,7 +548,6 @@ export class PrWalkthroughPanel extends LitElement {
 		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
-		.context-controls { width: 100%; min-width: max-content; display: flex; align-items: center; gap: 10px; padding: 5px 12px; background: color-mix(in oklch, var(--primary, Highlight) 12%, transparent); }
 		.context-toggle { width: 22px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
 		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 18%, transparent); }
 		.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -1058,22 +1068,29 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="split-grid">
-					${block.hunks.map(hunk => html`
-						<div class="hunk-header">${hunk.header}</div>
-						${this.diffRenderEntriesForHunk(card, block, hunk).map(entry => entry.kind === "context"
-							? this.renderContextToggle(card, block, hunk, entry)
-							: html`${this.buildSideBySidePairs(entry.lines).map(pair => html`
-								<div class="split-row">
-									${this.renderDiffLine(card, block, pair.left, "old")}
-									${this.renderDiffLine(card, block, pair.right, "new")}
-								</div>
-								${pair.left?.id === pair.right?.id
-									? this.renderLineDetails(card, block, pair.left)
-									: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
-							`)}`)}
-					`)}
+					${block.hunks.map(hunk => this.renderSplitHunk(card, block, hunk))}
 				</div>
 			</div>
+		`;
+	}
+
+	private renderSplitHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
+		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
+		return html`
+			${entries.map((entry, index) => entry.kind === "context"
+				? this.renderContextToggle(card, block, hunk, entry)
+				: html`
+					${index === 0 ? this.renderHunkHeader(hunk.header) : nothing}
+					${this.buildSideBySidePairs(entry.lines).map(pair => html`
+						<div class="split-row">
+							${this.renderDiffLine(card, block, pair.left, "old")}
+							${this.renderDiffLine(card, block, pair.right, "new")}
+						</div>
+						${pair.left?.id === pair.right?.id
+							? this.renderLineDetails(card, block, pair.left)
+							: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
+					`)}
+				`)}
 		`;
 	}
 
@@ -1081,13 +1098,29 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="inline-lines">
-					${block.hunks.map(hunk => html`
-						<div class="hunk-header">${hunk.header}</div>
-						${this.diffRenderEntriesForHunk(card, block, hunk).map(entry => entry.kind === "context"
-							? this.renderContextToggle(card, block, hunk, entry)
-							: html`${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}`)}
-					`)}
+					${block.hunks.map(hunk => this.renderInlineHunk(card, block, hunk))}
 				</div>
+			</div>
+		`;
+	}
+
+	private renderInlineHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
+		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
+		return html`
+			${entries.map((entry, index) => entry.kind === "context"
+				? this.renderContextToggle(card, block, hunk, entry)
+				: html`
+					${index === 0 ? this.renderHunkHeader(hunk.header) : nothing}
+					${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
+				`)}
+		`;
+	}
+
+	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult {
+		return html`
+			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header">
+				<div class="hunk-context-cell">${controls}</div>
+				<div class="hunk-signature">${header}</div>
 			</div>
 		`;
 	}
@@ -1169,21 +1202,23 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
+		return this.renderHunkHeader(hunk.header, this.renderContextButtons(card, block, hunk, entry));
+	}
+
+	private renderContextButtons(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
 		const aboveCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
 		const belowCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
 		return html`
-			<div class="context-controls" data-testid="pr-walkthrough-context-controls">
-				${entry.canExpandBelow ? html`
-					<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="below" type="button" title=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below`} aria-label=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "below")}>
-						<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
-					</button>
-				` : nothing}
-				${entry.canExpandAbove ? html`
-					<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="above" type="button" title=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above`} aria-label=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "above")}>
-						<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
-					</button>
-				` : nothing}
-			</div>
+			${entry.canExpandBelow ? html`
+				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="below" type="button" title=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below`} aria-label=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "below")}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
+				</button>
+			` : nothing}
+			${entry.canExpandAbove ? html`
+				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="above" type="button" title=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above`} aria-label=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "above")}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
+				</button>
+			` : nothing}
 		`;
 	}
 

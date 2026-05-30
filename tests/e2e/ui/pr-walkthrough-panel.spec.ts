@@ -424,12 +424,18 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
+		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
+		await expect(hunkHeader.locator(".hunk-signature"), "context controls should share the hunk signature bar").toContainText("@@ -1,15 +1,15 @@");
 		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
 		await expect(toggles.first(), "context controls should be icon-only").toHaveText("");
 		await expect(toggles.first()).toHaveAttribute("data-context-direction", "above");
 		await expect(toggles.first()).toHaveAttribute("title", /Show 4 more lines above/i);
 		await expect(toggles.nth(1)).toHaveAttribute("data-context-direction", "below");
 		await expect(toggles.nth(1)).toHaveAttribute("title", /Show 4 more lines below/i);
+		await expect.poll(async () => {
+			const [headerBox, toggleBox] = await Promise.all([hunkHeader.boundingBox(), toggles.first().boundingBox()]);
+			return headerBox && toggleBox ? toggleBox.y >= headerBox.y && toggleBox.y + toggleBox.height <= headerBox.y + headerBox.height : false;
+		}, { message: "context buttons should sit inside the hunk signature contrast bar" }).toBe(true);
 		await toggles.first().click();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding above context should reveal leading lines").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "trailing context should remain hidden until expanded below").toBeHidden();
