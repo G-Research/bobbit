@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { resolveGithubPr, GithubPrAdapterError } from "./github-adapter.js";
+import { resolveLocalChangeset } from "./git-changeset.js";
 import { saveWalkthrough, type WalkthroughStorePayload } from "./walkthrough-store.js";
 import {
 	mapYamlToWalkthroughPayload as defaultMapYamlToWalkthroughPayload,
 	validatePrWalkthroughYaml as defaultValidatePrWalkthroughYaml,
 	type PrWalkthroughYamlDocument,
+	type WalkthroughParsedDiffForYamlMapping,
 } from "./walkthrough-yaml-schema.js";
 import {
 	WalkthroughAgentStore,
@@ -72,6 +75,7 @@ export type WalkthroughAgentManagerDeps = {
 	broadcast?: (event: Record<string, unknown>) => void;
 	validateYaml?: (yamlText: string, job: PrWalkthroughJobRecord) => Promise<WalkthroughYamlValidationResult> | WalkthroughYamlValidationResult;
 	mapYamlToPayload?: (document: Record<string, unknown>, job: PrWalkthroughJobRecord) => Promise<WalkthroughStorePayload> | WalkthroughStorePayload;
+	resolveDiffForYamlMapping?: (document: Record<string, unknown>, job: PrWalkthroughJobRecord) => Promise<WalkthroughParsedDiffForYamlMapping> | WalkthroughParsedDiffForYamlMapping;
 };
 
 export type LaunchWalkthroughRequest = {
@@ -269,7 +273,15 @@ export class WalkthroughAgentManager {
 			return { ok: false, status: "validation_failed", retryable: true, validation: validation.summary, job: updated };
 		}
 
-		const payload = validation.payload ?? await this.mapYamlToPayload(validation.document, job);
+		let payload: WalkthroughStorePayload;
+		try {
+			payload = validation.payload ?? await this.mapYamlToPayload(validation.document, job);
+		} catch (error) {
+			const typed = classifyDiffResolutionError(error);
+			const updated = this.store.update(job.jobId, { status: "error", error: typed }) ?? job;
+			this.broadcastJob(updated);
+			throw routeError(statusForJobError(typed), typed.message, { code: typed.code, retryable: typed.retryable, job: updated });
+		}
 		const stored = saveWalkthrough(payload, this.stateDir);
 		const warnings = [...(validation.warnings ?? []), ...(payload.warnings ?? [])];
 		const updated = this.store.update(job.jobId, {
@@ -308,11 +320,63 @@ export class WalkthroughAgentManager {
 
 	private async mapYamlToPayload(document: Record<string, unknown>, job: PrWalkthroughJobRecord): Promise<WalkthroughStorePayload> {
 		if (this.deps.mapYamlToPayload) return this.deps.mapYamlToPayload(document, job);
-		return defaultMapYamlToWalkthroughPayload(document as unknown as PrWalkthroughYamlDocument, {}, {
+		const parsedDiff = await this.resolveDiffForYamlMapping(document, job);
+		return defaultMapYamlToWalkthroughPayload(document as unknown as PrWalkthroughYamlDocument, parsedDiff, {
 			changesetId: job.changesetId,
 			target: { ...job.target, changesetId: job.changesetId },
-			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission remains explicit and is handled by the existing export flow." },
+			export: parsedDiff.export ?? { provider: "github", available: false, previewOnly: true, reason: "GitHub submission remains explicit and is handled by the existing export flow." },
 		});
+	}
+
+	private async resolveDiffForYamlMapping(document: Record<string, unknown>, job: PrWalkthroughJobRecord): Promise<WalkthroughParsedDiffForYamlMapping> {
+		if (this.deps.resolveDiffForYamlMapping) return this.deps.resolveDiffForYamlMapping(document, job);
+		const yaml = document as unknown as PrWalkthroughYamlDocument;
+		const baseSha = job.target.baseSha;
+		const headSha = job.target.headSha;
+
+		if (job.target.provider === "local") {
+			if (!baseSha || !headSha) throw new Error("Local walkthrough diff resolution requires baseSha and headSha.");
+			return localDiffForYaml(job.cwd, baseSha, headSha);
+		}
+
+		if (job.target.provider === "github") {
+			if (baseSha && headSha) {
+				try {
+					const local = await localDiffForYaml(job.cwd, baseSha, headSha);
+					return {
+						...local,
+						changeset: {
+							...local.changeset,
+							provider: "github",
+							externalUrl: yaml.pr.url,
+							prUrl: yaml.pr.url,
+							prNumber: yaml.pr.number,
+							prTitle: yaml.pr.title,
+							prBody: yaml.pr.original_description.body,
+							title: yaml.pr.title,
+						},
+						export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
+					};
+				} catch {
+					// Fall through to the GitHub adapter so inaccessible/private/rate-limit
+					// failures become deterministic job errors instead of empty diff mapping.
+				}
+			}
+
+			const resolved = await resolveGithubPr({
+				cwd: job.cwd,
+				prUrl: job.target.prUrl ?? yaml.pr.url,
+				prNumber: job.target.number ?? yaml.pr.number,
+			});
+			return {
+				changeset: resolved.changeset,
+				files: resolved.files,
+				warnings: resolved.warnings,
+				export: resolved.export as unknown as WalkthroughParsedDiffForYamlMapping["export"],
+			};
+		}
+
+		throw new Error(`Unsupported PR walkthrough target provider: ${job.target.provider}`);
 	}
 
 	private getSession(sessionId: string): SessionLike | PersistedSessionLike | undefined {
@@ -457,10 +521,54 @@ function normalizeValidationSummary(value: unknown, yamlText: string): PrWalkthr
 	return validationSummary([{ path: "$", message: stringValue(value) ?? "Invalid YAML." }], createHash("sha256").update(yamlText).digest("hex").slice(0, 16));
 }
 
+async function localDiffForYaml(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughParsedDiffForYamlMapping> {
+	const resolved = await resolveLocalChangeset({ cwd, baseSha, headSha });
+	return {
+		changeset: resolved.changeset,
+		files: resolved.files,
+		warnings: resolved.warnings,
+		limits: resolved.limits as WalkthroughParsedDiffForYamlMapping["limits"],
+		export: { provider: "local", available: false, reason: "Local changesets can be previewed but not submitted to GitHub." },
+	};
+}
+
 function classifyAgentError(error: unknown, fallbackCode: string): PrWalkthroughJobError {
 	const message = error instanceof Error ? error.message : String(error);
 	const code = /model|api key|provider|unavailable/i.test(message) ? "MODEL_UNAVAILABLE" : fallbackCode;
 	return { code, message, retryable: true };
+}
+
+function classifyDiffResolutionError(error: unknown): PrWalkthroughJobError {
+	if (error instanceof GithubPrAdapterError) {
+		if (error.status === 401 || error.code === "github_auth_failed") {
+			return { code: "GITHUB_AUTH_REQUIRED", message: "GitHub rejected the configured credentials. Check GITHUB_TOKEN/GH_TOKEN or run gh auth status, then retry the walkthrough.", retryable: true };
+		}
+		if (error.status === 403 && error.code === "github_rate_limited") {
+			return { code: "GITHUB_RATE_LIMITED", message: "GitHub API rate limit exceeded. Configure GITHUB_TOKEN/GH_TOKEN, run gh auth login, or retry after the rate-limit reset time.", retryable: true };
+		}
+		if (error.status === 403) {
+			return { code: "GITHUB_FORBIDDEN", message: "GitHub denied access to this pull request or repository. Check token permissions and repository access, then retry.", retryable: true };
+		}
+		if (error.status === 404 || error.code === "github_pr_not_found") {
+			return { code: "GITHUB_NOT_FOUND_OR_PRIVATE", message: "GitHub could not find this pull request. It may be private, deleted, or inaccessible with the current credentials.", retryable: true };
+		}
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	if (/rate limit|api rate/i.test(message)) return { code: "GITHUB_RATE_LIMITED", message, retryable: true };
+	if (/forbidden|permission|denied/i.test(message)) return { code: "GITHUB_FORBIDDEN", message, retryable: true };
+	if (/not found|private|404/i.test(message)) return { code: "GITHUB_NOT_FOUND_OR_PRIVATE", message, retryable: true };
+	if (/auth|credential|token|401/i.test(message)) return { code: "GITHUB_AUTH_REQUIRED", message, retryable: true };
+	return { code: "DIFF_RESOLUTION_FAILED", message: `Could not resolve PR diff for YAML mapping: ${message}`, retryable: true };
+}
+
+function statusForJobError(error: PrWalkthroughJobError): number {
+	switch (error.code) {
+		case "GITHUB_AUTH_REQUIRED": return 401;
+		case "GITHUB_FORBIDDEN": return 403;
+		case "GITHUB_RATE_LIMITED": return 429;
+		case "GITHUB_NOT_FOUND_OR_PRIVATE": return 404;
+		default: return 502;
+	}
 }
 
 function isRecoverablePromptDispatchError(error: unknown): boolean {

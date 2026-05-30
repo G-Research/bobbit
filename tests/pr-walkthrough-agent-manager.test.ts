@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ let tempDir = "";
 const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
 const { WalkthroughAgentManager } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { handlePrWalkthroughApiRoute } = await import("../src/server/pr-walkthrough/routes.ts");
+const { getWalkthrough } = await import("../src/server/pr-walkthrough/walkthrough-store.ts");
 
 type MockResponse = {
 	status?: number;
@@ -72,7 +74,7 @@ function makeSessionManager() {
 	};
 }
 
-function validYaml(prNumber = 42): string {
+function validYaml(prNumber = 42, options: { baseSha?: string; headSha?: string; reviewChunk?: string; chunkOrder?: string } = {}): string {
 	return `schema_version: 1
 pr:
   provider: github
@@ -81,8 +83,8 @@ pr:
   number: ${prNumber}
   title: Demo PR
   url: https://github.com/acme/widgets/pull/${prNumber}
-  base_sha: "abcdef1"
-  head_sha: "1234567"
+  base_sha: "${options.baseSha ?? "abcdef1"}"
+  head_sha: "${options.headSha ?? "1234567"}"
   original_description:
     body: "Demo body"
     source: gh_api
@@ -106,7 +108,7 @@ walkthrough:
     blocking_concerns: []
     non_blocking_concerns: []
   design_decisions: []
-  review_chunks: []
+  review_chunks:${options.reviewChunk ?? " []"}
   omissions_and_followups: []
   audit:
     remaining_changed_areas: []
@@ -116,8 +118,53 @@ walkthrough:
       - Confirm behavior
   display:
     phase_order: [orientation, design, significant, other, audit]
-    chunk_order: []
+    chunk_order:${options.chunkOrder ?? " []"}
 `;
+}
+
+function createGitDiffFixture(): { baseSha: string; headSha: string; hunkHeader: string; filePath: string } {
+	execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
+	execFileSync("git", ["config", "user.email", "tests@example.com"], { cwd: tempDir });
+	execFileSync("git", ["config", "user.name", "Tests"], { cwd: tempDir });
+	execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: tempDir });
+	const srcDir = path.join(tempDir, "src");
+	fs.mkdirSync(srcDir, { recursive: true });
+	const filePath = "src/demo.ts";
+	fs.writeFileSync(path.join(tempDir, filePath), "export const value = 1;\n", "utf-8");
+	execFileSync("git", ["add", filePath], { cwd: tempDir });
+	execFileSync("git", ["commit", "-m", "base"], { cwd: tempDir, stdio: "ignore" });
+	const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: tempDir, encoding: "utf-8" }).trim();
+	fs.writeFileSync(path.join(tempDir, filePath), "export const value = 2;\nexport const label = 'demo';\n", "utf-8");
+	execFileSync("git", ["add", filePath], { cwd: tempDir });
+	execFileSync("git", ["commit", "-m", "change"], { cwd: tempDir, stdio: "ignore" });
+	const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: tempDir, encoding: "utf-8" }).trim();
+	const diff = execFileSync("git", ["diff", `${baseSha}..${headSha}`], { cwd: tempDir, encoding: "utf-8" });
+	const hunkHeader = diff.split(/\r?\n/).find(line => line.startsWith("@@ "));
+	assert.ok(hunkHeader);
+	return { baseSha, headSha, hunkHeader, filePath };
+}
+
+function yamlReviewChunkFor(fixture: { hunkHeader: string; filePath: string }): { reviewChunk: string; chunkOrder: string } {
+	return {
+		reviewChunk: `
+    - id: demo-change
+      phase: significant
+      title: Demo value change
+      reviewer_goal: Confirm the demo value change is intentional.
+      explanation: The exported demo value changes and a label is added.
+      files:
+        - ${fixture.filePath}
+      relevant_hunks:
+        - file: ${fixture.filePath}
+          hunk_header: "${fixture.hunkHeader.replace(/"/g, "\\\"")}"
+          line_range: "1-2"
+          why_relevant: Shows the changed export.
+      suggested_concerns: []
+      positive_notes:
+        - Small focused change`,
+		chunkOrder: `
+      - demo-change`,
+	};
 }
 
 async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}) {
@@ -205,11 +252,12 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
-		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml() });
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) });
 		assert.equal(result.ok, true);
 		assert.equal(result.status, "ready");
 		assert.equal(sessionManager.sessions.get(launch.childSessionId).status, "idle");
@@ -218,6 +266,50 @@ describe("WalkthroughAgentManager", () => {
 		assert.ok(job?.submittedAt);
 		assert.ok(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")));
 		assert.deepEqual(result.warnings.filter(warning => warning.code === "yaml-fallback-mapper"), []);
+	});
+
+	it("valid YAML submission maps relevant hunks to resolved diff blocks", async () => {
+		const fixture = createGitDiffFixture();
+		const chunk = yamlReviewChunkFor(fixture);
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		const result = await manager.submitYaml({
+			sessionId: launch.childSessionId,
+			jobId: launch.jobId,
+			yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha, ...chunk }),
+		});
+
+		assert.equal(result.ok, true);
+		const stored = getWalkthrough(launch.changesetId, tempDir);
+		assert.ok(stored);
+		const reviewCard = stored.cards.find((card: any) => card.id === "significant-demo-change");
+		assert.ok(reviewCard, "expected review chunk card to be stored");
+		assert.ok(reviewCard.diffBlocks.length > 0, "expected relevant_hunks to map to non-empty diffBlocks");
+		assert.equal(reviewCard.diffBlocks[0].filePath, fixture.filePath);
+		assert.equal(stored.warnings.some((warning: any) => warning.code === "unmapped_hunk"), false);
+	});
+
+	it("submit-yaml converts diff resolution failures into structured job errors", async () => {
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store: new WalkthroughAgentStore(tempDir),
+			resolveDiffForYamlMapping: () => { throw new Error("GitHub API rate limit exceeded"); },
+		});
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		await assert.rejects(
+			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml() }),
+			/GitHub API rate limit exceeded/,
+		);
+		const job = manager.getJob(launch.jobId);
+		assert.equal(job?.status, "error");
+		assert.equal(job?.error?.code, "GITHUB_RATE_LIMITED");
+		assert.equal(job?.error?.retryable, true);
 	});
 
 	it("internal submit validates YAML identity against the launch target", async () => {
@@ -251,9 +343,10 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("route exposes launch, job restore, session restore, and submit-yaml", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(launch.status, 201);
 		assert.equal(launch.body.status, "waiting_for_yaml");
 
@@ -269,7 +362,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(invalid.status, 200);
 		assert.equal(invalid.body.ok, false);
 
-		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml() });
+		const valid = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) });
 		assert.equal(valid.status, 200);
 		assert.equal(valid.body.ok, true);
 	});
