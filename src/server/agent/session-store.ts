@@ -48,6 +48,16 @@ export interface PersistedSession {
 	streamingStartedAt?: number;
 	/** If this session is a delegate, the parent session ID */
 	delegateOf?: string;
+	/** First-class parent session ID for visible child sessions (not delegate lifecycle). */
+	parentSessionId?: string;
+	/** Kind discriminator for first-class child sessions, e.g. "pr-walkthrough". */
+	childKind?: string;
+	/** Whether the session should be treated as read-only by clients/tools. */
+	readOnly?: boolean;
+	/** PR walkthrough job metadata for session-hosted walkthrough children. */
+	walkthroughJobId?: string;
+	walkthroughChangesetId?: string;
+	walkthroughTargetKey?: string;
 	/** Which project this session belongs to */
 	projectId?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester') */
@@ -120,6 +130,12 @@ export type UpdatableSessionFields = Pick<
 	| "wasStreaming"
 	| "streamingStartedAt"
 	| "delegateOf"
+	| "parentSessionId"
+	| "childKind"
+	| "readOnly"
+	| "walkthroughJobId"
+	| "walkthroughChangesetId"
+	| "walkthroughTargetKey"
 	| "role"
 	| "teamGoalId"
 	| "teamLeadSessionId"
@@ -496,6 +512,8 @@ export class SessionStore {
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
+		"parentSessionId", "childKind", "readOnly", "walkthroughJobId",
+		"walkthroughChangesetId", "walkthroughTargetKey",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId",

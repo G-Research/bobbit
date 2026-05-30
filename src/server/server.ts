@@ -3253,7 +3253,7 @@ async function handleApiRoute(
 		return;
 	}
 
-	// BFS helper: walk delegateOf, teamLeadSessionId, teamGoalId, and goalId chains
+	// BFS helper: walk delegateOf, parentSessionId, teamLeadSessionId, teamGoalId, and goalId chains
 	// from seed IDs through an archived session pool.
 	function bfsEnrichArchived(seedIds: string[], allArchived: any[]): any[] {
 		const result: any[] = [];
@@ -3264,6 +3264,7 @@ async function handleApiRoute(
 			for (const s of allArchived) {
 				if (!seen.has(s.id) && (
 					s.delegateOf === parentId ||
+					s.parentSessionId === parentId ||
 					s.teamLeadSessionId === parentId ||
 					s.teamGoalId === parentId ||
 					s.goalId === parentId
@@ -3485,6 +3486,12 @@ async function handleApiRoute(
 					goalId: archived.goalId,
 					assistantType: archived.assistantType,
 					delegateOf: archived.delegateOf,
+					parentSessionId: archived.parentSessionId,
+					childKind: archived.childKind,
+					readOnly: archived.readOnly,
+					walkthroughJobId: archived.walkthroughJobId,
+					walkthroughChangesetId: archived.walkthroughChangesetId,
+					walkthroughTargetKey: archived.walkthroughTargetKey,
 					role: archived.role,
 					accessory: archived.accessory,
 					teamGoalId: archived.teamGoalId,
@@ -3522,6 +3529,12 @@ async function handleApiRoute(
 			roleAssistant: session.assistantType === "role",
 			toolAssistant: session.assistantType === "tool",
 			delegateOf: session.delegateOf,
+			parentSessionId: sessionPs?.parentSessionId ?? session.parentSessionId,
+			childKind: sessionPs?.childKind ?? session.childKind,
+			readOnly: sessionPs?.readOnly ?? session.readOnly,
+			walkthroughJobId: sessionPs?.walkthroughJobId ?? session.walkthroughJobId,
+			walkthroughChangesetId: sessionPs?.walkthroughChangesetId ?? session.walkthroughChangesetId,
+			walkthroughTargetKey: sessionPs?.walkthroughTargetKey ?? session.walkthroughTargetKey,
 			role: session.role,
 			accessory: session.accessory,
 			teamGoalId: session.teamGoalId,
@@ -3781,7 +3794,20 @@ async function handleApiRoute(
 		}
 
 		try {
-			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, { ...createOpts, worktreeOpts, reattemptGoalId, sandboxed, projectId: resolvedProjectId, ...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}) });
+			const session = await sessionManager.createSession(cwd, args, goalId, assistantType, {
+				...createOpts,
+				worktreeOpts,
+				reattemptGoalId,
+				sandboxed,
+				projectId: resolvedProjectId,
+				...(autoSandboxBranch ? { sandboxBranch: autoSandboxBranch } : {}),
+				parentSessionId: typeof body?.parentSessionId === "string" ? body.parentSessionId : undefined,
+				childKind: typeof body?.childKind === "string" ? body.childKind : undefined,
+				readOnly: typeof body?.readOnly === "boolean" ? body.readOnly : undefined,
+				walkthroughJobId: typeof body?.walkthroughJobId === "string" ? body.walkthroughJobId : undefined,
+				walkthroughChangesetId: typeof body?.walkthroughChangesetId === "string" ? body.walkthroughChangesetId : undefined,
+				walkthroughTargetKey: typeof body?.walkthroughTargetKey === "string" ? body.walkthroughTargetKey : undefined,
+			});
 
 			// Set assistant role metadata if no explicit role was provided
 			if (!createOpts?.role && assistantType) {
@@ -3814,6 +3840,12 @@ async function handleApiRoute(
 				toolAssistant: session.assistantType === "tool",
 				role: session.role,
 				accessory: session.accessory,
+				parentSessionId: session.parentSessionId,
+				childKind: session.childKind,
+				readOnly: session.readOnly,
+				walkthroughJobId: session.walkthroughJobId,
+				walkthroughChangesetId: session.walkthroughChangesetId,
+				walkthroughTargetKey: session.walkthroughTargetKey,
 				reattemptGoalId,
 				...(provisionalProjectId ? { provisionalProjectId } : {}),
 			}, 201);
@@ -6912,6 +6944,7 @@ async function handleApiRoute(
 				sessionManager.updateSessionMeta(id, { delegateOf: body.delegateOf || undefined });
 			}
 		}
+
 
 		if (typeof body.teamLeadSessionId === "string") {
 			// Update teamLeadSessionId — works for both live and archived sessions
