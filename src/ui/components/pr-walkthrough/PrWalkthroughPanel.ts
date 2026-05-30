@@ -149,11 +149,12 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 
 		.title-row { display: contents; }
-		.title-wrap { min-width: 0; display: grid; gap: 1px; }
+		.title-wrap { min-width: 0; display: grid; gap: 1px; flex: 1 1 auto; }
+		.title-meta-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 		.kicker { display: none; }
 		.title { margin: 0; font-size: 14px; line-height: 1.25; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.meta { color: var(--muted-foreground, GrayText); font-size: 12px; margin-top: 4px; }
-		.header-spacer { flex: 1 1 auto; min-width: 10px; }
+		.header-spacer { display: none; }
 		.stats { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.2; white-space: nowrap; }
 		.stat-files { color: var(--muted-foreground, GrayText); }
 		.stat-sep { color: var(--muted-foreground, GrayText); opacity: 0.7; }
@@ -758,18 +759,20 @@ export class PrWalkthroughPanel extends LitElement {
 			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
 				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
 					<h1 class="title" title=${identity.title}>${identity.title}</h1>
-					<div class="stats" data-testid="pr-walkthrough-pr-stats">
-						<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
-						<span class="stat-sep" aria-hidden="true">·</span>
-						<span class="stat-lines" aria-label="Line changes">
-							<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
-							<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
-						</span>
+					<div class="title-meta-row">
+						<div class="stats" data-testid="pr-walkthrough-pr-stats">
+							<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
+							<span class="stat-sep" aria-hidden="true">·</span>
+							<span class="stat-lines" aria-label="Line changes">
+								<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
+								<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
+							</span>
+						</div>
+						${identity.url ? html`
+							<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}>${this.renderGithubMark()}<span>${githubLinkLabel}</span></a>
+						` : nothing}
 					</div>
 				</div>
-				${identity.url ? html`
-					<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}>${this.renderGithubMark()}<span>${githubLinkLabel}</span></a>
-				` : nothing}
 				<span class="header-spacer"></span>
 				<div class="progress-wrap" aria-label="Walkthrough progress" data-testid="pr-walkthrough-progress">
 					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
