@@ -432,6 +432,7 @@ test.describe("PR walkthrough panel", () => {
 		const hunkSignature = hunkHeader.locator(".hunk-signature");
 		await expect(hunkSignature, "context controls should show the signature that will be revealed next, not the fallback hunk header").toContainText("function contextFixture() {");
 		await expect(hunkSignature, "hunk range counts should be hidden from the visible signature").not.toContainText("@@");
+		await expect(hunkHeader, "hunk range counts should not appear in the blue-row tooltip").not.toHaveAttribute("title", /@@/);
 		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
 		await expect(toggles.first(), "context controls should be icon-only").toHaveText("");
 		await expect(toggles.first()).toHaveAttribute("data-context-direction", "above");

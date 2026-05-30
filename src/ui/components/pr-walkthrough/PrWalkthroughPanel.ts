@@ -1132,11 +1132,12 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult {
-		const label = header || "Expand hidden diff context";
+		const signature = this.hunkSignature(header);
+		const label = signature || "Expand hidden diff context";
 		return html`
-			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${label} title=${header}>
+			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${label} title=${signature}>
 				<div class="hunk-context-cell">${controls}</div>
-				<div class="hunk-signature">${this.hunkSignature(header)}</div>
+				<div class="hunk-signature">${signature}</div>
 			</div>
 		`;
 	}
