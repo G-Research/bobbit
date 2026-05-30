@@ -197,6 +197,7 @@ async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	const pips = collapsedRail.getByTestId("pr-walkthrough-phase-pip");
 	await expect(pips.first(), "collapsed rail should show visible phase pips").toBeVisible();
 	await expect(pips.first(), "phase pips should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
+	await expect.poll(() => pips.first().evaluate(el => getComputedStyle(el.parentElement as HTMLElement, "::before").content), { message: "first collapsed phase should not render a leading divider" }).toBe("none");
 	const unreviewedPip = pips.nth(1);
 	await expect(unreviewedPip, "collapsed rail phases should render as compact muted headers").toBeVisible();
 	await expect.poll(() => unreviewedPip.evaluate(el => {
@@ -353,6 +354,7 @@ test.describe("PR walkthrough panel", () => {
 			const [contentBox, actionsBox] = await Promise.all([panel.locator(".content").boundingBox(), activeCard(page).locator(".actions").boundingBox()]);
 			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
 		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
+		await expect(activeCard(page).locator(".actions"), "interaction bar should keep breathing room above the action row without adding bottom margin").toHaveCSS("padding-top", "16px");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".decision-icon"), "like action should include a thumbs-up icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator(".decision-icon"), "dislike action should include a thumbs-down icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action label should stay stable even when comments exist").toContainText(/^Like$/);
