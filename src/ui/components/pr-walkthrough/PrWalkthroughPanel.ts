@@ -158,7 +158,6 @@ export class PrWalkthroughPanel extends LitElement {
 		.stat-files { color: var(--muted-foreground, GrayText); }
 		.stat-add { color: var(--positive, var(--chart-3, green)); font-weight: 700; }
 		.stat-del { color: var(--negative, var(--chart-5, red)); font-weight: 700; }
-		.header-pill,
 		.pr-link { display: inline-flex; align-items: center; gap: 5px; max-width: min(32vw, 300px); padding: 2px 8px; border: 1px solid var(--border, ButtonBorder); border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 8%, transparent); color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.35; text-decoration: none; white-space: nowrap; }
 		.pr-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 25%, var(--border, ButtonBorder)); }
 		.pr-link span { overflow: hidden; text-overflow: ellipsis; }
@@ -754,7 +753,6 @@ export class PrWalkthroughPanel extends LitElement {
 					<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
 					<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
 				</span>
-				<span class="header-pill ask">Ask via Bobbit chat outside this pane</span>
 				${identity.url ? html`
 					<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}><span>${identity.linkLabel}</span> ↗</a>
 				` : nothing}
