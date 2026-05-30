@@ -379,7 +379,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-overflow { overflow-x: auto; overflow-y: hidden; }
 		.hunk-header {
 			display: grid;
-			grid-template-columns: 104px minmax(0, 1fr);
+			grid-template-columns: 78px minmax(0, 1fr);
 			min-width: max-content;
 			font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 			color: var(--muted-foreground, GrayText);
@@ -394,7 +394,7 @@ export class PrWalkthroughPanel extends LitElement {
 			gap: 0;
 			background: color-mix(in oklch, var(--primary, Highlight) 22%, transparent);
 		}
-		.hunk-signature { min-width: 0; padding: 8px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.hunk-signature { min-width: 0; padding: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.split-grid { min-width: 820px; }
 		.split-row {
 			display: grid;
@@ -566,6 +566,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-del-count { color: var(--negative, red); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
+		.hunk-header { grid-template-columns: 60px minmax(0, 1fr); }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
 		.diff-line { position: relative; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; font-size: 11.5px; line-height: 1.6; }
 		.diff-line:hover, .diff-line:focus-visible { background: color-mix(in oklch, var(--primary, Highlight) 6%, transparent); }
@@ -1118,11 +1119,15 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult {
 		return html`
-			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header">
+			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${header} title=${header}>
 				<div class="hunk-context-cell">${controls}</div>
-				<div class="hunk-signature">${header}</div>
+				<div class="hunk-signature">${this.hunkSignature(header)}</div>
 			</div>
 		`;
+	}
+
+	private hunkSignature(header: string): string {
+		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
 	}
 
 	private diffRenderEntriesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): DiffRenderEntry[] {

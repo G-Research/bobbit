@@ -415,7 +415,7 @@ test.describe("PR walkthrough panel", () => {
 				phaseId: "significant",
 				title: "Long context hunk",
 				summary: "This card verifies compact diff context.",
-				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,15 +1,15 @@", lines }] }],
+				diffBlocks: [{ id: "long-context-block", filePath: "src/context.ts", hunks: [{ id: "long-context-hunk", header: "@@ -1,15 +1,15 @@ function contextFixture() {", lines }] }],
 			}];
 			walkthrough.status = "ready";
 			await walkthrough.updateComplete;
@@ -425,7 +425,9 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-11"]`), "near trailing context should remain visible by default").toBeVisible();
 		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
-		await expect(hunkHeader.locator(".hunk-signature"), "context controls should share the hunk signature bar").toContainText("@@ -1,15 +1,15 @@");
+		const hunkSignature = hunkHeader.locator(".hunk-signature");
+		await expect(hunkSignature, "context controls should share the hunk signature bar").toContainText("function contextFixture() {");
+		await expect(hunkSignature, "hunk range counts should be hidden from the visible signature").not.toContainText("@@");
 		const toggles = activeCard(page).getByTestId("pr-walkthrough-context-toggle");
 		await expect(toggles.first(), "context controls should be icon-only").toHaveText("");
 		await expect(toggles.first()).toHaveAttribute("data-context-direction", "above");
@@ -436,6 +438,13 @@ test.describe("PR walkthrough panel", () => {
 			const [headerBox, toggleBox] = await Promise.all([hunkHeader.boundingBox(), toggles.first().boundingBox()]);
 			return headerBox && toggleBox ? toggleBox.y >= headerBox.y && toggleBox.y + toggleBox.height <= headerBox.y + headerBox.height : false;
 		}, { message: "context buttons should sit inside the hunk signature contrast bar" }).toBe(true);
+		await expect.poll(async () => {
+			const [signatureBox, textBox] = await Promise.all([
+				hunkSignature.boundingBox(),
+				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-5"] .line-text`).boundingBox(),
+			]);
+			return signatureBox && textBox ? Math.abs(signatureBox.x - textBox.x) <= 1 : false;
+		}, { message: "hunk signature should align with diff code text, not line numbers" }).toBe(true);
 		await toggles.first().click();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "expanding above context should reveal leading lines").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-15"]`), "trailing context should remain hidden until expanded below").toBeHidden();
