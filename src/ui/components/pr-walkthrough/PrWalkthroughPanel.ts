@@ -393,7 +393,6 @@ export class PrWalkthroughPanel extends LitElement {
 			align-items: stretch;
 			justify-content: center;
 			gap: 2px;
-			background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent);
 		}
 		.hunk-signature { min-width: 0; padding: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.split-grid { min-width: 820px; }
@@ -1078,22 +1077,27 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderSplitHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
 		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
-		return html`
-			${entries.map((entry, index) => entry.kind === "context"
-				? this.renderContextToggle(card, block, hunk, entry)
-				: html`
-					${index === 0 ? this.renderHunkHeader(hunk.header) : nothing}
-					${this.buildSideBySidePairs(entry.lines).map(pair => html`
-						<div class="split-row">
-							${this.renderDiffLine(card, block, pair.left, "old")}
-							${this.renderDiffLine(card, block, pair.right, "new")}
-						</div>
-						${pair.left?.id === pair.right?.id
-							? this.renderLineDetails(card, block, pair.left)
-							: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
-					`)}
+		return html`${entries.map((entry, index) => {
+			if (entry.kind === "context") return nothing;
+			const previous = entries[index - 1];
+			const next = entries[index + 1];
+			const previousContext = previous?.kind === "context" ? previous : undefined;
+			const nextContext = next?.kind === "context" ? next : undefined;
+			const controls = this.renderContextButtons(card, block, hunk, previousContext, nextContext);
+			const header = previousContext ? this.contextSignatureForGap(hunk, previousContext) : hunk.header;
+			return html`
+				${this.renderHunkHeader(header, controls)}
+				${this.buildSideBySidePairs(entry.lines).map(pair => html`
+					<div class="split-row">
+						${this.renderDiffLine(card, block, pair.left, "old")}
+						${this.renderDiffLine(card, block, pair.right, "new")}
+					</div>
+					${pair.left?.id === pair.right?.id
+						? this.renderLineDetails(card, block, pair.left)
+						: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
 				`)}
-		`;
+			`;
+		})}`;
 	}
 
 	private renderInlineDiff(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
@@ -1108,14 +1112,19 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderInlineHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
 		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
-		return html`
-			${entries.map((entry, index) => entry.kind === "context"
-				? this.renderContextToggle(card, block, hunk, entry)
-				: html`
-					${index === 0 ? this.renderHunkHeader(hunk.header) : nothing}
-					${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
-				`)}
-		`;
+		return html`${entries.map((entry, index) => {
+			if (entry.kind === "context") return nothing;
+			const previous = entries[index - 1];
+			const next = entries[index + 1];
+			const previousContext = previous?.kind === "context" ? previous : undefined;
+			const nextContext = next?.kind === "context" ? next : undefined;
+			const controls = this.renderContextButtons(card, block, hunk, previousContext, nextContext);
+			const header = previousContext ? this.contextSignatureForGap(hunk, previousContext) : hunk.header;
+			return html`
+				${this.renderHunkHeader(header, controls)}
+				${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
+			`;
+		})}`;
 	}
 
 	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult {
@@ -1207,6 +1216,9 @@ export class PrWalkthroughPanel extends LitElement {
 			while (index < hunk.lines.length && !visible.has(index)) index += 1;
 			const end = index - 1;
 			const baseGap = baseGaps.find(gap => start >= gap.start && end <= gap.end) ?? { start, end };
+			const canExpandAbove = baseGap.end < hunk.lines.length - 1;
+			const canExpandBelow = baseGap.start > 0;
+			if (!canExpandAbove && !canExpandBelow) continue;
 			entries.push({
 				kind: "context",
 				start,
@@ -1214,8 +1226,8 @@ export class PrWalkthroughPanel extends LitElement {
 				gapStart: baseGap.start,
 				gapEnd: baseGap.end,
 				hiddenCount: end - start + 1,
-				canExpandAbove: baseGap.end < hunk.lines.length - 1,
-				canExpandBelow: baseGap.start > 0,
+				canExpandAbove,
+				canExpandBelow,
 			});
 		}
 		return entries;
@@ -1242,22 +1254,18 @@ export class PrWalkthroughPanel extends LitElement {
 		return this._editingLineKey === key || this.commentsForLine(card.id, block.id, line.id).length > 0 || this.pendingSuggestionsForLine(card, block.id, line.id).length > 0;
 	}
 
-	private renderContextToggle(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
-		return this.renderHunkHeader(this.contextSignatureForGap(hunk, entry), this.renderContextButtons(card, block, hunk, entry));
-	}
-
-	private renderContextButtons(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry): TemplateResult {
-		const aboveCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
-		const belowCount = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
+	private renderContextButtons(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], aboveEntry?: DiffContextEntry, belowEntry?: DiffContextEntry): TemplateResult {
+		const aboveCount = aboveEntry ? Math.min(DIFF_CONTEXT_EXPAND_LINES, aboveEntry.hiddenCount) : 0;
+		const belowCount = belowEntry ? Math.min(DIFF_CONTEXT_EXPAND_LINES, belowEntry.hiddenCount) : 0;
 		return html`
-			${entry.canExpandBelow ? html`
-				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="below" type="button" title=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below`} aria-label=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "below")}>
-					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
+			${aboveEntry?.canExpandAbove ? html`
+				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="above" type="button" title=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above`} aria-label=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, aboveEntry, "above")}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
 				</button>
 			` : nothing}
-			${entry.canExpandAbove ? html`
-				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="above" type="button" title=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above`} aria-label=${`Show ${aboveCount} more line${aboveCount === 1 ? "" : "s"} above in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, "above")}>
-					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
+			${belowEntry?.canExpandBelow ? html`
+				<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction="below" type="button" title=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below`} aria-label=${`Show ${belowCount} more line${belowCount === 1 ? "" : "s"} below in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, belowEntry, "below")}>
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
 				</button>
 			` : nothing}
 		`;

@@ -425,7 +425,9 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-1"]`), "far context should be hidden by default").toBeHidden();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`), "near context should remain visible by default").toBeVisible();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-31"]`), "near trailing context should remain visible by default").toBeVisible();
-		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
+		const hunkHeaders = activeCard(page).getByTestId("pr-walkthrough-hunk-header");
+		await expect(hunkHeaders, "hunk bars should appear only above visible diff sections, not as trailing context rows").toHaveCount(1);
+		const hunkHeader = hunkHeaders.first();
 		const hunkSignature = hunkHeader.locator(".hunk-signature");
 		await expect(hunkSignature, "context controls should show the signature that will be revealed next, not the fallback hunk header").toContainText("function contextFixture() {");
 		await expect(hunkSignature, "hunk range counts should be hidden from the visible signature").not.toContainText("@@");
@@ -458,6 +460,7 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-55"]`), "trailing context should remain hidden until expanded below").toBeHidden();
 		await activeCard(page).locator(`${tid("pr-walkthrough-context-toggle")}[data-context-direction="below"]`).click();
 		await expect(activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-51"]`), "expanding below context should reveal the next 20 trailing lines").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-hunk-header"), "top/bottom file edges without controls should not render empty blue bars").toHaveCount(1);
 	});
 
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {
