@@ -1085,7 +1085,7 @@ export class PrWalkthroughPanel extends LitElement {
 			const nextContext = next?.kind === "context" ? next : undefined;
 			const aboveControl = previousContext?.canExpandAbove ? this.renderContextButton(card, block, hunk, previousContext, "above") : nothing;
 			const belowControl = nextContext?.canExpandBelow ? this.renderContextButton(card, block, hunk, nextContext, "below") : nothing;
-			const header = previousContext ? this.contextSignatureForGap(hunk, previousContext, "above") : hunk.header;
+			const header = this.sectionSignature(hunk, entry, previousContext);
 			return html`
 				${this.renderHunkHeader(header, aboveControl)}
 				${this.buildSideBySidePairs(entry.lines).map(pair => html`
@@ -1122,7 +1122,7 @@ export class PrWalkthroughPanel extends LitElement {
 			const nextContext = next?.kind === "context" ? next : undefined;
 			const aboveControl = previousContext?.canExpandAbove ? this.renderContextButton(card, block, hunk, previousContext, "above") : nothing;
 			const belowControl = nextContext?.canExpandBelow ? this.renderContextButton(card, block, hunk, nextContext, "below") : nothing;
-			const header = previousContext ? this.contextSignatureForGap(hunk, previousContext, "above") : hunk.header;
+			const header = this.sectionSignature(hunk, entry, previousContext);
 			return html`
 				${this.renderHunkHeader(header, aboveControl)}
 				${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
@@ -1146,8 +1146,14 @@ export class PrWalkthroughPanel extends LitElement {
 		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
 	}
 
-	private contextSignatureForGap(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry, direction: DiffContextDirection): string {
-		const fallback = this.hunkSignature(hunk.header);
+	private sectionSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffLineEntry, previousContext?: DiffContextEntry): string {
+		const previousSignature = previousContext ? this.contextSignatureForGap(hunk, previousContext, "above") : undefined;
+		if (previousSignature) return previousSignature;
+		return this.firstSignatureLikeLine(entry.lines.map(line => line.text)) ?? this.hunkSignature(hunk.header);
+	}
+
+	private contextSignatureForGap(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry, direction: DiffContextDirection): string | undefined {
+		const fallback = this.hunkSignature(hunk.header) || undefined;
 		const start = direction === "below" ? entry.start : Math.max(entry.start, entry.end - DIFF_CONTEXT_EXPAND_LINES + 1);
 		const end = direction === "below" ? Math.min(entry.end, entry.start + DIFF_CONTEXT_EXPAND_LINES - 1) : entry.end;
 		const lines = hunk.lines.slice(start, end + 1).map(line => line.text);
