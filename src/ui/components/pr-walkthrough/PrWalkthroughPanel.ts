@@ -150,7 +150,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 		.title-row { display: contents; }
 		.title-wrap { min-width: 0; display: grid; gap: 1px; }
-		.kicker { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		.kicker { display: none; }
 		.title { margin: 0; font-size: 14px; line-height: 1.25; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.meta { color: var(--muted-foreground, GrayText); font-size: 12px; margin-top: 4px; }
 		.header-spacer { flex: 1 1 auto; min-width: 10px; }
@@ -756,7 +756,6 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
 				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
-					<div class="kicker">${identity.kicker}</div>
 					<h1 class="title" title=${identity.title}>${identity.title}</h1>
 				</div>
 				<span class="stats" data-testid="pr-walkthrough-pr-stats">
