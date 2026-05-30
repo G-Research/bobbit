@@ -76,6 +76,7 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("grep -R walkthrough src/server/pr-walkthrough");
 		allowed("find src/server/pr-walkthrough -name '*.ts'");
 		allowed("ls src/server/pr-walkthrough");
+		allowed("ls .github");
 		allowed("cat package.json");
 		allowed("sed -n '1,40p' docs/design/pr-walkthrough-agent-session.md");
 		allowed("head -20 package.json");
@@ -108,6 +109,18 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("touch src/new.ts", /touch is not permitted/);
 		blocked("find . -name '*.tmp' -delete", /find action -delete/);
 		blocked("sed -i 's/a/b/' file.ts", /in-place/);
+	});
+
+	it("blocks secret and dot-directory reads in file/search commands", () => {
+		blocked("cat .bobbit/state/token", /blocked|hidden|credential|token/i);
+		blocked("cat .git/config", /blocked|hidden/i);
+		blocked("cat .env", /\.env files are blocked/);
+		blocked("grep -R token .bobbit", /blocked|hidden/i);
+		blocked("find .git -type f", /blocked|hidden/i);
+		blocked("ls .ssh", /blocked|hidden/i);
+		blocked("sed -n '1,5p' secrets.json", /credential|token/i);
+		blocked("head -20 private.pem", /key|certificate/i);
+		blocked("tail -20 config/.npmrc", /hidden path|blocked/i);
 	});
 
 	it("blocks installs, builds, tests, servers, docker, and inline interpreters", () => {

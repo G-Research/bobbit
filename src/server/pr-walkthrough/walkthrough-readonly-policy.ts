@@ -26,8 +26,11 @@ const BLOCKED_EXECUTABLES = new Set([
 
 const GIT_ALLOWED = new Set(["diff", "show", "log", "rev-parse", "status"]);
 const SEARCH_READ_ALLOWED = new Set(["rg", "grep", "ls", "cat", "head", "tail", "pwd"]);
+const PATH_READING_COMMANDS = new Set(["rg", "grep", "ls", "cat", "head", "tail", "find", "sed"]);
 const GH_PR_READ_ALLOWED = new Set(["view", "diff"]);
 const GENERIC_WRITE_OR_ESCAPE_FLAGS = new Set(["--output", "--output-file", "--pathspec-from-file", "--git-dir", "--work-tree", "-C"]);
+const SAFE_HIDDEN_PATH_SEGMENTS = new Set([".", ".github"]);
+const SENSITIVE_PATH_SEGMENTS = new Set([".bobbit", ".git", ".ssh", ".gnupg", ".aws", ".azure", ".gcloud"]);
 
 function basename(token: string): string {
 	const normalized = token.replace(/\\/g, "/");
@@ -109,13 +112,36 @@ function unsafeTokenReason(token: string): string | undefined {
 	return undefined;
 }
 
-function commonArgumentPolicy(argv: string[]): WalkthroughReadonlyDecision | undefined {
+function sensitivePathTokenReason(token: string): string | undefined {
+	if (!token || token === "." || token.startsWith("-")) return undefined;
+	const normalized = token.replace(/\\/g, "/").replace(/^['"]|['"]$/g, "");
+	if (!normalized || normalized === ".") return undefined;
+	const parts = normalized.split("/").filter(Boolean);
+	for (const part of parts) {
+		const lower = part.toLowerCase();
+		if (SENSITIVE_PATH_SEGMENTS.has(lower)) return `access to ${part}/ is blocked in PR walkthrough sessions`;
+		if (lower.startsWith(".env")) return ".env files are blocked in PR walkthrough sessions";
+		if (lower.startsWith(".") && !SAFE_HIDDEN_PATH_SEGMENTS.has(lower)) return `hidden path ${part} is blocked in PR walkthrough sessions`;
+	}
+	const leaf = parts.at(-1)?.toLowerCase() ?? normalized.toLowerCase();
+	if (/^(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|known_hosts|authorized_keys)$/.test(leaf)) return "SSH credential files are blocked in PR walkthrough sessions";
+	const looksLikePath = normalized.includes("/") || normalized.includes(".");
+	if (looksLikePath && /(?:^|[-_.])(secret|secrets|credential|credentials|token|tokens|apikey|api_key)(?:[-_.]|$)/.test(leaf)) return "credential and token files are blocked in PR walkthrough sessions";
+	if (/\.(?:pem|key|p12|pfx|kdbx|gpg|asc)$/i.test(leaf)) return "key and certificate files are blocked in PR walkthrough sessions";
+	return undefined;
+}
+
+function commonArgumentPolicy(argv: string[], options: { guardPaths?: boolean } = {}): WalkthroughReadonlyDecision | undefined {
 	for (const token of argv.slice(1)) {
 		if (GENERIC_WRITE_OR_ESCAPE_FLAGS.has(token) || token.startsWith("--output=") || token.startsWith("--output-file=") || token.startsWith("--pathspec-from-file=") || token.startsWith("--git-dir=") || token.startsWith("--work-tree=")) {
 			return block(`${token.split("=")[0]} is not allowed in read-only PR walkthrough sessions`, argv);
 		}
 		const reason = unsafeTokenReason(token);
 		if (reason) return block(reason, argv);
+		if (options.guardPaths) {
+			const pathReason = sensitivePathTokenReason(token);
+			if (pathReason) return block(pathReason, argv);
+		}
 	}
 	return undefined;
 }
@@ -182,7 +208,7 @@ function allowGit(argv: string[]): WalkthroughReadonlyDecision {
 }
 
 function allowFind(argv: string[]): WalkthroughReadonlyDecision {
-	const common = commonArgumentPolicy(argv);
+	const common = commonArgumentPolicy(argv, { guardPaths: true });
 	if (common) return common;
 	const blocked = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"]);
 	for (const token of argv.slice(1)) {
@@ -192,7 +218,7 @@ function allowFind(argv: string[]): WalkthroughReadonlyDecision {
 }
 
 function allowSed(argv: string[]): WalkthroughReadonlyDecision {
-	const common = commonArgumentPolicy(argv);
+	const common = commonArgumentPolicy(argv, { guardPaths: true });
 	if (common) return common;
 	let hasNoPrint = false;
 	let script: string | undefined;
@@ -232,7 +258,7 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	if (cmd === "find") return allowFind(argv);
 	if (cmd === "sed") return allowSed(argv);
 	if (SEARCH_READ_ALLOWED.has(cmd)) {
-		const common = commonArgumentPolicy(argv);
+		const common = commonArgumentPolicy(argv, { guardPaths: PATH_READING_COMMANDS.has(cmd) });
 		if (common) return common;
 		return { allowed: true, argv };
 	}
