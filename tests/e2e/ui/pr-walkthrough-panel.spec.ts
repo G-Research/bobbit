@@ -484,7 +484,7 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-hunk-header"), "top/bottom file edges without controls should not render empty blue bars").toHaveCount(1);
 	});
 
-	test("diff hunk headers fall back to visible type context when hidden context has no signature", async ({ page }) => {
+	test("diff hunk headers prefer the containing declaration scope over later visible symbols", async ({ page }) => {
 		await setupWalkthrough(page, { width: 1100, height: 820 });
 		await page.evaluate(async () => {
 			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
@@ -495,14 +495,20 @@ test.describe("PR walkthrough panel", () => {
 				oldLine: index === focalIndex ? undefined : index + 1,
 				newLine: index + 1,
 				kind: index === focalIndex ? "add" : "context",
-				text: index === focalIndex ? "const DEFAULT_DIFF_CONTEXT_LINES = 3;" : index === 30 ? "interface SideBySidePair {" : `context ${index + 1}`,
+				text: index === focalIndex
+					? "const DEFAULT_DIFF_CONTEXT_LINES = 3;"
+					: index === 7
+						? "const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = ["
+						: index === 30
+							? "interface SideBySidePair {"
+							: `context ${index + 1}`,
 			}));
 			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Visible context fixture", filesChanged: 1, additions: 1, deletions: 0 };
 			walkthrough.cards = [{
 				id: "visible-signature-card",
 				phaseId: "significant",
 				title: "Visible signature hunk",
-				summary: "This card verifies visible type context fallback.",
+				summary: "This card verifies containing scope context.",
 				diffBlocks: [{ id: "visible-signature-block", filePath: "src/context.ts", hunks: [{ id: "visible-signature-hunk", header: "@@ -1,55 +1,55 @@", lines }] }],
 			}];
 			walkthrough.status = "ready";
@@ -510,8 +516,42 @@ test.describe("PR walkthrough panel", () => {
 		});
 
 		const hunkHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
-		await expect(hunkHeader.locator(".hunk-signature"), "visible class/type context should still label the blue row when the hunk header has no signature").toContainText("interface SideBySidePair {");
+		await expect(hunkHeader.locator(".hunk-signature"), "containing declaration scope should label the blue row instead of the next visible interface").toContainText("const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [");
 		await expect(hunkHeader, "raw hunk ranges should still be absent from the tooltip").not.toHaveAttribute("title", /@@/);
+	});
+
+	test("diff hunk headers hide empty top-of-file context labels", async ({ page }) => {
+		await setupWalkthrough(page, { width: 1100, height: 820 });
+		await page.evaluate(async () => {
+			const walkthrough = document.querySelector("pr-walkthrough-panel") as any;
+			const focalIndex = 2;
+			const lines = Array.from({ length: 35 }, (_, index) => ({
+				id: `top-file-${index + 1}`,
+				side: index === focalIndex ? "new" : "context",
+				oldLine: index === focalIndex ? undefined : index + 1,
+				newLine: index + 1,
+				kind: index === focalIndex ? "add" : "context",
+				text: index === focalIndex ? "const topLevelChange = true;" : `context ${index + 1}`,
+			}));
+			walkthrough.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Top of file fixture", filesChanged: 1, additions: 1, deletions: 0 };
+			walkthrough.cards = [{
+				id: "top-file-card",
+				phaseId: "significant",
+				title: "Top file hunk",
+				summary: "This card verifies empty top-of-file context labels.",
+				diffBlocks: [{ id: "top-file-block", filePath: "src/top.ts", hunks: [{ id: "top-file-hunk", header: "@@ -1,35 +1,35 @@", lines }] }],
+			}];
+			walkthrough.status = "ready";
+			await walkthrough.updateComplete;
+		});
+
+		const firstLine = activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="top-file-1"]`);
+		const firstHeader = activeCard(page).getByTestId("pr-walkthrough-hunk-header").first();
+		await expect.poll(async () => {
+			const [lineBox, headerBox] = await Promise.all([firstLine.boundingBox(), firstHeader.boundingBox()]);
+			return lineBox && headerBox ? lineBox.y < headerBox.y : false;
+		}, { message: "empty top-of-file context labels should be hidden instead of borrowing later symbols" }).toBe(true);
+		await expect(firstHeader, "top-of-file hunk rows should not expose raw hunk ranges as tooltips").not.toHaveAttribute("title", /@@/);
 	});
 
 	test("renders right-side split comments for paired replacement rows", async ({ page }) => {

@@ -34,6 +34,8 @@ interface DiffContextEntry {
 
 interface DiffLineEntry {
 	kind: "lines";
+	start: number;
+	end: number;
 	lines: PrWalkthroughDiffLine[];
 }
 
@@ -1131,8 +1133,9 @@ export class PrWalkthroughPanel extends LitElement {
 		})}`;
 	}
 
-	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult {
+	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult | typeof nothing {
 		const signature = this.hunkSignature(header);
+		if (!signature && controls === nothing) return nothing;
 		const label = signature || "Expand hidden diff context";
 		return html`
 			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${label} title=${signature}>
@@ -1147,41 +1150,78 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private sectionSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffLineEntry, previousContext?: DiffContextEntry): string {
-		const previousSignature = previousContext ? this.contextSignatureForGap(hunk, previousContext, "above") : undefined;
-		if (previousSignature) return previousSignature;
-		return this.firstSignatureLikeLine(entry.lines.map(line => line.text)) ?? this.hunkSignature(hunk.header);
+		const scopedSignature = previousContext ? this.scopeSignatureBeforeIndex(hunk, entry.start) : undefined;
+		return scopedSignature ?? this.hunkSignature(hunk.header);
 	}
 
-	private contextSignatureForGap(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry, direction: DiffContextDirection): string | undefined {
-		const fallback = this.hunkSignature(hunk.header) || undefined;
-		const start = direction === "below" ? entry.start : Math.max(entry.start, entry.end - DIFF_CONTEXT_EXPAND_LINES + 1);
-		const end = direction === "below" ? Math.min(entry.end, entry.start + DIFF_CONTEXT_EXPAND_LINES - 1) : entry.end;
-		const lines = hunk.lines.slice(start, end + 1).map(line => line.text);
-		const candidate = direction === "below" ? this.firstSignatureLikeLine(lines) : this.lastSignatureLikeLine(lines);
-		return candidate ?? fallback;
+	private scopeSignatureBeforeIndex(hunk: PrWalkthroughDiffBlock["hunks"][number], anchorIndex: number): string | undefined {
+		const stack: Array<{ opener: "{" | "[" | "("; lineIndex: number }> = [];
+		for (let lineIndex = 0; lineIndex < anchorIndex; lineIndex += 1) {
+			const code = this.maskStringsAndLineComments(hunk.lines[lineIndex]?.text ?? "");
+			for (const char of code) {
+				if (char === "{" || char === "[" || char === "(") stack.push({ opener: char, lineIndex });
+				else if (char === "}" || char === "]" || char === ")") this.popScopeFrame(stack, char);
+			}
+		}
+		for (let index = stack.length - 1; index >= 0; index -= 1) {
+			const frame = stack[index]!;
+			if (frame.opener === "(") continue;
+			const signature = this.scopeStartSignature(hunk, frame.lineIndex);
+			if (signature) return signature;
+		}
+		return undefined;
 	}
 
-	private firstSignatureLikeLine(lines: string[]): string | undefined {
-		for (const line of lines) {
+	private popScopeFrame(stack: Array<{ opener: "{" | "[" | "("; lineIndex: number }>, closer: string): void {
+		const opener = closer === "}" ? "{" : closer === "]" ? "[" : "(";
+		for (let index = stack.length - 1; index >= 0; index -= 1) {
+			if (stack[index]?.opener === opener) {
+				stack.length = index;
+				return;
+			}
+		}
+	}
+
+	private scopeStartSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], lineIndex: number): string | undefined {
+		for (let index = lineIndex; index >= Math.max(0, lineIndex - 3); index -= 1) {
+			const line = hunk.lines[index]?.text ?? "";
 			const signature = this.signatureLikeLine(line);
 			if (signature) return signature;
+			if (index !== lineIndex && /[;}\]]\s*,?\s*$/.test(line.trim())) break;
 		}
 		return undefined;
 	}
 
-	private lastSignatureLikeLine(lines: string[]): string | undefined {
-		for (let index = lines.length - 1; index >= 0; index -= 1) {
-			const signature = this.signatureLikeLine(lines[index] ?? "");
-			if (signature) return signature;
+	private maskStringsAndLineComments(line: string): string {
+		let masked = "";
+		let quote: '"' | "'" | "`" | undefined;
+		let escaped = false;
+		for (let index = 0; index < line.length; index += 1) {
+			const char = line[index]!;
+			const next = line[index + 1];
+			if (!quote && char === "/" && next === "/") break;
+			if (quote) {
+				masked += " ";
+				if (escaped) escaped = false;
+				else if (char === "\\") escaped = true;
+				else if (char === quote) quote = undefined;
+				continue;
+			}
+			if (char === '"' || char === "'" || char === "`") {
+				quote = char;
+				masked += " ";
+				continue;
+			}
+			masked += char;
 		}
-		return undefined;
+		return masked;
 	}
 
 	private signatureLikeLine(line: string): string | undefined {
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.length > 180) return undefined;
 		if (/^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\b/.test(trimmed)) return trimmed;
-		if (/^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s*)?\(?[^=]*\)?\s*=>/.test(trimmed)) return trimmed;
+		if (/^(?:export\s+)?(?:const|let|var)\s+[\w$]+(?:\s*:[^=]+)?\s*=/.test(trimmed)) return trimmed;
 		if (/^[\w$.]+\s*\([^)]*\)\s*=>\s*\{?$/.test(trimmed)) return trimmed;
 		if (/^[\w$.]+\s*\([^)]*\)\s*[,;]?\s*$/.test(trimmed)) return trimmed;
 		return undefined;
@@ -1191,7 +1231,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const importantIndexes = hunk.lines
 			.map((line, index) => this.isImportantDiffLine(card, block, line) ? index : -1)
 			.filter(index => index >= 0);
-		if (importantIndexes.length === 0) return [{ kind: "lines", lines: hunk.lines }];
+		if (importantIndexes.length === 0) return [{ kind: "lines", start: 0, end: hunk.lines.length - 1, lines: hunk.lines }];
 
 		const baseVisible = new Set<number>();
 		for (const index of importantIndexes) {
@@ -1216,12 +1256,13 @@ export class PrWalkthroughPanel extends LitElement {
 		let index = 0;
 		while (index < hunk.lines.length) {
 			if (visible.has(index)) {
+				const start = index;
 				const lines: PrWalkthroughDiffLine[] = [];
 				while (index < hunk.lines.length && visible.has(index)) {
 					lines.push(hunk.lines[index]!);
 					index += 1;
 				}
-				entries.push({ kind: "lines", lines });
+				entries.push({ kind: "lines", start, end: index - 1, lines });
 				continue;
 			}
 			const start = index;
