@@ -151,6 +151,33 @@ test.describe("PR walkthrough REST API", () => {
 		}
 	});
 
+	test("large local diffs return truncation warnings instead of maxBuffer failures", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "bobbit-pr-walkthrough-large-"));
+		try {
+			git(cwd, ["init"]);
+			git(cwd, ["config", "user.name", "Bobbit E2E"]);
+			git(cwd, ["config", "user.email", "bobbit-e2e@example.test"]);
+			writeFileSync(join(cwd, "large.txt"), "base\n", "utf-8");
+			git(cwd, ["add", "."]);
+			git(cwd, ["commit", "-m", "base"]);
+			const baseSha = git(cwd, ["rev-parse", "HEAD"]);
+			writeFileSync(join(cwd, "large.txt"), Array.from({ length: 220_000 }, (_, index) => `line ${index} ${"x".repeat(16)}`).join("\n"), "utf-8");
+			git(cwd, ["add", "."]);
+			git(cwd, ["commit", "-m", "large"]);
+			const headSha = git(cwd, ["rev-parse", "HEAD"]);
+
+			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+				method: "POST",
+				body: JSON.stringify({ cwd, baseSha, headSha }),
+			});
+			expect(resp.status).toBe(200);
+			const result = await resp.json();
+			expect(result.warnings.some((warning: any) => warning.code === "diff-truncated")).toBe(true);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("empty local diffs resolve to an orientation-only walkthrough instead of a broken response", async () => {
 		const fixture = makeGitFixture();
 		try {
@@ -224,6 +251,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(result.changesetId).toBe(`github:acme/widgets#42:${fixture.headSha.slice(0, 7)}`);
 			expect(result.changeset.provider).toBe("github");
 			expect(result.changeset.prUrl).toBe(prUrl);
+			expect(result.changeset.externalUrl).toBe(prUrl);
 			expect(result.export.previewOnly).toBe(true);
 
 			const submitResp = await apiFetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
@@ -232,6 +260,23 @@ test.describe("PR walkthrough REST API", () => {
 			});
 			expect(submitResp.status).toBe(400);
 			expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
+		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	test("local SHA plus unsafe PR metadata does not persist clickable external URLs", async () => {
+		const fixture = makeGitFixture();
+		try {
+			const resp = await apiFetch("/api/pr-walkthrough/resolve", {
+				method: "POST",
+				body: JSON.stringify({ cwd: fixture.cwd, prUrl: "javascript:alert(1)", prNumber: 42, baseSha: fixture.baseSha, headSha: fixture.headSha }),
+			});
+			expect(resp.status).toBe(200);
+			const result = await resp.json();
+			expect(result.changeset.provider).toBe("github");
+			expect(result.changeset.prUrl).toBeUndefined();
+			expect(result.changeset.externalUrl).toBeUndefined();
 		} finally {
 			fixture.cleanup();
 		}

@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+
 import { execFileSafe } from "../exec-file-safe.js";
 import type { PrWalkthroughChangesetRef, WalkthroughLimits, WalkthroughWarning } from "../../shared/pr-walkthrough/types.js";
 import { changesetIdForLocal } from "../../shared/pr-walkthrough/ids.js";
@@ -39,17 +41,17 @@ export async function resolveLocalChangeset(request: ResolveLocalChangesetReques
 		verifyCommit(request.cwd, request.headSha, "headSha"),
 	]);
 
-	const [shortstatRaw, nameStatusRaw, diffRaw] = await Promise.all([
+	const [shortstatRaw, nameStatusRaw, diffCapture] = await Promise.all([
 		runGit(request.cwd, ["diff", "--shortstat", `${baseSha}..${headSha}`]),
 		runGit(request.cwd, ["diff", "--name-status", "-M", "-C", `${baseSha}..${headSha}`]),
-		runGit(request.cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", `${baseSha}..${headSha}`], Math.max(limits.maxDiffBytes * 2, 1_000_000)),
+		runGitLimited(request.cwd, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--binary", "--unified=80", `${baseSha}..${headSha}`], limits.maxDiffBytes + 64_000),
 	]);
 
 	const warnings: WalkthroughWarning[] = [];
 	const nameStatus = parseNameStatus(nameStatusRaw);
-	let diffForParsing = diffRaw;
-	if (Buffer.byteLength(diffRaw, "utf8") > limits.maxDiffBytes) {
-		diffForParsing = truncateUtf8(diffRaw, limits.maxDiffBytes);
+	let diffForParsing = diffCapture.stdout;
+	if (diffCapture.truncated || Buffer.byteLength(diffCapture.stdout, "utf8") > limits.maxDiffBytes) {
+		diffForParsing = truncateUtf8(diffCapture.stdout, limits.maxDiffBytes);
 		warnings.push({ code: "diff-truncated", severity: "warning", message: `Diff output exceeded ${limits.maxDiffBytes} bytes and was truncated.` });
 	}
 
@@ -137,6 +139,50 @@ async function runGit(cwd: string, args: readonly string[], maxBuffer = 10_000_0
 		maxBuffer,
 	});
 	return result.stdout;
+}
+
+async function runGitLimited(cwd: string, args: readonly string[], maxBytes: number): Promise<{ stdout: string; truncated: boolean }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn("git", args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+		const chunks: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		let capturedBytes = 0;
+		let truncated = false;
+		let settled = false;
+		const timer = setTimeout(() => {
+			truncated = true;
+			child.kill();
+		}, GIT_TIMEOUT_MS);
+		child.stdout.on("data", (chunk: Buffer) => {
+			if (capturedBytes < maxBytes) {
+				const remaining = maxBytes - capturedBytes;
+				chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
+				capturedBytes += Math.min(chunk.length, remaining);
+			}
+			if (chunk.length > 0 && capturedBytes >= maxBytes) {
+				truncated = true;
+				child.kill();
+			}
+		});
+		child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+		child.on("error", error => {
+			clearTimeout(timer);
+			if (!settled) {
+				settled = true;
+				reject(error);
+			}
+		});
+		child.on("close", code => {
+			clearTimeout(timer);
+			if (settled) return;
+			settled = true;
+			if (code && !truncated) {
+				reject(new Error(Buffer.concat(stderr).toString("utf8") || `git ${args.join(" ")} exited with ${code}`));
+				return;
+			}
+			resolve({ stdout: Buffer.concat(chunks).toString("utf8"), truncated });
+		});
+	});
 }
 
 function mergeNameStatus(files: ParsedWalkthroughDiffFile[], records: NameStatusRecord[]): ParsedWalkthroughDiffFile[] {

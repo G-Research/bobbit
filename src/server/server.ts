@@ -1994,7 +1994,20 @@ async function handleApiRoute(
 		json({ error: e.message, stack: e.stack, ...extra }, status);
 	};
 
-	if (await handlePrWalkthroughApiRoute(url, req, res, { defaultCwd: config.defaultCwd, readBody })) return;
+	if (await handlePrWalkthroughApiRoute(url, req, res, {
+		defaultCwd: config.defaultCwd,
+		readBody,
+		resolveSessionCwd: (sessionId: string) => {
+			const live = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
+		},
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+		preferencesStore,
+	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
 

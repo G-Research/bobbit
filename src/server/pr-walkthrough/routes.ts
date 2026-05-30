@@ -6,6 +6,9 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
+import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
+import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -82,9 +85,16 @@ type StoredWalkthrough = {
 export type PrWalkthroughRouteDeps = {
 	defaultCwd: string;
 	readBody: JsonReader;
+	resolveSessionCwd?: (sessionId: string) => string | undefined | Promise<string | undefined>;
+	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
+	preferencesStore?: { get(key: string): unknown };
+	getAvailableModels?: (preferencesStore: { get(key: string): unknown }) => Promise<ApiModel[]>;
+	completeModelText?: typeof defaultCompleteModelText;
+	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
+type WalkthroughSynthesisContext = { sessionId?: string; cwd: string; changeset?: WalkthroughChangeset };
 let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
 let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
 
@@ -115,7 +125,7 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Invalid resolve request");
 				return true;
 			}
-			const result = await resolveWalkthrough(body, deps);
+			const result = sanitizeResolveResult(await resolveWalkthrough(body, deps));
 			await storeWalkthrough(result);
 			json(result);
 			return true;
@@ -186,7 +196,9 @@ export async function handlePrWalkthroughApiRoute(
 async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthroughRouteDeps): Promise<WalkthroughResolveResult> {
 	if (body.fixture === true) return fixtureWalkthrough();
 
-	const cwd = typeof body.cwd === "string" && body.cwd.trim() ? body.cwd : deps.defaultCwd;
+	const sessionId = stringValue(body.sessionId);
+	const cwd = await resolveRequestCwd(body, deps, sessionId);
+	const context: WalkthroughSynthesisContext = { sessionId, cwd };
 	const baseSha = stringValue(body.baseSha);
 	const headSha = stringValue(body.headSha);
 	const prUrl = stringValue(body.prUrl);
@@ -194,7 +206,7 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	const wantsGithub = Boolean(prUrl || prNumber || body.provider === "github");
 
 	if (wantsGithub && baseSha && headSha) {
-		const local = await resolveLocalWithDelegation(cwd, baseSha, headSha);
+		const local = await resolveLocalWithDelegation(cwd, baseSha, headSha, deps, context);
 		const gh = parseGithubRef(prUrl, prNumber, cwd);
 		const head = shortSha(local.changeset.headSha);
 		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${prNumber ?? "unknown"}:${head}`;
@@ -204,9 +216,9 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 			changeset: {
 				...local.changeset,
 				provider: "github",
-				prUrl: prUrl || gh?.url,
+				prUrl: gh?.url,
 				prNumber: prNumber ?? gh?.number,
-				externalUrl: prUrl || gh?.url,
+				externalUrl: gh?.url,
 				title: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title,
 			},
 			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
@@ -214,22 +226,31 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	}
 
 	if (wantsGithub) {
-		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber });
+		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
 		if (delegated) return delegated;
 		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
 	}
 
 	if (!baseSha || !headSha) throw new Error("baseSha and headSha are required for local walkthrough resolution");
-	return resolveLocalWithDelegation(cwd, baseSha, headSha);
+	return resolveLocalWithDelegation(cwd, baseSha, headSha, deps, context);
 }
 
-async function resolveLocalWithDelegation(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult> {
-	const delegated = await tryResolveLocalWithModules(cwd, baseSha, headSha);
+async function resolveRequestCwd(body: Record<string, unknown>, deps: PrWalkthroughRouteDeps, sessionId: string | undefined): Promise<string> {
+	if (typeof body.cwd === "string" && body.cwd.trim()) return body.cwd.trim();
+	if (sessionId && deps.resolveSessionCwd) {
+		const sessionCwd = await deps.resolveSessionCwd(sessionId);
+		if (typeof sessionCwd === "string" && sessionCwd.trim()) return sessionCwd.trim();
+	}
+	return deps.defaultCwd;
+}
+
+async function resolveLocalWithDelegation(cwd: string, baseSha: string, headSha: string, deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughResolveResult> {
+	const delegated = await tryResolveLocalWithModules(cwd, baseSha, headSha, deps, context);
 	if (delegated) return delegated;
 	return resolveLocalFallback(cwd, baseSha, headSha);
 }
 
-async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult | undefined> {
+async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha: string, deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughResolveResult | undefined> {
 	const gitModule = await optionalPrModule("git-changeset");
 	const resolveLocalChangeset = gitModule?.resolveLocalChangeset;
 	if (typeof resolveLocalChangeset !== "function") return undefined;
@@ -241,7 +262,7 @@ async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha:
 	const warnings = Array.isArray(resolved?.warnings) ? resolved.warnings : [];
 	const changesetId = typeof resolved?.changesetId === "string" ? resolved.changesetId : changesetIdForLocal(changeset?.baseSha ?? baseSha, changeset?.headSha ?? headSha);
 	let cards = Array.isArray(resolved?.cards) ? resolved.cards : undefined;
-	cards ??= await synthesizeCardsForResolver(changeset, files, warnings);
+	cards ??= await synthesizeCardsForResolver(changeset, files, warnings, deps, { ...context, changeset });
 	return {
 		changesetId,
 		changeset,
@@ -252,22 +273,23 @@ async function tryResolveLocalWithModules(cwd: string, baseSha: string, headSha:
 	};
 }
 
-async function tryResolveGithubWithDelegation(input: Record<string, unknown>): Promise<WalkthroughResolveResult | undefined> {
+async function tryResolveGithubWithDelegation(input: Record<string, unknown>, deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughResolveResult | undefined> {
 	const module = await optionalPrModule("github-adapter");
 	const resolveGithubPr = module?.resolveGithubPr;
 	if (typeof resolveGithubPr !== "function") return undefined;
 	const resolved = await resolveGithubPr(input);
-	return normalizeGithubResolvedWalkthrough(resolved);
+	return normalizeGithubResolvedWalkthrough(resolved, deps, context);
 }
 
-export async function normalizeGithubResolvedWalkthrough(resolved: any): Promise<WalkthroughResolveResult | undefined> {
+export async function normalizeGithubResolvedWalkthrough(resolved: any, deps?: Partial<PrWalkthroughRouteDeps>, context?: Partial<WalkthroughSynthesisContext>): Promise<WalkthroughResolveResult | undefined> {
 	if (isResolveResult(resolved)) return resolved;
 	if (!resolved?.changeset) return undefined;
 	const warnings = Array.isArray(resolved.warnings) ? resolved.warnings : [];
 	const files = Array.isArray(resolved.files) ? resolved.files : [];
+	const routeDeps = deps ? { ...deps, defaultCwd: deps.defaultCwd ?? "", readBody: deps.readBody ?? (async () => ({})) } as PrWalkthroughRouteDeps : undefined;
 	const cards = Array.isArray(resolved.cards)
 		? resolved.cards
-		: await synthesizeCardsForResolver(resolved.changeset, files, warnings);
+		: await synthesizeCardsForResolver(resolved.changeset, files, warnings, routeDeps, { cwd: context?.cwd ?? "", sessionId: context?.sessionId, changeset: resolved.changeset });
 	return {
 		changesetId: typeof resolved.changesetId === "string" ? resolved.changesetId : changesetIdForLocal(resolved.changeset.baseSha, resolved.changeset.headSha),
 		changeset: resolved.changeset,
@@ -278,19 +300,36 @@ export async function normalizeGithubResolvedWalkthrough(resolved: any): Promise
 	};
 }
 
-async function synthesizeCardsForResolver(changeset: WalkthroughChangeset, files: any[], warnings: WalkthroughWarning[]): Promise<WalkthroughCard[]> {
+async function synthesizeCardsForResolver(
+	changeset: WalkthroughChangeset,
+	files: any[],
+	warnings: WalkthroughWarning[],
+	deps?: PrWalkthroughRouteDeps,
+	context: WalkthroughSynthesisContext = { cwd: "" },
+): Promise<WalkthroughCard[]> {
 	const synthesisModule = await optionalPrModule("card-synthesis");
 	const synthesize = synthesisModule?.synthesiseWalkthroughCards ?? synthesisModule?.synthesizeWalkthroughCards;
 	if (typeof synthesize === "function") {
-		const llm = await resolveConfiguredSynthesisAdapter();
+		const llm = await resolveConfiguredSynthesisAdapter(deps, { ...context, changeset });
 		const cards = await synthesize(changeset, files, { warnings, ...(llm ? { allowLlm: true, llm } : {}) });
 		if (Array.isArray(cards) && cards.length > 0) return cards;
 	}
 	return synthesizeFallbackCards(changeset, flattenDiffBlocks(files), warnings);
 }
 
-async function resolveConfiguredSynthesisAdapter(): Promise<WalkthroughLlmAdapter | undefined> {
+async function resolveConfiguredSynthesisAdapter(deps: PrWalkthroughRouteDeps | undefined, context: WalkthroughSynthesisContext): Promise<WalkthroughLlmAdapter | undefined> {
 	if (synthesisAdapterForTesting) return synthesisAdapterForTesting;
+	if (deps?.createSynthesisAdapter) {
+		const adapter = await deps.createSynthesisAdapter(context);
+		if (adapter) return adapter;
+	}
+	const envAdapter = await resolveEnvSynthesisAdapter();
+	if (envAdapter) return envAdapter;
+	if (deps) return createModelBackedSynthesisAdapter(deps, context);
+	return undefined;
+}
+
+async function resolveEnvSynthesisAdapter(): Promise<WalkthroughLlmAdapter | undefined> {
 	if (configuredSynthesisAdapter !== undefined) return configuredSynthesisAdapter ?? undefined;
 	const modulePath = stringValue(process.env.BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER);
 	if (!modulePath) {
@@ -301,6 +340,69 @@ async function resolveConfiguredSynthesisAdapter(): Promise<WalkthroughLlmAdapte
 	const adapter = module.default ?? module.synthesiseWalkthroughCards ?? module.synthesizeWalkthroughCards ?? module.synthesise;
 	configuredSynthesisAdapter = typeof adapter === "function" ? adapter : null;
 	return configuredSynthesisAdapter ?? undefined;
+}
+
+export async function createModelBackedSynthesisAdapter(deps: PrWalkthroughRouteDeps, context: WalkthroughSynthesisContext): Promise<WalkthroughLlmAdapter | undefined> {
+	const prefs = deps.preferencesStore;
+	if (!prefs) return undefined;
+	const modelPref = await resolveSynthesisModelPref(deps, context.sessionId);
+	if (!modelPref) return undefined;
+	const slash = modelPref.indexOf("/");
+	if (slash <= 0 || slash >= modelPref.length - 1) return undefined;
+	const provider = modelPref.slice(0, slash);
+	const modelId = modelPref.slice(slash + 1);
+	const models = await (deps.getAvailableModels ?? defaultGetAvailableModels)(prefs as any);
+	const model = models.find(item => item.provider === provider && item.id === modelId);
+	if (!model) return undefined;
+	const complete = deps.completeModelText ?? defaultCompleteModelText;
+	return async input => {
+		const text = await complete(model, prefs as any, {
+			systemPrompt: PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT,
+			userPrompt: buildSynthesisUserPrompt(input),
+			maxTokens: 2400,
+			thinkingLevel: "off",
+			timeoutMs: 30_000,
+		});
+		return parseJsonFromModelText(text);
+	};
+}
+
+const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
+
+async function resolveSynthesisModelPref(deps: PrWalkthroughRouteDeps, sessionId: string | undefined): Promise<string | undefined> {
+	if (sessionId && deps.resolveSessionModel) {
+		const sessionModel = await deps.resolveSessionModel(sessionId);
+		const normalized = normalizeModelPref(sessionModel);
+		if (normalized) return normalized;
+	}
+	const reviewModel = normalizeModelPref(deps.preferencesStore?.get("default.reviewModel"));
+	if (reviewModel) return reviewModel;
+	return normalizeModelPref(deps.preferencesStore?.get("default.sessionModel"));
+}
+
+function normalizeModelPref(value: unknown): string | undefined {
+	if (typeof value === "string" && value.includes("/")) return value.trim();
+	if (!value || typeof value !== "object") return undefined;
+	const record = value as { provider?: unknown; id?: unknown; modelId?: unknown };
+	const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+	const id = typeof record.id === "string" ? record.id.trim() : typeof record.modelId === "string" ? record.modelId.trim() : "";
+	return provider && id ? `${provider}/${id}` : undefined;
+}
+
+function buildSynthesisUserPrompt(input: Record<string, unknown>): string {
+	return JSON.stringify(input, null, 2);
+}
+
+function parseJsonFromModelText(text: string): unknown {
+	const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		const start = trimmed.indexOf("{");
+		const end = trimmed.lastIndexOf("}");
+		if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+		return text;
+	}
 }
 
 function flattenDiffBlocks(files: any[]): DiffBlock[] {
@@ -540,6 +642,48 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 
 export const submitExportForTesting = submitExport;
 
+function sanitizeResolveResult(payload: WalkthroughResolveResult): WalkthroughResolveResult {
+	return {
+		...payload,
+		changeset: sanitizeChangesetUrls(payload.changeset),
+		cards: payload.cards.map(card => ({
+			...card,
+			diffBlocks: card.diffBlocks.map(sanitizeDiffBlockUrls),
+		})),
+		export: payload.export ? sanitizeExportUrls(payload.export) : payload.export,
+	};
+}
+
+function sanitizeChangesetUrls(changeset: WalkthroughChangeset): WalkthroughChangeset {
+	const externalUrl = safeExternalUrl(changeset.externalUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+	const prUrl = safeExternalUrl(changeset.prUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+	return {
+		...changeset,
+		...(externalUrl ? { externalUrl } : { externalUrl: undefined }),
+		...(prUrl ? { prUrl } : { prUrl: undefined }),
+	};
+}
+
+function sanitizeDiffBlockUrls(block: DiffBlock): DiffBlock {
+	const extraHosts = trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS);
+	return {
+		...block,
+		externalUrl: safeExternalUrl(block.externalUrl, extraHosts),
+		blobUrl: safeExternalUrl(block.blobUrl, extraHosts),
+		rawUrl: safeExternalUrl(block.rawUrl, extraHosts),
+		contentsUrl: safeExternalUrl(block.contentsUrl, extraHosts),
+	};
+}
+
+function sanitizeExportUrls(exportCapability: WalkthroughExportCapability): WalkthroughExportCapability {
+	const extraHosts = trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS);
+	const sanitized: WalkthroughExportCapability = { ...exportCapability };
+	for (const key of ["url", "previewUrl", "submitUrl"] as const) {
+		if (typeof sanitized[key] === "string") sanitized[key] = safeExternalUrl(sanitized[key], extraHosts);
+	}
+	return sanitized;
+}
+
 async function storeWalkthrough(payload: WalkthroughResolveResult): Promise<void> {
 	const module = await optionalPrModule("walkthrough-store");
 	const store = module?.storeWalkthrough ?? module?.saveWalkthrough;
@@ -642,12 +786,23 @@ function stringValue(value: unknown): string | undefined {
 
 function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string): { owner: string; repo: string; number: string | number; url: string } | undefined {
 	if (prUrl) {
-		const match = prUrl.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
-		if (match) return { owner: match[1], repo: match[2], number: prNumber ?? match[3], url: prUrl };
+		let parsed: URL;
+		try {
+			parsed = new URL(prUrl);
+		} catch {
+			return undefined;
+		}
+		const safeUrl = safeExternalUrl(prUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+		const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
+		if (safeUrl && parsed.hostname.replace(/\.$/, "").toLowerCase() === "github.com" && match) {
+			return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]).replace(/\.git$/i, ""), number: prNumber ?? match[3], url: safeUrl };
+		}
 	}
 	void cwd;
 	return undefined;
 }
+
+export const resolveWalkthroughForTesting = resolveWalkthrough;
 
 function fixtureWalkthrough(): WalkthroughResolveResult {
 	const changeset: WalkthroughChangeset = {

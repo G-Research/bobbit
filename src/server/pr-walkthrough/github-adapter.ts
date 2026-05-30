@@ -1,3 +1,4 @@
+import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
 import { execFileSafe } from "../exec-file-safe.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
@@ -197,7 +198,7 @@ export function parseGithubPrReference(input: { prUrl?: string; prNumber?: strin
 		repo: stripGitSuffix(decodeURIComponent(match[2])),
 		number: Number(match[3]),
 		host,
-		url: prUrl,
+		url: safeGithubUrl(prUrl),
 	};
 }
 
@@ -255,7 +256,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 	const pr = await fetchGithubJson<GithubApiPullRequest>(fetchImpl, prApiUrl, headers, warnings);
 	const files = await fetchGithubFiles(fetchImpl, prApiUrl, headers, options.maxFiles ?? 300, warnings);
 	const resolvedFiles = await enrichFilesWithDiffs({ cwd: options.cwd, baseSha: pr.base.sha, headSha: pr.head.sha, files, warnings });
-	const prUrl = pr.html_url || parsed.url || `https://${host}/${owner}/${repo}/pull/${number}`;
+	const prUrl = safeGithubUrl(pr.html_url) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
 	const changesetId = changesetIdForGithub(owner, repo, number, pr.head.sha);
 	const exportAvailable = Boolean(token);
 
@@ -318,13 +319,18 @@ async function fetchGithubFiles(
 	warnings: GithubWalkthroughWarning[],
 ): Promise<GithubApiChangedFile[]> {
 	const result: GithubApiChangedFile[] = [];
-	for (let page = 1; result.length < maxFiles; page++) {
+	let maybeMorePages = false;
+	for (let page = 1; result.length <= maxFiles; page++) {
 		const pageUrl = `${prApiUrl}/files?per_page=100&page=${page}`;
 		const batch = await fetchGithubJson<GithubApiChangedFile[]>(fetchImpl, pageUrl, headers, warnings);
 		result.push(...batch);
 		if (batch.length < 100) break;
+		if (result.length >= maxFiles) {
+			maybeMorePages = true;
+			break;
+		}
 	}
-	if (result.length > maxFiles) {
+	if (result.length > maxFiles || maybeMorePages) {
 		warnings.push({ code: "github_files_truncated", severity: "warning", message: `GitHub changed files were truncated at ${maxFiles} files.` });
 	}
 	return result.slice(0, maxFiles);
@@ -369,10 +375,10 @@ async function enrichFilesWithDiffs(input: {
 			oldPath: file.previous_filename,
 			patch,
 			status,
-			externalUrl: file.blob_url,
-			blobUrl: file.blob_url,
-			rawUrl: file.raw_url,
-			contentsUrl: file.contents_url,
+			externalUrl: safeGithubUrl(file.blob_url),
+			blobUrl: safeGithubUrl(file.blob_url),
+			rawUrl: safeGithubUrl(file.raw_url),
+			contentsUrl: safeGithubUrl(file.contents_url),
 		});
 		if (!patch) {
 			input.warnings.push({
@@ -390,9 +396,9 @@ async function enrichFilesWithDiffs(input: {
 			deletions: file.deletions ?? 0,
 			changes: file.changes ?? ((file.additions ?? 0) + (file.deletions ?? 0)),
 			patch,
-			blobUrl: file.blob_url,
-			rawUrl: file.raw_url,
-			contentsUrl: file.contents_url,
+			blobUrl: safeGithubUrl(file.blob_url),
+			rawUrl: safeGithubUrl(file.raw_url),
+			contentsUrl: safeGithubUrl(file.contents_url),
 			diffBlocks: block.hunks.length > 0 ? [block] : [],
 		});
 	}
@@ -549,6 +555,10 @@ function normalizePrNumber(value: string | number | undefined): number | undefin
 
 function cleanString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function safeGithubUrl(value: unknown): string | undefined {
+	return safeExternalUrl(value, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
 }
 
 function stripGitSuffix(repo: string): string {

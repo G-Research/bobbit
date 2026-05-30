@@ -405,9 +405,22 @@ async function tryLlmSynthesis(
 	if (byteLength(input) > (options.maxLlmInputBytes ?? DEFAULT_MAX_LLM_INPUT_BYTES)) return [];
 	try {
 		const raw = typeof options.llm === "function" ? await options.llm(input) : await options.llm.synthesiseWalkthroughCards(input);
-		return validateSynthesisedCards(raw, files);
+		return validateSynthesisedCards(parseLlmJson(raw), files);
 	} catch {
 		return [];
+	}
+}
+
+function parseLlmJson(raw: unknown): unknown {
+	if (typeof raw !== "string") return raw;
+	const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		const start = trimmed.indexOf("{");
+		const end = trimmed.lastIndexOf("}");
+		if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+		return raw;
 	}
 }
 

@@ -288,6 +288,35 @@ describe("PR walkthrough GitHub adapter", () => {
 		assert.equal(resolved.files[0].diffBlocks[0].hunks[0].lines[1].newLine, 2);
 		assert.equal(resolved.files[0].diffBlocks[0].externalUrl, "https://github.com/SuuBro/bobbit/blob/bbbbbbbbbbbb/src/example.ts");
 	});
+
+	it("warns when GitHub changed-file pagination lands exactly on the max-files boundary", async () => {
+		const resolved = await resolveGithubPr({
+			prUrl: "https://github.com/SuuBro/bobbit/pull/42",
+			token: "token",
+			apiBaseUrl: "https://api.github.test",
+			maxFiles: 100,
+			fetch: async (url) => {
+				if (url.endsWith("/pulls/42")) {
+					return response(200, {
+						number: 42,
+						title: "Many files",
+						html_url: "https://github.com/SuuBro/bobbit/pull/42",
+						base: { sha: "aaaaaaaaaaaa" },
+						head: { sha: "bbbbbbbbbbbb" },
+						changed_files: 101,
+					});
+				}
+				return response(200, Array.from({ length: 100 }, (_, index) => ({
+					filename: `src/file-${index}.ts`,
+					status: "modified",
+					patch: "@@ -1,1 +1,2 @@\n context\n+added",
+				})));
+			},
+		});
+
+		assert.equal(resolved.files.length, 100);
+		assert.ok(resolved.warnings.some(warning => warning.code === "github_files_truncated"));
+	});
 });
 
 async function startMockGithubReviewServer(): Promise<{ baseUrl: string; requests: Array<{ url?: string; authorization?: string; body: any }>; close: () => Promise<void> }> {

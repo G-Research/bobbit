@@ -3,6 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
 import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "./fixtures.js";
 import { gatewayFetch } from "../../../app/gateway-fetch.js";
+import { safeExternalUrl } from "../../../shared/pr-walkthrough/url-safety.js";
 
 const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [
 	{ id: "orientation", label: "Orientation" },
@@ -674,14 +675,17 @@ export class PrWalkthroughPanel extends LitElement {
 	private get apiChangesetId(): string {
 		if (this.changesetId.trim()) return this.changesetId.trim();
 		const key = this.persistenceKey.replace(/^walkthrough:/, "").trim();
-		if (key) return key;
+		if (key) {
+			try { return decodeURIComponent(key); }
+			catch { return key; }
+		}
 		const changeset = this.effectiveChangeset;
 		return `${changeset.baseSha}..${changeset.headSha}`;
 	}
 
 	private get prIdentity(): { kicker: string; title: string; linkLabel: string; url: string } {
 		const changeset = this.effectiveChangeset;
-		const url = changeset.prUrl || changeset.externalUrl || "";
+		const url = safeExternalUrl(changeset.prUrl) || safeExternalUrl(changeset.externalUrl) || "";
 		const urlNumber = url ? /\/pull\/(\d+)(?:\/|$)/i.exec(url)?.[1] : undefined;
 		const titleNumber = changeset.title ? /^PR\s+#(\d+)/i.exec(changeset.title)?.[1] : undefined;
 		const number = changeset.prNumber != null && String(changeset.prNumber).trim() ? String(changeset.prNumber) : urlNumber ?? titleNumber;
@@ -1028,7 +1032,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
 		const linked = block as PrWalkthroughDiffBlock & { externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
-		return linked.externalUrl || linked.blobUrl || linked.rawUrl || linked.contentsUrl;
+		return safeExternalUrl(linked.externalUrl) || safeExternalUrl(linked.blobUrl) || safeExternalUrl(linked.rawUrl) || safeExternalUrl(linked.contentsUrl);
 	}
 
 	private renderDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine | null, column: "old" | "new" | "inline"): TemplateResult {
@@ -1194,6 +1198,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const invalidRows = rows.length - validRows.length;
 		const canSubmit = this.canUseExportApi && !this._exportPreviewLoading && !this._exportSubmitting && !!preview && (preview.canSubmit !== false);
 		const body = preview?.body || preview?.reviewBody || this.buildAuditText();
+		const reviewUrl = safeExternalUrl(this._exportResult?.url);
 		return html`
 			<div class="export-backdrop" data-testid="pr-walkthrough-export-preview" role="dialog" aria-modal="true" aria-label="Review export preview">
 				<section class="export-dialog">
@@ -1205,7 +1210,7 @@ export class PrWalkthroughPanel extends LitElement {
 					<div class="export-body">
 						${!this.canUseExportApi ? html`<div class="banner info" data-testid="pr-walkthrough-export-unavailable"><strong>Export unavailable</strong><div>${this.exportUnavailableReason}</div></div>` : nothing}
 						${this._exportError ? html`<div class="banner error" data-testid="pr-walkthrough-export-error"><strong>Export preview failed</strong><div>${this._exportError}</div></div>` : nothing}
-						${this._exportResult ? html`<div class="banner ${this._exportResult.ok === false ? "error" : "info"}" data-testid="pr-walkthrough-export-result"><strong>${this._exportResult.ok === false ? "Submission failed" : "Submitted"}</strong><div>${this._exportResult.message || this._exportResult.error || "GitHub review submitted."}</div>${this._exportResult.url ? html`<div><a href=${this._exportResult.url} target="_blank" rel="noopener noreferrer">Open review ↗</a></div>` : nothing}</div>` : nothing}
+						${this._exportResult ? html`<div class="banner ${this._exportResult.ok === false ? "error" : "info"}" data-testid="pr-walkthrough-export-result"><strong>${this._exportResult.ok === false ? "Submission failed" : "Submitted"}</strong><div>${this._exportResult.message || this._exportResult.error || "GitHub review submitted."}</div>${reviewUrl ? html`<div><a href=${reviewUrl} target="_blank" rel="noopener noreferrer">Open review ↗</a></div>` : nothing}</div>` : nothing}
 						${this._exportPreviewLoading ? this.renderLoadingState() : html`
 							<div class="export-summary" data-testid="pr-walkthrough-export-summary">
 								<span>${validRows.length} mapped comment${validRows.length === 1 ? "" : "s"}</span>
