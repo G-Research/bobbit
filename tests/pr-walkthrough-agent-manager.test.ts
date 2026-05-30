@@ -209,6 +209,46 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(second.childSessionId, first.childSessionId);
 	});
 
+	it("concurrent duplicate launches share one child job", async () => {
+		const sessionManager = makeSessionManager();
+		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
+		let createCount = 0;
+		let releaseCreate: (() => void) | undefined;
+		const createBarrier = new Promise<void>(resolve => { releaseCreate = resolve; });
+		sessionManager.createSession = async (...args: Parameters<typeof sessionManager.createSession>) => {
+			createCount += 1;
+			await createBarrier;
+			return originalCreateSession(...args);
+		};
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		const launches = Array.from({ length: 8 }, () => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		releaseCreate?.();
+		const results = await Promise.all(launches);
+
+		assert.equal(createCount, 1);
+		assert.equal(new Set(results.map(result => result.childSessionId)).size, 1);
+		assert.equal(results.filter(result => result.created).length, 1);
+		assert.equal(new WalkthroughAgentStore(tempDir).list().filter(job => job.target.canonicalKey === "github:acme/widgets#42").length, 1);
+	});
+
+	it("launch rejects unknown and stale parent sessions", async () => {
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		await assert.rejects(
+			() => manager.launch({ sessionId: "missing-parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			/Parent session missing-parent was not found/,
+		);
+		sessionManager.sessions.set("stale-parent", { id: "stale-parent", cwd: tempDir, status: "terminated" });
+		await assert.rejects(
+			() => manager.launch({ sessionId: "stale-parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			/no longer active/,
+		);
+		assert.equal(new WalkthroughAgentStore(tempDir).list().length, 0);
+	});
+
 	it("launch prompts include the required YAML schema fields and enums", async () => {
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
@@ -300,6 +340,43 @@ describe("WalkthroughAgentManager", () => {
 		const job = manager.getJob(launch.jobId);
 		assert.equal(job?.status, "ready");
 		assert.equal(job?.payloadUpdatedAt, publishedAt);
+	});
+
+	it("submit-yaml rejects SHA mismatches against authoritative resolved PR metadata", async () => {
+		const authoritativeBase = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const authoritativeHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store: new WalkthroughAgentStore(tempDir),
+			resolveDiffForYamlMapping: () => ({
+				changeset: { baseSha: authoritativeBase, headSha: authoritativeHead, provider: "github" },
+				files: [],
+			}),
+		});
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		const mismatch = await manager.submitYaml({
+			sessionId: launch.childSessionId,
+			jobId: launch.jobId,
+			yaml: validYaml(42, { baseSha: "ccccccc", headSha: authoritativeHead.slice(0, 7) }),
+		});
+		assert.equal(mismatch.ok, false);
+		assert.equal(mismatch.status, "validation_failed");
+		assert.match(mismatch.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n"), /\$\.pr\.base_sha: Must match the authoritative PR base SHA/);
+		assert.equal(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")), false);
+
+		const accepted = await manager.submitYaml({
+			sessionId: launch.childSessionId,
+			jobId: launch.jobId,
+			yaml: validYaml(42, { baseSha: authoritativeBase.slice(0, 7), headSha: authoritativeHead.slice(0, 7) }),
+		});
+		assert.equal(accepted.ok, true);
+		const stored = getWalkthrough(launch.changesetId, tempDir);
+		assert.equal(stored?.changeset.baseSha, authoritativeBase);
+		assert.equal(stored?.changeset.headSha, authoritativeHead);
 	});
 
 	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {

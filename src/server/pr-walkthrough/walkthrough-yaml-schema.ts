@@ -293,8 +293,8 @@ export function mapYamlToWalkthroughPayload(
 		changesetId,
 		changeset: {
 			...(parsedDiff.changeset ?? {}),
-			baseSha: document.pr.base_sha,
-			headSha: document.pr.head_sha,
+			baseSha: parsedDiff.changeset?.baseSha ?? document.pr.base_sha,
+			headSha: parsedDiff.changeset?.headSha ?? document.pr.head_sha,
 			provider: document.pr.provider,
 			externalUrl: document.pr.url,
 			prUrl: document.pr.url,

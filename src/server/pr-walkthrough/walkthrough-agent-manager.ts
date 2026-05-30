@@ -117,6 +117,12 @@ export type WalkthroughYamlValidationResult =
 	| { ok: true; document: Record<string, unknown>; warnings?: WalkthroughWarning[]; payload?: WalkthroughStorePayload }
 	| { ok: false; summary: PrWalkthroughValidationSummary };
 
+class WalkthroughYamlValidationFailure extends Error {
+	constructor(readonly summary: PrWalkthroughValidationSummary) {
+		super(summary.message);
+	}
+}
+
 export const WALKTHROUGH_ALLOWED_TOOLS = [
 	"readonly_bash",
 	"submit_pr_walkthrough_yaml",
@@ -126,6 +132,7 @@ export class WalkthroughAgentManager {
 	private readonly stateDir: string;
 	private readonly store: WalkthroughAgentStore;
 	private readonly reminderUnsubscribers = new Map<string, () => void>();
+	private readonly launchInFlight = new Map<string, Promise<LaunchWalkthroughResponse>>();
 
 	constructor(private readonly deps: WalkthroughAgentManagerDeps) {
 		this.stateDir = deps.stateDir ?? bobbitStateDir();
@@ -137,14 +144,32 @@ export class WalkthroughAgentManager {
 		if (!parentSessionId) throw routeError(400, "sessionId is required", { code: "INVALID_LAUNCH_REQUEST" });
 
 		const parent = this.getSession(parentSessionId);
+		this.assertLaunchableParent(parentSessionId, parent);
 		const target = canonicalizeTarget(input);
 		const existing = this.store.findByParentAndTarget(parentSessionId, target.canonicalKey);
 		if (existing && this.shouldReuse(existing)) {
 			return { ...responseFromJob(existing), created: false };
 		}
 
+		const launchKey = `${parentSessionId}\0${target.canonicalKey}`;
+		const inFlight = this.launchInFlight.get(launchKey);
+		if (inFlight) {
+			const result = await inFlight;
+			return { ...result, created: false };
+		}
+
+		const promise = this.launchNew(input, parentSessionId, parent, target);
+		this.launchInFlight.set(launchKey, promise);
+		try {
+			return await promise;
+		} finally {
+			this.launchInFlight.delete(launchKey);
+		}
+	}
+
+	private async launchNew(input: LaunchWalkthroughRequest, parentSessionId: string, parent: SessionLike | PersistedSessionLike, target: PrWalkthroughTarget): Promise<LaunchWalkthroughResponse> {
 		const cwd = await this.resolveCwd(input, parentSessionId, parent);
-		const projectId = stringValue(input.projectId) ?? stringValue(parent?.projectId);
+		const projectId = stringValue(input.projectId) ?? stringValue(parent.projectId);
 		const jobId = `prw-${randomUUID()}`;
 		const childSessionId = `prw-session-${randomUUID()}`;
 		const changesetId = changesetIdForTarget(target);
@@ -289,8 +314,17 @@ export class WalkthroughAgentManager {
 
 		let payload: WalkthroughStorePayload;
 		try {
-			payload = validation.payload ?? await this.mapYamlToPayload(validation.document, job);
+			payload = validation.payload ?? await this.mapYamlToPayload(validation.document, job, input.yaml);
 		} catch (error) {
+			if (error instanceof WalkthroughYamlValidationFailure) {
+				const updated = this.store.update(job.jobId, {
+					status: "validation_failed",
+					lastValidationError: error.summary,
+					error: { code: "YAML_SCHEMA_INVALID", message: error.summary.message, retryable: true },
+				}) ?? job;
+				this.broadcastJob(updated);
+				return { ok: false, status: "validation_failed", retryable: true, validation: error.summary, job: updated };
+			}
 			const typed = classifyDiffResolutionError(error);
 			const updated = this.store.update(job.jobId, { status: "error", error: typed }) ?? job;
 			this.broadcastJob(updated);
@@ -349,9 +383,13 @@ export class WalkthroughAgentManager {
 		return { ok: true, document: result.document as unknown as Record<string, unknown> };
 	}
 
-	private async mapYamlToPayload(document: Record<string, unknown>, job: PrWalkthroughJobRecord): Promise<WalkthroughStorePayload> {
+	private async mapYamlToPayload(document: Record<string, unknown>, job: PrWalkthroughJobRecord, yamlText: string): Promise<WalkthroughStorePayload> {
 		if (this.deps.mapYamlToPayload) return this.deps.mapYamlToPayload(document, job);
 		const parsedDiff = await this.resolveDiffForYamlMapping(document, job);
+		const authoritativeErrors = validateYamlAgainstAuthoritativeChangeset(document as unknown as PrWalkthroughYamlDocument, parsedDiff, job);
+		if (authoritativeErrors.length > 0) {
+			throw new WalkthroughYamlValidationFailure(validationSummary(authoritativeErrors, createHash("sha256").update(yamlText).digest("hex").slice(0, 16)));
+		}
 		return defaultMapYamlToWalkthroughPayload(document as unknown as PrWalkthroughYamlDocument, parsedDiff, {
 			changesetId: job.changesetId,
 			target: { ...job.target, changesetId: job.changesetId },
@@ -412,6 +450,21 @@ export class WalkthroughAgentManager {
 
 	private getSession(sessionId: string): SessionLike | PersistedSessionLike | undefined {
 		return this.deps.sessionManager?.getSession?.(sessionId) ?? this.deps.sessionManager?.getPersistedSession?.(sessionId);
+	}
+
+	private assertLaunchableParent(sessionId: string, parent: SessionLike | PersistedSessionLike | undefined): asserts parent is SessionLike | PersistedSessionLike {
+		if (!parent) {
+			throw routeError(404, `Parent session ${sessionId} was not found. Open or reload the launching session, then start the PR walkthrough again.`, {
+				code: "PARENT_SESSION_NOT_FOUND",
+				retryable: false,
+			});
+		}
+		if (parent.archived === true || parent.status === "terminated" || parent.status === "archived") {
+			throw routeError(409, `Parent session ${sessionId} is no longer active. Start the PR walkthrough from an active session.`, {
+				code: "PARENT_SESSION_STALE",
+				retryable: false,
+			});
+		}
 	}
 
 	private async resolveCwd(input: LaunchWalkthroughRequest, parentSessionId: string, parent: SessionLike | PersistedSessionLike | undefined): Promise<string> {
@@ -645,6 +698,30 @@ function validationSummary(errors: PrWalkthroughValidationIssue[], yamlHash: str
 	return { code: "YAML_SCHEMA_INVALID", message: "PR walkthrough YAML failed validation.", errors, retryable: true, yamlHash };
 }
 
+function validateYamlAgainstAuthoritativeChangeset(
+	document: PrWalkthroughYamlDocument,
+	parsedDiff: WalkthroughParsedDiffForYamlMapping,
+	job: PrWalkthroughJobRecord,
+): PrWalkthroughValidationIssue[] {
+	if (job.target.provider !== "github") return [];
+	const errors: PrWalkthroughValidationIssue[] = [];
+	const authoritativeBaseSha = stringValue(parsedDiff.changeset?.baseSha);
+	const authoritativeHeadSha = stringValue(parsedDiff.changeset?.headSha);
+	if (authoritativeBaseSha && !shaMatches(authoritativeBaseSha, document.pr.base_sha)) {
+		errors.push({
+			path: "$.pr.base_sha",
+			message: `Must match the authoritative PR base SHA ${authoritativeBaseSha} resolved from the PR diff. Re-fetch the PR metadata/diff and retry; the walkthrough was not published.`,
+		});
+	}
+	if (authoritativeHeadSha && !shaMatches(authoritativeHeadSha, document.pr.head_sha)) {
+		errors.push({
+			path: "$.pr.head_sha",
+			message: `Must match the authoritative PR head SHA ${authoritativeHeadSha} resolved from the PR diff. Re-fetch the PR metadata/diff and retry; the walkthrough was not published.`,
+		});
+	}
+	return errors;
+}
+
 function normalizeValidationSummary(value: unknown, yamlText: string): PrWalkthroughValidationSummary {
 	if (isRecord(value) && Array.isArray(value.errors)) {
 		return {
@@ -745,6 +822,10 @@ function stringValue(value: unknown): string | undefined {
 
 function shortSha(value: string): string {
 	return value.length > 7 ? value.slice(0, 7) : value;
+}
+
+function shaMatches(expected: string, actual: string): boolean {
+	return actual.toLowerCase().startsWith(expected.toLowerCase()) || expected.toLowerCase().startsWith(actual.toLowerCase());
 }
 
 function isFailureResult(value: unknown): value is { success: false; error: string } {
