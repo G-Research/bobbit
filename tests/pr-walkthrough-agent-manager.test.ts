@@ -174,7 +174,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")), false);
 	});
 
-	it("internal submit accepts valid YAML, persists payload, and keeps the child session alive", async () => {
+	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
@@ -187,6 +187,37 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(job?.status, "ready");
 		assert.ok(job?.submittedAt);
 		assert.ok(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")));
+		assert.deepEqual(result.warnings.filter(warning => warning.code === "yaml-fallback-mapper"), []);
+	});
+
+	it("internal submit validates YAML identity against the launch target", async () => {
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(43) });
+		assert.equal(result.ok, false);
+		assert.equal(result.status, "validation_failed");
+		assert.match(result.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n"), /pr number 42|URL https:\/\/github\.com\/acme\/widgets\/pull\/42/);
+	});
+
+	it("route constructs the production manager with SessionManager and broadcast dependencies", async () => {
+		const sessionManager = makeSessionManager();
+		const events: Record<string, unknown>[] = [];
+		const res = makeResponse();
+		const handled = await handlePrWalkthroughApiRoute(new URL("http://localhost/api/pr-walkthrough/launch"), { method: "POST" } as any, res as any, {
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			readBody: async () => ({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			sessionManager,
+			broadcast: event => events.push(event),
+		});
+		assert.equal(handled, true);
+		assert.equal(res.status, 201);
+		const body = JSON.parse(res.body ?? "{}");
+		assert.equal(body.status, "waiting_for_yaml");
+		assert.ok(sessionManager.sessions.get(body.childSessionId));
+		assert.ok(events.some(event => event.type === "pr_walkthrough_job_updated"));
 	});
 
 	it("route exposes launch, job restore, session restore, and submit-yaml", async () => {

@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import yaml from "yaml";
-
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { saveWalkthrough, type WalkthroughStorePayload } from "./walkthrough-store.js";
+import {
+	mapYamlToWalkthroughPayload as defaultMapYamlToWalkthroughPayload,
+	validatePrWalkthroughYaml as defaultValidatePrWalkthroughYaml,
+	type PrWalkthroughYamlDocument,
+} from "./walkthrough-yaml-schema.js";
 import {
 	WalkthroughAgentStore,
 	type PrWalkthroughJobError,
@@ -15,7 +18,7 @@ import {
 } from "./walkthrough-agent-store.js";
 
 type RpcLike = {
-	prompt?: (text: string, images?: unknown) => Promise<unknown> | unknown;
+	prompt?: (text: string, images?: any) => Promise<unknown> | unknown;
 	onEvent?: (handler: (event: unknown) => void) => (() => void);
 };
 
@@ -25,11 +28,11 @@ type SessionLike = {
 	cwd?: string;
 	worktreePath?: string;
 	status?: string;
+	archived?: boolean;
 	projectId?: string;
 	sandboxed?: boolean;
 	rpcClient?: RpcLike;
 	allowedTools?: string[];
-	[key: string]: unknown;
 };
 
 type PersistedSessionLike = {
@@ -42,7 +45,6 @@ type PersistedSessionLike = {
 	sandboxed?: boolean;
 	modelProvider?: string;
 	modelId?: string;
-	[key: string]: unknown;
 };
 
 export type WalkthroughSessionManagerLike = {
@@ -51,7 +53,7 @@ export type WalkthroughSessionManagerLike = {
 		agentArgs?: string[],
 		goalId?: string,
 		assistantType?: string,
-		opts?: Record<string, unknown>,
+		opts?: any,
 	) => Promise<SessionLike>;
 	getSession?: (sessionId: string) => SessionLike | undefined;
 	getPersistedSession?: (sessionId: string) => PersistedSessionLike | undefined;
@@ -189,6 +191,12 @@ export class WalkthroughAgentManager {
 					allowedTools: WALKTHROUGH_ALLOWED_TOOLS,
 					projectId,
 					sandboxed: parent?.sandboxed,
+					parentSessionId,
+					childKind: "pr-walkthrough",
+					readOnly: true,
+					walkthroughJobId: jobId,
+					walkthroughChangesetId: changesetId,
+					walkthroughTargetKey: target.canonicalKey,
 					env: {
 						BOBBIT_SESSION_ID: childSessionId,
 						BOBBIT_WALKTHROUGH_JOB_ID: jobId,
@@ -283,14 +291,18 @@ export class WalkthroughAgentManager {
 
 	private async validateYaml(yamlText: string, job: PrWalkthroughJobRecord): Promise<WalkthroughYamlValidationResult> {
 		if (this.deps.validateYaml) return this.deps.validateYaml(yamlText, job);
-		const schemaValidation = await tryExternalSchemaValidation(yamlText, job);
-		if (schemaValidation) return schemaValidation;
-		return fallbackValidateYaml(yamlText, job);
+		const result = defaultValidatePrWalkthroughYaml(yamlText, { target: job.target });
+		if (!result.ok) return { ok: false, summary: normalizeValidationSummary(result.summary, yamlText) };
+		return { ok: true, document: result.document as unknown as Record<string, unknown> };
 	}
 
 	private async mapYamlToPayload(document: Record<string, unknown>, job: PrWalkthroughJobRecord): Promise<WalkthroughStorePayload> {
 		if (this.deps.mapYamlToPayload) return this.deps.mapYamlToPayload(document, job);
-		return fallbackMapYamlToPayload(document, job);
+		return defaultMapYamlToWalkthroughPayload(document as unknown as PrWalkthroughYamlDocument, {}, {
+			changesetId: job.changesetId,
+			target: { ...job.target, changesetId: job.changesetId },
+			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission remains explicit and is handled by the existing export flow." },
+		});
 	}
 
 	private getSession(sessionId: string): SessionLike | PersistedSessionLike | undefined {
@@ -418,153 +430,8 @@ function buildKickoffPrompt(job: PrWalkthroughJobRecord): string {
 	].filter(Boolean).join("\n");
 }
 
-async function tryExternalSchemaValidation(yamlText: string, job: PrWalkthroughJobRecord): Promise<WalkthroughYamlValidationResult | null> {
-	try {
-		const modulePath = "./walkthrough-yaml-schema.js";
-		const mod = await import(modulePath) as Record<string, unknown>;
-		const fn = mod.validatePrWalkthroughYaml ?? mod.validateWalkthroughYaml ?? mod.parsePrWalkthroughYaml;
-		if (typeof fn !== "function") return null;
-		const result = await (fn as (text: string, job: PrWalkthroughJobRecord) => unknown)(yamlText, job);
-		if (!isRecord(result)) return null;
-		if (result.ok === false) {
-			return { ok: false, summary: normalizeValidationSummary(result.summary ?? result.error ?? result, yamlText) };
-		}
-		const document = isRecord(result.document) ? result.document : isRecord(result.value) ? result.value : undefined;
-		if (!document) return null;
-		return {
-			ok: true,
-			document,
-			warnings: Array.isArray(result.warnings) ? result.warnings as WalkthroughWarning[] : undefined,
-			payload: isRecord(result.payload) ? result.payload as unknown as WalkthroughStorePayload : undefined,
-		};
-	} catch {
-		return null;
-	}
-}
-
-function fallbackValidateYaml(yamlText: string, job: PrWalkthroughJobRecord): WalkthroughYamlValidationResult {
-	const yamlHash = createHash("sha256").update(yamlText).digest("hex").slice(0, 16);
-	if (Buffer.byteLength(yamlText, "utf-8") > 512_000) {
-		return invalid([{ path: "$", message: "YAML exceeds the 512KB limit; prioritize the most important review chunks." }], yamlHash);
-	}
-	let docs: yaml.Document.Parsed[];
-	try {
-		docs = yaml.parseAllDocuments(yamlText);
-	} catch (error) {
-		return invalid([{ path: "$", message: error instanceof Error ? error.message : String(error) }], yamlHash);
-	}
-	if (docs.length !== 1) return invalid([{ path: "$", message: "Submit exactly one YAML document." }], yamlHash);
-	const doc = docs[0];
-	if (doc.errors.length > 0) return invalid(doc.errors.map((error, index) => ({ path: `$[parseError${index}]`, message: error.message })), yamlHash);
-	const value = doc.toJSON();
-	if (!isRecord(value)) return invalid([{ path: "$", message: "YAML root must be an object." }], yamlHash);
-	const errors: PrWalkthroughValidationIssue[] = [];
-	if (value.schema_version !== 1) errors.push({ path: "schema_version", message: "schema_version must be 1." });
-	const pr = value.pr;
-	if (!isRecord(pr)) errors.push({ path: "pr", message: "pr object is required." });
-	else {
-		if (pr.provider !== "github") errors.push({ path: "pr.provider", message: "Only provider: github is supported for PR walkthrough agent submissions." });
-		if (job.target.owner && pr.owner !== job.target.owner) errors.push({ path: "pr.owner", message: `Must match launch target owner ${job.target.owner}.` });
-		if (job.target.repo && pr.repo !== job.target.repo) errors.push({ path: "pr.repo", message: `Must match launch target repo ${job.target.repo}.` });
-		if (job.target.number !== undefined && pr.number !== job.target.number) errors.push({ path: "pr.number", message: `Must match launch target PR #${job.target.number}.` });
-		for (const field of ["title", "url", "base_sha", "head_sha"] as const) {
-			if (typeof pr[field] !== "string" || !pr[field]) errors.push({ path: `pr.${field}`, message: `${field} is required.` });
-		}
-	}
-	const walkthrough = value.walkthrough;
-	if (!isRecord(walkthrough)) errors.push({ path: "walkthrough", message: "walkthrough object is required." });
-	else {
-		for (const field of ["context", "merge_assessment", "audit", "display"] as const) {
-			if (!isRecord(walkthrough[field])) errors.push({ path: `walkthrough.${field}`, message: `${field} object is required.` });
-		}
-		for (const field of ["design_decisions", "review_chunks", "omissions_and_followups"] as const) {
-			if (!Array.isArray(walkthrough[field])) errors.push({ path: `walkthrough.${field}`, message: `${field} array is required.` });
-		}
-	}
-	if (errors.length > 0) return invalid(errors, yamlHash);
-	return { ok: true, document: value };
-}
-
-function invalid(errors: PrWalkthroughValidationIssue[], yamlHash: string): WalkthroughYamlValidationResult {
-	return { ok: false, summary: validationSummary(errors, yamlHash) };
-}
-
 function validationSummary(errors: PrWalkthroughValidationIssue[], yamlHash: string): PrWalkthroughValidationSummary {
 	return { code: "YAML_SCHEMA_INVALID", message: "PR walkthrough YAML failed validation.", errors, retryable: true, yamlHash };
-}
-
-function fallbackMapYamlToPayload(document: Record<string, unknown>, job: PrWalkthroughJobRecord): WalkthroughStorePayload {
-	const pr = isRecord(document.pr) ? document.pr : {};
-	const walkthrough = isRecord(document.walkthrough) ? document.walkthrough : {};
-	const context = isRecord(walkthrough.context) ? walkthrough.context : {};
-	const merge = isRecord(walkthrough.merge_assessment) ? walkthrough.merge_assessment : {};
-	const audit = isRecord(walkthrough.audit) ? walkthrough.audit : {};
-	const chunks = Array.isArray(walkthrough.review_chunks) ? walkthrough.review_chunks.filter(isRecord) : [];
-	const decisions = Array.isArray(walkthrough.design_decisions) ? walkthrough.design_decisions.filter(isRecord) : [];
-	const omissions = Array.isArray(walkthrough.omissions_and_followups) ? walkthrough.omissions_and_followups.filter(isRecord) : [];
-	return {
-		changesetId: job.changesetId,
-		changeset: {
-			provider: "github",
-			baseSha: stringValue(pr.base_sha) ?? "unknown",
-			headSha: stringValue(pr.head_sha) ?? "unknown",
-			prUrl: stringValue(pr.url) ?? job.target.prUrl,
-			prNumber: numberValue(pr.number) ?? job.target.number,
-			prTitle: stringValue(pr.title),
-			prBody: isRecord(pr.original_description) ? stringValue(pr.original_description.body) : undefined,
-			title: stringValue(pr.title) ?? job.title,
-			filesChanged: numberValue(isRecord(pr.stats) ? pr.stats.files_changed : undefined),
-			additions: numberValue(isRecord(pr.stats) ? pr.stats.additions : undefined),
-			deletions: numberValue(isRecord(pr.stats) ? pr.stats.deletions : undefined),
-		},
-		cards: [
-			{
-				id: "orientation",
-				phaseId: "orientation",
-				title: "Orientation",
-				summary: stringValue(context.problem_solved) ?? stringValue(merge.summary) ?? "Review the PR context and author intent.",
-				rationale: Object.entries(context).map(([key, value]) => `${key}: ${String(value)}`).join("\n"),
-				diffBlocks: [],
-				checklist: arrayOfStrings(isRecord(audit) ? audit.reviewer_checklist : undefined),
-			},
-			...decisions.map((decision, index) => ({
-				id: stringValue(decision.id) ?? `design-${index + 1}`,
-				phaseId: "design" as const,
-				title: stringValue(decision.title) ?? `Design decision ${index + 1}`,
-				summary: stringValue(decision.explanation) ?? "Design decision from submitted walkthrough YAML.",
-				rationale: stringValue(decision.chosen_approach),
-				diffBlocks: [],
-				cardSuggestions: arrayOfStrings(decision.suggested_reviewer_concerns),
-			})),
-			...chunks.map((chunk, index) => ({
-				id: stringValue(chunk.id) ?? `chunk-${index + 1}`,
-				phaseId: phaseForChunk(stringValue(chunk.phase)),
-				title: stringValue(chunk.title) ?? `Review chunk ${index + 1}`,
-				summary: stringValue(chunk.explanation) ?? stringValue(chunk.reviewer_goal) ?? "Review chunk from submitted walkthrough YAML.",
-				rationale: stringValue(chunk.reviewer_goal),
-				diffBlocks: [],
-				cardSuggestions: arrayOfStrings(chunk.positive_notes),
-			})),
-			{
-				id: "omissions-and-followups",
-				phaseId: "other",
-				title: "Omissions and follow-ups",
-				summary: omissions.map(item => stringValue(item.concern)).filter(Boolean).join("\n") || "No omissions listed.",
-				diffBlocks: [],
-				cardSuggestions: omissions.map(item => stringValue(item.suggested_comment)).filter((item): item is string => Boolean(item)),
-			},
-			{
-				id: "audit",
-				phaseId: "audit",
-				title: "Audit",
-				summary: arrayOfStrings(audit.remaining_changed_areas).join("\n") || "Final audit checklist.",
-				diffBlocks: [],
-				checklist: arrayOfStrings(audit.reviewer_checklist),
-			},
-		],
-		warnings: [{ code: "yaml-fallback-mapper", severity: "warning", message: "Walkthrough YAML was accepted with the fallback mapper; diff hunk anchors will be enriched when the YAML schema mapper is integrated." }],
-		export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission remains explicit and is handled by the existing export flow." },
-	};
 }
 
 function normalizeValidationSummary(value: unknown, yamlText: string): PrWalkthroughValidationSummary {
@@ -604,14 +471,6 @@ function parseGithubPrUrl(input: string): { owner: string; repo: string; number:
 		}
 	} catch { /* not a URL */ }
 	return undefined;
-}
-
-function phaseForChunk(phase: string | undefined): "significant" | "other" | "audit" {
-	return phase === "audit" ? "audit" : phase === "other" ? "other" : "significant";
-}
-
-function arrayOfStrings(value: unknown): string[] {
-	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function numberValue(value: unknown): number | undefined {

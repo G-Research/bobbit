@@ -40,7 +40,7 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git status --porcelain=v2 --branch");
 	});
 
-	it("blocks mutating git commands", () => {
+	it("blocks mutating git commands and git filesystem escape flags", () => {
 		blocked("git checkout master", /not allowed/);
 		blocked("git switch feature", /not allowed/);
 		blocked("git reset --hard", /not allowed/);
@@ -49,6 +49,14 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("git push", /not allowed/);
 		blocked("git rebase origin/master", /not allowed/);
 		blocked("git status --ignored=matching", /restricted/);
+		blocked("git -C /tmp diff", /-C|absolute paths/);
+		blocked("git --git-dir .git diff", /--git-dir/);
+		blocked("git --git-dir=.git diff", /--git-dir/);
+		blocked("git --work-tree .. diff", /--work-tree|parent-directory/);
+		blocked("git --work-tree=.. diff", /--work-tree|parent-directory/);
+		blocked("git diff --output=diff.patch", /--output/);
+		blocked("git diff -- src/../package.json", /parent-directory/);
+		blocked("git show HEAD -- ':(top)package.json'", /pathspec magic/);
 	});
 
 	it("allows read/search commands and bounded sed", () => {
@@ -64,7 +72,14 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("pwd");
 	});
 
-	it("blocks filesystem writes and shell metacharacter bypasses", () => {
+	it("blocks filesystem escapes, writes, and shell metacharacter bypasses", () => {
+		blocked("cat /etc/passwd", /absolute paths/);
+		blocked("cat C:\\Windows\\win.ini", /absolute paths/);
+		blocked("cat ../package.json", /parent-directory/);
+		blocked("cat ~/secret", /home-directory/);
+		blocked("cat $HOME/.ssh/config", /environment-variable/);
+		blocked("find .. -name '*.ts'", /parent-directory/);
+		blocked("rg foo --output out.txt", /--output/);
 		blocked("echo hi > file.txt", /redirection/);
 		blocked("cat package.json | tee copy.json", /pipes/);
 		blocked("rg foo src && npm test", /chaining/);
