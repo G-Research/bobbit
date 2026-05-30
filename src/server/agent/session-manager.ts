@@ -3113,6 +3113,7 @@ export class SessionManager {
 			walkthroughJobId: ps.walkthroughJobId,
 			walkthroughChangesetId: ps.walkthroughChangesetId,
 			walkthroughTargetKey: ps.walkthroughTargetKey,
+			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 		});
@@ -3225,10 +3226,13 @@ export class SessionManager {
 		// Restore tool activation. Roleless normal sessions still use the general
 		// role so Bobbit extension tools and group policies are restored.
 		const overrideAllowedTools: string[] | undefined = (ps as any)._overrideAllowedTools;
+		const persistedAllowedTools = Array.isArray(ps.allowedTools) && ps.allowedTools.length > 0 ? ps.allowedTools : undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType);
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
 			? overrideAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
-			: this.resolveEffectiveAllowedTools(restoredRole);
+			: persistedAllowedTools
+				? persistedAllowedTools.map(n => tagAllowedTool(n, this.toolManager))
+				: this.resolveEffectiveAllowedTools(restoredRole);
 		const restoredAllowedTools = effectiveAllowed.length > 0 ? effectiveAllowed : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd);
@@ -3459,6 +3463,9 @@ export class SessionManager {
 		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
 			? opts.allowedTools.map(n => tagAllowedTool(n, this.toolManager))
 			: undefined;
+		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
+			? [...opts.allowedTools]
+			: undefined;
 		// Resolve projectId from opts or from the goal's project
 		const projectId = opts?.projectId ?? (goalId ? this.resolveGoal(goalId)?.projectId : undefined);
 		const ctx = this.buildPipelineContext(projectId);
@@ -3559,6 +3566,7 @@ export class SessionManager {
 				walkthroughJobId: opts?.walkthroughJobId,
 				walkthroughChangesetId: opts?.walkthroughChangesetId,
 				walkthroughTargetKey: opts?.walkthroughTargetKey,
+				sessionScopedAllowedTools,
 				worktreePath,
 				repoPath,
 				branch,
@@ -3623,6 +3631,7 @@ export class SessionManager {
 			walkthroughJobId: opts?.walkthroughJobId,
 			walkthroughChangesetId: opts?.walkthroughChangesetId,
 			walkthroughTargetKey: opts?.walkthroughTargetKey,
+			sessionScopedAllowedTools,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
