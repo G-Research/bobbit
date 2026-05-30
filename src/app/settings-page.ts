@@ -3795,10 +3795,10 @@ export function renderSettingsPage() {
 			<!-- Scope row -->
 			${renderScopeRow(currentScope, tabs)}
 			<!-- Tab bar -->
-			<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border bg-secondary/20">
+			<div class="shrink-0 flex items-center gap-1 px-4 py-2 border-b border-border bg-secondary/20 overflow-x-auto" style="scrollbar-width:thin;" data-testid="settings-tab-bar">
 				${tabs.map((tab) => html`
 					<button
-						class="px-3 py-1.5 text-sm rounded-md transition-colors
+						class="px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap shrink-0
 							${currentTab === tab.id
 								? "bg-background text-foreground shadow-sm border border-border"
 								: "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}"
