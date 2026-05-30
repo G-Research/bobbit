@@ -43,6 +43,9 @@ const RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS = new Set([
 	"-L",
 ]);
 
+const GH_API_BODY_FLAGS = new Set(["-f", "--field", "-F", "--raw-field", "--input"]);
+const GH_API_VALUE_FLAGS = new Set(["--jq", "-q", "--header", "-H", "--hostname"]);
+
 function basename(token: string): string {
 	const normalized = token.replace(/\\/g, "/");
 	return normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
@@ -239,6 +242,18 @@ function extractSearchPaths(argv: string[], optionConsumesValue: (token: string)
 	return paths;
 }
 
+function ghApiInlineMethod(token: string): string | undefined {
+	if (token.startsWith("--method=")) return token.slice("--method=".length);
+	if (token.startsWith("-X") && token.length > 2) return token.slice(2);
+	return undefined;
+}
+
+function isGhApiBodyFlag(token: string): boolean {
+	if (GH_API_BODY_FLAGS.has(token)) return true;
+	if (token.startsWith("--field=") || token.startsWith("--raw-field=") || token.startsWith("--input=")) return true;
+	return /^-[fF].+/.test(token);
+}
+
 function allowGh(argv: string[]): WalkthroughReadonlyDecision {
 	const common = commonArgumentPolicy(argv);
 	if (common) return common;
@@ -251,28 +266,26 @@ function allowGh(argv: string[]): WalkthroughReadonlyDecision {
 	let endpoint: string | undefined;
 	for (let i = 2; i < argv.length; i++) {
 		const token = argv[i];
+		if (token === "--") continue;
 		if (token === "--method" || token === "-X") {
 			const method = argv[i + 1]?.toUpperCase();
 			if (method !== "GET") return block("gh api is restricted to GET requests", argv);
 			i++;
 			continue;
 		}
-		if (token.startsWith("--method=")) {
-			if (token.slice("--method=".length).toUpperCase() !== "GET") return block("gh api is restricted to GET requests", argv);
+		const inlineMethod = ghApiInlineMethod(token);
+		if (inlineMethod !== undefined) {
+			if (inlineMethod.toUpperCase() !== "GET") return block("gh api is restricted to GET requests", argv);
 			continue;
 		}
-		if (token === "-f" || token === "--field" || token === "-F" || token === "--raw-field" || token === "--input") {
-			return block("gh api request bodies are not allowed", argv);
-		}
-		if (token.startsWith("-")) {
-			if (token === "--paginate" || token === "--jq" || token === "-q" || token === "--header" || token === "-H" || token === "--hostname") {
-				if (token !== "--paginate") i++;
-				continue;
-			}
+		if (isGhApiBodyFlag(token)) return block("gh api request bodies are not allowed", argv);
+		if (token.startsWith("-") && !endpoint) {
+			const optionName = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+			if (optionName === "--paginate") continue;
+			if (GH_API_VALUE_FLAGS.has(optionName) && !token.includes("=")) i++;
 			continue;
 		}
-		endpoint = token;
-		break;
+		if (!token.startsWith("-") && !endpoint) endpoint = token;
 	}
 
 	if (!endpoint) return block("gh api endpoint is required", argv);
@@ -360,6 +373,15 @@ function allowSed(argv: string[]): WalkthroughReadonlyDecision {
 	return { allowed: true, argv };
 }
 
+function longLivedReadFlagReason(commandName: string, token: string): string | undefined {
+	if (commandName !== "tail") return undefined;
+	if (token === "--follow" || token.startsWith("--follow=") || token === "-f" || token === "-F") {
+		return `${token} can keep readonly_bash running indefinitely and is not allowed`;
+	}
+	if (/^-[^-].*[fF]/.test(token)) return `${token} can keep readonly_bash running indefinitely and is not allowed`;
+	return undefined;
+}
+
 export function evaluateWalkthroughReadonlyCommand(command: string): WalkthroughReadonlyDecision {
 	const trimmed = command.trim();
 	if (!trimmed) return block("empty command");
@@ -385,6 +407,10 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	if (SEARCH_READ_ALLOWED.has(cmd)) {
 		const common = commonArgumentPolicy(argv, { guardPaths: PATH_READING_COMMANDS.has(cmd) });
 		if (common) return common;
+		for (const token of argv.slice(1)) {
+			const flagReason = longLivedReadFlagReason(cmd, token);
+			if (flagReason) return block(flagReason, argv);
+		}
 		return { allowed: true, argv };
 	}
 

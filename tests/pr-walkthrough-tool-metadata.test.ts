@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
+import { normalizeReadonlyTimeout } from "../defaults/tools/pr-walkthrough/extension.ts";
+
 const groupDir = path.resolve("defaults/tools/pr-walkthrough");
 
 function readToolText(file: string): string {
@@ -26,6 +28,9 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(text, /Blocks writes/i);
 		assert.match(text, /recursive searches from `\.`\/the repository root/i);
 		assert.match(text, /hidden\/ignore override flags/i);
+		assert.match(text, /tail -f/i);
+		assert.match(text, /timeouts must be finite and non-negative/i);
+		assert.match(text, /clamped to 300 seconds/i);
 		assert.match(text, /trusted absolute paths outside the worktree/i);
 	});
 
@@ -57,6 +62,10 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /Command blocked by PR walkthrough read-only policy/);
 		assert.match(source, /Use read-only PR\/diff inspection instead/);
 		assert.match(source, /truncateTail/);
+		assert.match(source, /normalizeReadonlyTimeout/);
+		assert.match(source, /Number\.isFinite\(timeout\)/);
+		assert.match(source, /timeout < 0/);
+		assert.match(source, /Math\.min\(timeout, MAX_TIMEOUT_SECONDS\)/);
 		assert.doesNotMatch(source, /createWriteStream|tmpdir|tempFilePath|Full output saved to/);
 	});
 
@@ -73,6 +82,24 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /FORCE_COLOR:\s*"0"/);
 		assert.doesNotMatch(source, /\/bin\/bash|cmd\.exe|\["-c"\]|\["\/c"\]/);
 		assert.doesNotMatch(source, /\.\.\.process\.env/);
+	});
+
+	it("readonly_bash clamps and rejects caller-provided timeouts", () => {
+		assert.deepEqual(normalizeReadonlyTimeout(undefined), { ok: true, seconds: 300, clamped: false });
+		assert.deepEqual(normalizeReadonlyTimeout(1.5), { ok: true, seconds: 1.5, clamped: false });
+		assert.deepEqual(normalizeReadonlyTimeout(999), { ok: true, seconds: 300, clamped: true });
+		assert.equal(normalizeReadonlyTimeout(-1).ok, false);
+		assert.equal(normalizeReadonlyTimeout(Number.NaN).ok, false);
+		assert.equal(normalizeReadonlyTimeout(Number.POSITIVE_INFINITY).ok, false);
+	});
+
+	it("readonly_bash handles aborts without leaving spawned children running", () => {
+		const source = readToolText("extension.ts");
+		assert.match(source, /abortSignal\?\.aborted\) return toolText\("readonly_bash interrupted before start\./);
+		assert.match(source, /const abortHandler = \(\) => \{/);
+		assert.match(source, /if \(child\.pid\) killProcessTree\(child\.pid\)/);
+		assert.match(source, /if \(abortSignal\.aborted\) abortHandler\(\)/);
+		assert.match(source, /Command interrupted; subprocess tree was killed/);
 	});
 
 	it("trusted executable resolution skips repo-local spoofed binaries", () => {

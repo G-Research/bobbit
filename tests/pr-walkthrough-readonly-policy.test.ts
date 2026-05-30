@@ -21,6 +21,7 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("gh api repos/owner/repo/pulls/123");
 		allowed("gh api repos/owner/repo/pulls/123/files --paginate");
 		allowed("gh api --method GET repos/owner/repo/pulls/123/commits");
+		allowed("gh api repos/owner/repo/pulls/123 --method GET --jq .title");
 	});
 
 	it("blocks mutating GitHub commands and write-capable API calls", () => {
@@ -28,6 +29,14 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("gh pr comment 123 --body ok", /not a read-only PR command/);
 		blocked("gh pr merge 123", /not a read-only PR command/);
 		blocked("gh api --method POST repos/owner/repo/pulls/123/comments", /GET/);
+		blocked("gh api repos/owner/repo/pulls/123 --method PATCH -f title=x", /GET/);
+		blocked("gh api repos/owner/repo/pulls/123/files -X PATCH", /GET/);
+		blocked("gh api repos/owner/repo/pulls/123 -- --method PATCH", /GET/);
+		blocked("gh api repos/owner/repo/pulls/123/commits --method=DELETE", /GET/);
+		blocked("gh api repos/owner/repo/pulls/123 --field title=x", /request bodies/);
+		blocked("gh api repos/owner/repo/pulls/123 --raw-field=title=x", /request bodies/);
+		blocked("gh api repos/owner/repo/pulls/123 -Ftitle=x", /request bodies/);
+		blocked("gh api repos/owner/repo/pulls/123 --input payload.json", /request bodies/);
 		blocked("gh api repos/owner/repo/issues/123/comments", /pull request metadata/);
 	});
 
@@ -112,6 +121,14 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("touch src/new.ts", /touch is not permitted/);
 		blocked("find . -name '*.tmp' -delete", /find action -delete/);
 		blocked("sed -i 's/a/b/' file.ts", /in-place/);
+	});
+
+	it("blocks long-lived follow flags on otherwise read-only commands", () => {
+		blocked("tail -f package.json", /indefinitely|follow/);
+		blocked("tail --follow package.json", /indefinitely|follow/);
+		blocked("tail --follow=name package.json", /indefinitely|follow/);
+		blocked("tail -F package.json", /indefinitely|follow/);
+		allowed("tail -20 package.json");
 	});
 
 	it("blocks recursive root traversal and hidden or ignore override search flags", () => {
