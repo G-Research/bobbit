@@ -349,6 +349,8 @@ test.describe("PR walkthrough panel", () => {
 			const [contentBox, actionsBox] = await Promise.all([panel.locator(".content").boundingBox(), activeCard(page).locator(".actions").boundingBox()]);
 			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
 		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator("svg"), "like action should include a thumbs-up icon").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator("svg"), "dislike action should include a thumbs-down icon").toBeVisible();
 		await expectActiveDiffMode(page, "split");
 		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
