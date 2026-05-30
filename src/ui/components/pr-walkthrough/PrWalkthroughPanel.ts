@@ -531,8 +531,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed .phase-pip.active, .rail.collapsed .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
 		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
 		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: currentColor; stroke: none; }
-		.rail.collapsed .card-dot.liked { background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
-		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
+		.rail.collapsed .card-dot.liked { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); opacity: 1; }
+		.rail.collapsed .card-dot.disliked { background-color: transparent; border-color: var(--negative, #dc2626); color: var(--negative, #dc2626); opacity: 1; }
 		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
 		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
 		.content { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); padding: 14px var(--walkthrough-content-x) 0; }
@@ -894,7 +894,6 @@ export class PrWalkthroughPanel extends LitElement {
 										class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}"
 										data-testid="pr-walkthrough-card-dot"
 										type="button"
-										style=${decision === "liked" ? "background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText);" : decision === "disliked" ? "background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff);" : nothing}
 										aria-label=${`Open ${phase.label} card: ${card.title}`}
 										title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
 										@click=${() => this.selectCard(card.id)}

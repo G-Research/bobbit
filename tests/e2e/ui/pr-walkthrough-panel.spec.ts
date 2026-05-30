@@ -398,7 +398,8 @@ test.describe("PR walkthrough panel", () => {
 		const likedDot = panel.getByTestId("pr-walkthrough-card-dot").first();
 		await expect(likedDot.locator("svg"), "liked cards should show a thumbs-up icon").toBeVisible();
 		await expect(likedDot.locator("svg path").first()).toHaveAttribute("d", /M5 10v12h4V10H5/);
-		await expect(likedDot, "liked cards should use primary styling").toHaveClass(/liked/);
+		await expect(likedDot, "liked cards should use primary outline styling").toHaveClass(/liked/);
+		await expect.poll(() => likedDot.evaluate(el => getComputedStyle(el as HTMLElement).backgroundColor), { message: "liked sidebar dots should stay unfilled" }).toMatch(/rgba\(0, 0, 0, 0\)|transparent/i);
 		await likedDot.click();
 		await expect.poll(() => likedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected liked dots should keep the active glow" }).not.toBe("none");
 
@@ -409,7 +410,8 @@ test.describe("PR walkthrough panel", () => {
 		const dislikedDot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
 		await expect(dislikedDot.locator("svg"), "disliked cards should show a thumbs-down icon").toBeVisible();
 		await expect(dislikedDot.locator("svg path").first()).toHaveAttribute("d", /M19 14V2h-4v12h4/);
-		await expect(dislikedDot, "disliked cards should use danger styling").toHaveClass(/disliked/);
+		await expect(dislikedDot, "disliked cards should use danger outline styling").toHaveClass(/disliked/);
+		await expect.poll(() => dislikedDot.evaluate(el => getComputedStyle(el as HTMLElement).backgroundColor), { message: "disliked sidebar dots should stay unfilled" }).toMatch(/rgba\(0, 0, 0, 0\)|transparent/i);
 		await dislikedDot.click();
 		await expect.poll(() => dislikedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected disliked dots should keep the active glow" }).not.toBe("none");
 
