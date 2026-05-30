@@ -289,6 +289,13 @@ test.describe("PR walkthrough panel", () => {
 		await expect(panel.getByTestId("pr-walkthrough-collapsed-rail"), "wide panel should not use the thin collapsed rail").toBeHidden();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" })).toBeVisible();
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" })).toBeVisible();
+		await expect.poll(async () => {
+			const [contentBox, innerBox] = await Promise.all([panel.locator(".content").boundingBox(), panel.locator(".inner").boundingBox()]);
+			if (!contentBox || !innerBox) return false;
+			const leftGutter = innerBox.x - contentBox.x;
+			const rightGutter = contentBox.x + contentBox.width - (innerBox.x + innerBox.width);
+			return leftGutter <= 30 && rightGutter <= 30;
+		}, { message: "walkthrough content should use the available panel width without oversized gutters" }).toBe(true);
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
 		await expectDiffExpandCollapseIfExposed(page);

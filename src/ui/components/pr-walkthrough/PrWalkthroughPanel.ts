@@ -172,7 +172,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.submit-button { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
 		.submit-icon { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.submit-button:disabled { background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); opacity: 1; }
-		.banner-stack { display: grid; gap: 8px; margin: 0 auto 14px; max-width: 1120px; }
+		.banner-stack { display: grid; gap: 8px; margin: 0 0 14px; max-width: none; }
 		.banner { padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); color: var(--foreground, CanvasText); }
 		.banner strong { display: block; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 		.banner.info { border-color: color-mix(in oklch, var(--info, var(--primary, Highlight)) 28%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 7%, transparent); }
@@ -490,8 +490,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
 		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
 		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
-		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
-		.inner { max-width: 1120px; margin: 0 auto; }
+		.content { padding: 14px clamp(12px, 1.6vw, 24px) 24px; }
+		.inner { width: 100%; max-width: none; margin: 0; }
 		.card { display: block; max-width: none; }
 		.card-head { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
 		.phase-label { display: inline-block; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
