@@ -352,10 +352,18 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".decision-icon"), "like action should include a thumbs-up icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator(".decision-icon"), "dislike action should include a thumbs-down icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action label should stay stable even when comments exist").toContainText(/^Like$/);
+		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like button should start at the compact action height").toHaveCSS("min-height", "32px");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".next-icon"), "like action should use an icon instead of an arrow character").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-prev").locator(".prev-icon"), "prev action should use an icon instead of an arrow character").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action should never say Like anyway").not.toContainText(/Like anyway|→/i);
 		await expect(activeCard(page).getByTestId("pr-walkthrough-prev"), "prev action should not render a literal arrow").not.toContainText(/←/);
+		await expect.poll(async () => {
+			const [thumbBox, nextBox] = await Promise.all([
+				activeCard(page).getByTestId("pr-walkthrough-like").locator(".decision-icon").boundingBox(),
+				activeCard(page).getByTestId("pr-walkthrough-like").locator(".next-icon").boundingBox(),
+			]);
+			return thumbBox && nextBox ? Math.abs((thumbBox.y + thumbBox.height / 2) - (nextBox.y + nextBox.height / 2)) <= 1 : false;
+		}, { message: "like chevron should align vertically with the thumbs-up icon" }).toBe(true);
 		await expectActiveDiffMode(page, "split");
 		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
@@ -631,7 +639,7 @@ test.describe("PR walkthrough panel", () => {
 		}).toBe(firstCard);
 		await deleteComment(page, broadConcern);
 		await expect(dislike, "Deleting the last supporting comment should clear the disliked decision and disable Dislike").toBeDisabled();
-		await expect(activeCard(page).locator(".decision-note"), "A disliked card without comments must not remain completed").not.toContainText("Current: disliked");
+		await expect(activeCard(page).locator(".decision-note"), "decision status text should not be used for selected actions").not.toContainText(/Current:/);
 		await createCardComment(page, broadConcern);
 		await expect(dislike).toBeEnabled();
 		await dislike.click();
@@ -652,6 +660,8 @@ test.describe("PR walkthrough panel", () => {
 			timeout: 5_000,
 			message: "Prev should backtrack to the liked card for revision",
 		}).toBe(secondCard);
+		await expect(panel.getByTestId("pr-walkthrough-like"), "selected decisions should be indicated by button styling").toHaveClass(/decision-selected/);
+		await expect(panel.getByTestId("pr-walkthrough-like")).toHaveAttribute("aria-pressed", "true");
 		await createCardComment(page, revisedConcern);
 		await panel.getByTestId("pr-walkthrough-dislike").click();
 

@@ -475,20 +475,17 @@ export class PrWalkthroughPanel extends LitElement {
 			padding: 12px 0 0;
 			background: linear-gradient(transparent, var(--background, Canvas) 30%);
 		}
-		.actions button { padding: 9px 14px; border-color: var(--border, ButtonBorder); background: var(--card, Canvas); }
-		.actions .decision-icon, .actions .nav-icon { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-		.actions .decision-icon { margin-right: 6px; vertical-align: -2px; }
+		.actions button { min-height: 32px; padding: 6px 12px; border-color: var(--border, ButtonBorder); background: var(--card, Canvas); }
+		.actions .decision-icon, .actions .nav-icon { width: 15px; height: 15px; flex: 0 0 auto; display: inline-block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
+		.actions .decision-icon { margin-right: 6px; }
 		.actions .nav-icon.prev-icon { margin-right: 6px; }
 		.actions .nav-icon.next-icon { margin-left: 6px; }
 		.actions button:hover:not(:disabled), .actions button:focus-visible:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); }
-		.actions .like {
-			border-color: var(--primary, Highlight);
-			background: var(--primary, Highlight);
-			color: var(--primary-foreground, HighlightText);
-			font-weight: 700;
-		}
-		.actions .like:hover:not(:disabled), .actions .like:focus-visible:not(:disabled) { filter: brightness(1.04); }
+		.actions .like { border-color: color-mix(in oklch, var(--primary, Highlight) 62%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--primary, Highlight) 7%, var(--card, Canvas)); color: var(--primary, Highlight); font-weight: 750; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary, Highlight) 14%, transparent); }
+		.actions .like:hover:not(:disabled), .actions .like:focus-visible:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 14%, var(--card, Canvas)); color: var(--primary, Highlight); filter: none; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary, Highlight) 22%, transparent), 0 6px 16px color-mix(in oklch, var(--primary, Highlight) 12%, transparent); }
 		.actions .dislike.enabled:hover, .actions .dislike.enabled:focus-visible { color: var(--negative, Mark); border-color: var(--negative, Mark); background: color-mix(in oklch, var(--negative, Mark) 12%, transparent); }
+		.actions .decision-selected { outline: 2px solid color-mix(in oklch, currentColor 38%, transparent); outline-offset: 2px; box-shadow: 0 0 0 3px color-mix(in oklch, currentColor 10%, transparent), 0 8px 18px color-mix(in oklch, currentColor 16%, transparent); }
+		.actions .dislike.decision-selected { color: var(--negative, Mark); border-color: color-mix(in oklch, var(--negative, Mark) 72%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, Mark) 10%, var(--card, Canvas)); }
 		.decision-note { margin-right: auto; color: var(--muted-foreground, GrayText); font-size: 12px; }
 
 		.audit {
@@ -592,7 +589,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.chip { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid color-mix(in oklch, var(--warning, orange) 32%, var(--border, ButtonBorder)); border-radius: 7px; background: var(--card, Canvas); color: var(--foreground, CanvasText); font-size: 12px; line-height: 1.35; }
 		.chip:hover { background: color-mix(in oklch, var(--warning, orange) 14%, transparent); }
 		.card-comment-card { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--negative, red); background: color-mix(in oklch, var(--negative, red) 5%, transparent); border-radius: 0 6px 6px 0; }
-		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 12px var(--walkthrough-content-x); border-top: 1px solid var(--border, ButtonBorder); background: color-mix(in oklch, var(--background, Canvas) 94%, transparent); backdrop-filter: blur(8px); }
+		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 10px var(--walkthrough-content-x); border-top: 1px solid var(--border, ButtonBorder); background: color-mix(in oklch, var(--background, Canvas) 94%, transparent); backdrop-filter: blur(8px); }
 		.actions .prev { border-color: transparent; color: var(--muted-foreground, GrayText); background: transparent; }
 
 		@media (max-width: 760px) {
@@ -1000,6 +997,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const phase = PHASES[phaseIndex]?.label ?? card.phaseId;
 		const dislikeDisabled = cardRequiresCommentForDislike({ comments: this._comments }, card.id);
 		const commentCount = this.commentCountForCard(card.id);
+		const decision = this._decisions[card.id]?.value;
 		return html`
 			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<div class="inner">
@@ -1017,10 +1015,10 @@ export class PrWalkthroughPanel extends LitElement {
 					${this.renderCardComments(card)}
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
-						<span class="decision-note">${this._decisions[card.id] ? html`Current: <b>${this._decisions[card.id].value}</b>` : commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
+						<span class="decision-note">${commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
 						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}><svg class="nav-icon prev-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 18-6-6 6-6"></path></svg>Prev</button>
-						<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"}" type="button" ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>Dislike${commentCount ? ` (${commentCount})` : ""}</button>
-						<button data-testid="pr-walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>Like<svg class="nav-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg></button>
+						<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"} ${decision === "disliked" ? "decision-selected" : ""}" type="button" aria-pressed=${decision === "disliked"} ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>Dislike${commentCount ? ` (${commentCount})` : ""}</button>
+						<button data-testid="pr-walkthrough-like" class="like ${decision === "liked" ? "decision-selected" : ""}" type="button" aria-pressed=${decision === "liked"} @click=${() => this.recordDecision(card, "liked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>Like<svg class="nav-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg></button>
 					</div>
 				</div>
 			</article>
