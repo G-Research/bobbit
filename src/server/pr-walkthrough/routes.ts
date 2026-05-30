@@ -9,6 +9,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
+import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest } from "./walkthrough-agent-manager.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -92,15 +93,31 @@ export type PrWalkthroughRouteDeps = {
 	getAvailableModels?: (preferencesStore: { get(key: string): unknown }) => Promise<ApiModel[]>;
 	completeModelText?: typeof defaultCompleteModelText;
 	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
+	walkthroughAgentManager?: WalkthroughAgentManager;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
 type WalkthroughSynthesisContext = { sessionId?: string; cwd: string; changeset?: WalkthroughChangeset };
 let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
 let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
+const agentManagersByDeps = new WeakMap<PrWalkthroughRouteDeps, WalkthroughAgentManager>();
 
 export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughLlmAdapter | undefined): void {
 	synthesisAdapterForTesting = adapter;
+}
+
+function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAgentManager {
+	if (deps.walkthroughAgentManager) return deps.walkthroughAgentManager;
+	let manager = agentManagersByDeps.get(deps);
+	if (!manager) {
+		manager = new WalkthroughAgentManager({
+			defaultCwd: deps.defaultCwd,
+			resolveSessionCwd: deps.resolveSessionCwd,
+			resolveSessionModel: deps.resolveSessionModel,
+		});
+		agentManagersByDeps.set(deps, manager);
+	}
+	return manager;
 }
 
 export async function handlePrWalkthroughApiRoute(
@@ -109,7 +126,9 @@ export async function handlePrWalkthroughApiRoute(
 	res: http.ServerResponse,
 	deps: PrWalkthroughRouteDeps,
 ): Promise<boolean> {
-	if (!url.pathname.startsWith("/api/pr-walkthrough")) return false;
+	const isPublicWalkthroughRoute = url.pathname.startsWith("/api/pr-walkthrough");
+	const isInternalSubmitRoute = url.pathname === "/api/internal/pr-walkthrough/submit-yaml";
+	if (!isPublicWalkthroughRoute && !isInternalSubmitRoute) return false;
 
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -120,6 +139,54 @@ export async function handlePrWalkthroughApiRoute(
 	};
 
 	try {
+		if (url.pathname === "/api/internal/pr-walkthrough/submit-yaml" && req.method === "POST") {
+			const body = await deps.readBody(req);
+			if (!body || typeof body !== "object") {
+				fail(400, "Invalid YAML submit request");
+				return true;
+			}
+			const manager = getWalkthroughAgentManager(deps);
+			const result = await manager.submitYaml(body as SubmitWalkthroughYamlRequest);
+			json(result);
+			return true;
+		}
+
+		if (url.pathname === "/api/pr-walkthrough/launch" && req.method === "POST") {
+			const body = await deps.readBody(req);
+			if (!body || typeof body !== "object") {
+				fail(400, "Invalid launch request");
+				return true;
+			}
+			const manager = getWalkthroughAgentManager(deps);
+			const result = await manager.launch(body as LaunchWalkthroughRequest);
+			json(result, result.created ? 201 : 200);
+			return true;
+		}
+
+		const jobMatch = url.pathname.match(/^\/api\/pr-walkthrough\/jobs\/([^/]+)$/);
+		if (jobMatch && req.method === "GET") {
+			const manager = getWalkthroughAgentManager(deps);
+			const job = manager.getJob(decodeURIComponent(jobMatch[1]));
+			if (!job) {
+				fail(404, "PR walkthrough job not found", { code: "JOB_NOT_FOUND" });
+				return true;
+			}
+			json({ job });
+			return true;
+		}
+
+		const sessionMatch = url.pathname.match(/^\/api\/pr-walkthrough\/session\/([^/]+)$/);
+		if (sessionMatch && req.method === "GET") {
+			const manager = getWalkthroughAgentManager(deps);
+			const job = manager.getJobForSession(decodeURIComponent(sessionMatch[1]));
+			if (!job) {
+				fail(404, "PR walkthrough session job not found", { code: "JOB_NOT_FOUND" });
+				return true;
+			}
+			json({ job });
+			return true;
+		}
+
 		if (url.pathname === "/api/pr-walkthrough/resolve" && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
