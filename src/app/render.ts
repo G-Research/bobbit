@@ -1817,8 +1817,20 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
+	const walkthroughTabButtonLabel = (tab: UnifiedPanelTab): string | undefined => {
+		if (tab.kind !== "walkthrough") return undefined;
+		const record = { ...((tab.state || {}) as Record<string, unknown>), ...((tab.source || {}) as Record<string, unknown>) };
+		const rawNumber = record.prNumber;
+		const number = typeof rawNumber === "number" && Number.isFinite(rawNumber)
+			? String(Math.trunc(rawNumber))
+			: typeof rawNumber === "string" && rawNumber.trim()
+				? rawNumber.trim().replace(/^#/, "")
+				: "";
+		return number ? `PR: #${number}` : undefined;
+	};
+
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
+		walkthroughTabButtonLabel(tab) || tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
 	);
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
@@ -2136,7 +2148,6 @@ export function doRenderApp(): void {
 		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
 		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
 		return html`
-			${walkthroughPrLink(tab)}
 			<button
 				type="button"
 				class="text-muted-foreground hover:text-foreground"

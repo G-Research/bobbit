@@ -253,8 +253,9 @@ async function completeRemainingCardsWithLikes(page: Page) {
 
 test.describe("PR walkthrough panel", () => {
 	test("launches from slash command with prototype header, labelled full-width rail, and split diff default", async ({ page }) => {
-		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		const { panel, tab } = await setupWalkthrough(page, { width: 1920, height: 1080 });
 
+		await expect(tab.locator(".goal-tab-pill-label"), "walkthrough tab should use the compact PR label").toHaveText("PR: #123");
 		await expectPrototypeHeader(panel, { pr: /PR\s*#123/i, title: /walkthrough/i });
 		await expectPrototypeCardHierarchy(page);
 		const labelledRail = panel.getByTestId("pr-walkthrough-labelled-rail");
@@ -508,11 +509,13 @@ test.describe("PR walkthrough panel", () => {
 		});
 
 		const { panel } = await expectWalkthroughOpened(page);
+		await expect(page.locator(PANEL_TAB_SELECTOR).first().locator(".goal-tab-pill-label"), "walkthrough tab should use a compact PR label").toHaveText("PR: #638");
 		await expectPrototypeHeader(panel, {
 			pr: /PR\s*#?638/i,
 			title: /Widget Launched Walkthrough/i,
 			href: "https://github.com/SuuBro/bobbit/pull/638",
 		});
+		await expect(page.getByTestId("pr-walkthrough-pr-link"), "GitHub PR link should only appear in the walkthrough header, not the tab strip").toHaveCount(1);
 		await expect(panel.getByTestId("pr-walkthrough-stat-files"), "Git Status launches should thread available file counts into walkthrough stats").toContainText("2 files");
 		await expect(panel.getByTestId("pr-walkthrough-stat-additions"), "Git Status insertionsVsPrimary should become walkthrough additions").toContainText("+17");
 		await expect(panel.getByTestId("pr-walkthrough-stat-deletions"), "Git Status deletionsVsPrimary should become walkthrough deletions").toContainText("-9");

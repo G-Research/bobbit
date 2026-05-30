@@ -162,6 +162,15 @@ function titleForInput(input: OpenPrWalkthroughInput): string {
 	return "Changeset Walkthrough";
 }
 
+function labelForPrNumber(value: unknown): string | undefined {
+	const prNumber = normalizePrNumber(value);
+	return prNumber ? `PR: #${prNumber}` : undefined;
+}
+
+function labelForInput(input: OpenPrWalkthroughInput): string {
+	return labelForPrNumber(input.prNumber) || (input.url || input.prUrl ? "PR" : "Walkthrough");
+}
+
 export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWalkthroughChangesetRef {
 	const prNumber = normalizePrNumber(input.prNumber);
 	const externalUrl = cleanString(input.prUrl) || cleanString(input.url);
@@ -278,7 +287,7 @@ function patchWalkthroughTab(
 			...tab,
 			id: nextTabId,
 			title,
-			label: tab.label || "Walkthrough",
+			label: labelForPrNumber(changeset?.prNumber) || tab.label || "Walkthrough",
 			source: {
 				...source,
 				type: "walkthrough",
@@ -416,7 +425,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		id: tabId,
 		kind: "walkthrough",
 		title,
-		label: "Walkthrough",
+		label: labelForInput(input),
 		legacyTab: "walkthrough",
 		source,
 		state: {
