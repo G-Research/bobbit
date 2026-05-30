@@ -354,6 +354,7 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action label should stay stable even when comments exist").toContainText(/^Like$/);
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like button should start at the compact action height").toHaveCSS("min-height", "32px");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".next-icon"), "like action should use an icon instead of an arrow character").toBeVisible();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator(".next-icon"), "dislike action should also use a forward chevron icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-prev").locator(".prev-icon"), "prev action should use an icon instead of an arrow character").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action should never say Like anyway").not.toContainText(/Like anyway|→/i);
 		await expect(activeCard(page).getByTestId("pr-walkthrough-prev"), "prev action should not render a literal arrow").not.toContainText(/←/);
