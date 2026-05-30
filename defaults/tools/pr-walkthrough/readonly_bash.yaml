@@ -1,5 +1,5 @@
 name: readonly_bash
-description: "Run a strictly read-only shell command for PR walkthrough analysis. Blocks writes, tests, builds, installs, servers, mutating git, GitHub review/comment actions, and secret/dot-directory reads."
+description: "Run a strictly read-only shell command for PR walkthrough analysis. Blocks writes, tests, builds, installs, servers, mutating git, GitHub review/comment actions, recursive root searches, hidden/ignore override flags, secret/dot-directory reads, and repo-local executable spoofing."
 summary: "Run read-only PR analysis commands"
 params: [command, description?, timeout?]
 provider:
@@ -7,4 +7,4 @@ provider:
   extension: extension.ts
 group: PR Walkthrough
 docs: |-
-  Executes only allowlisted read-only commands for PR walkthrough sessions: gh PR reads, git diff/show/log/status, and file search/read commands. Use this instead of bash. Mutating commands and access to `.bobbit/`, `.git/`, `.env*`, hidden credential directories, and key/token files are rejected by policy.
+  Executes only allowlisted read-only commands for PR walkthrough sessions: gh PR reads, git diff/show/log/status, and scoped file search/read commands. Use this instead of bash. Mutating commands, recursive searches from `.`/the repository root, ripgrep hidden/ignore override flags (`--hidden`, `--no-ignore`, `-u` forms), and access to `.bobbit/`, `.git/`, `.env*`, hidden credential directories, and key/token files are rejected by policy. The extension resolves allowlisted executables from absolute PATH entries to trusted absolute paths outside the worktree before spawning so repo-local spoofed binaries are not used.
