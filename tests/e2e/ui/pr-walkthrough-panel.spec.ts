@@ -100,6 +100,32 @@ async function expectOneHorizontalScrollerPerDiff(page: Page) {
 	}).toBe(1);
 }
 
+async function expectSplitDiffColumnsAligned(page: Page) {
+	const diff = activeCard(page).getByTestId("pr-walkthrough-diff-block").first();
+	await expect(diff).toBeVisible();
+	await expect.poll(async () => diff.evaluate((root) => {
+		const rows = Array.from(root.querySelectorAll(".split-row")) as HTMLElement[];
+		const measurements = rows.map((row) => {
+			const [left, right] = Array.from(row.querySelectorAll(":scope > .diff-line")) as HTMLElement[];
+			if (!left || !right) return null;
+			const leftBox = left.getBoundingClientRect();
+			const rightBox = right.getBoundingClientRect();
+			return { leftX: leftBox.x, rightX: rightBox.x, leftWidth: leftBox.width, rightWidth: rightBox.width };
+		}).filter(Boolean) as Array<{ leftX: number; rightX: number; leftWidth: number; rightWidth: number }>;
+		if (measurements.length < 2) return false;
+		const first = measurements[0]!;
+		return measurements.every((item) =>
+			Math.abs(item.leftX - first.leftX) <= 1
+			&& Math.abs(item.rightX - first.rightX) <= 1
+			&& Math.abs(item.leftWidth - first.leftWidth) <= 1
+			&& Math.abs(item.rightWidth - first.rightWidth) <= 1,
+		);
+	}), {
+		timeout: 5_000,
+		message: "split diff old/new columns should stay vertically aligned across rows",
+	}).toBe(true);
+}
+
 async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; title?: RegExp; href?: string | RegExp } = {}) {
 	const header = panel.getByTestId("pr-walkthrough-header");
 	await expect(header, "walkthrough should use the prominent prototype-style review header").toBeVisible({ timeout: 10_000 });
@@ -319,6 +345,7 @@ test.describe("PR walkthrough panel", () => {
 		await expect(activeCard(page).locator(".line-text .tok-keyword").first(), "diff lines should include lightweight syntax highlighting").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-diff-additions").first(), "diff headers should show line addition counts").toContainText(/\+\d+/);
 		await expectOneHorizontalScrollerPerDiff(page);
+		await expectSplitDiffColumnsAligned(page);
 		await expectDiffExpandCollapseIfExposed(page);
 	});
 
@@ -339,6 +366,7 @@ test.describe("PR walkthrough panel", () => {
 		await panel.getByTestId("diff-mode-split").click();
 		await expectActiveDiffMode(page, "split");
 		await expectOneHorizontalScrollerPerDiff(page);
+		await expectSplitDiffColumnsAligned(page);
 	});
 
 	test("collapsed rail card dots encode liked and disliked review decisions", async ({ page }) => {

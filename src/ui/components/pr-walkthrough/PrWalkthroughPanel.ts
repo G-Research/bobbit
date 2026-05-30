@@ -375,7 +375,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.split-row {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-			min-width: max-content;
+			width: 100%;
+			min-width: 100%;
 		}
 		.inline-lines { min-width: 620px; }
 		.diff-line {
