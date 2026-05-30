@@ -386,7 +386,7 @@ export class PrWalkthroughPanel extends LitElement {
 			background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent);
 		}
 		.hunk-context-cell {
-			min-height: 34px;
+			min-height: 24px;
 			padding: 3px;
 			display: inline-flex;
 			flex-direction: column;
@@ -394,7 +394,7 @@ export class PrWalkthroughPanel extends LitElement {
 			justify-content: center;
 			gap: 2px;
 		}
-		.hunk-signature { min-width: 0; padding: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.hunk-signature { min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.45; }
 		.split-grid { min-width: 820px; }
 		.split-row {
 			display: grid;
@@ -566,7 +566,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-del-count { color: var(--negative, red); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
-		.hunk-header { grid-template-columns: 60px minmax(0, 1fr); }
+		.hunk-header { grid-template-columns: 60px minmax(0, 1fr); font-size: 11.5px; line-height: 1.6; }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
 		.diff-line { position: relative; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; font-size: 11.5px; line-height: 1.6; }
 		.diff-line:hover, .diff-line:focus-visible { background: color-mix(in oklch, var(--primary, Highlight) 6%, transparent); }

@@ -454,6 +454,13 @@ test.describe("PR walkthrough panel", () => {
 			return aboveBox && firstLineBox && lastLineBox && belowBox ? aboveBox.y < firstLineBox.y && belowBox.y > lastLineBox.y : false;
 		}, { message: "above/below context controls should bracket the visible diff context" }).toBe(true);
 		await expect.poll(async () => {
+			const [headerBox, lineBox] = await Promise.all([
+				hunkHeader.boundingBox(),
+				activeCard(page).locator(`${tid("pr-walkthrough-diff-line")}[data-line-id="ctx-25"]`).boundingBox(),
+			]);
+			return headerBox && lineBox ? Math.abs(headerBox.height - lineBox.height) <= 1 : false;
+		}, { message: "blue context rows should match normal diff row height" }).toBe(true);
+		await expect.poll(async () => {
 			const [cellBox, toggleBox] = await Promise.all([hunkHeader.locator(".hunk-context-cell").boundingBox(), toggles.first().boundingBox()]);
 			return cellBox && toggleBox ? toggleBox.width >= cellBox.width - 8 && toggleBox.width < cellBox.width : false;
 		}, { message: "context buttons should span the line-number/sign gutter with a small margin" }).toBe(true);
