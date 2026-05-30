@@ -56,4 +56,15 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(source, /truncateTail/);
 		assert.doesNotMatch(source, /createWriteStream|tmpdir|tempFilePath|Full output saved to/);
 	});
+
+	it("readonly_bash executes argv directly with a sanitized environment", () => {
+		const source = readToolText("extension.ts");
+		assert.match(source, /spawn\(file, args, \{/);
+		assert.match(source, /shell:\s*false/);
+		assert.match(source, /getSanitizedEnv/);
+		assert.match(source, /NO_COLOR:\s*"1"/);
+		assert.match(source, /FORCE_COLOR:\s*"0"/);
+		assert.doesNotMatch(source, /\/bin\/bash|cmd\.exe|\["-c"\]|\["\/c"\]/);
+		assert.doesNotMatch(source, /\.\.\.process\.env/);
+	});
 });

@@ -86,6 +86,9 @@ function block(reason: string, argv?: string[]): WalkthroughReadonlyBlock {
 function unsafeTokenReason(token: string): string | undefined {
 	if (!token) return undefined;
 	if (token.includes("\0")) return "NUL bytes are not allowed in command arguments";
+	if (/(^|[^\\])\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]*\}|\([^)]*\))/.test(token) || /%[A-Za-z_][A-Za-z0-9_]*%/.test(token)) {
+		return "environment-variable expansion syntax is not allowed in command arguments";
+	}
 	if (token.startsWith("~")) return "home-directory paths are not allowed; use repo-relative paths";
 	if (token.startsWith("$") || token.startsWith("%")) return "environment-variable paths are not allowed; use repo-relative paths";
 	if (/^(?:[A-Za-z]:|[\\/])/.test(token)) return "absolute paths are not allowed; use repo-relative paths";

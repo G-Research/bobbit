@@ -1,7 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import { getGatewayToken, getGatewayUrl } from "../_shared/gateway.ts";
 
 const MAX_BYTES = 50 * 1024;
@@ -20,17 +19,13 @@ async function loadPolicy(): Promise<(command: string) => PolicyDecision> {
 	}
 }
 
-function getShellConfig(): { shell: string; args: string[] } {
-	if (process.platform === "win32") {
-		const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
-		try { if (fs.existsSync(gitBash)) return { shell: gitBash, args: ["-c"] }; } catch { /* ignore */ }
-		return { shell: "cmd.exe", args: ["/c"] };
-	}
-	return { shell: "/bin/bash", args: ["-c"] };
-}
-
-function getShellEnv(): NodeJS.ProcessEnv {
-	return { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
+function getSanitizedEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { NO_COLOR: "1", FORCE_COLOR: "0" };
+	const pathValue = process.env.PATH ?? process.env.Path;
+	if (pathValue) env.PATH = pathValue;
+	if (process.env.HOME) env.HOME = process.env.HOME;
+	else if (process.env.USERPROFILE) env.HOME = process.env.USERPROFILE;
+	return env;
 }
 
 function stripAnsiCodes(s: string): string {
@@ -97,10 +92,11 @@ const extension: ExtensionFactory = (pi) => {
 
 			return new Promise((resolve) => {
 				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
-				const { shell, args } = getShellConfig();
-				const child = spawn(shell, [...args, command], {
+				const [file, ...args] = decision.argv;
+				const child = spawn(file, args, {
 					detached: true,
-					env: getShellEnv(),
+					shell: false,
+					env: getSanitizedEnv(),
 					cwd: process.cwd(),
 					stdio: ["ignore", "pipe", "pipe"],
 				});
