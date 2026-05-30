@@ -154,10 +154,12 @@ export class PrWalkthroughPanel extends LitElement {
 		.title { margin: 0; font-size: 14px; line-height: 1.25; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.meta { color: var(--muted-foreground, GrayText); font-size: 12px; margin-top: 4px; }
 		.header-spacer { flex: 1 1 auto; min-width: 10px; }
-		.stats { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; white-space: nowrap; }
+		.stats { display: inline-grid; grid-template-rows: auto auto; align-items: center; gap: 1px; font-size: 11px; line-height: 1.2; white-space: nowrap; }
 		.stat-files { color: var(--muted-foreground, GrayText); }
+		.stat-lines { display: inline-flex; align-items: center; gap: 8px; }
 		.stat-add { color: var(--positive, var(--chart-3, green)); font-weight: 700; }
 		.stat-del { color: var(--negative, var(--chart-5, red)); font-weight: 700; }
+		.github-mark { width: 14px; height: 14px; flex: 0 0 auto; fill: currentColor; }
 		.pr-link { display: inline-flex; align-items: center; gap: 5px; max-width: min(32vw, 300px); padding: 2px 8px; border: 1px solid var(--border, ButtonBorder); border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 8%, transparent); color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.35; text-decoration: none; white-space: nowrap; }
 		.pr-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 25%, var(--border, ButtonBorder)); }
 		.pr-link span { overflow: hidden; text-overflow: ellipsis; }
@@ -587,6 +589,14 @@ export class PrWalkthroughPanel extends LitElement {
 		return this._diffModeOverride ?? defaultDiffModeForWidth(this.isNarrowLayout ? 0 : this._panelWidth);
 	}
 
+	private get isHalfPaneLayout(): boolean {
+		return this._panelWidth > 0 && this._panelWidth < 1200;
+	}
+
+	private renderGithubMark(): TemplateResult {
+		return html`<svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>`;
+	}
+
 	private get reviewCards(): PrWalkthroughCard[] {
 		return this.cards.filter(card => card.phaseId !== "audit");
 	}
@@ -742,6 +752,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const submitTitle = completed < this.reviewCards.length
 			? "Review every non-audit card before export."
 			: this.canUseExportApi ? "Preview GitHub review comments before submitting." : this.exportUnavailableReason;
+		const githubLinkLabel = this.isHalfPaneLayout ? "Open on GitHub" : identity.linkLabel;
 		return html`
 			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
 				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
@@ -750,11 +761,13 @@ export class PrWalkthroughPanel extends LitElement {
 				</div>
 				<span class="stats" data-testid="pr-walkthrough-pr-stats">
 					<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
-					<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
-					<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
+					<span class="stat-lines" aria-label="Line changes">
+						<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
+						<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
+					</span>
 				</span>
 				${identity.url ? html`
-					<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}><span>${identity.linkLabel}</span> ↗</a>
+					<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}>${this.renderGithubMark()}<span>${githubLinkLabel}</span></a>
 				` : nothing}
 				<span class="header-spacer"></span>
 				<div class="progress-wrap" aria-label="Walkthrough progress" data-testid="pr-walkthrough-progress">

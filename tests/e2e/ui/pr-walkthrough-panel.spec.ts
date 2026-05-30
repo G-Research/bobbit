@@ -107,9 +107,15 @@ async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; ti
 	if (expected.pr) await expect(header).toContainText(expected.pr);
 	if (expected.title) await expect(header).toContainText(expected.title);
 
-	await expect(header.getByTestId("pr-walkthrough-stat-files"), "header should show changed file count").toContainText(/\d+\s+files?/i);
-	await expect(header.getByTestId("pr-walkthrough-stat-additions"), "header should show green additions stat").toContainText(/\+\s*[\d,]+/);
+	const fileStat = header.getByTestId("pr-walkthrough-stat-files");
+	const addStat = header.getByTestId("pr-walkthrough-stat-additions");
+	await expect(fileStat, "header should show changed file count").toContainText(/\d+\s+files?/i);
+	await expect(addStat, "header should show green additions stat").toContainText(/\+\s*[\d,]+/);
 	await expect(header.getByTestId("pr-walkthrough-stat-deletions"), "header should show red deletions stat").toContainText(/-\s*[\d,]+/);
+	await expect.poll(async () => {
+		const [filesBox, additionsBox] = await Promise.all([fileStat.boundingBox(), addStat.boundingBox()]);
+		return filesBox && additionsBox ? additionsBox.y > filesBox.y : false;
+	}, { message: "line-change counts should sit beneath the file count" }).toBe(true);
 	await expect(header.getByTestId("pr-walkthrough-progress"), "header should show review progress").toContainText(/\d+\s*\/\s*\d+\s+reviewed/i);
 	await expect(header.getByRole("button", { name: /submit review/i }), "header should reserve the final draft submit control").toBeVisible();
 
@@ -118,6 +124,8 @@ async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; ti
 		await expect(link, "header should expose a compact external PR/GitHub link").toBeVisible();
 		await expect(link).toHaveAttribute("href", expected.href);
 		await expect(link).toHaveAttribute("target", "_blank");
+		await expect(link.locator("svg"), "GitHub links should include the GitHub mark").toBeVisible();
+		await expect(link, "half-pane GitHub links should use compact action text").toContainText(/Open on GitHub/i);
 	}
 }
 
@@ -395,7 +403,7 @@ test.describe("PR walkthrough panel", () => {
 	});
 
 	test("fullscreen toolbar control promotes the active walkthrough tab to the wide review surface", async ({ page }) => {
-		await setupWalkthrough(page, { width: 1600, height: 900 });
+		await setupWalkthrough(page, { width: 1600, height: 900 }, WALKTHROUGH_URL_COMMAND);
 
 		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
 		await expect(fullscreen, "active walkthrough tabs should expose the same fullscreen toolbar affordance as preview panes").toBeVisible({ timeout: 10_000 });
@@ -404,6 +412,7 @@ test.describe("PR walkthrough panel", () => {
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
 		await expect(fullscreenRoot, "fullscreen walkthrough should render inside the preview-pane fullscreen shell").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in fullscreen mode").toBeVisible();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-link").locator("svg"), "fullscreen walkthrough GitHub button should include the GitHub mark").toBeVisible();
 		await expectActiveDiffMode(page, "split");
 
 		const collapse = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
