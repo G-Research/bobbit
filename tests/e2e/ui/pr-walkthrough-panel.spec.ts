@@ -110,15 +110,19 @@ async function expectSplitDiffColumnsAligned(page: Page) {
 			if (!left || !right) return null;
 			const leftBox = left.getBoundingClientRect();
 			const rightBox = right.getBoundingClientRect();
-			return { leftX: leftBox.x, rightX: rightBox.x, leftWidth: leftBox.width, rightWidth: rightBox.width };
-		}).filter(Boolean) as Array<{ leftX: number; rightX: number; leftWidth: number; rightWidth: number }>;
+			const leftTextBox = left.querySelector(".line-text")?.getBoundingClientRect();
+			const rightTextBox = right.querySelector(".line-text")?.getBoundingClientRect();
+			return { leftX: leftBox.x, rightX: rightBox.x, leftWidth: leftBox.width, rightWidth: rightBox.width, leftTextRight: leftTextBox?.right ?? leftBox.right, rightTextLeft: rightTextBox?.left ?? rightBox.left };
+		}).filter(Boolean) as Array<{ leftX: number; rightX: number; leftWidth: number; rightWidth: number; leftTextRight: number; rightTextLeft: number }>;
 		if (measurements.length < 2) return false;
 		const first = measurements[0]!;
 		return measurements.every((item) =>
 			Math.abs(item.leftX - first.leftX) <= 1
 			&& Math.abs(item.rightX - first.rightX) <= 1
 			&& Math.abs(item.leftWidth - first.leftWidth) <= 1
-			&& Math.abs(item.rightWidth - first.rightWidth) <= 1,
+			&& Math.abs(item.rightWidth - first.rightWidth) <= 1
+			&& item.leftTextRight <= item.rightX + 1
+			&& item.rightTextLeft >= item.rightX - 1,
 		);
 	}), {
 		timeout: 5_000,
