@@ -31,7 +31,7 @@ function prUrlForNumber(prNumber: string | number): string {
 	return `https://github.com/SuuBro/bobbit/pull/${prNumber}`;
 }
 
-function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved Walkthrough PR", changesetId = `github:SuuBro/bobbit#${prNumber}:abc1234`, prUrl = prUrlForNumber(prNumber)) {
+function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved Walkthrough PR", changesetId = `github:SuuBro/bobbit#${prNumber}:abc1234`, prUrl = prUrlForNumber(prNumber), prBody = "") {
 	return {
 		changesetId,
 		changeset: {
@@ -43,6 +43,7 @@ function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved
 			prUrl,
 			prNumber,
 			prTitle: title,
+			prBody,
 			title: `PR #${prNumber}: ${title}`,
 		},
 		cards: getFixturePrWalkthroughCards(),
@@ -51,7 +52,7 @@ function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved
 	};
 }
 
-async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: string, title = `PR #${prNumber} Walkthrough`, prUrl = prUrlForNumber(prNumber)) {
+async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: string, title = `PR #${prNumber} Walkthrough`, prUrl = prUrlForNumber(prNumber), prBody = "") {
 	fixtureJobsByChildSession.clear();
 	fixtureJobsById.clear();
 	const routeHandler = async (route: any) => {
@@ -85,6 +86,7 @@ async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: strin
 			await apiFetch(`/api/sessions/${encodeURIComponent(actualChildSessionId)}`, { method: "PATCH", body: JSON.stringify({ title: effectiveTitle }) }).catch(() => undefined);
 			const job = {
 				schemaVersion: 1,
+				prBody,
 				jobId,
 				parentSessionId: String(body.sessionId || body.parentSessionId || ""),
 				childSessionId: actualChildSessionId,
@@ -142,7 +144,8 @@ async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: strin
 			const effectivePrNumber = /#(\d+)/.exec(changesetId)?.[1] ?? prNumber;
 			const effectivePrUrl = effectivePrNumber === prNumber ? prUrl : prUrlForNumber(effectivePrNumber);
 			const effectiveTitle = effectivePrNumber === prNumber ? title : `Resolved Walkthrough PR`;
-			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resolvedWalkthroughPayload(effectivePrNumber, effectiveTitle, changesetId, effectivePrUrl)) });
+			const effectivePrBody = effectivePrNumber === prNumber ? prBody : "";
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resolvedWalkthroughPayload(effectivePrNumber, effectiveTitle, changesetId, effectivePrUrl, effectivePrBody)) });
 			return;
 		}
 		await route.fallback();
@@ -261,7 +264,7 @@ async function publishWalkthroughJobUpdate(page: Page, childSessionId: string) {
 	}
 	const prNumber = String(job.target?.number ?? /#(\d+)/.exec(String(job.changesetId || ""))?.[1] ?? "123");
 	const prUrl = String(job.target?.prUrl || prUrlForNumber(prNumber));
-	const readyPayload = job.status === "ready" ? resolvedWalkthroughPayload(prNumber, prNumber === "638" ? "Widget Launched Walkthrough" : "Resolved Walkthrough PR", String(job.changesetId), prUrl) : undefined;
+	const readyPayload = job.status === "ready" ? resolvedWalkthroughPayload(prNumber, prNumber === "638" ? "Widget Launched Walkthrough" : "Resolved Walkthrough PR", String(job.changesetId), prUrl, String(job.prBody || "")) : undefined;
 	const tab = {
 		id: job.tabId || `walkthrough:${encodeURIComponent(String(job.changesetId || "fixture"))}`,
 		kind: "walkthrough",
@@ -360,10 +363,11 @@ async function setupWaitingWalkthrough(
 	page: Page,
 	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
 	command = WALKTHROUGH_COMMAND,
+	prBody = "",
 ) {
 	const prNumber = prNumberFromCommand(command);
 	const prUrl = command.includes("http") ? command.replace(/^\/walkthrough-pr\s+/, "") : prUrlForNumber(prNumber);
-	await installFixtureWalkthroughPayloadRoute(page, prNumber, `Resolved Walkthrough PR`, prUrl);
+	await installFixtureWalkthroughPayloadRoute(page, prNumber, `Resolved Walkthrough PR`, prUrl, prBody);
 	await page.setViewportSize(viewport);
 	await openApp(page);
 	await createSessionViaUI(page);
@@ -408,8 +412,9 @@ async function setupWalkthrough(
 	page: Page,
 	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
 	command = WALKTHROUGH_COMMAND,
+	prBody = "",
 ) {
-	const waiting = await setupWaitingWalkthrough(page, viewport, command);
+	const waiting = await setupWaitingWalkthrough(page, viewport, command, prBody);
 	const ready = await submitValidWalkthroughYaml(page, waiting);
 	return { ...ready, parentSessionId: waiting.parentSessionId, childSessionId: waiting.childSessionId, jobId: waiting.jobId };
 }
@@ -754,6 +759,33 @@ test.describe("PR walkthrough panel", () => {
 		await expectOneHorizontalScrollerPerDiff(page);
 		await expectSplitDiffColumnsAligned(page);
 		await expectDiffExpandCollapseIfExposed(page);
+	});
+
+	test("orientation renders original PR description as collapsed safe source material", async ({ page }) => {
+		const prBody = `# Demo PR body
+
+This is the author's source description with **markdown**.
+
+<script>window.__prBodyInjected = true</script>`;
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 }, "/walkthrough-pr 791", prBody);
+		const original = activeCard(page).getByTestId("pr-walkthrough-original-description");
+
+		await expect(original, "orientation should expose the original PR body as source material").toBeVisible();
+		await expect(original.getByTestId("pr-walkthrough-original-description-toggle")).toContainText(/Original PR description/i);
+		await expect(original).toContainText(/Source material from the PR body/i);
+		await expect(original.getByTestId("pr-walkthrough-original-description-body"), "PR body should start collapsed").toBeHidden();
+
+		await original.getByTestId("pr-walkthrough-original-description-toggle").click();
+		const body = original.getByTestId("pr-walkthrough-original-description-body");
+		await expect(body).toBeVisible();
+		await expect(body).toContainText("# Demo PR body");
+		await expect(body).toContainText("<script>window.__prBodyInjected = true</script>");
+		await expect.poll(() => page.evaluate(() => (window as any).__prBodyInjected === true), {
+			message: "original PR body must be rendered as escaped text, not executable HTML",
+		}).toBe(false);
+
+		await panel.getByTestId("pr-walkthrough-card-step").filter({ hasText: "Changeset-agnostic model" }).click();
+		await expect(activeCard(page).getByTestId("pr-walkthrough-original-description"), "non-orientation cards should not duplicate the PR body").toHaveCount(0);
 	});
 
 	test("narrow rail collapses to pips and clickable card dots, defaults inline, and can switch back to split", async ({ page }) => {

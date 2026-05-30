@@ -389,6 +389,38 @@ export class PrWalkthroughPanel extends LitElement {
 		.card h2 { margin: 0; font-size: 20px; line-height: 1.2; }
 		.summary, .rationale { margin: 0; color: var(--muted-foreground, GrayText); }
 		.checklist { margin: 4px 0 0; padding-left: 18px; color: var(--muted-foreground, GrayText); }
+		.original-description {
+			margin-top: 14px;
+			border: 1px solid var(--border, ButtonBorder);
+			border-radius: 12px;
+			background: var(--card, Canvas);
+			overflow: hidden;
+		}
+		.original-description summary {
+			padding: 10px 12px;
+			cursor: pointer;
+			font-weight: 700;
+			color: var(--foreground, CanvasText);
+		}
+		.original-description summary:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); }
+		.original-description-meta {
+			display: block;
+			margin-top: 2px;
+			font-size: 11px;
+			font-weight: 500;
+			color: var(--muted-foreground, GrayText);
+		}
+		.original-description-body {
+			margin: 0;
+			max-height: 360px;
+			overflow: auto;
+			padding: 12px;
+			border-top: 1px solid var(--border, ButtonBorder);
+			background: var(--background, Canvas);
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		}
 
 		.diff-block {
 			border: 1px solid var(--border, ButtonBorder);
@@ -586,6 +618,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.phase-label { display: inline-block; min-width: 0; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
+		.original-description { max-width: 850px; background: color-mix(in oklch, var(--card, Canvas) 86%, var(--background, Canvas)); }
 		.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
 		.modebar .mode-toggle { gap: 2px; padding: 2px; border-radius: 7px; background: color-mix(in oklch, var(--background, Canvas) 62%, transparent); }
 		.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); }
@@ -1103,6 +1136,20 @@ export class PrWalkthroughPanel extends LitElement {
 		this.dispatchEvent(new CustomEvent("pr-walkthrough-focus-chat", { bubbles: true, composed: true, detail: { jobId: this.jobId } }));
 	}
 
+	private renderOriginalPrDescription(card: PrWalkthroughCard): TemplateResult | typeof nothing {
+		const body = this.effectiveChangeset.prBody ?? "";
+		if (card.phaseId !== "orientation" || !body.trim()) return nothing;
+		return html`
+			<details class="original-description" data-testid="pr-walkthrough-original-description">
+				<summary data-testid="pr-walkthrough-original-description-toggle">
+					Original PR description
+					<span class="original-description-meta">Source material from the PR body. Compare this with the inferred author intent above.</span>
+				</summary>
+				<pre class="original-description-body" data-testid="pr-walkthrough-original-description-body">${body}</pre>
+			</details>
+		`;
+	}
+
 	private renderLoadingState(): TemplateResult {
 		return html`
 			<section class="state-card" data-testid="pr-walkthrough-loading" aria-live="polite">
@@ -1167,6 +1214,7 @@ export class PrWalkthroughPanel extends LitElement {
 						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
+						${this.renderOriginalPrDescription(card)}
 					</section>
 					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
 					${this.renderCardComments(card)}
