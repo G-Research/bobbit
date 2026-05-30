@@ -49,6 +49,9 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked(String.raw`C:\tmp\git.exe status`, /path-qualified executables/);
 		blocked("tools/rg walkthrough src/server", /path-qualified executables/);
 		blocked(String.raw`tools\rg walkthrough src/server`, /path-qualified executables/);
+		blocked("git.cmd status", /executable file extensions|allowlist/);
+		blocked("gh.exe pr view 123", /executable file extensions|allowlist/);
+		blocked("rg.exe walkthrough src", /executable file extensions|allowlist/);
 	});
 
 	it("blocks mutating git commands and git filesystem escape flags", () => {
@@ -109,6 +112,29 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("touch src/new.ts", /touch is not permitted/);
 		blocked("find . -name '*.tmp' -delete", /find action -delete/);
 		blocked("sed -i 's/a/b/' file.ts", /in-place/);
+	});
+
+	it("blocks recursive root traversal and hidden or ignore override search flags", () => {
+		blocked("grep -R token .", /recursive searches from the repository root|current directory/);
+		blocked("grep -r token ./", /recursive searches from the repository root|current directory/);
+		blocked("grep --recursive -e token .", /recursive searches from the repository root|current directory/);
+		blocked("grep -R token", /recursive searches from the repository root|current directory/);
+		blocked("find . -name token", /recursive searches from the repository root|current directory/);
+		blocked("find ./ -name token", /recursive searches from the repository root|current directory/);
+		blocked("find -name token", /recursive searches from the repository root|current directory/);
+		blocked("find . -type f -name '*token*'", /recursive searches from the repository root|current directory/);
+		blocked("rg token .", /recursive searches from the repository root|current directory/);
+		blocked("rg token ./", /recursive searches from the repository root|current directory/);
+		blocked("rg token", /recursive searches from the repository root|current directory/);
+		blocked("rg --hidden --no-ignore token .", /hidden|ignored|no-ignore/i);
+		blocked("rg -uuu token src", /hidden|ignored/i);
+		blocked("rg --unrestricted token src", /hidden|ignored/i);
+		blocked("rg --follow token src", /hidden|ignored|symlink/i);
+		allowed("grep -R token src/server/pr-walkthrough");
+		allowed("find src/server/pr-walkthrough -name token");
+		allowed("rg token src/server/pr-walkthrough");
+		allowed("rg --regexp=token src/server/pr-walkthrough");
+		allowed("grep --recursive --regexp=token src/server/pr-walkthrough");
 	});
 
 	it("blocks secret and dot-directory reads in file/search commands", () => {

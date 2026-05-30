@@ -31,11 +31,21 @@ const GH_PR_READ_ALLOWED = new Set(["view", "diff"]);
 const GENERIC_WRITE_OR_ESCAPE_FLAGS = new Set(["--output", "--output-file", "--pathspec-from-file", "--git-dir", "--work-tree", "-C"]);
 const SAFE_HIDDEN_PATH_SEGMENTS = new Set([".", ".github"]);
 const SENSITIVE_PATH_SEGMENTS = new Set([".bobbit", ".git", ".ssh", ".gnupg", ".aws", ".azure", ".gcloud"]);
+const RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS = new Set([
+	"--hidden",
+	"--no-ignore",
+	"--no-ignore-vcs",
+	"--no-ignore-parent",
+	"--no-ignore-global",
+	"--no-ignore-dot",
+	"--unrestricted",
+	"--follow",
+	"-L",
+]);
 
 function basename(token: string): string {
 	const normalized = token.replace(/\\/g, "/");
-	const last = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
-	return last.endsWith(".cmd") || last.endsWith(".bat") ? last.slice(0, -4) : last;
+	return normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
 }
 
 function executableTokenReason(token: string): string | undefined {
@@ -45,6 +55,9 @@ function executableTokenReason(token: string): string | undefined {
 	}
 	if (token.startsWith("~") || token.startsWith("$") || token.startsWith("%")) {
 		return "dynamic executable paths are not allowed; use trusted command names such as git, gh, rg, or cat";
+	}
+	if (/\.(?:exe|cmd|bat|ps1|sh)$/i.test(token)) {
+		return "executable file extensions are not allowed; use trusted command names such as git, gh, rg, or cat";
 	}
 	return undefined;
 }
@@ -114,7 +127,7 @@ function unsafeTokenReason(token: string): string | undefined {
 
 function sensitivePathTokenReason(token: string): string | undefined {
 	if (!token || token === "." || token.startsWith("-")) return undefined;
-	const normalized = token.replace(/\\/g, "/").replace(/^['"]|['"]$/g, "");
+	const normalized = token.replace(/\\/g, "/").replace(/^[']|[']$/g, "").replace(/^[\"]|[\"]$/g, "");
 	if (!normalized || normalized === ".") return undefined;
 	const parts = normalized.split("/").filter(Boolean);
 	for (const part of parts) {
@@ -144,6 +157,86 @@ function commonArgumentPolicy(argv: string[], options: { guardPaths?: boolean } 
 		}
 	}
 	return undefined;
+}
+
+function isCurrentRootPathToken(token: string): boolean {
+	const normalized = token.replace(/\\/g, "/").replace(/^['\"]|['\"]$/g, "").replace(/\/+/g, "/");
+	return normalized === "." || /^\.\/*$/.test(normalized);
+}
+
+function blockCurrentRootTraversal(commandName: string, argv: string[]): WalkthroughReadonlyBlock {
+	return block(`${commandName} recursive searches from the repository root/current directory are blocked; scope the command to a non-hidden subdirectory or file`, argv);
+}
+
+function rgFlagReason(token: string): string | undefined {
+	const flag = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+	if (RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS.has(flag)) return `${flag} can reveal hidden or ignored paths and is not allowed`;
+	if (/^-u{1,3}$/.test(token)) return `${token} can reveal ignored or hidden paths and is not allowed`;
+	return undefined;
+}
+
+function optionHasInlineValue(token: string): boolean {
+	return token.includes("=") || (/^-[A-Za-z][^A-Za-z-]/.test(token) && token.length > 2);
+}
+
+function rgOptionConsumesValue(token: string): boolean {
+	if (optionHasInlineValue(token)) return false;
+	return new Set([
+		"-e", "--regexp", "-f", "--file", "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not",
+		"-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context", "--context-separator",
+		"--colors", "--sort", "--sortr", "--threads", "--max-depth", "--max-filesize", "--encoding", "--engine",
+	]).has(token);
+}
+
+function grepOptionConsumesValue(token: string): boolean {
+	if (optionHasInlineValue(token)) return false;
+	return new Set([
+		"-e", "--regexp", "-f", "--file", "--include", "--exclude", "--exclude-dir", "--exclude-from",
+		"-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context", "-D", "-d",
+	]).has(token);
+}
+
+function isGrepRecursiveFlag(token: string): boolean {
+	return token === "-r" || token === "-R" || token === "--recursive" || token === "--dereference-recursive" || (/^-[^-].*[rR]/.test(token) && !token.startsWith("--"));
+}
+
+function extractSearchPaths(argv: string[], optionConsumesValue: (token: string) => boolean, patternOptions: Set<string>): string[] | undefined {
+	const paths: string[] = [];
+	let patternSeen = false;
+	for (let i = 1; i < argv.length; i++) {
+		const token = argv[i];
+		if (token === "--") {
+			if (!patternSeen) {
+				i++;
+				patternSeen = true;
+			}
+			paths.push(...argv.slice(i + 1));
+			break;
+		}
+		const optionName = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+		if (token.startsWith("-") && token.includes("=") && patternOptions.has(optionName)) {
+			patternSeen = true;
+			continue;
+		}
+		if (token.startsWith("-") && optionConsumesValue(token)) {
+			if (patternOptions.has(token)) patternSeen = true;
+			i++;
+			continue;
+		}
+		if (token.startsWith("-") && !patternSeen) continue;
+		if (!patternSeen) {
+			patternSeen = true;
+			continue;
+		}
+		if (token.startsWith("-") && optionConsumesValue(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		paths.push(token);
+	}
+	if (!patternSeen) return undefined;
+	return paths;
 }
 
 function allowGh(argv: string[]): WalkthroughReadonlyDecision {
@@ -207,13 +300,43 @@ function allowGit(argv: string[]): WalkthroughReadonlyDecision {
 	return { allowed: true, argv };
 }
 
+function allowRg(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv, { guardPaths: true });
+	if (common) return common;
+	for (const token of argv.slice(1)) {
+		const flagReason = rgFlagReason(token);
+		if (flagReason) return block(flagReason, argv);
+	}
+	const paths = extractSearchPaths(argv, rgOptionConsumesValue, new Set(["-e", "--regexp", "-f", "--file"]));
+	if (!paths || paths.length === 0 || paths.some(isCurrentRootPathToken)) return blockCurrentRootTraversal("rg", argv);
+	return { allowed: true, argv };
+}
+
+function allowGrep(argv: string[]): WalkthroughReadonlyDecision {
+	const common = commonArgumentPolicy(argv, { guardPaths: true });
+	if (common) return common;
+	const recursive = argv.slice(1).some(isGrepRecursiveFlag);
+	if (!recursive) return { allowed: true, argv };
+	const paths = extractSearchPaths(argv, grepOptionConsumesValue, new Set(["-e", "--regexp", "-f", "--file"]));
+	if (!paths || paths.length === 0 || paths.some(isCurrentRootPathToken)) return blockCurrentRootTraversal("grep", argv);
+	return { allowed: true, argv };
+}
+
 function allowFind(argv: string[]): WalkthroughReadonlyDecision {
 	const common = commonArgumentPolicy(argv, { guardPaths: true });
 	if (common) return common;
 	const blocked = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"]);
+	const paths: string[] = [];
 	for (const token of argv.slice(1)) {
 		if (blocked.has(token)) return block(`find action ${token} can mutate or write files`, argv);
+		if (token === "-L") return block("find -L can follow symlinks into hidden or secret paths and is not allowed", argv);
 	}
+	for (const token of argv.slice(1)) {
+		if (token === "--") continue;
+		if (token.startsWith("-") || token === "(" || token === "!" || token === ")" || token === ",") break;
+		paths.push(token);
+	}
+	if (paths.length === 0 || paths.some(isCurrentRootPathToken)) return blockCurrentRootTraversal("find", argv);
 	return { allowed: true, argv };
 }
 
@@ -257,6 +380,8 @@ export function evaluateWalkthroughReadonlyCommand(command: string): Walkthrough
 	if (cmd === "git") return allowGit(argv);
 	if (cmd === "find") return allowFind(argv);
 	if (cmd === "sed") return allowSed(argv);
+	if (cmd === "rg") return allowRg(argv);
+	if (cmd === "grep") return allowGrep(argv);
 	if (SEARCH_READ_ALLOWED.has(cmd)) {
 		const common = commonArgumentPolicy(argv, { guardPaths: PATH_READING_COMMANDS.has(cmd) });
 		if (common) return common;

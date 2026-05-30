@@ -1,13 +1,25 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
+import path from "node:path";
 import { getGatewayToken, getGatewayUrl } from "../_shared/gateway.ts";
 
 const MAX_BYTES = 50 * 1024;
 const MAX_LINES = 2000;
 const DEFAULT_TIMEOUT = 300;
 
+const TRUSTED_COMMANDS = new Set(["gh", "git", "rg", "grep", "find", "ls", "cat", "head", "tail", "pwd", "sed"]);
+
 type PolicyDecision = { allowed: true; argv: string[] } | { allowed: false; reason: string; argv?: string[] };
+
+export interface TrustedExecutableResolutionOptions {
+	cwd?: string;
+	envPath?: string;
+	platform?: NodeJS.Platform;
+	pathExt?: string;
+	pathDelimiter?: string;
+}
 
 async function loadPolicy(): Promise<(command: string) => PolicyDecision> {
 	try {
@@ -41,10 +53,71 @@ function truncateTail(content: string): { content: string; truncated: boolean } 
 	return { content: result, truncated: true };
 }
 
+function resolveRealPath(p: string): string {
+	try { return realpathSync.native(p); } catch { return path.resolve(p); }
+}
+
+function normalizeForCompare(p: string, platform: NodeJS.Platform): string {
+	const resolved = path.resolve(p);
+	return platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isPathInsideOrEqual(child: string, parent: string, platform: NodeJS.Platform): boolean {
+	const normalizedChild = normalizeForCompare(child, platform);
+	const normalizedParent = normalizeForCompare(parent, platform);
+	if (normalizedChild === normalizedParent) return true;
+	const relative = path.relative(normalizedParent, normalizedChild);
+	return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function candidateExecutableNames(command: string, platform: NodeJS.Platform, pathExt: string): string[] {
+	if (platform !== "win32") return [command];
+	if (/\.[A-Za-z0-9]+$/.test(command)) return [command];
+	const extensions = pathExt.split(";").map(ext => ext.trim().toLowerCase()).filter(Boolean);
+	const preferred = [".exe", "", ...extensions.filter(ext => ext !== ".exe")];
+	return Array.from(new Set(preferred.map(ext => command + ext)));
+}
+
+function assertFileIsExecutable(candidate: string, platform: NodeJS.Platform): void {
+	const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.F_OK | fsConstants.X_OK;
+	accessSync(candidate, mode);
+}
+
+export function resolveTrustedExecutable(command: string, options: TrustedExecutableResolutionOptions = {}): string {
+	if (!TRUSTED_COMMANDS.has(command)) throw new Error(`${command} is not a trusted PR walkthrough executable`);
+	if (/[\\/]/.test(command) || /^[A-Za-z]:/.test(command) || /\.(?:exe|cmd|bat|ps1|sh)$/i.test(command)) {
+		throw new Error("readonly_bash only resolves bare trusted command names");
+	}
+	const platform = options.platform ?? process.platform;
+	const cwd = resolveRealPath(options.cwd ?? process.cwd());
+	const envPath = options.envPath ?? process.env.PATH ?? process.env.Path ?? "";
+	const delimiter = options.pathDelimiter ?? (platform === "win32" ? ";" : path.delimiter);
+	const pathExt = options.pathExt ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD";
+	const names = candidateExecutableNames(command, platform, pathExt);
+
+	for (const rawDir of envPath.split(delimiter)) {
+		if (!rawDir || rawDir === "." || !path.isAbsolute(rawDir)) continue;
+		const realDir = resolveRealPath(rawDir);
+		if (isPathInsideOrEqual(realDir, cwd, platform)) continue;
+		for (const name of names) {
+			const candidate = path.join(realDir, name);
+			try {
+				assertFileIsExecutable(candidate, platform);
+				const realCandidate = resolveRealPath(candidate);
+				if (isPathInsideOrEqual(realCandidate, cwd, platform)) continue;
+				return realCandidate;
+			} catch { /* try next candidate */ }
+		}
+	}
+
+	throw new Error(`Unable to resolve trusted executable for ${command}; refusing to use PATH/current-directory resolution`);
+}
+
 function killProcessTree(pid: number): void {
 	try {
 		if (process.platform === "win32") {
-			spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+			const taskkill = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+			spawn(taskkill, ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
 		} else {
 			process.kill(-pid, "SIGTERM");
 		}
@@ -71,7 +144,7 @@ const extension: ExtensionFactory = (pi) => {
 		name: "readonly_bash",
 		label: "Read-only Bash",
 		description: "Run a strictly read-only shell command for PR walkthrough analysis.",
-		promptSnippet: "Run gh/git/search/read-only shell commands. Mutating commands, tests, builds, installs, servers, and GitHub review/comment actions are blocked.",
+		promptSnippet: "Run gh/git/search/read-only shell commands. Mutating commands, tests, builds, installs, servers, GitHub review/comment actions, hidden/ignore override flags, recursive root searches, and repo-local binary spoofing are blocked.",
 		parameters: Type.Object({
 			command: Type.String(),
 			timeout: Type.Optional(Type.Number({ description: "Seconds. Default 300." })),
@@ -90,10 +163,17 @@ const extension: ExtensionFactory = (pi) => {
 				return toolText(`Command blocked by PR walkthrough read-only policy: ${decision.reason}. Use read-only PR/diff inspection instead.`, true, { policy: decision });
 			}
 
+			let executablePath: string;
+			try {
+				executablePath = resolveTrustedExecutable(decision.argv[0], { cwd: process.cwd() });
+			} catch (err: any) {
+				return toolText(`readonly_bash blocked executable resolution: ${err?.message || err}`, true, { policy: decision });
+			}
+
 			return new Promise((resolve) => {
 				const timeoutSec = timeout ?? DEFAULT_TIMEOUT;
-				const [file, ...args] = decision.argv;
-				const child = spawn(file, args, {
+				const args = decision.argv.slice(1);
+				const child = spawn(executablePath, args, {
 					detached: true,
 					shell: false,
 					env: getSanitizedEnv(),
@@ -154,12 +234,12 @@ const extension: ExtensionFactory = (pi) => {
 					const wasTruncated = truncated.truncated || truncatedByStreaming;
 					if (wasTruncated) output = `[Output truncated to last ${MAX_LINES} lines / ${MAX_BYTES} bytes]\n` + output;
 
-					resolve(toolText(output, false, { exitCode: code, truncated: wasTruncated, policy: decision }));
+					resolve(toolText(output, false, { exitCode: code, truncated: wasTruncated, policy: decision, executablePath }));
 				});
 				child.on("error", (err) => {
 					clearTimeout(timer);
 					if (abortSignal) abortSignal.removeEventListener("abort", abortHandler);
-					resolve(toolText(`readonly_bash failed: ${err.message}`, true, { policy: decision }));
+					resolve(toolText(`readonly_bash failed: ${err.message}`, true, { policy: decision, executablePath }));
 				});
 			});
 		},
