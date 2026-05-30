@@ -483,10 +483,13 @@ export class PrWalkthroughPanel extends LitElement {
 		.phase-pip { width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid color-mix(in oklch, var(--muted-foreground, GrayText) 58%, transparent); background: transparent; color: var(--foreground, CanvasText); font-size: 11px; font-weight: 800; }
 		.phase-pip.active { border-color: var(--primary, Highlight); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
 		.phase-pip.complete { border-color: var(--positive, var(--primary, Highlight)); background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.card-dot { width: 13px; height: 13px; display: inline-flex; align-items: center; justify-content: center; border: 2px solid color-mix(in oklch, var(--foreground, CanvasText) 72%, transparent); background: transparent; color: var(--foreground, CanvasText); opacity: 0.95; font-size: 8px; line-height: 1; font-weight: 900; }
-		.card-dot.liked { background: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
-		.card-dot.disliked { background: var(--negative, red); border-color: var(--negative, red); color: var(--negative-foreground, HighlightText); opacity: 1; }
-		.card-dot.active:not(.liked):not(.disliked) { border-color: var(--primary, Highlight); box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; }
+		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
+		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); }
+		.rail.collapsed .card-dot.liked .dot-icon { transform: translate(-50%, -47%); }
+		.rail.collapsed .card-dot.liked { background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
+		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
+		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
 		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
 		.inner { max-width: 1120px; margin: 0 auto; }
 		.card { display: block; max-width: none; }
@@ -828,16 +831,20 @@ export class PrWalkthroughPanel extends LitElement {
 					return html`
 						<div class="collapsed-phase ${phaseActive ? "active" : ""}" title=${phase.label}>
 							<button class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-testid="pr-walkthrough-phase-pip" type="button" aria-label=${`Open ${phase.label}`} title=${phase.label} @click=${() => this.selectCard(cards[0].id)}>${index}</button>
-							${cards.map(card => html`
-								<button
-									class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${this._decisions[card.id]?.value === "liked" ? "liked" : ""} ${this._decisions[card.id]?.value === "disliked" ? "disliked" : ""}"
-									data-testid="pr-walkthrough-card-dot"
-									type="button"
-									aria-label=${`Open ${phase.label} card: ${card.title}`}
-									title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
-									@click=${() => this.selectCard(card.id)}
-								>${this._decisions[card.id]?.value === "liked" ? "♥" : this._decisions[card.id]?.value === "disliked" ? "×" : ""}</button>
-							`)}
+							${cards.map(card => {
+								const decision = this._decisions[card.id]?.value;
+								return html`
+									<button
+										class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}"
+										data-testid="pr-walkthrough-card-dot"
+										type="button"
+										style=${decision === "liked" ? "background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText);" : decision === "disliked" ? "background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff);" : nothing}
+										aria-label=${`Open ${phase.label} card: ${card.title}`}
+										title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
+										@click=${() => this.selectCard(card.id)}
+									>${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 13.6 6.95 12.7C3.4 9.67 1.25 7.82 1.25 5.47 1.25 3.62 2.7 2.2 4.58 2.2c1.06 0 2.08.49 2.74 1.26A3.58 3.58 0 0 1 10.08 2.2c1.88 0 3.33 1.42 3.33 3.27 0 2.35-2.15 4.2-5.7 7.23L8 13.6Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.3 4.3 11.7 11.7M11.7 4.3 4.3 11.7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path></svg>` : nothing}</button>
+								`;
+							})}
 						</div>
 					`;
 				})}
