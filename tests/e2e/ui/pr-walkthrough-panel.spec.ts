@@ -114,8 +114,8 @@ async function expectPrototypeHeader(panel: Locator, expected: { pr?: RegExp; ti
 	await expect(header.getByTestId("pr-walkthrough-stat-deletions"), "header should show red deletions stat").toContainText(/-\s*[\d,]+/);
 	await expect.poll(async () => {
 		const [filesBox, additionsBox] = await Promise.all([fileStat.boundingBox(), addStat.boundingBox()]);
-		return filesBox && additionsBox ? additionsBox.y > filesBox.y : false;
-	}, { message: "line-change counts should sit beneath the file count" }).toBe(true);
+		return filesBox && additionsBox ? additionsBox.x > filesBox.x && Math.abs(additionsBox.y - filesBox.y) < 6 : false;
+	}, { message: "line-change counts should sit to the right of the file count" }).toBe(true);
 	await expect(header.getByTestId("pr-walkthrough-progress"), "header should show review progress").toContainText(/\d+\s*\/\s*\d+\s+reviewed/i);
 	await expect(header.getByRole("button", { name: /submit review/i }), "header should reserve the final draft submit control").toBeVisible();
 
