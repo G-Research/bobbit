@@ -767,7 +767,7 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderRail(): TemplateResult {
-		if (this.status === "loading" || this.status === "error" || (this.status === "ready" && this.cards.length === 0)) return this.renderPlaceholderRail();
+		if (!this.cards.length && (this.status === "loading" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
 		return this.isNarrowLayout ? this.renderCollapsedRail() : this.renderLabelledRail();
 	}
 
@@ -857,7 +857,9 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderMainContent(active: PrWalkthroughCard | undefined): TemplateResult {
+		if (this.status === "loading" && active) return html`${this.renderWarningBanners()}${this.renderLoadingState()}${this.renderCard(active)}`;
 		if (this.status === "loading") return html`${this.renderWarningBanners()}${this.renderLoadingState()}`;
+		if (this.status === "error" && active) return html`${this.renderWarningBanners()}${this.renderErrorState()}${this.renderCard(active)}`;
 		if (this.status === "error") return html`${this.renderWarningBanners()}${this.renderErrorState()}`;
 		if (this.status === "ready" && this.cards.length === 0) return html`${this.renderWarningBanners()}${this.renderEmptyState()}`;
 		if (!active) return html`${this.renderWarningBanners()}<div class="state-card" data-testid="pr-walkthrough-empty-state"><h2>No walkthrough cards are available.</h2><p>There are no logical review cards for this changeset.</p></div>`;
@@ -882,7 +884,8 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderLoadingState(): TemplateResult {
 		return html`
-			<section class="state-card" data-testid="pr-walkthrough-loading-state" aria-live="polite">
+			<section class="state-card" data-testid="pr-walkthrough-loading" aria-live="polite">
+				<span data-testid="pr-walkthrough-loading-state" hidden></span>
 				<h2>Resolving walkthrough…</h2>
 				<p>Loading PR metadata, changed files, diff hunks, and logical review cards.</p>
 				<div class="skeleton" aria-hidden="true">
@@ -894,14 +897,24 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
+	private retryWalkthroughResolve(): void {
+		this.dispatchEvent(new CustomEvent("open-pr-walkthrough", {
+			bubbles: true,
+			composed: true,
+			detail: { ...(this.changeset || {}), changesetId: this.changesetId || undefined },
+		}));
+	}
+
 	private renderErrorState(): TemplateResult {
 		const message = this.error || "Unable to resolve this walkthrough.";
 		const isAuth = /auth|permission|rate|token/i.test(message);
 		return html`
-			<section class="state-card" data-testid="pr-walkthrough-error-state" role="alert">
+			<section class="state-card" data-testid="pr-walkthrough-error" role="alert">
+				<span data-testid="pr-walkthrough-error-state" hidden></span>
 				<h2>${/not found/i.test(message) ? "Pull request not found" : "Walkthrough unavailable"}</h2>
 				<p>${message}</p>
 				${isAuth ? html`<p>Check GitHub credentials or repository permissions, then retry from the walkthrough command.</p>` : nothing}
+				<button type="button" class="copy-button" @click=${this.retryWalkthroughResolve}>Retry</button>
 			</section>
 		`;
 	}

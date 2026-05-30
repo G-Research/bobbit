@@ -152,11 +152,11 @@ function parseStoredPayload(raw: StoredWalkthroughFile, expectedChangesetId?: st
 	const warnings = Array.isArray(raw.warnings) ? raw.warnings : [];
 	return sanitizePayload({
 		changesetId: raw.changesetId,
-		changeset: raw.changeset as PrWalkthroughChangesetRef,
-		cards: raw.cards as PrWalkthroughCard[],
-		warnings: warnings as WalkthroughWarning[],
-		limits: isRecord(raw.limits) ? raw.limits as WalkthroughLimits : undefined,
-		export: isRecord(raw.export) ? raw.export as WalkthroughExportCapability : undefined,
+		changeset: raw.changeset as unknown as PrWalkthroughChangesetRef,
+		cards: raw.cards as unknown as PrWalkthroughCard[],
+		warnings: warnings as unknown as WalkthroughWarning[],
+		limits: isRecord(raw.limits) ? raw.limits as unknown as WalkthroughLimits : undefined,
+		export: isRecord(raw.export) ? raw.export as unknown as WalkthroughExportCapability : undefined,
 		schemaVersion: WALKTHROUGH_STORE_SCHEMA_VERSION,
 		updatedAt: raw.updatedAt,
 	});
