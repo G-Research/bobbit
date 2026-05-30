@@ -355,6 +355,7 @@ test.describe("PR walkthrough panel", () => {
 			return contentBox && actionsBox ? Math.abs(contentBox.y + contentBox.height - (actionsBox.y + actionsBox.height)) <= 1 : false;
 		}, { message: "interaction bar should be pinned flush to the bottom of the walkthrough content panel" }).toBe(true);
 		await expect(activeCard(page).locator(".actions"), "interaction bar should keep breathing room above the action row without adding bottom margin").toHaveCSS("padding-top", "16px");
+		await expect.poll(() => activeCard(page).locator(".actions").evaluate(el => getComputedStyle(el as HTMLElement, "::before").maskImage || getComputedStyle(el as HTMLElement, "::before").webkitMaskImage), { message: "action bar blur should fade in with a mask gradient" }).toContain("linear-gradient");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like").locator(".decision-icon"), "like action should include a thumbs-up icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-dislike").locator(".decision-icon"), "dislike action should include a thumbs-down icon").toBeVisible();
 		await expect(activeCard(page).getByTestId("pr-walkthrough-like"), "like action label should stay stable even when comments exist").toContainText(/^Like$/);

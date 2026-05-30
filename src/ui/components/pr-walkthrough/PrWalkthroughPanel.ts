@@ -589,7 +589,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.chip { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid color-mix(in oklch, var(--warning, orange) 32%, var(--border, ButtonBorder)); border-radius: 7px; background: var(--card, Canvas); color: var(--foreground, CanvasText); font-size: 12px; line-height: 1.35; }
 		.chip:hover { background: color-mix(in oklch, var(--warning, orange) 14%, transparent); }
 		.card-comment-card { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--negative, red); background: color-mix(in oklch, var(--negative, red) 5%, transparent); border-radius: 0 6px 6px 0; }
-		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 16px var(--walkthrough-content-x) 10px; border-top: 0; background: linear-gradient(to bottom, transparent 0 12px, color-mix(in oklch, var(--background, Canvas) 94%, transparent) 12px); backdrop-filter: blur(8px); }
+		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 16px var(--walkthrough-content-x) 10px; border-top: 0; background: transparent; isolation: isolate; }
+		.actions::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent 0 12px, color-mix(in oklch, var(--background, Canvas) 94%, transparent) 12px); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); }
 		.actions .prev { border-color: transparent; color: var(--muted-foreground, GrayText); background: transparent; }
 
 		@media (max-width: 760px) {
