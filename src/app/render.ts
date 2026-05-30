@@ -8,7 +8,7 @@ import { repeat } from "lit/directives/repeat.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 import Sortable from "sortablejs";
 import { shortcutHint } from "./shortcut-registry.js";
-import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, Maximize2, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
+import { Archive, ArrowLeft, ExternalLink, FileText, FolderOpen, FolderPlus, Link, MessagesSquare, ChevronDown, Goal as GoalIcon, PanelRightClose, PanelRightOpen, Pencil, Plus, QrCode, RotateCw, Server, Settings, Trash2, Unplug, Users, Workflow as WorkflowIcon, Wrench, X, Zap } from "lucide";
 import {
 	state,
 	renderApp,
@@ -79,6 +79,7 @@ import {
 	isHistoricalProposalTab,
 	isLivePreviewTab,
 	isPinnedPanelTab,
+	markPreviewContentDismissed,
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
 	normalizeSidePanelTabs,
@@ -253,6 +254,7 @@ document.addEventListener("open-pr-walkthrough", (e: Event) => {
 		prUrl: stringDetail("prUrl", "url"),
 		title: stringDetail("title", "prTitle"),
 		prTitle: stringDetail("prTitle", "title"),
+		prBody: stringDetail("prBody", "body"),
 		provider: stringDetail("provider"),
 		filesChanged: filesFromDetail(),
 		additions: numberDetail("additions", "insertions", "insertionsVsPrimary"),
@@ -1772,6 +1774,7 @@ export function doRenderApp(): void {
 			}
 		}
 		if (tab.kind === "preview") {
+			if (!isHistoricalPreviewTab(tab)) markPreviewContentDismissed(sid, previewEntryFromTab(tab), previewContentHashFromTab(tab));
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
 				state.isPreviewSession = false;
@@ -1817,8 +1820,20 @@ export function doRenderApp(): void {
 		return state.activeProposals[type] != null || (type === currentAssistantProposalType() && state.assistantHasProposal);
 	};
 
+	const walkthroughTabButtonLabel = (tab: UnifiedPanelTab): string | undefined => {
+		if (tab.kind !== "walkthrough") return undefined;
+		const record = { ...((tab.state || {}) as Record<string, unknown>), ...((tab.source || {}) as Record<string, unknown>) };
+		const rawNumber = record.prNumber;
+		const number = typeof rawNumber === "number" && Number.isFinite(rawNumber)
+			? String(Math.trunc(rawNumber))
+			: typeof rawNumber === "string" && rawNumber.trim()
+				? rawNumber.trim().replace(/^#/, "")
+				: "";
+		return number ? `PR: #${number}` : undefined;
+	};
+
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => (
-		tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
+		walkthroughTabButtonLabel(tab) || tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "")
 	);
 
 	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
@@ -2095,48 +2110,10 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const walkthroughSourceRecord = (tab: UnifiedContentTab): Record<string, unknown> => ({
-		...((tab.state || {}) as Record<string, unknown>),
-		...((tab.source || {}) as Record<string, unknown>),
-	});
-
-	const walkthroughPrUrl = (tab: UnifiedContentTab): string => {
-		const record = walkthroughSourceRecord(tab);
-		return recordValue(record, "prUrl") || recordValue(record, "externalUrl") || recordValue(record, "url");
-	};
-
-	const walkthroughPrLabel = (tab: UnifiedContentTab): string => {
-		const record = walkthroughSourceRecord(tab);
-		const number = recordValue(record, "prNumber");
-		const title = recordValue(record, "prTitle") || recordValue(record, "title") || tab.title;
-		if (number && title && !/^PR\s+#/i.test(title)) return `PR #${number}: ${title}`;
-		if (number) return title && /^PR\s+#/i.test(title) ? title : `PR #${number}`;
-		return title || "Pull request";
-	};
-
-	const walkthroughPrLink = (tab: UnifiedContentTab) => {
-		const url = walkthroughPrUrl(tab);
-		if (!url) return "";
-		return html`
-			<a
-				href=${url}
-				target="_blank"
-				rel="noopener noreferrer"
-				class="inline-flex items-center gap-1 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
-				style="max-width: min(34vw, 360px); padding:2px 8px; font-size:11px; line-height:1.35; text-decoration:none;"
-				title=${`Open ${walkthroughPrLabel(tab)} on GitHub`}
-				data-testid="pr-walkthrough-pr-link"
-			>
-				<span class="truncate">${walkthroughPrLabel(tab)}</span>${icon(ExternalLink, "xs")}
-			</a>
-		`;
-	};
-
 	const walkthroughControlButtons = (tab: UnifiedContentTab) => {
 		const sid = recordValue((tab.source || {}) as Record<string, unknown>, "sessionId") || activeSessionId() || workspaceSessionId();
 		const standaloneUrl = prWalkthroughStandaloneHref(sid, tab.id);
 		return html`
-			${walkthroughPrLink(tab)}
 			<button
 				type="button"
 				class="text-muted-foreground hover:text-foreground"
@@ -2190,6 +2167,7 @@ export function doRenderApp(): void {
 			prUrl: typeof source.prUrl === "string" ? source.prUrl : typeof source.externalUrl === "string" ? source.externalUrl : undefined,
 			prNumber: typeof source.prNumber === "string" || typeof source.prNumber === "number" ? source.prNumber : undefined,
 			prTitle: typeof source.prTitle === "string" ? source.prTitle : undefined,
+			prBody: typeof source.prBody === "string" ? source.prBody : undefined,
 			title: typeof source.title === "string" ? source.title : tab.title,
 			filesChanged: typeof source.filesChanged === "number" ? source.filesChanged : undefined,
 			additions: typeof source.additions === "number" ? source.additions : undefined,
@@ -2263,15 +2241,6 @@ export function doRenderApp(): void {
 		}
 		return html`
 			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-				<div class="flex items-center justify-between gap-3 px-4 py-2 border-b border-border shrink-0" style="background:var(--background);">
-					<div class="min-w-0">
-						<div class="text-xs uppercase tracking-wide text-muted-foreground">PR walkthrough</div>
-						<div class="text-sm font-medium text-foreground truncate" title=${tab.title}>${tab.title}</div>
-					</div>
-					<div class="flex items-center gap-1 shrink-0">
-						${walkthroughPrLink(tab)}
-					</div>
-				</div>
 				${walkthroughPanelContent(tab)}
 			</div>
 		`;
@@ -2330,7 +2299,7 @@ export function doRenderApp(): void {
 						${activeTab.kind === "walkthrough" ? walkthroughControlButtons(activeTab) : ""}
 						${activeTabCanFullscreen ? html`
 						<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`${activeTab.kind === "walkthrough" ? "Fullscreen walkthrough" : "Fullscreen preview"}${shortcutHint("toggle-sidebar")}`} data-testid=${activeTab.kind === "walkthrough" ? "pr-walkthrough-fullscreen" : "preview-fullscreen"}>
-							${icon(Maximize2, "sm")}
+							${icon(PanelRightOpen, "sm")}
 						</button>` : ""}
 						<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
 							${icon(PanelRightClose, "sm")}
@@ -2482,11 +2451,11 @@ export function doRenderApp(): void {
 		if (getRouteFromHash().view === "walkthrough") {
 			render(html`
 				<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden">
-					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5">
+					<div class="flex items-center justify-between border-b border-border shrink-0 header-shadow px-3 py-1.5" data-testid="pr-walkthrough-standalone-topbar">
 						<div class="flex items-center gap-2 min-w-0">
 							${bobbitIcon}
 							<span class="text-sm font-semibold text-foreground">Bobbit</span>
-							<span class="text-xs text-muted-foreground">Standalone walkthrough</span>
+							<span class="text-xs text-muted-foreground">PR Walkthrough</span>
 						</div>
 						<theme-toggle></theme-toggle>
 					</div>

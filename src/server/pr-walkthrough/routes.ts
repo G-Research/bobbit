@@ -53,6 +53,7 @@ type WalkthroughChangeset = {
 	prUrl?: string;
 	prNumber?: string | number;
 	prTitle?: string;
+	prBody?: string;
 	title?: string;
 	filesChanged?: number;
 	additions?: number;
@@ -203,13 +204,24 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	const headSha = stringValue(body.headSha);
 	const prUrl = stringValue(body.prUrl);
 	const prNumber = typeof body.prNumber === "number" || typeof body.prNumber === "string" ? body.prNumber : undefined;
+	const prTitle = stringValue(body.prTitle) || stringValue(body.title);
 	const wantsGithub = Boolean(prUrl || prNumber || body.provider === "github");
+
+	if (wantsGithub && (!baseSha || !headSha)) {
+		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
+		if (delegated) return delegated;
+		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
+	}
 
 	if (wantsGithub && baseSha && headSha) {
 		const local = await resolveLocalWithDelegation(cwd, baseSha, headSha, deps, context);
 		const gh = parseGithubRef(prUrl, prNumber, cwd);
 		const head = shortSha(local.changeset.headSha);
-		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${prNumber ?? "unknown"}:${head}`;
+		const number = prNumber ?? gh?.number;
+		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${number ?? "unknown"}:${head}`;
+		const title = prTitle
+			? (number != null && !/^PR\s+#/i.test(prTitle) ? `PR #${number}: ${prTitle}` : prTitle)
+			: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title;
 		return {
 			...local,
 			changesetId,
@@ -217,18 +229,14 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 				...local.changeset,
 				provider: "github",
 				prUrl: gh?.url,
-				prNumber: prNumber ?? gh?.number,
+				prNumber: number,
+				prTitle,
+				prBody: stringValue(body.prBody),
 				externalUrl: gh?.url,
-				title: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title,
+				title,
 			},
 			export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
 		};
-	}
-
-	if (wantsGithub) {
-		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
-		if (delegated) return delegated;
-		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
 	}
 
 	if (!baseSha || !headSha) throw new Error("baseSha and headSha are required for local walkthrough resolution");
@@ -367,7 +375,7 @@ export async function createModelBackedSynthesisAdapter(deps: PrWalkthroughRoute
 	};
 }
 
-const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
+const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. The orientation card is special: it should explain PR context for reviewers (why the PR was raised, context/background needed to understand it, testing strategy, and useful PR-description details) and may use an empty diffBlockIds array. Do not make orientation a summary of the walkthrough process. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
 
 async function resolveSynthesisModelPref(deps: PrWalkthroughRouteDeps, sessionId: string | undefined): Promise<string | undefined> {
 	if (sessionId && deps.resolveSessionModel) {
@@ -539,14 +547,15 @@ function applyNameStatus(blocks: DiffBlock[], nameStatus: string): void {
 }
 
 function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlock[], warnings: WalkthroughWarning[]): WalkthroughCard[] {
+	const prContext = stringValue(changeset.prBody);
 	const cards: WalkthroughCard[] = [{
 		id: "orientation-summary",
 		phaseId: "orientation",
-		title: changeset.title ? `Review ${changeset.title}` : "Review changeset",
-		summary: `${changeset.filesChanged ?? files.length} files changed with ${changeset.additions ?? 0} additions and ${changeset.deletions ?? 0} deletions.`,
-		rationale: warnings.length ? `${warnings.length} warnings need reviewer attention.` : "Generated from the resolved changeset.",
-		diffBlocks: files.slice(0, 1),
-		checklist: ["Confirm scope", "Check generated warnings", "Review changed files"],
+		title: "PR context",
+		summary: `Why this PR was raised: ${prContext ? prContext.replace(/\s+/g, " ").slice(0, 220) : changeset.prTitle ?? changeset.title ?? "No PR description was available."}`,
+		rationale: `Context to understand the PR: ${changeset.prTitle ?? changeset.title ?? "No additional PR context was provided."}`,
+		diffBlocks: [],
+		checklist: ["Testing strategy: No testing strategy was specified in the PR description.", ...warnings.slice(0, 2).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message)],
 	}];
 	if (files.length > 0) {
 		const reviewBlocks = files.filter(file => file.status !== "binary");

@@ -54,6 +54,59 @@ describe("PR walkthrough card synthesis", () => {
 		assert.ok(cards.some(card => card.diffBlocks.some(diffBlock => diffBlock.id === "a")));
 	});
 
+	it("builds phase 0 from PR context and testing details, not walkthrough mechanics", async () => {
+		const cards = await synthesiseWalkthroughCards({
+			...changeset(),
+			prTitle: "Fix walkthrough panel defaults",
+			prBody: [
+				"## Why",
+				"The walkthrough panel opened against local refs and confused reviewers after merge.",
+				"## Context",
+				"GitHub remains the source of truth for PR diff scope and metadata.",
+				"## Testing strategy",
+				"Run typecheck plus targeted walkthrough browser coverage.",
+			].join("\n"),
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
+
+		const orientation = cards[0];
+		assert.equal(orientation.phaseId, "orientation");
+		assert.match(orientation.summary, /Why this PR was raised: The walkthrough panel opened against local refs/);
+		assert.match(orientation.rationale ?? "", /Context to understand the PR: GitHub remains the source of truth/);
+		assert.ok(orientation.checklist?.some(item => /Testing strategy: Run typecheck plus targeted walkthrough browser coverage/.test(item)));
+		assert.doesNotMatch(`${orientation.summary} ${orientation.rationale}`, /confirming scope|review generated cards|walkthrough process/i);
+	});
+
+	it("keeps deterministic PR-context phase 0 even when LLM synthesis returns walkthrough instructions", async () => {
+		const cards = await synthesiseWalkthroughCards({
+			...changeset(),
+			prBody: "## Why\nFix a confusing PR review scope.\n\n## Testing\nRun targeted walkthrough tests.",
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])], {
+			allowLlm: true,
+			llm: () => ({ cards: [
+				{ phaseId: "orientation", title: "Confirm scope", summary: "Start by confirming refs and reviewing cards in order.", diffBlockIds: [] },
+				{ phaseId: "significant", title: "Review code", summary: "Check implementation.", diffBlockIds: ["a"] },
+			] }),
+		});
+
+		assert.equal(cards[0].title, "PR context");
+		assert.match(cards[0].summary, /Why this PR was raised: Fix a confusing PR review scope/);
+		assert.doesNotMatch(`${cards[0].summary} ${cards[0].rationale}`, /confirming refs|reviewing cards/i);
+		assert.equal(cards[1]?.title, "Review code");
+	});
+
+	it("validates LLM orientation cards without requiring diff blocks", () => {
+		const cards = validateSynthesisedCards({
+			cards: [
+				{ phaseId: "orientation", title: "PR context", summary: "Why: fixes review context", diffBlockIds: [], checklist: ["Testing strategy: npm test"] },
+				{ phaseId: "significant", title: "Check resolver", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
+			],
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
+
+		assert.equal(cards.length, 2);
+		assert.equal(cards[0].phaseId, "orientation");
+		assert.deepEqual(cards[0].diffBlocks, []);
+	});
+
 	it("validates LLM card schema and drops suggested comments with bad anchors", () => {
 		const files = [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])];
 		const cards = validateSynthesisedCards({
@@ -112,7 +165,8 @@ describe("PR walkthrough card synthesis", () => {
 		});
 
 		assert.equal(completionCalls, 1);
-		assert.equal(result.cards[0]?.title, "Model card");
+		assert.equal(result.cards[0]?.phaseId, "orientation");
+		assert.equal(result.cards[1]?.title, "Model card");
 	});
 
 	it("resolver synthesis invokes configured LLM adapter and falls back when it returns invalid output", async () => {
@@ -130,7 +184,8 @@ describe("PR walkthrough card synthesis", () => {
 				export: { provider: "github", available: false },
 			});
 			assert.equal(calls, 1);
-			assert.equal(result?.cards[0]?.title, "LLM card");
+			assert.equal(result?.cards[0]?.phaseId, "orientation");
+			assert.equal(result?.cards[1]?.title, "LLM card");
 
 			setPrWalkthroughSynthesisAdapterForTesting(() => ({ cards: [{ phaseId: "bad", title: "Bad", summary: "Bad", diffBlockIds: ["llm-block"] }] }));
 			const fallback = await normalizeGithubResolvedWalkthrough({

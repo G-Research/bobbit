@@ -53,6 +53,7 @@ export interface OpenPrWalkthroughInput {
 	prUrl?: string;
 	title?: string;
 	prTitle?: string;
+	prBody?: string;
 	provider?: string;
 	filesChanged?: number;
 	additions?: number;
@@ -136,6 +137,7 @@ function normalizeInput(state: AppState, input: OpenPrWalkthroughInput): OpenPrW
 		prUrl: url,
 		prNumber: normalizePrNumber(merged.prNumber) || normalizePrNumber(urlMetadata.prNumber),
 		prTitle: cleanString(merged.prTitle) || cleanString(merged.title),
+		prBody: cleanString(merged.prBody),
 		title: cleanString(merged.title) || cleanString(merged.prTitle),
 		provider: cleanString(merged.provider) || urlMetadata.provider || (url ? "external-pr" : undefined),
 		filesChanged: finiteNonNegativeNumber(merged.filesChanged),
@@ -162,6 +164,15 @@ function titleForInput(input: OpenPrWalkthroughInput): string {
 	return "Changeset Walkthrough";
 }
 
+function labelForPrNumber(value: unknown): string | undefined {
+	const prNumber = normalizePrNumber(value);
+	return prNumber ? `PR: #${prNumber}` : undefined;
+}
+
+function labelForInput(input: OpenPrWalkthroughInput): string {
+	return labelForPrNumber(input.prNumber) || (input.url || input.prUrl ? "PR" : "Walkthrough");
+}
+
 export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWalkthroughChangesetRef {
 	const prNumber = normalizePrNumber(input.prNumber);
 	const externalUrl = cleanString(input.prUrl) || cleanString(input.url);
@@ -173,6 +184,7 @@ export function changesetRefForWalkthrough(input: OpenPrWalkthroughInput): PrWal
 		prUrl: externalUrl,
 		prNumber,
 		prTitle: cleanString(input.prTitle),
+		prBody: cleanString(input.prBody),
 		title: titleForInput(input),
 		filesChanged: finiteNonNegativeNumber(input.filesChanged),
 		additions: finiteNonNegativeNumber(input.additions),
@@ -192,13 +204,23 @@ function shouldResolveInput(input: OpenPrWalkthroughInput): boolean {
 }
 
 function resolveRequestForInput(sessionId: string, input: OpenPrWalkthroughInput): Record<string, unknown> {
+	const prUrl = cleanString(input.prUrl) || cleanString(input.url);
+	const prNumber = normalizePrNumber(input.prNumber);
+	const provider = cleanString(input.provider);
+	const shouldUseGithubPrDiff = Boolean(prUrl || prNumber || provider === "github" || provider === "external-pr");
 	return {
 		sessionId: sessionId || undefined,
-		baseSha: cleanString(input.baseSha),
-		headSha: cleanString(input.headSha),
-		prUrl: cleanString(input.prUrl) || cleanString(input.url),
-		prNumber: normalizePrNumber(input.prNumber),
-		provider: cleanString(input.provider),
+		// PR walkthroughs should resolve through the GitHub PR API by default so the
+		// diff matches GitHub's PR view, including already-merged PRs. Local refs are
+		// only sent for explicit local changeset walkthroughs.
+		baseSha: shouldUseGithubPrDiff ? undefined : cleanString(input.baseSha),
+		headSha: shouldUseGithubPrDiff ? undefined : cleanString(input.headSha),
+		prUrl,
+		prNumber,
+		prTitle: cleanString(input.prTitle),
+		prBody: cleanString(input.prBody),
+		title: cleanString(input.title),
+		provider,
 		fixture: !shouldResolveInput(input) || undefined,
 	};
 }
@@ -269,7 +291,7 @@ function patchWalkthroughTab(
 			...tab,
 			id: nextTabId,
 			title,
-			label: tab.label || "Walkthrough",
+			label: labelForPrNumber(changeset?.prNumber) || tab.label || "Walkthrough",
 			source: {
 				...source,
 				type: "walkthrough",
@@ -284,6 +306,7 @@ function patchWalkthroughTab(
 					prUrl: changeset.prUrl || changeset.externalUrl,
 					prNumber: changeset.prNumber,
 					prTitle: changeset.prTitle,
+					prBody: changeset.prBody,
 					filesChanged: changeset.filesChanged,
 					additions: changeset.additions,
 					deletions: changeset.deletions,
@@ -399,6 +422,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		prUrl,
 		prNumber,
 		prTitle,
+		prBody: changeset.prBody,
 		filesChanged: changeset.filesChanged,
 		additions: changeset.additions,
 		deletions: changeset.deletions,
@@ -407,7 +431,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 		id: tabId,
 		kind: "walkthrough",
 		title,
-		label: "Walkthrough",
+		label: labelForInput(input),
 		legacyTab: "walkthrough",
 		source,
 		state: {
@@ -418,6 +442,7 @@ export function openPrWalkthroughPanel(state: AppState, sessionId: string, rawIn
 			prUrl,
 			prNumber,
 			prTitle,
+			prBody: changeset.prBody,
 			baseSha: changeset.baseSha,
 			headSha: changeset.headSha,
 			filesChanged: changeset.filesChanged,

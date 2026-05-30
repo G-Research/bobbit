@@ -11,6 +11,7 @@ import {
 	previewTabIdentityForContent,
 	previewVersionRecordFor,
 	normalizePreviewContentHash,
+	isPreviewContentDismissed,
 	panelTabsForSession,
 	previewContentHashFromTab,
 	proposalPanelTabId,
@@ -426,7 +427,7 @@ export function startPreviewSubscription(sessionId: string): void {
 			}
 			contentHash = normalizePreviewContentHash(data?.contentHash);
 			(state as any).previewPanelContentHash = contentHash;
-			if (entry) {
+			if (entry && !isPreviewContentDismissed(sessionId, entry, contentHash)) {
 				selectHtmlPreviewTab({
 					sessionId,
 					entry,
@@ -464,7 +465,7 @@ export function startPreviewSubscription(sessionId: string): void {
 				const contentHash = normalizePreviewContentHash(data?.contentHash);
 				const artifactId = typeof data?.artifactId === "string" && data.artifactId ? data.artifactId : undefined;
 				(state as any).previewPanelContentHash = contentHash;
-				if (entry) {
+				if (entry && !isPreviewContentDismissed(sessionId, entry, contentHash)) {
 					selectHtmlPreviewTab({
 						sessionId,
 						entry,

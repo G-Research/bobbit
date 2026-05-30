@@ -1,5 +1,7 @@
+import { icon } from "@mariozechner/mini-lit";
 import { css, html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { PanelLeftClose, PanelLeftOpen } from "lucide";
 import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
 import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "./fixtures.js";
 import { gatewayFetch } from "../../../app/gateway-fetch.js";
@@ -13,9 +15,39 @@ const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [
 	{ id: "audit", label: "Audit" },
 ];
 
+const DEFAULT_DIFF_CONTEXT_LINES = 3;
+const DIFF_CONTEXT_EXPAND_LINES = 20;
+
 interface SideBySidePair {
 	left: PrWalkthroughDiffLine | null;
 	right: PrWalkthroughDiffLine | null;
+}
+
+interface DiffContextEntry {
+	kind: "context";
+	start: number;
+	end: number;
+	gapStart: number;
+	gapEnd: number;
+	hiddenCount: number;
+	canExpandAbove: boolean;
+	canExpandBelow: boolean;
+}
+
+interface DiffLineEntry {
+	kind: "lines";
+	start: number;
+	end: number;
+	lines: PrWalkthroughDiffLine[];
+}
+
+type DiffRenderEntry = DiffContextEntry | DiffLineEntry;
+
+type DiffContextDirection = "above" | "below";
+
+interface DiffContextExpansion {
+	above?: number;
+	below?: number;
 }
 
 type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
@@ -94,6 +126,8 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _activeCardId = "";
 	@state() private _panelWidth = 1024;
 	@state() private _observedNarrow = false;
+	@state() private _railCollapsed = false;
+	@state() private _railWidth = 240;
 	@state() private _diffModeOverride?: PrWalkthroughDiffMode;
 	@state() private _comments: PrWalkthroughComment[] = [];
 	@state() private _decisions: Record<string, PrWalkthroughDecision> = {};
@@ -104,6 +138,7 @@ export class PrWalkthroughPanel extends LitElement {
 	@state() private _cardDrafts: Record<string, string> = {};
 	@state() private _dismissedSuggestionIds: string[] = [];
 	@state() private _collapsedDiffBlockIds: string[] = [];
+	@state() private _contextExpansions: Record<string, DiffContextExpansion> = {};
 	@state() private _copied = false;
 	@state() private _exportPreviewOpen = false;
 	@state() private _exportPreviewLoading = false;
@@ -140,38 +175,39 @@ export class PrWalkthroughPanel extends LitElement {
 		.header {
 			display: flex;
 			align-items: center;
-			gap: 12px;
+			gap: 14px;
 			min-width: 0;
-			height: 48px;
-			padding: 0 14px;
+			height: 58px;
+			padding: 0 18px;
 			border-bottom: 1px solid var(--border, ButtonBorder);
 			background: var(--card, Canvas);
 		}
 
 		.title-row { display: contents; }
-		.title-wrap { min-width: 0; display: grid; gap: 1px; }
-		.kicker { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		.title-wrap { min-width: 0; display: grid; gap: 5px; flex: 1 1 auto; }
+		.title-meta-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+		.kicker { display: none; }
 		.title { margin: 0; font-size: 14px; line-height: 1.25; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.meta { color: var(--muted-foreground, GrayText); font-size: 12px; margin-top: 4px; }
-		.header-spacer { flex: 1 1 auto; min-width: 10px; }
-		.stats { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; white-space: nowrap; }
+		.header-spacer { display: none; }
+		.stats { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.2; white-space: nowrap; }
 		.stat-files { color: var(--muted-foreground, GrayText); }
+		.stat-sep { color: var(--muted-foreground, GrayText); opacity: 0.7; }
+		.stat-lines { display: inline-flex; align-items: center; gap: 8px; }
 		.stat-add { color: var(--positive, var(--chart-3, green)); font-weight: 700; }
 		.stat-del { color: var(--negative, var(--chart-5, red)); font-weight: 700; }
-		.header-pill,
+		.github-mark { width: 14px; height: 14px; flex: 0 0 auto; fill: currentColor; }
 		.pr-link { display: inline-flex; align-items: center; gap: 5px; max-width: min(32vw, 300px); padding: 2px 8px; border: 1px solid var(--border, ButtonBorder); border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 8%, transparent); color: var(--muted-foreground, GrayText); font-size: 11px; line-height: 1.35; text-decoration: none; white-space: nowrap; }
 		.pr-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 25%, var(--border, ButtonBorder)); }
 		.pr-link span { overflow: hidden; text-overflow: ellipsis; }
-		.progress-wrap { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+		.progress-wrap { display: inline-grid; align-items: center; justify-items: stretch; gap: 4px; min-width: 0; }
 		.progress-label { color: var(--muted-foreground, GrayText); font-size: 11px; white-space: nowrap; }
-		.progress-track { width: 150px; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); }
+		.progress-track { width: 100%; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); }
 		.progress-fill { height: 100%; border-radius: inherit; background: var(--primary, Highlight); transition: width 160ms ease; }
-		.submit-button { border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
+		.submit-button { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); white-space: nowrap; }
+		.submit-icon { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.submit-button:disabled { background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); opacity: 1; }
-		.status-pill { border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 12%, transparent); color: var(--info, var(--primary, Highlight)); }
-		.status-pill.error { background: color-mix(in oklch, var(--negative, red) 12%, transparent); color: var(--negative, red); }
-
-		.banner-stack { display: grid; gap: 8px; margin: 0 auto 14px; max-width: 1120px; }
+		.banner-stack { display: grid; gap: 8px; margin: 0 0 14px; max-width: none; }
 		.banner { padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-radius: 10px; background: var(--card, Canvas); color: var(--foreground, CanvasText); }
 		.banner strong { display: block; margin-bottom: 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 		.banner.info { border-color: color-mix(in oklch, var(--info, var(--primary, Highlight)) 28%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 7%, transparent); }
@@ -232,23 +268,19 @@ export class PrWalkthroughPanel extends LitElement {
 
 		.body {
 			display: grid;
-			grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+			grid-template-columns: var(--walkthrough-rail-width, 240px) minmax(0, 1fr);
 			min-height: 0;
 		}
 
 		.body.narrow { grid-template-columns: 38px minmax(0, 1fr); }
 
 		.rail {
+			position: relative;
 			overflow: auto;
 			padding: 12px;
 			border-right: 1px solid var(--border, ButtonBorder);
 			background: color-mix(in oklch, var(--card, Canvas) 62%, var(--background, Canvas));
 		}
-		.rail-prbox { padding-bottom: 12px; margin-bottom: 10px; border-bottom: 1px solid var(--border, ButtonBorder); }
-		.rail-prbox .num { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
-		.rail-prbox .prtitle { margin-top: 3px; font-weight: 700; line-height: 1.25; }
-		.rail-prbox .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--muted-foreground, GrayText); }
-
 		.phase { display: grid; gap: 6px; margin-bottom: 14px; }
 		.phase-button {
 			width: 100%;
@@ -310,6 +342,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.content {
 			overflow: auto;
 			min-width: 0;
+			box-sizing: border-box;
 			padding: 16px;
 		}
 
@@ -353,26 +386,40 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 		.diff-overflow { overflow-x: auto; overflow-y: hidden; }
 		.hunk-header {
-			padding: 6px 10px;
+			display: grid;
+			grid-template-columns: 78px minmax(0, 1fr);
 			min-width: max-content;
 			font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-			color: var(--info, var(--primary, Highlight));
+			color: var(--muted-foreground, GrayText);
 			background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent);
 		}
+		.hunk-context-cell {
+			min-height: 24px;
+			padding: 3px;
+			display: inline-flex;
+			flex-direction: column;
+			align-items: stretch;
+			justify-content: center;
+			gap: 2px;
+		}
+		.hunk-signature { min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.45; }
 		.split-grid { min-width: 820px; }
 		.split-row {
 			display: grid;
 			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-			min-width: max-content;
+			width: 100%;
+			min-width: 100%;
 		}
 		.inline-lines { min-width: 620px; }
 		.diff-line {
 			width: 100%;
+			min-width: 0;
 			min-height: 24px;
 			padding: 0;
 			border: 0;
 			border-radius: 0;
 			display: grid;
+			overflow: hidden;
 			grid-template-columns: 54px 24px minmax(280px, 1fr) 72px;
 			align-items: stretch;
 			text-align: left;
@@ -385,7 +432,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.diff-line.add { background: color-mix(in oklch, var(--positive, var(--chart-2, var(--primary, Highlight))) 15%, transparent); }
 		.diff-line.del { background: color-mix(in oklch, var(--negative, var(--chart-5, var(--primary, Highlight))) 13%, transparent); }
 		.line-no, .prefix, .comment-cue { padding: 3px 6px; color: var(--muted-foreground, GrayText); user-select: none; }
-		.line-text { padding: 3px 8px; white-space: pre; }
+		.line-text { min-width: 0; padding: 3px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 		.comment-cue { opacity: 0; font-family: inherit; }
 		.diff-line:hover .comment-cue, .diff-line:focus-visible .comment-cue { opacity: 1; }
 		.line-comments, .line-editor, .suggestions { display: grid; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border, ButtonBorder); background: color-mix(in oklch, var(--card, Canvas) 88%, var(--background, Canvas)); }
@@ -434,16 +481,17 @@ export class PrWalkthroughPanel extends LitElement {
 			padding: 12px 0 0;
 			background: linear-gradient(transparent, var(--background, Canvas) 30%);
 		}
-		.actions button { padding: 9px 14px; border-color: var(--border, ButtonBorder); background: var(--card, Canvas); }
+		.actions button { min-height: 32px; padding: 6px 12px; border-color: var(--border, ButtonBorder); background: var(--card, Canvas); }
+		.actions .decision-icon, .actions .nav-icon { width: 15px; height: 15px; flex: 0 0 auto; display: inline-block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -2px; }
+		.actions .decision-icon { margin-right: 6px; }
+		.actions .nav-icon.prev-icon { margin-right: 6px; }
+		.actions .nav-icon.next-icon { margin-left: 6px; }
 		.actions button:hover:not(:disabled), .actions button:focus-visible:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); }
-		.actions .like {
-			border-color: var(--primary, Highlight);
-			background: var(--primary, Highlight);
-			color: var(--primary-foreground, HighlightText);
-			font-weight: 700;
-		}
-		.actions .like:hover:not(:disabled), .actions .like:focus-visible:not(:disabled) { filter: brightness(1.04); }
+		.actions .like { border-color: color-mix(in oklch, var(--primary, Highlight) 62%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--primary, Highlight) 7%, var(--card, Canvas)); color: var(--primary, Highlight); font-weight: 750; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary, Highlight) 14%, transparent); }
+		.actions .like:hover:not(:disabled), .actions .like:focus-visible:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 14%, var(--card, Canvas)); color: var(--primary, Highlight); filter: none; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary, Highlight) 22%, transparent), 0 6px 16px color-mix(in oklch, var(--primary, Highlight) 12%, transparent); }
 		.actions .dislike.enabled:hover, .actions .dislike.enabled:focus-visible { color: var(--negative, Mark); border-color: var(--negative, Mark); background: color-mix(in oklch, var(--negative, Mark) 12%, transparent); }
+		.actions .decision-selected { outline: 2px solid color-mix(in oklch, currentColor 38%, transparent); outline-offset: 2px; box-shadow: 0 0 0 3px color-mix(in oklch, currentColor 10%, transparent), 0 8px 18px color-mix(in oklch, currentColor 16%, transparent); }
+		.actions .dislike.decision-selected { color: var(--negative, Mark); border-color: color-mix(in oklch, var(--negative, Mark) 72%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, Mark) 10%, var(--card, Canvas)); }
 		.decision-note { margin-right: auto; color: var(--muted-foreground, GrayText); font-size: 12px; }
 
 		.audit {
@@ -466,74 +514,110 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 
 		/* Prototype-density overrides for the production walkthrough surface. */
-		.phase { border-radius: 8px; overflow: hidden; margin: 3px 0; }
-		.phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
-		.phase.complete .phase-index { background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.phase-button { display: flex; align-items: center; gap: 8px; border: 0; border-radius: 8px; }
-		.phase-index { width: 20px; height: 20px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: color-mix(in oklch, var(--muted-foreground, GrayText) 18%, transparent); color: var(--muted-foreground, GrayText); font-size: 10px; font-weight: 800; }
-		.phase.active .phase-index { background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
-		.phase-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-		.phase-count { font-size: 11px; color: var(--muted-foreground, GrayText); }
-		.phase-cards { display: grid; gap: 1px; padding: 0 8px 7px 30px; }
-		.card-button { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 5px; font-size: 11.5px; }
+		.rail:not(.collapsed) { display: flex; flex-direction: column; gap: 6px; padding: 6px 6px 6px 8px; overflow-x: hidden; }
+		.phase { width: 100%; display: grid; gap: 5px; margin: 0; padding: 0 0 5px; border-radius: 6px; }
+		.phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
+		.rail:not(.collapsed) .phase:first-of-type::before { content: none; display: none; }
+		.phase-button { width: 100%; min-height: 13px; display: flex; align-items: center; gap: 4px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
+		.phase-button::after { content: none; }
+		.phase-button.active { color: var(--muted-foreground, GrayText); background: transparent; }
+		.phase-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
+		.rail:not(.collapsed) .phase-pip { width: 10px; height: 13px; padding: 0; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0; }
+		.rail:not(.collapsed) .phase-pip.active, .rail:not(.collapsed) .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
+		.phase-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground, GrayText); font-size: 0.8333em; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+		.phase-count { display: none; }
+		.phase-cards { display: grid; gap: 5px; padding: 0 0 0 8px; }
+		.card-button { width: 100%; min-height: 16px; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); font-size: 13px; font-weight: 400; text-align: left; }
 		.card-button::before { content: none; }
-		.card-dot-rail { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; background: var(--muted-foreground, GrayText); opacity: 0.45; }
-		.card-button.complete .card-dot-rail { background: var(--positive, var(--primary, Highlight)); opacity: 1; }
-		.card-button.disliked .card-dot-rail { background: var(--negative, red); opacity: 1; }
-		.card-button.active .card-dot-rail { background: var(--primary, Highlight); opacity: 1; box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 22%, transparent); }
-		.rail.collapsed { gap: 8px; padding: 6px 3px; overflow-x: hidden; }
-		.collapsed-phase { width: 100%; padding: 2px 0 5px; border-radius: 8px; }
-		.collapsed-phase.active { background: color-mix(in oklch, var(--primary, Highlight) 8%, transparent); }
-		.phase-pip { width: 24px; height: 24px; padding: 0; border: 0; font-size: 11px; font-weight: 800; }
-		.phase-pip.complete { background: var(--positive, var(--primary, Highlight)); color: var(--positive-foreground, HighlightText); }
-		.card-dot { width: 10px; height: 10px; border: 0; }
-		.card-dot.disliked { background: var(--negative, red); opacity: 1; }
-		.content { padding: 26px clamp(16px, 4vw, 54px) 38px; }
-		.inner { max-width: 1120px; margin: 0 auto; }
-		.card { display: block; max-width: none; }
+		.card-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
+		.card-button.active { color: var(--foreground, CanvasText); background: transparent; }
+		.rail:not(.collapsed) .card-dot { position: relative; width: 14px; height: 14px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; border-radius: 999px; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
+		.rail:not(.collapsed) .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+		.rail:not(.collapsed) .card-dot.liked { background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		.rail:not(.collapsed) .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
+		.rail:not(.collapsed) .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
+		.rail:not(.collapsed) .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
+		.card-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+		.card-decision { display: none; }
+		.rail-toggle { margin-top: auto; align-self: flex-end; padding: 8px; display: flex; align-items: center; gap: 0.375rem; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground, GrayText); transition: color 120ms ease, background 120ms ease; }
+		.rail-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--secondary, var(--muted-foreground, GrayText)) 50%, transparent); }
+		.rail-toggle svg { width: 16px; height: 16px; }
+		.walkthrough-rail-resize-handle { position: absolute; top: 0; right: -2px; width: 6px; height: 100%; z-index: 5; cursor: col-resize; background: transparent; transition: background 120ms ease; touch-action: none; }
+		.walkthrough-rail-resize-handle:hover, .walkthrough-rail-resize-handle:active { background: color-mix(in oklch, var(--primary, Highlight) 25%, transparent); }
+		.rail.collapsed { gap: 6px; padding: 6px 3px; overflow-x: hidden; }
+		.collapsed-phase { width: 100%; display: grid; justify-items: center; gap: 5px; padding: 0 0 5px; border-radius: 6px; }
+		.collapsed-phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
+		.rail.collapsed .collapsed-phase:first-child::before { content: none; display: none; }
+		.collapsed-phase.active { background: transparent; }
+		.rail.collapsed .phase-pip { width: 24px; height: 13px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
+		.rail.collapsed .phase-pip.active, .rail.collapsed .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
+		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
+		.rail.collapsed .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+		.rail.collapsed .card-dot.liked { background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		.rail.collapsed .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
+		.rail.collapsed .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
+		.rail.collapsed .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
+		.rail.collapsed .rail-toggle { align-self: center; margin-bottom: 8px; padding: 8px; }
+		.rail.collapsed .walkthrough-rail-resize-handle { display: none; }
+		.content { --walkthrough-content-x: clamp(12px, 1.6vw, 24px); padding: 14px var(--walkthrough-content-x) 0; }
+		.inner { width: 100%; max-width: none; min-height: 100%; margin: 0; display: flex; flex-direction: column; }
+		.card { display: flex; flex-direction: column; max-width: none; min-height: 100%; }
 		.card-head { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; }
-		.phase-label { display: inline-block; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+		.card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+		.phase-label { display: inline-block; min-width: 0; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
-		.meta2 { color: var(--muted-foreground, GrayText); font-size: 12px; margin-bottom: 16px; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
-		.modebar { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; flex-wrap: wrap; }
-		.modebar .label { font-size: 11px; color: var(--muted-foreground, GrayText); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 800; }
-		.modebar .mode-toggle { overflow: hidden; border-radius: 7px; }
-		.modebar .mode-toggle button { border-radius: 0; font-size: 12px; }
-		.modebar .mode-toggle button.active { background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
-		.narrow-note { display: none; font-size: 12px; color: var(--muted-foreground, GrayText); }
-		.body.narrow .narrow-note { display: inline; }
+		.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
+		.modebar .mode-toggle { gap: 2px; padding: 2px; border-radius: 7px; background: color-mix(in oklch, var(--background, Canvas) 62%, transparent); }
+		.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); }
+		.modebar .mode-toggle button.active { background: color-mix(in oklch, var(--primary, Highlight) 22%, transparent); color: var(--primary, Highlight); outline: 1px solid color-mix(in oklch, var(--primary, Highlight) 42%, var(--border, ButtonBorder)); }
+		.modebar .mode-icon { width: 15px; height: 15px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-block { margin: 12px 0; border-radius: 9px; }
 		.diff-block.closed .diff-overflow { display: none; }
+		.context-toggle { width: 100%; height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 10%, transparent); color: var(--muted-foreground, GrayText); }
+		.context-toggle:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 18%, transparent); }
+		.context-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.diff-file-header-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border, ButtonBorder); }
 		.diff-block.closed .diff-file-header-row { border-bottom: 0; }
 		.diff-file-header { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
-		.diff-external-link { display: inline-flex; align-items: center; flex: 0 0 auto; padding: 0 12px; border-left: 1px solid var(--border, ButtonBorder); font-size: 11px; font-weight: 800; color: var(--primary, Highlight); text-decoration: none; }
-		.diff-external-link:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); text-decoration: underline; }
+		.diff-external-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 36px; padding: 0; border-left: 1px solid var(--border, ButtonBorder); color: var(--muted-foreground, GrayText); text-decoration: none; }
+		.diff-external-link:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); }
+		.diff-external-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 		.caret { width: 12px; color: var(--muted-foreground, GrayText); transition: transform 140ms ease; font-family: ui-monospace, monospace; }
 		.diff-block.open .caret { transform: rotate(90deg); }
 		.diff-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.diff-path b { color: var(--foreground, CanvasText); }
-		.diff-kind { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; color: var(--chart-1, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 16%, transparent); }
-		.diff-status { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 999px; color: var(--chart-2, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 14%, transparent); border: 1px solid color-mix(in oklch, var(--chart-2, var(--primary, Highlight)) 26%, var(--border, ButtonBorder)); }
+		.diff-counts { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; }
+		.diff-add-count { color: var(--positive, green); }
+		.diff-del-count { color: var(--negative, red); }
 		.diff-comment-count { font-size: 11px; color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 12%, transparent); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
 		.split-grid { min-width: 980px; }
+		.hunk-header { grid-template-columns: 60px minmax(0, 1fr); font-size: 11.5px; line-height: 1.6; }
 		.split-row .diff-line:first-child { border-right: 1px solid var(--border, ButtonBorder); }
 		.diff-line { position: relative; grid-template-columns: 42px 18px minmax(280px, 1fr) 26px; font-size: 11.5px; line-height: 1.6; }
 		.diff-line:hover, .diff-line:focus-visible { background: color-mix(in oklch, var(--primary, Highlight) 6%, transparent); }
 		.diff-line.commented .line-no::before { content: "●"; position: absolute; left: 3px; color: var(--primary, Highlight); font-size: 8px; }
 		.line-no { position: relative; text-align: right; }
+		.tok-keyword { color: var(--chart-4, var(--primary, Highlight)); }
+		.tok-string { color: var(--chart-2, var(--positive, green)); }
+		.tok-number { color: var(--chart-3, var(--info, Highlight)); }
+		.tok-comment { color: var(--muted-foreground, GrayText); font-style: italic; }
+		.tok-property { color: var(--chart-1, var(--primary, Highlight)); }
+		.tok-function { color: var(--chart-6, var(--primary, Highlight)); }
 		.comment-cue { align-self: center; justify-self: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); line-height: 18px; font-weight: 800; }
 		.diff-line.editing .comment-cue, .diff-line.commented .comment-cue { opacity: 1; }
-		.editor-anchor { margin-bottom: 2px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted-foreground, GrayText); }
 		.card-comments { margin: 18px 0 0; border-color: color-mix(in oklch, var(--warning, orange) 22%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--warning, orange) 5%, transparent); }
 		.card-comments h3 { font-size: 11px; color: var(--muted-foreground, GrayText); text-transform: uppercase; letter-spacing: 0.07em; }
 		.card-comment-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 		.chip { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid color-mix(in oklch, var(--warning, orange) 32%, var(--border, ButtonBorder)); border-radius: 7px; background: var(--card, Canvas); color: var(--foreground, CanvasText); font-size: 12px; line-height: 1.35; }
 		.chip:hover { background: color-mix(in oklch, var(--warning, orange) 14%, transparent); }
 		.card-comment-card { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--negative, red); background: color-mix(in oklch, var(--negative, red) 5%, transparent); border-radius: 0 6px 6px 0; }
-		.actions { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border, ButtonBorder); }
+		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 16px var(--walkthrough-content-x) 10px; border-top: 0; background: transparent; isolation: isolate; flex-wrap: nowrap; }
+		.actions::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent 0 12px, color-mix(in oklch, var(--background, Canvas) 94%, transparent) 12px); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); }
 		.actions .prev { border-color: transparent; color: var(--muted-foreground, GrayText); background: transparent; }
+		.body.narrow .decision-note { display: none; }
+		.body.narrow .actions { gap: 6px; justify-content: flex-end; }
+		.body.narrow .actions button { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; }
 
 		@media (max-width: 760px) {
 			.header { padding: 12px; }
@@ -589,8 +673,20 @@ export class PrWalkthroughPanel extends LitElement {
 		return this.narrow || this._observedNarrow;
 	}
 
+	private get isRailCollapsed(): boolean {
+		return this.isNarrowLayout || this._railCollapsed;
+	}
+
+	private get railWidth(): number {
+		return Math.max(150, Math.min(360, Math.round(this._railWidth)));
+	}
+
 	private get effectiveDiffMode(): PrWalkthroughDiffMode {
 		return this._diffModeOverride ?? defaultDiffModeForWidth(this.isNarrowLayout ? 0 : this._panelWidth);
+	}
+
+	private renderGithubMark(): TemplateResult {
+		return html`<svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>`;
 	}
 
 	private get reviewCards(): PrWalkthroughCard[] {
@@ -617,6 +713,7 @@ export class PrWalkthroughPanel extends LitElement {
 		this._cardDrafts = {};
 		this._dismissedSuggestionIds = [];
 		this._collapsedDiffBlockIds = [];
+		this._contextExpansions = {};
 		this._copied = false;
 		this._exportPreviewOpen = false;
 		this._exportPreviewLoading = false;
@@ -727,7 +824,7 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<section class="shell" data-testid="pr-walkthrough-panel" data-active-card-id=${activeCardId} data-diff-mode=${this.effectiveDiffMode} data-status=${this.status}>
 				${this.renderHeader()}
-				<div class="body ${this.isNarrowLayout ? "narrow" : ""}">
+				<div class="body ${this.isRailCollapsed ? "narrow" : ""}" style=${`--walkthrough-rail-width: ${this.railWidth}px;`}>
 					${this.renderRail()}
 					<main class="content">${this.renderMainContent(active)}</main>
 				</div>
@@ -742,70 +839,58 @@ export class PrWalkthroughPanel extends LitElement {
 		const percent = Math.round((completed / total) * 100);
 		const identity = this.prIdentity;
 		const stats = this.changesetStats;
-		const submitLabel = completed < this.reviewCards.length
-			? `Submit review (${completed}/${this.reviewCards.length})`
-			: this.currentDraftHasConcerns ? "Submit review · request changes" : "Submit review · approve";
 		const submitTitle = completed < this.reviewCards.length
 			? "Review every non-audit card before export."
 			: this.canUseExportApi ? "Preview GitHub review comments before submitting." : this.exportUnavailableReason;
+		const githubLinkLabel = "Open on GitHub";
 		return html`
 			<header class="header" data-testid="pr-walkthrough-header" data-legacy-testid="pr-walkthrough-review-header">
 				<div class="title-wrap" data-testid="pr-walkthrough-pr-title">
-					<div class="kicker">${identity.kicker}</div>
 					<h1 class="title" title=${identity.title}>${identity.title}</h1>
+					<div class="title-meta-row">
+						<div class="stats" data-testid="pr-walkthrough-pr-stats">
+							<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
+							<span class="stat-sep" aria-hidden="true">·</span>
+							<span class="stat-lines" aria-label="Line changes">
+								<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
+								<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
+							</span>
+						</div>
+						${identity.url ? html`
+							<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}>${this.renderGithubMark()}<span>${githubLinkLabel}</span></a>
+						` : nothing}
+					</div>
 				</div>
-				<span class="stats" data-testid="pr-walkthrough-pr-stats">
-					<span class="stat-files" data-testid="pr-walkthrough-stat-files">${stats.files} files</span>
-					<span class="stat-add" data-testid="pr-walkthrough-stat-additions">+${this.formatNumber(stats.additions)}</span>
-					<span class="stat-del" data-testid="pr-walkthrough-stat-deletions">-${this.formatNumber(stats.deletions)}</span>
-				</span>
-				<span class="header-pill ask">Ask via Bobbit chat outside this pane</span>
-				${identity.url ? html`
-					<a class="pr-link" data-testid="pr-walkthrough-pr-link" href=${identity.url} target="_blank" rel="noopener noreferrer" title=${`Open ${identity.linkLabel} on GitHub`}><span>${identity.linkLabel}</span> ↗</a>
-				` : nothing}
 				<span class="header-spacer"></span>
 				<div class="progress-wrap" aria-label="Walkthrough progress" data-testid="pr-walkthrough-progress">
-					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 					<div class="progress-track"><div class="progress-fill" style="width: ${percent}%"></div></div>
+					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 				</div>
-				${this.status !== "fixture" ? html`<span class="status-pill ${this.status === "error" ? "error" : ""}">${this.status}</span>` : nothing}
-				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}>${submitLabel}</button>
+				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}><svg class="submit-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg><span>Submit</span></button>
 			</header>
 		`;
 	}
 
 	private renderRail(): TemplateResult {
 		if (!this.cards.length && (this.status === "loading" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
-		return this.isNarrowLayout ? this.renderCollapsedRail() : this.renderLabelledRail();
+		return this.isRailCollapsed ? this.renderCollapsedRail() : this.renderLabelledRail();
 	}
 
 	private renderPlaceholderRail(): TemplateResult {
-		const identity = this.prIdentity;
-		const stats = this.changesetStats;
 		return html`
-			<nav class="rail ${this.isNarrowLayout ? "collapsed" : ""}" data-testid=${this.isNarrowLayout ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
-				${this.isNarrowLayout ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
-					<div class="rail-prbox">
-						<div class="num">${identity.kicker}</div>
-						<div class="prtitle">${identity.title}</div>
-						<div class="meta"><span>${stats.files} files</span><span class="stat-add">+${this.formatNumber(stats.additions)}</span><span class="stat-del">-${this.formatNumber(stats.deletions)}</span></div>
-					</div>
+			<nav class="rail ${this.isRailCollapsed ? "collapsed" : ""}" data-testid=${this.isRailCollapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
+				${this.isRailCollapsed ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
 					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
 				`}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
 
 	private renderLabelledRail(): TemplateResult {
-		const identity = this.prIdentity;
-		const stats = this.changesetStats;
 		return html`
 			<nav class="rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phases">
-				<div class="rail-prbox">
-					<div class="num">${identity.kicker}</div>
-					<div class="prtitle">${identity.title}</div>
-					<div class="meta"><span>${stats.files} files</span><span class="stat-add">+${this.formatNumber(stats.additions)}</span><span class="stat-del">-${this.formatNumber(stats.deletions)}</span></div>
-				</div>
+				<div class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" title="Drag to resize walkthrough sidebar" @pointerdown=${this.onRailResizePointerDown} @dblclick=${this.resetRailWidth}></div>
 				${PHASES.map((phase, index) => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;
@@ -814,12 +899,13 @@ export class PrWalkthroughPanel extends LitElement {
 					return html`
 						<section class="phase ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-phase-id=${phase.id}>
 							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => this.selectCard(cards[0].id)} title=${`Phase ${index}: ${phase.label}`}>
-								<span class="phase-index">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
+								<span class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" aria-hidden="true">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
 							</button>
 							<div class="phase-cards">${cards.map(card => this.renderRailCardButton(card))}</div>
 						</section>
 					`;
 				})}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
@@ -835,31 +921,79 @@ export class PrWalkthroughPanel extends LitElement {
 					return html`
 						<div class="collapsed-phase ${phaseActive ? "active" : ""}" title=${phase.label}>
 							<button class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-testid="pr-walkthrough-phase-pip" type="button" aria-label=${`Open ${phase.label}`} title=${phase.label} @click=${() => this.selectCard(cards[0].id)}>${index}</button>
-							${cards.map(card => html`
-								<button
-									class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${this._decisions[card.id]?.value === "disliked" ? "disliked" : ""}"
-									data-testid="pr-walkthrough-card-dot"
-									type="button"
-									aria-label=${`Open ${phase.label} card: ${card.title}`}
-									title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
-									@click=${() => this.selectCard(card.id)}
-								></button>
-							`)}
+							${cards.map(card => {
+								const decision = this._decisions[card.id]?.value;
+								return html`
+									<button
+										class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}"
+										data-testid="pr-walkthrough-card-dot"
+										type="button"
+										aria-label=${`Open ${phase.label} card: ${card.title}`}
+										title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
+										@click=${() => this.selectCard(card.id)}
+									>${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</button>
+								`;
+							})}
 						</div>
 					`;
 				})}
+				${this.renderRailControls()}
 			</nav>
 		`;
 	}
+
+	private renderRailControls(): TemplateResult {
+		const collapsed = this.isRailCollapsed;
+		return html`
+			<button class="rail-toggle" data-testid="pr-walkthrough-rail-toggle" type="button" title=${collapsed ? "Expand walkthrough sidebar" : "Collapse walkthrough sidebar"} @click=${this.toggleRailCollapsed}>
+				${collapsed ? icon(PanelLeftOpen, "sm") : icon(PanelLeftClose, "sm")}
+			</button>
+		`;
+	}
+
+	private toggleRailCollapsed = (): void => {
+		if (this.isNarrowLayout) return;
+		this._railCollapsed = !this._railCollapsed;
+	};
+
+	private resetRailWidth = (event?: Event): void => {
+		event?.preventDefault();
+		this._railWidth = 240;
+	};
+
+	private onRailResizePointerDown = (event: PointerEvent): void => {
+		event.preventDefault();
+		if (this.isRailCollapsed) return;
+		const handle = event.currentTarget as HTMLElement;
+		const startX = event.clientX;
+		const startWidth = this.railWidth;
+		try { handle.setPointerCapture(event.pointerId); } catch {}
+		document.body.style.cursor = "col-resize";
+		document.body.style.userSelect = "none";
+		const onMove = (moveEvent: PointerEvent) => {
+			this._railWidth = Math.max(150, Math.min(360, Math.round(startWidth + moveEvent.clientX - startX)));
+		};
+		const onUp = (upEvent: PointerEvent) => {
+			handle.removeEventListener("pointermove", onMove);
+			handle.removeEventListener("pointerup", onUp);
+			handle.removeEventListener("pointercancel", onUp);
+			try { handle.releasePointerCapture(upEvent.pointerId); } catch {}
+			document.body.style.cursor = "";
+			document.body.style.userSelect = "";
+		};
+		handle.addEventListener("pointermove", onMove);
+		handle.addEventListener("pointerup", onUp);
+		handle.addEventListener("pointercancel", onUp);
+	};
 
 	private renderRailCardButton(card: PrWalkthroughCard): TemplateResult {
 		const decision = this._decisions[card.id]?.value;
 		const comments = this.commentCountForCard(card.id);
 		return html`
-			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
-				<span class="card-dot-rail" aria-hidden="true"></span>
+			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
+				<span class="card-dot card-dot-rail ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" aria-hidden="true">${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</span>
 				<span class="card-title">${card.title}</span>
-				${comments ? html`<span class="card-decision">${comments}</span>` : html`<span class="card-decision">${decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>`}
+				<span class="card-decision">${comments ? comments : decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>
 			</button>
 		`;
 	}
@@ -939,70 +1073,73 @@ export class PrWalkthroughPanel extends LitElement {
 	private renderCard(card: PrWalkthroughCard): TemplateResult {
 		const phaseIndex = PHASES.findIndex(item => item.id === card.phaseId);
 		const phase = PHASES[phaseIndex]?.label ?? card.phaseId;
-		const phaseCards = this.cardsForPhase(card.phaseId);
-		const cardIndex = phaseCards.findIndex(item => item.id === card.id);
 		const dislikeDisabled = cardRequiresCommentForDislike({ comments: this._comments }, card.id);
 		const commentCount = this.commentCountForCard(card.id);
+		const decision = this._decisions[card.id]?.value;
 		return html`
 			<article class="card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
 				<div class="inner">
 					<section class="card-head">
-						<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
+						<div class="card-top">
+							<div class="phase-label" data-testid="pr-walkthrough-card-phase-tag">Phase ${Math.max(phaseIndex, 0)} · ${phase}</div>
+							${card.diffBlocks.length ? this.renderDiffModeChooser() : nothing}
+						</div>
 						<h2 data-testid="pr-walkthrough-card-title">${card.title}</h2>
-						<div class="meta2">Card ${cardIndex + 1} of ${phaseCards.length} · logical change set</div>
 						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
 					</section>
-					${card.diffBlocks.length ? html`
-						<div class="modebar">
-							<span class="label">Diff display</span>
-							<span class="mode-toggle" aria-label="Diff mode">
-								<button id="diff-mode-split" data-testid="diff-mode-split" class=${this.effectiveDiffMode === "split" ? "active" : ""} type="button" aria-pressed=${this.effectiveDiffMode === "split"} @click=${() => this.setDiffMode("split")}>Split</button>
-								<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" aria-pressed=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}>Inline</button>
-							</span>
-							<span class="narrow-note">Inline defaults at half-width; split remains available.</span>
-						</div>
-					` : nothing}
 					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
 					${this.renderCardComments(card)}
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
-						<span class="decision-note">${this._decisions[card.id] ? html`Current: <b>${this._decisions[card.id].value}</b>` : commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
-						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}>← Prev</button>
-						<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"}" type="button" ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}>Dislike${commentCount ? ` (${commentCount})` : ""}</button>
-						<button data-testid="pr-walkthrough-like" class="like" type="button" @click=${() => this.recordDecision(card, "liked")}>${commentCount ? "Like anyway" : "Like"} →</button>
+						<span class="decision-note">${commentCount ? html`<b>${commentCount}</b> comment${commentCount === 1 ? "" : "s"} drafted on this card.` : dislikeDisabled ? "Add a comment to enable Dislike." : "Ready for a decision."}</span>
+						<button data-testid="pr-walkthrough-prev" class="prev" type="button" @click=${this.goPrev} ?disabled=${!this.previousCardId()}><svg class="nav-icon prev-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 18-6-6 6-6"></path></svg>Prev</button>
+						<button data-testid="pr-walkthrough-dislike" class="dislike ${dislikeDisabled ? "" : "enabled"} ${decision === "disliked" ? "decision-selected" : ""}" type="button" aria-pressed=${decision === "disliked"} ?disabled=${dislikeDisabled} @click=${() => this.recordDecision(card, "disliked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>Dislike${commentCount ? ` (${commentCount})` : ""}<svg class="nav-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg></button>
+						<button data-testid="pr-walkthrough-like" class="like ${decision === "liked" ? "decision-selected" : ""}" type="button" aria-pressed=${decision === "liked"} @click=${() => this.recordDecision(card, "liked")}><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>Like<svg class="nav-icon next-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg></button>
 					</div>
 				</div>
 			</article>
 		`;
 	}
 
-	private diffStatusLabel(block: PrWalkthroughDiffBlock): string {
-		const status = block.status;
-		if (status === "added") return "Added";
-		if (status === "modified") return "Modified";
-		if (status === "deleted") return "Deleted";
-		if (status === "renamed") return "Renamed";
-		if (status === "copied") return "Copied";
-		if (status === "binary") return "Binary";
-		return "";
+	private renderDiffModeChooser(): TemplateResult {
+		return html`
+			<div class="modebar" data-testid="pr-walkthrough-diff-mode-chooser">
+				<span class="mode-toggle" role="radiogroup" aria-label="Diff display mode">
+					<button id="diff-mode-split" data-testid="diff-mode-split" class=${this.effectiveDiffMode === "split" ? "active" : ""} type="button" role="radio" aria-label="Split diff" title="Split diff" aria-checked=${this.effectiveDiffMode === "split"} @click=${() => this.setDiffMode("split")}><svg class="mode-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2" y="3" width="5" height="10" rx="1"></rect><rect x="9" y="3" width="5" height="10" rx="1"></rect></svg></button>
+					<button id="diff-mode-inline" data-testid="diff-mode-inline" class=${this.effectiveDiffMode === "inline" ? "active" : ""} type="button" role="radio" aria-label="Inline diff" title="Inline diff" aria-checked=${this.effectiveDiffMode === "inline"} @click=${() => this.setDiffMode("inline")}><svg class="mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h4"></path><path d="M13 6h8"></path><path d="M5 12h4"></path><path d="M13 12h8"></path><path d="M5 18h4M7 16v4"></path><path d="M13 18h8"></path></svg></button>
+				</span>
+			</div>
+		`;
+	}
+
+	private diffBlockLineStats(block: PrWalkthroughDiffBlock): { additions: number; deletions: number } {
+		let additions = 0;
+		let deletions = 0;
+		for (const hunk of block.hunks) {
+			for (const line of hunk.lines) {
+				if (line.kind === "add") additions += 1;
+				else if (line.kind === "del") deletions += 1;
+			}
+		}
+		return { additions, deletions };
 	}
 
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		const collapsed = this._collapsedDiffBlockIds.includes(block.id);
 		const comments = this._comments.filter(comment => comment.cardId === card.id && comment.diffBlockId === block.id).length;
+		const stats = this.diffBlockLineStats(block);
 		return html`
 			<section class="diff-block ${collapsed ? "closed" : "open"}" data-testid="pr-walkthrough-diff-block" data-diff-block-id=${block.id} data-file-path=${block.filePath} data-diff-mode=${this.effectiveDiffMode} data-expanded=${collapsed ? "false" : "true"}>
 				<div class="diff-file-header-row">
 					<button class="diff-file-header" data-testid="pr-walkthrough-diff-toggle" type="button" aria-expanded=${!collapsed} @click=${() => this.toggleDiffBlock(block.id)}>
 						<span class="caret">▸</span>
-						${this.diffStatusLabel(block) ? html`<span class="diff-status" data-testid="pr-walkthrough-diff-status">${this.diffStatusLabel(block)}</span>` : nothing}
 						<span class="diff-path"><b>${block.oldPath && block.oldPath !== block.filePath ? `${block.oldPath} → ${block.filePath}` : block.filePath}</b></span>
 						${comments ? html`<span class="diff-comment-count">${comments} comment${comments === 1 ? "" : "s"}</span>` : nothing}
-						<span class="diff-kind">${block.hunks.length} hunk${block.hunks.length === 1 ? "" : "s"}</span>
+						<span class="diff-counts" data-testid="pr-walkthrough-diff-counts" aria-label=${`${stats.additions} additions, ${stats.deletions} deletions`}><span class="diff-add-count" data-testid="pr-walkthrough-diff-additions">+${stats.additions}</span><span class="diff-del-count" data-testid="pr-walkthrough-diff-deletions">-${stats.deletions}</span></span>
 					</button>
-					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link">Open file</a>` : nothing}
+					${this.externalFileUrl(block) ? html`<a class="diff-external-link" href=${this.externalFileUrl(block)!} target="_blank" rel="noreferrer" data-testid="pr-walkthrough-external-file-link" title="Open file" aria-label=${`Open ${block.filePath}`}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></a>` : nothing}
 				</div>
 				${collapsed ? nothing : this.effectiveDiffMode === "split" ? this.renderSplitDiff(card, block) : this.renderInlineDiff(card, block)}
 			</section>
@@ -1013,39 +1150,298 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="split-grid">
-					${block.hunks.map(hunk => html`
-						<div class="hunk-header">${hunk.header}</div>
-						${this.buildSideBySidePairs(hunk.lines).map(pair => html`
-							<div class="split-row">
-								${this.renderDiffLine(card, block, pair.left, "old")}
-								${this.renderDiffLine(card, block, pair.right, "new")}
-							</div>
-							${pair.left?.id === pair.right?.id
-								? this.renderLineDetails(card, block, pair.left)
-								: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
-						`)}
-					`)}
+					${block.hunks.map(hunk => this.renderSplitHunk(card, block, hunk))}
 				</div>
 			</div>
 		`;
+	}
+
+	private renderSplitHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
+		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
+		return html`${entries.map((entry, index) => {
+			if (entry.kind === "context") return nothing;
+			const previous = entries[index - 1];
+			const next = entries[index + 1];
+			const previousContext = previous?.kind === "context" ? previous : undefined;
+			const nextContext = next?.kind === "context" ? next : undefined;
+			const aboveControl = previousContext?.canExpandAbove ? this.renderContextButton(card, block, hunk, previousContext, "above") : nothing;
+			const belowControl = nextContext?.canExpandBelow ? this.renderContextButton(card, block, hunk, nextContext, "below") : nothing;
+			const header = this.sectionSignature(hunk, entry, previousContext);
+			return html`
+				${this.renderHunkHeader(header, aboveControl)}
+				${this.buildSideBySidePairs(entry.lines).map(pair => html`
+					<div class="split-row">
+						${this.renderDiffLine(card, block, pair.left, "old")}
+						${this.renderDiffLine(card, block, pair.right, "new")}
+					</div>
+					${pair.left?.id === pair.right?.id
+						? this.renderLineDetails(card, block, pair.left)
+						: html`${this.renderLineDetails(card, block, pair.left)}${this.renderLineDetails(card, block, pair.right)}`}
+				`)}
+				${belowControl === nothing ? nothing : this.renderHunkHeader("", belowControl)}
+			`;
+		})}`;
 	}
 
 	private renderInlineDiff(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
 		return html`
 			<div class="diff-overflow" data-testid="pr-walkthrough-diff-scroll">
 				<div class="inline-lines">
-					${block.hunks.map(hunk => html`
-						<div class="hunk-header">${hunk.header}</div>
-						${hunk.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
-					`)}
+					${block.hunks.map(hunk => this.renderInlineHunk(card, block, hunk))}
 				</div>
 			</div>
 		`;
 	}
 
+	private renderInlineHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): TemplateResult {
+		const entries = this.diffRenderEntriesForHunk(card, block, hunk);
+		return html`${entries.map((entry, index) => {
+			if (entry.kind === "context") return nothing;
+			const previous = entries[index - 1];
+			const next = entries[index + 1];
+			const previousContext = previous?.kind === "context" ? previous : undefined;
+			const nextContext = next?.kind === "context" ? next : undefined;
+			const aboveControl = previousContext?.canExpandAbove ? this.renderContextButton(card, block, hunk, previousContext, "above") : nothing;
+			const belowControl = nextContext?.canExpandBelow ? this.renderContextButton(card, block, hunk, nextContext, "below") : nothing;
+			const header = this.sectionSignature(hunk, entry, previousContext);
+			return html`
+				${this.renderHunkHeader(header, aboveControl)}
+				${entry.lines.map(line => html`${this.renderDiffLine(card, block, line, "inline")}${this.renderLineDetails(card, block, line)}`)}
+				${belowControl === nothing ? nothing : this.renderHunkHeader("", belowControl)}
+			`;
+		})}`;
+	}
+
+	private renderHunkHeader(header: string, controls: TemplateResult | typeof nothing = nothing): TemplateResult | typeof nothing {
+		const signature = this.hunkSignature(header);
+		if (!signature && controls === nothing) return nothing;
+		const label = signature || "Expand hidden diff context";
+		return html`
+			<div class="hunk-header" data-testid="pr-walkthrough-hunk-header" aria-label=${label} title=${signature}>
+				<div class="hunk-context-cell">${controls}</div>
+				<div class="hunk-signature">${signature}</div>
+			</div>
+		`;
+	}
+
+	private hunkSignature(header: string): string {
+		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
+	}
+
+	private sectionSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffLineEntry, previousContext?: DiffContextEntry): string {
+		const scopedSignature = previousContext ? this.scopeSignatureBeforeIndex(hunk, entry.start) : undefined;
+		return scopedSignature ?? this.hunkSignature(hunk.header);
+	}
+
+	private scopeSignatureBeforeIndex(hunk: PrWalkthroughDiffBlock["hunks"][number], anchorIndex: number): string | undefined {
+		const stack: Array<{ opener: "{" | "[" | "("; lineIndex: number }> = [];
+		for (let lineIndex = 0; lineIndex < anchorIndex; lineIndex += 1) {
+			const code = this.maskStringsAndLineComments(hunk.lines[lineIndex]?.text ?? "");
+			for (const char of code) {
+				if (char === "{" || char === "[" || char === "(") stack.push({ opener: char, lineIndex });
+				else if (char === "}" || char === "]" || char === ")") this.popScopeFrame(stack, char);
+			}
+		}
+		for (let index = stack.length - 1; index >= 0; index -= 1) {
+			const frame = stack[index]!;
+			if (frame.opener === "(") continue;
+			const signature = this.scopeStartSignature(hunk, frame.lineIndex);
+			if (signature) return signature;
+		}
+		return undefined;
+	}
+
+	private popScopeFrame(stack: Array<{ opener: "{" | "[" | "("; lineIndex: number }>, closer: string): void {
+		const opener = closer === "}" ? "{" : closer === "]" ? "[" : "(";
+		for (let index = stack.length - 1; index >= 0; index -= 1) {
+			if (stack[index]?.opener === opener) {
+				stack.length = index;
+				return;
+			}
+		}
+	}
+
+	private scopeStartSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], lineIndex: number): string | undefined {
+		for (let index = lineIndex; index >= Math.max(0, lineIndex - 3); index -= 1) {
+			const line = hunk.lines[index]?.text ?? "";
+			const signature = this.signatureLikeLine(line);
+			if (signature) return signature;
+			if (index !== lineIndex && /[;}\]]\s*,?\s*$/.test(line.trim())) break;
+		}
+		return undefined;
+	}
+
+	private maskStringsAndLineComments(line: string): string {
+		let masked = "";
+		let quote: '"' | "'" | "`" | undefined;
+		let escaped = false;
+		for (let index = 0; index < line.length; index += 1) {
+			const char = line[index]!;
+			const next = line[index + 1];
+			if (!quote && char === "/" && next === "/") break;
+			if (quote) {
+				masked += " ";
+				if (escaped) escaped = false;
+				else if (char === "\\") escaped = true;
+				else if (char === quote) quote = undefined;
+				continue;
+			}
+			if (char === '"' || char === "'" || char === "`") {
+				quote = char;
+				masked += " ";
+				continue;
+			}
+			masked += char;
+		}
+		return masked;
+	}
+
+	private signatureLikeLine(line: string): string | undefined {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.length > 180) return undefined;
+		if (/^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\b/.test(trimmed)) return trimmed;
+		if (/^(?:export\s+)?(?:const|let|var)\s+[\w$]+(?:\s*:[^=]+)?\s*=/.test(trimmed)) return trimmed;
+		if (/^[\w$.]+\s*\([^)]*\)\s*=>\s*\{?$/.test(trimmed)) return trimmed;
+		if (/^[\w$.]+\s*\([^)]*\)\s*[,;]?\s*$/.test(trimmed)) return trimmed;
+		return undefined;
+	}
+
+	private diffRenderEntriesForHunk(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number]): DiffRenderEntry[] {
+		const importantIndexes = hunk.lines
+			.map((line, index) => this.isImportantDiffLine(card, block, line) ? index : -1)
+			.filter(index => index >= 0);
+		if (importantIndexes.length === 0) return [{ kind: "lines", start: 0, end: hunk.lines.length - 1, lines: hunk.lines }];
+
+		const baseVisible = new Set<number>();
+		for (const index of importantIndexes) {
+			const start = Math.max(0, index - DEFAULT_DIFF_CONTEXT_LINES);
+			const end = Math.min(hunk.lines.length - 1, index + DEFAULT_DIFF_CONTEXT_LINES);
+			for (let lineIndex = start; lineIndex <= end; lineIndex += 1) baseVisible.add(lineIndex);
+		}
+
+		const visible = new Set(baseVisible);
+		const baseGaps = this.hiddenContextRanges(baseVisible, hunk.lines.length);
+		for (const gap of baseGaps) {
+			const key = this.contextGapKey(card.id, block.id, hunk.id, gap.start, gap.end);
+			const expansion = this._contextExpansions[key] ?? {};
+			const hiddenCount = gap.end - gap.start + 1;
+			const belowCount = Math.min(expansion.below ?? 0, hiddenCount);
+			const aboveCount = Math.min(expansion.above ?? 0, Math.max(0, hiddenCount - belowCount));
+			for (let index = gap.start; index < gap.start + belowCount; index += 1) visible.add(index);
+			for (let index = gap.end - aboveCount + 1; index <= gap.end; index += 1) visible.add(index);
+		}
+
+		const entries: DiffRenderEntry[] = [];
+		let index = 0;
+		while (index < hunk.lines.length) {
+			if (visible.has(index)) {
+				const start = index;
+				const lines: PrWalkthroughDiffLine[] = [];
+				while (index < hunk.lines.length && visible.has(index)) {
+					lines.push(hunk.lines[index]!);
+					index += 1;
+				}
+				entries.push({ kind: "lines", start, end: index - 1, lines });
+				continue;
+			}
+			const start = index;
+			while (index < hunk.lines.length && !visible.has(index)) index += 1;
+			const end = index - 1;
+			const baseGap = baseGaps.find(gap => start >= gap.start && end <= gap.end) ?? { start, end };
+			const canExpandAbove = baseGap.end < hunk.lines.length - 1;
+			const canExpandBelow = baseGap.start > 0;
+			if (!canExpandAbove && !canExpandBelow) continue;
+			entries.push({
+				kind: "context",
+				start,
+				end,
+				gapStart: baseGap.start,
+				gapEnd: baseGap.end,
+				hiddenCount: end - start + 1,
+				canExpandAbove,
+				canExpandBelow,
+			});
+		}
+		return entries;
+	}
+
+	private hiddenContextRanges(visible: Set<number>, totalLines: number): Array<{ start: number; end: number }> {
+		const ranges: Array<{ start: number; end: number }> = [];
+		let index = 0;
+		while (index < totalLines) {
+			if (visible.has(index)) {
+				index += 1;
+				continue;
+			}
+			const start = index;
+			while (index < totalLines && !visible.has(index)) index += 1;
+			ranges.push({ start, end: index - 1 });
+		}
+		return ranges;
+	}
+
+	private isImportantDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine): boolean {
+		if (line.kind !== "context") return true;
+		const key = this.lineKey(card.id, block.id, line.id);
+		return this._editingLineKey === key || this.commentsForLine(card.id, block.id, line.id).length > 0 || this.pendingSuggestionsForLine(card, block.id, line.id).length > 0;
+	}
+
+	private renderContextButton(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffContextEntry, direction: DiffContextDirection): TemplateResult {
+		const count = Math.min(DIFF_CONTEXT_EXPAND_LINES, entry.hiddenCount);
+		const label = `Show ${count} more line${count === 1 ? "" : "s"} ${direction}`;
+		return html`
+			<button class="context-toggle" data-testid="pr-walkthrough-context-toggle" data-context-direction=${direction} type="button" title=${label} aria-label=${`${label} in ${block.filePath}`} @click=${() => this.expandHunkContext(card.id, block.id, hunk.id, entry, direction)}>
+				${direction === "above" ? html`
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9"></path><path d="M4.5 6.5 8 3l3.5 3.5"></path><path d="M4.5 13h7"></path></svg>
+				` : html`
+					<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 4v9"></path><path d="M4.5 9.5 8 13l3.5-3.5"></path><path d="M4.5 3h7"></path></svg>
+				`}
+			</button>
+		`;
+	}
+
+	private expandHunkContext(cardId: string, blockId: string, hunkId: string, entry: DiffContextEntry, direction: DiffContextDirection): void {
+		const key = this.contextGapKey(cardId, blockId, hunkId, entry.gapStart, entry.gapEnd);
+		const current = this._contextExpansions[key] ?? {};
+		this._contextExpansions = {
+			...this._contextExpansions,
+			[key]: { ...current, [direction]: (current[direction] ?? 0) + DIFF_CONTEXT_EXPAND_LINES },
+		};
+	}
+
+	private contextGapKey(cardId: string, blockId: string, hunkId: string, start: number, end: number): string {
+		return `${cardId}::${blockId}::${hunkId}::${start}-${end}`;
+	}
+
 	private externalFileUrl(block: PrWalkthroughDiffBlock): string | undefined {
 		const linked = block as PrWalkthroughDiffBlock & { externalUrl?: string; blobUrl?: string; rawUrl?: string; contentsUrl?: string };
 		return safeExternalUrl(linked.externalUrl) || safeExternalUrl(linked.blobUrl) || safeExternalUrl(linked.rawUrl) || safeExternalUrl(linked.contentsUrl);
+	}
+
+	private renderHighlightedLine(text: string): TemplateResult[] {
+		const tokenPattern = /(\/\/.*$|`(?:\\.|[^`])*`|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\b(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\()|\b[A-Za-z_$][\w$]*(?=\??\s*:))/g;
+		const parts: TemplateResult[] = [];
+		let lastIndex = 0;
+		for (const match of text.matchAll(tokenPattern)) {
+			const index = match.index ?? 0;
+			if (index > lastIndex) parts.push(html`${text.slice(lastIndex, index)}`);
+			const token = match[0];
+			const className = token.startsWith("//")
+				? "tok-comment"
+				: token.startsWith("\"") || token.startsWith("'") || token.startsWith("`")
+					? "tok-string"
+					: /^\d/.test(token)
+						? "tok-number"
+						: /^(?:const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|interface|type|export|import|from|async|await|new|private|public|protected|readonly|extends|implements|true|false|null|undefined)$/.test(token)
+							? "tok-keyword"
+							: text.slice(index + token.length).match(/^\s*\(/)
+								? "tok-function"
+								: "tok-property";
+			parts.push(html`<span class=${className}>${token}</span>`);
+			lastIndex = index + token.length;
+		}
+		if (lastIndex < text.length) parts.push(html`${text.slice(lastIndex)}`);
+		return parts;
 	}
 
 	private renderDiffLine(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock, line: PrWalkthroughDiffLine | null, column: "old" | "new" | "inline"): TemplateResult {
@@ -1073,7 +1469,7 @@ export class PrWalkthroughPanel extends LitElement {
 			>
 				<span class="line-no">${lineNo ?? ""}</span>
 				<span class="prefix">${prefix}</span>
-				<span class="line-text">${line.text}</span>
+				<span class="line-text">${this.renderHighlightedLine(line.text)}</span>
 				<button class="comment-cue" data-testid="pr-walkthrough-line-comment-button" type="button" aria-label="Add line comment" @click=${(event: Event) => { event.stopPropagation(); this.openLineEditor(card.id, block.id, line.id); }}>+</button>
 			</div>
 		`;
@@ -1089,7 +1485,6 @@ export class PrWalkthroughPanel extends LitElement {
 			${comments.length ? html`<div class="line-comments">${comments.map(comment => this.renderComment(comment, "line"))}</div>` : nothing}
 			${this._editingLineKey === key ? html`
 				<div class="line-editor" data-testid="pr-walkthrough-comment-editor" data-comment-scope="line" data-card-id=${card.id} data-diff-block-id=${block.id} data-line-id=${line.id}>
-					<div class="editor-anchor">Comment anchors to <b>${block.filePath}:${line.newLine ?? line.oldLine ?? line.id}</b></div>
 					<textarea data-testid="pr-walkthrough-comment-input" .value=${this._lineDrafts[key] ?? ""} placeholder="Or write your own comment…" @input=${(event: InputEvent) => this.updateLineDraft(key, event)}></textarea>
 					<div class="comment-actions">
 						<button data-testid="pr-walkthrough-comment-save" type="button" @click=${() => this.saveLineComment(card.id, block.id, line.id)}>Save comment</button>

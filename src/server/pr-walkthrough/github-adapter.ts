@@ -45,6 +45,7 @@ export interface GithubWalkthroughChangesetRef {
 	prUrl: string;
 	prNumber: number;
 	prTitle: string;
+	prBody?: string;
 	title: string;
 	filesChanged?: number;
 	additions?: number;
@@ -129,6 +130,7 @@ export interface ParsedGithubPrReference {
 interface GithubApiPullRequest {
 	number: number;
 	title: string;
+	body?: string | null;
 	html_url: string;
 	base: { sha: string };
 	head: { sha: string };
@@ -256,14 +258,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		throw new GithubPrAdapterError("GitHub PR number is required", { status: 400, code: "github_pr_number_required" });
 	}
 
-	const token = cleanString(options.token) ?? cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
-	if (!token) {
-		warnings.push({
-			code: "github_unauthenticated",
-			severity: "info",
-			message: "No GITHUB_TOKEN/GH_TOKEN configured; using unauthenticated GitHub API requests with lower rate limits.",
-		});
-	}
+	const token = await resolveGithubToken(options, host);
 
 	const apiBaseUrl = cleanString(options.apiBaseUrl) ?? cleanString(process.env.BOBBIT_GITHUB_API_BASE_URL) ?? apiBaseUrlForHost(host);
 	const fetchImpl = options.fetch ?? fetch;
@@ -294,6 +289,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 			prUrl,
 			prNumber: pr.number,
 			prTitle: pr.title,
+			prBody: cleanString(pr.body),
 			title: `PR #${pr.number}: ${pr.title}`,
 			filesChanged: pr.changed_files,
 			additions: pr.additions,
@@ -620,12 +616,39 @@ function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["statu
 	}
 }
 
+async function resolveGithubToken(options: ResolveGithubPrOptions, host: string): Promise<string | undefined> {
+	const explicit = cleanString(options.token);
+	if (explicit) return explicit;
+	const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
+	if (envToken) return envToken;
+	return githubCliAuthToken(options.cwd, host);
+}
+
+async function githubCliAuthToken(cwd: string | undefined, host: string): Promise<string | undefined> {
+	const args = ["auth", "token"];
+	if (host && host !== "github.com") args.push("--hostname", host);
+	try {
+		const command = cleanString(process.env.BOBBIT_GH_COMMAND) || "gh";
+		const { stdout } = await execFileSafe(command, args, {
+			cwd,
+			encoding: "utf8",
+			timeout: 5_000,
+			windowsHide: true,
+			maxBuffer: 1024 * 1024,
+			...(process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command) ? { shell: true } : {}),
+		});
+		return cleanString(stdout);
+	} catch {
+		return undefined;
+	}
+}
+
 function warningForGithubHttpFailure(status: number, headers: FetchHeadersLike): GithubWalkthroughWarning | undefined {
-	if (status === 401) return { code: "github_auth_failed", severity: "error", message: "GitHub rejected the configured token. Check GITHUB_TOKEN/GH_TOKEN." };
+	if (status === 401) return { code: "github_auth_failed", severity: "error", message: "GitHub rejected the configured token. Check GITHUB_TOKEN/GH_TOKEN or gh auth status." };
 	if (status === 403) {
 		const remaining = headers.get("x-ratelimit-remaining");
 		return remaining === "0"
-			? { code: "github_rate_limited", severity: "error", message: "GitHub API rate limit exceeded. Configure a token or retry after the reset time." }
+			? { code: "github_rate_limited", severity: "error", message: "GitHub API rate limit exceeded. Configure GITHUB_TOKEN/GH_TOKEN, run gh auth login, or retry after the reset time." }
 			: { code: "github_permission_denied", severity: "error", message: "GitHub denied access to this pull request or repository." };
 	}
 	return undefined;
