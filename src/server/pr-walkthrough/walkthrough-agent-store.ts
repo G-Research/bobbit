@@ -1,3 +1,4 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -71,6 +72,35 @@ export interface PrWalkthroughJobRecord {
 type StoredJobFile = Partial<PrWalkthroughJobRecord> & Record<string, unknown>;
 
 const STORE_DIR = "pr-walkthrough-agents";
+
+export function createSubmissionProof(): string {
+	return randomBytes(32).toString("base64url");
+}
+
+export function hashSubmissionProof(jobId: string, sessionId: string, proof: string): string {
+	return createHash("sha256").update(`${jobId}\0${sessionId}\0${proof}`).digest("hex");
+}
+
+export function verifySubmissionProof(proof: string | undefined, job: Pick<PrWalkthroughJobRecord, "jobId" | "childSessionId" | "submissionProofHash">): boolean {
+	if (!proof || !job.submissionProofHash) return false;
+	const expected = Buffer.from(job.submissionProofHash, "hex");
+	const actual = Buffer.from(hashSubmissionProof(job.jobId, job.childSessionId, proof), "hex");
+	return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export function rotateSubmissionProofForRestoredJob(stateDir: string, sessionId: string, jobId: string): Record<string, string> | undefined {
+	const store = new WalkthroughAgentStore(stateDir);
+	const job = store.get(jobId);
+	if (!job || job.childSessionId !== sessionId || job.status === "ready" || job.status === "error") return undefined;
+	const proof = createSubmissionProof();
+	const updated = store.update(jobId, { submissionProofHash: hashSubmissionProof(job.jobId, job.childSessionId, proof) });
+	if (!updated) return undefined;
+	return {
+		BOBBIT_SESSION_ID: sessionId,
+		BOBBIT_WALKTHROUGH_JOB_ID: jobId,
+		BOBBIT_WALKTHROUGH_SUBMIT_PROOF: proof,
+	};
+}
 
 export class WalkthroughAgentStore {
 	private readonly rootDir: string;
@@ -206,6 +236,7 @@ function sanitizeValue(value: unknown): unknown {
 }
 
 function isSensitiveKey(key: string): boolean {
+	if (/proof/i.test(key) && !/hash$/i.test(key)) return true;
 	return /(^|[-_])(token|secret|authorization|auth[-_]?header|auth[-_]?headers|raw[-_]?headers|headers?)($|[-_])/i.test(key)
 		|| /^(token|secret|authorization|auth|headers)$/i.test(key);
 }

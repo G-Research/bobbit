@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { resolveGithubPr, GithubPrAdapterError } from "./github-adapter.js";
@@ -12,6 +12,9 @@ import {
 } from "./walkthrough-yaml-schema.js";
 import {
 	WalkthroughAgentStore,
+	createSubmissionProof,
+	hashSubmissionProof,
+	verifySubmissionProof,
 	type PrWalkthroughJobError,
 	type PrWalkthroughJobRecord,
 	type PrWalkthroughTarget,
@@ -204,6 +207,7 @@ export class WalkthroughAgentManager {
 			return { ...responseFromJob(job), created: true };
 		}
 
+		const initialModel = await this.resolveParentInitialModel(parentSessionId, parent);
 		let child: SessionLike;
 		try {
 			child = await this.deps.sessionManager.createSession(
@@ -226,6 +230,7 @@ export class WalkthroughAgentManager {
 					walkthroughJobId: jobId,
 					walkthroughChangesetId: changesetId,
 					walkthroughTargetKey: target.canonicalKey,
+					initialModel,
 					env: {
 						BOBBIT_SESSION_ID: childSessionId,
 						BOBBIT_WALKTHROUGH_JOB_ID: jobId,
@@ -482,6 +487,11 @@ export class WalkthroughAgentManager {
 		const resolved = await this.deps.resolveSessionCwd?.(parentSessionId);
 		if (resolved) return resolved;
 		return stringValue(parent?.worktreePath) ?? stringValue(parent?.cwd) ?? this.deps.defaultCwd;
+	}
+
+	private async resolveParentInitialModel(parentSessionId: string, parent: SessionLike | PersistedSessionLike | undefined): Promise<string | undefined> {
+		const resolved = await this.deps.resolveSessionModel?.(parentSessionId);
+		return normalizeModelPref(resolved) ?? normalizeModelPref(parent);
 	}
 
 	private shouldReuse(job: PrWalkthroughJobRecord): boolean {
@@ -838,19 +848,12 @@ function statusForJobError(error: PrWalkthroughJobError): number {
 	}
 }
 
-function createSubmissionProof(): string {
-	return randomBytes(32).toString("base64url");
-}
-
-function hashSubmissionProof(jobId: string, sessionId: string, proof: string): string {
-	return createHash("sha256").update(`${jobId}\0${sessionId}\0${proof}`).digest("hex");
-}
-
-function verifySubmissionProof(proof: string | undefined, job: PrWalkthroughJobRecord): boolean {
-	if (!proof || !job.submissionProofHash) return false;
-	const expected = Buffer.from(job.submissionProofHash, "hex");
-	const actual = Buffer.from(hashSubmissionProof(job.jobId, job.childSessionId, proof), "hex");
-	return expected.length === actual.length && timingSafeEqual(expected, actual);
+function normalizeModelPref(value: unknown): string | undefined {
+	if (typeof value === "string" && /^[^/]+\/.+/.test(value.trim())) return value.trim();
+	if (!isRecord(value)) return undefined;
+	const provider = stringValue(value.provider);
+	const id = stringValue(value.id) ?? stringValue(value.modelId);
+	return provider && id ? `${provider}/${id}` : undefined;
 }
 
 function runtimeFailureMessage(event: unknown): string | undefined {
