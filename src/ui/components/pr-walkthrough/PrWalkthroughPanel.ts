@@ -508,21 +508,31 @@ export class PrWalkthroughPanel extends LitElement {
 		}
 
 		/* Prototype-density overrides for the production walkthrough surface. */
-		.phase { display: grid; gap: 2px; margin: 8px 0 3px; }
-		.phase-button { display: flex; align-items: center; gap: 6px; padding: 5px 8px 3px; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
-		.phase-button::after { content: ""; height: 1px; flex: 1 1 auto; min-width: 10px; background: var(--border, ButtonBorder); opacity: 0.7; }
+		.rail:not(.collapsed) { display: flex; flex-direction: column; gap: 6px; padding: 6px 6px 6px 8px; overflow-x: hidden; }
+		.phase { width: 100%; display: grid; gap: 5px; margin: 0; padding: 0 0 5px; border-radius: 6px; }
+		.phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
+		.rail:not(.collapsed) .phase:first-child::before { content: none; display: none; }
+		.phase-button { width: 100%; min-height: 13px; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground, GrayText); }
+		.phase-button::after { content: none; }
 		.phase-button.active { color: var(--muted-foreground, GrayText); background: transparent; }
 		.phase-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
-		.phase-index { flex: 0 0 auto; color: inherit; font-size: 9px; font-weight: 900; opacity: 0.75; }
-		.phase-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-		.phase-count { order: 3; flex: 0 0 auto; color: inherit; font-size: 9px; letter-spacing: 0.04em; opacity: 0.7; }
-		.phase-cards { display: grid; gap: 1px; padding: 0 8px 5px 14px; }
-		.card-button { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 5px; font-size: 11.5px; }
+		.rail:not(.collapsed) .phase-pip { width: 24px; height: 13px; padding: 0; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
+		.rail:not(.collapsed) .phase-pip.active, .rail:not(.collapsed) .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
+		.phase-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground, GrayText); font-size: 0.8333em; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+		.phase-count { display: none; }
+		.phase-cards { display: grid; gap: 5px; padding: 0 0 0 44px; }
+		.card-button { width: 100%; min-height: 16px; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); font-size: 13px; font-weight: 400; text-align: left; }
 		.card-button::before { content: none; }
-		.card-dot-rail { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; background: var(--muted-foreground, GrayText); opacity: 0.45; }
-		.card-button.complete .card-dot-rail { background: var(--positive, var(--primary, Highlight)); opacity: 1; }
-		.card-button.disliked .card-dot-rail { background: var(--negative, red); opacity: 1; }
-		.card-button.active .card-dot-rail { background: var(--primary, Highlight); opacity: 1; box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 22%, transparent); }
+		.card-button:hover { color: var(--foreground, CanvasText); background: color-mix(in oklch, var(--foreground, CanvasText) 5%, transparent); }
+		.card-button.active { color: var(--foreground, CanvasText); background: transparent; }
+		.rail:not(.collapsed) .card-dot { position: relative; width: 14px; height: 14px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; border-radius: 999px; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
+		.rail:not(.collapsed) .card-dot .dot-icon { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; display: block; pointer-events: none; transform: translate(-50%, -50%); fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+		.rail:not(.collapsed) .card-dot.liked { background-color: var(--primary, Highlight); border-color: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		.rail:not(.collapsed) .card-dot.disliked { background-color: var(--negative, #dc2626); border-color: var(--negative, #dc2626); color: var(--negative-foreground, #fff); opacity: 1; }
+		.rail:not(.collapsed) .card-dot.active { box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary, Highlight) 24%, transparent); opacity: 1; transform: scale(1.06); }
+		.rail:not(.collapsed) .card-dot.active:not(.liked):not(.disliked) { background-color: transparent; border-color: var(--primary, Highlight); color: var(--primary, Highlight); }
+		.card-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+		.card-decision { display: none; }
 		.rail.collapsed { gap: 6px; padding: 6px 3px; overflow-x: hidden; }
 		.collapsed-phase { width: 100%; display: grid; justify-items: center; gap: 5px; padding: 0 0 5px; border-radius: 6px; }
 		.collapsed-phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
@@ -589,9 +599,12 @@ export class PrWalkthroughPanel extends LitElement {
 		.chip { display: inline-flex; align-items: center; padding: 5px 9px; border: 1px solid color-mix(in oklch, var(--warning, orange) 32%, var(--border, ButtonBorder)); border-radius: 7px; background: var(--card, Canvas); color: var(--foreground, CanvasText); font-size: 12px; line-height: 1.35; }
 		.chip:hover { background: color-mix(in oklch, var(--warning, orange) 14%, transparent); }
 		.card-comment-card { margin-top: 10px; padding: 10px 12px; border-left: 3px solid var(--negative, red); background: color-mix(in oklch, var(--negative, red) 5%, transparent); border-radius: 0 6px 6px 0; }
-		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 16px var(--walkthrough-content-x) 10px; border-top: 0; background: transparent; isolation: isolate; }
+		.actions { margin: auto calc(-1 * var(--walkthrough-content-x)) 0; padding: 16px var(--walkthrough-content-x) 10px; border-top: 0; background: transparent; isolation: isolate; flex-wrap: nowrap; }
 		.actions::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent 0 12px, color-mix(in oklch, var(--background, Canvas) 94%, transparent) 12px); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.16) 6px, black 16px); }
 		.actions .prev { border-color: transparent; color: var(--muted-foreground, GrayText); background: transparent; }
+		.body.narrow .decision-note { display: none; }
+		.body.narrow .actions { gap: 6px; justify-content: flex-end; }
+		.body.narrow .actions button { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; }
 
 		@media (max-width: 760px) {
 			.header { padding: 12px; }
@@ -863,7 +876,7 @@ export class PrWalkthroughPanel extends LitElement {
 					return html`
 						<section class="phase ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-phase-id=${phase.id}>
 							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => this.selectCard(cards[0].id)} title=${`Phase ${index}: ${phase.label}`}>
-								<span class="phase-index">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
+								<span class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" aria-hidden="true">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
 							</button>
 							<div class="phase-cards">${cards.map(card => this.renderRailCardButton(card))}</div>
 						</section>
@@ -908,10 +921,10 @@ export class PrWalkthroughPanel extends LitElement {
 		const decision = this._decisions[card.id]?.value;
 		const comments = this.commentCountForCard(card.id);
 		return html`
-			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
-				<span class="card-dot-rail" aria-hidden="true"></span>
+			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
+				<span class="card-dot card-dot-rail ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" aria-hidden="true">${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</span>
 				<span class="card-title">${card.title}</span>
-				${comments ? html`<span class="card-decision">${comments}</span>` : html`<span class="card-decision">${decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>`}
+				<span class="card-decision">${comments ? comments : decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>
 			</button>
 		`;
 	}

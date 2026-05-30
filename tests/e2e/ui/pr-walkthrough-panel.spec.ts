@@ -340,9 +340,26 @@ test.describe("PR walkthrough panel", () => {
 		await expect(panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" })).toBeVisible();
 		await expect.poll(() => orientationPhase.evaluate(el => {
 			const style = getComputedStyle(el as HTMLElement);
-			const rule = getComputedStyle(el as HTMLElement, "::after");
-			return { textTransform: style.textTransform, ruleHeight: rule.height, background: style.backgroundColor };
-		}), { message: "phase navigation should use dense muted section headers with divider rules, not selection fills" }).toMatchObject({ textTransform: "uppercase", ruleHeight: /[1-9]/, background: /rgba\(0, 0, 0, 0\)|transparent/i });
+			const nameStyle = getComputedStyle(el.querySelector(".phase-name") as HTMLElement);
+			const leadingRule = getComputedStyle(el.closest(".phase") as HTMLElement, "::before");
+			return { background: style.backgroundColor, nameTransform: nameStyle.textTransform, nameWeight: nameStyle.fontWeight, leadingRuleContent: leadingRule.content };
+		}), { message: "expanded phase navigation should mirror collapsed headers while using sidebar-goal title typography" }).toMatchObject({ background: /rgba\(0, 0, 0, 0\)|transparent/i, nameTransform: "uppercase", nameWeight: "500", leadingRuleContent: "none" });
+		const secondPhase = panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Key design choices" });
+		await expect.poll(() => secondPhase.evaluate(el => getComputedStyle(el.closest(".phase") as HTMLElement, "::before").height), { message: "expanded phases after the first should retain collapsed-style dividers" }).toMatch(/[1-9]/);
+		const labelledCardStep = panel.getByTestId("pr-walkthrough-card-step").first();
+		await expect.poll(() => labelledCardStep.evaluate(el => {
+			const dot = el.querySelector(".card-dot") as HTMLElement;
+			const title = el.querySelector(".card-title") as HTMLElement;
+			const dotStyle = getComputedStyle(dot);
+			const titleStyle = getComputedStyle(title);
+			return { dotWidth: dotStyle.width, dotBackground: dotStyle.backgroundColor, titleWeight: titleStyle.fontWeight };
+		}), { message: "expanded card rows should mirror collapsed status dots with sidebar-session typography" }).toMatchObject({ dotWidth: "14px", dotBackground: /rgba\(0, 0, 0, 0\)|transparent/i, titleWeight: "400" });
+		await expect.poll(() => labelledRail.evaluate(root => {
+			const phaseName = (root.querySelector('[data-testid="pr-walkthrough-phase-button"] .phase-name') as HTMLElement).getBoundingClientRect();
+			const cardDot = (root.querySelector('[data-testid="pr-walkthrough-card-step"] .card-dot') as HTMLElement).getBoundingClientRect();
+			const cardTitle = (root.querySelector('[data-testid="pr-walkthrough-card-step"] .card-title') as HTMLElement).getBoundingClientRect();
+			return cardDot.x > phaseName.x && cardTitle.x > phaseName.x;
+		}), { message: "expanded card dots and titles should be indented relative to phase titles" }).toBe(true);
 		await expect.poll(async () => {
 			const [contentBox, innerBox] = await Promise.all([panel.locator(".content").boundingBox(), panel.locator(".inner").boundingBox()]);
 			if (!contentBox || !innerBox) return false;
@@ -385,6 +402,15 @@ test.describe("PR walkthrough panel", () => {
 
 		await expect(panel.getByTestId("pr-walkthrough-labelled-rail"), "narrow panel should hide labelled rail").toBeHidden();
 		await expectActiveDiffMode(page, "inline");
+		await expect(activeCard(page).locator(".decision-note"), "narrow action bars should hide the note before wrapping controls").toBeHidden();
+		await expect.poll(async () => {
+			const buttons = activeCard(page).locator(".actions button");
+			const boxes = await Promise.all([buttons.nth(0).boundingBox(), buttons.nth(1).boundingBox(), buttons.nth(2).boundingBox()]);
+			const concrete = boxes.filter(Boolean) as Array<{ y: number; height: number }>;
+			if (concrete.length !== boxes.length) return false;
+			const centers = concrete.map(box => box.y + box.height / 2);
+			return Math.max(...centers) - Math.min(...centers) <= 1;
+		}, { message: "narrow action buttons should stay on a single row" }).toBe(true);
 
 		const dot = await expectCollapsedRailPipsAndDots(panel);
 		const before = await activeCardId(page);
