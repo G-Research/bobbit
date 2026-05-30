@@ -73,6 +73,7 @@ export type WalkthroughAgentManagerDeps = {
 	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
 	store?: WalkthroughAgentStore;
 	broadcast?: (event: Record<string, unknown>) => void;
+	preflightGithubLaunch?: boolean | ((job: PrWalkthroughJobRecord) => Promise<void> | void);
 	validateYaml?: (yamlText: string, job: PrWalkthroughJobRecord) => Promise<WalkthroughYamlValidationResult> | WalkthroughYamlValidationResult;
 	mapYamlToPayload?: (document: Record<string, unknown>, job: PrWalkthroughJobRecord) => Promise<WalkthroughStorePayload> | WalkthroughStorePayload;
 	resolveDiffForYamlMapping?: (document: Record<string, unknown>, job: PrWalkthroughJobRecord) => Promise<WalkthroughParsedDiffForYamlMapping> | WalkthroughParsedDiffForYamlMapping;
@@ -116,11 +117,7 @@ export type WalkthroughYamlValidationResult =
 	| { ok: true; document: Record<string, unknown>; warnings?: WalkthroughWarning[]; payload?: WalkthroughStorePayload }
 	| { ok: false; summary: PrWalkthroughValidationSummary };
 
-const WALKTHROUGH_ALLOWED_TOOLS = [
-	"read",
-	"grep",
-	"find",
-	"ls",
+export const WALKTHROUGH_ALLOWED_TOOLS = [
 	"readonly_bash",
 	"submit_pr_walkthrough_yaml",
 ];
@@ -216,6 +213,16 @@ export class WalkthroughAgentManager {
 
 		this.applySessionMetadata(child, job);
 		this.deps.sessionManager.setTitle?.(childSessionId, title, { markGenerated: true });
+
+		try {
+			await this.preflightLaunch(job);
+		} catch (error) {
+			const typed = classifyDiffResolutionError(error);
+			job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
+			this.broadcastJob(job);
+			return { ...responseFromJob(job), created: true };
+		}
+
 		job = this.store.update(jobId, { status: "waiting_for_yaml" }) ?? job;
 		this.broadcastJob(job);
 		this.attachIdleReminder(childSessionId, jobId, child.rpcClient);
@@ -260,6 +267,13 @@ export class WalkthroughAgentManager {
 		if (!job) throw routeError(404, "No PR walkthrough job found for this jobId", { code: "JOB_NOT_FOUND" });
 		if (job.childSessionId !== input.sessionId) {
 			throw routeError(403, "Session is not allowed to submit YAML for this walkthrough job", { code: "WALKTHROUGH_JOB_SESSION_MISMATCH" });
+		}
+		if (job.status === "ready") {
+			throw routeError(409, "This PR walkthrough has already accepted a YAML submission. The published payload will not be mutated by follow-up tool calls.", {
+				code: "WALKTHROUGH_ALREADY_READY",
+				retryable: false,
+				job,
+			});
 		}
 
 		const validation = await this.validateYaml(input.yaml, job);
@@ -309,6 +323,23 @@ export class WalkthroughAgentManager {
 			const session = this.deps.sessionManager?.getSession?.(job.childSessionId);
 			if (session) this.attachIdleReminder(job.childSessionId, job.jobId, session.rpcClient);
 		}
+	}
+
+	private async preflightLaunch(job: PrWalkthroughJobRecord): Promise<void> {
+		if (job.target.provider !== "github") return;
+		if (!this.deps.preflightGithubLaunch) return;
+		if (typeof this.deps.preflightGithubLaunch === "function") {
+			await this.deps.preflightGithubLaunch(job);
+			return;
+		}
+		await resolveGithubPr({
+			cwd: job.cwd,
+			prUrl: job.target.prUrl,
+			prNumber: job.target.number,
+			maxFiles: 1,
+			maxPatchBytes: 1,
+			maxLinesPerFile: 1,
+		});
 	}
 
 	private async validateYaml(yamlText: string, job: PrWalkthroughJobRecord): Promise<WalkthroughYamlValidationResult> {
@@ -484,13 +515,118 @@ function responseFromJob(job: PrWalkthroughJobRecord): Omit<LaunchWalkthroughRes
 	};
 }
 
+const REQUIRED_YAML_SCHEMA_PROMPT = `Required submit_pr_walkthrough_yaml YAML shape (submit exactly one YAML document; preserve these keys and enum values):
+
+schema_version: 1
+pr:
+  provider: github
+  owner: string
+  repo: string
+  number: 123
+  title: string
+  url: string
+  base_sha: 7-40 hex chars
+  head_sha: 7-40 hex chars
+  original_description:
+    body: string
+    source: gh_api|gh_cli|unknown
+    fetched_at: ISO timestamp string
+  stats:
+    files_changed: 0
+    additions: 0
+    deletions: 0
+walkthrough:
+  context:
+    why_created: string
+    problem_solved: string
+    why_worth_merging: string
+    merge_concerns: string
+    author_intent: string
+    reviewer_map: string
+  merge_assessment:
+    recommendation: approve|comment|request_changes|unknown
+    confidence: low|medium|high
+    summary: string
+    blocking_concerns:
+      - string
+    non_blocking_concerns:
+      - string
+  design_decisions:
+    - id: stable-id
+      title: string
+      explanation: string
+      chosen_approach: string
+      alternatives_considered:
+        - option: string
+          pros:
+            - string
+          cons:
+            - string
+      tradeoffs:
+        - string
+      suggested_reviewer_concerns:
+        - string
+      relevant_hunks:
+        - file: path/to/file.ts
+          hunk_header: "@@ ... @@"
+          why_relevant: string
+  review_chunks:
+    - id: stable-id
+      phase: significant|other|audit
+      title: string
+      reviewer_goal: string
+      explanation: string
+      files:
+        - path/to/file.ts
+      relevant_hunks:
+        - file: path/to/file.ts
+          hunk_header: "@@ ... @@"
+          line_range: string
+          why_relevant: string
+      suggested_concerns:
+        - severity: blocking|non_blocking|question|nit
+          concern: string
+          suggested_comment: string
+          anchors:
+            - file: path/to/file.ts
+              hunk_header: "@@ ... @@"
+              line_range: string
+      positive_notes:
+        - string
+  omissions_and_followups:
+    - category: tests|docs|migration|telemetry|security|performance|compatibility|cleanup|other
+      expected_artifact: string
+      evidence_checked: string
+      concern: string
+      suggested_comment: string
+      severity: blocking|non_blocking|question
+  audit:
+    remaining_changed_areas:
+      - string
+    low_signal_or_mechanical_changes:
+      - string
+    generated_or_binary_files:
+      - string
+    reviewer_checklist:
+      - string
+  display:
+    phase_order:
+      - orientation
+      - design
+      - significant
+      - other
+      - audit
+    chunk_order:
+      - review_chunk_id`;
+
 function buildRolePrompt(target: PrWalkthroughTarget): string {
 	return [
 		"You are a read-only PR walkthrough agent.",
 		"Investigate the PR using only read-only tools and report rough percentage progress in chat.",
 		"Do not edit files, run tests/builds, install dependencies, push, commit, or submit GitHub reviews/comments.",
-		"When complete, call submit_pr_walkthrough_yaml with exactly one YAML document matching the PR walkthrough schema. The panel will remain empty until that tool succeeds.",
+		"When complete, call submit_pr_walkthrough_yaml with exactly one YAML document matching the schema below. The panel will remain empty until that tool succeeds.",
 		`Target: ${target.canonicalKey}`,
+		REQUIRED_YAML_SCHEMA_PROMPT,
 	].join("\n");
 }
 
@@ -501,6 +637,7 @@ function buildKickoffPrompt(job: PrWalkthroughJobRecord): string {
 		job.target.baseSha && job.target.headSha ? `Range: ${job.target.baseSha}..${job.target.headSha}` : undefined,
 		"Start by saying you are beginning the investigation with an approximate progress percentage.",
 		"Populate the panel only by calling submit_pr_walkthrough_yaml with valid YAML. Stay available after success.",
+		REQUIRED_YAML_SCHEMA_PROMPT,
 	].filter(Boolean).join("\n");
 }
 

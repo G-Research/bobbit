@@ -146,6 +146,7 @@ import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
+import { WalkthroughAgentManager } from "./pr-walkthrough/walkthrough-agent-manager.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
@@ -995,7 +996,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -1244,6 +1245,23 @@ export function createGateway(config: GatewayConfig) {
 			sendMs: performance.now() - sendStart,
 		});
 	}
+
+	const prWalkthroughAgentManager = new WalkthroughAgentManager({
+		defaultCwd: config.defaultCwd,
+		stateDir,
+		sessionManager,
+		broadcast: broadcastToAll,
+		preflightGithubLaunch: true,
+		resolveSessionCwd: (sessionId: string) => {
+			const live = sessionManager.getSession(sessionId);
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return live?.worktreePath || persisted?.worktreePath || live?.cwd || persisted?.cwd;
+		},
+		resolveSessionModel: (sessionId: string) => {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+		},
+	});
 
 	// Bridge search index progress bus → WS. Progress events are debounced
 	// to 500ms per-project (design §9). Complete + error events pass through.
@@ -1539,6 +1557,7 @@ export function createGateway(config: GatewayConfig) {
 
 			// Restore persisted sessions before accepting connections
 			await sessionManager.restoreSessions();
+			prWalkthroughAgentManager.restore();
 
 			// NOTE: Orphaned worktree cleanup and non-interactive session cleanup
 			// are no longer automatic on startup. Use the Settings → Maintenance UI
@@ -1981,6 +2000,7 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
+	prWalkthroughAgentManager?: WalkthroughAgentManager,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -1999,6 +2019,7 @@ async function handleApiRoute(
 		readBody,
 		sessionManager,
 		broadcast: broadcastToAll,
+		walkthroughAgentManager: prWalkthroughAgentManager,
 		resolveSessionCwd: (sessionId: string) => {
 			const live = sessionManager.getSession(sessionId);
 			const persisted = sessionManager.getPersistedSession(sessionId);

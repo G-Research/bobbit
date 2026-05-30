@@ -10,7 +10,7 @@ import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
-import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
+import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -98,6 +98,7 @@ export type PrWalkthroughRouteDeps = {
 	sessionManager?: WalkthroughSessionManagerLike;
 	broadcast?: (event: Record<string, unknown>) => void;
 	walkthroughAgentManager?: WalkthroughAgentManager;
+	preflightGithubLaunch?: WalkthroughAgentManagerDeps["preflightGithubLaunch"];
 	sandboxScope?: SandboxScope;
 };
 
@@ -105,7 +106,8 @@ type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown
 type WalkthroughSynthesisContext = { sessionId?: string; cwd: string; changeset?: WalkthroughChangeset };
 let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
 let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
-const agentManagersByDeps = new WeakMap<PrWalkthroughRouteDeps, WalkthroughAgentManager>();
+const agentManagersBySessionManager = new WeakMap<object, WalkthroughAgentManager>();
+const agentManagersByStateKey = new Map<string, WalkthroughAgentManager>();
 
 export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughLlmAdapter | undefined): void {
 	synthesisAdapterForTesting = adapter;
@@ -113,17 +115,28 @@ export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughL
 
 function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAgentManager {
 	if (deps.walkthroughAgentManager) return deps.walkthroughAgentManager;
-	let manager = agentManagersByDeps.get(deps);
+	const create = () => new WalkthroughAgentManager({
+		defaultCwd: deps.defaultCwd,
+		stateDir: deps.stateDir,
+		resolveSessionCwd: deps.resolveSessionCwd,
+		resolveSessionModel: deps.resolveSessionModel,
+		sessionManager: deps.sessionManager,
+		broadcast: deps.broadcast,
+		preflightGithubLaunch: deps.preflightGithubLaunch,
+	});
+	if (deps.sessionManager && typeof deps.sessionManager === "object") {
+		let manager = agentManagersBySessionManager.get(deps.sessionManager);
+		if (!manager) {
+			manager = create();
+			agentManagersBySessionManager.set(deps.sessionManager, manager);
+		}
+		return manager;
+	}
+	const key = `${deps.stateDir ?? ""}\0${deps.defaultCwd}`;
+	let manager = agentManagersByStateKey.get(key);
 	if (!manager) {
-		manager = new WalkthroughAgentManager({
-			defaultCwd: deps.defaultCwd,
-			stateDir: deps.stateDir,
-			resolveSessionCwd: deps.resolveSessionCwd,
-			resolveSessionModel: deps.resolveSessionModel,
-			sessionManager: deps.sessionManager,
-			broadcast: deps.broadcast,
-		});
-		agentManagersByDeps.set(deps, manager);
+		manager = create();
+		agentManagersByStateKey.set(key, manager);
 	}
 	return manager;
 }
@@ -814,12 +827,14 @@ function storePath(changesetId: string): string {
 
 function typedRouteError(err: unknown): { status: number; extra: Record<string, unknown> } | undefined {
 	if (!err || typeof err !== "object") return undefined;
-	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown };
+	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown; extra?: unknown };
 	const status = typeof candidate.status === "number" && candidate.status >= 400 && candidate.status < 600 ? candidate.status : undefined;
-	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings)) return undefined;
+	const extra = candidate.extra && typeof candidate.extra === "object" && !Array.isArray(candidate.extra) ? candidate.extra as Record<string, unknown> : undefined;
+	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings) && !extra) return undefined;
 	return {
 		status: status ?? 500,
 		extra: {
+			...(extra ?? {}),
 			...(typeof candidate.code === "string" ? { code: candidate.code } : {}),
 			...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings } : {}),
 		},
