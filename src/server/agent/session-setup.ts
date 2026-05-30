@@ -119,6 +119,8 @@ export interface SessionSetupPlan {
 	walkthroughJobId?: string;
 	walkthroughChangesetId?: string;
 	walkthroughTargetKey?: string;
+	/** Explicit session-scoped tool allowlist that must survive process restarts. */
+	sessionScopedAllowedTools?: string[];
 	taskId?: string;
 	worktreePath?: string;
 	repoPath?: string;
@@ -609,6 +611,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		walkthroughJobId: plan.walkthroughJobId,
 		walkthroughChangesetId: plan.walkthroughChangesetId,
 		walkthroughTargetKey: plan.walkthroughTargetKey,
+		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
 	});

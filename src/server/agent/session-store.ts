@@ -58,6 +58,8 @@ export interface PersistedSession {
 	walkthroughJobId?: string;
 	walkthroughChangesetId?: string;
 	walkthroughTargetKey?: string;
+	/** Explicit session-scoped tool allowlist captured at creation. Undefined means derive from role/default policy. */
+	allowedTools?: string[];
 	/** Which project this session belongs to */
 	projectId?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester') */
