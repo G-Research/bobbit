@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Goal as GoalIcon, LayoutDashboard, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, Copy, CopyPlus, Github, Goal as GoalIcon, LayoutDashboard, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,12 +20,15 @@ import {
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { connectToSession, terminateSession, createAndConnectSession, startReattempt } from "./session-manager.js";
+import { connectToSession, terminateSession, createAndConnectSession, startReattempt, duplicateSession } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
-import { startTeam, deleteGoal, gatewayFetch } from "./api.js";
+import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { getActiveNavId } from "./sidebar-nav.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
+import "../ui/components/SidebarActionsPopover.js";
+import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
+import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
 
 // ============================================================================
 // FORMATTING
@@ -359,6 +362,323 @@ export const CHEVRON_W = 14;
 export const HEADER_CHEVRON_W = 20;
 
 // ============================================================================
+// SIDEBAR ACTIONS MENU
+// ============================================================================
+
+export type SidebarActionEntityKind = "session" | "goal";
+
+export interface SidebarActionItem {
+	id: string;
+	label: string;
+	title?: string;
+	icon: TemplateResult;
+	tone?: "default" | "danger";
+	quick: boolean;
+	run: (event: Event) => void | Promise<void>;
+}
+
+interface OpenSidebarActionsPopover {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	element: SidebarActionsPopover;
+	actions: SidebarActionItem[];
+	refresh: () => SidebarActionItem[];
+}
+
+let _openSidebarActionsPopover: OpenSidebarActionsPopover | null = null;
+
+function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: string): boolean {
+	return _openSidebarActionsPopover?.kind === kind
+		&& _openSidebarActionsPopover.entityId === entityId
+		&& _openSidebarActionsPopover.element.open;
+}
+
+function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
+	return actions.map(({ id, label, icon, tone, quick }) => ({ id, label, icon, tone, quick }));
+}
+
+function closeSidebarActionsPopover(render = true): void {
+	const current = _openSidebarActionsPopover;
+	if (!current) return;
+	_openSidebarActionsPopover = null;
+	current.element.open = false;
+	if (render) renderApp();
+}
+
+function removeSidebarActionsPopoverElement(element: SidebarActionsPopover): void {
+	if (_openSidebarActionsPopover?.element === element) _openSidebarActionsPopover = null;
+	try { element.remove(); } catch { /* ignore */ }
+	renderApp();
+}
+
+function refreshOpenSidebarActionsPopover(): void {
+	const current = _openSidebarActionsPopover;
+	if (!current) return;
+	current.actions = current.refresh();
+	current.element.items = sidebarActionPopoverItems(current.actions);
+}
+
+function openSidebarActionsPopover(input: {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	trigger: HTMLElement;
+	actions: SidebarActionItem[];
+	refresh: () => SidebarActionItem[];
+	sourceRects: SidebarActionsFlipRect[];
+}): void {
+	if (isSidebarActionsPopoverOpen(input.kind, input.entityId)) {
+		closeSidebarActionsPopover();
+		return;
+	}
+	closeSidebarActionsPopover(false);
+	const element = document.createElement("sidebar-actions-popover") as SidebarActionsPopover;
+	element.anchorEl = input.trigger;
+	element.items = sidebarActionPopoverItems(input.actions);
+	element.sourceRects = input.sourceRects;
+	element.open = true;
+	element.addEventListener("sidebar-action-select", ((event: CustomEvent<{ actionId: string }>) => {
+		event.stopPropagation();
+		const current = _openSidebarActionsPopover;
+		const action = current?.actions.find((item) => item.id === event.detail.actionId);
+		void action?.run(event);
+	}) as EventListener);
+	element.addEventListener("close", () => removeSidebarActionsPopoverElement(element));
+	document.body.appendChild(element);
+	_openSidebarActionsPopover = {
+		kind: input.kind,
+		entityId: input.entityId,
+		element,
+		actions: input.actions,
+		refresh: input.refresh,
+	};
+	renderApp();
+}
+
+function renderSidebarQuickActions(actions: SidebarActionItem[], opts: { mobile: boolean; btnPad: string }): TemplateResult {
+	return html`${actions.filter((action) => action.quick).map((action) => {
+		const danger = action.tone === "danger";
+		const colorClass = opts.mobile
+			? `text-muted-foreground ${danger ? "active:bg-destructive/10" : "active:bg-secondary/80"}`
+			: danger
+				? "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+				: "hover:bg-secondary/80 text-muted-foreground hover:text-foreground";
+		return html`
+			<button
+				class="${opts.btnPad} rounded ${colorClass}"
+				data-sidebar-action-id=${action.id}
+				data-sidebar-action-quick="true"
+				@click=${action.run}
+				title=${action.title || action.label}
+				aria-label=${action.label}
+			>${action.icon}</button>
+		`;
+	})}`;
+}
+
+function renderSidebarActionsTrigger(input: {
+	kind: SidebarActionEntityKind;
+	entityId: string;
+	actions: SidebarActionItem[];
+	mobile: boolean;
+	btnPad: string;
+	refresh: () => SidebarActionItem[];
+	onBeforeOpen?: () => void;
+}): TemplateResult | typeof nothing {
+	if (input.mobile) return nothing;
+	const expanded = isSidebarActionsPopoverOpen(input.kind, input.entityId);
+	const label = input.kind === "session" ? "Session actions" : "Goal actions";
+	const openFromTrigger = (event: Event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const trigger = event.currentTarget as HTMLElement;
+		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
+		const actions = input.refresh();
+		input.onBeforeOpen?.();
+		openSidebarActionsPopover({
+			kind: input.kind,
+			entityId: input.entityId,
+			trigger,
+			actions,
+			refresh: input.refresh,
+			sourceRects: row ? captureSidebarActionSourceRects(row) : [],
+		});
+	};
+	return html`
+		<button
+			class="${input.btnPad} rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground"
+			data-testid="sidebar-actions-trigger"
+			data-sidebar-actions-kind=${input.kind}
+			data-sidebar-actions-id=${input.entityId}
+			aria-haspopup="menu"
+			aria-expanded=${expanded ? "true" : "false"}
+			aria-label=${label}
+			title=${label}
+			@click=${openFromTrigger}
+			@keydown=${(event: KeyboardEvent) => {
+				if (event.key === "ArrowDown" || event.key === "ArrowUp") openFromTrigger(event);
+				else event.stopPropagation();
+			}}
+		>${icon(Menu, "xs")}</button>
+	`;
+}
+
+function buildSessionSidebarActions(session: GatewaySession, displayTitle: string): SidebarActionItem[] {
+	const staffId = session.staffId;
+	const modifyLabel = staffId ? "Edit staff" : "Modify";
+	const actions: SidebarActionItem[] = [
+		{
+			id: "modify",
+			label: modifyLabel,
+			title: modifyLabel,
+			icon: icon(Pencil, "xs"),
+			quick: true,
+			run: staffId
+				? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
+				: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
+		},
+		{
+			id: "terminate",
+			label: session.role === "team-lead" ? "End team" : "Terminate",
+			title: `${session.role === "team-lead" ? "End team" : "Terminate"}${shortcutHint("terminate-session")}`,
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Copy, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+	];
+	if (canDuplicateSidebarSession(session)) {
+		actions.push({
+			id: "duplicate",
+			label: "Duplicate session",
+			icon: icon(CopyPlus, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void duplicateSession(session); },
+		});
+	}
+	return actions;
+}
+
+function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: string, goalId?: string): SidebarActionItem[] {
+	return [
+		{
+			id: "modify",
+			label: "Modify",
+			title: "Modify",
+			icon: icon(Pencil, "xs"),
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); },
+		},
+		{
+			id: "terminate",
+			label: "End team",
+			title: `End team${shortcutHint("terminate-session")}`,
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Copy, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+	];
+}
+
+function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean; showArchive: boolean }): SidebarActionItem[] {
+	const actions: SidebarActionItem[] = [];
+	if (!input.hasActiveSession) {
+		actions.push({
+			id: "reattempt",
+			label: "Re-attempt",
+			title: "Re-attempt goal",
+			icon: icon(RotateCcw, "xs"),
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); startReattempt(goal.id); },
+		});
+	}
+	if (input.showArchive) {
+		actions.push({
+			id: "archive",
+			label: "Archive",
+			title: "Archive goal",
+			icon: icon(Trash2, "xs"),
+			tone: "danger",
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); deleteGoal(goal.id); },
+		});
+	}
+	actions.push(
+		{
+			id: "dashboard",
+			label: "Goal dashboard",
+			title: "Goal dashboard",
+			icon: icon(LayoutDashboard, "xs"),
+			quick: true,
+			run: (e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); },
+		},
+		{
+			id: "copy-link",
+			label: "Copy link",
+			icon: icon(Copy, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(goalDeepLink(goal.id), "Copy goal link"); },
+		},
+	);
+	const githubLink = getCachedGoalGithubLink(goal.id);
+	if (githubLink?.available) {
+		actions.push({
+			id: "open-github",
+			label: "Open on GitHub",
+			icon: icon(Github, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openExternalUrl(githubLink.url); },
+		});
+	}
+	return actions;
+}
+
+function canDuplicateSidebarSession(session: GatewaySession): boolean {
+	return session.status !== "terminated"
+		&& !session.archived
+		&& !session.readOnly
+		&& !session.nonInteractive
+		&& !isChildSession(session)
+		&& !session.role
+		&& !session.teamGoalId
+		&& !session.teamLeadSessionId;
+}
+
+function openExternalUrl(url: string): void {
+	const opened = window.open(url, "_blank", "noopener");
+	try { if (opened) opened.opener = null; } catch { /* ignore */ }
+}
+
+function prefetchGoalGithubLink(goalId: string): void {
+	if (getCachedGoalGithubLink(goalId)) return;
+	void fetchGoalGithubLink(goalId, { skipRender: true })
+		.then(() => {
+			if (_openSidebarActionsPopover?.kind === "goal" && _openSidebarActionsPopover.entityId === goalId) {
+				refreshOpenSidebarActionsPopover();
+				renderApp();
+			}
+		})
+		.catch(() => undefined);
+}
+
+// Keep the imported response type pinned to this module's action cache contract.
+void (undefined as GoalGithubLinkResponse | undefined);
+
+// ============================================================================
 // ARCHIVED BUCKETING (shared between desktop sidebar and mobile landing)
 // ============================================================================
 
@@ -477,29 +797,15 @@ export function renderSessionRow(session: GatewaySession) {
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
 
-	const isTeamLead = session.role === "team-lead";
-
-	// Desktop: hover-revealed gradient overlay. Mobile: always-visible inline buttons.
-	// Staff-backed sessions: route pencil to the staff editor instead of the
-	// rename dialog (per surface-staff-in-sessions design).
-	const staffId = session.staffId;
-	const pencilTitle = staffId ? "Edit staff" : "Modify";
-	const pencilHandler = staffId
-		? (e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${staffId}`; }
-		: (e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); };
-	const buttons = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${pencilHandler}
-			title=${pencilTitle}>${icon(Pencil, "xs")}</button>
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
-			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id); }}
-			title=${(isTeamLead ? "End team" : "Terminate") + shortcutHint("terminate-session")}>${icon(Trash2, "xs")}</button>
-	`;
+	const actions = buildSessionSidebarActions(session, displayTitle);
+	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
+	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh })}`;
 
 	const navId = `session:${session.id}`;
 	return html`
 		<div
 			data-session-id="${session.id}"
+			data-sidebar-actions-row-root
 			data-nav-id=${navId}
 			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -620,14 +926,9 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 
 	const goalId = session.goalId || session.teamGoalId;
 
-	const buttons = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); showRenameDialog(session.id, displayTitle); }}
-			title="Modify">${icon(Pencil, "xs")}</button>
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-destructive/10" : "hover:bg-destructive/10 text-muted-foreground hover:text-destructive"}"
-			@click=${(e: Event) => { e.stopPropagation(); terminateSession(session.id, { goalId: goalId || undefined, isTeamLead: true }); }}
-			title=${`End team${shortcutHint("terminate-session")}`}>${icon(Trash2, "xs")}</button>
-	`;
+	const actions = buildTeamLeadSidebarActions(session, displayTitle, goalId);
+	const actionRefresh = () => buildTeamLeadSidebarActions(session, displayTitle, goalId);
+	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh })}`;
 
 	const chevron = html`<span
 		class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -641,6 +942,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const tlNavId = `session:${session.id}`;
 	return html`
 		<div
+			data-session-id="${session.id}"
+			data-sidebar-actions-row-root
 			data-nav-id=${tlNavId}
 			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -861,28 +1164,13 @@ export function renderGoalGroup(goal: Goal) {
 	};
 
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
-
-	const dashboardBtn = html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); setHashRoute("goal-dashboard", goal.id); }}
-			title="Goal dashboard">${icon(LayoutDashboard, "xs")}</button>
-	`;
-
 	const pr = state.prStatusCache.get(goal.id);
 	const showArchive = !goal.archived;
 	const isWorkMerged = !goal.archived && pr?.state === "MERGED" && !hasActiveTeam;
 	const hasActiveSession = goalSessions.some((s) => s.status !== "terminated");
-	const reattemptBtn = !hasActiveSession ? html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); startReattempt(goal.id); }}
-			title="Re-attempt goal">${icon(RotateCcw, "xs")}</button>
-	` : nothing;
-
-	const archiveBtn = showArchive ? html`
-		<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary" : "hover:bg-secondary text-muted-foreground hover:text-secondary-foreground"}"
-			@click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}
-			title="Archive goal">${icon(Trash2, "xs")}</button>
-	` : nothing;
+	const goalActions = buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
+	const goalActionRefresh = () => buildGoalSidebarActions(goal, { hasActiveSession, showArchive });
+	const goalButtons = html`${renderSidebarQuickActions(goalActions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "goal", entityId: goal.id, actions: goalActions, mobile, btnPad, refresh: goalActionRefresh, onBeforeOpen: () => prefetchGoalGithubLink(goal.id) })}`;
 
 	const emptyState = html`
 		<div class="pl-2 py-1 text-muted-foreground" style="${mobile ? "" : "font-size: 0.9167em;"}">
@@ -932,6 +1220,7 @@ export function renderGoalGroup(goal: Goal) {
 	return html`
 		<div class="flex flex-col ${goal.state === "shelved" ? "opacity-60" : ""}">
 			<div class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${mobile ? "py-1" : "py-0.5"} rounded-md cursor-pointer ${goalNavActive ? "bg-secondary text-foreground sidebar-session-active" : (mobile ? "active:bg-secondary/50" : "hover:bg-secondary/50")} transition-colors"
+				data-sidebar-actions-row-root
 				data-nav-id=${goalNavId}
 				data-nav-active=${goalNavActive ? "true" : "false"}
 				style="padding-left:${HEADER_CHEVRON_W}px;"
@@ -943,9 +1232,9 @@ export function renderGoalGroup(goal: Goal) {
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}</span>
 				${renderGoalBadge(goal)}
 				${mobile
-					? html`${reattemptBtn}${archiveBtn}${dashboardBtn}`
+					? goalButtons
 					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-						${reattemptBtn}${archiveBtn}${dashboardBtn}
+						${goalButtons}
 					</div>`}
 			</div>
 			${isExpanded ? html`
