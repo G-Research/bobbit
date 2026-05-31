@@ -7,7 +7,14 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
-import { renderApp } from "./state.js";
+import {
+	expandedGoals,
+	renderApp,
+	saveExpandedGoals,
+	setArchivedParentExpanded,
+	setTeamLeadExpanded,
+	state as globalState,
+} from "./state.js";
 import type { state as appState } from "./state.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 
@@ -340,6 +347,22 @@ function labelForJob(job: WalkthroughJobRecord): string {
 	return labelForPrNumber(job.target?.number) || (job.target?.prUrl ? "PR" : "Walkthrough");
 }
 
+function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boolean {
+	const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+	return session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
+}
+
+function collapseLiveWalkthroughPanel(state: AppState, sessionId: string): void {
+	setActivePanelTabIdForSession(state, sessionId, "");
+	const tabs = panelTabsForSession(state, sessionId);
+	const nextTabs = tabs.map((tab) => tab.kind === "walkthrough" && tab.state?.fullscreenOnReady === true
+		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
+		: tab);
+	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
+	(state as any).previewPanelFullscreen = false;
+	try { localStorage.setItem(`bobbit-preview-collapsed-${sessionId}`, "true"); } catch { /* non-browser/test */ }
+}
+
 export function upsertPrWalkthroughJobPanel(
 	state: AppState,
 	job: WalkthroughJobRecord,
@@ -352,6 +375,8 @@ export function upsertPrWalkthroughJobPanel(
 	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
 	const target = job.target || {};
 	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);
+	const liveSessionHosted = !!job.parentSessionId || isLiveSessionHostedWalkthrough(state, sessionId);
+	const fullscreenOnReady = !!options.fullscreenOnReady && !liveSessionHosted;
 	const tab: PanelWorkspaceTab = {
 		id: tabId,
 		kind: "walkthrough",
@@ -389,7 +414,7 @@ export function upsertPrWalkthroughJobPanel(
 			prTitle: changeset.prTitle,
 			baseSha: changeset.baseSha,
 			headSha: changeset.headSha,
-			fullscreenOnReady: status === "ready" || undefined,
+			fullscreenOnReady: status === "ready" && fullscreenOnReady || undefined,
 		},
 	};
 
@@ -405,11 +430,12 @@ export function upsertPrWalkthroughJobPanel(
 			: candidate)
 		: [...existing, tab];
 	setPanelTabsForSession(state, sessionId, next);
-	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
+	if (options.select && !(status === "ready" && liveSessionHosted)) setActivePanelTabIdForSession(state, sessionId, tabId);
 	if (status === "ready") {
-		setActivePanelTabIdForSession(state, sessionId, tabId);
-		if (options.fullscreenOnReady || (state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
-		restorePrWalkthroughPanel(state, sessionId, tabId);
+		if (liveSessionHosted) collapseLiveWalkthroughPanel(state, sessionId);
+		else setActivePanelTabIdForSession(state, sessionId, tabId);
+		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
+		if (!liveSessionHosted) restorePrWalkthroughPanel(state, sessionId, tabId);
 	}
 	return tab;
 }
@@ -467,10 +493,14 @@ function patchWalkthroughTab(
 	const deduped = nextTabId !== tabId ? nextTabs.filter((tab, index, all) => tab.id !== nextTabId || all.findIndex((candidate) => candidate.id === nextTabId) === index) : nextTabs;
 	if (replaced) {
 		setPanelTabsForSession(state, sessionId, deduped);
-		if (nextTabId !== tabId) setActivePanelTabIdForSession(state, sessionId, nextTabId);
+		const liveSessionHosted = isLiveSessionHostedWalkthrough(state, sessionId);
+		if (nextTabId !== tabId && !(patch.status === "ready" && liveSessionHosted)) setActivePanelTabIdForSession(state, sessionId, nextTabId);
 		if (patch.status === "ready") {
-			setActivePanelTabIdForSession(state, sessionId, nextTabId);
-			if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+			if (liveSessionHosted) collapseLiveWalkthroughPanel(state, sessionId);
+			else {
+				setActivePanelTabIdForSession(state, sessionId, nextTabId);
+				if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+			}
 		}
 	}
 	return updatedTabId;
@@ -558,6 +588,35 @@ function launchRequestForInput(sessionId: string, input: OpenPrWalkthroughInput)
 	return resolveRequestForInput(sessionId, input);
 }
 
+function expandWalkthroughSidebarContainers(childSessionId: string): void {
+	const sessions = [...globalState.gatewaySessions, ...globalState.archivedSessions];
+	const byId = new Map(sessions.map((session) => [session.id, session]));
+	const visited = new Set<string>();
+	let current = byId.get(childSessionId);
+	let savedGoalsChanged = false;
+
+	while (current && !visited.has(current.id)) {
+		visited.add(current.id);
+		const goalId = current.teamGoalId || current.goalId;
+		if (goalId && !expandedGoals.has(goalId)) {
+			expandedGoals.add(goalId);
+			savedGoalsChanged = true;
+		}
+
+		const teamLeadId = current.teamLeadSessionId;
+		if (teamLeadId) setTeamLeadExpanded(teamLeadId, true);
+
+		const parentId = current.parentSessionId || current.delegateOf;
+		if (!parentId) break;
+		setArchivedParentExpanded(parentId, true);
+		const parent = byId.get(parentId);
+		if (parent?.role === "team-lead") setTeamLeadExpanded(parentId, true);
+		current = parent;
+	}
+
+	if (savedGoalsChanged) saveExpandedGoals();
+}
+
 async function focusWalkthroughChildSession(childSessionId: string): Promise<void> {
 	try {
 		const [{ refreshSessions }, { connectToSession }] = await Promise.all([
@@ -565,7 +624,8 @@ async function focusWalkthroughChildSession(childSessionId: string): Promise<voi
 			import("./session-manager.js"),
 		]);
 		await refreshSessions();
-		await connectToSession(childSessionId, true, { readOnly: true });
+		expandWalkthroughSidebarContainers(childSessionId);
+		await connectToSession(childSessionId, true);
 	} catch {
 		// The launch already created the child tab state. Session polling will make
 		// the child visible if an immediate focus attempt races session refresh.
@@ -606,6 +666,7 @@ const jobRestoreLastAttempt = new Map<string, number>();
 
 export function restorePrWalkthroughJobForSession(state: AppState, childSessionId: string): void {
 	if (!childSessionId) return;
+	if (isLiveSessionHostedWalkthrough(state, childSessionId)) collapseLiveWalkthroughPanel(state, childSessionId);
 	const now = Date.now();
 	const last = jobRestoreLastAttempt.get(childSessionId) || 0;
 	if (jobRestoreInFlight.has(childSessionId) || now - last < 2_000) return;

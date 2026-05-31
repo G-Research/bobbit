@@ -2222,6 +2222,15 @@ export function doRenderApp(): void {
 		};
 	};
 
+	const isLiveSessionHostedWalkthroughActive = (tab?: UnifiedContentTab) => {
+		const activeId = activeSessionId();
+		const session = state.gatewaySessions.find((candidate) => candidate.id === activeId);
+		if (session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived") return true;
+		const archived = state.archivedSessions.some((candidate) => candidate.id === activeId || (candidate.parentSessionId === activeId && candidate.status === "terminated"));
+		const source = tab?.source as Record<string, unknown> | undefined;
+		return !archived && tab?.kind === "walkthrough" && typeof activeId === "string" && activeId.length > 0 && source?.sessionId === activeId;
+	};
+
 	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind !== "walkthrough") return "";
 		void ensurePrWalkthroughPanel();
@@ -2234,9 +2243,9 @@ export function doRenderApp(): void {
 		const exportCapability = tabState.exportCapability;
 		const validationError = tabState.validationError || tabState.lastValidationError;
 		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
-		if (status === "ready" && tabState.fullscreenOnReady === true && !state.previewPanelFullscreen) {
+		if (status === "ready" && tabState.fullscreenOnReady === true && !state.previewPanelFullscreen && !isLiveSessionHostedWalkthroughActive(tab)) {
 			queueMicrotask(() => {
-				if (activeSessionId() === workspaceSessionId()) {
+				if (activeSessionId() === workspaceSessionId() && !isLiveSessionHostedWalkthroughActive(tab)) {
 					state.previewPanelFullscreen = true;
 					renderApp();
 				}
@@ -2421,7 +2430,9 @@ export function doRenderApp(): void {
 			const fullscreenContent = fullscreenTab?.kind === "walkthrough"
 				? walkthroughPanelContent(fullscreenTab)
 				: htmlPreviewContent();
-			if (desktop && state.previewPanelFullscreen && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
+			const suppressFullscreenForLiveWalkthrough = isLiveSessionHostedWalkthroughActive(fullscreenTab) && fullscreenTab?.kind === "walkthrough";
+			if (suppressFullscreenForLiveWalkthrough && state.previewPanelFullscreen) state.previewPanelFullscreen = false;
+			if (desktop && state.previewPanelFullscreen && !suppressFullscreenForLiveWalkthrough && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
