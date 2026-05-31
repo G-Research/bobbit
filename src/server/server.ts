@@ -264,6 +264,31 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+
+type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
+let _ghExecFileForTests: GhExecFileForTests | undefined;
+
+export function buildGhPrViewArgs(branch?: string): string[] {
+	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
+	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
+	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	return String(stdout);
+}
+
+export function __setGhExecFileForPrStatusTests(fn: GhExecFileForTests | undefined): void {
+	_ghExecFileForTests = fn;
+	__resetPrStatusCachesForTests();
+}
+
+export function __resetPrStatusCachesForTests(): void {
+	_prCache.clear();
+	_prInFlight.clear();
+	_repoPermCache.clear();
+}
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -273,9 +298,7 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
-			cwd, encoding: "utf-8", timeout: 10000,
-		});
+		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
 		_repoPermCache.set(cwd, { perm, ts: Date.now() });
 		return perm === "ADMIN";
@@ -287,15 +310,13 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
-	const branchArg = branch ? ` ${branch}` : "";
-	const cmd = `gh pr view${branchArg} ${ghFields}`;
+	const args = buildGhPrViewArgs(branch);
 
 	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
-			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
+			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
 			const viewerIsAdmin = await getViewerIsAdmin(dir);
 			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
@@ -308,6 +329,10 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 	}
 	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 	return null;
+}
+
+export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return getCachedPrStatus(cwd, branch, fallbackCwd);
 }
 
 async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
