@@ -42,6 +42,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 |---|---|---|
 | `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
+| `POST` | `/api/sessions/:id/duplicate` | Create a fresh live session from persisted source-session context, without copying transcript/tool/proposal history. See [Duplicate session endpoint](#duplicate-session-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
@@ -60,6 +61,31 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
+
+### Duplicate session endpoint
+
+`POST /api/sessions/:id/duplicate` duplicates a live source session's project/task/goal/staff context into a new session. It is the contract behind the sidebar **Duplicate session** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+
+Success returns `201`:
+
+```json
+{
+  "id": "new-session-id",
+  "cwd": "/repo-or-worktree",
+  "status": "idle",
+  "projectId": "project-id",
+  "goalId": "goal-id",
+  "assistantType": "goal"
+}
+```
+
+`goalId` and `assistantType` are omitted when not applicable. The new session title is generated as `Copy of <source title>`.
+
+The duplicate preserves project id, cwd/worktree selection, goal id, task id, reattempt goal id, assistant type, staff id, role/accessory context, sandbox setting, allowed tools, and selected model. It does **not** copy JSONL transcript history, tool content, proposal drafts, read state, or other historical UI state.
+
+Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`.
+
+See [Sidebar Actions Menu](sidebar-actions-menu.md#duplicate-session-endpoint) for the user-facing behavior.
 
 ### Background processes
 
@@ -169,7 +195,30 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
+| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback for sidebar `Open on GitHub`. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
+
+### Goal GitHub link endpoint
+
+`GET /api/goals/:id/github-link` resolves the URL used by the sidebar **Open on GitHub** menu item.
+
+Success or unavailability both return `200` with a discriminated response:
+
+```ts
+type GoalGithubLinkResponse =
+  | { available: true; url: string; kind: "pr" | "branch" }
+  | { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+```
+
+Resolution order:
+
+1. Return the goal's cached PR URL from `PrStatusStore` when present.
+2. Otherwise look up PR status for the goal branch using `gh` through `execFile` argument arrays, not shell command strings.
+3. If no PR URL exists, read `origin` with `git remote get-url origin` through `execFile`.
+4. Strip embedded credentials, accept only GitHub remotes, and build an encoded branch tree URL.
+5. Return `available: false` for missing goals, goals without branches, missing/non-GitHub remotes, or git lookup failures.
+
+The browser caches this endpoint separately from the PR-status cache and hides the menu item while the response is unavailable. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for the client behavior and cache freshness notes.
 
 ### Goal Tasks
 
