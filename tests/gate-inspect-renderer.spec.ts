@@ -116,6 +116,40 @@ test.describe("GateInspectRenderer", () => {
 		expect(result.steps[2].hasOutput).toBe(false);
 	});
 
+	test("verification section prefers explicit active status over passed=false placeholders", async ({ page }) => {
+		const result = await page.evaluate(() =>
+			(window as any).renderInspect(
+				{ gate_id: "impl" },
+				{
+					isError: false,
+					content: [{
+						type: "text",
+						text: JSON.stringify({
+							section: "verification",
+							signalIndex: 0,
+							signalId: "sig-active",
+							summary: "1 passed, 1 running, 1 waiting, 1 blocked",
+							steps: [
+								{ name: "typecheck", type: "command", status: "passed", passed: true, duration_ms: 5000, output: "OK" },
+								{ name: "test", type: "command", status: "running", passed: false, duration_ms: 12000, output: "running tail" },
+								{ name: "review", type: "llm-review", status: "waiting", passed: false, duration_ms: 0, output: "" },
+								{ name: "qa", type: "agent-qa", status: "blocked-by-earlier-failure", passed: false, duration_ms: 0 },
+							],
+						}),
+					}],
+				},
+			),
+		);
+
+		expect(result.branch).toBe("verification");
+		expect(result.summary).toBe("1 passed, 1 running, 1 waiting, 1 blocked");
+		expect(result.steps.map((s: any) => s.status)).toEqual(["passed", "running", "waiting", "blocked"]);
+		expect(result.steps[1].isFailed).toBe(false);
+		expect(result.steps[1].showsDuration).toBe(true);
+		expect(result.steps[2].showsDuration).toBe(false);
+		expect(result.steps[3].showsDuration).toBe(false);
+	});
+
 	// ── Bug 1: Verification step expand/collapse (DOM-direct) ────────
 
 	test("failed steps start expanded, passed steps start collapsed", async ({ page }) => {
