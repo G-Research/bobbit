@@ -58,6 +58,24 @@ test("path session deep link with auth token query still parses as a session rou
 	);
 });
 
+test("hash session route wins over path session fallback", () => {
+	const route = routeWithLocation({ pathname: "/session/old", hash: "#/session/new" });
+	assert.deepEqual(
+		route,
+		{ view: "session", sessionId: "new" },
+		`ROUTE_MISMATCH: /session/old#/session/new should parse the hash session route, got ${JSON.stringify(route)}`,
+	);
+});
+
+test("hash settings route wins over path session fallback", () => {
+	const route = routeWithLocation({ pathname: "/session/old", hash: "#/settings" });
+	assert.deepEqual(
+		route,
+		{ view: "settings" },
+		`ROUTE_MISMATCH: /session/old#/settings should parse the hash settings route, got ${JSON.stringify(route)}`,
+	);
+});
+
 test("walkthrough pathname route remains unchanged", () => {
 	const route = routeWithLocation({ pathname: "/walkthrough", search: "?session=abc&tab=review" });
 	assert.deepEqual(route, {
