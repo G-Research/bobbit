@@ -15,7 +15,7 @@ import { customElement, state } from "lit/decorators.js";
 @customElement("copy-link-fallback-dialog")
 export class CopyLinkFallbackDialog extends DialogBase {
 	@state() private url = "";
-	@state() private title = "Copy session link";
+	@state() private dialogTitle = "Copy session link";
 
 	protected modalWidth = "min(520px, 92vw)";
 	protected modalHeight = "auto";
@@ -27,7 +27,7 @@ export class CopyLinkFallbackDialog extends DialogBase {
 	static show(url: string, opts?: { title?: string }) {
 		const dialog = new CopyLinkFallbackDialog();
 		dialog.url = url;
-		dialog.title = opts?.title || "Copy session link";
+		dialog.dialogTitle = opts?.title || "Copy session link";
 		document.body.appendChild(dialog);
 		dialog.open();
 		// After the input renders, select its contents so Ctrl/Cmd+C works.
@@ -60,7 +60,7 @@ export class CopyLinkFallbackDialog extends DialogBase {
 				className: "flex flex-col",
 				children: html`
 					${DialogHeader({
-						title: this.title,
+						title: this.dialogTitle,
 						description: "Press Ctrl/Cmd+C to copy, or use the button below.",
 					})}
 					<div class="mt-4">
