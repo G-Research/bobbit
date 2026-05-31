@@ -50,8 +50,8 @@ attribute on the rendered element.
 `getActiveNavId()` in `sidebar-nav.ts` returns the `data-nav-id` of the active
 row, computed from:
 
-1. The current hash route (`getRouteFromHash()`):
-   - `#/session/<id>` → `session:<id>`
+1. The current app route (`getRouteFromHash()`):
+   - `#/session/<id>` or `/session/<id>` → `session:<id>`
    - `#/goal/<id>` → `goal:<id>`
    - `#/settings/<projectId>/<tab>` → `project:<projectId>`
 2. `state.selectedSessionId` as a fallback.
