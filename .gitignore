@@ -38,6 +38,11 @@ binaries/binaries-*/bin/rg
 binaries/binaries-*/bin/rg.exe
 .e2e-real-pi
 .e2e-real-bobbit
+
+# Heavy on-demand component-test bundle (Messages.ts pulls the app graph, ~9MB).
+# Built by tests/user-message-image-render.spec.ts::beforeAll when missing/stale.
+tests/fixtures/user-message-image-render-bundle.js
+tests/fixtures/user-message-image-render-bundle.css
 .e2e-ui-pi
 .e2e-ui-bobbit
 tests/code-review-results.json
