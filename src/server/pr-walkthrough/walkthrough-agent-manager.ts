@@ -826,13 +826,13 @@ function validateYamlAgainstAuthoritativeChangeset(
 	if (authoritativeBaseSha && !shaMatches(authoritativeBaseSha, document.pr.base_sha)) {
 		errors.push({
 			path: "$.pr.base_sha",
-			message: `Must match the authoritative PR base SHA ${authoritativeBaseSha} resolved from the PR diff. Re-fetch the PR metadata/diff and retry; the walkthrough was not published.`,
+			message: `Must match the authoritative PR base SHA ${authoritativeBaseSha} resolved from the PR diff. Re-fetch the authoritative PR diff and regenerate all hunk_header, line_range, and anchor references before retrying; do not only patch this SHA. The walkthrough was not published.`,
 		});
 	}
 	if (authoritativeHeadSha && !shaMatches(authoritativeHeadSha, document.pr.head_sha)) {
 		errors.push({
 			path: "$.pr.head_sha",
-			message: `Must match the authoritative PR head SHA ${authoritativeHeadSha} resolved from the PR diff. Re-fetch the PR metadata/diff and retry; the walkthrough was not published.`,
+			message: `Must match the authoritative PR head SHA ${authoritativeHeadSha} resolved from the PR diff. Re-fetch the authoritative PR diff and regenerate all hunk_header, line_range, and anchor references before retrying; do not only patch this SHA. The walkthrough was not published.`,
 		});
 	}
 	return errors;
