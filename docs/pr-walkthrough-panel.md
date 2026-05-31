@@ -1,74 +1,112 @@
 # PR Walkthrough Panel
 
-The PR walkthrough panel is Bobbit's guided review surface for pull requests and local changesets. It opens beside chat so the transcript stays available while the walkthrough owns review navigation, line comments, card decisions, the audit draft, and GitHub export preview.
+The PR walkthrough panel is Bobbit's guided review surface for pull requests and local changesets. For GitHub PRs launched from chat, Bobbit now hosts the walkthrough in a dedicated read-only child agent session so the reviewer can watch progress, inspect the generated review cards, and ask follow-up questions in the same PR-aware chat.
 
-The product is intentionally changeset-oriented rather than GitHub-specific. Local SHA pairs, GitHub PRs, and test fixtures all resolve into the same model: a changeset reference, diff blocks with hunks and line anchors, logical review cards, warnings, and export capability metadata. GitHub lookup and submission are adapters around that model, not assumptions inside the UI.
+The panel model remains changeset-oriented rather than GitHub-specific. GitHub PRs, local SHA pairs, and fixtures all resolve into the same renderable payload: a changeset reference, diff blocks with hunks and line anchors, logical review cards, warnings, and export capability metadata. The session-hosted agent is the primary GitHub PR ingestion path; the older resolver remains for fixture/local compatibility and standalone restore.
 
-The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html) remains the UX reference. This document describes the production ingestion, persistence, export, and troubleshooting behavior around that UI.
+The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](design/pr-walkthrough-panel-prototype.html) remains the UX reference for the ready-state review surface. This document describes the production launch, agent, persistence, export, and troubleshooting behavior around that UI.
 
 ## Launch paths and surfaces
 
-Users can open the walkthrough from these entry points:
+Users can open a walkthrough from these entry points:
 
 - **Slash command** — `/walkthrough-pr <url|number>` in chat.
-  - GitHub PR URLs resolve directly from the owner, repository, and PR number in the URL.
-  - Numbers, with or without `#`, resolve against the selected session's `origin` remote.
-  - Empty invocations use the fixture walkthrough for development and compatibility.
+  - GitHub PR URLs carry the owner, repository, host, and PR number.
+  - Numbers, with or without `#`, resolve against the launching session's GitHub `origin` remote.
+  - Re-launching the same PR from the same parent focuses the existing walkthrough child when it is still usable.
 - **Git Status Widget / custom event** — the UI listens for `open-pr-walkthrough` events and accepts PR metadata, file stats, and local `baseSha` / `headSha` values.
-- **Standalone route** — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` opens the same walkthrough tab in a wide review surface.
+- **Standalone route** — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` opens an already-created walkthrough tab in a wide review surface.
+- **Compatibility resolver** — fixture and local SHA walkthroughs can still be resolved directly into a tab by the standalone/local resolver paths. Session-hosted walkthrough agents currently support GitHub PR targets only.
 
-Launches create or focus a side-panel tab with a canonical `walkthrough:<changeset-id>` id. When the resolver returns the canonical changeset id, the tab is renamed to that id so reopening the same PR or SHA pair focuses the existing tab instead of duplicating state.
+For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. The UI switches/focuses the child session, and the sidebar shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata.
 
-The same walkthrough can be used in:
+The same ready walkthrough can be reviewed in:
 
-- the normal Bobbit side panel beside chat;
-- the fullscreen / wide review surface from the side-panel toolbar;
+- the child session side panel beside chat;
+- fullscreen / wide review mode from the side-panel toolbar;
 - the standalone `/walkthrough?...` route opened from the toolbar.
 
-## Resolution pipeline
+## Session-hosted GitHub PR flow
 
-All real walkthroughs resolve through `POST /api/pr-walkthrough/resolve`. The client normally sends the active `sessionId`; callers may also pass an explicit `cwd` for tests or integrations.
+### 1. Launch or focus a child session
 
-### CWD and worktree selection
+`/walkthrough-pr <url|number>` calls `POST /api/pr-walkthrough/launch` with the launching `sessionId` and target. The server:
 
-Resolution is session-aware:
+1. resolves the parent session and cwd;
+2. canonicalizes the GitHub target;
+3. checks for an existing job for the same `(parentSessionId, canonicalKey)`;
+4. creates a normal read-only child session with role `pr-walkthrough`;
+5. persists a walkthrough job with status `starting`, then `waiting_for_yaml`;
+6. opens the walkthrough tab in the child session and prompts the agent to investigate.
 
-1. An explicit request `cwd` wins.
-2. Otherwise the server uses the live or persisted session worktree path.
-3. If the session has no worktree, it uses the session cwd.
-4. If no session path is available, it falls back to the gateway default cwd.
+The child title is `PR #<number> Walkthrough` when the PR number is known. If launch preflight fails, the failure is surfaced in the child transcript and panel as a structured job error.
 
-This matters because local SHAs and PR numbers are interpreted in the selected session's checkout, not in the primary project worktree. PR-number resolution also uses that checkout's `origin` remote to infer the GitHub owner and repository.
+### 2. Empty waiting panel
 
-### Local SHA walkthroughs
+The child session initially looks like a goal assistant: chat on one side, PR walkthrough panel on the other. The panel is intentionally empty while the agent investigates. It shows a waiting state explaining that cards appear only after the read-only walkthrough agent calls `submit_pr_walkthrough_yaml` with valid YAML.
 
-Local walkthroughs require `baseSha` and `headSha`. The server verifies both refs, reads git shortstat and name-status metadata, and parses a unified diff with rename/copy detection enabled.
+Progress is reported in chat by the agent, not by a panel progress bar. The panel may also show validation or runtime errors from the job record, but it does not scrape chat messages into cards.
 
-The result includes:
+### 3. Read-only investigation
 
-- full base/head SHAs and local provider metadata;
-- changed file, addition, and deletion counts;
-- one diff block per parsed file, with status, old path when applicable, hunk headers, stable line ids, old-line numbers, and new-line numbers;
-- warnings for truncation, generated files, binary files, omitted files, and other parse limitations.
+Walkthrough sessions receive a narrow tool set:
+
+- `readonly_bash` for read-only PR/diff/file inspection;
+- `submit_pr_walkthrough_yaml` for publishing the completed walkthrough.
+
+They do not receive unrestricted `bash`, file write/edit tools, build/test/install commands, commit/push tools, or GitHub review/comment submission tools.
+
+`readonly_bash` enforces policy before execution. At a high level it allows commands such as:
+
+- `gh pr view` and `gh pr diff` for the launched PR;
+- scoped `gh api` reads for the launched repository and PR;
+- read-only `git diff`, `git show`, `git log`, `git rev-parse`, and `git status`;
+- bounded file/search commands such as `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `pwd`, and `sed`.
+
+It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments.
+
+### 4. YAML submission is the completion path
+
+The walkthrough panel is populated only through `submit_pr_walkthrough_yaml`. The agent must submit exactly one YAML document matching the PR walkthrough schema. A final chat answer is never treated as completion.
+
+The tool posts to the internal submit endpoint with the child `sessionId`, job id, YAML text, and a scoped submit proof. The gateway validates:
+
+- YAML syntax and single-document shape;
+- required fields, enum values, size limits, and cross-field target consistency;
+- authoritative PR identity against the launched target;
+- hunk/file references against the fetched or local diff where possible.
+
+On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
+
+On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, selects the child walkthrough tab, and enters fullscreen review mode when the child is active. The tool response tells the agent to stay available for follow-up questions.
+
+### 5. Follow-up chat remains live
+
+A successful YAML submission does not terminate the child session. The user can ask follow-up questions in the walkthrough chat while the PR context, previous investigation, and tool results remain loaded. Further `submit_pr_walkthrough_yaml` calls are rejected once the job is `ready`; the published payload is immutable for that job.
+
+## Target scoping and canonicalization
+
+GitHub PR targets are canonicalized so repeated launches focus the same child instead of duplicating work:
+
+- Full PR URL: `github:<owner>/<repo>#<number>`.
+- Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key.
+
+A number-only target fails with an actionable error when the session worktree has no GitHub `origin` remote. Passing a full PR URL avoids that dependency.
+
+The child tool runtime receives scoped environment variables for the launched GitHub target, including provider, owner, repo, and number. `readonly_bash` uses those values to reject cross-repo and cross-PR GitHub reads. The submit tool also receives a per-job submit proof; only its hash is persisted.
+
+## Local changesets and standalone behavior
+
+Session-hosted walkthrough agents currently support GitHub PRs only. Launching an agent for a local `baseSha` / `headSha` changeset returns `LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED` and tells the caller to use the standalone local walkthrough resolver.
+
+The existing standalone/local resolver behavior remains relevant for:
+
+- fixtures and development compatibility;
+- local SHA-pair walkthroughs;
+- restoring already-persisted walkthrough payloads by `changesetId`;
+- the standalone `/walkthrough?...` route for an existing tab.
 
 Local walkthroughs can produce review drafts and export previews, but they cannot submit to GitHub because there is no provider review target.
-
-### GitHub PR walkthroughs
-
-GitHub walkthroughs accept either a PR URL or a PR number:
-
-- A URL carries owner, repository, host, and PR number.
-- A number requires a GitHub `origin` remote in the resolved cwd so Bobbit can infer owner and repository.
-
-The adapter fetches PR metadata and changed files from the GitHub API. If the base and head commits are available locally in the session worktree, Bobbit prefers local per-file patches so review hunks contain richer context than the GitHub files API often returns. Otherwise it uses the patch content returned by GitHub.
-
-`GITHUB_TOKEN` or `GH_TOKEN` is optional for public PR resolution, but unauthenticated requests have lower rate limits and cannot submit reviews. Private PRs and review submission require a token with permission to read the repository and create pull request reviews.
-
-For GitHub Enterprise or test environments, the adapter also honors the configured API base URL and trusted host allowlist. Untrusted hosts are rejected before any external request is made.
-
-### GitHub metadata with local SHAs
-
-If a request includes both GitHub metadata and local `baseSha` / `headSha`, Bobbit resolves the diff locally and decorates the changeset as GitHub. This is useful when the commits are already present in the worktree or when an integration provides PR metadata but export credentials are unavailable. Submission remains preview-only unless a real GitHub adapter target and credentials are available.
 
 ## Changeset and card model
 
@@ -81,28 +119,33 @@ Key concepts:
 - **Hunk** — original hunk header plus ordered line records.
 - **Line** — stable id, kind (`context`, `add`, `del`), side (`context`, `new`, `old`), text, and old/new line numbers for review anchors.
 - **Card** — a logical review unit in one of the walkthrough phases. A card can contain multiple diff blocks across one or more files.
-- **Warning** — visible ingestion or export issue with a severity, code, message, and optional file path.
+- **Warning** — visible ingestion, mapping, validation, or export issue with a severity, code, message, and optional file path.
 
-The UI never needs to know whether a diff came from local git or GitHub. It renders the same cards, warnings, comments, decisions, draft review, and export preview for every provider.
+The UI never needs to know whether cards came from the session-hosted YAML flow or the compatibility resolver. It renders the same cards, warnings, comments, decisions, draft review, and export preview for every provider.
 
-## Logical card synthesis
+## YAML-to-card mapping
 
-After resolving files and diff blocks, the server attempts to create logical cards.
+Validated YAML is mapped into the existing card model:
 
-1. **Model-backed LLM attempt** — when a synthesis adapter or configured review/session model is available, Bobbit sends a bounded JSON description of the changeset, files, warnings, and diff block ids. The model must return JSON cards that reference only known diff block ids and valid line ids.
-2. **Validation** — invalid phases, missing titles/summaries, unknown diff blocks, duplicate block assignments, and bad suggested-comment anchors are discarded.
-3. **Deterministic fallback** — if the model is unavailable, times out, or returns no valid cards, Bobbit groups cards deterministically by path area, change weight, and special file category.
+- `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card.
+- `design_decisions` become Key design choices cards with trade-offs, alternatives, suggested concerns, and linked hunks.
+- `review_chunks` become significant, other, or audit review cards with diff-backed hunks and suggested concerns.
+- `omissions_and_followups` feed Other + omissions guidance and card-level suggested comments.
+- `audit` feeds the final Audit card and draft reviewer checklist.
+- `display.phase_order` and `display.chunk_order` influence visible ordering while preserving the known phase set.
 
-The fallback always starts with an orientation card. It then assigns representative diff blocks to design, significant, other, and audit phases where possible. Generated, binary, renamed, deleted, copied, and truncated files are grouped into lower-signal or edge-case cards so they are visible without overwhelming the main review path. Empty diffs resolve to an orientation-only walkthrough instead of a broken panel.
+Hunk references are best-effort mapped to parsed diff blocks by file path and hunk header. Unmapped references are preserved as warnings or card suggestions rather than silently disappearing.
+
+The older model-backed synthesis and deterministic grouping remain compatibility behavior for direct resolver paths. The session-hosted GitHub flow does not populate cards from chat text or from silent model synthesis in the launcher.
 
 ## Review flow
 
 The walkthrough is organised into five phases:
 
-1. **Orientation** — confirms scope, refs, provider metadata, stats, and warnings.
-2. **Key design choices** — highlights the largest or most architecture-relevant path group.
+1. **Orientation** — confirms scope, refs, provider metadata, stats, warnings, original PR body, inferred author intent, and merge assessment.
+2. **Key design choices** — highlights architecture or product decisions and their trade-offs.
 3. **Significant changes** — reviews high-signal implementation diffs.
-4. **Other + omissions** — covers smaller changes and special files.
+4. **Other + omissions** — covers smaller changes, expected artifacts, and follow-up concerns.
 5. **Audit** — checks remaining coverage and renders the final draft review.
 
 Every phase can contain normal diff-backed cards. A card can span multiple files or hunks when that better matches the reviewer story. Audit cards use the same line comments, card comments, suggestions, diff expansion, and Like/Dislike controls as other cards, then render the copyable draft review.
@@ -154,23 +197,27 @@ The draft can always be copied, even when provider export is unavailable.
 
 ## Persistence and reload
 
-Persistence has two layers:
+Persistence has four layers:
 
-- **Resolved walkthrough payload** — the server stores resolved changeset/cards/warnings/export metadata under Bobbit state by `changesetId`. Stored payloads are schema-versioned and sanitized so auth tokens or raw headers are not persisted.
+- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only identity.
+- **Walkthrough job record** — the PR walkthrough agent store persists status (`starting`, `waiting_for_yaml`, `validation_failed`, `ready`, or `error`), target, tab id, last validation error, warnings, submitted timestamp, payload timestamp, and a submit-proof hash. Sensitive values such as tokens and raw submit proofs are sanitized.
+- **Resolved walkthrough payload** — after valid YAML, the existing walkthrough store persists final changeset/cards/diff blocks/warnings/export metadata under the `changesetId`.
 - **Reviewer interaction state** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`.
 
-When the app reloads, Bobbit restores the side-panel tab. If the tab has no cards yet, it calls `GET /api/pr-walkthrough/<changeset-id>` to reload the server payload. The component then restores browser interaction state only when the card checksum still matches, which avoids applying old comments to a changed diff.
+When the app reloads or the user selects a walkthrough child, the UI calls `GET /api/pr-walkthrough/session/<childSessionId>` to restore waiting, validation-failed, ready, or error job state. Ready tabs then call `GET /api/pr-walkthrough/<changeset-id>` if cards are not already loaded.
+
+When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. This lets an interrupted waiting session continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
 
 Because side panel, fullscreen, and standalone route all refer to the same tab id and persistence key, comments and decisions survive tab switching, wide review, standalone routing, and reload. Browser-local interaction state is not shared across browsers or devices.
 
 ## GitHub export
 
-GitHub export is deliberately two-step:
+GitHub export is deliberately two-step and user-confirmed:
 
 1. **Preview** — `POST /api/pr-walkthrough/<changeset-id>/export/preview` maps the current draft to a review body and per-line GitHub review comments.
 2. **Confirmed submit** — `POST /api/pr-walkthrough/<changeset-id>/export/submit` requires `confirm: true`. The UI only sends this after the reviewer clicks **Confirm submit to GitHub** in the preview dialog.
 
-Bobbit never submits comments to GitHub during resolution or preview.
+The walkthrough analysis agent never submits comments or reviews to GitHub. `readonly_bash` also blocks GitHub review/comment actions during analysis.
 
 Preview behavior:
 
@@ -190,14 +237,16 @@ Unavailable cases still show a safe preview/copy path. Local changesets, unauthe
 
 ## Edge states and warnings
 
-The panel renders loading, error, empty, and warning states instead of falling back to broken UI.
+The panel renders waiting, validation-failed, loading, error, empty, and warning states instead of falling back to broken UI.
 
 Common warning/error categories:
 
-- **Missing PR** — GitHub `404` responses return a structured error and the panel shows the resolver failure.
+- **Missing PR** — GitHub `404` responses return a structured error and the panel shows the failure.
 - **Authentication failure** — GitHub `401` indicates the configured token was rejected.
 - **Permission failure** — GitHub `403` with remaining rate limit usually means the token cannot access the repository or PR.
 - **Rate limit** — GitHub `403` with no remaining quota reports rate limiting; configure a token or retry later.
+- **Validation failure** — invalid YAML keeps the panel empty and returns retryable field-level errors.
+- **Agent runtime failure** — launch or runtime failures before YAML publication become job errors shown in the child session and panel.
 - **Large/truncated diffs** — local diff output, GitHub patch bytes, per-file line counts, or changed-file pages can be truncated. Warnings identify the affected files when possible.
 - **Generated files** — generated-looking paths are flagged as low-signal and grouped into edge-case cards.
 - **Binary files** — binary changes have no reviewable text hunks and cannot receive GitHub line comments.
@@ -211,41 +260,49 @@ Warnings are shown at the top of the panel and again in export preview when they
 
 The walkthrough API is internal to the Bobbit UI but useful for tests and integrations:
 
-- `POST /api/pr-walkthrough/resolve` — resolve a fixture, local SHA pair, GitHub PR, or GitHub metadata plus local SHAs. Stores the resolved payload.
-- `GET /api/pr-walkthrough/<changeset-id>` — reload a stored walkthrough payload.
+- `POST /api/pr-walkthrough/launch` — create or focus a session-hosted GitHub PR walkthrough child. Returns the job, `childSessionId`, `changesetId`, tab id, status, and whether the job was newly created.
+- `GET /api/pr-walkthrough/jobs/<jobId>` — return the sanitized persisted job record.
+- `GET /api/pr-walkthrough/session/<childSessionId>` — return the sanitized job for a child session so the UI can restore waiting/failed/ready/error state.
+- `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; requires scoped session access and submit proof.
+- `POST /api/pr-walkthrough/resolve` — compatibility resolver for fixture/local/direct walkthrough payloads. Stores the resolved payload.
+- `GET /api/pr-walkthrough/<changeset-id>` — reload a stored ready payload.
 - `POST /api/pr-walkthrough/<changeset-id>/export/preview` — build a provider review preview from a draft.
 - `POST /api/pr-walkthrough/<changeset-id>/export/submit` — submit a provider review only when `confirm: true` and export is available.
 
-Important request fields for resolve:
+Important launch fields:
 
-- `sessionId` — lets the server use the selected session worktree/cwd and session model.
-- `cwd` — explicit repository path, mainly for tests and integrations.
-- `baseSha`, `headSha` — required for local SHA resolution.
-- `prUrl`, `prNumber`, `provider` — GitHub resolution inputs.
-- `fixture` — explicit fixture fallback.
+- `sessionId` — launching session; required for child ownership, cwd/model inheritance, and number-only PR scoping.
+- `prUrl` — full GitHub PR URL.
+- `prNumber` — GitHub PR number; requires a GitHub `origin` remote in the launching session cwd.
+- `owner`, `repo` — optional explicit GitHub target fields when a URL is not supplied.
+- `cwd` — explicit repository path, mainly for tests or integrations.
+- `baseSha`, `headSha` — local SHA hints. Agent-hosted local changesets are currently rejected; compatibility resolver paths can still use SHA pairs.
 
 ## Credentials and configuration
 
 - `GITHUB_TOKEN` / `GH_TOKEN` — used for GitHub API requests and required for review submission.
 - `BOBBIT_GITHUB_API_BASE_URL` — overrides the GitHub API base URL, useful for GitHub Enterprise or tests.
 - `BOBBIT_GITHUB_TRUSTED_HOSTS` — comma-separated allowlist for additional trusted GitHub hosts.
-- `BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER` — optional module path for a custom synthesis adapter.
+- `BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER` — optional module path for compatibility resolver synthesis.
 
-For model-backed synthesis without a custom adapter, Bobbit uses the selected session model when available, then the default review model, then the default session model. If none are configured or the model output is invalid, deterministic fallback cards are used.
+For compatibility resolver model synthesis without a custom adapter, Bobbit uses the selected session model when available, then the default review model, then the default session model. The session-hosted GitHub flow instead relies on the child walkthrough agent and validated YAML submission.
 
 ## Limitations
 
-- Browser interaction state is local to the browser storage for the tab id; it is not synchronized between devices.
+- Session-hosted walkthrough agents currently support GitHub PRs only.
+- Number-only launch depends on the launching session worktree having a GitHub `origin` remote.
+- Browser interaction state is local to the browser storage for the tab id; it is not synchronized between browsers or devices.
 - GitHub line-comment export can only submit comments with valid GitHub review anchors. Card-level and unmappable comments remain in the review body/preview.
 - Binary files and files without text patches cannot receive line comments on GitHub.
 - Large diffs may show representative hunks and truncation warnings rather than every changed line.
-- PR-number-only launch depends on the session worktree having a GitHub `origin` remote.
 - Unauthenticated public PR resolution is best-effort and subject to GitHub's lower anonymous API rate limits.
 
 ## Troubleshooting
 
 - **`/walkthrough-pr 123` cannot find the repository** — select a session whose worktree has a GitHub `origin` remote, or use the full PR URL.
-- **Invalid base/head ref** — make sure both SHAs exist in the session worktree. Fetch the branch or use the correct session.
+- **Local changeset launch is unsupported** — use the standalone/local resolver flow for `baseSha` / `headSha` walkthroughs; session-hosted agents are GitHub-only.
+- **Panel stays empty** — the agent has not successfully called `submit_pr_walkthrough_yaml`; check the child transcript and validation state.
+- **YAML validation failed** — fix the field-level errors returned by the tool and call `submit_pr_walkthrough_yaml` again from the same child session.
 - **Private PR fails or shows permission errors** — set `GITHUB_TOKEN` or `GH_TOKEN` with repository read and pull request review permissions, then retry.
 - **Rate limited** — configure a token or wait for GitHub's rate limit reset.
 - **Export button only shows copy/preview** — the walkthrough is local, unauthenticated, missing a GitHub target, or export capability was disabled by the resolver.
@@ -257,9 +314,11 @@ For model-backed synthesis without a custom adapter, Bobbit uses the selected se
 
 Coverage is split across unit, API E2E, and browser E2E tests:
 
-- diff parsing and changeset ids;
-- card synthesis, LLM validation, deterministic fallback, and store sanitization;
-- local SHA resolution, persisted reload, large diff warnings, empty diffs, GitHub errors, and export confirmation enforcement;
-- browser behavior for loading states, real resolved cards, warning banners, persistence across reload/fullscreen/standalone, export preview, confirmed submit, error states, responsive layout, and the original MVP interaction contract.
+- YAML schema validation and YAML-to-card mapping;
+- read-only command policy and walkthrough tool metadata;
+- session child metadata, submit proof restore, job persistence, and duplicate launch behavior;
+- launch API, invalid/valid YAML submission, keeping the child alive after success, and job restore;
+- browser behavior for child session launch/focus, empty waiting panel, validation retry state, final cards, fullscreen on success, reload persistence, standalone route, and explicit export confirmation;
+- compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
-Use these tests as the pinning contract when changing resolver behavior, card synthesis, persistence, or panel UX.
+Use these tests as the pinning contract when changing walkthrough launch, resolver compatibility, YAML mapping, persistence, readonly policy, or panel UX.
