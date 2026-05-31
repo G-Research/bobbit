@@ -2,22 +2,22 @@
 
 ## Summary
 
-Launching a PR walkthrough should create a first-class, read-only child agent session instead of resolving cards silently in the launching session. The child session owns the walkthrough side panel, reports progress in chat, submits one validated YAML document through a walkthrough-only tool, then stays alive for follow-up questions with the PR context loaded.
+Launching a PR walkthrough creates a first-class, read-only child agent session instead of resolving cards silently in the launching session. Before that child starts, the server resolves the PR metadata and diff once, sanitizes it, and persists a versioned analysis bundle for the job. The child session owns the walkthrough side panel, reports progress in chat, reads the persisted bundle through a scoped tool, submits one validated YAML document through a walkthrough-only tool, then stays alive for follow-up questions.
 
-This design replaces the current `POST /api/pr-walkthrough/resolve` model-backed synthesis path with an asynchronous session-hosted workflow while preserving the existing walkthrough panel, persistence, standalone route, and explicit GitHub export flow.
+This design replaces the old `POST /api/pr-walkthrough/resolve` model-backed synthesis path with an asynchronous session-hosted workflow while preserving the existing walkthrough panel, persistence, standalone route, and explicit GitHub export flow. The launch-time analysis bundle is the authoritative source for YAML hunk mapping and final payload construction; submission-time PR diff re-fetch is not part of the model.
 
-## Current state
+## Relevant modules
 
-Relevant current implementation:
+The session-hosted walkthrough path is split between launch/session ownership, launch-time bundle persistence, YAML mapping, and final payload/export storage:
 
 - `src/app/pr-walkthrough.ts`
-  - `parseWalkthroughPrCommand()` parses `/walkthrough-pr`.
-  - `openPrWalkthroughPanel()` immediately creates a `walkthrough:<changesetId>` tab in the active session and calls `resolvePrWalkthrough()`.
-  - `resolvePrWalkthrough()` calls `POST /api/pr-walkthrough/resolve` and patches the same tab to `ready` or `error`.
-  - `restorePrWalkthroughPanel()` reloads stored payloads with `GET /api/pr-walkthrough/:changesetId`.
+  - Parses `/walkthrough-pr`, launches or focuses the child session, restores job-backed panels, and reloads final payloads with `GET /api/pr-walkthrough/:changesetId`.
 - `src/server/pr-walkthrough/routes.ts`
-  - `handlePrWalkthroughApiRoute()` handles resolve, get, export preview, and export submit.
-  - `resolveWalkthrough()` fetches GitHub/local diff data, parses diff blocks, then calls `synthesiseWalkthroughCards()` through `card-synthesis.ts`.
+  - Handles launch, job/session restore, scoped bundle reads, YAML submission, legacy resolve compatibility, and export preview/submit routes.
+- `src/server/pr-walkthrough/walkthrough-agent-manager.ts`
+  - Owns job launch, duplicate detection, child session creation, bundle-first prompts, YAML submission, and job state transitions.
+- `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`
+  - Stores the sanitized launch-time analysis bundle and serves bounded `read_pr_walkthrough_bundle` reads for the owning job/session.
 - `src/server/pr-walkthrough/walkthrough-store.ts`
   - Stores final `WalkthroughStorePayload` as JSON under `.bobbit/state/pr-walkthrough/v1/` keyed by `changesetId`.
 - `src/shared/pr-walkthrough/types.ts`
@@ -37,10 +37,11 @@ Goals:
 
 1. `/walkthrough-pr <url|number>` or equivalent actions create or focus a dedicated PR walkthrough child session beneath the launching session.
 2. The child session opens with chat plus an empty waiting walkthrough panel.
-3. The agent can only perform read-only PR investigation and must submit valid YAML via `submit_pr_walkthrough_yaml` to populate the panel.
-4. Invalid YAML gives actionable retry feedback; no partial cards are rendered.
-5. Successful submission persists a YAML-derived payload, switches the child to fullscreen review mode, and leaves the agent alive.
-6. Existing final review export remains explicit and user-confirmed.
+3. Launch resolves and persists a sanitized, versioned analysis bundle before the analysis child session is created or prompted.
+4. The agent can only perform read-only PR investigation, starts from `read_pr_walkthrough_bundle`, and must submit valid YAML via `submit_pr_walkthrough_yaml` to populate the panel.
+5. Invalid YAML gives actionable retry feedback; no partial cards are rendered.
+6. Successful submission maps against the stored bundle, persists a YAML-derived payload, switches the child to fullscreen review mode, and leaves the agent alive.
+7. Existing final review export remains explicit and user-confirmed.
 
 Non-goals:
 
@@ -59,10 +60,13 @@ Add a small PR walkthrough job/session layer under `src/server/pr-walkthrough/`:
   - Owns job lifecycle state, dedupe, idle reminder, and event broadcasts.
   - Wraps `SessionManager.createSession()` rather than `createDelegateSession()`.
 - `walkthrough-agent-store.ts`
-  - Persists job/session metadata and validation state separately from final card payloads.
+  - Persists job/session metadata, analysis bundle metadata, and validation state separately from final card payloads.
+- `walkthrough-analysis-bundle.ts`
+  - Persists the sanitized launch-time PR metadata and parsed diff bundle under a versioned artifact path.
+  - Serves bounded bundle reads for the scoped analysis tool and adapts the bundle back to the YAML mapper's parsed-diff shape.
 - `walkthrough-yaml-schema.ts`
   - Parses and validates the submitted YAML document.
-  - Maps validated YAML plus parsed diff blocks into existing `WalkthroughStorePayload`.
+  - Maps validated YAML plus parsed diff data from the stored bundle into existing `WalkthroughStorePayload`.
 - `walkthrough-readonly-policy.ts`
   - Shared command/tool allow/deny checks for the walkthrough role and tests.
 
@@ -108,10 +112,18 @@ export interface PrWalkthroughJobRecord {
   payloadUpdatedAt?: string;
   warnings?: WalkthroughWarning[];
   error?: { code: string; message: string; retryable?: boolean };
+  analysisBundle?: {
+    schemaVersion: 1;
+    kind: "pr_walkthrough_analysis_bundle";
+    artifactId: string;
+    checksum: string;
+    generatedAt: string;
+    files: number;
+  };
 }
 ```
 
-Persist under `.bobbit/state/pr-walkthrough-agents/v1/<jobId>.json`, plus an index by `(parentSessionId, canonicalKey)` for duplicate prevention. The record should be sanitized with the same sensitive-key discipline as `walkthrough-store.ts`.
+Persist under `.bobbit/state/pr-walkthrough-agents/v1/<jobId>.json`, plus an index by `(parentSessionId, canonicalKey)` for duplicate prevention. The record should be sanitized with the same sensitive-key discipline as `walkthrough-store.ts`. `analysisBundle` is metadata only; the full bundle lives in the bundle store and must not include tokens, auth headers, submission proofs, raw request headers, or other sensitive values.
 
 Add `walkthroughAgent` metadata to persisted session info through `SessionManager.updateSessionMeta()`:
 
@@ -128,6 +140,65 @@ Add `walkthroughAgent` metadata to persisted session info through `SessionManage
 ```
 
 This implementation must add a first-class `parentSessionId` / `childKind: "pr-walkthrough"` relationship for visible child sessions. `delegateOf` and `createDelegateSession()` are explicitly out of scope for PR walkthrough launch, sidebar nesting, lifecycle, cleanup, and persistence. Existing delegate rendering may be used only as a visual reference when implementing the new generic child-session renderer.
+
+### Launch-time analysis bundle
+
+Each job has one authoritative analysis bundle. Launch resolves the PR metadata, body, file stats, export capability, warnings, limits, and parsed diff/hunks once, then persists the sanitized bundle before the child session exists. This removes network and GitHub-rate-limit dependency from YAML submission, prevents diff drift between agent analysis and server mapping, and lets launch fail early before a waiting agent is created without usable input.
+
+Bundle artifacts are versioned separately from the final walkthrough payload:
+
+```ts
+export interface PrWalkthroughAnalysisBundle {
+  schema_version: 1;
+  kind: "pr_walkthrough_analysis_bundle";
+  generated_at: string;
+  job_id: string;
+  target: {
+    provider: "github" | string;
+    owner?: string;
+    repo?: string;
+    number?: number;
+    url?: string;
+  };
+  changeset: {
+    base_sha?: string;
+    head_sha?: string;
+    title?: string;
+    body?: string;
+    files_changed?: number;
+    additions?: number;
+    deletions?: number;
+  };
+  limits?: Record<string, unknown>;
+  warnings: WalkthroughWarning[];
+  export?: { provider: string; available: boolean; [key: string]: unknown };
+  files: Array<{
+    path: string;
+    old_path?: string;
+    status?: string;
+    additions?: number;
+    deletions?: number;
+    is_binary?: boolean;
+    is_generated?: boolean;
+    is_truncated?: boolean;
+    hunks: Array<{
+      header: string;
+      old_start?: number;
+      old_lines?: number;
+      new_start?: number;
+      new_lines?: number;
+      lines: Array<{
+        kind: "context" | "add" | "del";
+        old_line?: number;
+        new_line?: number;
+        text: string;
+      }>;
+    }>;
+  }>;
+}
+```
+
+The implementation may store the bundle as one JSON artifact or split very large jobs into a manifest plus per-file artifacts, but the agent-facing contract stays versioned and bounded. `WalkthroughStorePayload` remains the final renderable/exportable review format and is still written only after valid YAML maps successfully.
 
 ## Launch API
 
@@ -211,23 +282,27 @@ For compatibility during migration, `resolve` can remain for fixture/local tests
    - GitHub number without URL: `github:<parent repo owner>/<parent repo>#<number>` when inferable; otherwise `pr:<number>` scoped by parent.
    - Local sha pair: `local:<baseSha>..<headSha>`.
 4. Check the job index for an active child with same `(parentSessionId, canonicalKey)` and return it if found.
-5. Pre-generate `jobId` and `childSessionId` so the submission tool resolver exists before the agent starts.
+5. Pre-generate `jobId` and `childSessionId` so scoped bundle and submission tool resolvers can bind to stable ids before the agent starts.
 6. Persist a `starting` job record.
-7. Create a normal session with `SessionManager.createSession(cwd, undefined, undefined, undefined, opts)`:
+7. Resolve the full PR metadata and diff for the launch target, sanitize it, persist a versioned analysis bundle, and attach bundle metadata to the job record. If this resolution fails, return the existing structured launch error before creating or prompting the child session; do not leave a waiting agent with no bundle.
+8. Create a normal session with `SessionManager.createSession(cwd, undefined, undefined, undefined, opts)`:
    - `sessionId: childSessionId`
    - `projectId`, `sandboxed`, and sandbox cwd inherited from the parent
    - `roleName: "pr-walkthrough"`, `role: "pr-walkthrough"`, `accessory: "review"`
-   - `allowedTools` set to the explicit read-only list plus `submit_pr_walkthrough_yaml`
-   - `rolePrompt` containing the analysis instructions and YAML contract
+   - `allowedTools` set to the explicit read-only list plus `read_pr_walkthrough_bundle` and `submit_pr_walkthrough_yaml`
+   - `rolePrompt` containing the bundle-first analysis instructions and YAML contract
    - `skipAutoModel`/`initialModel` inherited from parent when appropriate
-8. Set title to `PR #123 Walkthrough` / `PR Walkthrough` and persist metadata.
-9. Create/update the child session panel tab to waiting state by broadcasting a WebSocket event.
-10. Send the first prompt asynchronously with target details, allowed operations, required progress chat, and the YAML schema.
-11. Subscribe to `agent_end` or session status transitions. If no successful submission exists, enqueue a reminder prompt instead of marking complete.
+9. Set title to `PR #123 Walkthrough` / `PR Walkthrough` and persist metadata.
+10. Create/update the child session panel tab to waiting state by broadcasting a WebSocket event.
+11. Send the first prompt asynchronously with target details, allowed operations, required progress chat, bundle-read instructions, and the YAML schema.
+12. Subscribe to `agent_end` or session status transitions. If no successful submission exists, enqueue a reminder prompt instead of marking complete.
 
 The first prompt should explicitly say:
 
-- Investigate using read-only commands and tools only.
+- Start by calling `read_pr_walkthrough_bundle` in `manifest` or `summary` mode.
+- Treat the persisted bundle as authoritative for PR body, base/head SHA, stats, files, hunks, warnings, limits, and export capability.
+- Use bounded `mode=file` reads by path or index for detailed hunk inspection.
+- Use `readonly_bash` only for additional read-only investigation; never as a way to read arbitrary bundle files.
 - Do not edit files, run tests/builds/checks, install dependencies, start servers, commit, push, or submit GitHub reviews/comments.
 - Report rough percentage progress in chat.
 - Finish only by calling `submit_pr_walkthrough_yaml` with one YAML document.
@@ -307,6 +382,44 @@ Add a first-class child relationship to session metadata and rendering:
 
 
 
+## Bundle read tool
+
+### Tool registration
+
+The walkthrough-only tool group includes `read_pr_walkthrough_bundle` alongside the YAML submit tool.
+
+Tool name: `read_pr_walkthrough_bundle`.
+
+The extension registers only when `BOBBIT_WALKTHROUGH_JOB_ID` and `BOBBIT_SESSION_ID` are present. It calls the internal bundle endpoint with those environment-derived ids and ignores caller-supplied identity fields. The gateway validates that the session owns the job before returning data.
+
+Internal endpoint:
+
+`POST /api/internal/pr-walkthrough/bundle`
+
+Request parameters:
+
+```json
+{
+  "sessionId": "child-session-id",
+  "jobId": "prw_...",
+  "mode": "manifest",
+  "path": "src/example.ts",
+  "index": 0,
+  "offset": 0,
+  "limit": 50,
+  "hunkOffset": 0,
+  "hunkLimit": 50
+}
+```
+
+Read modes:
+
+- `summary` / `manifest`: return bundle header, changeset, limits, warnings, export capability, and a bounded file manifest.
+- `files`: return a bounded page of file manifests.
+- `file`: return one file by `path`, `old_path`, or `index`, with bounded hunk output.
+
+The tool does not read arbitrary filesystem paths, does not expose raw artifact paths, and does not loosen `readonly_bash`. Large PRs should be explored by reading the manifest first, then bounded per-file/hunk slices.
+
 ## YAML submission tool
 
 ### Tool registration
@@ -361,7 +474,20 @@ Response on retryable validation failure should be a tool error with field-level
 }
 ```
 
-Allow this internal endpoint in `src/server/auth/sandbox-guard.ts` only for the submitting session/job. This mirrors `verification_result` but must not be goal-scoped.
+If the stored launch-time bundle is missing, corrupt, schema-incompatible, or otherwise unusable, submission returns a deterministic retryable error instead of fetching the PR diff again:
+
+```json
+{
+  "ok": false,
+  "code": "PR_WALKTHROUGH_BUNDLE_MISSING",
+  "message": "PR walkthrough analysis bundle is missing or unusable. Relaunch the walkthrough so the PR diff can be resolved before analysis.",
+  "retryable": true
+}
+```
+
+The correct user action is to relaunch the walkthrough. The server must not silently recover by re-fetching GitHub/local diff data at submit time, because that can drift from the agent's analysis input.
+
+Allow these internal endpoints in `src/server/auth/sandbox-guard.ts` only for the owning session/job. This mirrors `verification_result` but must not be goal-scoped.
 
 ### Validation implementation
 
@@ -438,16 +564,17 @@ mapYamlToWalkthroughPayload(document, parsedDiff, job): WalkthroughStorePayload;
 
 Mapping strategy:
 
-1. Re-fetch or load the PR diff blocks read-only on submission using the same GitHub/local parsing utilities currently used by `resolveWalkthrough()`.
-2. Build an Orientation card from `walkthrough.context`, `merge_assessment`, and `pr.original_description.body`.
-3. Build Design cards from `design_decisions`.
-4. Build review cards from `review_chunks`, using `phase` to choose `phaseId`.
-5. Build Other cards from `omissions_and_followups` where they are not already represented by a chunk.
-6. Build Audit card from `walkthrough.audit`.
-7. Map `relevant_hunks` to existing `PrWalkthroughDiffBlock`/`PrWalkthroughHunk` by file path and exact or normalized hunk header.
-8. For unmapped hunks, keep visible warnings in `warnings` and a card-level note instead of dropping them.
-9. Map `suggested_concerns[*].anchors` to `PrWalkthroughSuggestedComment` when file+hunk+line can be resolved; otherwise demote to `cardSuggestions` with an `unmapped_anchor` warning.
-10. Preserve `pr.original_description.body` in `changeset.prBody` and optionally in card metadata so Orientation can show/collapse original PR text.
+1. Load the stored launch-time analysis bundle for the job and adapt it to the existing parsed-diff mapper input. Do not fetch GitHub/local diff data during YAML submission.
+2. If the bundle is missing or unusable, fail with retryable `PR_WALKTHROUGH_BUNDLE_MISSING` and tell the user to relaunch.
+3. Build an Orientation card from `walkthrough.context`, `merge_assessment`, and the bundle's original PR body.
+4. Build Design cards from `design_decisions`.
+5. Build review cards from `review_chunks`, using `phase` to choose `phaseId`.
+6. Build Other cards from `omissions_and_followups` where they are not already represented by a chunk.
+7. Build Audit card from `walkthrough.audit`.
+8. Map `relevant_hunks` to existing `PrWalkthroughDiffBlock`/`PrWalkthroughHunk` by file path and exact or normalized hunk header from the bundle.
+9. For unmapped hunks, keep visible warnings in `warnings` and a card-level note instead of dropping them.
+10. Map `suggested_concerns[*].anchors` to `PrWalkthroughSuggestedComment` when file+hunk+line can be resolved; otherwise demote to `cardSuggestions` with an `unmapped_anchor` warning.
+11. Preserve the bundle's original PR body in `changeset.prBody` and optionally in card metadata so Orientation can show/collapse original PR text.
 
 The existing `card-synthesis.ts` should remain as fallback/fixture code during migration but should not be the primary path for agent-hosted walkthroughs.
 
@@ -459,10 +586,11 @@ Prompt-only restrictions are insufficient. Enforce with both allowlisted tools a
 
 The walkthrough session should receive an explicit `allowedTools` list:
 
+- primary PR input: `read_pr_walkthrough_bundle`;
 - read/search/navigation: `read`, `grep`, `find`, `ls`, `read_session` only if needed;
 - shell: dedicated `readonly_bash` only; do not register unrestricted `bash` for walkthrough sessions;
 - web/GitHub read APIs if already available: `web_fetch`, `web_search`, `mcp_describe`, selected read-only GitHub MCP operations if configured;
-- required: `submit_pr_walkthrough_yaml`.
+- required publisher: `submit_pr_walkthrough_yaml`.
 
 Do not allow:
 
@@ -513,11 +641,12 @@ After success, disable reminders but keep the session running.
 
 ## Persistence and reload
 
-Persist three layers:
+Persist four layers:
 
 1. Session metadata through the existing session store.
-2. Job status through `walkthrough-agent-store.ts`.
-3. Final renderable payload through `walkthrough-store.ts`.
+2. Job status and bundle metadata through `walkthrough-agent-store.ts`.
+3. Launch-time PR metadata/diff through the analysis bundle store.
+4. Final renderable payload through `walkthrough-store.ts`.
 
 Detailed ownership:
 
@@ -526,6 +655,7 @@ Detailed ownership:
 | Child relationship and read-only identity | Session store fields `parentSessionId`, `childKind`, `readOnly`, `walkthroughJobId` | `GET /api/sessions` and sidebar render |
 | Waiting/error/validation/ready lifecycle | `walkthrough-agent-store.ts` job record | `/api/pr-walkthrough/session/:childSessionId` |
 | Latest validation error details | Job record `lastValidationError` | Child panel job restore and chat tool result |
+| Launch-time PR metadata, parsed files/hunks, limits, warnings, and export capability | Analysis bundle store plus job `analysisBundle` metadata | `read_pr_walkthrough_bundle` and YAML mapper |
 | Final cards, parsed diff blocks, warnings, export capability | Existing `walkthrough-store.ts` payload | `GET /api/pr-walkthrough/:changesetId` |
 | Original PR body | Final payload `changeset.prBody` plus Orientation card metadata | Existing payload restore |
 | Active tab, fullscreen-on-ready intent | Panel workspace state plus job/session UI metadata | Session switch/job restore |
@@ -537,6 +667,7 @@ Reload cases:
 - Child exists, no YAML yet: UI selects child and calls `GET /api/pr-walkthrough/session/:childSessionId`; panel restores `waiting_for_yaml`.
 - Last submission invalid: job record includes `lastValidationError`; panel restores `validation_failed` banner.
 - Submitted successfully: `GET /api/pr-walkthrough/:changesetId` restores cards; job says `ready`.
+- Bundle missing after launch: bundle reads or YAML submission return retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; the UI should direct the user to relaunch instead of retrying hidden PR diff fetches.
 - Server restarted while agent running: `WalkthroughAgentManager.restore()` scans job records, reconnects idle listeners for live sessions, and does not create duplicate sessions.
 - Child archived/terminated: job remains for historical lookup; launcher dedupe should not reuse terminated children unless explicitly requested.
 
@@ -575,8 +706,8 @@ Update `src/app/render-helpers.ts` and session types to render `parentSessionId`
 
 ### `src/server/pr-walkthrough/routes.ts`
 
-- Add `/launch`, `/jobs/:jobId`, `/session/:childSessionId`, and internal `/api/internal/pr-walkthrough/submit-yaml` handling or delegate the internal route from `server.ts` to the manager.
-- Keep export routes unchanged.
+- Add `/launch`, `/jobs/:jobId`, `/session/:childSessionId`, and internal `/api/internal/pr-walkthrough/bundle` plus `/api/internal/pr-walkthrough/submit-yaml` handling, or delegate the internal routes from `server.ts` to the manager.
+- Keep export routes unchanged; export preview/submit continue to read the final `WalkthroughStorePayload`, not the analysis bundle.
 - Move direct `resolveWalkthrough()` use behind a compatibility/fallback flag.
 
 ### `src/server/pr-walkthrough/walkthrough-store.ts`
@@ -617,7 +748,7 @@ Update `src/app/render-helpers.ts` and session types to render `parentSessionId`
 - **Model unavailable before first prompt:** create the child/session record first when practical, then transition `starting` to `error` with code `MODEL_UNAVAILABLE`, provider/model name when safe, and guidance to select another model or retry. If session creation itself fails, return `502` to the launcher.
 - **Agent startup/runtime crash:** transition `waiting_for_yaml` to `error` with code `AGENT_RUNTIME_FAILED`, keep transcript/panel available, and allow the user to prompt/retry in the same child after the runtime recovers.
 - **Prompt dispatch failure:** transition `starting` to `error` with code `PROMPT_DISPATCH_FAILED`; the child remains visible and retrying launch focuses the existing child and resends the first prompt after clearing the error.
-- **GitHub auth/rate limit/private PR:** use explicit error codes (`GITHUB_AUTH_REQUIRED`, `GITHUB_FORBIDDEN`, `GITHUB_RATE_LIMITED`, `GITHUB_NOT_FOUND_OR_PRIVATE`). The panel must state whether a token is missing, permissions are insufficient, the PR may be private, or the reset time from GitHub rate-limit headers when available. These errors are retryable in the same child after auth/permission/rate-limit changes.
+- **GitHub auth/rate limit/private PR during launch:** use explicit error codes (`GITHUB_AUTH_REQUIRED`, `GITHUB_FORBIDDEN`, `GITHUB_RATE_LIMITED`, `GITHUB_NOT_FOUND_OR_PRIVATE`). The panel must state whether a token is missing, permissions are insufficient, the PR may be private, or the reset time from GitHub rate-limit headers when available. These errors surface before the analysis child session starts; after auth/permission/rate-limit recovery, the user relaunches.
 - **Invalid YAML:** tool returns retryable field errors, transitions or remains `validation_failed`, and keeps the panel unpopulated with a validation banner. A later valid tool call transitions to `ready`.
 - **Large PR/truncation:** submission can succeed with `warnings` and `limits`; panel shows warnings in Orientation/Audit and the agent explains prioritization in chat.
 - **Policy violation:** blocked tool/command result is visible in chat; manager does not fail the job unless the agent cannot recover. Repeated policy violations can trigger a reminder prompt that restates allowed read-only operations.
@@ -627,22 +758,23 @@ Status transitions and retry semantics:
 
 | From | Event | To | Retry/reuse behavior |
 | --- | --- | --- | --- |
-| `starting` | session and first prompt created | `waiting_for_yaml` | Existing child is active. |
+| `starting` | analysis bundle resolved and persisted, then session and first prompt created | `waiting_for_yaml` | Existing child is active. |
+| `starting` | metadata/diff resolution fails before child exists | `error` / launch error | User relaunches after auth/network/rate-limit recovery; no waiting child is created. |
 | `starting` | session creation fails before child exists | no job / launch `502` | User retries launch; no child to reuse. |
 | `starting` | model unavailable or prompt dispatch fails after child persisted | `error` | Reuse existing child; retry can resend prompt after config/auth fix. |
 | `waiting_for_yaml` | invalid YAML tool call | `validation_failed` | Same child; agent retries tool call. |
 | `validation_failed` | another invalid YAML tool call | `validation_failed` | Update latest summary and reminder context. |
 | `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, fullscreen review, keep agent alive. |
 | `waiting_for_yaml` or `validation_failed` | agent idle without successful tool call | same status | Enqueue rate-limited reminder; no cards rendered. |
-| any non-terminal state | GitHub auth/private/rate-limit prevents required metadata/diff | `error` | Same child is reused after credentials or rate limit recover. |
+| `waiting_for_yaml` or `validation_failed` | stored analysis bundle is missing or unusable during bundle read or YAML submission | `error` with `PR_WALKTHROUGH_BUNDLE_MISSING` | Retryable, but requires relaunch; no submit-time diff re-fetch. |
 | `error` | duplicate launch of same parent/target | `error` or `waiting_for_yaml` after explicit retry | Focus existing child; do not create duplicate. |
 | `ready` | duplicate launch of same parent/target | `ready` | Focus existing child and existing panel. |
 
 ## Migration plan
 
-1. Add job store, schema validator, and mapper with unit coverage.
-2. Add `submit_pr_walkthrough_yaml` tool and internal endpoint.
-3. Add `WalkthroughAgentManager.launch()` and launch API.
+1. Add job store, analysis bundle store, schema validator, and mapper with unit coverage.
+2. Add `read_pr_walkthrough_bundle` and `submit_pr_walkthrough_yaml` tools plus internal endpoints.
+3. Add `WalkthroughAgentManager.launch()` and launch API with launch-time bundle resolution before child creation.
 4. Update UI launch flow to create/focus child and show waiting panel.
 5. Add sidebar child-session metadata/rendering.
 6. Add idle reminder and fullscreen-on-success behavior.
@@ -656,6 +788,10 @@ Unit tests:
 - YAML parser rejects syntax errors, multiple docs, missing fields, bad enums, mismatched PR identity, and oversized docs.
 - YAML parser accepts a minimal valid document and normalizes optional arrays to empty arrays.
 - Mapper creates Orientation, Design, Review, Other, and Audit cards.
+- Launch persists a sanitized versioned analysis bundle before child session creation.
+- YAML submission maps from the stored analysis bundle and does not call submit-time GitHub/local diff resolution.
+- Missing or unusable bundle returns retryable `PR_WALKTHROUGH_BUNDLE_MISSING`.
+- Bundle read tool enforces owning `BOBBIT_SESSION_ID` / `BOBBIT_WALKTHROUGH_JOB_ID` and supports bounded manifest/file reads.
 - Hunk mapping preserves unmapped references as warnings.
 - Suggested comment anchors map to line ids when possible and demote cleanly when not.
 - Read-only command policy allows `gh pr view`, `gh pr diff`, `gh api` read calls, `git diff/show/log/grep`, and read-only search/read commands.
@@ -665,14 +801,15 @@ Unit tests:
 API E2E:
 
 - `POST /api/pr-walkthrough/launch` creates a child session, returns `childSessionId`, and persists a waiting job.
-- Private PR, missing token, forbidden token, not-found/private ambiguity, and GitHub rate-limit responses produce structured job errors with actionable messages and retryability.
+- Private PR, missing token, forbidden token, not-found/private ambiguity, and GitHub rate-limit responses produce structured launch errors before child session creation.
 - Model unavailable, prompt dispatch failure, and agent runtime failure transition to deterministic `error` states without losing the child when one was persisted.
 - Duplicate launch from same parent/target returns the existing child.
 - Same target from a different parent creates a separate child.
 - Invalid `submit_pr_walkthrough_yaml` returns structured errors and leaves job/panel unpopulated.
 - Valid submission stores `WalkthroughStorePayload`, returns ready, and leaves the child session alive.
+- Missing analysis bundle on read/submission returns `PR_WALKTHROUGH_BUNDLE_MISSING` and does not re-fetch PR diff data.
 - `GET /api/pr-walkthrough/session/:childSessionId` restores waiting, failed, and ready states.
-- Sandbox token cannot submit YAML for another session/job.
+- Sandbox token cannot submit YAML or read a bundle for another session/job.
 - Existing export preview/submit still requires explicit confirmation and works from final payloads.
 
 Browser E2E:
@@ -697,8 +834,8 @@ Regression tests:
 - **Tool leaks through extensions:** pass explicit `allowedTools`, keep `tool-guard-extension.ts`, and add regression tests that intentionally attempt forbidden tools.
 - **Shell command parsing bypasses:** use the dedicated `readonly_bash` extension with argv parsing and reject shell metacharacters/inline interpreters before execution; unrestricted `bash` must not be registered for walkthrough sessions.
 - **Sidebar relationship ambiguity:** implement `parentSessionId`/`childKind` as mandatory session metadata and add tests proving PR walkthrough rows do not depend on `delegateOf`.
-- **Large PRs exceed YAML/tool limits:** enforce byte limits, instruct prioritization, and allow warnings/omissions rather than failing the whole job.
-- **Stale diff mapping:** re-fetch diff at submission and compare `base_sha/head_sha` to launch metadata; warn or reject on mismatch depending on severity.
+- **Large PRs exceed YAML/tool limits:** enforce byte limits, instruct prioritization, and allow warnings/omissions rather than failing the whole job. Use bounded `read_pr_walkthrough_bundle` manifest/file reads so the agent does not need broad filesystem access.
+- **Stale diff mapping:** persist the launch-time bundle and map YAML against it. If it is missing or unusable, return `PR_WALKTHROUGH_BUNDLE_MISSING` and require relaunch rather than silently re-fetching a potentially different diff.
 - **Model finishes in prose:** idle reminder must be driven by missing successful tool call, not by chat content.
 - **User loses child on reload:** persist job metadata before sending the first prompt and restore panel tabs from session/job metadata.
 
@@ -707,4 +844,4 @@ Regression tests:
 1. Implement generic `parentSessionId` / `childKind` session nesting immediately. Do not use `delegateOf`, `createDelegateSession()`, delegate cleanup, or delegate hidden-session semantics for PR walkthroughs.
 2. Expose a dedicated `readonly_bash` tool for walkthrough sessions instead of registering unrestricted `bash`. The tool parses argv, applies `walkthrough-readonly-policy.ts`, and rejects shell metacharacters/inline interpreters before execution.
 3. Do not persist raw invalid YAML. Persist the latest validation summary, a content hash for diagnostics, and the final sanitized YAML-derived payload. If raw successful YAML is needed for debugging, store it in a separate sanitized job artifact behind an explicit debug flag, never in `walkthrough-store.ts`.
-4. Fetch lightweight PR metadata at launch for prompt context and error surfacing; fetch the authoritative diff again at YAML submission for hunk mapping and `base_sha`/`head_sha` validation.
+4. Resolve and persist the authoritative PR metadata/diff bundle at launch before child creation; YAML submission maps only from that stored bundle, and missing/unusable bundles return retryable `PR_WALKTHROUGH_BUNDLE_MISSING` with relaunch guidance.
