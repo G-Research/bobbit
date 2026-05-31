@@ -632,8 +632,20 @@ async function focusWalkthroughChildSession(childSessionId: string): Promise<voi
 	}
 }
 
+async function showWalkthroughLaunchToast(message: string): Promise<void> {
+	try {
+		const { showHeaderToast } = await import("./render.js");
+		showHeaderToast(message);
+	} catch { /* best-effort toast */ }
+}
+
 export async function launchPrWalkthroughAgent(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): Promise<PanelWorkspaceTab | undefined> {
 	const input = normalizeInput(state, rawInput);
+	if (!shouldResolveInput(input)) {
+		await showWalkthroughLaunchToast("Enter a PR URL or number: /walkthrough-pr <GitHub PR URL>");
+		renderApp();
+		return undefined;
+	}
 	try {
 		const data = await fetchWalkthroughJson("/api/pr-walkthrough/launch", {
 			method: "POST",
@@ -648,10 +660,7 @@ export async function launchPrWalkthroughAgent(state: AppState, sessionId: strin
 	} catch (error) {
 		const err = error as WalkthroughApiError;
 		console.error("[pr-walkthrough] launch failed", err);
-		try {
-			const { showHeaderToast } = await import("./render.js");
-			showHeaderToast(err.message || "Failed to launch PR walkthrough agent");
-		} catch { /* best-effort toast */ }
+		await showWalkthroughLaunchToast(err.message || "Failed to launch PR walkthrough agent");
 		renderApp();
 		return undefined;
 	}

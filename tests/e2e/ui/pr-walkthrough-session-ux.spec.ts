@@ -196,6 +196,35 @@ async function ensureTeamLeadRole() {
 }
 
 test.describe("Session-hosted PR walkthrough UX regressions", () => {
+	test("normal session advertises walkthrough slash command and intercepts it in the UI", async ({ page }) => {
+		await installWalkthroughLaunchFixture(page);
+		await page.setViewportSize({ width: 1600, height: 900 });
+		await openApp(page);
+		await createSessionViaUI(page);
+		const parentSessionId = await activeSessionId(page);
+
+		const textarea = page.locator("textarea").first();
+		await textarea.fill("/walk");
+		const slashCommand = page.getByTestId("slash-command-walkthrough-pr");
+		await expect(slashCommand, "walkthrough slash command should be discoverable from composer autocomplete").toBeVisible({ timeout: 10_000 });
+		await expect(slashCommand).toContainText("/walkthrough-pr");
+		await expect(slashCommand).toContainText(/GitHub PR URL/i);
+		await slashCommand.click();
+		await expect(textarea).toHaveValue("/walkthrough-pr ");
+
+		const launchResponse = page.waitForResponse((response) => response.url().includes("/api/pr-walkthrough/launch") && response.request().method() === "POST", { timeout: 20_000 });
+		await textarea.fill(`/walkthrough-pr ${prUrl(780)}`);
+		await textarea.press("Enter");
+		const launch = await (await launchResponse).json() as LaunchJob & { job?: LaunchJob };
+		const job = (launch.job && typeof launch.job === "object" ? launch.job : launch) as LaunchJob;
+
+		await expect.poll(() => activeSessionId(page), {
+			timeout: 15_000,
+			message: "slash command should create and focus the live walkthrough child without prompting the agent",
+		}).toBe(job.childSessionId);
+		await expectChildNestedUnderParent(page, parentSessionId, job.childSessionId, "discoverable slash command");
+	});
+
 	test("normal session launch nests the live walkthrough child, survives reload, and keeps follow-up chat promptable", async ({ page }) => {
 		await installWalkthroughLaunchFixture(page);
 		await page.setViewportSize({ width: 1600, height: 900 });
