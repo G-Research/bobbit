@@ -130,7 +130,7 @@ Every rendered action button/menu row should carry:
 [data-sidebar-action-quick="true|false"]
 ```
 
-The hamburger trigger should carry:
+The hamburger trigger is focusable and must carry accessible menu-button attributes:
 
 ```html
 [data-testid="sidebar-actions-trigger"]
@@ -141,7 +141,7 @@ aria-expanded="true|false"
 aria-label="Session actions" / "Goal actions"
 ```
 
-Use the hamburger as an additive right-most button in the same action strip. Do not move or wrap the existing quick icons ahead of it.
+Use the hamburger as an additive right-most button in the same action strip. Do not move or wrap the existing quick icons ahead of it. Keep `aria-expanded` synchronized with the mounted/open popover state.
 
 ## Proposed popover component
 
@@ -255,7 +255,7 @@ Algorithm:
 4. Component renders final menu rows with matching `data-sidebar-action-id`.
 5. In `firstUpdated` / `updated(open)`, collect target icon rects for matching quick actions.
 6. If `matchMedia("(prefers-reduced-motion: reduce)").matches`, skip FLIP and only show final rows.
-7. Otherwise, for each matching quick action icon, animate the target icon from source to target using Web Animations:
+7. Otherwise, for each matching quick action icon, animate the target icon from source to target using Web Animations. For menu-only actions (`copy-link`, `duplicate`, `open-github`), animate their rows with a short opacity + translateY fade/slide after a 40–70 ms delay so new actions visibly appear alongside the shared quick actions:
 
 ```ts
 el.animate([
@@ -312,42 +312,48 @@ async function copySidebarLink(url: string): Promise<void> {
 
 ## Duplicate session decision
 
-Decision: **v1 can use existing `POST /api/sessions`; no new server endpoint is required** if “Duplicate session” means “start a fresh session with the same project/session context”, not “clone transcript and continue from the exact same history”.
+Decision: **add a dedicated `POST /api/sessions/:id/duplicate` endpoint for v1**. The goal requires “forks the session into a new one with the same project/goal/spec context”; the server owns the authoritative persisted session metadata and can preserve context more reliably than a client-side best-effort `POST /api/sessions` call. This endpoint duplicates context, not transcript history.
 
-Why existing `POST /api/sessions` is enough:
+Endpoint shape:
 
-- It accepts `projectId`, `cwd`, `goalId`, `assistantType`, `roleId`, `worktree`, `sandboxed`, `parentSessionId`, `childKind`, and related metadata.
-- It already resolves `projectId` from `cwd` when absent.
-- It already creates worktrees by default for normal sessions via `shouldCreateWorktree(...)`.
-- Goal-bound sessions inherit the goal cwd and transition the goal to in-progress.
-- Re-attempt uses the same route with `{ assistantType: "goal", reattemptGoalId }`.
+```http
+POST /api/sessions/:id/duplicate
+```
 
-Client helper signature:
+Response:
+
+```ts
+type DuplicateSessionResponse = {
+  id: string;
+  cwd: string;
+  status: string;
+  projectId?: string;
+  goalId?: string;
+  assistantType?: string;
+};
+```
+
+Server contract:
+
+1. Resolve the source from live sessions first. v1 UI calls this only for live sessions.
+2. Reject unsupported sources with `422`: `delegateOf`, `parentSessionId`, `teamGoalId`, `teamLeadSessionId`, `role === "team-lead"`, `readOnly`, and archived sessions.
+3. Read the persisted session record from the project session store so server-only fields are preserved: `projectId`, `cwd`, `goalId`, `assistantType`, `staffId`, `role`, `accessory`, `sandboxed`, model selection (`modelProvider`, `modelId`), and any persisted `reattemptGoalId` / spec-context fields already present on the record.
+4. If the session belongs to a goal, resolve the goal and pass the goal id/cwd/project id so the new session inherits the goal spec context through the existing goal-session creation path.
+5. If the session is staff-backed, preserve `staffId` and assistant/staff context.
+6. Create the new session with the same project/goal/spec context and normal fresh worktree/session lifecycle. Do not copy JSONL transcript, tool-content snapshots, read state, or proposal drafts.
+7. Persist the copied model selection when present using the same store path used by normal WS model persistence.
+8. Title the new session `Copy of <source title>` unless the session manager has a better title hook; never mutate the source.
+
+Client helper signature in `src/app/session-manager.ts`:
 
 ```ts
 export async function duplicateSession(source: GatewaySession): Promise<void>;
 ```
 
-Recommended request body:
+Client behavior:
 
 ```ts
-const body: Record<string, unknown> = {
-  projectId: source.projectId,
-  cwd: source.cwd,
-  sandboxed: source.sandboxed === true,
-};
-if (source.goalId) body.goalId = source.goalId;
-if (source.assistantType) body.assistantType = source.assistantType;
-if (source.role && !isTeamRole(source.role)) body.roleId = source.role;
-```
-
-Then:
-
-```ts
-const res = await gatewayFetch("/api/sessions", {
-  method: "POST",
-  body: JSON.stringify(body),
-});
+const res = await gatewayFetch(`/api/sessions/${source.id}/duplicate`, { method: "POST" });
 const { id } = await res.json();
 await refreshSessions();
 await connectToSession(id, false);
@@ -355,29 +361,17 @@ await connectToSession(id, false);
 
 Compatibility caveats:
 
-- Do **not** offer Duplicate for `delegateOf`, `parentSessionId`, `teamGoalId`, `teamLeadSessionId`, `role === "team-lead"`, archived, or `readOnly` sessions in v1. Their lifecycle semantics are not equivalent to a plain session.
-- Do **not** attempt to use `POST /api/sessions/:id/continue` for live duplicate. That endpoint is archived-only, rejects live sources with `409`, and rejects goal/delegate/team sources with `422`.
-- If product later requires lossless transcript cloning or exact model carry-over, add a new server endpoint such as `POST /api/sessions/:id/duplicate`. It should be based on the `continue` route’s JSONL/proposal/tool-content copy logic but allow live sources and decide explicitly whether to clone model, title, worktree, proposals, and read state.
+- Do **not** offer Duplicate for delegates, first-class children, team leads/team members, archived sessions, or read-only sessions in v1. Their lifecycle semantics are not equivalent to a plain session fork.
+- Do **not** use `POST /api/sessions/:id/continue`; that endpoint is archived-only, rejects live sources with `409`, and clones transcript context, which is a different mental model.
+- Browser E2E must assert context preservation, not just that a new session exists: at minimum the duplicated session has a different id and matching `projectId`, `cwd`, `goalId` when applicable, `assistantType`, and persisted model fields when available in the fixture.
 
 ## Open on GitHub decision
 
-There are two levels of support:
+Decision: **implement full spec support in v1 with a server-derived branch fallback**. The action must open an existing PR when one is known, otherwise open the goal branch view when the project has a GitHub remote, and be hidden only when no GitHub remote/branch can be resolved.
 
-### Minimal v1 with no new server endpoint
+Add a small server resolver because the client `Project` and `Goal` models do not contain the GitHub remote URL. The server already shells out to `git remote get-url origin` in sandbox/bootstrap and has token-stripping/parsing utilities; reuse that sanitization style and never construct GitHub URLs from unparsed client strings.
 
-Show “Open on GitHub” only when `state.prStatusCache.get(goal.id)?.url` exists. Clicking opens that URL in a new tab:
-
-```ts
-window.open(pr.url, "_blank", "noopener,noreferrer");
-```
-
-This is safe and uses already-cached PR status, but it does not satisfy the branch-view fallback when no PR exists.
-
-### Full spec support with branch fallback
-
-Add a small server resolver because the client `Project` and `Goal` models do not contain the GitHub remote URL. The server already shells out to `git remote get-url origin` in sandbox bootstrap and has `stripTokenFromGitUrl(...)`; reuse that parsing/sanitization style.
-
-Suggested endpoint:
+Endpoint:
 
 ```http
 GET /api/goals/:id/github-link
@@ -400,9 +394,12 @@ Server behavior:
 5. Parse GitHub HTTPS/SSH forms into `https://<host>/<owner>/<repo>/tree/<encoded-branch>`.
 6. Return unavailable for non-GitHub remotes.
 
-Client can lazy-fetch this only when the menu opens and cache per goal id to avoid adding sidebar polling.
+Client behavior:
 
-If implementation time is tight, choose minimal v1 and document the branch fallback as a deferred gap; otherwise, full spec support needs the endpoint above.
+- When building goal menu actions, first use `state.prStatusCache.get(goal.id)?.url` if present so cached PRs open instantly.
+- If no PR URL exists, lazy-fetch `GET /api/goals/:id/github-link` when the menu opens and cache the result per goal id.
+- Render `Open on GitHub` when the resolver returns `available: true`; hide it for `available: false`.
+- Browser E2E must cover three states: PR URL opens PR, no PR + GitHub remote opens branch tree URL, and no GitHub remote hides the row.
 
 ## Route-change dismissal
 
