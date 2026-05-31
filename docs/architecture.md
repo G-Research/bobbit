@@ -26,9 +26,11 @@ Bobbit has three layers:
 Bobbit's browser UI is primarily hash-routed so it can run as a static single-page app behind the gateway, Vite, or a remote reverse proxy. Session routes support both forms:
 
 - `#/session/<session-id>` — the normal in-app route used by sidebar and hash navigation.
-- `/session/<session-id>` — a path-style deep link used by the session header's copy-link action.
+- `/session/<session-id>` — a path-style external/shareable deep link used by the session header's copy-link action.
 
-Path-style session links are intentionally valid entrypoints. Opening or reloading `/session/<session-id>` after a full page load selects the same session as the hash route, so copied links continue to work when pasted into a fresh browser tab. Auth query parameters remain on the URL while routing is resolved; for example, `/session/<id>?token=...` can authenticate the browser and still open `<id>`.
+Path-style session links are intentionally valid entrypoints. Opening or reloading `/session/<session-id>` after a full page load selects the same session as the hash route, so copied links continue to work when pasted into a fresh browser tab. Auth query parameters are also supported; for example, `/session/<id>?token=...` can authenticate the browser and still open `<id>`.
+
+After the app resolves and connects a path-style session route, the visible in-app URL is canonicalized to `/#/session/<id>`. The cleanup uses history replacement rather than dispatching hash or route changes, so it does not restart or race the active `connectToSession()` flow.
 
 Hash routes take precedence over the path-style session fallback once the app has loaded. This keeps in-app navigation meaningful even from a copied path URL: `/session/old#/session/new` opens `new`, not `old`. The standalone `/walkthrough?...` pathname route is handled separately, and non-session pathnames are not treated as session deep links.
 
