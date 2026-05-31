@@ -9,8 +9,24 @@
  *      present and click still copies.
  */
 import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
+import { base, createSession, deleteSession, readE2ETokenAsync, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
+
+async function openSessionByHash(page: import("@playwright/test").Page, sessionId: string): Promise<void> {
+	await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
+	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+}
+
+async function expectSessionComposer(page: import("@playwright/test").Page, sessionId: string, label: string): Promise<void> {
+	await expect(
+		page.locator("textarea").first(),
+		`${label}: ROUTE_VIEW_SESSION_MISMATCH expected /session/${sessionId} to open the session composer`,
+	).toBeVisible({ timeout: 15_000 });
+	await expect(
+		page.locator('[data-testid="copy-session-link"] button').first(),
+		`${label}: ROUTE_VIEW_SESSION_MISMATCH expected session header actions for ${sessionId}`,
+	).toBeVisible({ timeout: 10_000 });
+}
 
 // Grant clipboard read/write permissions so navigator.clipboard works in
 // headless Chromium.
@@ -24,8 +40,7 @@ test.describe("Copy session link button (UI)", () => {
 		try {
 			await openApp(page);
 			// Navigate to the session.
-			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await openSessionByHash(page, sessionId);
 
 			// Button is present.
 			const btn = page.locator('[data-testid="copy-session-link"] button').first();
@@ -60,6 +75,47 @@ test.describe("Copy session link button (UI)", () => {
 				expect(clip).toBe(expectedUrl);
 			}).toPass({ timeout: 5_000 });
 		} finally {
+			await deleteSession(sessionId).catch(() => { /* best-effort */ });
+		}
+	});
+
+	test("direct /session path deep link opens the session and survives reload", async ({ page }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		try {
+			const token = await readE2ETokenAsync();
+			await page.goto(`${base()}/session/${sessionId}?token=${encodeURIComponent(token)}`);
+			await expectSessionComposer(page, sessionId, "direct path load");
+
+			await page.reload();
+			await expectSessionComposer(page, sessionId, "direct path reload");
+		} finally {
+			await deleteSession(sessionId).catch(() => { /* best-effort */ });
+		}
+	});
+
+	test("copied path-style session link opens in a fresh full-page load", async ({ page, browser }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const freshContext = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+		const freshPage = await freshContext.newPage();
+
+		try {
+			await openApp(page);
+			await openSessionByHash(page, sessionId);
+
+			const btn = page.locator('[data-testid="copy-session-link"] button').first();
+			await expect(btn).toBeVisible({ timeout: 10_000 });
+			await btn.click();
+			const copiedUrl = await page.evaluate(() => navigator.clipboard.readText());
+			expect(copiedUrl, "copy action should produce the path-style session URL being fixed").toBe(`${base()}/session/${sessionId}`);
+
+			const token = await readE2ETokenAsync();
+			await freshPage.goto(`${copiedUrl}?token=${encodeURIComponent(token)}`);
+			await expectSessionComposer(freshPage, sessionId, "copied path link fresh load");
+		} finally {
+			await freshContext.close().catch(() => { /* best-effort */ });
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
 		}
 	});
