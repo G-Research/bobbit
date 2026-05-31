@@ -3,6 +3,7 @@ import { PromptQueue } from "../src/server/agent/prompt-queue.ts";
 import type { QueuedMessage } from "../src/server/ws/protocol.ts";
 
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
+const MAX_RECOVER_DRAIN_RETRIES = 2;
 const SYSTEM_PREFIX_RE = /^\[SYSTEM: previous turn failed with: .+\. Ignore the incomplete last turn and handle the following\.\]\n\n/;
 function buildErrorRecoveryPrefix(errMsg: string, userText: string): string {
 	const snippet = (errMsg || "unknown error").slice(0, 200);
@@ -22,6 +23,7 @@ class DispatchSimulator {
 	lastTurnErrorMessage = "";
 	consecutiveErrorTurns = 0;
 	transientRetryAttempts = 0;
+	recoverDrainAttempts = 0;
 	turnHadToolCalls = false;
 	pendingAutoRetryTimer: { cancelled: boolean } | undefined = undefined;
 	logs: string[] = [];
@@ -150,6 +152,61 @@ class DispatchSimulator {
 		const method = next.isFollowUp ? "followUp" as const : "prompt" as const;
 		this.dispatched.push({ message: next, method });
 		return true;
+	}
+
+	/**
+	 * Models drainQueue + recoverPromptDispatch against a bridge that may reject
+	 * the dispatch with "Agent is already processing." `bridgeBusy()` is polled
+	 * each drain attempt; when it returns true the dispatch fails and we recover.
+	 *
+	 * Mirrors the real tick-0 retry loop, but synchronous: instead of
+	 * setTimeout(0) we loop here, counting attempts. Returns the number of drain
+	 * attempts made (the initial drain plus every immediate retry). The loop is
+	 * bounded by MAX_RECOVER_DRAIN_RETRIES — a regression that drops the bound
+	 * would spin forever, caught by the hard safety valve.
+	 */
+	drainWithRecovery(bridgeBusy: () => boolean): number {
+		let attempts = 0;
+		let rescheduled = true;
+		while (rescheduled) {
+			attempts++;
+			if (attempts > 1000) throw new Error("drainWithRecovery did not terminate — recover loop is unbounded");
+			rescheduled = false;
+			if (this.queue.isEmpty) break;
+
+			// drainQueue: batch steered at front, else pop one.
+			const steered = this.queue.dequeueAllSteered();
+			const rows = steered.length > 0
+				? steered.map(m => ({ text: m.text, isSteered: true }))
+				: (() => { const n = this.queue.dequeue(); return n ? [{ text: n.text, isSteered: !!n.isSteered }] : []; })();
+			if (rows.length === 0) break;
+
+			this.setStatus("streaming");
+
+			if (bridgeBusy()) {
+				// recoverPromptDispatch: re-enqueue at front, then bounded tick-0 retry.
+				for (const r of [...rows].reverse()) this.queue.enqueueAtFront(r.text, { isSteered: r.isSteered });
+				this.setStatus("idle");
+				const next = this.recoverDrainAttempts + 1;
+				if (next > MAX_RECOVER_DRAIN_RETRIES) {
+					this.recoverDrainAttempts = 0;
+					this.logs.push(`recover-defer:attempts=${next - 1}`);
+					rescheduled = false;
+				} else {
+					this.recoverDrainAttempts = next;
+					rescheduled = true;
+				}
+			} else {
+				// Dispatch landed — record the same payload drainQueue sends: a
+				// steered front group is batched into one newline-joined prompt.
+				const text = rows.length > 0 && rows.every(r => r.isSteered)
+					? rows.map(r => r.text).join("\n")
+					: rows[0]?.text ?? "";
+				this.dispatched.push({ message: { id: `drain-${this.dispatched.length}`, text, isSteered: rows.some(r => r.isSteered), createdAt: Date.now() }, method: "prompt" });
+				this.recoverDrainAttempts = 0;
+			}
+		}
+		return attempts;
 	}
 
 	/** Simulate the agent finishing a turn (agent_end). */
@@ -1143,5 +1200,56 @@ test.describe("Queue Dispatch Integration", () => {
 		// Transitions should include "aborting": streaming → aborting → idle
 		expect(sim.statusTransitions).toContain("aborting");
 		expect(sim.statusTransitions).toEqual(["idle", "streaming", "aborting", "idle"]);
+	});
+
+	test("(recover-spin) one-microtask busy race recovers on the first retry without deferring", () => {
+		// The intended use of the tick-0 retry: agent_end's synchronous
+		// drainQueue prompt() loses to the SDK's not-yet-run finishRun(), so the
+		// bridge reports "Agent is already processing" exactly once. One macrotask
+		// later the bridge is idle and the redrain lands.
+		const sim = new DispatchSimulator();
+		sim.queue.enqueue("Steer1", { isSteered: true });
+		sim.queue.enqueue("Steer2", { isSteered: true });
+
+		// Busy on the first attempt only (the race), idle thereafter.
+		let calls = 0;
+		const attempts = sim.drainWithRecovery(() => ++calls === 1);
+
+		// Initial drain (busy) + one retry (lands) = 2 attempts; nothing deferred.
+		expect(attempts).toBe(2);
+		expect(sim.logs.some(l => l.startsWith("recover-defer:"))).toBe(false);
+		// Both steered rows reached the agent as a single batch, and the budget reset.
+		expect(sim.dispatchedTexts).toEqual(["Steer1\nSteer2"]);
+		expect(sim.recoverDrainAttempts).toBe(0);
+		expect(sim.queue.isEmpty).toBe(true);
+	});
+
+	test("(recover-spin) a persistently busy bridge bounds the redrains and defers, never spins", () => {
+		// Regression for the live log flood: when the agent is genuinely mid-turn
+		// the bridge keeps rejecting with "Agent is already processing." The old
+		// code rescheduled a tick-0 drain on every failure — an unbounded
+		// setTimeout(0) spin. The redrains must be bounded by
+		// MAX_RECOVER_DRAIN_RETRIES, after which the row is left queued for the
+		// next agent_end drain. (drainWithRecovery throws if the loop is unbounded.)
+		const sim = new DispatchSimulator();
+		sim.queue.enqueue("Steer1", { isSteered: true });
+
+		const attempts = sim.drainWithRecovery(() => true /* always busy */);
+
+		// Initial drain + MAX_RECOVER_DRAIN_RETRIES immediate retries, then defer.
+		expect(attempts).toBe(MAX_RECOVER_DRAIN_RETRIES + 1);
+		expect(sim.logs.some(l => l.startsWith("recover-defer:"))).toBe(true);
+		// The row was NOT lost — it survives at the front of the queue.
+		expect(sim.dispatched.length).toBe(0);
+		expect(sim.queue.peek()?.text).toBe("Steer1");
+		// Budget reset so the next agent_end drain gets a fresh allowance.
+		expect(sim.recoverDrainAttempts).toBe(0);
+
+		// When the turn finally ends, the agent goes idle and the deferred row
+		// drains cleanly on the next attempt.
+		const followup = sim.drainWithRecovery(() => false /* idle now */);
+		expect(followup).toBe(1);
+		expect(sim.dispatchedTexts).toEqual(["Steer1"]);
+		expect(sim.queue.isEmpty).toBe(true);
 	});
 });
