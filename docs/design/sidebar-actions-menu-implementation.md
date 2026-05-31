@@ -21,7 +21,7 @@ Implementation should be split by owner so parallel agents do not collide:
 | Session duplicate endpoint + helper | `src/server/server.ts`, `src/app/session-manager.ts` | Add dedicated `POST /api/sessions/:id/duplicate`, then export a client helper that calls that endpoint, refreshes session list, and connects. |
 | GitHub branch URL resolver | `src/server/server.ts` and `src/app/api.ts` | Add required `GET /api/goals/:id/github-link` branch fallback resolver for `Open on GitHub`. |
 | Modal/open-popover suppression | `src/ui/components/AgentInterface.ts` | Add `sidebar-actions-popover` to the global Escape suppression selector. |
-| Tests | `tests/e2e/ui/sidebar-actions-menu.spec.ts` plus optional unit test | Browser coverage for menu behavior; unit coverage if FLIP math is extracted. |
+| Tests | `tests/e2e/ui/sidebar-actions-menu.spec.ts` plus conditional unit test | Browser coverage for menu behavior; unit coverage is required whenever FLIP rect/delta logic is extracted to a helper. |
 
 No `src/` or `tests/` changes are made by this research task.
 
@@ -266,13 +266,13 @@ el.animate([
 
 Simplest robust approach: animate the actual menu-row icon from an inverted transform rather than creating global floating clones. This still reads as shared-element motion, is interruptible by `Animation.cancel()`, and avoids orphaned elements. The non-quick actions can fade/slide in with a separate animation on their rows.
 
-Reverse animation on close is optional only if it can be made reliable without delaying unmount. If implemented, expose:
+Reverse animation on close is required when the source row and matching quick-action rects are still available. Expose:
 
 ```ts
 public closeWithAnimation(): Promise<void>;
 ```
 
-The sidebar can await it before removing the element. If another trigger is clicked while closing, cancel in-flight animations and remove immediately.
+The sidebar awaits it before removing the element. If the source row no longer exists because of route/layout changes, fall back to fade-only close and unmount. If another trigger is clicked while closing, cancel in-flight animations and remove immediately.
 
 ## Copy link behavior
 
@@ -297,13 +297,13 @@ Use hash routes for sidebar copy links. The existing header copy button uses `${
 Copy helper:
 
 ```ts
-async function copySidebarLink(url: string): Promise<void> {
+async function copySidebarLink(url: string, title: "Copy session link" | "Copy goal link"): Promise<void> {
   try {
     await navigator.clipboard.writeText(url);
     showHeaderToast("Link copied");
   } catch {
     const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
-    m.CopyLinkFallbackDialog.show(url);
+    m.CopyLinkFallbackDialog.show(url, { title });
   }
 }
 ```
