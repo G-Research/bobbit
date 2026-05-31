@@ -354,6 +354,11 @@ function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boo
 
 function collapseLiveWalkthroughPanel(state: AppState, sessionId: string): void {
 	setActivePanelTabIdForSession(state, sessionId, "");
+	const tabs = panelTabsForSession(state, sessionId);
+	const nextTabs = tabs.map((tab) => tab.kind === "walkthrough" && tab.state?.fullscreenOnReady === true
+		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
+		: tab);
+	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
 	(state as any).previewPanelFullscreen = false;
 	try { localStorage.setItem(`bobbit-preview-collapsed-${sessionId}`, "true"); } catch { /* non-browser/test */ }
 }
@@ -429,7 +434,7 @@ export function upsertPrWalkthroughJobPanel(
 	if (status === "ready") {
 		if (liveSessionHosted) collapseLiveWalkthroughPanel(state, sessionId);
 		else setActivePanelTabIdForSession(state, sessionId, tabId);
-		if (fullscreenOnReady) (state as any).previewPanelFullscreen = true;
+		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
 		if (!liveSessionHosted) restorePrWalkthroughPanel(state, sessionId, tabId);
 	}
 	return tab;

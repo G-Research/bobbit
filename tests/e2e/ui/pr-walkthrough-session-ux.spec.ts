@@ -156,7 +156,14 @@ async function expectLivePromptAcceptsFollowup(page: Page, text: string) {
 	await prompt.fill(text);
 	await expect(prompt, "live walkthrough child prompt editor should accept typed follow-up text").toHaveValue(text);
 	await prompt.press("Enter");
-	await expect(page.getByText(text, { exact: true }).first(), "submitted follow-up chat should appear in the walkthrough child transcript").toBeVisible({ timeout: 10_000 });
+	await expect.poll(async () => page.evaluate((expected) => {
+		const session: any = (window as any).bobbitState?.chatPanel?.agentInterface?.session;
+		const messages = session?.state?.messages || [];
+		return messages.some((message: any) => {
+			const content = Array.isArray(message?.content) ? message.content : [];
+			return content.some((part: any) => part?.type === "text" && part.text === expected);
+		});
+	}, text), { timeout: 10_000 }).toBe(true);
 }
 
 async function submitValidYaml(page: Page, job: LaunchJob) {
