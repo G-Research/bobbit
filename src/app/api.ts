@@ -37,6 +37,115 @@ export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
 }
 
+export type SidebarCopyLinkTitle = "Copy session link" | "Copy goal link";
+
+export function absoluteHashUrl(hash: string): string {
+	const route = hash.startsWith("#")
+		? hash
+		: hash.startsWith("/")
+			? `#${hash}`
+			: `#/${hash}`;
+	if (typeof location === "undefined") return route;
+	return `${location.origin}${location.pathname}${location.search}${route}`;
+}
+
+export function sessionDeepLink(sessionId: string): string {
+	return absoluteHashUrl(`/session/${encodeURIComponent(sessionId)}`);
+}
+
+export function goalDeepLink(goalId: string): string {
+	return absoluteHashUrl(`/goal/${encodeURIComponent(goalId)}`);
+}
+
+export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
+	try {
+		if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+			throw new Error("Clipboard API unavailable");
+		}
+		await navigator.clipboard.writeText(url);
+	} catch {
+		const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
+		m.CopyLinkFallbackDialog.show(url, { title });
+	}
+}
+
+export type GoalGithubLinkResponse =
+	| { available: true; url: string; kind: "pr" | "branch" }
+	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+
+const goalGithubLinkCache = new Map<string, GoalGithubLinkResponse>();
+const goalGithubLinkInFlight = new Map<string, Promise<GoalGithubLinkResponse>>();
+
+function sameGoalGithubLink(a: GoalGithubLinkResponse | undefined, b: GoalGithubLinkResponse): boolean {
+	if (!a || a.available !== b.available) return false;
+	if (a.available && b.available) return a.url === b.url && a.kind === b.kind;
+	if (!a.available && !b.available) return a.reason === b.reason;
+	return false;
+}
+
+function cacheGoalGithubLink(goalId: string, value: GoalGithubLinkResponse, skipRender = false): GoalGithubLinkResponse {
+	const changed = !sameGoalGithubLink(goalGithubLinkCache.get(goalId), value);
+	goalGithubLinkCache.set(goalId, value);
+	if (changed && !skipRender) renderApp();
+	return value;
+}
+
+function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
+	if (!value || typeof value !== "object") throw new Error("Invalid GitHub link response");
+	const data = value as Partial<GoalGithubLinkResponse>;
+	if (data.available === true) {
+		const url = (data as { url?: unknown }).url;
+		const kind = (data as { kind?: unknown }).kind;
+		if (typeof url === "string" && (kind === "pr" || kind === "branch")) return { available: true, url, kind };
+	}
+	if (data.available === false) {
+		const reason = (data as { reason?: unknown }).reason;
+		if (reason === "no-branch" || reason === "no-github-remote" || reason === "goal-not-found") return { available: false, reason };
+	}
+	throw new Error("Invalid GitHub link response");
+}
+
+export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
+	return goalGithubLinkCache.get(goalId);
+}
+
+export function clearGoalGithubLinkCache(goalId?: string): void {
+	if (goalId) {
+		goalGithubLinkCache.delete(goalId);
+		goalGithubLinkInFlight.delete(goalId);
+	} else {
+		goalGithubLinkCache.clear();
+		goalGithubLinkInFlight.clear();
+	}
+}
+
+export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return cacheGoalGithubLink(goalId, { available: true, url: prUrl, kind: "pr" }, opts?.skipRender);
+
+	if (!opts?.force) {
+		const cached = goalGithubLinkCache.get(goalId);
+		if (cached) return cached;
+		const inFlight = goalGithubLinkInFlight.get(goalId);
+		if (inFlight) return inFlight;
+	}
+
+	const request = (async () => {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/github-link`);
+		if (res.status === 404) return cacheGoalGithubLink(goalId, { available: false, reason: "goal-not-found" }, opts?.skipRender);
+		if (!res.ok) throw new Error(`Failed to fetch goal GitHub link: ${res.status}`);
+		return cacheGoalGithubLink(goalId, parseGoalGithubLinkResponse(await res.json()), opts?.skipRender);
+	})();
+	goalGithubLinkInFlight.set(goalId, request);
+	try {
+		return await request;
+	} finally {
+		if (goalGithubLinkInFlight.get(goalId) === request) goalGithubLinkInFlight.delete(goalId);
+	}
+}
+
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
