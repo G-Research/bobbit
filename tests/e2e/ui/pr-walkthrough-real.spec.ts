@@ -389,7 +389,7 @@ async function saveCardComment(page: Page, body: string) {
 
 
 test.describe("real PR walkthrough browser UX", () => {
-	test("loads mocked resolved cards and preserves comments through reload, fullscreen, and standalone", async ({ page, context }) => {
+	test("loads mocked resolved cards and preserves comments through reload, split panel, and standalone", async ({ page, context }) => {
 		let releaseResolve!: () => void;
 		const state: MockWalkthroughState = {
 			mode: "success",
@@ -421,15 +421,12 @@ test.describe("real PR walkthrough browser UX", () => {
 		await saveLineComment(page, commentBody);
 
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
-		if (!await fullscreenRoot.isVisible().catch(() => false)) {
-			const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
-			await expect(fullscreen).toBeVisible();
-			await fullscreen.click();
-		}
-		await expect(fullscreenRoot).toBeVisible({ timeout: 10_000 });
+		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
+		await expect(fullscreen).toBeVisible();
+		await fullscreen.click();
+		await expect(fullscreenRoot, "live walkthrough children should stay in split view so chat remains promptable").toBeHidden({ timeout: 10_000 });
+		await expect(page.locator("textarea").first(), "live walkthrough child prompt should remain visible after fullscreen click").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: commentBody })).toBeVisible();
-		const collapseFullscreen = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
-		if (await collapseFullscreen.isVisible().catch(() => false)) await collapseFullscreen.click();
 
 		await page.reload();
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-card-title"), "resolved card identity should survive full reload").toContainText("Resolved changeset overview", { timeout: 15_000 });

@@ -352,15 +352,15 @@ function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boo
 	return session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
 }
 
-function collapseLiveWalkthroughPanel(state: AppState, sessionId: string): void {
-	setActivePanelTabIdForSession(state, sessionId, "");
+function keepLiveWalkthroughPanelPromptable(state: AppState, sessionId: string, tabId?: string): void {
+	if (tabId) setActivePanelTabIdForSession(state, sessionId, tabId);
 	const tabs = panelTabsForSession(state, sessionId);
 	const nextTabs = tabs.map((tab) => tab.kind === "walkthrough" && tab.state?.fullscreenOnReady === true
 		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
 		: tab);
 	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
 	(state as any).previewPanelFullscreen = false;
-	try { localStorage.setItem(`bobbit-preview-collapsed-${sessionId}`, "true"); } catch { /* non-browser/test */ }
+	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* non-browser/test */ }
 }
 
 export function upsertPrWalkthroughJobPanel(
@@ -430,9 +430,9 @@ export function upsertPrWalkthroughJobPanel(
 			: candidate)
 		: [...existing, tab];
 	setPanelTabsForSession(state, sessionId, next);
-	if (options.select && !(status === "ready" && liveSessionHosted)) setActivePanelTabIdForSession(state, sessionId, tabId);
+	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
 	if (status === "ready") {
-		if (liveSessionHosted) collapseLiveWalkthroughPanel(state, sessionId);
+		if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, tabId);
 		else setActivePanelTabIdForSession(state, sessionId, tabId);
 		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
 		if (!liveSessionHosted) restorePrWalkthroughPanel(state, sessionId, tabId);
@@ -494,9 +494,9 @@ function patchWalkthroughTab(
 	if (replaced) {
 		setPanelTabsForSession(state, sessionId, deduped);
 		const liveSessionHosted = isLiveSessionHostedWalkthrough(state, sessionId);
-		if (nextTabId !== tabId && !(patch.status === "ready" && liveSessionHosted)) setActivePanelTabIdForSession(state, sessionId, nextTabId);
+		if (nextTabId !== tabId) setActivePanelTabIdForSession(state, sessionId, nextTabId);
 		if (patch.status === "ready") {
-			if (liveSessionHosted) collapseLiveWalkthroughPanel(state, sessionId);
+			if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, nextTabId);
 			else {
 				setActivePanelTabIdForSession(state, sessionId, nextTabId);
 				if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
@@ -666,7 +666,7 @@ const jobRestoreLastAttempt = new Map<string, number>();
 
 export function restorePrWalkthroughJobForSession(state: AppState, childSessionId: string): void {
 	if (!childSessionId) return;
-	if (isLiveSessionHostedWalkthrough(state, childSessionId)) collapseLiveWalkthroughPanel(state, childSessionId);
+	if (isLiveSessionHostedWalkthrough(state, childSessionId)) keepLiveWalkthroughPanelPromptable(state, childSessionId);
 	const now = Date.now();
 	const last = jobRestoreLastAttempt.get(childSessionId) || 0;
 	if (jobRestoreInFlight.has(childSessionId) || now - last < 2_000) return;
