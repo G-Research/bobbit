@@ -1,0 +1,494 @@
+import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import {
+	computeSidebarActionFlipDeltas,
+	type SidebarActionsFlipRect,
+} from "./sidebar-actions-flip";
+
+export type { SidebarActionsFlipRect } from "./sidebar-actions-flip";
+
+export interface SidebarActionsPopoverItem {
+	id: string;
+	label: string;
+	icon: TemplateResult;
+	tone?: "default" | "danger";
+	quick: boolean;
+}
+
+export interface SidebarActionsSelectDetail {
+	actionId: string;
+}
+
+export interface SidebarActionsPopoverPosition {
+	top: number;
+	left: number;
+	placement: "bottom" | "top";
+}
+
+const VIEWPORT_PADDING = 8;
+const ANCHOR_GAP = 6;
+const OPEN_DURATION = 150;
+const CLOSE_DURATION = 120;
+
+export function computeSidebarActionsPopoverPosition(
+	anchorRect: DOMRectReadOnly,
+	menuSize: { width: number; height: number },
+	viewport: { width: number; height: number },
+): SidebarActionsPopoverPosition {
+	const width = Math.max(0, menuSize.width);
+	const height = Math.max(0, menuSize.height);
+	const belowTop = anchorRect.bottom + ANCHOR_GAP;
+	const aboveTop = anchorRect.top - ANCHOR_GAP - height;
+	const belowSpace = viewport.height - VIEWPORT_PADDING - belowTop;
+	const aboveSpace = anchorRect.top - VIEWPORT_PADDING - ANCHOR_GAP;
+	const placement: "bottom" | "top" = belowSpace < height && aboveSpace > belowSpace ? "top" : "bottom";
+	const unclampedTop = placement === "top" ? aboveTop : belowTop;
+	const minTop = VIEWPORT_PADDING;
+	const maxTop = Math.max(VIEWPORT_PADDING, viewport.height - VIEWPORT_PADDING - height);
+	const top = Math.min(Math.max(unclampedTop, minTop), maxTop);
+	const rightAlignedLeft = anchorRect.right - width;
+	const maxLeft = Math.max(VIEWPORT_PADDING, viewport.width - VIEWPORT_PADDING - width);
+	const left = Math.min(Math.max(rightAlignedLeft, VIEWPORT_PADDING), maxLeft);
+	return { top, left, placement };
+}
+
+@customElement("sidebar-actions-popover")
+export class SidebarActionsPopover extends LitElement {
+	@property({ attribute: false }) items: SidebarActionsPopoverItem[] = [];
+	@property({ attribute: false }) anchorEl: HTMLElement | null = null;
+	@property({ attribute: false }) sourceRects: SidebarActionsFlipRect[] = [];
+	@property({ type: Boolean, reflect: true }) open = false;
+
+	@state() private _highlightIndex = 0;
+	@state() private _closing = false;
+	@state() private _position: SidebarActionsPopoverPosition = { top: VIEWPORT_PADDING, left: VIEWPORT_PADDING, placement: "bottom" };
+	@state() private _maxHeight = 320;
+
+	private _previousFocus: HTMLElement | null = null;
+	private _listenersBound = false;
+	private _animations: Animation[] = [];
+	private _closeRequested = false;
+	private _openedToken = 0;
+	private _finishingInternalClose = false;
+
+	private _onDocPointerDown = (ev: PointerEvent) => this._handleDocPointerDown(ev);
+	private _onDocKeyDown = (ev: KeyboardEvent) => this._handleDocKeyDown(ev);
+	private _onRouteChange = () => this._requestClose();
+	private _onViewportChange = () => this._measureAndPosition();
+
+	override createRenderRoot() {
+		return this;
+	}
+
+	override connectedCallback(): void {
+		super.connectedCallback();
+		this.style.display = "contents";
+		this._syncPopoverOpenAttr();
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		this._unbindListeners();
+		this._cancelAnimations();
+		this.removeAttribute("data-popover-open");
+	}
+
+	override willUpdate(changed: PropertyValues<this>): void {
+		if (changed.has("open") && changed.get("open") === true && !this.open && !this._finishingInternalClose && !this._closing) {
+			this._closing = true;
+			this._closeRequested = true;
+			this._syncPopoverOpenAttr();
+		}
+	}
+
+	override updated(changed: PropertyValues<this>): void {
+		if (changed.has("open")) {
+			if (this.open) this._onOpen();
+			else if (!this._finishingInternalClose) {
+				if (this._closing) this._onExternalCloseWithAnimation();
+				else this._onExternalClose();
+			}
+		}
+		if (changed.has("items")) {
+			this._highlightIndex = this._clampIndex(this._highlightIndex);
+			if (this.open) queueMicrotask(() => this._measureAndPosition());
+		}
+		this._syncPopoverOpenAttr();
+	}
+
+	private _onOpen(): void {
+		this._openedToken += 1;
+		this._closeRequested = false;
+		this._closing = false;
+		this._cancelAnimations();
+		this._previousFocus = (document.activeElement as HTMLElement | null) ?? null;
+		this._highlightIndex = this.items.length > 0 ? this._clampIndex(this._highlightIndex) : -1;
+		this._bindListeners();
+		this._syncPopoverOpenAttr();
+		void this._afterOpenRender(this._openedToken);
+	}
+
+	private _onExternalClose(): void {
+		this._closeRequested = false;
+		this._closing = false;
+		this._unbindListeners();
+		this._cancelAnimations();
+		this._restoreFocus();
+		this._syncPopoverOpenAttr();
+	}
+
+	private _onExternalCloseWithAnimation(): void {
+		this._unbindListeners();
+		this._syncPopoverOpenAttr();
+		if (this._prefersReducedMotion()) {
+			this._finishExternalClose();
+			return;
+		}
+		void this._animateClose().finally(() => this._finishExternalClose());
+	}
+
+	private _finishExternalClose(): void {
+		this._closeRequested = false;
+		this._closing = false;
+		this._cancelAnimations();
+		this._restoreFocus();
+		this._syncPopoverOpenAttr();
+		this.requestUpdate();
+	}
+
+	private async _afterOpenRender(token: number): Promise<void> {
+		await this.updateComplete;
+		if (!this.open || token !== this._openedToken) return;
+		this._measureAndPosition();
+		await this.updateComplete;
+		if (!this.open || token !== this._openedToken) return;
+		this._focusHighlighted();
+		this._animateOpen();
+	}
+
+	private _bindListeners(): void {
+		if (this._listenersBound) return;
+		document.addEventListener("pointerdown", this._onDocPointerDown, true);
+		document.addEventListener("keydown", this._onDocKeyDown, true);
+		window.addEventListener("hashchange", this._onRouteChange);
+		window.addEventListener("popstate", this._onRouteChange);
+		window.addEventListener("resize", this._onViewportChange);
+		window.addEventListener("scroll", this._onViewportChange, true);
+		this._listenersBound = true;
+	}
+
+	private _unbindListeners(): void {
+		if (!this._listenersBound) return;
+		document.removeEventListener("pointerdown", this._onDocPointerDown, true);
+		document.removeEventListener("keydown", this._onDocKeyDown, true);
+		window.removeEventListener("hashchange", this._onRouteChange);
+		window.removeEventListener("popstate", this._onRouteChange);
+		window.removeEventListener("resize", this._onViewportChange);
+		window.removeEventListener("scroll", this._onViewportChange, true);
+		this._listenersBound = false;
+	}
+
+	private _handleDocPointerDown(ev: PointerEvent): void {
+		if (!this.open || this._closing) return;
+		const target = ev.target as Node | null;
+		if (!target) return;
+		if (this.contains(target)) return;
+		if (this.anchorEl?.contains(target)) return;
+		this._requestClose();
+	}
+
+	private _handleDocKeyDown(ev: KeyboardEvent): void {
+		if (!this.open || this._closing) return;
+		switch (ev.key) {
+			case "Escape":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._requestClose();
+				return;
+			case "ArrowDown":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._moveHighlight(1);
+				return;
+			case "ArrowUp":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._moveHighlight(-1);
+				return;
+			case "Home":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._setHighlight(0);
+				return;
+			case "End":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._setHighlight(this.items.length - 1);
+				return;
+			case "Enter":
+			case " ":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._selectHighlighted(ev);
+				return;
+			case "Tab":
+				setTimeout(() => this._requestClose(false), 0);
+				return;
+		}
+	}
+
+	private _requestClose(restoreFocus = true): void {
+		if (!this.open || this._closeRequested) return;
+		this._closeRequested = true;
+		this._closing = true;
+		this._syncPopoverOpenAttr();
+		this._unbindListeners();
+		if (this._prefersReducedMotion()) {
+			this._finishClose(restoreFocus);
+			return;
+		}
+		void this._animateClose().finally(() => this._finishClose(restoreFocus));
+	}
+
+	private _finishClose(restoreFocus: boolean): void {
+		this._finishingInternalClose = true;
+		this.open = false;
+		this._closing = false;
+		this._closeRequested = false;
+		this._cancelAnimations();
+		this._syncPopoverOpenAttr();
+		if (restoreFocus) this._restoreFocus();
+		this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+		queueMicrotask(() => { this._finishingInternalClose = false; });
+	}
+
+	private _restoreFocus(): void {
+		try {
+			const target = this.anchorEl ?? this._previousFocus;
+			if (target && typeof target.focus === "function") target.focus();
+		} catch {
+			// Ignore focus races during route changes/unmount.
+		}
+		this._previousFocus = null;
+	}
+
+	private _syncPopoverOpenAttr(): void {
+		if (this.open || this._closing) this.setAttribute("data-popover-open", "");
+		else this.removeAttribute("data-popover-open");
+	}
+
+	private _clampIndex(index: number): number {
+		if (this.items.length === 0) return -1;
+		return Math.min(Math.max(index, 0), this.items.length - 1);
+	}
+
+	private _moveHighlight(delta: number): void {
+		if (this.items.length === 0) return;
+		const current = this._highlightIndex < 0 ? 0 : this._highlightIndex;
+		this._setHighlight((current + delta + this.items.length) % this.items.length);
+	}
+
+	private _setHighlight(index: number): void {
+		this._highlightIndex = this._clampIndex(index);
+		this.updateComplete.then(() => this._focusHighlighted()).catch(() => undefined);
+	}
+
+	private _focusHighlighted(): void {
+		const item = this._highlightedButton();
+		if (item) item.focus({ preventScroll: true });
+		else this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu")?.focus({ preventScroll: true });
+	}
+
+	private _highlightedButton(): HTMLButtonElement | null {
+		if (this._highlightIndex < 0) return null;
+		return this.querySelector<HTMLButtonElement>(`button[data-sidebar-actions-index="${this._highlightIndex}"]`);
+	}
+
+	private _selectHighlighted(event: Event): void {
+		const item = this.items[this._highlightIndex];
+		if (item) this._select(item.id, event);
+	}
+
+	private _select(actionId: string, event: Event): void {
+		event.stopPropagation();
+		if (this._closeRequested) return;
+		this.dispatchEvent(new CustomEvent<SidebarActionsSelectDetail>("sidebar-action-select", {
+			detail: { actionId },
+			bubbles: true,
+			composed: true,
+		}));
+		this._requestClose();
+	}
+
+	private _measureAndPosition(): void {
+		if (!this.open || !this.anchorEl || typeof this.anchorEl.getBoundingClientRect !== "function") return;
+		const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu");
+		const width = Math.max(menu?.offsetWidth ?? 0, 208);
+		const estimatedHeight = Math.max(this.items.length * 36 + 8, 44);
+		const height = Math.max(menu?.offsetHeight ?? 0, estimatedHeight);
+		const viewport = {
+			width: window.innerWidth || document.documentElement.clientWidth || 1024,
+			height: window.innerHeight || document.documentElement.clientHeight || 768,
+		};
+		const anchorRect = this.anchorEl.getBoundingClientRect();
+		const position = computeSidebarActionsPopoverPosition(anchorRect, { width, height }, viewport);
+		const available = position.placement === "top"
+			? Math.max(44, anchorRect.top - VIEWPORT_PADDING - ANCHOR_GAP)
+			: Math.max(44, viewport.height - position.top - VIEWPORT_PADDING);
+		this._position = position;
+		this._maxHeight = Math.floor(available);
+	}
+
+	private _prefersReducedMotion(): boolean {
+		return typeof window !== "undefined"
+			&& typeof window.matchMedia === "function"
+			&& window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	}
+
+	private _animateOpen(): void {
+		if (this._prefersReducedMotion()) return;
+		this._cancelAnimations();
+		const targets = this._targetQuickIconRects();
+		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
+		for (const delta of deltas) {
+			const icon = this._quickIcon(delta.actionId);
+			if (!icon || typeof icon.animate !== "function") continue;
+			const animation = icon.animate([
+				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})`, opacity: 0.85 },
+				{ transform: "translate(0, 0) scale(1, 1)", opacity: 1 },
+			], { duration: OPEN_DURATION, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "none" });
+			this._animations.push(animation);
+		}
+		for (const row of this._menuOnlyRows()) {
+			if (typeof row.animate !== "function") continue;
+			const animation = row.animate([
+				{ opacity: 0, transform: "translateY(-0.25em)" },
+				{ opacity: 1, transform: "translateY(0)" },
+			], { duration: OPEN_DURATION, delay: 55, easing: "ease-out", fill: "backwards" });
+			this._animations.push(animation);
+		}
+	}
+
+	private async _animateClose(): Promise<void> {
+		this._cancelAnimations();
+		const animations: Animation[] = [];
+		const targets = this._targetQuickIconRects();
+		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
+		for (const delta of deltas) {
+			const icon = this._quickIcon(delta.actionId);
+			if (!icon || typeof icon.animate !== "function") continue;
+			const animation = icon.animate([
+				{ transform: "translate(0, 0) scale(1, 1)", opacity: 1 },
+				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})`, opacity: 0.8 },
+			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" });
+			animations.push(animation);
+		}
+		for (const row of this._menuOnlyRows()) {
+			if (typeof row.animate !== "function") continue;
+			const animation = row.animate([
+				{ opacity: 1, transform: "translateY(0)" },
+				{ opacity: 0, transform: "translateY(-0.25em)" },
+			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" });
+			animations.push(animation);
+		}
+		if (animations.length === 0) {
+			const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-layer");
+			if (menu && typeof menu.animate === "function") {
+				animations.push(menu.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
+			}
+		}
+		this._animations = animations;
+		await Promise.allSettled(animations.map((animation) => animation.finished));
+	}
+
+	private _cancelAnimations(): void {
+		for (const animation of this._animations) {
+			try { animation.cancel(); } catch { /* ignore */ }
+		}
+		this._animations = [];
+	}
+
+	private _targetQuickIconRects(): SidebarActionsFlipRect[] {
+		return this._quickIcons().map((icon) => ({
+			actionId: icon.dataset.sidebarActionId!,
+			rect: icon.getBoundingClientRect(),
+		}));
+	}
+
+	private _quickIcons(): HTMLElement[] {
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-popover-icon][data-sidebar-action-quick='true'][data-sidebar-action-id]")];
+	}
+
+	private _quickIcon(actionId: string): HTMLElement | null {
+		return this._quickIcons().find((icon) => icon.dataset.sidebarActionId === actionId) ?? null;
+	}
+
+	private _menuOnlyRows(): HTMLElement[] {
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-quick='false']")];
+	}
+
+	override render() {
+		if (!this.open && !this._closing) return nothing;
+
+		const position = this._position;
+		const layerStyle = [
+			"position:fixed",
+			`top:${position.top}px`,
+			`left:${position.left}px`,
+			"z-index:60",
+			"min-width:13em",
+			"max-width:min(20em, calc(100vw - 1em))",
+		].join(";");
+
+		return html`
+			<div class="bobbit-sidebar-actions-layer" style=${layerStyle} @click=${(e: Event) => e.stopPropagation()}>
+				<div
+					class="bobbit-sidebar-actions-menu"
+					role="menu"
+					tabindex="-1"
+					data-placement=${position.placement}
+					style=${`box-sizing:border-box;display:flex;flex-direction:column;gap:0.125em;max-height:${this._maxHeight}px;overflow:auto;padding:0.25em;border:1px solid var(--border);border-radius:0.6em;background:var(--popover, var(--card, var(--background)));color:var(--popover-foreground, var(--foreground));box-shadow:0 0.5em 1.5em color-mix(in oklch, var(--foreground) 16%, transparent);font-size:calc(0.875em * var(--sidebar-font-scale, 1));outline:none;`}
+					@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
+				>
+					${this.items.map((item, index) => this._renderItem(item, index))}
+				</div>
+			</div>
+		`;
+	}
+
+	private _renderItem(item: SidebarActionsPopoverItem, index: number): TemplateResult {
+		const highlighted = index === this._highlightIndex;
+		const danger = item.tone === "danger";
+		const color = danger ? "var(--negative, var(--destructive, currentColor))" : "inherit";
+		const background = highlighted ? "color-mix(in oklch, var(--foreground) 10%, transparent)" : "transparent";
+		return html`
+			<button
+				type="button"
+				role="menuitem"
+				data-sidebar-actions-row
+				data-sidebar-actions-index=${index}
+				data-sidebar-action-id=${item.id}
+				data-sidebar-action-quick=${item.quick ? "true" : "false"}
+				tabindex=${highlighted ? "0" : "-1"}
+				class="bobbit-sidebar-actions-row"
+				style=${`display:flex;align-items:center;gap:0.55em;width:100%;min-width:0;padding:0.45em 0.6em;border:0;border-radius:0.45em;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
+				@mouseenter=${() => { this._highlightIndex = index; }}
+				@click=${(event: Event) => this._select(item.id, event)}
+			>
+				<span
+					data-sidebar-actions-popover-icon
+					data-sidebar-action-id=${item.id}
+					data-sidebar-action-quick=${item.quick ? "true" : "false"}
+					style="display:inline-flex;align-items:center;justify-content:center;width:1.2em;height:1.2em;flex:0 0 auto;transform-origin:top left;"
+				>${item.icon}</span>
+				<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.label}</span>
+			</button>
+		`;
+	}
+}
+
+declare global {
+	interface HTMLElementTagNameMap {
+		"sidebar-actions-popover": SidebarActionsPopover;
+	}
+}
