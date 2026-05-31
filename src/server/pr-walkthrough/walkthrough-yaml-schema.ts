@@ -720,12 +720,43 @@ class DiffReferenceMapper {
 
 	findHunk(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
 		const normalizedHeader = normalizeHunkHeader(hunkHeader);
+		const coordinates = parseHunkCoordinates(hunkHeader);
 		for (const block of this.byFile.get(normalizePath(file)) ?? []) {
 			const hunk = block.hunks.find(candidate => candidate.header === hunkHeader || normalizeHunkHeader(candidate.header) === normalizedHeader);
 			if (hunk) return { block, hunk };
+			if (coordinates) {
+				const coordinateMatch = block.hunks.find(candidate => hunkCoordinatesEqual(parseHunkCoordinates(candidate.header), coordinates));
+				if (coordinateMatch) return { block, hunk: coordinateMatch };
+			}
 		}
 		return undefined;
 	}
+}
+
+interface HunkCoordinates {
+	oldStart: number;
+	oldCount: number;
+	newStart: number;
+	newCount: number;
+}
+
+function parseHunkCoordinates(header: string): HunkCoordinates | undefined {
+	const match = /^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@(?:\s.*)?$/.exec(normalizeHunkHeader(header));
+	if (!match) return undefined;
+	return {
+		oldStart: Number(match[1]),
+		oldCount: match[2] === undefined ? 1 : Number(match[2]),
+		newStart: Number(match[3]),
+		newCount: match[4] === undefined ? 1 : Number(match[4]),
+	};
+}
+
+function hunkCoordinatesEqual(left: HunkCoordinates | undefined, right: HunkCoordinates): boolean {
+	return Boolean(left
+		&& left.oldStart === right.oldStart
+		&& left.oldCount === right.oldCount
+		&& left.newStart === right.newStart
+		&& left.newCount === right.newCount);
 }
 
 function flattenDiffBlocks(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrWalkthroughDiffBlock[] {
