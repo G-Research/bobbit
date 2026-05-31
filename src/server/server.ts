@@ -115,6 +115,10 @@ function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
 	const goalIds = ws.viewerGoalIds;
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
+
+function isSandboxContainerPath(cwd?: string): boolean {
+	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+}
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -168,6 +172,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
+import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -2071,6 +2076,45 @@ async function handleApiRoute(
 			if (ctx) return ctx.project.rootPath;
 		}
 		return cwd;
+	}
+
+	function sourceProjectRoot(projectId?: string): string | undefined {
+		return projectId ? projectRegistry.get(projectId)?.rootPath : undefined;
+	}
+
+	function duplicateSourceCwd(ps: any): string {
+		const projectRoot = sourceProjectRoot(ps.projectId);
+		if (ps.worktreePath && ps.repoPath && ps.cwd) {
+			const rel = path.relative(ps.worktreePath, ps.cwd);
+			if (rel && rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+				return path.join(ps.repoPath, rel);
+			}
+			return ps.repoPath;
+		}
+		if (ps.sandboxed && isSandboxContainerPath(ps.cwd)) return projectRoot || config.defaultCwd;
+		return ps.cwd || projectRoot || config.defaultCwd;
+	}
+
+	async function duplicateSessionWorktreeOpts(ps: any, cwd: string): Promise<{ repoPath: string } | undefined> {
+		if (!ps.worktreePath && !ps.repoWorktrees) return undefined;
+		if (ps.repoPath) return { repoPath: ps.repoPath };
+		const projectRoot = sourceProjectRoot(ps.projectId);
+		if (projectRoot) return { repoPath: projectRoot };
+		try {
+			if (await isGitRepo(cwd)) return { repoPath: await getRepoRoot(cwd) };
+		} catch { /* ignore */ }
+		return undefined;
+	}
+
+	function isUnsupportedDuplicateSource(session: any, ps: any): string | null {
+		if (!session || !ps) return "session not found";
+		if (ps.archived) return "archived sessions cannot be duplicated";
+		if (session.status === "terminated") return "terminated sessions cannot be duplicated";
+		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be duplicated";
+		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be duplicated";
+		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be duplicated";
+		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be duplicated";
+		return null;
 	}
 
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
@@ -6349,6 +6393,46 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/goals/:id/github-link — PR URL or sanitized GitHub branch fallback
+	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
+	if (goalGithubLinkMatch && req.method === "GET") {
+		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+
+		const cached = prStatusStore.get(goalId);
+		if (cached?.url) {
+			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
+			return;
+		}
+
+		if (goal.branch && fs.existsSync(goal.cwd)) {
+			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
+			if (fresh?.url) {
+				prStatusStore.set(goalId, fresh);
+				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
+				return;
+			}
+		}
+
+		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
+
+		const remoteCwd = goal.repoPath || goal.cwd;
+		try {
+			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+				cwd: remoteCwd,
+				encoding: "utf-8",
+				timeout: 5_000,
+			});
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
+			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
+		} catch {
+			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
+		}
+		return;
+	}
+
 	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
@@ -6642,6 +6726,97 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// POST /api/sessions/:id/duplicate — duplicate a live plain session without transcript/tool/proposal state.
+	const duplicateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/duplicate$/);
+	if (duplicateMatch && req.method === "POST") {
+		const sourceId = duplicateMatch[1];
+		await readBody(req).catch(() => ({}));
+
+		const source = sessionManager.getSession(sourceId);
+		const ps = sessionManager.getPersistedSession(sourceId);
+		if (!ps) { json({ error: "session not found" }, 404); return; }
+		if (ps.archived) { json({ error: "archived sessions cannot be duplicated" }, 422); return; }
+		if (!source) { json({ error: "only live sessions can be duplicated" }, 422); return; }
+
+		const unsupported = isUnsupportedDuplicateSource(source, ps);
+		if (unsupported) { json({ error: unsupported }, 422); return; }
+
+		const projectId = ps.projectId || source.projectId;
+		if (!projectId || !projectRegistry.get(projectId)) {
+			json({ error: "source project no longer registered" }, 410);
+			return;
+		}
+
+		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
+		if (goal?.state === "todo") {
+			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		}
+
+		const duplicateId = randomUUID();
+		const sourceCwd = goal?.cwd || duplicateSourceCwd({ ...ps, projectId });
+		const worktreeOpts = ps.goalId ? undefined : await duplicateSessionWorktreeOpts(ps, sourceCwd);
+		const createOpts: any = {
+			sessionId: duplicateId,
+			projectId,
+			sandboxed: !!ps.sandboxed,
+			worktreeOpts,
+			reattemptGoalId: ps.reattemptGoalId,
+			staffId: ps.staffId,
+			allowedTools: ps.allowedTools,
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+		};
+		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+			createOpts.sandboxBranch = `session/${duplicateId.slice(0, 8)}`;
+		}
+
+		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+		if (staff) {
+			let fullPrompt = staff.systemPrompt;
+			if (staff.memory) fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
+			createOpts.rolePrompt = fullPrompt;
+			createOpts.roleName = staff.roleId;
+			createOpts.accessory = staff.accessory;
+			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+		} else {
+			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			if (role) {
+				createOpts.rolePrompt = role.promptTemplate;
+				createOpts.roleName = role.name;
+				createOpts.role = role.name;
+				createOpts.accessory = role.accessory;
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+		}
+
+		try {
+			const duplicate = await sessionManager.createSession(sourceCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			const baseTitle = (ps.title || source.title || "session").trim() || "session";
+			const title = `Copy of ${baseTitle}`;
+			sessionManager.setTitle(duplicate.id, title, { markGenerated: true });
+			if (ps.staffId) duplicate.staffId = ps.staffId;
+			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(duplicate.id, ps.modelProvider, ps.modelId);
+
+			json({
+				id: duplicate.id,
+				cwd: duplicate.cwd,
+				status: duplicate.status,
+				projectId,
+				goalId: ps.goalId,
+				assistantType: ps.assistantType,
+			}, 201);
+		} catch (err) {
+			jsonError(500, err, { error: `failed to duplicate session: ${err instanceof Error ? err.message : String(err)}` });
+		}
+		return;
 	}
 
 	// POST /api/sessions/:id/wait — block until session becomes idle
