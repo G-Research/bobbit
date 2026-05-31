@@ -2,6 +2,7 @@ import type { Page, Route } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
 type LaunchJob = {
 	jobId: string;
@@ -195,6 +196,46 @@ async function ensureTeamLeadRole() {
 	expect([200, 201, 409], `team-lead role fixture should be creatable: ${roleResponse.status}`).toContain(roleResponse.status);
 }
 
+async function markWalkthroughChildArchivedInClient(page: Page, job: LaunchJob) {
+	await page.evaluate((input) => {
+		const appState = (window as any).bobbitState ?? (window as any).__bobbitState;
+		if (!appState) throw new Error("bobbit state unavailable");
+		const now = Date.now();
+		const parent = appState.gatewaySessions.find((session: any) => session.id === input.parentSessionId);
+		let child = appState.gatewaySessions.find((session: any) => session.id === input.childSessionId);
+		if (!child) {
+			child = {
+				id: input.childSessionId,
+				title: input.title,
+				cwd: parent?.cwd || "",
+				projectId: parent?.projectId,
+				createdAt: now,
+				lastActivity: now,
+				clientCount: 0,
+			};
+			appState.gatewaySessions.push(child);
+		}
+		Object.assign(child, {
+			title: input.title,
+			status: "terminated",
+			archived: true,
+			archivedAt: now,
+			parentSessionId: input.parentSessionId,
+			childKind: "pr-walkthrough",
+			readOnly: true,
+			walkthroughJobId: input.jobId,
+			walkthroughChangesetId: input.changesetId,
+		});
+		appState.archivedSessions = [
+			...appState.archivedSessions.filter((session: any) => session.id !== input.childSessionId),
+			{ ...child },
+		];
+		appState.showArchived = false;
+		localStorage.setItem("bobbit-show-archived", "false");
+		(window as any).__bobbitRenderApp?.();
+	}, job);
+}
+
 test.describe("Session-hosted PR walkthrough UX regressions", () => {
 	test("normal session advertises walkthrough slash command and intercepts it in the UI", async ({ page }) => {
 		await installWalkthroughLaunchFixture(page);
@@ -273,13 +314,44 @@ test.describe("Session-hosted PR walkthrough UX regressions", () => {
 		}
 	});
 
+	test("terminated walkthrough child is hidden until Show Archived is enabled", async ({ page }) => {
+		await installWalkthroughLaunchFixture(page);
+		await page.addInitScript(() => localStorage.setItem("bobbit-show-archived", "false"));
+		await page.setViewportSize({ width: 1600, height: 900 });
+		await openApp(page);
+		await createSessionViaUI(page);
+		const parentSessionId = await activeSessionId(page);
+
+		const job = await launchWalkthroughFromActiveSession(page, "779");
+		const childRow = page.locator(`[data-session-id="${job.childSessionId}"]`);
+		await expect(childRow, "live walkthrough child should initially be visible").toHaveCount(1, { timeout: 10_000 });
+
+		const deleteResponse = await apiFetch(`/api/sessions/${encodeURIComponent(job.childSessionId)}`, { method: "DELETE" });
+		expect(deleteResponse.ok, `walkthrough child should terminate cleanly: ${deleteResponse.status}`).toBe(true);
+		await navigateToHash(page, `#/session/${parentSessionId}`);
+		await markWalkthroughChildArchivedInClient(page, job);
+
+		await expect(childRow, "terminated walkthrough child should be hidden when Show Archived is off").toHaveCount(0, { timeout: 5_000 });
+
+		const archivedToggle = filtersButton(page);
+		await expect(archivedToggle).toBeVisible({ timeout: 10_000 });
+		await clickShowArchivedToggle(page);
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.showArchived === true), { timeout: 10_000 }).toBe(true);
+		await expect(childRow, "terminated walkthrough child should appear when Show Archived is on").toHaveCount(1, { timeout: 10_000 });
+		await expectChildNestedUnderParent(page, parentSessionId, job.childSessionId, "archived walkthrough child");
+
+		await clickShowArchivedToggle(page);
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.showArchived === false), { timeout: 10_000 }).toBe(true);
+		await expect(childRow, "terminated walkthrough child should hide again when Show Archived is toggled off").toHaveCount(0, { timeout: 5_000 });
+	});
+
 	test("terminated walkthrough child remains archived read-only", async ({ page }) => {
 		await installWalkthroughLaunchFixture(page);
 		await page.setViewportSize({ width: 1600, height: 900 });
 		await openApp(page);
 		await createSessionViaUI(page);
 
-		const job = await launchWalkthroughFromActiveSession(page, "779");
+		const job = await launchWalkthroughFromActiveSession(page, "780");
 		const deleteResponse = await apiFetch(`/api/sessions/${encodeURIComponent(job.childSessionId)}`, { method: "DELETE" });
 		expect(deleteResponse.ok, `walkthrough child should terminate cleanly: ${deleteResponse.status}`).toBe(true);
 
