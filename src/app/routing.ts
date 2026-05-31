@@ -38,6 +38,10 @@ export function getRouteFromHash(): AppRoute {
 			walkthroughTabId: params.get("tab") || undefined,
 		};
 	}
+	const pathSessionMatch = path.match(/^\/session\/([a-zA-Z0-9_-]+)$/i);
+	if (pathSessionMatch) {
+		return { view: "session", sessionId: pathSessionMatch[1] };
+	}
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
