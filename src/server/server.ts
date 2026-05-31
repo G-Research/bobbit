@@ -5291,6 +5291,7 @@ async function handleApiRoute(
 		if (url.searchParams.get("view") === "summary") {
 			const latestSignal = gate.signals[gate.signals.length - 1];
 			const slim: Record<string, unknown> = {
+				goalId,
 				gateId: gate.gateId,
 				name: def?.name,
 				status: gate.status,

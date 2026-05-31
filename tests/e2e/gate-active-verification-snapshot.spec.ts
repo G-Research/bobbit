@@ -144,6 +144,7 @@ test.describe("active gate verification snapshot overlay", () => {
 				throw new Error(`${MARKER}: gate status detail request failed: ${statusRes.status} ${await statusRes.text()}`);
 			}
 			const statusDetail = await statusRes.json();
+			expect(statusDetail.goalId, `${MARKER}: gate status summary must include goalId for live REST reconciliation`).toBe(goalId);
 			const statusSteps = statusDetail.latestSignal?.verification?.steps ?? [];
 			const statusRunning = statusSteps.find((s: any) => s.name === "Live output command");
 			const statusWaiting = statusSteps.find((s: any) => s.name === "Waiting follow-up");
