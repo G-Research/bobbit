@@ -72,6 +72,9 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git show --stat HEAD");
 		allowed("git log --oneline -5");
 		allowed("git log -1 --format=%H");
+		allowed("git grep submit_pr_walkthrough_yaml src/server/pr-walkthrough");
+		allowed("git grep -n -e walkthrough -- src/server/pr-walkthrough");
+		allowed("git grep TODO");
 		allowed("git rev-parse HEAD");
 		allowed("git status --short");
 		allowed("git status --porcelain=v2 --branch");
@@ -110,6 +113,11 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("git diff --output=diff.patch", /--output/);
 		blocked("git diff -- src/../package.json", /parent-directory/);
 		blocked("git show HEAD -- ':(top)package.json'", /pathspec magic/);
+		blocked("git grep --untracked token src", /--untracked/);
+		blocked("git grep --no-exclude-standard token src", /--no-exclude-standard/);
+		blocked("git grep --open-files-in-pager=vim token src", /--open-files-in-pager/);
+		blocked("git grep -Ovim token src", /-O|pager\/editor/);
+		blocked("git grep --recurse-submodules token", /--recurse-submodules/);
 		blocked("git for-each-ref --git-dir=.git refs/heads", /--git-dir/);
 		blocked("git for-each-ref --work-tree=.. refs/heads", /--work-tree|parent-directory/);
 		blocked("git for-each-ref --output=refs.txt refs/heads", /--output/);

@@ -480,6 +480,7 @@ If `bash` is allowed, wrap it with a walkthrough command policy rather than rely
 - `git diff ...`
 - `git show ...`
 - `git log ...`
+- `git grep ...`
 - `git rev-parse ...`
 - `git status --short` / `git status --porcelain`
 - `rg ...`, `grep ...`, `find ...`, `ls ...`, `cat ...`, `sed -n ...`, `head ...`, `tail ...`, `pwd`
@@ -657,7 +658,7 @@ Unit tests:
 - Mapper creates Orientation, Design, Review, Other, and Audit cards.
 - Hunk mapping preserves unmapped references as warnings.
 - Suggested comment anchors map to line ids when possible and demote cleanly when not.
-- Read-only command policy allows `gh pr view`, `gh pr diff`, `gh api` read calls, `git diff/show/log`, and read-only search/read commands.
+- Read-only command policy allows `gh pr view`, `gh pr diff`, `gh api` read calls, `git diff/show/log/grep`, and read-only search/read commands.
 - Read-only command policy blocks edits, commits, pushes, installs, builds, tests, servers, and GitHub review/comment commands.
 - Idle reminder chooses generic vs YAML-validation retry prompts and rate-limits reminders.
 
