@@ -394,7 +394,9 @@ The extension registers only when `BOBBIT_WALKTHROUGH_JOB_ID` and `BOBBIT_SESSIO
 
 Internal endpoint:
 
-`POST /api/internal/pr-walkthrough/bundle`
+`GET /api/internal/pr-walkthrough/bundle` / `POST /api/internal/pr-walkthrough/bundle`
+
+Compatibility alias: `/api/internal/pr-walkthrough/analysis-bundle`.
 
 Request parameters:
 
@@ -669,7 +671,7 @@ Reload cases:
 - Submitted successfully: `GET /api/pr-walkthrough/:changesetId` restores cards; job says `ready`.
 - Bundle missing after launch: bundle reads or YAML submission return retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; the UI should direct the user to relaunch instead of retrying hidden PR diff fetches.
 - Server restarted while agent running: `WalkthroughAgentManager.restore()` scans job records, reconnects idle listeners for live sessions, and does not create duplicate sessions.
-- Child archived/terminated: job remains for historical lookup; launcher dedupe should not reuse terminated children unless explicitly requested.
+- Child archived/terminated: job remains for historical lookup; launcher dedupe should not reuse terminated children unless explicitly requested. Sidebar filtering hides terminated/archived walkthrough children while **Show Archived** is off and shows them nested under the parent when it is on.
 
 Existing draft review state, comments, decisions, and standalone route should remain keyed by `sessionId + walkthrough tab id` in the current UI stores.
 
