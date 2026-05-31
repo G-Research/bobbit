@@ -191,6 +191,34 @@ function yamlReviewChunkFor(fixture: { hunkHeader: string; filePath: string }): 
 	};
 }
 
+function jsonFilesUnder(root: string): string[] {
+	if (!fs.existsSync(root)) return [];
+	const files: string[] = [];
+	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+		const fullPath = path.join(root, entry.name);
+		if (entry.isDirectory()) files.push(...jsonFilesUnder(fullPath));
+		else if (entry.isFile() && entry.name.endsWith(".json")) files.push(fullPath);
+	}
+	return files;
+}
+
+function readAnalysisBundleArtifacts(): Array<Record<string, any>> {
+	return jsonFilesUnder(tempDir)
+		.map(file => {
+			try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
+		})
+		.filter((value): value is Record<string, any> => value?.kind === "pr_walkthrough_analysis_bundle");
+}
+
+function removeAnalysisBundleArtifacts(): void {
+	for (const file of jsonFilesUnder(tempDir)) {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+			if (parsed?.kind === "pr_walkthrough_analysis_bundle") fs.rmSync(file, { force: true });
+		} catch { /* ignore non-bundle JSON */ }
+	}
+}
+
 async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
 	const res = makeResponse();
 	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method, headers } as any, res as any, {
@@ -225,7 +253,7 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(child.parentSessionId, "parent");
 		assert.equal(child.childKind, "pr-walkthrough");
 		assert.equal(child.readOnly, true);
-		assert.deepEqual(child.allowedTools, ["readonly_bash", "submit_pr_walkthrough_yaml"]);
+		assert.deepEqual(child.allowedTools, ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_yaml"]);
 
 		const second = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 		assert.equal(second.created, false);
@@ -249,6 +277,71 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_OWNER, "acme");
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_REPO, "widgets");
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_NUMBER, "42");
+	});
+
+	it("launch resolves and persists a full versioned analysis bundle before child creation", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
+		let bundleCountAtCreate = -1;
+		let bundleCountAtEnqueue = -1;
+		sessionManager.createSession = async (...args: Parameters<typeof sessionManager.createSession>) => {
+			bundleCountAtCreate = readAnalysisBundleArtifacts().length;
+			return originalCreateSession(...args);
+		};
+		const originalEnqueuePrompt = sessionManager.enqueuePrompt.bind(sessionManager);
+		sessionManager.enqueuePrompt = (...args: Parameters<typeof sessionManager.enqueuePrompt>) => {
+			bundleCountAtEnqueue = readAnalysisBundleArtifacts().length;
+			return originalEnqueuePrompt(...args);
+		};
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		assert.equal(launch.status, "waiting_for_yaml");
+		assert.ok(bundleCountAtCreate > 0, "analysis bundle must be persisted before child session creation");
+		assert.ok(bundleCountAtEnqueue > 0, "analysis bundle must be persisted before kickoff prompt enqueue");
+		const [bundle] = readAnalysisBundleArtifacts();
+		assert.ok(bundle, "expected a persisted pr_walkthrough_analysis_bundle artifact");
+		assert.equal(bundle.schema_version, 1);
+		assert.equal(bundle.kind, "pr_walkthrough_analysis_bundle");
+		assert.deepEqual(bundle.target, {
+			provider: "github",
+			owner: "acme",
+			repo: "widgets",
+			number: 42,
+			url: "https://github.com/acme/widgets/pull/42",
+		});
+		assert.equal(bundle.changeset.base_sha, fixture.baseSha);
+		assert.equal(bundle.changeset.head_sha, fixture.headSha);
+		assert.equal(bundle.changeset.files_changed, 1);
+		assert.ok(Array.isArray(bundle.files), "bundle.files must contain the authoritative launch-time diff files");
+		assert.ok(bundle.files.some((file: any) => file.path === fixture.filePath && Array.isArray(file.hunks) && file.hunks.length > 0), "bundle must include parsed hunks for the changed file");
+		const child = sessionManager.sessions.get(launch.childSessionId);
+		assert.ok(child.allowedTools.includes("read_pr_walkthrough_bundle"), "walkthrough child must be allowed to read its scoped persisted bundle");
+		assert.match(`${child.rolePrompt}\n${sessionManager.prompts.join("\n")}`, /read_pr_walkthrough_bundle/);
+	});
+
+	it("launch-time diff resolution failure returns a structured job error without creating a waiting child agent", async () => {
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store,
+			preflightGithubLaunch: () => { throw new Error("GitHub API rate limit exceeded"); },
+		});
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		assert.equal(launch.status, "error");
+		assert.equal(launch.job.error?.code, "GITHUB_RATE_LIMITED");
+		assert.equal(launch.job.error?.retryable, true);
+		assert.equal(store.list().length, 1);
+		assert.equal(store.list()[0].status, "error");
+		assert.equal(sessionManager.sessions.size, 1, "expected no child session when launch-time bundle resolution fails");
+		assert.equal(sessionManager.prompts.length, 0, "expected no waiting/kickoff prompt when launch-time bundle resolution fails");
 	});
 
 	it("local changeset launches are rejected before creating an agent job", async () => {
@@ -602,6 +695,45 @@ describe("WalkthroughAgentManager", () => {
 		assert.ok(reviewCard.diffBlocks.length > 0, "expected relevant_hunks to map to non-empty diffBlocks");
 		assert.equal(reviewCard.diffBlocks[0].filePath, fixture.filePath);
 		assert.equal(stored.warnings.some((warning: any) => warning.code === "unmapped_hunk"), false);
+	});
+
+	it("submit-yaml maps against the stored launch bundle without submit-time diff resolution", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const launchManager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
+		const launch = await launchManager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+		const proof = submitProof(sessionManager, launch.childSessionId);
+		const submitManager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store,
+			resolveDiffForYamlMapping: () => { throw new Error("submit-time resolver called; expected stored PR walkthrough analysis bundle"); },
+		});
+
+		const result = await submitManager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: proof });
+
+		assert.equal(result.ok, true);
+		const stored = getWalkthrough(launch.changesetId, tempDir);
+		assert.equal(stored?.changeset.baseSha, fixture.baseSha);
+		assert.equal(stored?.changeset.headSha, fixture.headSha);
+	});
+
+	it("missing stored analysis bundle returns a deterministic retryable submission error instead of re-resolving diff data", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+		const proof = submitProof(sessionManager, launch.body.childSessionId);
+		removeAnalysisBundleArtifacts();
+
+		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
+
+		assert.notEqual(result.status, 200, "missing bundle must not be silently recovered by submit-time GitHub/local diff resolution");
+		assert.equal(result.body.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
+		assert.equal(result.body.retryable, true);
+		assert.match(result.body.message, /bundle/i);
 	});
 
 	it("submit-yaml converts diff resolution failures into structured job errors", async () => {
