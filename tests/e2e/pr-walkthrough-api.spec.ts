@@ -79,7 +79,7 @@ test.describe("PR walkthrough REST API", () => {
 		const fixture = makeGitFixture();
 		try {
 			const parentSessionId = await createSession();
-			const launchBody = { sessionId: parentSessionId, cwd: fixture.cwd, baseSha: fixture.baseSha, headSha: fixture.headSha };
+			const launchBody = { sessionId: parentSessionId, cwd: fixture.cwd, prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha };
 			const launchResp = await apiFetch("/api/pr-walkthrough/launch", {
 				method: "POST",
 				body: JSON.stringify(launchBody),
@@ -89,6 +89,7 @@ test.describe("PR walkthrough REST API", () => {
 			expect(launch.status).toBe("waiting_for_yaml");
 			expect(launch.job.parentSessionId).toBe(parentSessionId);
 			expect(launch.job.childSessionId).toBe(launch.childSessionId);
+			expect(launch.job.target.canonicalKey).toBe("github:acme/widgets#42");
 
 			const sessionResp = await apiFetch(`/api/sessions/${encodeURIComponent(launch.childSessionId)}`);
 			expect(sessionResp.status).toBe(200);

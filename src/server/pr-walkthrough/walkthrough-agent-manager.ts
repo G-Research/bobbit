@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
-import { resolveGithubPr, GithubPrAdapterError } from "./github-adapter.js";
+import { execFileSafe } from "../exec-file-safe.js";
+import { resolveGithubPr, GithubPrAdapterError, parseGithubRemoteUrl } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import { saveWalkthrough, type WalkthroughStorePayload } from "./walkthrough-store.js";
 import {
@@ -15,6 +16,7 @@ import {
 	createSubmissionProof,
 	hashSubmissionProof,
 	verifySubmissionProof,
+	walkthroughTargetEnvForJob,
 	type PrWalkthroughJobError,
 	type PrWalkthroughJobRecord,
 	type PrWalkthroughTarget,
@@ -149,7 +151,8 @@ export class WalkthroughAgentManager {
 
 		const parent = this.getSession(parentSessionId);
 		this.assertLaunchableParent(parentSessionId, parent);
-		const target = canonicalizeTarget(input);
+		const cwd = await this.resolveCwd(input, parentSessionId, parent);
+		const target = await this.resolveLaunchTarget(input, cwd);
 		const existing = this.store.findByParentAndTarget(parentSessionId, target.canonicalKey);
 		if (existing && this.shouldReuse(existing)) {
 			return { ...responseFromJob(existing), created: false };
@@ -162,7 +165,7 @@ export class WalkthroughAgentManager {
 			return { ...result, created: false };
 		}
 
-		const promise = this.launchNew(input, parentSessionId, parent, target);
+		const promise = this.launchNew(input, parentSessionId, parent, target, cwd);
 		this.launchInFlight.set(launchKey, promise);
 		try {
 			return await promise;
@@ -171,8 +174,7 @@ export class WalkthroughAgentManager {
 		}
 	}
 
-	private async launchNew(input: LaunchWalkthroughRequest, parentSessionId: string, parent: SessionLike | PersistedSessionLike, target: PrWalkthroughTarget): Promise<LaunchWalkthroughResponse> {
-		const cwd = await this.resolveCwd(input, parentSessionId, parent);
+	private async launchNew(input: LaunchWalkthroughRequest, parentSessionId: string, parent: SessionLike | PersistedSessionLike, target: PrWalkthroughTarget, cwd: string): Promise<LaunchWalkthroughResponse> {
 		const projectId = stringValue(input.projectId) ?? stringValue(parent.projectId);
 		const jobId = `prw-${randomUUID()}`;
 		const childSessionId = `prw-session-${randomUUID()}`;
@@ -207,7 +209,7 @@ export class WalkthroughAgentManager {
 			return { ...responseFromJob(job), created: true };
 		}
 
-		const targetEnv = walkthroughTargetEnv(target);
+		const targetEnv = walkthroughTargetEnvForJob(job);
 		const initialModel = await this.resolveParentInitialModel(parentSessionId, parent);
 		let child: SessionLike;
 		try {
@@ -377,6 +379,7 @@ export class WalkthroughAgentManager {
 
 	private async preflightLaunch(job: PrWalkthroughJobRecord): Promise<void> {
 		if (job.target.provider !== "github") return;
+		if (job.target.baseSha && job.target.headSha) return;
 		if (!this.deps.preflightGithubLaunch) return;
 		if (typeof this.deps.preflightGithubLaunch === "function") {
 			await this.deps.preflightGithubLaunch(job);
@@ -491,6 +494,18 @@ export class WalkthroughAgentManager {
 		return stringValue(parent?.worktreePath) ?? stringValue(parent?.cwd) ?? this.deps.defaultCwd;
 	}
 
+	private async resolveLaunchTarget(input: LaunchWalkthroughRequest, cwd: string): Promise<PrWalkthroughTarget> {
+		const target = canonicalizeTarget(input);
+		if (target.provider === "local") {
+			throw routeError(400, "Session-hosted PR walkthrough agents currently support GitHub pull requests only. Use the standalone local walkthrough resolver for local base/head changesets.", {
+				code: "LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED",
+				retryable: false,
+			});
+		}
+		if (target.provider !== "github" || (target.owner && target.repo)) return target;
+		return resolveNumberOnlyGithubTarget(target, cwd);
+	}
+
 	private async resolveParentInitialModel(parentSessionId: string, parent: SessionLike | PersistedSessionLike | undefined): Promise<string | undefined> {
 		const resolved = await this.deps.resolveSessionModel?.(parentSessionId);
 		return normalizeModelPref(resolved) ?? normalizeModelPref(parent);
@@ -603,14 +618,34 @@ export function canonicalizeTarget(input: LaunchWalkthroughRequest): PrWalkthrou
 	throw routeError(400, "A GitHub PR URL/number or local baseSha/headSha is required", { code: "INVALID_TARGET" });
 }
 
-function walkthroughTargetEnv(target: PrWalkthroughTarget): Record<string, string> {
-	if (target.provider !== "github" || !target.owner || !target.repo || target.number === undefined) return {};
+async function resolveNumberOnlyGithubTarget(target: PrWalkthroughTarget, cwd: string): Promise<PrWalkthroughTarget> {
+	const inferred = await inferGithubRepository(cwd);
+	if (!inferred) {
+		throw routeError(400, "A GitHub PR number requires a GitHub origin remote so Bobbit can scope readonly_bash to owner/repo/number. Pass a full GitHub PR URL or run from a GitHub-backed worktree.", {
+			code: "GITHUB_REPOSITORY_REQUIRED",
+			retryable: false,
+		});
+	}
+	const number = target.number;
+	if (number === undefined) return target;
+	const host = inferred.host || "github.com";
+	const prUrl = target.prUrl ?? `https://${host}/${inferred.owner}/${inferred.repo}/pull/${number}`;
 	return {
-		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
-		BOBBIT_WALKTHROUGH_TARGET_OWNER: target.owner,
-		BOBBIT_WALKTHROUGH_TARGET_REPO: target.repo,
-		BOBBIT_WALKTHROUGH_TARGET_NUMBER: String(target.number),
+		...target,
+		owner: inferred.owner,
+		repo: inferred.repo,
+		prUrl,
+		canonicalKey: `github:${inferred.owner}/${inferred.repo}#${number}`,
 	};
+}
+
+async function inferGithubRepository(cwd: string): Promise<{ owner: string; repo: string; host: string } | undefined> {
+	try {
+		const { stdout } = await execFileSafe("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000, encoding: "utf8" });
+		return parseGithubRemoteUrl(stdout) ?? undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function changesetIdForTarget(target: PrWalkthroughTarget): string {
