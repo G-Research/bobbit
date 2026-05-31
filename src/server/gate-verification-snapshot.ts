@@ -11,6 +11,9 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
+const LIVE_LOG_READ_MAX_BYTES = 256 * 1024;
+const LIVE_LOG_TAIL_CHUNK_BYTES = 16 * 1024;
+
 export type GateVerificationSnapshotStatus = "passed" | "failed" | "skipped" | "running" | "waiting" | "blocked";
 
 export interface GateVerificationSnapshotStep {
@@ -78,25 +81,129 @@ export function gateVerificationDefaultSelection(options: TextSelectionOptions =
 	return options;
 }
 
-function readOptionalFile(filePath: string | undefined): string {
-	if (!filePath) return "";
-	try { return fs.readFileSync(filePath, "utf8"); } catch { return ""; }
+interface BoundedLiveLogRead {
+	text: string;
+	truncated: boolean;
+	truncationReason?: string;
 }
 
-function readLiveCommandOutput(activeStep: ActiveVerification["steps"][number]): { output: string; liveLogs?: { stdout: boolean; stderr: boolean } } {
-	const stdout = readOptionalFile(activeStep.outFile).replace(/(?:\r?\n)+$/, "");
-	const stderr = readOptionalFile(activeStep.errFile).replace(/(?:\r?\n)+$/, "");
+function combineTruncationReasons(reasons: Array<string | undefined>): string | undefined {
+	const unique = [...new Set(reasons.filter((reason): reason is string => !!reason))];
+	return unique.length ? unique.join("; ") : undefined;
+}
+
+function readFromStart(filePath: string, maxBytes: number): BoundedLiveLogRead {
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return { text: "", truncated: false };
+		const bytesToRead = Math.min(stat.size, maxBytes);
+		const buffer = Buffer.allocUnsafe(bytesToRead);
+		fd = fs.openSync(filePath, "r");
+		const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+		const truncated = stat.size > bytesRead;
+		return {
+			text: buffer.subarray(0, bytesRead).toString("utf8"),
+			truncated,
+			truncationReason: truncated ? `live log read bounded to first ${bytesRead} bytes before selection` : undefined,
+		};
+	} catch {
+		return { text: "", truncated: false };
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore close failure */ }
+		}
+	}
+}
+
+function countLineFeeds(buffer: Buffer): number {
+	let count = 0;
+	for (const byte of buffer) if (byte === 10) count++;
+	return count;
+}
+
+function readTailByLines(filePath: string, lines: number, maxBytes: number): BoundedLiveLogRead {
+	let fd: number | undefined;
+	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size <= 0) return { text: "", truncated: false };
+		fd = fs.openSync(filePath, "r");
+		const chunks: Buffer[] = [];
+		let position = stat.size;
+		let bytesReadTotal = 0;
+		let lineFeeds = 0;
+		const targetLineFeeds = Math.max(lines, 1);
+
+		while (position > 0 && bytesReadTotal < maxBytes && lineFeeds <= targetLineFeeds) {
+			const bytesToRead = Math.min(LIVE_LOG_TAIL_CHUNK_BYTES, position, maxBytes - bytesReadTotal);
+			const buffer = Buffer.allocUnsafe(bytesToRead);
+			position -= bytesToRead;
+			const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, position);
+			const chunk = buffer.subarray(0, bytesRead);
+			chunks.unshift(chunk);
+			bytesReadTotal += bytesRead;
+			lineFeeds += countLineFeeds(chunk);
+			if (bytesRead === 0) break;
+		}
+
+		const truncated = position > 0;
+		return {
+			text: Buffer.concat(chunks).toString("utf8"),
+			truncated,
+			truncationReason: truncated ? `live log read bounded to last ${bytesReadTotal} bytes before selection` : undefined,
+		};
+	} catch {
+		return { text: "", truncated: false };
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* ignore close failure */ }
+		}
+	}
+}
+
+function readBoundedLiveLog(filePath: string | undefined, selectionOptions: TextSelectionOptions): BoundedLiveLogRead {
+	if (!filePath) return { text: "", truncated: false };
+	if (selectionOptions.mode === "tail") {
+		return readTailByLines(filePath, selectionOptions.lines ?? 20, LIVE_LOG_READ_MAX_BYTES);
+	}
+	return readFromStart(filePath, LIVE_LOG_READ_MAX_BYTES);
+}
+
+function trimTrailingNewlines(text: string): string {
+	return text.replace(/(?:\r?\n)+$/, "");
+}
+
+function prefixLogLines(label: "stdout" | "stderr", text: string): string {
+	return text.split(/\r?\n/).map(line => `[${label}] ${line}`).join("\n");
+}
+
+function composeLiveLogOutput(stdout: string, stderr: string): string {
+	if (stdout && stderr) return [prefixLogLines("stdout", stdout), prefixLogLines("stderr", stderr)].join("\n");
+	return stdout || stderr;
+}
+
+function readLiveCommandOutput(
+	activeStep: ActiveVerification["steps"][number],
+	selectionOptions: TextSelectionOptions,
+): { output: string; liveLogs?: { stdout: boolean; stderr: boolean }; truncationReason?: string } {
+	const stdoutRead = readBoundedLiveLog(activeStep.outFile, selectionOptions);
+	const stderrRead = readBoundedLiveLog(activeStep.errFile, selectionOptions);
+	const stdout = trimTrailingNewlines(stdoutRead.text);
+	const stderr = trimTrailingNewlines(stderrRead.text);
 	const hasStdout = stdout.length > 0;
 	const hasStderr = stderr.length > 0;
+	const truncationReason = combineTruncationReasons([stdoutRead.truncationReason, stderrRead.truncationReason]);
 	if (hasStdout || hasStderr) {
 		return {
-			output: [stdout, stderr].filter(Boolean).join("\n"),
+			output: composeLiveLogOutput(stdout, stderr),
 			liveLogs: { stdout: !!activeStep.outFile, stderr: !!activeStep.errFile },
+			truncationReason,
 		};
 	}
 	return {
 		output: activeStep.output || "",
 		liveLogs: activeStep.outFile || activeStep.errFile ? { stdout: !!activeStep.outFile, stderr: !!activeStep.errFile } : undefined,
+		truncationReason,
 	};
 }
 
@@ -157,6 +264,7 @@ export function buildGateVerificationSnapshot(input: {
 		let rawOutput = rawPersistedOutput;
 		let durationMs = persisted.duration_ms;
 		let liveLogs: GateVerificationSnapshotStep["liveLogs"];
+		let liveLogTruncationReason: string | undefined;
 		const sessionId = activeStep?.sessionId;
 
 		if (activeStep) {
@@ -167,9 +275,10 @@ export function buildGateVerificationSnapshot(input: {
 			}
 			if (activeStep.status === "running") {
 				durationMs = runningDurationMs(activeStep, now);
-				const live = activeStep.type === "command" ? readLiveCommandOutput(activeStep) : { output: activeStep.output || rawPersistedOutput };
+				const live = activeStep.type === "command" ? readLiveCommandOutput(activeStep, selectionOptions) : { output: activeStep.output || rawPersistedOutput };
 				rawOutput = live.output;
 				liveLogs = live.liveLogs;
+				liveLogTruncationReason = live.truncationReason;
 			} else {
 				durationMs = activeStep.durationMs ?? persisted.duration_ms;
 				rawOutput = activeStep.output ?? rawPersistedOutput;
@@ -180,7 +289,16 @@ export function buildGateVerificationSnapshot(input: {
 		}
 
 		const selected = selectText(rawOutput, selectionOptions);
-		aggregateTotalLines += selected.selection.totalLines;
+		const selection = liveLogTruncationReason
+			? {
+				...selected.selection,
+				truncated: true,
+				truncationReason: selected.selection.truncationReason
+					? `${liveLogTruncationReason}; ${selected.selection.truncationReason}`
+					: liveLogTruncationReason,
+			}
+			: selected.selection;
+		aggregateTotalLines += selection.totalLines;
 		if (status === "failed") priorFailure = true;
 
 		const out: GateVerificationSnapshotStep = {
@@ -189,7 +307,7 @@ export function buildGateVerificationSnapshot(input: {
 			status,
 			duration_ms: durationMs,
 			output: selected.text,
-			selection: selected.selection,
+			selection,
 		};
 		if (shouldExposePassed(status)) out.passed = status === "passed" || (status === "skipped" && persisted.passed === true);
 		if (status === "skipped" || status === "blocked" || persisted.skipped) out.skipped = true;
