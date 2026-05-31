@@ -80,6 +80,40 @@ function normaliseText(s: string): string {
 	return s.replace(/\s+/g, " ").trim();
 }
 
+/** Multiset dedup key for plain-text rows (snapshot↔live). Empty-text rows —
+ *  id-less aborted/errored assistant message_ends — key on
+ *  `${role}|EMPTY|${stopReason}` so the snapshot dedups them by multiset count
+ *  instead of skipping them (the S7/S10 double-banner). Non-empty rows keep
+ *  `${role}|${text}`, preserving the existing H3 cardinality contract. (WP2/RC1) */
+function plainTextEquivKey(m: any): string {
+	const t = normaliseText(extractText(m));
+	if (t.length === 0) return `${m.role}|EMPTY|${(m as any).stopReason ?? ""}`;
+	return `${m.role}|${t}`;
+}
+
+/** Reconstruct the server "modelText" from an optimistic row's originalText plus
+ *  its `skillExpansions` (the expanded slash-skill body the server echoes back).
+ *  Splice each expansion's `[start,end]` range right-to-left so earlier indices
+ *  stay valid. Returns the raw text when there are no (valid) expansions. Lets the
+ *  optimistic text-fallback match a `/foo` row against its `EXPANDED foo` echo so
+ *  a skill-expanded prompt doesn't render twice. (WP2/RC1 — S17, unprefixed case) */
+function reconstructModelText(m: any): string {
+	const orig = extractText(m);
+	const exps = (m as any).skillExpansions;
+	if (!Array.isArray(exps) || exps.length === 0) return orig;
+	const ranged = exps.filter((e: any) => Array.isArray(e?.range) && e.range.length === 2);
+	ranged.sort((a: any, b: any) => b.range[0] - a.range[0]);
+	let out = orig;
+	for (const e of ranged) {
+		const start = e.range[0];
+		const end = e.range[1];
+		if (typeof start === "number" && typeof end === "number" && start >= 0 && end <= out.length && start <= end) {
+			out = out.slice(0, start) + (typeof e.expanded === "string" ? e.expanded : "") + out.slice(end);
+		}
+	}
+	return out;
+}
+
 // ---------------------------------------------------------------------------
 // Compaction marker helpers.
 //
@@ -202,7 +236,17 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// carrying image content blocks becomes user-with-attachments so it
 			// renders without depending on the racy _pendingAttachments slot. No-op
 			// for non-user / no-image / already-enriched rows. (WP1 / RC2)
-			const incoming = enrichUserMessage(frame.message);
+			let incoming = enrichUserMessage(frame.message);
+			// RC1/WP2: stamp a stable synthetic id on id-less server rows. pi
+			// persists user/aborted/errored rows id-less (agent.js:255-259), so
+			// without an id the reducer cannot replace-by-id or dedup an id-less
+			// live row against its snapshot copy (the S7/S10 double "Request
+			// aborted" banner). Distinct from the synth:tc: scheme
+			// (streaming-message-id.ts) stamped upstream in remote-agent.ts BEFORE
+			// the reducer, so a non-empty id (real or synth:tc) is never overwritten.
+			if (typeof incoming.id !== "string" || incoming.id.length === 0) {
+				incoming = { ...incoming, id: `synth:seq:${seq}` };
+			}
 			const role = incoming.role;
 			let messages = state.messages.slice();
 
@@ -217,26 +261,52 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// Reconcile user echoes against optimistic rows: id-match, then
 			// text-fallback when the optimistic id matches `^optimistic_`.
 			if (role === "user" || role === "user-with-attachments") {
+				const text = extractText(incoming);
 				const idMatchIdx = messages.findIndex(
 					(m) =>
 						m._origin === "optimistic" &&
 						typeof incoming.id === "string" &&
 						m.id === incoming.id,
 				);
+				let reconciled = false;
 				if (idMatchIdx !== -1) {
 					messages.splice(idMatchIdx, 1);
+					reconciled = true;
 				} else {
-					const text = extractText(incoming);
+					// Text-fallback: match either the raw optimistic text OR its
+					// skill-expanded modelText (WP2/RC1 — S17). A slash-skill prompt
+					// renders optimistically as "/foo" but the server echoes the
+					// expanded body, so exact-text alone would leave a duplicate.
 					const textIdx = messages.findIndex(
 						(m) =>
 							m._origin === "optimistic" &&
 							typeof m.id === "string" &&
 							m.id.startsWith("optimistic_") &&
-							extractText(m) === text,
+							(extractText(m) === text || reconstructModelText(m) === text),
 					);
 					if (textIdx !== -1) {
 						messages.splice(textIdx, 1);
+						reconciled = true;
 					}
+				}
+				// Step 4b (S18): if no optimistic matched, the echo may be replacing a
+				// prior-SNAPSHOT user artifact of the same text — a snapshot that landed
+				// in the optimistic→echo gap already deduped the optimistic, leaving
+				// only the id-less snapshot copy. Consume that artifact so the live echo
+				// replaces rather than re-stacks. id-less + _order<=0 scoping excludes
+				// the id'd inflight-steer:* synthetic; the user-role scope means a
+				// distinct new assistant same-text reply is never over-deduped.
+				if (!reconciled) {
+					const artifactIdx = messages.findIndex(
+						(m) =>
+							m._origin === "server" &&
+							m._order <= 0 &&
+							(typeof m.id !== "string" || m.id.length === 0) &&
+							(m.role === "user" || m.role === "user-with-attachments") &&
+							isPlainTextRow(m) &&
+							extractText(m) === text,
+					);
+					if (artifactIdx !== -1) messages.splice(artifactIdx, 1);
 				}
 			}
 
@@ -321,9 +391,8 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const serverPlainTextCounts = new Map<string, number>();
 			for (const m of snapshotRows) {
 				if (!isPlainTextRow(m)) continue;
-				const t = normaliseText(extractText(m));
-				if (t.length === 0) continue;
-				const key = `${m.role}|${t}`;
+				// WP2/RC1: key empty-text rows too (S7/S10) via plainTextEquivKey.
+				const key = plainTextEquivKey(m);
 				serverPlainTextCounts.set(key, (serverPlainTextCounts.get(key) ?? 0) + 1);
 			}
 
@@ -368,14 +437,14 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					// multiset preserves cardinality. Skipped for
 					// toolCall/toolResult rows handled above.
 					if (isPlainTextRow(m)) {
-						const t = normaliseText(extractText(m));
-						if (t.length > 0) {
-							const key = `${m.role}|${t}`;
-							const remaining = serverPlainTextCounts.get(key) ?? 0;
-							if (remaining > 0) {
-								serverPlainTextCounts.set(key, remaining - 1);
-								continue;
-							}
+						// WP2/RC1: consume the multiset via plainTextEquivKey so id-less
+						// EMPTY-text aborted/errored rows dedup against the snapshot's
+						// copy (S7/S10) — previously skipped, leaving a double banner.
+						const key = plainTextEquivKey(m);
+						const remaining = serverPlainTextCounts.get(key) ?? 0;
+						if (remaining > 0) {
+							serverPlainTextCounts.set(key, remaining - 1);
+							continue;
 						}
 					}
 					// 3) Structural invariant (H3 fix). A LIVE server row (positive
@@ -409,9 +478,23 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 					continue;
 				}
 				if (m._origin === "optimistic") {
-					// Optimistic prompts/steers always survive — server echo will
-					// reconcile via id/text on a later live-event.
+					// Optimistic prompts/steers normally survive — the server echo
+					// reconciles via id/text on a later live-event.
 					if (typeof m.id === "string" && serverIds.has(m.id)) continue;
+					// Step 4a (S18): dedup a same-text optimistic row against a snapshot
+					// that arrived BEFORE the live echo. Consume the same multiset budget
+					// the server-origin survivors use, so a snapshot user row
+					// representing this prompt drops the optimistic instead of leaving
+					// both. Multiset-counted → two genuinely-distinct same-text prompts
+					// still both survive.
+					if (isPlainTextRow(m)) {
+						const key = plainTextEquivKey(m);
+						const remaining = serverPlainTextCounts.get(key) ?? 0;
+						if (remaining > 0) {
+							serverPlainTextCounts.set(key, remaining - 1);
+							continue;
+						}
+					}
 					survivors.push(m);
 					continue;
 				}
