@@ -2197,12 +2197,22 @@ export class RemoteAgent {
 						this.streamingMessageId = undefined;
 
 						// Enrich echoed user messages with stashed attachments / skill expansions.
+						// The attachment slot is now a FALLBACK only (WP1 / RC2): when the
+						// echo already carries image content blocks, the reducer's
+						// enrichUserMessage derives the tiles from server-authoritative
+						// content — applying the slot too would double-attach. Use the slot
+						// only when the echo has no image block; clear it unconditionally
+						// (one-shot) so a later text-only prompt can't inherit stale images.
 						if (msg.role === "user" && this._pendingAttachments) {
-							msg = {
-								...msg,
-								role: "user-with-attachments",
-								attachments: this._pendingAttachments,
-							};
+							const echoHasImage = Array.isArray(msg.content)
+								&& msg.content.some((c: any) => c?.type === "image" && c?.data);
+							if (!echoHasImage) {
+								msg = {
+									...msg,
+									role: "user-with-attachments",
+									attachments: this._pendingAttachments,
+								};
+							}
 							this._pendingAttachments = null;
 						}
 						if (

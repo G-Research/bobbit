@@ -180,19 +180,28 @@ export class UserMessage extends LitElement {
 			<div class="flex justify-start mx-2 sm:mx-4 my-1">
 				<div class="user-message-container py-2 px-3 sm:px-4">
 					${body}
-					${
-						this.message.role === "user-with-attachments" &&
-						this.message.attachments &&
-						this.message.attachments.length > 0
+					${(() => {
+						// Rich attachments (optimistic preview / restored) win; otherwise
+						// derive tiles from server-authoritative image content blocks so a
+						// bare role:"user" echo still renders its image live (WP1 / RC2 / S6).
+						const richAttachments =
+							this.message.role === "user-with-attachments" && this.message.attachments
+								? this.message.attachments
+								: [];
+						const tiles =
+							richAttachments.length > 0
+								? richAttachments
+								: imageAttachmentsFromContent(this.message.content);
+						return tiles.length > 0
 							? html`
 								<div class="mt-3 flex flex-wrap gap-2">
-									${this.message.attachments.map(
+									${tiles.map(
 										(attachment) => html` <attachment-tile .attachment=${attachment}></attachment-tile> `,
 									)}
 								</div>
 							`
-							: ""
-					}
+							: "";
+					})()}
 				</div>
 				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
@@ -681,6 +690,34 @@ export function convertAttachments(attachments: Attachment[]): (TextContent | Im
 		}
 	}
 	return content;
+}
+
+/**
+ * Build attachment tiles from a user message's image content blocks. Mirrors
+ * message-reducer.ts::enrichUserMessage field-for-field so a live `role:"user"`
+ * echo renders identically to a reloaded one (WP1 / RC2 — removes the render's
+ * dependency on the racy `_pendingAttachments` slot; closes S6).
+ */
+export function imageAttachmentsFromContent(content: unknown): Attachment[] {
+	if (!Array.isArray(content)) return [];
+	const out: Attachment[] = [];
+	let i = 0;
+	for (const c of content) {
+		const img = c as { type?: string; data?: string; mimeType?: string; media_type?: string };
+		if (img && img.type === "image" && img.data) {
+			out.push({
+				id: `restored_${i}`,
+				type: "image",
+				fileName: `image-${i + 1}.png`,
+				mimeType: img.mimeType || img.media_type || "image/png",
+				size: img.data.length || 0,
+				content: img.data,
+				preview: img.data,
+			});
+			i++;
+		}
+	}
+	return out;
 }
 
 /**

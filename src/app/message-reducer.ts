@@ -160,8 +160,12 @@ function stamp(
 	return { ...msg, _order: order, _origin: origin, _insertionTick: tick };
 }
 
-/** When restoring messages from the server, reconstruct user-with-attachments. */
-function enrichUserMessage(msg: any): any {
+/** Reconstruct a `user-with-attachments` row from a user message's image
+ *  content blocks. Used on BOTH the snapshot path and the live-event path so a
+ *  server-authoritative `role:"user"` echo carrying `{type:"image"}` blocks
+ *  renders identically live and after reload (WP1 / RC2 — the live/snapshot
+ *  asymmetry was the root of the "image heals only on reload" symptom). */
+export function enrichUserMessage(msg: any): any {
 	if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
 	const imageChunks = msg.content.filter((c: any) => c.type === "image" && c.data);
 	if (imageChunks.length === 0) return msg;
@@ -194,7 +198,11 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			if (frame?.type !== "message_end" || !frame.message) {
 				return { ...state, highestSeq: nextHighest };
 			}
-			const incoming = frame.message;
+			// Enrich on the LIVE path too (not just snapshots): a role:"user" echo
+			// carrying image content blocks becomes user-with-attachments so it
+			// renders without depending on the racy _pendingAttachments slot. No-op
+			// for non-user / no-image / already-enriched rows. (WP1 / RC2)
+			const incoming = enrichUserMessage(frame.message);
 			const role = incoming.role;
 			let messages = state.messages.slice();
 
