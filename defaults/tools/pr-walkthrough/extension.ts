@@ -273,6 +273,47 @@ const extension: ExtensionFactory = (pi) => {
 	});
 
 	pi.registerTool({
+		name: "read_pr_walkthrough_bundle",
+		label: "Read PR Walkthrough Bundle",
+		description: "Read the scoped persisted launch-time PR metadata and diff bundle for this walkthrough job with bounded output.",
+		promptSnippet: "Start PR walkthrough analysis by reading the authoritative persisted bundle. Use manifest/summary first, then read individual files by path or index with limits.",
+		parameters: Type.Object({
+			mode: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("manifest"), Type.Literal("files"), Type.Literal("file")], { description: "Bounded read mode. Default manifest." })),
+			path: Type.Optional(Type.String({ description: "File path for mode=file." })),
+			index: Type.Optional(Type.Number({ description: "File index for mode=file when path is omitted." })),
+			offset: Type.Optional(Type.Number({ description: "File or hunk offset. Default 0." })),
+			limit: Type.Optional(Type.Number({ description: "Maximum files/hunks to return. Default 50; capped by gateway." })),
+			hunkOffset: Type.Optional(Type.Number({ description: "Hunk offset for mode=file." })),
+			hunkLimit: Type.Optional(Type.Number({ description: "Maximum hunks for mode=file." })),
+		}),
+		async execute(_toolCallId, args) {
+			let baseUrl: string;
+			let token: string;
+			try {
+				baseUrl = getGatewayUrl();
+				token = getGatewayToken();
+			} catch {
+				return toolText("read_pr_walkthrough_bundle failed: missing Bobbit gateway credentials.", true);
+			}
+
+			try {
+				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/bundle`, {
+					method: "POST",
+					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+					body: JSON.stringify({ sessionId, jobId, ...args }),
+				});
+				const text = await response.text();
+				let data: unknown = text;
+				try { data = JSON.parse(text); } catch { /* keep text */ }
+				if (!response.ok) return toolText(formatGatewayResponse(data), true, data);
+				return toolText(formatGatewayResponse(data), false, data);
+			} catch (err: any) {
+				return toolText(`read_pr_walkthrough_bundle failed: ${err?.message || err}`, true);
+			}
+		},
+	});
+
+	pi.registerTool({
 		name: "submit_pr_walkthrough_yaml",
 		label: "Submit PR Walkthrough YAML",
 		description: "Submit the completed PR walkthrough YAML document for validation and panel publishing.",

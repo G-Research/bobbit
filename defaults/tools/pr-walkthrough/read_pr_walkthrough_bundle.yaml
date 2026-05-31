@@ -1,0 +1,11 @@
+name: read_pr_walkthrough_bundle
+group: PR Walkthrough
+description: Read the scoped persisted launch-time PR metadata and diff bundle for this walkthrough job. Output is bounded; start with manifest/summary, then request files by path or index.
+params: [mode, file, path, index, offset, limit, hunkOffset, hunkLimit]
+examples:
+  - read_pr_walkthrough_bundle mode=manifest limit=50
+  - read_pr_walkthrough_bundle mode=file path=src/example.ts hunkOffset=0 hunkLimit=20
+notes:
+  - The gateway validates BOBBIT_SESSION_ID and BOBBIT_WALKTHROUGH_JOB_ID ownership.
+  - Does not read arbitrary filesystem paths and does not loosen readonly_bash.
+  - Large bundles are truncated by limit/offset; use mode=files or mode=file for bounded follow-up reads.

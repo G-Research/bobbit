@@ -509,9 +509,8 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(launch.status, "error");
 		assert.equal(launch.job.error?.code, "GITHUB_RATE_LIMITED");
 		assert.equal(launch.job.error?.retryable, true);
-		assert.equal(sessionManager.prompts.length, 1, "child transcript should receive a launch failure notice");
-		assert.match(sessionManager.prompts[0], /launch preflight failed|GITHUB_RATE_LIMITED|rate limit/i);
-		assert.doesNotMatch(sessionManager.prompts[0], /schema_version: 1/, "kickoff schema prompt should not be sent for inaccessible PRs");
+		assert.equal(sessionManager.sessions.size, 1, "launch-time bundle failures should not create a child analysis session");
+		assert.equal(sessionManager.prompts.length, 0, "kickoff schema prompt should not be sent for inaccessible PRs");
 	});
 
 	it("launch kickoff failures are surfaced in the child transcript", async () => {

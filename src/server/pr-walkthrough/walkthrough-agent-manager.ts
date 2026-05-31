@@ -4,6 +4,13 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import { execFileSafe } from "../exec-file-safe.js";
 import { resolveGithubPr, GithubPrAdapterError, parseGithubRemoteUrl } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
+import {
+	WalkthroughAnalysisBundleStore,
+	analysisBundleToParsedDiff,
+	createAnalysisBundleFromParsedDiff,
+	missingBundleError,
+	type ReadPrWalkthroughBundleRequest,
+} from "./walkthrough-analysis-bundle.js";
 import { saveWalkthrough, type WalkthroughStorePayload } from "./walkthrough-store.js";
 import {
 	mapYamlToWalkthroughPayload as defaultMapYamlToWalkthroughPayload,
@@ -131,18 +138,21 @@ class WalkthroughYamlValidationFailure extends Error {
 
 export const WALKTHROUGH_ALLOWED_TOOLS = [
 	"readonly_bash",
+	"read_pr_walkthrough_bundle",
 	"submit_pr_walkthrough_yaml",
 ];
 
 export class WalkthroughAgentManager {
 	private readonly stateDir: string;
 	private readonly store: WalkthroughAgentStore;
+	private readonly bundleStore: WalkthroughAnalysisBundleStore;
 	private readonly reminderUnsubscribers = new Map<string, () => void>();
 	private readonly launchInFlight = new Map<string, Promise<LaunchWalkthroughResponse>>();
 
 	constructor(private readonly deps: WalkthroughAgentManagerDeps) {
 		this.stateDir = deps.stateDir ?? bobbitStateDir();
 		this.store = deps.store ?? new WalkthroughAgentStore(this.stateDir);
+		this.bundleStore = new WalkthroughAnalysisBundleStore(this.stateDir);
 	}
 
 	async launch(input: LaunchWalkthroughRequest): Promise<LaunchWalkthroughResponse> {
@@ -209,6 +219,15 @@ export class WalkthroughAgentManager {
 			return { ...responseFromJob(job), created: true };
 		}
 
+		try {
+			job = await this.resolveAndPersistLaunchBundle(job);
+		} catch (error) {
+			const typed = classifyDiffResolutionError(error);
+			job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
+			this.broadcastJob(job);
+			return { ...responseFromJob(job), created: true };
+		}
+
 		const targetEnv = walkthroughTargetEnvForJob(job);
 		const initialModel = await this.resolveParentInitialModel(parentSessionId, parent);
 		let child: SessionLike;
@@ -252,16 +271,6 @@ export class WalkthroughAgentManager {
 		this.applySessionMetadata(child, job);
 		this.deps.sessionManager.setTitle?.(childSessionId, title, { markGenerated: true });
 
-		try {
-			await this.preflightLaunch(job);
-		} catch (error) {
-			const typed = classifyDiffResolutionError(error);
-			job = this.store.update(jobId, { status: "error", error: typed }) ?? job;
-			this.broadcastJob(job);
-			await this.notifyChildOfError(child, typed, "launch preflight");
-			return { ...responseFromJob(job), created: true };
-		}
-
 		job = this.store.update(jobId, { status: "waiting_for_yaml" }) ?? job;
 		this.broadcastJob(job);
 		this.attachRuntimeListeners(childSessionId, jobId, child.rpcClient);
@@ -297,6 +306,18 @@ export class WalkthroughAgentManager {
 
 	getJobForSession(childSessionId: string): PrWalkthroughJobRecord | null {
 		return publicJob(this.store.getByChildSession(childSessionId));
+	}
+
+	readBundle(input: ReadPrWalkthroughBundleRequest): Record<string, unknown> {
+		if (!input.sessionId || !input.jobId) {
+			throw routeError(400, "Missing required fields: sessionId and jobId", { code: "INVALID_BUNDLE_READ_REQUEST", retryable: false });
+		}
+		const job = this.store.get(input.jobId);
+		if (!job) throw routeError(404, "No PR walkthrough job found for this jobId", { code: "JOB_NOT_FOUND", retryable: false });
+		if (job.childSessionId !== input.sessionId) {
+			throw routeError(403, "Session is not allowed to read the analysis bundle for this walkthrough job", { code: "WALKTHROUGH_JOB_SESSION_MISMATCH", retryable: false });
+		}
+		return this.bundleStore.read(job, input);
 	}
 
 	async submitYaml(input: SubmitWalkthroughYamlRequest): Promise<SubmitWalkthroughYamlResponse> {
@@ -377,22 +398,66 @@ export class WalkthroughAgentManager {
 		}
 	}
 
-	private async preflightLaunch(job: PrWalkthroughJobRecord): Promise<void> {
-		if (job.target.provider !== "github") return;
-		if (job.target.baseSha && job.target.headSha) return;
-		if (!this.deps.preflightGithubLaunch) return;
+	private async resolveAndPersistLaunchBundle(job: PrWalkthroughJobRecord): Promise<PrWalkthroughJobRecord> {
+		const parsedDiff = await this.resolveLaunchDiffForBundle(job);
+		if (!parsedDiff) return job;
+		const bundle = createAnalysisBundleFromParsedDiff(job, parsedDiff);
+		const { metadata } = this.bundleStore.save(job.jobId, bundle);
+		const baseSha = bundle.changeset.base_sha;
+		const headSha = bundle.changeset.head_sha;
+		return this.store.update(job.jobId, {
+			analysisBundle: metadata,
+			target: {
+				...job.target,
+				...(baseSha ? { baseSha } : {}),
+				...(headSha ? { headSha } : {}),
+			},
+			warnings: bundle.warnings,
+		}) ?? job;
+	}
+
+	private async resolveLaunchDiffForBundle(job: PrWalkthroughJobRecord): Promise<WalkthroughParsedDiffForYamlMapping | undefined> {
+		if (job.target.provider !== "github") return undefined;
+		if (job.target.baseSha && job.target.headSha) {
+			if (typeof this.deps.preflightGithubLaunch === "function") return undefined;
+			let local: WalkthroughParsedDiffForYamlMapping;
+			try {
+				local = await localDiffForYaml(job.cwd, job.target.baseSha, job.target.headSha);
+			} catch (error) {
+				if (this.deps.preflightGithubLaunch) return undefined;
+				throw error;
+			}
+			return {
+				...local,
+				changeset: {
+					...local.changeset,
+					provider: "github",
+					externalUrl: job.target.prUrl,
+					prUrl: job.target.prUrl,
+					prNumber: job.target.number,
+					prTitle: job.title,
+					prBody: "",
+					title: job.title,
+				},
+				export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires launch-time GitHub metadata; preview is available." },
+			};
+		}
+		if (!this.deps.preflightGithubLaunch) return undefined;
 		if (typeof this.deps.preflightGithubLaunch === "function") {
 			await this.deps.preflightGithubLaunch(job);
-			return;
+			return undefined;
 		}
-		await resolveGithubPr({
+		const resolved = await resolveGithubPr({
 			cwd: job.cwd,
 			prUrl: job.target.prUrl,
 			prNumber: job.target.number,
-			maxFiles: 1,
-			maxPatchBytes: 1,
-			maxLinesPerFile: 1,
 		});
+		return {
+			changeset: resolved.changeset,
+			files: resolved.files,
+			warnings: resolved.warnings,
+			export: resolved.export as unknown as WalkthroughParsedDiffForYamlMapping["export"],
+		};
 	}
 
 	private async validateYaml(yamlText: string, job: PrWalkthroughJobRecord): Promise<WalkthroughYamlValidationResult> {
@@ -417,6 +482,11 @@ export class WalkthroughAgentManager {
 	}
 
 	private async resolveDiffForYamlMapping(document: Record<string, unknown>, job: PrWalkthroughJobRecord): Promise<WalkthroughParsedDiffForYamlMapping> {
+		if (job.analysisBundle) {
+			const bundle = this.bundleStore.load(job.jobId);
+			if (!bundle) throw missingBundleError(job.jobId);
+			return analysisBundleToParsedDiff(bundle);
+		}
 		if (this.deps.resolveDiffForYamlMapping) return this.deps.resolveDiffForYamlMapping(document, job);
 		const yaml = document as unknown as PrWalkthroughYamlDocument;
 		const baseSha = job.target.baseSha;
@@ -792,6 +862,7 @@ function buildRolePrompt(target: PrWalkthroughTarget): string {
 	return [
 		"You are a read-only PR walkthrough agent.",
 		"Investigate the PR using only read-only tools and report rough percentage progress in chat.",
+		"Start from read_pr_walkthrough_bundle; it is the authoritative launch-time PR metadata and diff bundle for this job. Use readonly_bash only for additional read-only investigation.",
 		"Do not edit files, run tests/builds, install dependencies, push, commit, or submit GitHub reviews/comments.",
 		"When complete, call submit_pr_walkthrough_yaml with exactly one YAML document matching the schema below. The panel will remain empty until that tool succeeds.",
 		`Target: ${target.canonicalKey}`,
@@ -804,7 +875,8 @@ function buildKickoffPrompt(job: PrWalkthroughJobRecord): string {
 		`Review target: ${job.target.canonicalKey}`,
 		job.target.prUrl ? `PR URL: ${job.target.prUrl}` : undefined,
 		job.target.baseSha && job.target.headSha ? `Range: ${job.target.baseSha}..${job.target.headSha}` : undefined,
-		"Start by saying you are beginning the investigation with an approximate progress percentage.",
+		"Start by calling read_pr_walkthrough_bundle in manifest mode, then say you are beginning the investigation with an approximate progress percentage.",
+		"Treat the persisted bundle as authoritative for PR body, SHAs, stats, files, hunks, warnings, and limits.",
 		"Populate the panel only by calling submit_pr_walkthrough_yaml with valid YAML. Stay available after success.",
 		REQUIRED_YAML_SCHEMA_PROMPT,
 	].filter(Boolean).join("\n");
@@ -869,6 +941,9 @@ function classifyAgentError(error: unknown, fallbackCode: string): PrWalkthrough
 }
 
 function classifyDiffResolutionError(error: unknown): PrWalkthroughJobError {
+	if (isRecord(error) && isRecord(error.extra) && typeof error.extra.code === "string") {
+		return { code: error.extra.code, message: error instanceof Error ? error.message : String(error), retryable: error.extra.retryable !== false };
+	}
 	if (error instanceof GithubPrAdapterError) {
 		if (error.status === 401 || error.code === "github_auth_failed") {
 			return { code: "GITHUB_AUTH_REQUIRED", message: "GitHub rejected the configured credentials. Check GITHUB_TOKEN/GH_TOKEN or run gh auth status, then retry the walkthrough.", retryable: true };
@@ -897,6 +972,7 @@ function statusForJobError(error: PrWalkthroughJobError): number {
 		case "GITHUB_FORBIDDEN": return 403;
 		case "GITHUB_RATE_LIMITED": return 429;
 		case "GITHUB_NOT_FOUND_OR_PRIVATE": return 404;
+		case "PR_WALKTHROUGH_BUNDLE_MISSING": return 409;
 		default: return 502;
 	}
 }
