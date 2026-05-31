@@ -35,11 +35,13 @@ historical `preview_open` artifacts and use `contentHash` to collapse duplicate
 content when available. Proposal tabs distinguish the live editable draft from
 historical revisions. Review tabs map to review documents by encoded title.
 Walkthrough tabs use `walkthrough:<changeset-id>` and host the guided PR /
-changeset review surface launched from `/walkthrough-pr`, the Git Status
-Widget, or PR-link metadata. The same tab can render beside chat, fullscreen,
-or through the standalone `/walkthrough?...` route. Desktop renders a scrollable
-tab strip next to the chat; mobile renders the same side-panel tab set in the
-header and slider track.
+changeset review surface. GitHub PR launches from `/walkthrough-pr` create or
+focus a read-only child session; the child owns the waiting panel until its
+walkthrough agent publishes validated YAML. Local/fixture walkthroughs still use
+the compatibility resolver. The same ready tab can render beside chat,
+fullscreen, or through the standalone `/walkthrough?...` route. Desktop renders
+a scrollable tab strip next to the chat; mobile renders the same side-panel tab
+set in the header and slider track.
 
 The main client modules are `src/app/panel-workspace.ts` for tab identity and
 persistence, `src/app/preview-panel.ts` for preview selection helpers and SSE
