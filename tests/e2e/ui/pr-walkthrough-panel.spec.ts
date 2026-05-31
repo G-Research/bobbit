@@ -404,7 +404,8 @@ async function submitValidWalkthroughYaml(page: Page, job: { childSessionId: str
 	expect(response.ok, `valid YAML submit should succeed: ${response.status} ${response.text}`).toBe(true);
 	await focusChildWalkthroughSession(page, job.childSessionId);
 	await publishWalkthroughJobUpdate(page, job.childSessionId);
-	await expect(page.locator(".preview-fullscreen-prompt").first(), "successful YAML submission should automatically promote the child walkthrough to fullscreen review mode").toBeVisible({ timeout: 10_000 });
+	await expect(page.locator(".preview-fullscreen-prompt"), "live walkthrough child should stay in split view so chat remains promptable").toHaveCount(0);
+	await expect(page.locator("textarea").first(), "live walkthrough child should keep the chat prompt visible after YAML submission").toBeVisible({ timeout: 10_000 });
 	return expectWalkthroughOpened(page);
 }
 
@@ -1110,7 +1111,7 @@ This is the author's source description with **markdown**.
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(revisedConcern);
 	});
 
-	test("fullscreen toolbar control promotes the active walkthrough tab to the wide review surface", async ({ page }) => {
+	test("fullscreen toolbar control keeps live child walkthroughs in split promptable view", async ({ page }) => {
 		await setupWalkthrough(page, { width: 1600, height: 900 }, WALKTHROUGH_URL_COMMAND);
 
 		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
@@ -1118,15 +1119,11 @@ This is the author's source description with **markdown**.
 		await fullscreen.click();
 
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
-		await expect(fullscreenRoot, "fullscreen walkthrough should render inside the preview-pane fullscreen shell").toBeVisible({ timeout: 10_000 });
-		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in fullscreen mode").toBeVisible();
-		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-link").locator("svg"), "fullscreen walkthrough GitHub button should include the GitHub mark").toBeVisible();
-		await expectActiveDiffMode(page, "split");
-
-		const collapse = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
-		await expect(collapse).toBeVisible();
-		await collapse.click();
-		await expect(page.locator(".goal-split-layout"), "collapsing fullscreen should return to chat + side-panel split layout").toBeVisible({ timeout: 10_000 });
+		await expect(fullscreenRoot, "live walkthrough children should not enter fullscreen and hide the main chat prompt").toBeHidden({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in the side panel").toBeVisible();
+		await expect(page.locator("textarea").first(), "live walkthrough child prompt should remain visible").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-link").locator("svg"), "walkthrough GitHub button should include the GitHub mark").toBeVisible();
+		await expectActiveDiffMode(page, "inline");
 	});
 
 	test("open-in-new-tab toolbar control renders the same walkthrough in a standalone wide route", async ({ page, context }) => {
