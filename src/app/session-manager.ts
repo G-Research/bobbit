@@ -12,6 +12,7 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
+	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
@@ -2173,6 +2174,51 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		const code = err && typeof err === "object" ? (err as any).code : undefined;
 		const stack = err instanceof Error ? err.stack : undefined;
 		showConnectionError("Failed to create session", msg, { code, stack });
+	} finally {
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
+		renderApp();
+	}
+}
+
+export type DuplicateSessionResponse = {
+	id: string;
+	cwd: string;
+	status: string;
+	projectId?: string;
+	goalId?: string;
+	assistantType?: string;
+};
+
+export async function duplicateSession(source: GatewaySession): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	state.creatingSessionForGoalId = source.goalId || null;
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/duplicate`, { method: "POST" });
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session duplicate failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
+		const duplicate = await res.json() as DuplicateSessionResponse;
+		if (!duplicate?.id) throw new Error("Session duplicate response did not include an id");
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
+		await refreshSessions();
+		await connectToSession(
+			duplicate.id,
+			false,
+			duplicate.assistantType ? { assistantType: duplicate.assistantType } : undefined,
+		);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to duplicate session", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;
