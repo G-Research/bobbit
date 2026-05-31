@@ -664,8 +664,9 @@ function openExternalUrl(url: string): void {
 }
 
 function prefetchGoalGithubLink(goalId: string): void {
-	if (getCachedGoalGithubLink(goalId)) return;
-	void fetchGoalGithubLink(goalId, { skipRender: true })
+	const cached = getCachedGoalGithubLink(goalId);
+	if (cached?.available) return;
+	void fetchGoalGithubLink(goalId, { skipRender: true, force: cached?.available === false })
 		.then(() => {
 			if (_openSidebarActionsPopover?.kind === "goal" && _openSidebarActionsPopover.entityId === goalId) {
 				refreshOpenSidebarActionsPopover();
