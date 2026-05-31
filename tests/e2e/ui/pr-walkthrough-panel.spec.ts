@@ -359,6 +359,16 @@ async function expectWalkthroughOpened(page: Page) {
 	return { tab, panel };
 }
 
+async function expectActiveWalkthroughSurface(page: Page) {
+	const root = page.getByTestId("pr-walkthrough-panel-root");
+	const panel = walkthroughPanel(page);
+	const draft = panel.getByTestId("pr-walkthrough-draft");
+	await expect(root, "ready walkthrough root should remain mounted in split or fullscreen mode").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 10_000 });
+	await expect(root, "ready walkthrough root should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+	await expect(panel, "ready walkthrough panel should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+	await expect(draft, "audit draft should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+}
+
 async function setupWaitingWalkthrough(
 	page: Page,
 	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
@@ -1040,7 +1050,7 @@ This is the author's source description with **markdown**.
 		const broadConcern = `broad-concern-${Date.now()}`;
 		const revisedConcern = `revised-concern-${Date.now()}`;
 
-		const { panel, tab } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
 
 		const dislike = panel.getByTestId("pr-walkthrough-dislike").first();
 		await expect(dislike, "Dislike should be disabled until the active card has a comment").toBeDisabled();
@@ -1101,7 +1111,7 @@ This is the author's source description with **markdown**.
 		await expect(draft, "Audit draft should include revised concerns after using Prev").toContainText(revisedConcern);
 		await expect(draft, "Audit draft should group accepted/liked context").toContainText(/approved|liked|accepted/i);
 		await expect(draft, "Audit draft should group concerns for disliked cards").toContainText(/concern|disliked|changes requested/i);
-		await expect(tab).toHaveClass(/goal-tab-pill--active/);
+		await expectActiveWalkthroughSurface(page);
 
 		await page.reload();
 		await expectWalkthroughOpened(page);
