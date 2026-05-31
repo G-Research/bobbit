@@ -179,6 +179,7 @@ describe("restoreSession source guard", () => {
 		assert.ok(restoreEnvIdx > envInitIdx, "restoreSession must rotate/re-inject walkthrough submit proof env");
 		assert.ok(toolActivationIdx > restoreEnvIdx, "walkthrough submit env must be available before extensions are activated");
 		assert.match(src, /rotateSubmissionProofForRestoredJob\(bobbitStateDir\(\), ps\.id, ps\.walkthroughJobId\)/);
+		assert.match(src, /Object\.assign\(env, scopedEnv\)/, "rotated env, including target scope, must be merged into bridgeOptions.env");
 	});
 
 	it("restoreSession spawn-pins a persisted model before role or preference fallback", async () => {

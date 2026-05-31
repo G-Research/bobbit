@@ -99,6 +99,19 @@ export function rotateSubmissionProofForRestoredJob(stateDir: string, sessionId:
 		BOBBIT_SESSION_ID: sessionId,
 		BOBBIT_WALKTHROUGH_JOB_ID: jobId,
 		BOBBIT_WALKTHROUGH_SUBMIT_PROOF: proof,
+		...walkthroughTargetEnvForJob(updated),
+	};
+}
+
+export function walkthroughTargetEnvForJob(job: Pick<PrWalkthroughJobRecord, "target">): Record<string, string> {
+	const target = job.target;
+	const number = typeof target.number === "number" ? target.number : Number(target.number);
+	if (target.provider !== "github" || !target.owner || !target.repo || !Number.isInteger(number)) return {};
+	return {
+		BOBBIT_WALKTHROUGH_TARGET_PROVIDER: "github",
+		BOBBIT_WALKTHROUGH_TARGET_OWNER: target.owner,
+		BOBBIT_WALKTHROUGH_TARGET_REPO: target.repo,
+		BOBBIT_WALKTHROUGH_TARGET_NUMBER: String(number),
 	};
 }
 

@@ -10,6 +10,7 @@ let tempDir = "";
 
 const { WalkthroughAgentStore, rotateSubmissionProofForRestoredJob, verifySubmissionProof } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
 const { WalkthroughAgentManager } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { evaluateWalkthroughReadonlyCommand } = await import("../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
 const { handlePrWalkthroughApiRoute } = await import("../src/server/pr-walkthrough/routes.ts");
 const { getWalkthrough } = await import("../src/server/pr-walkthrough/walkthrough-store.ts");
 
@@ -135,6 +136,16 @@ walkthrough:
 `;
 }
 
+function addGithubOrigin(owner = "acme", repo = "widgets"): void {
+	try {
+		execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
+	} catch { /* repo may already exist */ }
+	try {
+		execFileSync("git", ["remote", "remove", "origin"], { cwd: tempDir, stdio: "ignore" });
+	} catch { /* origin may not exist */ }
+	execFileSync("git", ["remote", "add", "origin", `https://github.com/${owner}/${repo}.git`], { cwd: tempDir });
+}
+
 function createGitDiffFixture(): { baseSha: string; headSha: string; hunkHeader: string; filePath: string } {
 	execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
 	execFileSync("git", ["config", "user.email", "tests@example.com"], { cwd: tempDir });
@@ -221,6 +232,37 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(second.childSessionId, first.childSessionId);
 	});
 
+	it("number-only GitHub launches infer owner/repo before child env and persistence", async () => {
+		addGithubOrigin("acme", "widgets");
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		const launch = await manager.launch({ sessionId: "parent", prNumber: 42 });
+
+		assert.equal(launch.job.target.canonicalKey, "github:acme/widgets#42");
+		assert.equal(launch.job.target.owner, "acme");
+		assert.equal(launch.job.target.repo, "widgets");
+		assert.equal(launch.job.target.prUrl, "https://github.com/acme/widgets/pull/42");
+		assert.doesNotMatch(launch.job.target.canonicalKey, /unknown\/unknown/);
+		const child = sessionManager.sessions.get(launch.childSessionId);
+		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_PROVIDER, "github");
+		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_OWNER, "acme");
+		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_REPO, "widgets");
+		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_NUMBER, "42");
+	});
+
+	it("local changeset launches are rejected before creating an agent job", async () => {
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
+
+		await assert.rejects(
+			() => manager.launch({ sessionId: "parent", baseSha: "abcdef1", headSha: "1234567" }),
+			(error: any) => error?.extra?.code === "LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED",
+		);
+		assert.equal(store.list().length, 0);
+	});
+
 	it("launch spawn-pins the walkthrough child to the parent session model", async () => {
 		const sessionManager = makeSessionManager();
 		const seenOpts: Record<string, unknown>[] = [];
@@ -261,9 +303,23 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(env?.BOBBIT_SESSION_ID, "child-restore");
 		assert.equal(env?.BOBBIT_WALKTHROUGH_JOB_ID, "job-restore");
 		assert.equal(typeof env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF, "string");
+		assert.equal(env?.BOBBIT_WALKTHROUGH_TARGET_PROVIDER, "github");
+		assert.equal(env?.BOBBIT_WALKTHROUGH_TARGET_OWNER, "acme");
+		assert.equal(env?.BOBBIT_WALKTHROUGH_TARGET_REPO, "widgets");
+		assert.equal(env?.BOBBIT_WALKTHROUGH_TARGET_NUMBER, "42");
 		const restored = store.get("job-restore");
 		assert.equal(verifySubmissionProof(env?.BOBBIT_WALKTHROUGH_SUBMIT_PROOF, restored!), true);
 		assert.equal((restored as any).submissionProof, undefined);
+		const target = {
+			provider: env!.BOBBIT_WALKTHROUGH_TARGET_PROVIDER as "github",
+			owner: env!.BOBBIT_WALKTHROUGH_TARGET_OWNER,
+			repo: env!.BOBBIT_WALKTHROUGH_TARGET_REPO,
+			number: Number(env!.BOBBIT_WALKTHROUGH_TARGET_NUMBER),
+		};
+		assert.equal(evaluateWalkthroughReadonlyCommand("gh pr view 42", { githubTarget: target }).allowed, true);
+		const crossPr = evaluateWalkthroughReadonlyCommand("gh pr view 43", { githubTarget: target });
+		assert.equal(crossPr.allowed, false);
+		assert.match(crossPr.reason, /may only read launched PR #42/);
 
 		const sessionManager = makeSessionManager();
 		sessionManager.sessions.set("child-restore", { id: "child-restore", cwd: tempDir, status: "idle", env });
@@ -329,6 +385,21 @@ describe("WalkthroughAgentManager", () => {
 		assert.match(promptText, /phase: significant\|other\|audit/);
 		assert.match(promptText, /category: tests\|docs\|migration\|telemetry\|security\|performance\|compatibility\|cleanup\|other/);
 		assert.match(promptText, /phase_order:/);
+	});
+
+	it("launch with local SHAs skips GitHub preflight and waits for YAML", async () => {
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store: new WalkthroughAgentStore(tempDir),
+			preflightGithubLaunch: () => { throw new Error("should not hit network when local SHAs are supplied"); },
+		});
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: "abcdef1", headSha: "1234567" });
+		assert.equal(launch.status, "waiting_for_yaml");
+		assert.equal(launch.job.target.canonicalKey, "github:acme/widgets#42");
 	});
 
 	it("launch preflight surfaces GitHub auth and availability errors as job errors", async () => {
@@ -589,6 +660,13 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(result.body.code, "WALKTHROUGH_ALREADY_READY");
 		assert.equal(result.body.retryable, false);
 		assert.equal(result.body.job.jobId, "job-1");
+	});
+
+	it("route rejects local agent launches with a structured error", async () => {
+		const sessionManager = makeSessionManager();
+		const result = await callRoute(undefined as any, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", baseSha: "abcdef1", headSha: "1234567" }, { sessionManager, broadcast: () => undefined });
+		assert.equal(result.status, 400);
+		assert.equal(result.body.code, "LOCAL_WALKTHROUGH_AGENT_UNSUPPORTED");
 	});
 
 	it("route constructs a stable manager across fresh dependency objects", async () => {
