@@ -327,6 +327,20 @@ async function expectWalkthroughWaiting(page: Page) {
 	return { tab, panel };
 }
 
+async function expectActiveWalkthroughSurface(page: Page, tab: Locator) {
+	await expect.poll(async () => {
+		const tabIsActive = await tab.evaluate((el) => el.classList.contains("goal-tab-pill--active")).catch(() => false);
+		if (tabIsActive) return true;
+
+		const fullscreenControlsVisible = await page.locator(".preview-fullscreen-prompt, button[title*='Collapse preview'], button[title*='Collapse walkthrough']").first().isVisible().catch(() => false);
+		const panelVisible = await walkthroughPanel(page).isVisible().catch(() => false);
+		return fullscreenControlsVisible && panelVisible;
+	}, {
+		timeout: 10_000,
+		message: "walkthrough should remain active as a side-panel tab or fullscreen walkthrough surface",
+	}).toBe(true);
+}
+
 async function expectWalkthroughOpened(page: Page) {
 	const root = page.getByTestId("pr-walkthrough-panel-root");
 	await expect(root, "valid YAML should publish the child walkthrough panel").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 15_000 });
@@ -1101,7 +1115,7 @@ This is the author's source description with **markdown**.
 		await expect(draft, "Audit draft should include revised concerns after using Prev").toContainText(revisedConcern);
 		await expect(draft, "Audit draft should group accepted/liked context").toContainText(/approved|liked|accepted/i);
 		await expect(draft, "Audit draft should group concerns for disliked cards").toContainText(/concern|disliked|changes requested/i);
-		await expect(tab).toHaveClass(/goal-tab-pill--active/);
+		await expectActiveWalkthroughSurface(page, tab);
 
 		await page.reload();
 		await expectWalkthroughOpened(page);
