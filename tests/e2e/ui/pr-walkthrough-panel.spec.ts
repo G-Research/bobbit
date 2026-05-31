@@ -598,6 +598,22 @@ async function selectCardById(page: Page, cardId: string) {
 	}).toBe(cardId);
 }
 
+function visibleCommentEditor(page: Page): Locator {
+	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-comment-editor")}:visible`).last();
+}
+
+async function waitForOpenCommentEditor(page: Page, message = "comment editor should be open") {
+	const editor = visibleCommentEditor(page);
+	await expect(editor, message).toBeVisible({ timeout: 5_000 });
+	const input = editor.getByTestId("pr-walkthrough-comment-input");
+	const save = editor.getByTestId("pr-walkthrough-comment-save");
+	await expect(input, "open comment editor input should be visible").toBeVisible({ timeout: 5_000 });
+	await expect(input, "open comment editor input should be enabled").toBeEnabled({ timeout: 5_000 });
+	await expect(save, "open comment editor save button should be visible").toBeVisible({ timeout: 5_000 });
+	await expect(save, "open comment editor save button should be enabled").toBeEnabled({ timeout: 5_000 });
+	return { editor, input, save };
+}
+
 async function openLineCommentEditor(page: Page) {
 	const line = activeCard(page).getByTestId("pr-walkthrough-diff-line").first();
 	await expect(line, "diff lines should be commentable").toBeVisible({ timeout: 10_000 });
@@ -613,14 +629,16 @@ async function openLineCommentEditor(page: Page) {
 		message: "line comment affordance should be visually/textually identifiable as +",
 	}).toMatch(/\+/);
 	await add.click();
-	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toBeVisible({ timeout: 5_000 });
+	await waitForOpenCommentEditor(page);
 }
 
 async function saveOpenComment(page: Page, body: string) {
-	const editor = page.getByTestId("pr-walkthrough-comment-editor");
-	await editor.getByTestId("pr-walkthrough-comment-input").fill(body);
-	await editor.getByTestId("pr-walkthrough-comment-save").click();
-	await expect(editor).toBeHidden({ timeout: 5_000 });
+	const { editor, input, save } = await waitForOpenCommentEditor(page, "a visible comment editor should be ready before saving");
+	await input.fill(body);
+	await expect(input, "comment editor input should contain the draft before save").toHaveValue(body, { timeout: 5_000 });
+	await expect(save, "comment editor save button should remain enabled after filling").toBeEnabled({ timeout: 5_000 });
+	await save.click();
+	await expect(editor, "saved comment editor should close").toBeHidden({ timeout: 5_000 });
 	await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: body })).toBeVisible({ timeout: 5_000 });
 }
 
@@ -634,7 +652,8 @@ async function createCommentOnDiffLine(page: Page, lineId: string, body: string)
 	await expect(line, `diff line ${lineId} should be visible and commentable`).toBeVisible({ timeout: 10_000 });
 	await line.hover();
 	await line.getByTestId("pr-walkthrough-line-comment-button").click();
-	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toHaveAttribute("data-line-id", lineId, { timeout: 5_000 });
+	const { editor } = await waitForOpenCommentEditor(page, `comment editor for diff line ${lineId} should open`);
+	await expect(editor).toHaveAttribute("data-line-id", lineId, { timeout: 5_000 });
 	await saveOpenComment(page, body);
 }
 
@@ -658,7 +677,7 @@ async function createCardComment(page: Page, body: string) {
 	await expect(addComment, "active card should expose a card-level comment affordance before adding a comment").toBeVisible({ timeout: 10_000 });
 	await expect(addComment, "card-level comment affordance should be enabled before adding a comment").toBeEnabled({ timeout: 5_000 });
 	await addComment.click();
-	await expect(page.getByTestId("pr-walkthrough-comment-editor"), "clicking the card-level comment affordance should open the comment editor").toBeVisible({ timeout: 5_000 });
+	await waitForOpenCommentEditor(page, "clicking the card-level comment affordance should open the comment editor");
 	await saveOpenComment(page, body);
 }
 
