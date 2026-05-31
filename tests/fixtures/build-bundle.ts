@@ -20,6 +20,7 @@
  */
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
 export interface BuildBundleOptions {
 	entry: string;
@@ -65,6 +66,8 @@ export function buildBundle(opts: BuildBundleOptions): void {
 	const depMtime = deps.reduce((m, p) => Math.max(m, fs.statSync(p).mtimeMs), 0);
 
 	if (isFresh(outfile, depMtime)) return;
+
+	fs.mkdirSync(path.dirname(outfile), { recursive: true });
 
 	const lockDir = `${outfile}.lock`;
 	const start = Date.now();
