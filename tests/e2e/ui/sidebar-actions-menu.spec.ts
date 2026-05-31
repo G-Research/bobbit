@@ -224,10 +224,12 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator('[data-testid="copy-link-fallback-input"]')).toHaveValue(await expectedHashUrl(page, `#/goal/${goal.id}`));
 	});
 
-	test("dismissal closes on outside click, Escape, route change, and item selection", async ({ page }) => {
+	test("dismissal closes on outside click, Escape, route change, item selection, repeated toggle, and direct menu switch", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
+		const goal = await createGoal({ title: `Sidebar switch cleanup ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		goalIds.push(goal.id as string);
 		const row = await openSession(page, sessionId);
 
 		await openMenu(row, "session", sessionId);
@@ -246,6 +248,19 @@ test.describe("Sidebar actions menu", () => {
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await openMenu(row, "session", sessionId);
 		await menuItem(page, "copy-link").click();
+		await expectNoPopover(page);
+
+		await openMenu(row, "session", sessionId);
+		await triggerFor(row, "session", sessionId).click();
+		await expectNoPopover(page);
+
+		await openMenu(row, "session", sessionId);
+		const goalMenuRow = await ensureGoalExpanded(page, goal.id as string);
+		await goalMenuRow.hover();
+		await triggerFor(goalMenuRow, "goal", goal.id as string).click();
+		await expect(page.locator("sidebar-actions-popover")).toHaveCount(1, { timeout: 5_000 });
+		await expect(menuItem(page, "dashboard")).toBeVisible({ timeout: 5_000 });
+		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
 	});
 
@@ -321,8 +336,15 @@ test.describe("Sidebar actions menu", () => {
 		const row = await ensureGoalExpanded(page, noRemoteGoal.id as string);
 		await openMenu(row, "goal", noRemoteGoal.id as string);
 		await expect(menuItem(page, "open-github")).toHaveCount(0, { timeout: 2_000 });
+		gateway.sessionManager.getGoalStoreForProject(noRemoteGoal.projectId).update(noRemoteGoal.id, { branch: "feature/cache-refresh", repoPath: repo, cwd: repo });
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
+
+		await openMenu(row, "goal", noRemoteGoal.id as string);
+		await expect(menuItem(page, "open-github")).toBeVisible({ timeout: 10_000 });
+		await menuItem(page, "open-github").click();
+		await expectNoPopover(page);
+		await expect.poll(() => page.evaluate(() => (window as any).__sidebarOpenedUrls.at(-1))).toBe("https://github.com/acme/widget/tree/feature%2Fcache-refresh");
 		await context.clearCookies(); // keeps the test from relying on a real external popup side effect.
 	});
 

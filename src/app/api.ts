@@ -73,7 +73,15 @@ export type GoalGithubLinkResponse =
 	| { available: true; url: string; kind: "pr" | "branch" }
 	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
 
-const goalGithubLinkCache = new Map<string, GoalGithubLinkResponse>();
+const GOAL_GITHUB_LINK_POSITIVE_TTL_MS = 60_000;
+const GOAL_GITHUB_LINK_NEGATIVE_TTL_MS = 10_000;
+
+type GoalGithubLinkCacheEntry = {
+	value: GoalGithubLinkResponse;
+	fetchedAt: number;
+};
+
+const goalGithubLinkCache = new Map<string, GoalGithubLinkCacheEntry>();
 const goalGithubLinkInFlight = new Map<string, Promise<GoalGithubLinkResponse>>();
 
 function sameGoalGithubLink(a: GoalGithubLinkResponse | undefined, b: GoalGithubLinkResponse): boolean {
@@ -83,9 +91,22 @@ function sameGoalGithubLink(a: GoalGithubLinkResponse | undefined, b: GoalGithub
 	return false;
 }
 
+function isGoalGithubLinkCacheEntryFresh(entry: GoalGithubLinkCacheEntry): boolean {
+	const ttl = entry.value.available ? GOAL_GITHUB_LINK_POSITIVE_TTL_MS : GOAL_GITHUB_LINK_NEGATIVE_TTL_MS;
+	return Date.now() - entry.fetchedAt < ttl;
+}
+
+function getFreshGoalGithubLinkCacheEntry(goalId: string): GoalGithubLinkCacheEntry | undefined {
+	const entry = goalGithubLinkCache.get(goalId);
+	if (!entry) return undefined;
+	if (isGoalGithubLinkCacheEntryFresh(entry)) return entry;
+	goalGithubLinkCache.delete(goalId);
+	return undefined;
+}
+
 function cacheGoalGithubLink(goalId: string, value: GoalGithubLinkResponse, skipRender = false): GoalGithubLinkResponse {
-	const changed = !sameGoalGithubLink(goalGithubLinkCache.get(goalId), value);
-	goalGithubLinkCache.set(goalId, value);
+	const changed = !sameGoalGithubLink(goalGithubLinkCache.get(goalId)?.value, value);
+	goalGithubLinkCache.set(goalId, { value, fetchedAt: Date.now() });
 	if (changed && !skipRender) renderApp();
 	return value;
 }
@@ -108,7 +129,7 @@ function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
 export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
 	const prUrl = state.prStatusCache.get(goalId)?.url;
 	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
-	return goalGithubLinkCache.get(goalId);
+	return getFreshGoalGithubLinkCacheEntry(goalId)?.value;
 }
 
 export function clearGoalGithubLinkCache(goalId?: string): void {
@@ -123,10 +144,10 @@ export function clearGoalGithubLinkCache(goalId?: string): void {
 
 export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
 	const prUrl = state.prStatusCache.get(goalId)?.url;
-	if (prUrl) return cacheGoalGithubLink(goalId, { available: true, url: prUrl, kind: "pr" }, opts?.skipRender);
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
 
 	if (!opts?.force) {
-		const cached = goalGithubLinkCache.get(goalId);
+		const cached = getFreshGoalGithubLinkCacheEntry(goalId)?.value;
 		if (cached) return cached;
 		const inFlight = goalGithubLinkInFlight.get(goalId);
 		if (inFlight) return inFlight;
@@ -326,6 +347,10 @@ export async function refreshSessions(): Promise<void> {
 					(g) => g.archived && !incomingIds.has(g.id),
 				);
 				state.goals = [...incoming, ...preservedArchived];
+				// Goal branch/repo metadata drives the GitHub menu link; invalidate lazy
+				// lookups whenever the goal list changes so negative entries don't stick
+				// after a branch or remote becomes available.
+				clearGoalGithubLinkCache();
 				// Auto-expand only newly discovered goals that have sessions — never
 				// re-expand a goal the user has already seen (and may have collapsed).
 				for (const g of incoming) {

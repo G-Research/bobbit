@@ -153,6 +153,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._cancelAnimations();
 		this._restoreFocus();
 		this._syncPopoverOpenAttr();
+		this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
 		this.requestUpdate();
 	}
 
