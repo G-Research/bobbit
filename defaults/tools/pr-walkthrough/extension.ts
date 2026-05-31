@@ -285,7 +285,7 @@ const extension: ExtensionFactory = (pi) => {
 			limit: Type.Optional(Type.Number({ description: "Maximum files/hunks to return. Default 50; capped by gateway." })),
 			hunkOffset: Type.Optional(Type.Number({ description: "Hunk offset for mode=file." })),
 			hunkLimit: Type.Optional(Type.Number({ description: "Maximum hunks for mode=file." })),
-		}),
+		}, { additionalProperties: false }),
 		async execute(_toolCallId, args) {
 			let baseUrl: string;
 			let token: string;
@@ -296,11 +296,21 @@ const extension: ExtensionFactory = (pi) => {
 				return toolText("read_pr_walkthrough_bundle failed: missing Bobbit gateway credentials.", true);
 			}
 
+			const readArgs = {
+				mode: args.mode,
+				path: args.path,
+				index: args.index,
+				offset: args.offset,
+				limit: args.limit,
+				hunkOffset: args.hunkOffset,
+				hunkLimit: args.hunkLimit,
+			};
+
 			try {
 				const response = await fetch(`${baseUrl}/api/internal/pr-walkthrough/bundle`, {
 					method: "POST",
 					headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-					body: JSON.stringify({ sessionId, jobId, ...args }),
+					body: JSON.stringify({ ...readArgs, sessionId, jobId }),
 				});
 				const text = await response.text();
 				let data: unknown = text;

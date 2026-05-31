@@ -419,14 +419,7 @@ export class WalkthroughAgentManager {
 	private async resolveLaunchDiffForBundle(job: PrWalkthroughJobRecord): Promise<WalkthroughParsedDiffForYamlMapping | undefined> {
 		if (job.target.provider !== "github") return undefined;
 		if (job.target.baseSha && job.target.headSha) {
-			if (typeof this.deps.preflightGithubLaunch === "function") return undefined;
-			let local: WalkthroughParsedDiffForYamlMapping;
-			try {
-				local = await localDiffForYaml(job.cwd, job.target.baseSha, job.target.headSha);
-			} catch (error) {
-				if (this.deps.preflightGithubLaunch) return undefined;
-				throw error;
-			}
+			const local = await localDiffForYaml(job.cwd, job.target.baseSha, job.target.headSha);
 			return {
 				...local,
 				changeset: {
@@ -442,11 +435,7 @@ export class WalkthroughAgentManager {
 				export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires launch-time GitHub metadata; preview is available." },
 			};
 		}
-		if (!this.deps.preflightGithubLaunch) return undefined;
-		if (typeof this.deps.preflightGithubLaunch === "function") {
-			await this.deps.preflightGithubLaunch(job);
-			return undefined;
-		}
+		if (typeof this.deps.preflightGithubLaunch === "function") await this.deps.preflightGithubLaunch(job);
 		const resolved = await resolveGithubPr({
 			cwd: job.cwd,
 			prUrl: job.target.prUrl,
@@ -487,51 +476,14 @@ export class WalkthroughAgentManager {
 			if (!bundle) throw missingBundleError(job.jobId);
 			return analysisBundleToParsedDiff(bundle);
 		}
+		if (job.target.provider === "github") throw missingBundleError(job.jobId);
 		if (this.deps.resolveDiffForYamlMapping) return this.deps.resolveDiffForYamlMapping(document, job);
-		const yaml = document as unknown as PrWalkthroughYamlDocument;
 		const baseSha = job.target.baseSha;
 		const headSha = job.target.headSha;
 
 		if (job.target.provider === "local") {
 			if (!baseSha || !headSha) throw new Error("Local walkthrough diff resolution requires baseSha and headSha.");
 			return localDiffForYaml(job.cwd, baseSha, headSha);
-		}
-
-		if (job.target.provider === "github") {
-			if (baseSha && headSha) {
-				try {
-					const local = await localDiffForYaml(job.cwd, baseSha, headSha);
-					return {
-						...local,
-						changeset: {
-							...local.changeset,
-							provider: "github",
-							externalUrl: yaml.pr.url,
-							prUrl: yaml.pr.url,
-							prNumber: yaml.pr.number,
-							prTitle: yaml.pr.title,
-							prBody: yaml.pr.original_description.body,
-							title: yaml.pr.title,
-						},
-						export: { provider: "github", available: false, previewOnly: true, reason: "GitHub submission requires adapter credentials; preview is available." },
-					};
-				} catch {
-					// Fall through to the GitHub adapter so inaccessible/private/rate-limit
-					// failures become deterministic job errors instead of empty diff mapping.
-				}
-			}
-
-			const resolved = await resolveGithubPr({
-				cwd: job.cwd,
-				prUrl: job.target.prUrl ?? yaml.pr.url,
-				prNumber: job.target.number ?? yaml.pr.number,
-			});
-			return {
-				changeset: resolved.changeset,
-				files: resolved.files,
-				warnings: resolved.warnings,
-				export: resolved.export as unknown as WalkthroughParsedDiffForYamlMapping["export"],
-			};
 		}
 
 		throw new Error(`Unsupported PR walkthrough target provider: ${job.target.provider}`);

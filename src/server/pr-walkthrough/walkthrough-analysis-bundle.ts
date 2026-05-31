@@ -152,7 +152,7 @@ export class WalkthroughAnalysisBundleStore {
 
 export function createAnalysisBundleFromParsedDiff(job: PrWalkthroughJobRecord, parsedDiff: WalkthroughParsedDiffForYamlMapping): PrWalkthroughAnalysisBundle {
 	const changeset = parsedDiff.changeset ?? {};
-	const files = diffBlocksFromParsedDiff(parsedDiff).map((block, index) => bundleFileFromDiffBlock(block, parsedDiff.files?.[index]));
+	const files = bundleFilesFromParsedDiff(parsedDiff);
 	return sanitizeBundle({
 		schema_version: PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
 		kind: PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND,
@@ -191,7 +191,21 @@ export function analysisBundleToParsedDiff(bundle: PrWalkthroughAnalysisBundle):
 			additions: bundle.changeset.additions,
 			deletions: bundle.changeset.deletions,
 		},
-		diffBlocks: bundle.files.map(diffBlockFromBundleFile),
+		files: bundle.files.map(file => ({
+			filePath: file.path,
+			oldPath: file.old_path ?? undefined,
+			status: file.status,
+			additions: file.additions,
+			deletions: file.deletions,
+			isBinary: file.is_binary,
+			isGenerated: file.is_generated,
+			isTruncated: file.is_truncated,
+			externalUrl: file.external_url,
+			blobUrl: file.blob_url,
+			rawUrl: file.raw_url,
+			contentsUrl: file.contents_url,
+			diffBlocks: [diffBlockFromBundleFile(file)],
+		})),
 		warnings: bundle.warnings,
 		limits: bundle.limits as WalkthroughParsedDiffForYamlMapping["limits"],
 		export: bundle.export as WalkthroughParsedDiffForYamlMapping["export"],
@@ -205,6 +219,12 @@ export function missingBundleError(jobId: string): Error & { status?: number; ex
 	});
 }
 
+function bundleFilesFromParsedDiff(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrWalkthroughAnalysisBundleFile[] {
+	const sourceFiles = Array.isArray(parsedDiff.files) ? parsedDiff.files.filter(isRecord) : [];
+	if (sourceFiles.length > 0) return sourceFiles.map(bundleFileFromParsedFile).filter((file): file is PrWalkthroughAnalysisBundleFile => Boolean(file));
+	return diffBlocksFromParsedDiff(parsedDiff).map(block => bundleFileFromDiffBlock(block));
+}
+
 function diffBlocksFromParsedDiff(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrWalkthroughDiffBlock[] {
 	if (Array.isArray(parsedDiff.diffBlocks)) return parsedDiff.diffBlocks.filter(isDiffBlock);
 	const blocks: PrWalkthroughDiffBlock[] = [];
@@ -216,18 +236,44 @@ function diffBlocksFromParsedDiff(parsedDiff: WalkthroughParsedDiffForYamlMappin
 	return blocks;
 }
 
-function bundleFileFromDiffBlock(block: PrWalkthroughDiffBlock, source: unknown): PrWalkthroughAnalysisBundleFile {
-	const record = isRecord(source) ? source : {};
+function bundleFileFromParsedFile(file: Record<string, unknown>): PrWalkthroughAnalysisBundleFile | null {
+	const blocks = Array.isArray(file.diffBlocks)
+		? file.diffBlocks.filter(isDiffBlock)
+		: isDiffBlock(file)
+			? [file]
+			: [];
+	const primary = blocks[0];
+	const filePath = stringValue(file.filePath) ?? stringValue(file.path) ?? primary?.filePath;
+	if (!filePath) return null;
+	return {
+		id: stringValue(file.id) ?? primary?.id,
+		path: filePath,
+		old_path: stringValue(file.oldPath) ?? stringValue(file.old_path) ?? primary?.oldPath ?? null,
+		status: stringValue(file.status) ?? primary?.status,
+		additions: numberValue(file.additions),
+		deletions: numberValue(file.deletions),
+		is_binary: Boolean(file.isBinary ?? file.is_binary ?? primary?.isBinary),
+		is_generated: Boolean(file.isGenerated ?? file.is_generated ?? primary?.isGenerated),
+		is_truncated: Boolean(file.isTruncated ?? file.is_truncated ?? file.truncated ?? primary?.isTruncated),
+		external_url: stringValue(file.externalUrl) ?? stringValue(file.external_url) ?? primary?.externalUrl,
+		blob_url: stringValue(file.blobUrl) ?? stringValue(file.blob_url) ?? primary?.blobUrl,
+		raw_url: stringValue(file.rawUrl) ?? stringValue(file.raw_url) ?? primary?.rawUrl,
+		contents_url: stringValue(file.contentsUrl) ?? stringValue(file.contents_url) ?? primary?.contentsUrl,
+		hunks: blocks.flatMap(block => block.hunks.map(bundleHunkFromDiffHunk)),
+	};
+}
+
+function bundleFileFromDiffBlock(block: PrWalkthroughDiffBlock): PrWalkthroughAnalysisBundleFile {
 	return {
 		id: block.id,
 		path: block.filePath,
 		old_path: block.oldPath ?? null,
 		status: block.status,
-		additions: numberValue(record.additions),
-		deletions: numberValue(record.deletions),
-		is_binary: Boolean(block.isBinary ?? record.isBinary),
-		is_generated: Boolean(block.isGenerated ?? record.isGenerated),
-		is_truncated: Boolean(block.isTruncated ?? record.isTruncated ?? record.truncated),
+		additions: undefined,
+		deletions: undefined,
+		is_binary: Boolean(block.isBinary),
+		is_generated: Boolean(block.isGenerated),
+		is_truncated: Boolean(block.isTruncated),
 		external_url: block.externalUrl,
 		blob_url: block.blobUrl,
 		raw_url: block.rawUrl,
