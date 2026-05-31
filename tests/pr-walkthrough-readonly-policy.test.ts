@@ -75,6 +75,9 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git rev-parse HEAD");
 		allowed("git status --short");
 		allowed("git status --porcelain=v2 --branch");
+		allowed("git for-each-ref refs/heads");
+		allowed("git for-each-ref --format=%(refname:short) refs/remotes/origin");
+		allowed("git for-each-ref --sort=-committerdate --count=5 refs/heads");
 	});
 
 	it("blocks path-qualified executables before command allowlisting", () => {
@@ -107,6 +110,14 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("git diff --output=diff.patch", /--output/);
 		blocked("git diff -- src/../package.json", /parent-directory/);
 		blocked("git show HEAD -- ':(top)package.json'", /pathspec magic/);
+		blocked("git for-each-ref --git-dir=.git refs/heads", /--git-dir/);
+		blocked("git for-each-ref --work-tree=.. refs/heads", /--work-tree|parent-directory/);
+		blocked("git for-each-ref --output=refs.txt refs/heads", /--output/);
+		blocked("git for-each-ref --ext-diff refs/heads", /external diff/);
+		blocked("git for-each-ref --external-diff refs/heads", /external diff/);
+		blocked("git for-each-ref --shell refs/heads", /shell\/interpreter-quoted output/);
+		blocked("git for-each-ref --python refs/heads", /shell\/interpreter-quoted output/);
+		blocked("git for-each-ref --tcl=unexpected refs/heads", /shell\/interpreter-quoted output/);
 	});
 
 	it("allows read/search commands and bounded sed", () => {
