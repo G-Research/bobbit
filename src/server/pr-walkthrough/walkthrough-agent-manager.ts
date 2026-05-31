@@ -678,8 +678,11 @@ function publicJob(job: PrWalkthroughJobRecord | null): PrWalkthroughJobRecord |
 	return safeJob as PrWalkthroughJobRecord;
 }
 
-const REQUIRED_YAML_SCHEMA_PROMPT = `Required submit_pr_walkthrough_yaml YAML shape (submit exactly one YAML document; preserve these keys and enum values):
+const REQUIRED_YAML_SCHEMA_PROMPT = `Required submit_pr_walkthrough_yaml YAML shape (preserve these keys and enum values).
+You must call submit_pr_walkthrough_yaml with exactly one raw YAML document matching this schema.
+Do not include Markdown code fences, backticks, blockquotes, commentary, or multiple documents in the submit_pr_walkthrough_yaml tool argument.
 
+\`\`\`yaml
 schema_version: 1
 pr:
   provider: github
@@ -780,7 +783,10 @@ walkthrough:
       - other
       - audit
     chunk_order:
-      - review_chunk_id`;
+      - review_chunk_id
+\`\`\`
+
+The fenced block above is only a prompt example for readability; the submit_pr_walkthrough_yaml tool argument must be the raw YAML document without code fences.`;
 
 function buildRolePrompt(target: PrWalkthroughTarget): string {
 	return [
