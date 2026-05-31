@@ -28,15 +28,12 @@ import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
+import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
-	MAX_SELECTED_BYTES,
-	MAX_SELECTED_LINES,
 	TextSelectionError,
 	selectText,
-	truncateTextToBudget,
 	type TextSelectionMode,
 	type TextSelectionOptions,
-	type TextSelectionMetadata,
 } from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
@@ -1931,44 +1928,6 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 		from: parseGateInspectIntegerParam(params, "from"),
 		to: parseGateInspectIntegerParam(params, "to"),
 	};
-}
-
-interface GateInspectOutputStep {
-	output?: string;
-	selection?: TextSelectionMetadata;
-}
-
-function enforceGateInspectAggregateOutputBudget(steps: GateInspectOutputStep[]): { truncated: boolean; truncationReason?: string } {
-	let remainingLines = MAX_SELECTED_LINES;
-	let remainingBytes = MAX_SELECTED_BYTES;
-	let truncated = false;
-	let truncationReason: string | undefined;
-
-	for (const step of steps) {
-		if (typeof step.output !== "string" || step.output.length === 0) continue;
-		if (remainingLines <= 0 || remainingBytes <= 0) {
-			step.output = "";
-			truncated = true;
-			truncationReason = truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
-			if (step.selection) {
-				step.selection = { ...step.selection, truncated: true, truncationReason: truncationReason };
-			}
-			continue;
-		}
-		const capped = truncateTextToBudget(step.output, remainingLines, remainingBytes);
-		step.output = capped.text;
-		remainingLines -= capped.lines;
-		remainingBytes -= capped.bytes;
-		if (capped.truncated) {
-			truncated = true;
-			truncationReason = capped.truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
-			if (step.selection) {
-				step.selection = { ...step.selection, truncated: true, truncationReason };
-			}
-		}
-	}
-
-	return { truncated, truncationReason };
 }
 
 async function handleApiRoute(
@@ -5331,7 +5290,6 @@ async function handleApiRoute(
 		const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
 		if (url.searchParams.get("view") === "summary") {
 			const latestSignal = gate.signals[gate.signals.length - 1];
-			const MAX_TAIL_LINES = 40;
 			const slim: Record<string, unknown> = {
 				gateId: gate.gateId,
 				name: def?.name,
@@ -5344,23 +5302,26 @@ async function handleApiRoute(
 			};
 			if (gate.currentMetadata) slim.currentMetadata = gate.currentMetadata;
 			if (latestSignal) {
+				const verificationSnapshot = latestSignal.verification ? buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: latestSignal.id,
+					verification: latestSignal.verification,
+					activeVerification: verificationHarness.getActiveVerification(latestSignal.id),
+					selectionOptions: { implicitDefault: true },
+				}) : undefined;
 				slim.latestSignal = {
 					id: latestSignal.id,
 					sessionId: latestSignal.sessionId,
 					timestamp: latestSignal.timestamp,
 					commitSha: latestSignal.commitSha,
-					verification: latestSignal.verification ? {
-						status: latestSignal.verification.status,
-						steps: latestSignal.verification.steps.map(s => {
-							const base: Record<string, unknown> = { name: s.name, passed: s.passed };
-							if (!s.passed && !s.skipped && s.output) {
-								const lines = s.output.split("\n");
-								base.output = lines.length > MAX_TAIL_LINES
-									? lines.slice(-MAX_TAIL_LINES).join("\n")
-									: s.output;
-							}
-							return base;
-						}),
+					verification: verificationSnapshot ? {
+						status: verificationSnapshot.status,
+						summary: verificationSnapshot.summary,
+						counts: verificationSnapshot.counts,
+						active: verificationSnapshot.active,
+						steps: verificationSnapshot.steps,
+						selection: verificationSnapshot.selection,
 					} : undefined,
 				};
 			}
@@ -5427,35 +5388,25 @@ async function handleApiRoute(
 		if (section === "verification") {
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
-			const v = resolved.signal.verification;
 			try {
-				let aggregateTotalLines = 0;
-				const steps = v ? v.steps.map(s => {
-					const rawOutput = typeof s.output === "string" ? s.output : "";
-					const selected = selectText(rawOutput, selectionOptions);
-					aggregateTotalLines += selected.selection.totalLines;
-					return {
-						name: s.name,
-						type: s.type,
-						passed: s.passed,
-						skipped: s.skipped || undefined,
-						duration_ms: s.duration_ms,
-						output: typeof s.output === "string" ? selected.text : undefined,
-						selection: selected.selection,
-					};
-				}) : [];
-				const aggregate = enforceGateInspectAggregateOutputBudget(steps);
+				const snapshot = buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: resolved.signal.id,
+					verification: resolved.signal.verification,
+					activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
+					selectionOptions,
+				});
 				json({
 					gateId, section: "verification",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
-					steps,
-					selection: {
-						mode: selectionOptions.mode ?? "tail",
-						totalLines: aggregateTotalLines,
-						truncated: aggregate.truncated,
-						truncationReason: aggregate.truncationReason,
-					},
+					status: snapshot.status,
+					summary: snapshot.summary,
+					counts: snapshot.counts,
+					active: snapshot.active,
+					steps: snapshot.steps,
+					selection: snapshot.selection,
 				});
 			} catch (err) {
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
