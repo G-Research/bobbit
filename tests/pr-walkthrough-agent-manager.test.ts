@@ -10,6 +10,7 @@ let tempDir = "";
 
 const { WalkthroughAgentStore, rotateSubmissionProofForRestoredJob, verifySubmissionProof } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
 const { WalkthroughAgentManager } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { createAnalysisBundleFromParsedDiff } = await import("../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts");
 const { evaluateWalkthroughReadonlyCommand } = await import("../src/server/pr-walkthrough/walkthrough-readonly-policy.ts");
 const { handlePrWalkthroughApiRoute } = await import("../src/server/pr-walkthrough/routes.ts");
 const { getWalkthrough } = await import("../src/server/pr-walkthrough/walkthrough-store.ts");
@@ -191,6 +192,34 @@ function yamlReviewChunkFor(fixture: { hunkHeader: string; filePath: string }): 
 	};
 }
 
+function jsonFilesUnder(root: string): string[] {
+	if (!fs.existsSync(root)) return [];
+	const files: string[] = [];
+	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+		const fullPath = path.join(root, entry.name);
+		if (entry.isDirectory()) files.push(...jsonFilesUnder(fullPath));
+		else if (entry.isFile() && entry.name.endsWith(".json")) files.push(fullPath);
+	}
+	return files;
+}
+
+function readAnalysisBundleArtifacts(): Array<Record<string, any>> {
+	return jsonFilesUnder(tempDir)
+		.map(file => {
+			try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
+		})
+		.filter((value): value is Record<string, any> => value?.kind === "pr_walkthrough_analysis_bundle");
+}
+
+function removeAnalysisBundleArtifacts(): void {
+	for (const file of jsonFilesUnder(tempDir)) {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+			if (parsed?.kind === "pr_walkthrough_analysis_bundle") fs.rmSync(file, { force: true });
+		} catch { /* ignore non-bundle JSON */ }
+	}
+}
+
 async function callRoute(manager: InstanceType<typeof WalkthroughAgentManager>, method: string, pathname: string, body?: unknown, extraDeps: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
 	const res = makeResponse();
 	const handled = await handlePrWalkthroughApiRoute(new URL(`http://localhost${pathname}`), { method, headers } as any, res as any, {
@@ -213,10 +242,11 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("launch creates a waiting child job and dedupes by parent plus target", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 
-		const first = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const first = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(first.created, true);
 		assert.equal(first.status, "waiting_for_yaml");
 		assert.equal(first.job.parentSessionId, "parent");
@@ -225,19 +255,20 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(child.parentSessionId, "parent");
 		assert.equal(child.childKind, "pr-walkthrough");
 		assert.equal(child.readOnly, true);
-		assert.deepEqual(child.allowedTools, ["readonly_bash", "submit_pr_walkthrough_yaml"]);
+		assert.deepEqual(child.allowedTools, ["readonly_bash", "read_pr_walkthrough_bundle", "submit_pr_walkthrough_yaml"]);
 
-		const second = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const second = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(second.created, false);
 		assert.equal(second.childSessionId, first.childSessionId);
 	});
 
 	it("number-only GitHub launches infer owner/repo before child env and persistence", async () => {
+		const fixture = createGitDiffFixture();
 		addGithubOrigin("acme", "widgets");
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 
-		const launch = await manager.launch({ sessionId: "parent", prNumber: 42 });
+		const launch = await manager.launch({ sessionId: "parent", prNumber: 42, baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		assert.equal(launch.job.target.canonicalKey, "github:acme/widgets#42");
 		assert.equal(launch.job.target.owner, "acme");
@@ -249,6 +280,102 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_OWNER, "acme");
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_REPO, "widgets");
 		assert.equal(child.env.BOBBIT_WALKTHROUGH_TARGET_NUMBER, "42");
+	});
+
+	it("launch resolves and persists a full versioned analysis bundle before child creation", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
+		let bundleCountAtCreate = -1;
+		let bundleCountAtEnqueue = -1;
+		sessionManager.createSession = async (...args: Parameters<typeof sessionManager.createSession>) => {
+			bundleCountAtCreate = readAnalysisBundleArtifacts().length;
+			return originalCreateSession(...args);
+		};
+		const originalEnqueuePrompt = sessionManager.enqueuePrompt.bind(sessionManager);
+		sessionManager.enqueuePrompt = (...args: Parameters<typeof sessionManager.enqueuePrompt>) => {
+			bundleCountAtEnqueue = readAnalysisBundleArtifacts().length;
+			return originalEnqueuePrompt(...args);
+		};
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+
+		assert.equal(launch.status, "waiting_for_yaml");
+		assert.ok(bundleCountAtCreate > 0, "analysis bundle must be persisted before child session creation");
+		assert.ok(bundleCountAtEnqueue > 0, "analysis bundle must be persisted before kickoff prompt enqueue");
+		const [bundle] = readAnalysisBundleArtifacts();
+		assert.ok(bundle, "expected a persisted pr_walkthrough_analysis_bundle artifact");
+		assert.equal(bundle.schema_version, 1);
+		assert.equal(bundle.kind, "pr_walkthrough_analysis_bundle");
+		assert.deepEqual(bundle.target, {
+			provider: "github",
+			owner: "acme",
+			repo: "widgets",
+			number: 42,
+			url: "https://github.com/acme/widgets/pull/42",
+		});
+		assert.equal(bundle.changeset.base_sha, fixture.baseSha);
+		assert.equal(bundle.changeset.head_sha, fixture.headSha);
+		assert.equal(bundle.changeset.files_changed, 1);
+		assert.ok(Array.isArray(bundle.files), "bundle.files must contain the authoritative launch-time diff files");
+		assert.ok(bundle.files.some((file: any) => file.path === fixture.filePath && Array.isArray(file.hunks) && file.hunks.length > 0), "bundle must include parsed hunks for the changed file");
+		const child = sessionManager.sessions.get(launch.childSessionId);
+		assert.ok(child.allowedTools.includes("read_pr_walkthrough_bundle"), "walkthrough child must be allowed to read its scoped persisted bundle");
+		assert.match(`${child.rolePrompt}\n${sessionManager.prompts.join("\n")}`, /read_pr_walkthrough_bundle/);
+	});
+
+	it("analysis bundle preserves parsed files without diff blocks and avoids metadata index drift", () => {
+		const bundle = createAnalysisBundleFromParsedDiff({
+			jobId: "job-bundle-files",
+			parentSessionId: "parent",
+			childSessionId: "child",
+			cwd: tempDir,
+			target: { provider: "github", canonicalKey: "github:acme/widgets#42", owner: "acme", repo: "widgets", number: 42, prUrl: "https://github.com/acme/widgets/pull/42" },
+			changesetId: "github:acme/widgets#42",
+			tabId: "walkthrough:github:acme/widgets#42",
+			status: "waiting_for_yaml",
+			title: "PR #42 Walkthrough",
+		}, {
+			changeset: { baseSha: "base", headSha: "head", provider: "github", filesChanged: 2, additions: 8, deletions: 2 },
+			files: [
+				{ filePath: "assets/logo.png", status: "modified", additions: 0, deletions: 0, isBinary: true, isGenerated: false, isTruncated: true, blobUrl: "https://example.test/blob", rawUrl: "https://example.test/raw", contentsUrl: "https://example.test/contents", diffBlocks: [] },
+				{ filePath: "src/demo.ts", status: "modified", additions: 8, deletions: 2, isBinary: false, isGenerated: true, isTruncated: false, externalUrl: "https://example.test/diff", diffBlocks: [{ id: "block-demo", filePath: "src/demo.ts", status: "modified", isGenerated: true, hunks: [{ id: "hunk-demo", header: "@@ -1,1 +1,2 @@", lines: [{ id: "line-demo", kind: "add", side: "new", newLine: 2, text: "export const value = 2;" }] }] }] },
+			],
+		});
+
+		assert.equal(bundle.files.length, 2);
+		assert.deepEqual(bundle.files.map(file => file.path), ["assets/logo.png", "src/demo.ts"]);
+		assert.equal(bundle.files[0].hunks.length, 0, "files without diff blocks must remain in the launch bundle");
+		assert.equal(bundle.files[0].is_binary, true);
+		assert.equal(bundle.files[0].is_truncated, true);
+		assert.equal(bundle.files[0].blob_url, "https://example.test/blob");
+		assert.equal(bundle.files[1].additions, 8, "metadata must come from its own parsed file, not flattened diff-block index");
+		assert.equal(bundle.files[1].deletions, 2);
+		assert.equal(bundle.files[1].is_generated, true);
+		assert.equal(bundle.files[1].hunks.length, 1);
+	});
+
+	it("launch-time diff resolution failure returns a structured job error without creating a waiting child agent", async () => {
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const manager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store,
+			preflightGithubLaunch: () => { throw new Error("GitHub API rate limit exceeded"); },
+		});
+
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+
+		assert.equal(launch.status, "error");
+		assert.equal(launch.job.error?.code, "GITHUB_RATE_LIMITED");
+		assert.equal(launch.job.error?.retryable, true);
+		assert.equal(store.list().length, 1);
+		assert.equal(store.list()[0].status, "error");
+		assert.equal(sessionManager.sessions.size, 1, "expected no child session when launch-time bundle resolution fails");
+		assert.equal(sessionManager.prompts.length, 0, "expected no waiting/kickoff prompt when launch-time bundle resolution fails");
 	});
 
 	it("local changeset launches are rejected before creating an agent job", async () => {
@@ -264,6 +391,7 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("launch spawn-pins the walkthrough child to the parent session model", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const seenOpts: Record<string, unknown>[] = [];
 		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
@@ -279,7 +407,7 @@ describe("WalkthroughAgentManager", () => {
 			resolveSessionModel: sessionId => sessionId === "parent" ? { provider: "anthropic", modelId: "claude-opus-4-1" } : undefined,
 		});
 
-		await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		assert.equal(seenOpts[0].initialModel, "anthropic/claude-opus-4-1");
 	});
@@ -333,6 +461,7 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("concurrent duplicate launches share one child job", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
 		let createCount = 0;
@@ -345,7 +474,7 @@ describe("WalkthroughAgentManager", () => {
 		};
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 
-		const launches = Array.from({ length: 8 }, () => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }));
+		const launches = Array.from({ length: 8 }, () => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha }));
 		await new Promise(resolve => setTimeout(resolve, 0));
 		releaseCreate?.();
 		const results = await Promise.all(launches);
@@ -373,10 +502,11 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("launch prompts include the required YAML schema fields and enums", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		const child = sessionManager.sessions.get(launch.childSessionId);
 		const promptText = `${child.rolePrompt}\n${sessionManager.prompts.join("\n")}`;
 		assert.match(promptText, /schema_version: 1/);
@@ -388,6 +518,7 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("launch with local SHAs skips GitHub preflight and waits for YAML", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({
 			defaultCwd: tempDir,
@@ -397,7 +528,7 @@ describe("WalkthroughAgentManager", () => {
 			preflightGithubLaunch: () => { throw new Error("should not hit network when local SHAs are supplied"); },
 		});
 
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: "abcdef1", headSha: "1234567" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(launch.status, "waiting_for_yaml");
 		assert.equal(launch.job.target.canonicalKey, "github:acme/widgets#42");
 	});
@@ -416,23 +547,24 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(launch.status, "error");
 		assert.equal(launch.job.error?.code, "GITHUB_RATE_LIMITED");
 		assert.equal(launch.job.error?.retryable, true);
-		assert.equal(sessionManager.prompts.length, 1, "child transcript should receive a launch failure notice");
-		assert.match(sessionManager.prompts[0], /launch preflight failed|GITHUB_RATE_LIMITED|rate limit/i);
-		assert.doesNotMatch(sessionManager.prompts[0], /schema_version: 1/, "kickoff schema prompt should not be sent for inaccessible PRs");
+		assert.equal(sessionManager.sessions.size, 1, "launch-time bundle failures should not create a child analysis session");
+		assert.equal(sessionManager.prompts.length, 0, "kickoff schema prompt should not be sent for inaccessible PRs");
 	});
 
 	it("launch kickoff failures are surfaced in the child transcript", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		sessionManager.enqueuePrompt = () => ({ success: false, error: "dispatch exploded" });
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
 
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(launch.status, "error");
 		assert.equal(launch.job.error?.code, "PROMPT_DISPATCH_FAILED");
 		assert.match(sessionManager.prompts.at(-1) ?? "", /kickoff prompt dispatch failed|PROMPT_DISPATCH_FAILED|dispatch exploded/i);
 	});
 
 	it("runtime failures before YAML transition the job to AGENT_RUNTIME_FAILED", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const events: Record<string, unknown>[] = [];
 		const manager = new WalkthroughAgentManager({
@@ -442,7 +574,7 @@ describe("WalkthroughAgentManager", () => {
 			store: new WalkthroughAgentStore(tempDir),
 			broadcast: event => events.push(event),
 		});
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		const promptCountAfterLaunch = sessionManager.prompts.length;
 
 		sessionManager.sessions.get(launch.childSessionId).emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "model stream crashed" } });
@@ -461,6 +593,7 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("retry after pre-child createSession failure creates a fresh child job", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const store = new WalkthroughAgentStore(tempDir);
 		const originalCreateSession = sessionManager.createSession.bind(sessionManager);
@@ -475,14 +608,14 @@ describe("WalkthroughAgentManager", () => {
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
 
 		await assert.rejects(
-			() => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			() => manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha }),
 			/create failed before child persisted/,
 		);
 		const failedJob = store.findByParentAndTarget("parent", "github:acme/widgets#42");
 		assert.equal(failedJob?.status, "error");
 		assert.equal(sessionManager.sessions.has(failedJob!.childSessionId), false);
 
-		const retry = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const retry = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		assert.equal(retry.created, true);
 		assert.equal(retry.status, "waiting_for_yaml");
 		assert.notEqual(retry.childSessionId, failedJob?.childSessionId);
@@ -490,9 +623,10 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("internal submit stores validation failures without publishing cards", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: "schema_version: 1\n", submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, false);
@@ -521,46 +655,34 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(job?.payloadUpdatedAt, publishedAt);
 	});
 
-	it("submit-yaml rejects SHA mismatches against authoritative resolved PR metadata", async () => {
-		const authoritativeBase = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-		const authoritativeHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+	it("submit-yaml rejects SHA mismatches against authoritative launch bundle metadata", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
-		const manager = new WalkthroughAgentManager({
-			defaultCwd: tempDir,
-			stateDir: tempDir,
-			sessionManager,
-			store: new WalkthroughAgentStore(tempDir),
-			resolveDiffForYamlMapping: () => ({
-				changeset: { baseSha: authoritativeBase, headSha: authoritativeHead, provider: "github" },
-				files: [],
-			}),
-		});
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		const mismatch = await manager.submitYaml({
 			sessionId: launch.childSessionId,
 			jobId: launch.jobId,
-			yaml: validYaml(42, { baseSha: "ccccccc", headSha: authoritativeHead.slice(0, 7) }),
+			yaml: validYaml(42, { baseSha: "ccccccc", headSha: fixture.headSha.slice(0, 7) }),
 			submissionProof: submitProof(sessionManager, launch.childSessionId),
 		});
 		assert.equal(mismatch.ok, false);
 		assert.equal(mismatch.status, "validation_failed");
 		const mismatchMessage = mismatch.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n");
-		assert.match(mismatchMessage, /\$\.pr\.base_sha: Must match the authoritative PR base SHA/);
-		assert.match(mismatchMessage, /regenerate all hunk_header, line_range, and anchor references/);
-		assert.match(mismatchMessage, /do not only patch this SHA/);
+		assert.match(mismatchMessage, /\$\.pr\.base_sha: Must match (the authoritative PR|launch target) base SHA/);
 		assert.equal(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")), false);
 
 		const accepted = await manager.submitYaml({
 			sessionId: launch.childSessionId,
 			jobId: launch.jobId,
-			yaml: validYaml(42, { baseSha: authoritativeBase.slice(0, 7), headSha: authoritativeHead.slice(0, 7) }),
+			yaml: validYaml(42, { baseSha: fixture.baseSha.slice(0, 7), headSha: fixture.headSha.slice(0, 7) }),
 			submissionProof: submitProof(sessionManager, launch.childSessionId),
 		});
 		assert.equal(accepted.ok, true);
 		const stored = getWalkthrough(launch.changesetId, tempDir);
-		assert.equal(stored?.changeset.baseSha, authoritativeBase);
-		assert.equal(stored?.changeset.headSha, authoritativeHead);
+		assert.equal(stored?.changeset.baseSha, fixture.baseSha);
+		assert.equal(stored?.changeset.headSha, fixture.headSha);
 	});
 
 	it("internal submit accepts valid YAML with the real schema mapper and keeps the child session alive", async () => {
@@ -604,31 +726,85 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(stored.warnings.some((warning: any) => warning.code === "unmapped_hunk"), false);
 	});
 
-	it("submit-yaml converts diff resolution failures into structured job errors", async () => {
+	it("submit-yaml maps against the stored launch bundle without submit-time diff resolution", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const launchManager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
+		const launch = await launchManager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+		const proof = submitProof(sessionManager, launch.childSessionId);
+		const submitManager = new WalkthroughAgentManager({
+			defaultCwd: tempDir,
+			stateDir: tempDir,
+			sessionManager,
+			store,
+			resolveDiffForYamlMapping: () => { throw new Error("submit-time resolver called; expected stored PR walkthrough analysis bundle"); },
+		});
+
+		const result = await submitManager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }), submissionProof: proof });
+
+		assert.equal(result.ok, true);
+		const stored = getWalkthrough(launch.changesetId, tempDir);
+		assert.equal(stored?.changeset.baseSha, fixture.baseSha);
+		assert.equal(stored?.changeset.headSha, fixture.headSha);
+	});
+
+	it("missing stored analysis bundle returns a deterministic retryable submission error instead of re-resolving diff data", async () => {
+		const fixture = createGitDiffFixture();
+		const sessionManager = makeSessionManager();
+		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
+		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
+		const proof = submitProof(sessionManager, launch.body.childSessionId);
+		removeAnalysisBundleArtifacts();
+
+		const result = await callRoute(manager, "POST", "/api/internal/pr-walkthrough/submit-yaml", { sessionId: launch.body.childSessionId, jobId: launch.body.jobId, yaml: validYaml(42, { baseSha: fixture.baseSha, headSha: fixture.headSha }) }, {}, { "x-bobbit-walkthrough-submit-proof": proof });
+
+		assert.notEqual(result.status, 200, "missing bundle must not be silently recovered by submit-time GitHub/local diff resolution");
+		assert.equal(result.body.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
+		assert.equal(result.body.retryable, true);
+		assert.match(result.body.message, /bundle/i);
+	});
+
+	it("github submit without analysis bundle metadata fails before custom or submit-time diff fallback", async () => {
+		const sessionManager = makeSessionManager();
+		const store = new WalkthroughAgentStore(tempDir);
+		const proof = "scoped-proof";
+		store.create({
+			jobId: "job-no-bundle-metadata",
+			parentSessionId: "parent",
+			childSessionId: "child-no-bundle-metadata",
+			cwd: tempDir,
+			target: { provider: "github", canonicalKey: "github:acme/widgets#42", owner: "acme", repo: "widgets", number: 42, prUrl: "https://github.com/acme/widgets/pull/42", baseSha: "abcdef1", headSha: "1234567" },
+			changesetId: "github:acme/widgets#42",
+			tabId: "walkthrough:github:acme/widgets#42",
+			status: "waiting_for_yaml",
+			title: "PR #42 Walkthrough",
+			submissionProofHash: submitProofHash("job-no-bundle-metadata", "child-no-bundle-metadata", proof),
+		});
+		sessionManager.sessions.set("child-no-bundle-metadata", { id: "child-no-bundle-metadata", cwd: tempDir, status: "idle" });
 		const manager = new WalkthroughAgentManager({
 			defaultCwd: tempDir,
 			stateDir: tempDir,
 			sessionManager,
-			store: new WalkthroughAgentStore(tempDir),
-			resolveDiffForYamlMapping: () => { throw new Error("GitHub API rate limit exceeded"); },
+			store,
+			resolveDiffForYamlMapping: () => { throw new Error("custom submit-time resolver should not be called"); },
 		});
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
 
 		await assert.rejects(
-			() => manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
-			/GitHub API rate limit exceeded/,
+			() => manager.submitYaml({ sessionId: "child-no-bundle-metadata", jobId: "job-no-bundle-metadata", yaml: validYaml(), submissionProof: proof }),
+			/PR walkthrough analysis bundle is missing or unusable/,
 		);
-		const job = manager.getJob(launch.jobId);
+		const job = manager.getJob("job-no-bundle-metadata");
 		assert.equal(job?.status, "error");
-		assert.equal(job?.error?.code, "GITHUB_RATE_LIMITED");
+		assert.equal(job?.error?.code, "PR_WALKTHROUGH_BUNDLE_MISSING");
 		assert.equal(job?.error?.retryable, true);
 	});
 
 	it("internal submit validates YAML identity against the launch target", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		const result = await manager.submitYaml({ sessionId: launch.childSessionId, jobId: launch.jobId, yaml: validYaml(43), submissionProof: submitProof(sessionManager, launch.childSessionId) });
 		assert.equal(result.ok, false);
@@ -673,8 +849,9 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("route constructs a stable manager across fresh dependency objects", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
-		const body = { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" };
+		const body = { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha };
 		const first = await callRoute(undefined as any, "POST", "/api/pr-walkthrough/launch", body, { sessionManager, broadcast: () => undefined });
 		const second = await callRoute(undefined as any, "POST", "/api/pr-walkthrough/launch", body, { sessionManager, broadcast: () => undefined });
 		assert.equal(first.status, 201);
@@ -683,10 +860,11 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("restore reattaches idle-reminder listeners for non-ready jobs", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const store = new WalkthroughAgentStore(tempDir);
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		const restoredManager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store });
 		restoredManager.restore();
 		sessionManager.sessions.get(launch.childSessionId).emit({ type: "agent_end" });
@@ -695,13 +873,14 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("route constructs the production manager with SessionManager and broadcast dependencies", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const events: Record<string, unknown>[] = [];
 		const res = makeResponse();
 		const handled = await handlePrWalkthroughApiRoute(new URL("http://localhost/api/pr-walkthrough/launch"), { method: "POST" } as any, res as any, {
 			defaultCwd: tempDir,
 			stateDir: tempDir,
-			readBody: async () => ({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" }),
+			readBody: async () => ({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha }),
 			sessionManager,
 			broadcast: event => events.push(event),
 		});
@@ -749,9 +928,10 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("sandbox submit-yaml rejects child sessions outside the caller scope", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await callRoute(manager, "POST", "/api/pr-walkthrough/launch", { sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 
 		const result = await callRoute(
 			manager,
@@ -767,9 +947,10 @@ describe("WalkthroughAgentManager", () => {
 	});
 
 	it("submit-yaml rejects a different child session for the same job", async () => {
+		const fixture = createGitDiffFixture();
 		const sessionManager = makeSessionManager();
 		const manager = new WalkthroughAgentManager({ defaultCwd: tempDir, stateDir: tempDir, sessionManager, store: new WalkthroughAgentStore(tempDir) });
-		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42" });
+		const launch = await manager.launch({ sessionId: "parent", prUrl: "https://github.com/acme/widgets/pull/42", baseSha: fixture.baseSha, headSha: fixture.headSha });
 		await assert.rejects(
 			() => manager.submitYaml({ sessionId: "other-session", jobId: launch.jobId, yaml: validYaml(), submissionProof: submitProof(sessionManager, launch.childSessionId) }),
 			/error|not allowed/i,

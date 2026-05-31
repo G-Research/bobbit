@@ -15,10 +15,12 @@ Launching a walkthrough should feel like inviting a senior reviewer into the cur
 
 1. User launches from `/walkthrough-pr <url|number>`, Git Status **Walkthrough**, or PR-link action.
 2. The launching session keeps its transcript; it does not receive the walkthrough panel.
-3. Bobbit creates or focuses a dedicated walkthrough child session for the resolved PR target.
-4. The launcher shows a short system/chat notice: `PR walkthrough started in “PR #123 Walkthrough”.` Include a primary inline action: `Open walkthrough`.
-5. If creation takes more than a moment, show the target child row in `starting/preparing` state immediately so the user sees that work began.
-6. If the user stays in the launcher, the sidebar child row should show activity/unread state as the walkthrough agent posts progress.
+3. Bobbit resolves the PR target, metadata, and diff, then persists the launch-time analysis bundle before creating any child session.
+4. If launch-time resolution fails, the launcher shows the structured error and retry guidance; no walkthrough child row is created.
+5. If resolution succeeds, Bobbit creates or focuses a dedicated walkthrough child session for the resolved PR target.
+6. The launcher shows a short system/chat notice: `PR walkthrough started in “PR #123 Walkthrough”.` Include a primary inline action: `Open walkthrough`.
+7. If child creation takes more than a moment after bundle resolution, show the target child row in `starting/preparing` state so the user sees that work began.
+8. If the user stays in the launcher, the sidebar child row should show activity/unread state as the walkthrough agent posts progress.
 
 ## Sidebar placement and identity
 
@@ -27,6 +29,7 @@ Launching a walkthrough should feel like inviting a senior reviewer into the cur
 - Title format: `PR #123 Walkthrough` when a number is known; otherwise `PR Walkthrough` or `Changeset Walkthrough`.
 - The row should use a distinct review/walkthrough accessory and a read-only affordance in tooltip or secondary metadata: `Read-only PR walkthrough agent`.
 - The session is selectable like any other session and remains listed until explicitly terminated/archived.
+- Terminated or archived walkthrough children are hidden when **Show Archived** is off and reappear nested under their parent when **Show Archived** is on.
 
 ## Child session initial layout
 
@@ -47,10 +50,12 @@ Waiting panel copy:
 
 The agent should report rough investigation progress in chat at meaningful milestones, for example:
 
-- `10% — fetched PR metadata and description.`
-- `35% — grouped changed files into review areas.`
-- `70% — checking omissions and follow-up risks.`
+- `10% — read the launch-time bundle manifest and PR description.`
+- `35% — grouped bundled changed files into review areas.`
+- `70% — checking omissions and follow-up risks against bundle hunks.`
 - `90% — validating walkthrough YAML before publishing.`
+
+The server has already resolved the authoritative input at launch. The agent starts from `read_pr_walkthrough_bundle` and uses `readonly_bash` only for extra read-only investigation, not to fetch a second authoritative PR diff.
 
 Progress is intentionally approximate. It should help the user trust the process without introducing a second panel-level loader.
 
@@ -101,10 +106,11 @@ Deduplicate by canonical target within the launching session:
 
 ## Failure states
 
-Failure should be visible in the child session and actionable from the launcher.
+Failure should be visible and actionable from the launcher or child, depending on when it occurs.
 
-- **Creation/model failure:** create the child if possible, show an error panel and chat explanation. Launcher notice links to the failed child.
-- **GitHub auth/permission/rate limit:** child panel shows a structured error with retry guidance; chat states what access is missing.
+- **Launch metadata/diff resolution failure:** return the structured launch error before child creation; the launcher shows retry guidance and no child row is created.
+- **Creation/model failure after bundle resolution:** create the child if possible, show an error panel and chat explanation. Launcher notice links to the failed child.
+- **GitHub auth/permission/rate limit during launch:** return a structured launch error with retry guidance before creating a waiting child.
 - **Read-only policy violation blocked:** tool result explains the blocked action; panel remains waiting unless the agent can continue safely.
 - **Large/truncated PR:** walkthrough can still publish with visible warnings and prioritized chunks; warnings appear in Orientation and Audit.
 - **Agent timeout/idle:** keep the child session alive, mark panel as waiting with reminder, and let the user prompt the agent again.
