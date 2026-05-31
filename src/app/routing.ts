@@ -116,6 +116,13 @@ export function getRouteFromHash(): AppRoute {
 		const tab = second as SettingsTabId | undefined;
 		return { view: "settings", settingsScope: first, settingsTab: tab && SETTINGS_TABS.has(tab) ? tab : undefined };
 	}
+	if (hash) {
+		return { view: "landing" };
+	}
+	const pathSessionMatch = path.match(/^\/session\/([a-zA-Z0-9_-]+)$/i);
+	if (pathSessionMatch) {
+		return { view: "session", sessionId: pathSessionMatch[1] };
+	}
 	return { view: "landing" };
 }
 

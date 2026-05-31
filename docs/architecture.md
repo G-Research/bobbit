@@ -21,6 +21,17 @@ Bobbit has three layers:
 
 3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
 
+## Client routing
+
+Bobbit's browser UI is primarily hash-routed so it can run as a static single-page app behind the gateway, Vite, or a remote reverse proxy. Session routes support both forms:
+
+- `#/session/<session-id>` — the normal in-app route used by sidebar and hash navigation.
+- `/session/<session-id>` — a path-style deep link used by the session header's copy-link action.
+
+Path-style session links are intentionally valid entrypoints. Opening or reloading `/session/<session-id>` after a full page load selects the same session as the hash route, so copied links continue to work when pasted into a fresh browser tab. Auth query parameters remain on the URL while routing is resolved; for example, `/session/<id>?token=...` can authenticate the browser and still open `<id>`.
+
+Hash routes take precedence over the path-style session fallback once the app has loaded. This keeps in-app navigation meaningful even from a copied path URL: `/session/old#/session/new` opens `new`, not `old`. The standalone `/walkthrough?...` pathname route is handled separately, and non-session pathnames are not treated as session deep links.
+
 ## Side-panel workspace
 
 Every chat session owns a dynamic side-panel workspace. The workspace is shared
