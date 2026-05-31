@@ -311,6 +311,7 @@ async function publishWalkthroughJobUpdate(page: Page, state: MockWalkthroughSta
 			changeset: payload?.changeset ?? { ...realChangeset, prNumber: job!.target?.number, prUrl: job!.target?.prUrl, externalUrl: job!.target?.prUrl, title: job!.title },
 			cards: payload?.cards,
 			warnings: payload?.warnings || [],
+			exportCapability: payload?.exportCapability ?? payload?.export,
 			error: job!.error?.message,
 			errorCode: job!.error?.code,
 		},
