@@ -545,7 +545,10 @@ describe("WalkthroughAgentManager", () => {
 		});
 		assert.equal(mismatch.ok, false);
 		assert.equal(mismatch.status, "validation_failed");
-		assert.match(mismatch.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n"), /\$\.pr\.base_sha: Must match the authoritative PR base SHA/);
+		const mismatchMessage = mismatch.validation.errors.map(error => `${error.path}: ${error.message}`).join("\n");
+		assert.match(mismatchMessage, /\$\.pr\.base_sha: Must match the authoritative PR base SHA/);
+		assert.match(mismatchMessage, /regenerate all hunk_header, line_range, and anchor references/);
+		assert.match(mismatchMessage, /do not only patch this SHA/);
 		assert.equal(fs.existsSync(path.join(tempDir, "pr-walkthrough", "v1")), false);
 
 		const accepted = await manager.submitYaml({
