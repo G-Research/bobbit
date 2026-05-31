@@ -22,6 +22,10 @@ test.describe("Sidebar actions menu", () => {
 	const sessionIds: string[] = [];
 	const goalIds: string[] = [];
 
+	test.beforeEach(async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 900 });
+	});
+
 	test.afterAll(async () => {
 		for (const id of sessionIds.splice(0)) await deleteSession(id).catch(() => {});
 		for (const id of goalIds.splice(0)) await deleteGoal(id).catch(() => {});
