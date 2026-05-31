@@ -780,13 +780,13 @@ Goal-wide fields: `passed`, `total`, `verifying`, `verifyingCount`, `awaitingSig
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 
-Returns the latest signal only, with truncated output for failed verification steps (last 40 lines). Content body is replaced with `hasContent` + `contentLength`.
+Returns the latest signal only. Content body is replaced with `hasContent` + `contentLength`. When the latest signal is still running, `latestSignal.verification` is built from the same active snapshot used by `gate_inspect section=verification`, so `gate_status` and inspect agree on step status, durations, summary counts, active metadata, and bounded output.
 
 ```json
 {
   "gateId": "implementation",
   "name": "Implementation",
-  "status": "failed",
+  "status": "passed",
   "dependsOn": ["design-doc"],
   "signalCount": 22,
   "updatedAt": 1775853741666,
@@ -799,17 +799,22 @@ Returns the latest signal only, with truncated output for failed verification st
     "timestamp": 1775853741666,
     "commitSha": "bd8fc7b",
     "verification": {
-      "status": "failed",
+      "status": "running",
+      "summary": "1 passed, 1 running, 1 waiting",
+      "counts": { "passed": 1, "failed": 0, "skipped": 0, "running": 1, "waiting": 1, "blocked": 0 },
+      "active": true,
       "steps": [
-        { "name": "Type check passes", "passed": true },
-        { "name": "E2E tests", "passed": false, "output": "… last 40 lines …" }
-      ]
+        { "name": "Type check passes", "type": "command", "status": "passed", "passed": true, "duration_ms": 15320 },
+        { "name": "E2E tests", "type": "command", "status": "running", "duration_ms": 62150, "output": "… last 20 live lines …" },
+        { "name": "QA review", "type": "agent-qa", "status": "waiting" }
+      ],
+      "selection": { "mode": "tail", "truncated": false }
     }
   }
 }
 ```
 
-Passed verification steps include only `name` and `passed: true` — no output. Failed steps include a tail of their output (40 lines max).
+Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps. Completed signals keep their persisted final results.
 
 **`GET /api/goals/:id/tasks?view=summary`**
 
@@ -916,7 +921,7 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
 |-----------|------|----------|---------|-------------|
 | `section` | `"content"` \| `"verification"` \| `"signals"` | yes | — | What data to retrieve |
 | `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
-| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns a bounded tail, not full output. |
+| `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns the last 20 lines per selected field/verification step, not full output. |
 | `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
 | `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
 | `max_results` | integer | no | server default | Maximum grep matches before truncating. |
@@ -930,7 +935,7 @@ Retrieval controls mirror the background-shell inspection tools where they make 
 - `head` and `tail` return bounded ranges identified in metadata.
 - `full` requests the full rendered text, but normal line/byte/tool-result caps still apply.
 
-When `mode` is omitted, the endpoint defaults to a bounded tail. If that implicit default omits earlier lines, the response includes an omission hint such as:
+When `mode` is omitted, the endpoint defaults to the last 20 lines. If that implicit default omits earlier lines, the response includes an omission hint such as:
 
 ```text
 [N lines omitted — use mode="grep" with pattern="error|failed", or mode="slice" from=X to=Y, to inspect more]
@@ -967,31 +972,48 @@ Selection metadata is returned with filtered output:
 }
 ```
 
-**`section=verification`** — Returns verification steps with each step's `output` independently selected. A top-level `selection` may also appear when the combined response is capped.
+**`section=verification`** — Returns a verification snapshot with each step's `output` independently selected. For the latest running signal, this is the same active snapshot used by `gate_status`: persisted signal rows are overlaid with active harness state before output selection. A top-level `selection` may also appear when the combined response is capped.
 ```json
 {
   "gateId": "implementation",
   "section": "verification",
   "signalIndex": 21,
   "signalId": "sig-22",
+  "status": "running",
+  "summary": "1 passed, 1 running, 1 waiting",
+  "counts": { "passed": 1, "failed": 0, "skipped": 0, "running": 1, "waiting": 1, "blocked": 0 },
+  "active": true,
   "steps": [
+    {
+      "name": "Type check passes",
+      "type": "command",
+      "status": "passed",
+      "passed": true,
+      "duration_ms": 15320,
+      "selection": { "mode": "tail", "totalLines": 1, "truncated": false }
+    },
     {
       "name": "E2E tests",
       "type": "command",
-      "passed": false,
+      "status": "running",
       "duration_ms": 95200,
-      "output": "317: Error: expected button to be visible\n318: failed locator check",
-      "selection": {
-        "mode": "grep",
-        "totalLines": 900,
-        "matchCount": 2,
-        "shownMatches": 2,
-        "truncated": false
-      }
+      "output": "… last 20 live stdout/stderr lines …",
+      "liveLogs": { "stdout": true, "stderr": true },
+      "selection": { "mode": "tail", "totalLines": 900, "range": { "from": 881, "to": 900 }, "truncated": false }
+    },
+    {
+      "name": "QA review",
+      "type": "agent-qa",
+      "status": "waiting"
     }
-  ]
+  ],
+  "selection": { "mode": "tail", "truncated": false }
 }
 ```
+
+Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` means it will not run because an earlier phase failed. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
+
+Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
 
 **`section=signals`** — Returns bounded signal history. The `signals[]` field remains present for compatibility, and large histories include totals/truncation fields plus deterministic selected JSON-lines `text`.
 ```json

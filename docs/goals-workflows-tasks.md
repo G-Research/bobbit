@@ -272,6 +272,37 @@ Gates can define automated verification that runs when signaled:
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
 
+#### Active verification snapshots
+
+While verification is running, the gate store contains seeded step rows so history is never empty. Those rows are not authoritative for live progress: they may carry placeholder values before a step starts. Agent tools and UI surfaces therefore read a shared active snapshot that overlays the persisted signal with `VerificationHarness` state for the latest running signal.
+
+`gate_status` and `gate_inspect section=verification` use the same snapshot, so they agree on step status, summary counts, durations, bounded output, and active metadata. Final completed signals still read from the persisted verification result.
+
+Step `status` is explicit:
+
+| Status | Meaning |
+|---|---|
+| `passed` | Step completed successfully. |
+| `failed` | Step completed unsuccessfully. |
+| `skipped` | Step was intentionally skipped, such as a disabled optional step. |
+| `running` | Step is executing now; duration is elapsed time so far. |
+| `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
+| `blocked` | Step did not run because an earlier phase failed. |
+
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. `passed` is only meaningful on final `passed`, `failed`, or `skipped` steps.
+
+Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
+
+- `mode=tail&lines=N` for more trailing context;
+- `mode=head&lines=N` for startup output;
+- `mode=slice&from=A&to=B` for an exact line range;
+- `mode=grep&pattern=...&context=N` for focused failure searches;
+- `full` only when a broad read is needed. Normal line, byte, and tool-result caps still apply.
+
+Running command steps can include live stdout/stderr tails. The server reads those log files with bounded byte limits before applying the same selection and aggregate response budgets used for persisted output.
+
+The UI uses the same explicit-status model. Gate status cards, the `gate_inspect` renderer, and signaled gate live cards reconcile WebSocket events, active-verification fetches, and persisted signal rows without flickering back to placeholder failed or `0ms` states while verification is still running.
+
 #### Gate verification baselines
 
 A gate's **baseline** is the git reference the reviewer diffs `HEAD` against when deciding what to comment on. Choosing the right baseline matters: too broad and the reviewer critiques upstream work that another agent already merged; too narrow and real goal-branch changes slip through unreviewed. It is also the single biggest source of false-positive "branch doesn't match design doc" findings when it drifts.
