@@ -706,6 +706,8 @@ describe("WalkthroughAgentManager", () => {
 		assert.equal(res.status, 201);
 		const body = JSON.parse(res.body ?? "{}");
 		assert.equal(body.status, "waiting_for_yaml");
+		assert.equal(body.tabId, `walkthrough:${encodeURIComponent(body.changesetId)}`);
+		assert.equal(body.job.tabId, `walkthrough:${encodeURIComponent(body.changesetId)}`);
 		assert.ok(sessionManager.sessions.get(body.childSessionId));
 		assert.ok(events.some(event => event.type === "pr_walkthrough_job_updated"));
 	});

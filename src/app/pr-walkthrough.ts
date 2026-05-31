@@ -371,7 +371,8 @@ export function upsertPrWalkthroughJobPanel(
 	const sessionId = job.childSessionId;
 	const changeset = targetChangesetFromJob(job);
 	const changesetId = job.changesetId;
-	const tabId = job.tabId || walkthroughPanelTabId(changesetId);
+	const rawTabId = cleanString(job.tabId);
+	const tabId = rawTabId && walkthroughChangesetIdFromPanelTabId(rawTabId) ? rawTabId : walkthroughPanelTabId(changesetId);
 	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
 	const target = job.target || {};
 	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);

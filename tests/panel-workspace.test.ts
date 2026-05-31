@@ -26,6 +26,8 @@ import {
 	reorderSidePanelTab,
 	reviewPanelTabId,
 	setActivePanelTabIdForSession,
+	walkthroughChangesetIdFromPanelTabId,
+	walkthroughPanelTabId,
 	type PanelWorkspaceTab,
 } from "../src/app/panel-workspace.ts";
 
@@ -181,6 +183,24 @@ describe("panel workspace side-pane tab contract", () => {
 
 		assert.equal(activePanelTabIdForSession(state, "s1"), previewEntryTabId("legacy.html"));
 		assert.equal(state.panelWorkspaceActiveBySession.s1, previewEntryTabId("legacy.html"));
+	});
+
+	it("walkthrough tab ids encode PR changeset ids before activation", () => {
+		const changesetId = "github:SuuBro/bobbit#666";
+		const encodedTabId = walkthroughPanelTabId(changesetId);
+		const rawTabId = `walkthrough:${changesetId}`;
+		const state = {
+			selectedSessionId: "s1",
+			panelTabsBySession: { s1: [{ id: encodedTabId, kind: "walkthrough" }] },
+			panelWorkspaceActiveBySession: { s1: rawTabId },
+		};
+
+		assert.equal(encodedTabId, "walkthrough:github%3ASuuBro%2Fbobbit%23666");
+		assert.equal(walkthroughChangesetIdFromPanelTabId(encodedTabId), changesetId);
+		assert.equal(walkthroughChangesetIdFromPanelTabId(rawTabId), "");
+		assert.equal(activePanelTabIdForSession(state, "s1"), "");
+		setActivePanelTabIdForSession(state, "s1", encodedTabId);
+		assert.equal(activePanelTabIdForSession(state, "s1"), encodedTabId);
 	});
 
 	it("normalizeSidePanelTabs drops legacy chat/invalid rows, normalizes live preview, merges metadata, dedupes, and pins Inbox", () => {

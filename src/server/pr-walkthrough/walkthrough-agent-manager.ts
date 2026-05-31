@@ -189,7 +189,7 @@ export class WalkthroughAgentManager {
 			cwd,
 			target,
 			changesetId,
-			tabId: `walkthrough:${changesetId}`,
+			tabId: `walkthrough:${encodeURIComponent(changesetId)}`,
 			status: "starting",
 			title,
 			submissionProofHash: hashSubmissionProof(jobId, childSessionId, submissionProof),
