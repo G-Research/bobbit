@@ -1389,6 +1389,7 @@
       this.sessionId = "";
       this.goalId = "";
       this.token = "";
+      this.hideWalkthrough = false;
       this.viewerIsAdmin = false;
       this._modalFile = null;
       this._loadingDiff = null;
@@ -1807,6 +1808,7 @@
         >Ask agent to raise PR</button>`;
     }
     _renderWalkthroughButton(opts = {}) {
+      if (this.hideWalkthrough) return A;
       return b2`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;${opts.marginLeft ? "margin-left:4px" : ""}"
             title=${this.prNumber != null ? `Walk through PR #${this.prNumber}` : "Walk through branch changes"}
@@ -2473,6 +2475,9 @@
   __decorateClass([
     n4()
   ], GitStatusWidget.prototype, "token", 2);
+  __decorateClass([
+    n4({ type: Boolean })
+  ], GitStatusWidget.prototype, "hideWalkthrough", 2);
   __decorateClass([
     n4()
   ], GitStatusWidget.prototype, "prState", 2);
