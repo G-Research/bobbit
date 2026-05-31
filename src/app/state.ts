@@ -571,13 +571,14 @@ export function saveExpandedGoals(): void {
 }
 
 
-export function toggleTeamLeadExpanded(sessionId: string): void {
-	if (collapsedTeamLeadSessions.has(sessionId)) {
-		collapsedTeamLeadSessions.delete(sessionId);
-	} else {
-		collapsedTeamLeadSessions.add(sessionId);
-	}
+export function setTeamLeadExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) collapsedTeamLeadSessions.delete(sessionId);
+	else collapsedTeamLeadSessions.add(sessionId);
 	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+}
+
+export function toggleTeamLeadExpanded(sessionId: string): void {
+	setTeamLeadExpanded(sessionId, collapsedTeamLeadSessions.has(sessionId));
 }
 
 export function isTeamLeadExpanded(sessionId: string): boolean {
@@ -589,13 +590,14 @@ const expandedDelegateParents: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]"),
 );
 
-export function toggleArchivedParentExpanded(sessionId: string): void {
-	if (expandedDelegateParents.has(sessionId)) {
-		expandedDelegateParents.delete(sessionId);
-	} else {
-		expandedDelegateParents.add(sessionId);
-	}
+export function setArchivedParentExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) expandedDelegateParents.add(sessionId);
+	else expandedDelegateParents.delete(sessionId);
 	localStorage.setItem(EXPANDED_DELEGATE_PARENTS_KEY, JSON.stringify([...expandedDelegateParents]));
+}
+
+export function toggleArchivedParentExpanded(sessionId: string): void {
+	setArchivedParentExpanded(sessionId, !expandedDelegateParents.has(sessionId));
 }
 
 export function isArchivedParentExpanded(sessionId: string): boolean {
