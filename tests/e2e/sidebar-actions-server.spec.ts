@@ -60,6 +60,45 @@ test.describe("sidebar actions server endpoints", () => {
 		}
 	});
 
+	test("POST /api/sessions/:id/duplicate preserves persisted task context", async ({ gateway }) => {
+		const goal = await createGoal({ title: `sidebar task duplicate ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		let sourceId: string | undefined;
+		let duplicateId: string | undefined;
+		try {
+			const taskResp = await apiFetch(`/api/goals/${goal.id}/tasks`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Duplicate task context", type: "implementation" }),
+			});
+			expect(taskResp.status).toBe(201);
+			const task = await taskResp.json();
+
+			sourceId = await createSession({ goalId: goal.id, projectId: goal.projectId as string });
+			const assignResp = await apiFetch(`/api/tasks/${task.id}/assign`, {
+				method: "POST",
+				body: JSON.stringify({ sessionId: sourceId }),
+			});
+			expect(assignResp.status).toBe(200);
+
+			gateway.sessionManager.getSessionStore(goal.projectId as string).update(sourceId, { taskId: task.id });
+			expect(gateway.sessionManager.getPersistedSession(sourceId)?.taskId).toBe(task.id);
+
+			const resp = await apiFetch(`/api/sessions/${sourceId}/duplicate`, { method: "POST" });
+			expect(resp.status).toBe(201);
+			duplicateId = (await resp.json()).id;
+
+			const dupResp = await apiFetch(`/api/sessions/${duplicateId}`);
+			expect(dupResp.status).toBe(200);
+			const dup = await dupResp.json();
+			expect(dup.goalId).toBe(goal.id);
+			expect(dup.taskId).toBe(task.id);
+			expect(gateway.sessionManager.getPersistedSession(duplicateId)?.taskId).toBe(task.id);
+		} finally {
+			if (duplicateId) await deleteSession(duplicateId);
+			if (sourceId) await deleteSession(sourceId);
+			await deleteGoal(goal.id);
+		}
+	});
+
 	test("GET /api/goals/:id/github-link returns PR, branch fallback, and unavailable states", async ({ gateway }) => {
 		const prGoal = await createGoal({ title: `sidebar pr ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		const noBranchGoal = await createGoal({ title: `sidebar no branch ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });

@@ -6788,6 +6788,7 @@ async function handleApiRoute(
 			projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
+			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
 			allowedTools: ps.allowedTools,
