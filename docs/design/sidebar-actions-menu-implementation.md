@@ -18,8 +18,8 @@ Implementation should be split by owner so parallel agents do not collide:
 |---|---|---|
 | Sidebar action modeling and row wiring | `src/app/render-helpers.ts` | Build session/goal action arrays, keep existing hover buttons, add hamburger trigger, mount/unmount popover, copy/duplicate/open handlers. |
 | Popover component and FLIP helper | `src/ui/components/SidebarActionsPopover.ts` plus optional `src/ui/components/sidebar-actions-flip.ts` | Render menu, keyboard nav, outside/Escape dismissal, positioning, shared-element animation. |
-| Session duplicate helper | `src/app/session-manager.ts` | Export a focused client helper that calls existing `POST /api/sessions`, refreshes session list, and connects. |
-| Optional GitHub branch URL resolver | `src/server/server.ts` and `src/app/api.ts` | Only needed if v1 must show branch fallback when no PR exists. See “Open on GitHub decision”. |
+| Session duplicate endpoint + helper | `src/server/server.ts`, `src/app/session-manager.ts` | Add dedicated `POST /api/sessions/:id/duplicate`, then export a client helper that calls that endpoint, refreshes session list, and connects. |
+| GitHub branch URL resolver | `src/server/server.ts` and `src/app/api.ts` | Add required `GET /api/goals/:id/github-link` branch fallback resolver for `Open on GitHub`. |
 | Modal/open-popover suppression | `src/ui/components/AgentInterface.ts` | Add `sidebar-actions-popover` to the global Escape suppression selector. |
 | Tests | `tests/e2e/ui/sidebar-actions-menu.spec.ts` plus optional unit test | Browser coverage for menu behavior; unit coverage if FLIP math is extracted. |
 
@@ -308,7 +308,13 @@ async function copySidebarLink(url: string): Promise<void> {
 }
 ```
 
-`CopyLinkFallbackDialog.show(url: string)` can be reused as-is. Its title says “Copy session link”; acceptable for a first pass, but a later polish can add an optional label parameter if goal-link wording matters.
+Update `CopyLinkFallbackDialog.show` to accept an optional context label so goal fallback wording is accurate:
+
+```ts
+CopyLinkFallbackDialog.show(url, { title: "Copy goal link" });
+```
+
+Default remains `Copy session link` for existing callers. Sidebar session copy uses `Copy session link`; sidebar goal copy uses `Copy goal link`.
 
 ## Duplicate session decision
 
@@ -439,7 +445,14 @@ Reasoning:
 - Adding a fourth/fifth tiny target increases crowding in the row.
 - The popover’s discovery animation is primarily a hover-strip desktop affordance; mobile has no hover-strip source positions for FLIP.
 
-Impact: new menu-only actions (Copy link, Duplicate session, Open on GitHub) are desktop-only in v1 unless separate mobile affordances are added. If mobile parity is mandatory, use the same hamburger but skip FLIP and show the centered-sheet pattern from `ProjectPickerPopover`; this should be treated as a follow-up or explicitly assigned to the component owner.
+Acceptance criteria for mobile v1:
+
+- The hamburger trigger is hidden below the desktop breakpoint.
+- Existing mobile inline quick buttons remain visible and directly clickable.
+- Menu-only actions (Copy link, Duplicate session, Open on GitHub) are intentionally desktop-only in v1.
+- Browser E2E must resize to mobile and assert the hamburger is absent while existing inline quick actions remain available.
+
+If mobile parity becomes mandatory later, use a bottom sheet instead of an anchored popover below 640 px; that is out of scope for this goal.
 
 ## Compatibility risks
 
@@ -450,7 +463,7 @@ Impact: new menu-only actions (Copy link, Duplicate session, Open on GitHub) are
 - **Animation orphaning:** avoid body-level floating clones unless lifecycle is airtight. Inverted target-icon animation is safer and still satisfies the visual intent.
 - **Reduced motion:** all FLIP and fade/slide animations must be skipped when `prefers-reduced-motion: reduce` matches.
 - **GitHub link trust:** never construct branch URLs from arbitrary remotes without parsing and stripping embedded credentials. Hide action for non-GitHub remotes.
-- **Duplicate semantics:** `POST /api/sessions` duplicates context but not transcript. If users expect a true fork, this must become a dedicated server endpoint.
+- **Duplicate semantics:** `POST /api/sessions/:id/duplicate` duplicates project/goal/spec context but not transcript history. If users expect lossless transcript continuation, that is a separate archived-continue style feature.
 - **Sidebar font scale:** hard-coded pixel font sizes in the popover will ignore `--sidebar-font-scale`; use em-relative sizing.
 
 ## Test plan for later implementation
@@ -493,24 +506,32 @@ Required browser E2E cases:
 
 6. **Duplicate session**
    - Click Duplicate session from a plain live session menu.
-   - Wait for a `POST /api/sessions` response and hash route `#/session/<newId>`.
-   - Assert new id differs and the new session has matching `projectId`/`cwd` via `GET /api/sessions/:id`.
+   - Wait for a `POST /api/sessions/:id/duplicate` response with `{ id, cwd, status, projectId?, goalId?, assistantType? }` and hash route `#/session/<newId>`.
+   - Assert new id differs and the new session has matching `projectId`, `cwd`, `goalId` when applicable, `assistantType`, and copied model fields when the fixture has them via `GET /api/sessions/:id`.
+   - Add one negative endpoint test or browser/API assertion for an unsupported source returning `422`.
 
-7. **Reduced motion**
+7. **Mobile v1 acceptance**
+   - Resize below 640 px.
+   - Assert `[data-testid="sidebar-actions-trigger"]` is absent.
+   - Assert existing inline quick actions remain visible/clickable.
+   - Assert menu-only actions are not exposed on mobile in v1.
+
+8. **Reduced motion**
    - Override `window.matchMedia` for `(prefers-reduced-motion: reduce)` before opening the menu.
    - Assert menu opens and no `Element.prototype.animate` call is required. If using a spy, assert FLIP helper is bypassed.
 
-Optional unit/file-fixture test if FLIP math is extracted:
+Unit/file-fixture test requirement:
 
-- `tests/sidebar-actions-flip.test.ts`: verify `computeSidebarActionFlipDeltas` computes `dx`, `dy`, `sx`, `sy`; ignores missing source/target ids; handles zero-size rects without `Infinity`/`NaN`.
+- If rect-capture or FLIP delta logic lives in a helper, add `tests/sidebar-actions-flip.test.ts` verifying `computeSidebarActionFlipDeltas` computes `dx`, `dy`, `sx`, `sy`; ignores missing source/target ids; and handles zero-size rects without `Infinity`/`NaN`.
 
 ## Recommended implementation order
 
 1. Add `SidebarActionsPopover.ts` with static menu rendering, keyboard nav, positioning, and dismissal. No FLIP yet.
 2. Refactor `render-helpers.ts` action strips to action arrays and keep existing quick buttons byte-behavior equivalent.
 3. Add hamburger trigger and sidebar-owned popover mount/unmount.
-4. Add Copy link handlers and duplicate helper via `POST /api/sessions`.
-5. Add Open on GitHub minimal PR URL support; add full branch resolver only if assigned.
-6. Add FLIP/reduced-motion animation.
-7. Add E2E/unit coverage.
-8. Add `sidebar-actions-popover` to `AgentInterface` Escape suppression.
+4. Add `CopyLinkFallbackDialog.show(url, { title })` support and Copy link handlers with accurate session/goal fallback titles.
+5. Add dedicated `POST /api/sessions/:id/duplicate` endpoint and client helper.
+6. Add required `GET /api/goals/:id/github-link` branch resolver plus goal menu Open on GitHub integration.
+7. Add FLIP/reduced-motion animation.
+8. Add E2E/unit coverage, including mobile v1 acceptance and helper-level FLIP tests if helper logic exists.
+9. Add `sidebar-actions-popover` to `AgentInterface` Escape suppression.

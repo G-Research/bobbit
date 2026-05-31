@@ -101,9 +101,9 @@ Action behavior:
 
 1. Try `navigator.clipboard.writeText(url)`.
 2. On success, show the existing header toast: `Link copied`.
-3. On rejection, lazy-load and show `CopyLinkFallbackDialog.show(url)`.
+3. On rejection, lazy-load and show `CopyLinkFallbackDialog.show(url, { title })`.
 
-The existing fallback dialog title says “Copy session link”; implementation should either make the title generic or accept a label parameter before using it for goals.
+Implementation must extend the fallback dialog title API so wording is accurate: session links use `Copy session link`, goal links use `Copy goal link`.
 
 ## Open on GitHub decision
 
@@ -252,7 +252,13 @@ Rationale:
 
 - Mobile rows already show inline actions persistently, so the discovery problem is desktop-specific.
 - Adding a hamburger would create redundant targets and increase accidental taps in a dense row.
-- Copy link / duplicate / GitHub can wait for a mobile-specific overflow pass if users ask for those actions on mobile.
+- Copy link / duplicate / GitHub are intentionally desktop-only in v1 and should be covered by a mobile acceptance test so this is not mistaken for a regression.
+
+Mobile acceptance criteria for this goal:
+
+- Below 640 px, no hamburger trigger is rendered.
+- Existing inline quick actions remain visible and directly clickable.
+- Menu-only actions are not exposed on mobile in v1.
 
 If product later needs parity, use a bottom sheet instead of an anchored popover below 640 px. The sheet should list the same rows with larger touch targets and no FLIP animation.
 
@@ -260,7 +266,7 @@ If product later needs parity, use a bottom sheet instead of an anchored popover
 
 - Hamburger has `aria-label`, `aria-haspopup="menu"`, and live `aria-expanded`.
 - Popover has `role="menu"`; rows have `role="menuitem"`.
-- Icon-only hover buttons keep existing `title` and should also gain `aria-label` where missing.
+- Icon-only hover buttons keep existing `title` and must also gain `aria-label` where missing.
 - Visible focus ring uses existing focus/ring tokens.
 - Destructive actions are not conveyed by color alone: label text is explicit.
 - Menu width and row heights scale with the sidebar font scale through inherited/em sizing.
