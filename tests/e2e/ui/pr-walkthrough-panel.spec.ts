@@ -150,8 +150,8 @@ async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: strin
 		}
 		await route.fallback();
 	};
-	await page.route("**/api/pr-walkthrough/**", routeHandler);
-	await page.route("**/api/internal/pr-walkthrough/submit-yaml", routeHandler);
+	await page.context().route("**/api/pr-walkthrough/**", routeHandler);
+	await page.context().route("**/api/internal/pr-walkthrough/submit-yaml", routeHandler);
 }
 
 function validWalkthroughYaml(prNumber: string | number, title = "Resolved Walkthrough PR", prUrl = prUrlForNumber(prNumber)): string {
@@ -1148,14 +1148,46 @@ This is the author's source description with **markdown**.
 		await standalone.close();
 	});
 
-	test("slash command creates a child session, waits for YAML, then applies ready cards", async ({ page }) => {
+	test("slash command creates a child session, waits for YAML, then applies interactive ready cards", async ({ page, context }) => {
 		const waiting = await setupWaitingWalkthrough(page, { width: 1920, height: 1080 }, "/walkthrough-pr 789");
 		await expect(page.getByTestId("pr-walkthrough-panel-root"), "child should remain in waiting state until YAML submission succeeds").toHaveAttribute("data-walkthrough-status", "waiting_for_yaml");
 		const { panel, tab } = await submitValidWalkthroughYaml(page, waiting);
+		const tabId = await tab.getAttribute("data-panel-tab-id");
 		await expect(tab).toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
 		await expect(walkthroughPanel(page).locator(".title"), "header should switch from launch placeholder to resolved PR metadata").toContainText("PR #789: Resolved Walkthrough PR");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "cards should come from the YAML-backed ready payload").toContainText("Separate walkthrough from chat");
 		await expect(panel.getByTestId("pr-walkthrough-waiting")).toHaveCount(0);
+
+		const firstCardId = await activeCard(page).getAttribute("data-card-id");
+		const like = activeCard(page).getByTestId("pr-walkthrough-like");
+		await like.click();
+		await expect(walkthroughPanel(page).locator(`${tid("pr-walkthrough-card-step")}[data-card-id="${firstCardId}"]`), "ready card like button should record a decision after YAML submission").toHaveClass(/liked/);
+		const diff = activeCard(page).getByTestId("pr-walkthrough-diff-block").first();
+		await diff.getByTestId("pr-walkthrough-diff-toggle").click();
+		await expect(diff, "diff block collapse should remain interactive after YAML submission").toHaveAttribute("data-expanded", "false");
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-rail-toggle").click();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-collapsed-rail"), "rail collapse should remain interactive after YAML submission").toBeVisible();
+
+		await page.evaluate(({ childSessionId, tabId }) => {
+			const storageKey = "bobbit-panel-tabs-by-session";
+			const bySession = JSON.parse(localStorage.getItem(storageKey) || "{}");
+			const tabs = Array.isArray(bySession[childSessionId]) ? bySession[childSessionId] : [];
+			bySession[childSessionId] = tabs.map((candidate: any) => candidate?.id === tabId
+				? { ...candidate, state: { ...(candidate.state || {}), status: "waiting_for_yaml", cards: undefined } }
+				: candidate);
+			localStorage.setItem(storageKey, JSON.stringify(bySession));
+		}, { childSessionId: waiting.childSessionId, tabId });
+
+		const openStandalone = page.getByTestId("pr-walkthrough-open-in-new-tab").first();
+		const [standalone] = await Promise.all([
+			context.waitForEvent("page"),
+			openStandalone.click(),
+		]);
+		await standalone.setViewportSize({ width: 1700, height: 1000 });
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(standalone.getByTestId("pr-walkthrough-panel-root"), "standalone route should hydrate submitted ready payload instead of stale waiting content").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 15_000 });
+		await expect(activeCard(standalone).getByTestId("pr-walkthrough-card-title"), "standalone route should render submitted cards").toContainText(/Separate walkthrough from chat|Changeset-agnostic model/);
+		await standalone.close();
 	});
 
 	test("invalid YAML submission keeps child panel in validation retry state", async ({ page }) => {

@@ -74,6 +74,8 @@ describe("PR walkthrough readonly command policy", () => {
 		allowed("git log -1 --format=%H");
 		allowed("git grep submit_pr_walkthrough_yaml src/server/pr-walkthrough");
 		allowed("git grep -n -e walkthrough -- src/server/pr-walkthrough");
+		allowed("git grep -n -C 40 walkthrough src/server/pr-walkthrough");
+		allowed("git grep -n -C40 walkthrough src/server/pr-walkthrough");
 		allowed("git grep TODO");
 		allowed("git rev-parse HEAD");
 		allowed("git status --short");
@@ -106,6 +108,7 @@ describe("PR walkthrough readonly command policy", () => {
 		blocked("git rebase origin/master", /not allowed/);
 		blocked("git status --ignored=matching", /restricted/);
 		blocked("git -C /tmp diff", /-C|absolute paths/);
+		blocked("git -C src diff", /git -C|not allowed/);
 		blocked("git --git-dir .git diff", /--git-dir/);
 		blocked("git --git-dir=.git diff", /--git-dir/);
 		blocked("git --work-tree .. diff", /--work-tree|parent-directory/);

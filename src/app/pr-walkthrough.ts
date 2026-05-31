@@ -436,7 +436,10 @@ export function upsertPrWalkthroughJobPanel(
 		if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, tabId);
 		else setActivePanelTabIdForSession(state, sessionId, tabId);
 		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
-		if (!liveSessionHosted) restorePrWalkthroughPanel(state, sessionId, tabId);
+		// A ready job broadcast carries job metadata, not the YAML-derived cards.
+		// Always hydrate the payload from the walkthrough store so live child
+		// panels and standalone tabs don't remain stuck on stale waiting content.
+		restorePrWalkthroughPanel(state, sessionId, tabId);
 	}
 	return tab;
 }

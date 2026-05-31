@@ -23,6 +23,7 @@ import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
 registerToolRenderer("bash", new BashRenderer());
+registerToolRenderer("readonly_bash", new BashRenderer());
 registerToolRenderer("read", new ReadRenderer());
 registerToolRenderer("write", new WriteRenderer());
 registerToolRenderer("edit", new EditRenderer());
