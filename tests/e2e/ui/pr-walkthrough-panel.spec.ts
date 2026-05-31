@@ -654,7 +654,11 @@ async function deleteComment(page: Page, body: string) {
 }
 
 async function createCardComment(page: Page, body: string) {
-	await activeCard(page).getByTestId("pr-walkthrough-add-card-comment").click();
+	const addComment = activeCard(page).getByTestId("pr-walkthrough-add-card-comment");
+	await expect(addComment, "active card should expose a card-level comment affordance before adding a comment").toBeVisible({ timeout: 10_000 });
+	await expect(addComment, "card-level comment affordance should be enabled before adding a comment").toBeEnabled({ timeout: 5_000 });
+	await addComment.click();
+	await expect(page.getByTestId("pr-walkthrough-comment-editor"), "clicking the card-level comment affordance should open the comment editor").toBeVisible({ timeout: 5_000 });
 	await saveOpenComment(page, body);
 }
 
