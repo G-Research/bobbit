@@ -34,6 +34,18 @@ import { needsHumanAttention, needsImmediateHumanAttention } from "./notificatio
 /** Guard set to prevent repeated on-demand child fetches per goal. */
 const _goalChildrenFetched = new Set<string>();
 
+export function sessionParentId(session: GatewaySession): string | undefined {
+	return session.parentSessionId || session.delegateOf;
+}
+
+export function isChildSession(session: GatewaySession): boolean {
+	return !!sessionParentId(session);
+}
+
+function isFirstClassChildSession(session: GatewaySession): boolean {
+	return !!session.parentSessionId && !session.delegateOf;
+}
+
 /** Clear the on-demand child fetch guard (called when archived state is reset). */
 export function clearGoalChildrenFetchedCache(): void {
 	_goalChildrenFetched.clear();
@@ -105,7 +117,7 @@ export function filterArchivedGoalsByQuery(
 	const combined = [...liveSessions, ...archivedSessions];
 	return archivedGoals.filter(goal => {
 		if (goal.title.toLowerCase().includes(q)) return true;
-		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+		const affiliated = combined.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
 		return affiliated.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 	});
 }
@@ -451,15 +463,16 @@ export function renderSessionRow(session: GatewaySession) {
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
-	// Check for children (live delegates + archived delegates)
+	// Check for children (live delegates + first-class child sessions + archived children)
 	const _bypassFilters = !!state.searchQuery.trim();
-	const liveDelegates = state.gatewaySessions.filter(s =>
-		s.delegateOf === session.id
+	const liveChildren = state.gatewaySessions.filter(s =>
+		sessionParentId(s) === session.id
 		&& (state.showArchived || s.status !== "terminated")
 		&& passesSidebarFilters(s, s.id === activeSessionId(), _bypassFilters));
-	const archivedDelegates = state.showArchived ? state.archivedSessions.filter(s => s.delegateOf === session.id) : [];
-	const hasChildren = liveDelegates.length > 0 || archivedDelegates.length > 0;
-	const childrenExpanded = hasChildren && isArchivedParentExpanded(session.id);
+	const archivedChildren = state.showArchived ? state.archivedSessions.filter(s => sessionParentId(s) === session.id) : [];
+	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
+	const autoExpanded = liveChildren.some(isFirstClassChildSession);
+	const childrenExpanded = hasChildren && (autoExpanded || isArchivedParentExpanded(session.id));
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
@@ -524,13 +537,13 @@ export function renderSessionRow(session: GatewaySession) {
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
 	const bypassFilters = !!state.searchQuery.trim();
-	const delegates = state.gatewaySessions.filter(s =>
-		s.delegateOf === parentSessionId
+	const children = state.gatewaySessions.filter(s =>
+		sessionParentId(s) === parentSessionId
 		&& (state.showArchived || s.status !== "terminated")
 		&& passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
-	if (delegates.length === 0) return "";
+	if (children.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-		${delegates.map(s => s.status === "terminated"
+		${children.map(s => s.status === "terminated"
 			? html`${renderArchivedSessionRow(s)}${renderArchivedDelegates(s.id)}`
 			: renderSessionRow(s))}
 	</div>`;
@@ -544,7 +557,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	const delegates = state.archivedSessions.filter(s => s.delegateOf === session.id);
+	const delegates = state.archivedSessions.filter(s => sessionParentId(s) === session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
@@ -577,7 +590,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 /** Render any archived delegate sessions nested under a parent session. */
 export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
 	if (!isArchivedParentExpanded(parentSessionId)) return "";
-	const delegates = state.archivedSessions.filter(s => s.delegateOf === parentSessionId);
+	const delegates = state.archivedSessions.filter(s => sessionParentId(s) === parentSessionId);
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => html`
@@ -675,7 +688,7 @@ const teamLoading = new Set<string>();
 export function renderGateProgressBadge(goalId: string): TemplateResult | string {
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
-	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !s.delegateOf);
+	const goalAgents = state.gatewaySessions.filter(s => (s.goalId === goalId || s.teamGoalId === goalId) && !isChildSession(s));
 	const hasTeam = goalAgents.some(s => s.role === "team-lead" && s.status !== "terminated");
 	const anyAgentWorking = goalAgents.some(s => s.status === "streaming" || s.status === "busy" || s.isCompacting);
 	const allPassed = gs.passed === gs.total;
@@ -774,7 +787,7 @@ export function renderGoalGroup(goal: Goal) {
 	// goal. It drives badges, gate counts, `hasActiveTeam`, `isWorkMerged`,
 	// `hasActiveSession`, and the on-demand team-agents fetch below — all of
 	// which must reflect REAL goal state, not the user's current filter view.
-	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+	const goalSessions = state.gatewaySessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s)).sort((a, b) => a.createdAt - b.createdAt);
 	const isCreatingHere = state.creatingSessionForGoalId === goal.id;
 	const isTeamGoal = !!(goal as any).team;
 	const hasActiveTeam = isTeamGoal && goalSessions.some((s) => s.role === "team-lead" && s.status !== "terminated");
@@ -897,7 +910,7 @@ export function renderGoalGroup(goal: Goal) {
 		const tlExpanded = isTeamLeadExpanded(teamLead.id);
 		// Archived members belonging to the live lead
 		const archivedForLiveLead = state.showArchived
-			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
+			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s) && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
 			: [];
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
@@ -952,7 +965,7 @@ export function renderGoalGroup(goal: Goal) {
 					</div>` : ""}
 					${teamControls}
 					${state.showArchived ? (() => {
-						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !s.delegateOf);
+						const archivedForGoal = state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s));
 						const archivedLeads = archivedForGoal.filter(s => s.role === "team-lead");
 						const archivedMembers = archivedForGoal.filter(s => s.role !== "team-lead");
 

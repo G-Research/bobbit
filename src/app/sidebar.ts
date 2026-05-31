@@ -34,7 +34,7 @@ import { showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { refreshSessions, fetchRoles, fetchStaff, fetchOrphanedStaff, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchProjects, saveProjectOrder } from "./api.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, SESSION_ROW_PY, INDENT, CHEVRON_W, HEADER_CHEVRON_W, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, renderProjectArchivedSection as renderSharedProjectArchivedSection, passesSidebarFilters, isChildSession } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -1441,7 +1441,7 @@ export function renderSidebar() {
 								// Client-side title filter
 								filteredGoals = liveGoals.map(goal => {
 									const goalMatches = goal.title.toLowerCase().includes(q);
-									const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+									const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
 									const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 									if (!goalMatches && !hasMatchingSession) return null as unknown as Goal;
 									return goal;
@@ -1484,7 +1484,7 @@ export function renderSidebar() {
 							}
 
 							// Filter + bucket archived goals / standalone archived sessions by project.
-							const allStandaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf);
+							const allStandaloneArchived = state.archivedSessions.filter(s => !s.teamGoalId && !isChildSession(s));
 							const filteredArchivedGoals = filterArchivedGoalsByQuery(archivedGoals, state.gatewaySessions, state.archivedSessions, state.searchQuery);
 							const filteredStandaloneArchived = filterArchivedSessionsByQuery(allStandaloneArchived, state.searchQuery);
 							for (const g of filteredArchivedGoals) {
@@ -1668,7 +1668,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 					return html`
 						${pi > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
 						${bucket.goals.map((goal, i) => {
-							const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+							const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s)).sort((a, b) => a.createdAt - b.createdAt);
 							const expanded = expandedGoals.has(goal.id);
 							return html`
 								${i > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5"></div>` : ""}
@@ -1710,7 +1710,7 @@ function renderCollapsedSidebar(sortedGoals: Goal[], _ungroupedSessions: Gateway
 				${state.showArchived && archivedGoals.length > 0 ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
 					${archivedGoals.map((goal) => {
-						const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf).sort((a, b) => a.createdAt - b.createdAt);
+						const goalSessions = allSessions.filter((s) => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s)).sort((a, b) => a.createdAt - b.createdAt);
 						const expanded = expandedGoals.has(goal.id);
 						return html`
 							<div class="opacity-60">

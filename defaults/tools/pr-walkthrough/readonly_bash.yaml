@@ -1,0 +1,10 @@
+name: readonly_bash
+description: "Run a strictly read-only shell command for PR walkthrough analysis. Blocks writes, tests, builds, installs, servers, mutating git, GitHub review/comment actions, cross-PR/cross-repo GitHub reads, recursive root searches, hidden/ignore override flags, secret/dot-directory reads, and repo-local executable spoofing."
+summary: "Run read-only PR analysis commands"
+params: [command, description?, timeout?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: PR Walkthrough
+docs: |-
+  Executes only allowlisted read-only commands for PR walkthrough sessions: gh PR reads, git diff/show/log/status, and scoped file search/read commands. Use this instead of bash. When the walkthrough was launched for a known GitHub PR, `gh pr view`, `gh pr diff`, and `gh api repos/<owner>/<repo>/pulls/<number>...` must match that launched PR; cross-repo/cross-PR reads, URL arguments, `--repo`/`-R`, and `--hostname` are rejected. Mutating commands, recursive searches from `.`/the repository root, ripgrep hidden/ignore override flags (`--hidden`, `--no-ignore`, `-u` forms), long-lived follow flags such as `tail -f`, and access to `.bobbit/`, `.git/`, `.env*`, hidden credential directories, and key/token files are rejected by policy. Caller-provided timeouts must be finite and non-negative; values above 300 seconds are clamped to 300 seconds. The extension resolves allowlisted executables from absolute PATH entries to trusted absolute paths outside the worktree before spawning so repo-local spoofed binaries are not used.

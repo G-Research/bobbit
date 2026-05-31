@@ -155,6 +155,32 @@ describe("SessionStore", () => {
 			assert.equal(updated.teamGoalId, "goal-42");
 		});
 
+		it("persists first-class child session metadata", () => {
+			const walkthroughAllowedTools = ["read", "grep", "find", "ls", "readonly_bash", "submit_pr_walkthrough_yaml"];
+			const store1 = freshStore();
+			store1.put(makeSession({
+				parentSessionId: "launcher-1",
+				childKind: "pr-walkthrough",
+				readOnly: true,
+				walkthroughJobId: "job-1",
+				walkthroughChangesetId: "changeset-1",
+				walkthroughTargetKey: "github:owner/repo#123",
+				allowedTools: walkthroughAllowedTools,
+			}));
+			store1.flush();
+
+			const store2 = freshStore();
+			const restored = store2.get("sess-1")!;
+			assert.equal(restored.parentSessionId, "launcher-1");
+			assert.equal(restored.childKind, "pr-walkthrough");
+			assert.equal(restored.readOnly, true);
+			assert.equal(restored.walkthroughJobId, "job-1");
+			assert.equal(restored.walkthroughChangesetId, "changeset-1");
+			assert.equal(restored.walkthroughTargetKey, "github:owner/repo#123");
+			assert.deepEqual(restored.allowedTools, walkthroughAllowedTools);
+			assert.equal(restored.delegateOf, undefined);
+		});
+
 		it("updates goalId and taskId", () => {
 			const store = freshStore();
 			store.put(makeSession());

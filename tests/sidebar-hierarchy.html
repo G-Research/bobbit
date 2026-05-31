@@ -13,8 +13,8 @@
      * Returns { section, goalId?, parentSessionId? }
      */
     function categorizeSession(session, goals) {
-      if (session.delegateOf) {
-        return { section: "delegate", parentSessionId: session.delegateOf };
+      if (session.parentSessionId || session.delegateOf) {
+        return { section: "delegate", parentSessionId: session.parentSessionId || session.delegateOf };
       }
       if (session.teamGoalId) {
         return { section: "team-goal", goalId: session.teamGoalId };
@@ -61,9 +61,9 @@
         ? archivedGoals.map(goal => buildGoalGroup(goal, sessions, archivedSessions, showArchived))
         : [];
 
-      // Ungrouped: sessions without goalId, teamGoalId, delegateOf, or staffId
+      // Ungrouped: sessions without goalId, teamGoalId, child parent, or staffId
       const ungrouped = sessions.filter(s =>
-        !s.goalId && !s.teamGoalId && !s.delegateOf && !staffSessionIds.has(s.id)
+        !s.goalId && !s.teamGoalId && !s.delegateOf && !s.parentSessionId && !staffSessionIds.has(s.id)
       );
 
       // Staff sessions
@@ -76,9 +76,9 @@
      * Build a single goal group with team lead, members, delegates nested.
      */
     function buildGoalGroup(goal, sessions, archivedSessions, showArchived) {
-      // Get sessions for this goal (no delegates at top level)
+      // Get sessions for this goal (no child sessions at top level)
       const goalSessions = sessions.filter(s =>
-        (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf
+        (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf && !s.parentSessionId
       );
 
       const isTeamGoal = !!goal.team;
@@ -91,16 +91,16 @@
       // Archived members (non-delegates, non-leads) for the live lead
       const archivedMembers = showArchived && teamLead
         ? archivedSessions.filter(s =>
-            s.teamGoalId === goal.id && !s.delegateOf &&
+            s.teamGoalId === goal.id && !s.delegateOf && !s.parentSessionId &&
             s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id
           )
         : [];
 
       // Get all delegates for each session (recursive)
       const getDelegates = (parentId) => {
-        const liveDelegates = sessions.filter(s => s.delegateOf === parentId);
+        const liveDelegates = sessions.filter(s => (s.parentSessionId || s.delegateOf) === parentId);
         const archivedDels = showArchived
-          ? archivedSessions.filter(s => s.delegateOf === parentId)
+          ? archivedSessions.filter(s => (s.parentSessionId || s.delegateOf) === parentId)
           : [];
         return [...liveDelegates, ...archivedDels].map(d => ({
           ...d,
@@ -127,7 +127,7 @@
      * Flatten a goal group into a list of visible session IDs
      * (top-level sessions only, delegates listed under their parent).
      */
-    function getVisibleSessionIds(tree, showArchived) {
+    function getVisibleSessionIds(tree, showArchived, sessions = [], archivedSessions = []) {
       const ids = [];
 
       // Helper to collect IDs recursively from delegate tree
@@ -169,9 +169,9 @@
 
       // Ungrouped (with delegates)
       const getDelegateIds = (parentId, sessions, archivedSessions) => {
-        const liveDelegates = sessions.filter(s => s.delegateOf === parentId);
+        const liveDelegates = sessions.filter(s => (s.parentSessionId || s.delegateOf) === parentId);
         const archivedDels = showArchived
-          ? archivedSessions.filter(s => s.delegateOf === parentId)
+          ? archivedSessions.filter(s => (s.parentSessionId || s.delegateOf) === parentId)
           : [];
         for (const d of [...liveDelegates, ...archivedDels]) {
           ids.push(d.id);
@@ -181,6 +181,7 @@
 
       for (const s of tree.ungrouped) {
         ids.push(s.id);
+        getDelegateIds(s.id, sessions, archivedSessions);
       }
 
       for (const s of tree.staff) {

@@ -50,7 +50,7 @@ interface DiffContextExpansion {
 	below?: number;
 }
 
-type PrWalkthroughStatus = "fixture" | "loading" | "ready" | "error";
+type PrWalkthroughStatus = "fixture" | "loading" | "waiting_for_yaml" | "validation_failed" | "ready" | "error";
 
 type WalkthroughWarningSeverity = "info" | "warning" | "error";
 
@@ -68,6 +68,19 @@ interface WalkthroughExportCapability {
 	enabled?: boolean;
 	reason?: string;
 	message?: string;
+}
+
+interface WalkthroughValidationIssue {
+	path?: string;
+	message?: string;
+	[key: string]: unknown;
+}
+
+interface WalkthroughValidationSummary {
+	message?: string;
+	errors?: WalkthroughValidationIssue[];
+	issues?: WalkthroughValidationIssue[];
+	[key: string]: unknown;
 }
 
 interface WalkthroughExportPreviewRow {
@@ -119,6 +132,8 @@ export class PrWalkthroughPanel extends LitElement {
 	@property({ attribute: false }) warnings: WalkthroughWarning[] = [];
 	@property({ attribute: false }) error?: string;
 	@property({ attribute: false }) exportCapability?: WalkthroughExportCapability;
+	@property({ attribute: false }) validationError?: WalkthroughValidationSummary;
+	@property({ attribute: "job-id" }) jobId = "";
 	@property({ attribute: "changeset-id" }) changesetId = "";
 	@property({ type: Boolean, reflect: true }) narrow = false;
 	@property({ attribute: "persistence-key" }) persistenceKey = "";
@@ -218,6 +233,10 @@ export class PrWalkthroughPanel extends LitElement {
 		.state-card { max-width: 760px; margin: 32px auto; padding: 24px; border: 1px solid var(--border, ButtonBorder); border-radius: 16px; background: var(--card, Canvas); box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground, CanvasText) 7%, transparent); }
 		.state-card h2 { margin: 0 0 8px; font-size: 20px; }
 		.state-card p { margin: 0; color: var(--muted-foreground, GrayText); }
+		.state-card .state-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+		.validation-list { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+		.validation-list li { padding: 8px 10px; border: 1px solid color-mix(in oklch, var(--warning, orange) 34%, var(--border, ButtonBorder)); border-radius: 8px; background: color-mix(in oklch, var(--warning, orange) 7%, transparent); }
+		.validation-path { display: block; margin-bottom: 2px; color: var(--muted-foreground, GrayText); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 		.skeleton { display: grid; gap: 12px; }
 		.skeleton-line { height: 12px; border-radius: 999px; background: linear-gradient(90deg, color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent), color-mix(in oklch, var(--muted-foreground, GrayText) 20%, transparent), color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent)); background-size: 220% 100%; animation: pr-walkthrough-pulse 1.4s ease-in-out infinite; }
 		.skeleton-line.short { width: 45%; }
@@ -370,6 +389,38 @@ export class PrWalkthroughPanel extends LitElement {
 		.card h2 { margin: 0; font-size: 20px; line-height: 1.2; }
 		.summary, .rationale { margin: 0; color: var(--muted-foreground, GrayText); }
 		.checklist { margin: 4px 0 0; padding-left: 18px; color: var(--muted-foreground, GrayText); }
+		.original-description {
+			margin-top: 14px;
+			border: 1px solid var(--border, ButtonBorder);
+			border-radius: 12px;
+			background: var(--card, Canvas);
+			overflow: hidden;
+		}
+		.original-description summary {
+			padding: 10px 12px;
+			cursor: pointer;
+			font-weight: 700;
+			color: var(--foreground, CanvasText);
+		}
+		.original-description summary:hover { background: color-mix(in oklch, var(--primary, Highlight) 7%, transparent); }
+		.original-description-meta {
+			display: block;
+			margin-top: 2px;
+			font-size: 11px;
+			font-weight: 500;
+			color: var(--muted-foreground, GrayText);
+		}
+		.original-description-body {
+			margin: 0;
+			max-height: 360px;
+			overflow: auto;
+			padding: 12px;
+			border-top: 1px solid var(--border, ButtonBorder);
+			background: var(--background, Canvas);
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		}
 
 		.diff-block {
 			border: 1px solid var(--border, ButtonBorder);
@@ -567,6 +618,7 @@ export class PrWalkthroughPanel extends LitElement {
 		.phase-label { display: inline-block; min-width: 0; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 12%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 		.card h2 { margin: 10px 0 5px; font-size: 24px; letter-spacing: -0.015em; }
 		.summary, .rationale { max-width: 850px; line-height: 1.65; }
+		.original-description { max-width: 850px; background: color-mix(in oklch, var(--card, Canvas) 86%, var(--background, Canvas)); }
 		.modebar { display: flex; align-items: center; gap: 0; margin: 0; flex: 0 0 auto; }
 		.modebar .mode-toggle { gap: 2px; padding: 2px; border-radius: 7px; background: color-mix(in oklch, var(--background, Canvas) 62%, transparent); }
 		.modebar .mode-toggle button { width: 25px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--muted-foreground, GrayText); }
@@ -652,7 +704,7 @@ export class PrWalkthroughPanel extends LitElement {
 			this.restorePersistedState();
 			return;
 		}
-		if (changed.has("status") && (this.status === "loading" || this.status === "error")) {
+		if (changed.has("status") && (this.status === "loading" || this.status === "waiting_for_yaml" || this.status === "validation_failed" || this.status === "error")) {
 			this._exportPreviewOpen = false;
 			this._exportPreview = undefined;
 			this._exportError = "";
@@ -866,13 +918,13 @@ export class PrWalkthroughPanel extends LitElement {
 					<div class="progress-track"><div class="progress-fill" style="width: ${percent}%"></div></div>
 					<div class="progress-label">${completed} / ${this.reviewCards.length} reviewed</div>
 				</div>
-				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "error"} @click=${this.openExportPreview}><svg class="submit-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg><span>Submit</span></button>
+				<button class="submit-button" data-testid="pr-walkthrough-submit-review" type="button" title=${submitTitle} ?disabled=${completed < this.reviewCards.length || this.status === "loading" || this.status === "waiting_for_yaml" || this.status === "validation_failed" || this.status === "error"} @click=${this.openExportPreview}><svg class="submit-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg><span>Submit</span></button>
 			</header>
 		`;
 	}
 
 	private renderRail(): TemplateResult {
-		if (!this.cards.length && (this.status === "loading" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
+		if (!this.cards.length && (this.status === "loading" || this.status === "waiting_for_yaml" || this.status === "validation_failed" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
 		return this.isRailCollapsed ? this.renderCollapsedRail() : this.renderLabelledRail();
 	}
 
@@ -880,7 +932,7 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<nav class="rail ${this.isRailCollapsed ? "collapsed" : ""}" data-testid=${this.isRailCollapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
 				${this.isRailCollapsed ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
-					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
+					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "waiting_for_yaml" || this.status === "validation_failed" ? "Waiting for walkthrough" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
 				`}
 				${this.renderRailControls()}
 			</nav>
@@ -999,6 +1051,8 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderMainContent(active: PrWalkthroughCard | undefined): TemplateResult {
+		if (this.status === "waiting_for_yaml") return html`${this.renderWarningBanners()}${this.renderWaitingState()}`;
+		if (this.status === "validation_failed") return html`${this.renderWarningBanners()}${this.renderValidationFailedState()}`;
 		if (this.status === "loading" && active) return html`${this.renderWarningBanners()}${this.renderLoadingState()}${this.renderCard(active)}`;
 		if (this.status === "loading") return html`${this.renderWarningBanners()}${this.renderLoadingState()}`;
 		if (this.status === "error" && active) return html`${this.renderWarningBanners()}${this.renderErrorState()}${this.renderCard(active)}`;
@@ -1021,6 +1075,78 @@ export class PrWalkthroughPanel extends LitElement {
 					</div>
 				`)}
 			</div>
+		`;
+	}
+
+	private validationIssues(): WalkthroughValidationIssue[] {
+		const summary = this.validationError;
+		if (!summary || typeof summary !== "object") return [];
+		const issues = Array.isArray(summary.errors) ? summary.errors : Array.isArray(summary.issues) ? summary.issues : [];
+		return issues.filter((issue): issue is WalkthroughValidationIssue => !!issue && typeof issue === "object").slice(0, 8);
+	}
+
+	private validationSummaryMessage(): string {
+		const summary = this.validationError;
+		if (summary && typeof summary.message === "string" && summary.message.trim()) return summary.message.trim();
+		const first = this.validationIssues().find(issue => typeof issue.message === "string" && issue.message.trim());
+		return first?.message?.trim() || "The submitted YAML did not match the walkthrough schema.";
+	}
+
+	private renderWaitingState(): TemplateResult {
+		return html`
+			<section class="state-card" data-testid="pr-walkthrough-waiting" aria-live="polite">
+				<span data-testid="pr-walkthrough-waiting-state" hidden></span>
+				<h2>Waiting for walkthrough</h2>
+				<p>The read-only walkthrough agent is reviewing the PR. Cards appear here only after it calls <code>submit_pr_walkthrough_yaml</code> with valid YAML.</p>
+				<p>Progress updates will appear in the chat while the panel waits.</p>
+				<div class="skeleton" aria-hidden="true">
+					<div class="skeleton-line short"></div>
+					<div class="skeleton-line medium"></div>
+					<div class="skeleton-box"></div>
+				</div>
+			</section>
+		`;
+	}
+
+	private renderValidationFailedState(): TemplateResult {
+		const issues = this.validationIssues();
+		return html`
+			<section class="state-card" data-testid="pr-walkthrough-validation-failed" role="status" aria-live="polite">
+				<span data-testid="pr-walkthrough-validation-failed-state" hidden></span>
+				<h2>YAML needs changes</h2>
+				<p>${this.validationSummaryMessage()}</p>
+				${issues.length ? html`
+					<ul class="validation-list" data-testid="pr-walkthrough-validation-errors">
+						${issues.map(issue => html`
+							<li data-testid="pr-walkthrough-validation-error">
+								${issue.path ? html`<span class="validation-path">${issue.path}</span>` : nothing}
+								<span>${issue.message || "Invalid field"}</span>
+							</li>
+						`)}
+					</ul>
+				` : nothing}
+				<div class="state-actions">
+					<button type="button" class="copy-button" data-testid="pr-walkthrough-validation-view-chat" @click=${this.focusChat}>View details in chat</button>
+				</div>
+			</section>
+		`;
+	}
+
+	private focusChat(): void {
+		this.dispatchEvent(new CustomEvent("pr-walkthrough-focus-chat", { bubbles: true, composed: true, detail: { jobId: this.jobId } }));
+	}
+
+	private renderOriginalPrDescription(card: PrWalkthroughCard): TemplateResult | typeof nothing {
+		const body = this.effectiveChangeset.prBody ?? "";
+		if (card.phaseId !== "orientation" || !body.trim()) return nothing;
+		return html`
+			<details class="original-description" data-testid="pr-walkthrough-original-description">
+				<summary data-testid="pr-walkthrough-original-description-toggle">
+					Original PR description
+					<span class="original-description-meta">Source material from the PR body. Compare this with the inferred author intent above.</span>
+				</summary>
+				<pre class="original-description-body" data-testid="pr-walkthrough-original-description-body">${body}</pre>
+			</details>
 		`;
 	}
 
@@ -1088,6 +1214,7 @@ export class PrWalkthroughPanel extends LitElement {
 						<p class="summary" data-testid="pr-walkthrough-card-summary">${card.summary}</p>
 						${card.rationale ? html`<p class="rationale">${card.rationale}</p>` : nothing}
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
+						${this.renderOriginalPrDescription(card)}
 					</section>
 					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
 					${this.renderCardComments(card)}

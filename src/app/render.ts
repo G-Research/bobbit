@@ -67,7 +67,7 @@ import "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
-import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters } from "./render-helpers.js";
+import { renderGoalGroup, renderSessionRow, renderSandboxIndicator, INDENT, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, bucketArchivedByProject, renderProjectArchivedSection, passesSidebarFilters, isChildSession } from "./render-helpers.js";
 import { PROPOSAL_TYPES, type ProposalType } from "./proposal-registry.js";
 import {
 	CHAT_PANEL_TAB_ID,
@@ -99,7 +99,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import type { OpenPrWalkthroughInput } from "./pr-walkthrough.js";
-import { restorePrWalkthroughPanel } from "./pr-walkthrough.js";
+import { restorePrWalkthroughJobForSession, restorePrWalkthroughPanel, upsertPrWalkthroughJobPanel } from "./pr-walkthrough.js";
 import { ensurePrWalkthroughPanel } from "./pr-walkthrough-lazy.js";
 
 const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
@@ -261,10 +261,53 @@ document.addEventListener("open-pr-walkthrough", (e: Event) => {
 		deletions: numberDetail("deletions", "deletionsVsPrimary"),
 	} satisfies OpenPrWalkthroughInput;
 	void import("./pr-walkthrough.js").then(({ openPrWalkthroughPanel }) => {
-		openPrWalkthroughPanel(state, activeSessionId() || "", input);
+		void openPrWalkthroughPanel(state, activeSessionId() || "", input);
 		renderApp();
 	});
 });
+
+function handlePrWalkthroughJobUpdated(detail: unknown): void {
+	const record = detail && typeof detail === "object" ? detail as Record<string, unknown> : undefined;
+	const job = (record?.job && typeof record.job === "object" ? record.job : record) as any;
+	if (!job?.jobId || !job?.childSessionId || !job?.changesetId || !job?.status) return;
+	const active = activeSessionId();
+	upsertPrWalkthroughJobPanel(state, job, { select: active === job.childSessionId, fullscreenOnReady: job.status === "ready" && active === job.childSessionId });
+	renderApp();
+}
+
+let prWalkthroughViewerWs: WebSocket | null = null;
+let prWalkthroughViewerReconnect: ReturnType<typeof setTimeout> | null = null;
+
+function connectPrWalkthroughViewerEvents(): void {
+	if (prWalkthroughViewerWs && (prWalkthroughViewerWs.readyState === WebSocket.OPEN || prWalkthroughViewerWs.readyState === WebSocket.CONNECTING)) return;
+	const token = localStorage.getItem("gateway.token");
+	if (!token) {
+		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
+		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
+		return;
+	}
+	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+	const ws = new WebSocket(`${protocol}//${location.host}/ws/viewer`);
+	prWalkthroughViewerWs = ws;
+	ws.addEventListener("open", () => {
+		ws.send(JSON.stringify({ type: "auth", token }));
+	});
+	ws.addEventListener("message", (event) => {
+		try {
+			const msg = JSON.parse(event.data as string);
+			if (msg?.type === "pr_walkthrough_job_updated" || msg?.type === "pr-walkthrough-job-updated") handlePrWalkthroughJobUpdated(msg);
+		} catch { /* ignore */ }
+	});
+	ws.addEventListener("close", () => {
+		if (prWalkthroughViewerWs === ws) prWalkthroughViewerWs = null;
+		if (prWalkthroughViewerReconnect) clearTimeout(prWalkthroughViewerReconnect);
+		prWalkthroughViewerReconnect = setTimeout(connectPrWalkthroughViewerEvents, 3_000);
+	});
+}
+
+document.addEventListener("pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
+window.addEventListener("bobbit-pr-walkthrough-job-updated", (e: Event) => handlePrWalkthroughJobUpdated((e as CustomEvent).detail));
+connectPrWalkthroughViewerEvents();
 
 import { teardownMobileScrollTracking, ensureMobileScrollTracking } from "./mobile-header.js";
 import { getRouteFromHash, setHashRoute, isRouteActive, toggleConfigPage } from "./routing.js";
@@ -370,7 +413,7 @@ function renderMobileLanding() {
 		const q = state.searchQuery.toLowerCase();
 		liveGoals = liveGoals.filter(goal => {
 			const goalMatches = goal.title.toLowerCase().includes(q);
-			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !s.delegateOf);
+			const goalSessions = state.gatewaySessions.filter(s => (s.goalId === goal.id || s.teamGoalId === goal.id) && !isChildSession(s));
 			const hasMatchingSession = goalSessions.some(s => s.title?.toLowerCase().includes(q) || s.role?.toLowerCase().includes(q));
 			return goalMatches || hasMatchingSession;
 		});
@@ -504,7 +547,7 @@ function renderMobileLanding() {
 											bucket.staff.push(s);
 										}
 										// Bucket archived goals + standalone archived sessions per project.
-										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !s.delegateOf) : [];
+										const allStandaloneArchivedAll = state.showArchived ? state.archivedSessions.filter(s => !s.teamGoalId && !isChildSession(s)) : [];
 										const filteredStandaloneArchivedAll = filterArchivedSessionsByQuery(allStandaloneArchivedAll, state.searchQuery);
 										const archivedByProject = bucketArchivedByProject(archivedGoals, filteredStandaloneArchivedAll, projectsForRender);
 										return html`<div data-project-reorder-list>${projectsForRender.map((project, i) => {
@@ -1069,6 +1112,10 @@ function ensureUnifiedActiveTab(tabs: PanelWorkspaceTab[]): void {
 /** Ordered list of available unified panel tabs for the current session. */
 export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	const sessionId = workspaceSessionId();
+	const activeGatewaySession = state.gatewaySessions.find((session) => session.id === sessionId) as any;
+	if (activeGatewaySession?.walkthroughJobId || activeGatewaySession?.childKind === "pr-walkthrough") {
+		restorePrWalkthroughJobForSession(state, sessionId);
+	}
 	const derivedTabs = buildPanelWorkspaceTabs({
 		sessionId,
 		isPreviewSession: state.isPreviewSession,
@@ -2185,28 +2232,29 @@ export function doRenderApp(): void {
 		const warnings = Array.isArray(tabState.warnings) ? tabState.warnings : [];
 		const error = typeof tabState.error === "string" ? tabState.error : undefined;
 		const exportCapability = tabState.exportCapability;
+		const validationError = tabState.validationError || tabState.lastValidationError;
+		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
+		if (status === "ready" && tabState.fullscreenOnReady === true && !state.previewPanelFullscreen) {
+			queueMicrotask(() => {
+				if (activeSessionId() === workspaceSessionId()) {
+					state.previewPanelFullscreen = true;
+					renderApp();
+				}
+			});
+		}
 		return html`
 			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id} data-walkthrough-status=${status}>
-				${cards ? html`
-					<pr-walkthrough-panel
-						.changeset=${changeset}
-						.cards=${cards}
-						.status=${status}
-						.warnings=${warnings}
-						.error=${error}
-						.exportCapability=${exportCapability}
-						.persistenceKey=${tab.id}
-					></pr-walkthrough-panel>
-				` : html`
-					<pr-walkthrough-panel
-						.changeset=${changeset}
-						.status=${status}
-						.warnings=${warnings}
-						.error=${error}
-						.exportCapability=${exportCapability}
-						.persistenceKey=${tab.id}
-					></pr-walkthrough-panel>
-				`}
+				<pr-walkthrough-panel
+					.changeset=${changeset}
+					.cards=${cards ?? []}
+					.status=${status}
+					.warnings=${warnings}
+					.error=${error}
+					.exportCapability=${exportCapability}
+					.validationError=${validationError}
+					.jobId=${jobId}
+					.persistenceKey=${tab.id}
+				></pr-walkthrough-panel>
 			</div>
 		`;
 	};
