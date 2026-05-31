@@ -47,6 +47,10 @@ test.describe("Sidebar actions menu", () => {
 		return page.locator("sidebar-actions-popover").first();
 	}
 
+	function actionStrip(row: Locator): Locator {
+		return row.locator(".sidebar-actions").first();
+	}
+
 	function menuItem(page: Page, actionId: string): Locator {
 		return page.locator(`sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="${actionId}"]`).first();
 	}
@@ -59,9 +63,27 @@ test.describe("Sidebar actions menu", () => {
 		const page = row.page();
 		const trigger = triggerFor(row, kind, id);
 		await page.mouse.move(1, 1);
-		await expect(trigger, `${kind} hamburger should be hidden until hover on desktop`).toBeHidden();
+		await expect(actionStrip(row), `${kind} action strip should be visually hidden until hover on desktop`).toHaveCSS("opacity", "0");
+		await expect(actionStrip(row), `${kind} action strip should not accept pointer clicks until hover on desktop`).toHaveCSS("pointer-events", "none");
 		await row.hover();
+		await expect(actionStrip(row), `${kind} action strip should become visible on hover`).toHaveCSS("opacity", "1", { timeout: 5_000 });
 		await expect(trigger, `${kind} hamburger should appear on hover`).toBeVisible({ timeout: 5_000 });
+	}
+
+	async function openMenuFromKeyboard(row: Locator, kind: "session" | "goal", id: string, lastQuickActionId: string): Promise<void> {
+		const page = row.page();
+		const trigger = triggerFor(row, kind, id);
+		await page.mouse.move(1, 1);
+		await expect(actionStrip(row), `${kind} action strip starts visually hidden before keyboard focus`).toHaveCSS("opacity", "0");
+		const lastQuickAction = row.locator(`[data-sidebar-action-id="${lastQuickActionId}"][data-sidebar-action-quick="true"]`).first();
+		await lastQuickAction.focus();
+		await expect(lastQuickAction, `${kind} quick action should be focusable even before hover`).toBeFocused();
+		await expect(actionStrip(row), `${kind} action strip should become visible on focus-within`).toHaveCSS("opacity", "1", { timeout: 5_000 });
+		await page.keyboard.press("Tab");
+		await expect(trigger, `${kind} hamburger should be reachable from the quick actions with Tab`).toBeFocused();
+		await page.keyboard.press("Enter");
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await expect(trigger).toHaveAttribute("aria-expanded", "true");
 	}
 
 	async function openMenu(row: Locator, kind: "session" | "goal", id: string): Promise<void> {
@@ -110,6 +132,11 @@ test.describe("Sidebar actions menu", () => {
 
 		const row = await openSession(page, sessionId);
 		await assertHamburgerAppearsOnHover(row, "session", sessionId);
+		await openMenuFromKeyboard(row, "session", sessionId, "terminate");
+		await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Copy link", "Duplicate session"]);
+		await page.keyboard.press("Escape");
+		await expectNoPopover(page);
+
 		await openMenu(row, "session", sessionId);
 		await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Copy link", "Duplicate session"]);
 
@@ -135,7 +162,7 @@ test.describe("Sidebar actions menu", () => {
 		await openApp(page);
 		const row = await ensureGoalExpanded(page, goal.id as string);
 		await assertHamburgerAppearsOnHover(row, "goal", goal.id as string);
-		await openMenu(row, "goal", goal.id as string);
+		await openMenuFromKeyboard(row, "goal", goal.id as string, "dashboard");
 		await expect.poll(() => menuLabels(page)).toEqual(["Re-attempt", "Archive", "Goal dashboard", "Copy link"]);
 
 		await page.keyboard.press("Escape");
