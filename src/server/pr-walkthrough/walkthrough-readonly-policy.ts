@@ -35,7 +35,7 @@ const BLOCKED_EXECUTABLES = new Set([
 	"service", "systemctl", "nohup", "setsid",
 ]);
 
-const GIT_ALLOWED = new Set(["diff", "show", "log", "rev-parse", "status"]);
+const GIT_ALLOWED = new Set(["diff", "show", "log", "rev-parse", "status", "for-each-ref"]);
 const SEARCH_READ_ALLOWED = new Set(["rg", "grep", "ls", "cat", "head", "tail", "pwd"]);
 const PATH_READING_COMMANDS = new Set(["rg", "grep", "ls", "cat", "head", "tail", "find", "sed"]);
 const GH_PR_READ_ALLOWED = new Set(["view", "diff"]);
@@ -53,6 +53,7 @@ const RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS = new Set([
 	"--follow",
 	"-L",
 ]);
+const GIT_FOR_EACH_REF_ESCAPE_FLAGS = new Set(["--shell", "--perl", "--python", "--tcl"]);
 
 const GH_API_BODY_FLAGS = new Set(["-f", "--field", "-F", "--raw-field", "--input"]);
 const GH_API_VALUE_FLAGS = new Set(["--jq", "-q", "--header", "-H"]);
@@ -395,6 +396,14 @@ function allowGit(argv: string[]): WalkthroughReadonlyDecision {
 		for (const arg of argv.slice(2)) {
 			if (!allowedStatusArgs.has(arg) && !arg.startsWith("--untracked-files=")) {
 				return block("git status is restricted to short/porcelain-style read-only flags", argv);
+			}
+		}
+	}
+	if (sub === "for-each-ref") {
+		for (const arg of argv.slice(2)) {
+			const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+			if (GIT_FOR_EACH_REF_ESCAPE_FLAGS.has(flag)) {
+				return block(`${flag} is not allowed in read-only PR walkthrough sessions because it emits shell/interpreter-quoted output`, argv);
 			}
 		}
 	}

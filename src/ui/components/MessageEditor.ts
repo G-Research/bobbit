@@ -18,7 +18,21 @@ interface SlashSkillInfo {
 	name: string;
 	description: string;
 	argumentHint?: string;
-	source: "project" | "personal" | "legacy";
+	source: "project" | "personal" | "legacy" | "built-in";
+}
+
+const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [
+	{
+		name: "walkthrough-pr",
+		argumentHint: "<GitHub PR URL or #>",
+		description: "Launch a guided PR walkthrough child session.",
+		source: "built-in",
+	},
+];
+
+function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
+	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
+	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
@@ -89,7 +103,7 @@ export class MessageEditor extends LitElement {
 	private _savedDraft = ""; // draft saved when entering history mode
 
 	// Slash skill autocomplete state
-	@state() private _slashSkills: SlashSkillInfo[] = [];
+	@state() private _slashSkills: SlashSkillInfo[] = mergeBuiltInSlashCommands([]);
 	@state() private _slashFilteredSkills: SlashSkillInfo[] = [];
 	@state() private _slashMenuOpen = false;
 	@state() private _slashSelectedIndex = 0;
@@ -144,7 +158,10 @@ export class MessageEditor extends LitElement {
 	}
 
 	private async _loadSlashSkills() {
-		if (!this.cwd) return;
+		if (!this.cwd) {
+			this._slashSkills = mergeBuiltInSlashCommands([]);
+			return;
+		}
 		if (this._slashSkillsLoaded && this._slashSkillsCwd === this.cwd && this._slashSkillsProjectId === this.projectId) return;
 		try {
 			let url = `/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`;
@@ -152,10 +169,11 @@ export class MessageEditor extends LitElement {
 			const res = await gatewayFetch(url);
 			if (res.ok) {
 				const data = await res.json();
-				this._slashSkills = data.skills || [];
+				this._slashSkills = mergeBuiltInSlashCommands(data.skills || []);
 			}
 		} catch {
 			// Best effort
+			this._slashSkills = mergeBuiltInSlashCommands([]);
 		}
 		this._slashSkillsCwd = this.cwd;
 		this._slashSkillsProjectId = this.projectId;
@@ -857,6 +875,7 @@ export class MessageEditor extends LitElement {
 						${this._slashFilteredSkills.map((skill, i) => html`
 							<button
 								class="w-full text-left px-3 py-2 flex items-start gap-2 cursor-pointer transition-colors ${i === this._slashSelectedIndex ? "bg-accent text-accent-foreground" : "hover:bg-muted/50"}"
+								data-testid=${`slash-command-${skill.name}`}
 								@mousedown=${(e: Event) => { e.preventDefault(); this._selectSlashSkill(skill); }}
 								@mouseenter=${() => { this._slashSelectedIndex = i; }}
 							>

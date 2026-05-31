@@ -11,14 +11,15 @@ The checked-in prototype in [`docs/design/pr-walkthrough-panel-prototype.html`](
 Users can open a walkthrough from these entry points:
 
 - **Slash command** — `/walkthrough-pr <url|number>` in chat.
+  - The composer exposes `/walkthrough-pr` as a built-in slash-command autocomplete entry with the hint `<GitHub PR URL or #>`.
   - GitHub PR URLs carry the owner, repository, host, and PR number.
   - Numbers, with or without `#`, resolve against the launching session's GitHub `origin` remote.
   - Re-launching the same PR from the same parent focuses the existing walkthrough child when it is still usable.
-- **Git Status Widget / custom event** — the UI listens for `open-pr-walkthrough` events and accepts PR metadata, file stats, and local `baseSha` / `headSha` values.
+- **Git Status Widget / custom event** — when the widget has PR metadata/status, its expanded Pull Request section shows a **Walkthrough** button. Clicking it dispatches `open-pr-walkthrough` with the detected PR number/URL/title/status plus branch, file stats, and local base/head metadata.
 - **Standalone route** — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` opens an already-created walkthrough tab in a wide review surface.
 - **Compatibility resolver** — fixture and local SHA walkthroughs can still be resolved directly into a tab by the standalone/local resolver paths. Session-hosted walkthrough agents currently support GitHub PR targets only.
 
-For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. The UI switches/focuses the child session, and the sidebar shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata.
+For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. The UI switches/focuses the child session, expands the needed sidebar containers, and shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata. This nesting applies to ordinary sessions, goal sessions, team member sessions, and team-lead rows, and it is restored after reload from persisted session metadata and sidebar expansion state.
 
 The same ready walkthrough can be reviewed in:
 
@@ -60,14 +61,16 @@ They do not receive unrestricted `bash`, file write/edit tools, build/test/insta
 
 - `gh pr view` and `gh pr diff` for the launched PR;
 - scoped `gh api` reads for the launched repository and PR;
-- read-only `git diff`, `git show`, `git log`, `git rev-parse`, and `git status`;
+- read-only `git diff`, `git show`, `git log`, `git rev-parse`, `git status`, and `git for-each-ref` for ref inspection;
 - bounded file/search commands such as `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `pwd`, and `sed`.
 
-It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments.
+It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments. `git for-each-ref` is allowed only as read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`, `--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
 
 ### 4. YAML submission is the completion path
 
 The walkthrough panel is populated only through `submit_pr_walkthrough_yaml`. The agent must submit exactly one YAML document matching the PR walkthrough schema. A final chat answer is never treated as completion.
+
+The agent prompt includes the schema as a fenced `yaml` block for readability. That fence is documentation only: the `submit_pr_walkthrough_yaml` tool argument must be raw YAML with no Markdown fences, backticks, blockquotes, commentary, or extra YAML documents.
 
 The tool posts to the internal submit endpoint with the child `sessionId`, job id, YAML text, and a scoped submit proof. The gateway validates:
 
@@ -82,7 +85,7 @@ On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, pe
 
 ### 5. Follow-up chat remains live
 
-A successful YAML submission does not terminate the child session. The user can ask follow-up questions in the walkthrough chat while the PR context, previous investigation, and tool results remain loaded. Further `submit_pr_walkthrough_yaml` calls are rejected once the job is `ready`; the published payload is immutable for that job.
+A successful YAML submission does not terminate the child session. The user can ask follow-up questions in the walkthrough chat while the PR context, previous investigation, and tool results remain loaded. The child session may carry `readOnly: true` metadata for tool/file policy, but live walkthrough children are still promptable; only archived or terminated walkthrough sessions render as non-interactive. Further `submit_pr_walkthrough_yaml` calls are rejected once the job is `ready`; the published payload is immutable for that job.
 
 ## Target scoping and canonicalization
 
@@ -134,7 +137,7 @@ Validated YAML is mapped into the existing card model:
 - `audit` feeds the final Audit card and draft reviewer checklist.
 - `display.phase_order` and `display.chunk_order` influence visible ordering while preserving the known phase set.
 
-Hunk references are best-effort mapped to parsed diff blocks by file path and hunk header. Unmapped references are preserved as warnings or card suggestions rather than silently disappearing.
+Hunk references are best-effort mapped to parsed diff blocks by normalized file path and hunk identity. Exact hunk-header matches are preferred, but Bobbit also maps by the numeric old/new hunk ranges when either side includes, omits, or changes the trailing context text after the closing `@@`. Unmapped references are preserved as warnings or card suggestions rather than silently disappearing, and fallback file-level mapping avoids duplicating diff blocks.
 
 The older model-backed synthesis and deterministic grouping remain compatibility behavior for direct resolver paths. The session-hosted GitHub flow does not populate cards from chat text or from silent model synthesis in the launcher.
 
@@ -199,7 +202,7 @@ The draft can always be copied, even when provider export is unavailable.
 
 Persistence has four layers:
 
-- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only identity.
+- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only tool identity. The sidebar renders these first-class children under their parent even when the parent is a team lead or the goal/team session list filters out child sessions from the top-level roster.
 - **Walkthrough job record** — the PR walkthrough agent store persists status (`starting`, `waiting_for_yaml`, `validation_failed`, `ready`, or `error`), target, tab id, last validation error, warnings, submitted timestamp, payload timestamp, and a submit-proof hash. Sensitive values such as tokens and raw submit proofs are sanitized.
 - **Resolved walkthrough payload** — after valid YAML, the existing walkthrough store persists final changeset/cards/diff blocks/warnings/export metadata under the `changesetId`.
 - **Reviewer interaction state** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`.
