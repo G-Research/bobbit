@@ -12,6 +12,7 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
+	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
