@@ -830,8 +830,8 @@ export function renderSessionRow(session: GatewaySession) {
 			${mobile
 				? buttons
 				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+					<span class="group-hover:hidden group-focus-within:hidden flex items-center">${renderSessionTime(session, active)}</span>
+					<div class="sidebar-actions flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0">
 						${buttons}
 					</div>
 				</div>`}
@@ -961,8 +961,8 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			${mobile
 				? buttons
 				: html`<div class="absolute right-0 top-0 bottom-0 flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-					<span class="group-hover:hidden flex items-center">${renderSessionTime(session, active)}</span>
-					<div class="sidebar-actions hidden group-hover:flex items-center gap-0">
+					<span class="group-hover:hidden group-focus-within:hidden flex items-center">${renderSessionTime(session, active)}</span>
+					<div class="sidebar-actions flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0">
 						${buttons}
 					</div>
 				</div>`}
@@ -1233,7 +1233,7 @@ export function renderGoalGroup(goal: Goal) {
 				${renderGoalBadge(goal)}
 				${mobile
 					? goalButtons
-					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 hidden group-hover:flex items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+					: html`<div class="sidebar-actions absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center gap-0 pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${goalButtons}
 					</div>`}
 			</div>
