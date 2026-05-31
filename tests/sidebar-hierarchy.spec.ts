@@ -29,6 +29,7 @@ const mockSessions = [
 	{ id: "ungrouped1", status: "idle" },
 	{ id: "ungrouped2", status: "idle" },
 	{ id: "delegate-of-ungrouped1", delegateOf: "ungrouped1", status: "idle" },
+	{ id: "pr-walkthrough-child", parentSessionId: "ungrouped1", childKind: "pr-walkthrough", readOnly: true, status: "idle" },
 
 	// Staff
 	{ id: "staff1", staffId: "my-staff", status: "idle" },
@@ -37,6 +38,7 @@ const mockSessions = [
 const mockArchivedSessions = [
 	{ id: "archived-member3", teamGoalId: "goal1", teamLeadSessionId: "lead1", archived: true, status: "terminated" },
 	{ id: "archived-delegate-of-lead", delegateOf: "lead1", archived: true, status: "terminated" },
+	{ id: "archived-pr-walkthrough", parentSessionId: "lead1", childKind: "pr-walkthrough", archived: true, status: "terminated" },
 ];
 
 const mockGoals = [
@@ -70,13 +72,19 @@ test.describe("SB-00: Sidebar hierarchy and nesting", () => {
 		expect(cat).toEqual({ section: "delegate", parentSessionId: "member1" });
 	});
 
+	test("PR walkthrough child uses parentSessionId without delegateOf", async ({ page }) => {
+		const cat = await page.evaluate((s) => (window as any).__hierarchy.categorizeSession(s, []), mockSessions[9]);
+		expect(cat).toEqual({ section: "delegate", parentSessionId: "ungrouped1" });
+		expect((mockSessions[9] as any).delegateOf).toBeUndefined();
+	});
+
 	test("ungrouped session is categorized as ungrouped", async ({ page }) => {
 		const cat = await page.evaluate((s) => (window as any).__hierarchy.categorizeSession(s, []), mockSessions[6]);
 		expect(cat).toEqual({ section: "ungrouped" });
 	});
 
 	test("staff session is categorized as staff", async ({ page }) => {
-		const cat = await page.evaluate((s) => (window as any).__hierarchy.categorizeSession(s, []), mockSessions[9]);
+		const cat = await page.evaluate((s) => (window as any).__hierarchy.categorizeSession(s, []), mockSessions[10]);
 		expect(cat).toEqual({ section: "staff" });
 	});
 
@@ -158,8 +166,9 @@ test.describe("SB-00: Sidebar hierarchy and nesting", () => {
 		);
 		expect(ids).toContain("ungrouped1");
 		expect(ids).toContain("ungrouped2");
-		// Delegates should NOT be in ungrouped
+		// Child sessions should NOT be in ungrouped
 		expect(ids).not.toContain("delegate-of-ungrouped1");
+		expect(ids).not.toContain("pr-walkthrough-child");
 	});
 
 	test("staff in staff section", async ({ page }) => {
@@ -173,8 +182,22 @@ test.describe("SB-00: Sidebar hierarchy and nesting", () => {
 		expect(ids).toContain("staff1");
 	});
 
+	test("PR walkthrough child remains visible beneath its parent", async ({ page }) => {
+		const ids = await page.evaluate(
+			({ sessions, archived, goals }) => {
+				const tree = (window as any).__hierarchy.buildSidebarTree(sessions, archived, goals, false);
+				return (window as any).__hierarchy.getVisibleSessionIds(tree, false, sessions, archived);
+			},
+			{ sessions: mockSessions, archived: mockArchivedSessions, goals: mockGoals },
+		);
+		const parentIndex = ids.indexOf("ungrouped1");
+		const childIndex = ids.indexOf("pr-walkthrough-child");
+		expect(parentIndex).toBeGreaterThanOrEqual(0);
+		expect(childIndex).toBeGreaterThan(parentIndex);
+	});
+
 	test("delegate never appears at top level of any section", async ({ page }) => {
-		const delegateIds = ["delegate-of-member1", "delegate-of-goal2-session", "delegate-of-ungrouped1"];
+		const delegateIds = ["delegate-of-member1", "delegate-of-goal2-session", "delegate-of-ungrouped1", "pr-walkthrough-child"];
 		const results = await page.evaluate(
 			({ sessions, archived, goals, delegateIds }) => {
 				const tree = (window as any).__hierarchy.buildSidebarTree(sessions, archived, goals, true);

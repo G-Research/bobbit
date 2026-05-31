@@ -6,9 +6,11 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
+import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -85,6 +87,7 @@ type StoredWalkthrough = {
 
 export type PrWalkthroughRouteDeps = {
 	defaultCwd: string;
+	stateDir?: string;
 	readBody: JsonReader;
 	resolveSessionCwd?: (sessionId: string) => string | undefined | Promise<string | undefined>;
 	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
@@ -92,15 +95,50 @@ export type PrWalkthroughRouteDeps = {
 	getAvailableModels?: (preferencesStore: { get(key: string): unknown }) => Promise<ApiModel[]>;
 	completeModelText?: typeof defaultCompleteModelText;
 	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
+	sessionManager?: WalkthroughSessionManagerLike;
+	broadcast?: (event: Record<string, unknown>) => void;
+	walkthroughAgentManager?: WalkthroughAgentManager;
+	preflightGithubLaunch?: WalkthroughAgentManagerDeps["preflightGithubLaunch"];
+	sandboxScope?: SandboxScope;
 };
 
 type WalkthroughLlmAdapter = (input: Record<string, unknown>) => Promise<unknown> | unknown;
 type WalkthroughSynthesisContext = { sessionId?: string; cwd: string; changeset?: WalkthroughChangeset };
 let synthesisAdapterForTesting: WalkthroughLlmAdapter | undefined;
 let configuredSynthesisAdapter: WalkthroughLlmAdapter | undefined | null;
+const agentManagersBySessionManager = new WeakMap<object, WalkthroughAgentManager>();
+const agentManagersByStateKey = new Map<string, WalkthroughAgentManager>();
 
 export function setPrWalkthroughSynthesisAdapterForTesting(adapter: WalkthroughLlmAdapter | undefined): void {
 	synthesisAdapterForTesting = adapter;
+}
+
+function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAgentManager {
+	if (deps.walkthroughAgentManager) return deps.walkthroughAgentManager;
+	const create = () => new WalkthroughAgentManager({
+		defaultCwd: deps.defaultCwd,
+		stateDir: deps.stateDir,
+		resolveSessionCwd: deps.resolveSessionCwd,
+		resolveSessionModel: deps.resolveSessionModel,
+		sessionManager: deps.sessionManager,
+		broadcast: deps.broadcast,
+		preflightGithubLaunch: deps.preflightGithubLaunch,
+	});
+	if (deps.sessionManager && typeof deps.sessionManager === "object") {
+		let manager = agentManagersBySessionManager.get(deps.sessionManager);
+		if (!manager) {
+			manager = create();
+			agentManagersBySessionManager.set(deps.sessionManager, manager);
+		}
+		return manager;
+	}
+	const key = `${deps.stateDir ?? ""}\0${deps.defaultCwd}`;
+	let manager = agentManagersByStateKey.get(key);
+	if (!manager) {
+		manager = create();
+		agentManagersByStateKey.set(key, manager);
+	}
+	return manager;
 }
 
 export async function handlePrWalkthroughApiRoute(
@@ -109,7 +147,9 @@ export async function handlePrWalkthroughApiRoute(
 	res: http.ServerResponse,
 	deps: PrWalkthroughRouteDeps,
 ): Promise<boolean> {
-	if (!url.pathname.startsWith("/api/pr-walkthrough")) return false;
+	const isPublicWalkthroughRoute = url.pathname.startsWith("/api/pr-walkthrough");
+	const isInternalSubmitRoute = url.pathname === "/api/internal/pr-walkthrough/submit-yaml";
+	if (!isPublicWalkthroughRoute && !isInternalSubmitRoute) return false;
 
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -120,6 +160,60 @@ export async function handlePrWalkthroughApiRoute(
 	};
 
 	try {
+		if (url.pathname === "/api/internal/pr-walkthrough/submit-yaml" && req.method === "POST") {
+			const body = await deps.readBody(req);
+			if (!body || typeof body !== "object") {
+				fail(400, "Invalid YAML submit request");
+				return true;
+			}
+			const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+			if (deps.sandboxScope && (!sessionId || !deps.sandboxScope.sessionIds.has(sessionId))) {
+				fail(403, "Forbidden: PR walkthrough YAML submit session is outside sandbox scope", { code: "SANDBOX_SESSION_OUT_OF_SCOPE" });
+				return true;
+			}
+			const manager = getWalkthroughAgentManager(deps);
+			const submissionProof = headerValue(req, "x-bobbit-walkthrough-submit-proof");
+			const result = await manager.submitYaml({ ...(body as SubmitWalkthroughYamlRequest), submissionProof });
+			json(result);
+			return true;
+		}
+
+		if (url.pathname === "/api/pr-walkthrough/launch" && req.method === "POST") {
+			const body = await deps.readBody(req);
+			if (!body || typeof body !== "object") {
+				fail(400, "Invalid launch request");
+				return true;
+			}
+			const manager = getWalkthroughAgentManager(deps);
+			const result = await manager.launch(body as LaunchWalkthroughRequest);
+			json(result, result.created ? 201 : 200);
+			return true;
+		}
+
+		const jobMatch = url.pathname.match(/^\/api\/pr-walkthrough\/jobs\/([^/]+)$/);
+		if (jobMatch && req.method === "GET") {
+			const manager = getWalkthroughAgentManager(deps);
+			const job = manager.getJob(decodeURIComponent(jobMatch[1]));
+			if (!job) {
+				fail(404, "PR walkthrough job not found", { code: "JOB_NOT_FOUND" });
+				return true;
+			}
+			json({ job });
+			return true;
+		}
+
+		const sessionMatch = url.pathname.match(/^\/api\/pr-walkthrough\/session\/([^/]+)$/);
+		if (sessionMatch && req.method === "GET") {
+			const manager = getWalkthroughAgentManager(deps);
+			const job = manager.getJobForSession(decodeURIComponent(sessionMatch[1]));
+			if (!job) {
+				fail(404, "PR walkthrough session job not found", { code: "JOB_NOT_FOUND" });
+				return true;
+			}
+			json({ job });
+			return true;
+		}
+
 		if (url.pathname === "/api/pr-walkthrough/resolve" && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
@@ -734,12 +828,14 @@ function storePath(changesetId: string): string {
 
 function typedRouteError(err: unknown): { status: number; extra: Record<string, unknown> } | undefined {
 	if (!err || typeof err !== "object") return undefined;
-	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown };
+	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown; extra?: unknown };
 	const status = typeof candidate.status === "number" && candidate.status >= 400 && candidate.status < 600 ? candidate.status : undefined;
-	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings)) return undefined;
+	const extra = candidate.extra && typeof candidate.extra === "object" && !Array.isArray(candidate.extra) ? candidate.extra as Record<string, unknown> : undefined;
+	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings) && !extra) return undefined;
 	return {
 		status: status ?? 500,
 		extra: {
+			...(extra ?? {}),
 			...(typeof candidate.code === "string" ? { code: candidate.code } : {}),
 			...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings } : {}),
 		},
@@ -791,6 +887,12 @@ function slug(value: string): string {
 
 function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function headerValue(req: http.IncomingMessage, name: string): string | undefined {
+	const value = req.headers[name.toLowerCase()];
+	if (Array.isArray(value)) return stringValue(value[0]);
+	return stringValue(value);
 }
 
 function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string): { owner: string; repo: string; number: string | number; url: string } | undefined {

@@ -18,6 +18,9 @@ export function isSandboxAllowed(
 	// MCP calls are blocked — sandbox agents must not trigger host-side execution.
 	// if (pathname === "/api/internal/mcp-call" && m === "POST") return true;
 	if (pathname === "/api/internal/verification-result" && m === "POST") return true;
+	// PR walkthrough YAML submission is allowed through the sandbox guard; the
+	// route manager performs the scoped child-session/job ownership check.
+	if (pathname === "/api/internal/pr-walkthrough/submit-yaml" && m === "POST") return true;
 	// /api/internal/user-question/submit is called from UI widgets (not the
 	// sandboxed agent) — the legacy POST /api/internal/user-question used by the
 	// blocking tool extension has been removed.
