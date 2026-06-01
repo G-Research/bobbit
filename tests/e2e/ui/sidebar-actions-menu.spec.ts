@@ -1,5 +1,4 @@
 import type { Locator, Page } from "@playwright/test";
-import { execFileSync } from "node:child_process";
 import { test, expect } from "../gateway-harness.js";
 import {
 	apiFetch,
@@ -7,7 +6,6 @@ import {
 	createSession,
 	deleteGoal,
 	deleteSession,
-	gitCwd,
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
@@ -133,12 +131,15 @@ test.describe("Sidebar actions menu", () => {
 		const row = await openSession(page, sessionId);
 		await assertHamburgerAppearsOnHover(row, "session", sessionId);
 		await openMenuFromKeyboard(row, "session", sessionId, "terminate");
-		await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Copy link", "Duplicate session"]);
+		// Popover lists quick actions in REVERSE strip order (right-most first),
+		// then the menu-only actions in their declared order.
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Duplicate session"]);
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
 
 		await openMenu(row, "session", sessionId);
-		await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Copy link", "Duplicate session"]);
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Duplicate session"]);
+		await expect(triggerFor(row, "session", sessionId), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
@@ -186,8 +187,13 @@ test.describe("Sidebar actions menu", () => {
 		await openApp(page);
 		const row = await ensureGoalExpanded(page, goal.id as string);
 		await assertHamburgerAppearsOnHover(row, "goal", goal.id as string);
+		// Re-attempt is popover-only: it must NOT render as a hover quick-action button.
+		await row.hover();
+		await expect(row.locator('[data-sidebar-action-id="reattempt"][data-sidebar-action-quick="true"]'), "re-attempt is not a hover quick action").toHaveCount(0);
 		await openMenuFromKeyboard(row, "goal", goal.id as string, "dashboard");
-		await expect.poll(() => menuLabels(page)).toEqual(["Re-attempt", "Archive", "Goal dashboard", "Copy link"]);
+		await expect.poll(() => menuLabels(page)).toEqual(["Goal dashboard", "Archive", "Re-attempt", "Copy link"]);
+		await expect(menuItem(page, "reattempt"), "re-attempt still appears in the popover menu").toBeVisible();
+		await expect(triggerFor(row, "goal", goal.id as string), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
@@ -323,21 +329,19 @@ test.describe("Sidebar actions menu", () => {
 		expect(dup).toMatchObject({ goalId: goal.id, projectId: goal.projectId, title: "Copy of Source context session" });
 	});
 
-	test("Open on GitHub uses PR URLs, branch fallback URLs, and stays hidden without a GitHub link", async ({ page, gateway, context }) => {
+	test("Open on GitHub mirrors the goal-row PR badge: coloured PR icon + url only when the badge shows", async ({ page }) => {
 		const prGoal = await createGoal({ title: `GitHub PR goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		const branchGoal = await createGoal({ title: `GitHub branch goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		const noRemoteGoal = await createGoal({ title: `GitHub hidden goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		goalIds.push(prGoal.id as string, branchGoal.id as string, noRemoteGoal.id as string);
+		const gatedGoal = await createGoal({ title: `GitHub gated goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		const noPrGoal = await createGoal({ title: `GitHub no-PR goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
+		goalIds.push(prGoal.id as string, gatedGoal.id as string, noPrGoal.id as string);
 
-		gateway.sessionManager.prStatusStore.set(prGoal.id, { state: "OPEN", url: "https://github.com/acme/widget/pull/123" });
-		const repo = gitCwd();
-		try { execFileSync("git", ["remote", "remove", "origin"], { cwd: repo, stdio: "ignore" }); } catch {}
-		execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: repo, stdio: "pipe" });
-		gateway.sessionManager.getGoalStoreForProject(branchGoal.projectId).update(branchGoal.id, { branch: "feature/sidebar-actions", repoPath: repo, cwd: repo });
-		gateway.sessionManager.getGoalStoreForProject(noRemoteGoal.projectId).update(noRemoteGoal.id, { branch: "feature/no-remote", repoPath: nonGitCwd(), cwd: nonGitCwd() });
-
+		const PR_URL = "https://github.com/acme/widget/pull/123";
 		await openApp(page);
+		// Stop session polling so the injected PR/gate caches that drive the badge
+		// aren't clobbered mid-test (same approach as notification-policy.spec.ts).
 		await page.evaluate(() => {
+			const state: any = (window as any).__bobbitState;
+			if (state?.sessionPollTimer) { clearInterval(state.sessionPollTimer); state.sessionPollTimer = null; }
 			(window as any).__sidebarOpenedUrls = [];
 			window.open = ((url: string | URL | undefined) => {
 				(window as any).__sidebarOpenedUrls.push(String(url));
@@ -345,31 +349,50 @@ test.describe("Sidebar actions menu", () => {
 			}) as any;
 		});
 
-		for (const [goalId, expected] of [
-			[prGoal.id as string, "https://github.com/acme/widget/pull/123"],
-			[branchGoal.id as string, "https://github.com/acme/widget/tree/feature%2Fsidebar-actions"],
-		] as const) {
-			const row = await ensureGoalExpanded(page, goalId);
-			await openMenu(row, "goal", goalId);
-			await expect(menuItem(page, "open-github")).toBeVisible({ timeout: 10_000 });
-			await menuItem(page, "open-github").click();
-			await expectNoPopover(page);
-			await expect.poll(() => page.evaluate(() => (window as any).__sidebarOpenedUrls.at(-1))).toBe(expected);
-		}
+		// "Open on GitHub" must mirror the goal-row PR badge exactly. The badge is
+		// derived from the same client caches `renderGoalBadge` reads: a PR entry,
+		// plus — for workflow goals — a fully-passed gate summary. Drive those caches
+		// directly (the established cross-surface pattern) so the contract is
+		// exercised without standing up real PRs or gate verification.
+		await page.evaluate(({ prId, gatedId, noPrId, url }) => {
+			const state: any = (window as any).bobbitState ?? (window as any).__bobbitState;
+			const passed = { passed: 1, total: 1, verifying: false, verifyingCount: 0, awaitingSignoffCount: 0, awaitingHumanSignoff: false, runningGateIds: [], gates: [] };
+			const pending = { ...passed, passed: 0 };
+			// prGoal: PR present + all gates passed → badge (and menu item) shown.
+			state.gateStatusCache.set(prId, passed);
+			state.prStatusCache.set(prId, { state: "OPEN", url });
+			// gatedGoal: PR present but gates NOT all passed → badge suppressed.
+			state.gateStatusCache.set(gatedId, pending);
+			state.prStatusCache.set(gatedId, { state: "OPEN", url });
+			// noPrGoal: gates passed but no PR → no badge.
+			state.gateStatusCache.set(noPrId, passed);
+			(window as any).__bobbitRenderApp?.();
+		}, { prId: prGoal.id, gatedId: gatedGoal.id, noPrId: noPrGoal.id, url: PR_URL });
 
-		const row = await ensureGoalExpanded(page, noRemoteGoal.id as string);
-		await openMenu(row, "goal", noRemoteGoal.id as string);
+		// PR goal: visible, uses the SAME coloured PR/merge SVG as the goal row
+		// (OPEN with no review decision → green #6bc485), and opens the PR url.
+		const prRow = await ensureGoalExpanded(page, prGoal.id as string);
+		await openMenu(prRow, "goal", prGoal.id as string);
+		const ghItem = menuItem(page, "open-github");
+		await expect(ghItem).toBeVisible({ timeout: 10_000 });
+		expect(await ghItem.locator("svg").first().getAttribute("stroke"), "open-github uses the coloured PR icon, not the lucide Github icon").toBe("#6bc485");
+		await ghItem.click();
+		await expectNoPopover(page);
+		await expect.poll(() => page.evaluate(() => (window as any).__sidebarOpenedUrls.at(-1))).toBe(PR_URL);
+
+		// Workflow goal with a PR but gates not fully passed: badge hidden → item hidden.
+		const gatedRow = await ensureGoalExpanded(page, gatedGoal.id as string);
+		await openMenu(gatedRow, "goal", gatedGoal.id as string);
 		await expect(menuItem(page, "open-github")).toHaveCount(0, { timeout: 2_000 });
-		gateway.sessionManager.getGoalStoreForProject(noRemoteGoal.projectId).update(noRemoteGoal.id, { branch: "feature/cache-refresh", repoPath: repo, cwd: repo });
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
 
-		await openMenu(row, "goal", noRemoteGoal.id as string);
-		await expect(menuItem(page, "open-github")).toBeVisible({ timeout: 10_000 });
-		await menuItem(page, "open-github").click();
+		// Goal with no PR at all: hidden.
+		const noPrRow = await ensureGoalExpanded(page, noPrGoal.id as string);
+		await openMenu(noPrRow, "goal", noPrGoal.id as string);
+		await expect(menuItem(page, "open-github")).toHaveCount(0, { timeout: 2_000 });
+		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
-		await expect.poll(() => page.evaluate(() => (window as any).__sidebarOpenedUrls.at(-1))).toBe("https://github.com/acme/widget/tree/feature%2Fcache-refresh");
-		await context.clearCookies(); // keeps the test from relying on a real external popup side effect.
 	});
 
 	test("reduced-motion opens and closes without FLIP/slide animations", async ({ page }) => {
@@ -412,7 +435,7 @@ test.describe("Sidebar actions menu", () => {
 
 		const gRow = await ensureGoalExpanded(page, goal.id as string);
 		await expect(triggerFor(gRow, "goal", goal.id as string)).toHaveCount(0);
-		await expect(gRow.locator('[data-sidebar-action-id="reattempt"][data-sidebar-action-quick="true"]')).toBeVisible();
+		await expect(gRow.locator('[data-sidebar-action-id="reattempt"]'), "re-attempt is popover-only and not an inline quick action").toHaveCount(0);
 		await expect(gRow.locator('[data-sidebar-action-id="archive"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(gRow.locator('[data-sidebar-action-id="dashboard"][data-sidebar-action-quick="true"]')).toBeVisible();
 		await expect(gRow.locator('[data-sidebar-action-id="copy-link"]')).toHaveCount(0);
