@@ -224,6 +224,47 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	return stdout.toString().trim();
 }
 
+/**
+ * Canonicalize a path for robust equality comparison: resolve to absolute,
+ * follow symlinks via `realpathSync.native` where possible (no-op when the
+ * path doesn't exist), and lowercase on win32 where the filesystem is
+ * case-insensitive. Mirrors the comparison style of
+ * `worktree-pool.ts::resolveRepoToplevel`.
+ */
+function canonicalizePath(p: string): string {
+	let resolved = path.resolve(p);
+	try {
+		resolved = fs.realpathSync.native(resolved);
+	} catch {
+		// realpath fails when the path doesn't exist — fall back to resolve().
+	}
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Whether `dir` is the TOPLEVEL of a git working tree (i.e. a git repo ROOT),
+ * NOT merely a directory nested somewhere inside one.
+ *
+ * `isGitRepo` (which runs `git rev-parse --is-inside-work-tree`) returns true
+ * for ANY path inside a repo — including a non-git container that happens to be
+ * nested under an unrelated parent git repo. That false-positive would cause
+ * `createWorktreeSet` to run `git worktree add` against the container root. This
+ * helper distinguishes the two by comparing the canonicalized
+ * `git rev-parse --show-toplevel` against the canonicalized input dir.
+ *
+ * Returns false on any error (not a git repo, missing dir, git failure).
+ */
+export async function isGitRepoRoot(dir: string): Promise<boolean> {
+	try {
+		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd: dir });
+		const toplevel = stdout.toString().trim();
+		if (!toplevel) return false;
+		return canonicalizePath(toplevel) === canonicalizePath(dir);
+	} catch {
+		return false;
+	}
+}
+
 export interface WorktreeResult {
 	worktreePath: string;
 	branchName: string;
@@ -449,16 +490,19 @@ export async function createWorktreeSet(
 		};
 	}
 
-	// Multi-repo: drop a non-git `.` container entry. In a poly-repo (non-git
-	// container root + git sub-repos) the component list may still carry a
-	// `repo: "."` entry pointing at the non-git container `rootPath`. Running
-	// `git worktree add` there fails with `fatal: not a git repository`, so it
-	// must never reach worktree creation. A `.` entry whose source IS a git repo
-	// (genuine container-root component) is kept. See docs/design/multi-repo-components.md.
+	// Multi-repo: keep a distinct repo ONLY if its source dir is itself a git
+	// repo ROOT. This skips, in one rule:
+	//   • the non-git `.` container in a poly-repo (running `git worktree add`
+	//     there fails with `fatal: not a git repository`),
+	//   • the nested-parent false-positive — a non-git container nested under an
+	//     UNRELATED parent git repo (where `isGitRepo` would return true), and
+	//   • non-git sub-repos and missing source dirs (graceful no-worktree).
+	// A `.` entry whose source IS a git repo root (genuine container-root
+	// component) is kept. See docs/design/multi-repo-components.md.
 	const repoList: string[] = [];
 	for (const repo of repos) {
-		if (repo === "." && !(await isGitRepo(rootPath))) continue;
-		repoList.push(repo);
+		const repoSrc = path.join(rootPath, repo === "." ? "" : repo);
+		if (await isGitRepoRoot(repoSrc)) repoList.push(repo);
 	}
 
 	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.

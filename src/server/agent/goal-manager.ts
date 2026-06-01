@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { resolveWorktreeSupport } from "./worktree-support.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
@@ -127,16 +128,16 @@ export class GoalManager {
 		let setupStatus: "ready" | "preparing" = "ready";
 
 		// Detect git repo root — needed for team operations even without a worktree.
-		// Multi-repo: override `repoPath` with the project's container root so the
-		// per-repo worktrees land beneath one shared `<rootPath>-wt/<branch>/`.
+		// Single source of truth shared with the session path (server.ts) and the
+		// staff path (staff-manager.ts): a multi-repo project resolves to its
+		// container root as `repoPath` (per-repo worktrees land beneath one shared
+		// `<rootPath>-wt/<branch>/`) ONLY when at least one component is a git repo
+		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
+		// and to no-worktree when that also fails (never throws).
 		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
-		const isMulti = !!components && components.some(c => c.repo !== ".");
 		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
-		if (isMulti && projectRoot) {
-			repoPath = projectRoot;
-		} else if (await isGitRepo(cwd)) {
-			repoPath = await getRepoRoot(cwd);
-		}
+		const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd);
+		if (support.supported) repoPath = support.repoPath;
 
 		// Compute worktree path and branch (but don't create yet)
 		if (worktree && repoPath) {
@@ -287,6 +288,17 @@ export class GoalManager {
 					? this.baseRefResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
 					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
+					// Defense-in-depth: if no worktree-able git sub-repo remained
+					// (createWorktreeSet skips the non-git container and non-git
+					// sub-repos), fall back gracefully to no-worktree — mark ready
+					// with cwd unchanged rather than throwing. resolveWorktreeSupport
+					// normally prevents reaching here (repoPath stays unset, so
+					// setupWorktree isn't called), but guard anyway.
+					if (set.worktrees.length === 0) {
+						this.store.update(goal.id, { setupStatus: "ready", setupError: undefined });
+						console.warn(`[goal-manager] No worktree-able repo for goal "${goal.title}" — proceeding without a worktree`);
+						return;
+					}
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
 					try {

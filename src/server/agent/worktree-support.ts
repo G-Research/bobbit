@@ -22,8 +22,13 @@
  * See docs/design/multi-repo-components.md §4 + §5.
  */
 
+import path from "node:path";
 import type { Component } from "./project-config-store.js";
-import { isGitRepo as defaultIsGitRepo, getRepoRoot as defaultGetRepoRoot } from "../skills/git.js";
+import {
+	isGitRepo as defaultIsGitRepo,
+	getRepoRoot as defaultGetRepoRoot,
+	isGitRepoRoot as defaultIsGitRepoRoot,
+} from "../skills/git.js";
 
 export interface WorktreeSupport {
 	supported: boolean;
@@ -34,6 +39,7 @@ export interface WorktreeSupport {
 export interface WorktreeSupportDeps {
 	isGitRepo: (cwd: string) => Promise<boolean>;
 	getRepoRoot: (cwd: string) => Promise<string>;
+	isGitRepoRoot: (dir: string) => Promise<boolean>;
 }
 
 /**
@@ -48,15 +54,32 @@ export async function resolveWorktreeSupport(
 	components: Component[],
 	projectRoot: string | undefined,
 	cwd: string,
-	deps: WorktreeSupportDeps = { isGitRepo: defaultIsGitRepo, getRepoRoot: defaultGetRepoRoot },
+	deps: WorktreeSupportDeps = {
+		isGitRepo: defaultIsGitRepo,
+		getRepoRoot: defaultGetRepoRoot,
+		isGitRepoRoot: defaultIsGitRepoRoot,
+	},
 ): Promise<WorktreeSupport> {
 	const multiRepo = components.some(c => c.repo !== ".");
 
 	if (multiRepo && projectRoot) {
 		// Poly-repo: the container root IS the repoPath even when it isn't itself
 		// a git repo. `createWorktreeSet` worktrees each git sub-repo and skips a
-		// non-git `.` container entry.
-		return { supported: true, repoPath: projectRoot, multiRepo: true };
+		// non-git `.` container entry. BUT only claim multi-repo support if at
+		// least one distinct component repo actually resolves to a git repo ROOT
+		// under projectRoot — otherwise there is nothing to worktree and claiming
+		// support would make `createWorktreeSet` (and downstream callers) operate
+		// on a non-existent container. Fall through to the single-repo probe.
+		const distinct = new Set<string>();
+		for (const c of components) {
+			if (distinct.has(c.repo)) continue;
+			distinct.add(c.repo);
+			const repoSrc = path.join(projectRoot, c.repo === "." ? "" : c.repo);
+			if (await deps.isGitRepoRoot(repoSrc)) {
+				return { supported: true, repoPath: projectRoot, multiRepo: true };
+			}
+		}
+		// No git repo root among the declared components — fall through.
 	}
 
 	try {

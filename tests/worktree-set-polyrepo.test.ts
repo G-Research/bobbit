@@ -109,3 +109,111 @@ describe("createWorktreeSet poly-repo (non-git container + git sub-repos)", () =
 		);
 	});
 });
+
+/**
+ * Regression (acceptance criterion 2): nested-parent container false-positive.
+ *
+ * A non-git poly-repo container nested INSIDE an unrelated parent git repo.
+ * `git rev-parse --is-inside-work-tree` (used by `isGitRepo`) returns TRUE for
+ * the container because of the parent repo, so the old skip rule kept the
+ * `repo: "."` entry and ran `git worktree add` against the container root.
+ * `isGitRepoRoot` must distinguish "inside a repo" from "is a repo root" so the
+ * `.` entry is still skipped.
+ */
+describe("createWorktreeSet poly-repo nested under an unrelated parent git repo", () => {
+	let parent: string;
+	let container: string;
+	let wtRoot: string;
+	const branch = "staff-nested-12345678";
+
+	before(async () => {
+		// Unrelated PARENT git repo.
+		parent = fs.mkdtempSync(path.join(os.tmpdir(), "wt-parent-"));
+		await git(["-c", "init.defaultBranch=master", "init", parent], path.dirname(parent));
+		fs.writeFileSync(path.join(parent, "README.md"), "# parent\n");
+		await git(["add", "."], parent);
+		await git(
+			["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial commit"],
+			parent,
+		);
+		// Non-git container INSIDE the parent working tree, with two git sub-repos.
+		container = path.join(parent, "polyrepo-container");
+		fs.mkdirSync(container, { recursive: true });
+		await makeGitRepo(container, "repo-a");
+		await makeGitRepo(container, "repo-b");
+		wtRoot = path.resolve(path.dirname(container), path.basename(container) + "-wt");
+	});
+
+	after(() => {
+		fs.rmSync(parent, { recursive: true, force: true });
+		fs.rmSync(wtRoot, { recursive: true, force: true });
+	});
+
+	it("skips the '.' container even though it is inside the parent repo", async () => {
+		const components = [
+			{ name: "container", repo: "." },
+			{ name: "a", repo: "repo-a" },
+			{ name: "b", repo: "repo-b" },
+		];
+
+		const set = await createWorktreeSet(container, components, branch);
+
+		const repos = set.worktrees.map((w) => w.repo).sort();
+		assert.deepStrictEqual(repos, ["repo-a", "repo-b"], "should worktree exactly the two git sub-repos");
+		assert.ok(
+			!set.worktrees.some((w) => w.repo === "."),
+			'the nested non-git "." container must be skipped (not a git repo ROOT)',
+		);
+
+		// The branch container must hold no top-level `.git` — proof that
+		// `git worktree add` never ran against the non-git container root.
+		const branchContainer = path.join(wtRoot, branch);
+		assert.ok(
+			!fs.existsSync(path.join(branchContainer, ".git")),
+			"the non-git container root must never be worktree'd",
+		);
+	});
+});
+
+/**
+ * Regression (acceptance criterion 3): multi-repo declaration with NO git
+ * sub-repos must fall back to no-worktree gracefully (empty set) rather than
+ * throwing `source repo not found` / `git worktree add` failures.
+ */
+describe("createWorktreeSet multi-repo with no git sub-repos", () => {
+	let root: string;
+	let wtRoot: string;
+	const branch = "staff-nogit-12345678";
+
+	before(() => {
+		// Non-git container with two NON-git sub-dirs.
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "wt-nogit-"));
+		fs.mkdirSync(path.join(root, "repo-a"), { recursive: true });
+		fs.mkdirSync(path.join(root, "repo-b"), { recursive: true });
+		fs.writeFileSync(path.join(root, "repo-a", "file.txt"), "a\n");
+		fs.writeFileSync(path.join(root, "repo-b", "file.txt"), "b\n");
+		wtRoot = path.resolve(path.dirname(root), path.basename(root) + "-wt");
+	});
+
+	after(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(wtRoot, { recursive: true, force: true });
+	});
+
+	it("returns an empty worktree set and does not throw", async () => {
+		const components = [
+			{ name: "container", repo: "." },
+			{ name: "a", repo: "repo-a" },
+			{ name: "b", repo: "repo-b" },
+		];
+
+		const set = await createWorktreeSet(root, components, branch);
+		assert.deepStrictEqual(set.worktrees, [], "no git sub-repo ⇒ empty worktree set");
+
+		// No container directory should have been created for an empty set.
+		assert.ok(
+			!fs.existsSync(path.join(wtRoot, branch, ".git")),
+			"no worktree should have been created",
+		);
+	});
+});
