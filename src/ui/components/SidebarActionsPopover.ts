@@ -652,10 +652,14 @@ export class SidebarActionsPopover extends LitElement {
 					@click=${(event: Event) => this._handleToggle(item, event)}
 					@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleToggle(item, event); }}
 				>
-					<span
+					<input
+						type="checkbox"
+						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						.checked=${toggle.checked}
 						aria-hidden="true"
-						style=${`display:inline-flex;align-items:center;justify-content:center;width:1em;height:1em;flex:0 0 auto;border:1px solid var(--border, currentColor);border-radius:3px;background:${toggle.checked ? "var(--primary, currentColor)" : "transparent"};color:var(--primary-foreground, var(--background, #fff));font-size:0.85em;line-height:1;`}
-					>${toggle.checked ? "✓" : ""}</span>
+						tabindex="-1"
+						style="pointer-events:none;flex:0 0 auto;"
+					/>
 					${toggle.label ? html`<span style="overflow:hidden;text-overflow:ellipsis;">${toggle.label}</span>` : nothing}
 				</span>
 			</div>
