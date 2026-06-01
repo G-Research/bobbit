@@ -42,7 +42,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 |---|---|---|
 | `GET` | `/api/sessions` | List all sessions. Supports `?since=N` generation counter for conditional fetch. Response includes `archivedDelegates` array (see below) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
-| `POST` | `/api/sessions/:id/duplicate` | Create a fresh live session from persisted source-session context, without copying transcript/tool/proposal history. See [Duplicate session endpoint](#duplicate-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
@@ -62,9 +62,18 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`. Same-project authorization via the `x-bobbit-session-id` request header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400), `permission_denied` (403). Pure parser lives in `src/server/agent/transcript-reader.ts`. |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Same-project authorization via the `x-bobbit-session-id` header. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `permission_denied` (403). Branch-split via the sidecar's `firstKeptEntryId`; legacy fallback scans the JSONL for an inline `type:"compaction"` marker. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts`. See [docs/compaction-history.md](compaction-history.md). |
 
-### Duplicate session endpoint
+### Fork session endpoint
 
-`POST /api/sessions/:id/duplicate` duplicates a live source session's project/task/goal/staff context into a new session. It is the contract behind the sidebar **Duplicate session** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+
+Request body (optional):
+
+```json
+{ "newWorktree": true }
+```
+
+- `newWorktree: true` (default when omitted) — create a fresh worktree/branch off the project repo (a plain project-root session when the project isn't a git repo).
+- `newWorktree: false` — reuse the source session's existing worktree directly. The fork's `cwd` is set to the source's `worktreePath` and **no** new worktree is created; the two live sessions intentionally share the worktree/branch. The fork does not register worktree metadata, so terminating either session never tears down the shared tree. When the source has no worktree, the fork reuses the project-root cwd.
 
 Success returns `201`:
 
@@ -75,17 +84,17 @@ Success returns `201`:
   "status": "idle",
   "projectId": "project-id",
   "goalId": "goal-id",
-  "assistantType": "goal"
+  "title": "Fork: Source title"
 }
 ```
 
-`goalId` and `assistantType` are omitted when not applicable. The new session title is generated as `Copy of <source title>`.
+`goalId` is omitted when not applicable. The new session title is `Fork: <source title>` (`markGenerated`, so the first prompt's auto-titler won't overwrite it).
 
-The duplicate preserves project id, cwd/worktree selection, goal id, task id, reattempt goal id, assistant type, staff id, role/accessory context, sandbox setting, allowed tools, and selected model. It does **not** copy JSONL transcript history, tool content, proposal drafts, read state, or other historical UI state.
+The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
 
-Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`.
+Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
 
-See [Sidebar Actions Menu](sidebar-actions-menu.md#duplicate-session-endpoint) for the user-facing behavior.
+See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
 
 ### Background processes
 

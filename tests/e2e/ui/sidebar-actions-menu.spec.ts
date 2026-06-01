@@ -132,13 +132,15 @@ test.describe("Sidebar actions menu", () => {
 		await assertHamburgerAppearsOnHover(row, "session", sessionId);
 		await openMenuFromKeyboard(row, "session", sessionId, "terminate");
 		// Popover lists quick actions in REVERSE strip order (right-most first),
-		// then the menu-only actions in their declared order.
-		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Duplicate session"]);
+		// then the menu-only actions in their declared order. The Fork row carries
+		// a trailing "New worktree" checkbox, but only its `[role=menuitem]` label
+		// counts here (the checkbox is a sibling `[role=menuitemcheckbox]`).
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Fork"]);
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
 
 		await openMenu(row, "session", sessionId);
-		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Duplicate session"]);
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Fork"]);
 		await expect(triggerFor(row, "session", sessionId), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
 		await page.keyboard.press("Escape");
@@ -294,39 +296,81 @@ test.describe("Sidebar actions menu", () => {
 		await expectNoPopover(page);
 	});
 
-	test("duplicate session menu action calls the endpoint, navigates, and preserves goal context", async ({ page }) => {
-		const goal = await createGoal({ title: `Duplicate context goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
-		goalIds.push(goal.id as string);
-		const sourceId = await createSession({ goalId: goal.id as string });
+	test("fork menu action toggles the New worktree checkbox without firing, then forks and navigates", async ({ page }) => {
+		const sourceId = await createSession();
 		sessionIds.push(sourceId);
 		await waitForSessionStatus(sourceId, "idle");
-		await apiFetch(`/api/sessions/${sourceId}`, {
-			method: "PATCH",
-			body: JSON.stringify({ title: "Source context session" }),
+		const navTarget = "11111111-2222-3333-4444-555555555555";
+
+		// Mock the fork endpoint so the test never spins up a real worktree/clone.
+		// Capture every request body so we can assert the checkbox state is read
+		// at fork time (and that toggling alone never POSTs).
+		await page.route(`**/api/sessions/${sourceId}/fork`, async (route) => {
+			const post = route.request().postDataJSON?.() ?? {};
+			await page.evaluate((b) => { (window as any).__forkBodies = [...((window as any).__forkBodies || []), b]; }, post);
+			await route.fulfill({
+				status: 201,
+				contentType: "application/json",
+				body: JSON.stringify({ id: navTarget, cwd: "/tmp/fork", status: "idle", title: "Fork: Source", projectId: "p", goalId: undefined }),
+			});
 		});
 
-		await openSession(page, sourceId);
-		await ensureGoalExpanded(page, goal.id as string);
-		const row = sessionRow(page, sourceId);
+		const row = await openSession(page, sourceId);
+		await page.evaluate(() => { (window as any).__forkBodies = []; });
 		await openMenu(row, "session", sourceId);
 
-		const responsePromise = page.waitForResponse((resp) =>
-			resp.url().includes(`/api/sessions/${sourceId}/duplicate`) && resp.request().method() === "POST",
-		);
-		await menuItem(page, "duplicate").click();
-		const response = await responsePromise;
-		expect(response.status()).toBe(201);
-		const body = await response.json();
-		expect(body).toMatchObject({ goalId: goal.id, projectId: goal.projectId });
-		expect(body.id).toBeTruthy();
-		expect(body.id).not.toBe(sourceId);
-		sessionIds.push(body.id);
+		const forkItem = menuItem(page, "fork");
+		await expect(forkItem).toBeVisible();
+		const checkbox = page.locator('sidebar-actions-popover [role="menuitemcheckbox"][data-sidebar-action-id="fork"]').first();
+		await expect(checkbox).toBeVisible();
+		// Default: checked (new worktree on).
+		await expect(checkbox).toHaveAttribute("aria-checked", "true");
 
-		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toBe(`#/session/${body.id}`);
-		const dupResp = await apiFetch(`/api/sessions/${body.id}`);
-		expect(dupResp.status).toBe(200);
-		const dup = await dupResp.json();
-		expect(dup).toMatchObject({ goalId: goal.id, projectId: goal.projectId, title: "Copy of Source context session" });
+		// Clicking the checkbox toggles it WITHOUT firing fork or closing the menu.
+		await checkbox.click();
+		await expect(checkbox).toHaveAttribute("aria-checked", "false");
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible();
+		expect(await page.evaluate(() => (window as any).__forkBodies.length)).toBe(0);
+
+		// Toggle back on so the fork posts newWorktree:true.
+		await checkbox.click();
+		await expect(checkbox).toHaveAttribute("aria-checked", "true");
+		expect(await page.evaluate(() => (window as any).__forkBodies.length)).toBe(0);
+
+		// Clicking the rest of the row forks using the current checkbox state.
+		await forkItem.click();
+		await expectNoPopover(page);
+		await expect.poll(() => page.evaluate(() => (window as any).__forkBodies), { timeout: 10_000 }).toEqual([{ newWorktree: true }]);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toBe(`#/session/${navTarget}`);
+	});
+
+	test("fork posts newWorktree:false when the New worktree checkbox is unchecked", async ({ page }) => {
+		const sourceId = await createSession();
+		sessionIds.push(sourceId);
+		await waitForSessionStatus(sourceId, "idle");
+		const navTarget = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+
+		await page.route(`**/api/sessions/${sourceId}/fork`, async (route) => {
+			const post = route.request().postDataJSON?.() ?? {};
+			await page.evaluate((b) => { (window as any).__forkBodies = [...((window as any).__forkBodies || []), b]; }, post);
+			await route.fulfill({
+				status: 201,
+				contentType: "application/json",
+				body: JSON.stringify({ id: navTarget, cwd: "/tmp/fork", status: "idle", title: "Fork: Source", projectId: "p" }),
+			});
+		});
+
+		const row = await openSession(page, sourceId);
+		await page.evaluate(() => { (window as any).__forkBodies = []; });
+		await openMenu(row, "session", sourceId);
+
+		const checkbox = page.locator('sidebar-actions-popover [role="menuitemcheckbox"][data-sidebar-action-id="fork"]').first();
+		await checkbox.click();
+		await expect(checkbox).toHaveAttribute("aria-checked", "false");
+		await menuItem(page, "fork").click();
+		await expectNoPopover(page);
+		await expect.poll(() => page.evaluate(() => (window as any).__forkBodies), { timeout: 10_000 }).toEqual([{ newWorktree: false }]);
+		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toBe(`#/session/${navTarget}`);
 	});
 
 	test("Open on GitHub mirrors the goal-row PR badge: coloured PR icon + url only when the badge shows", async ({ page }) => {

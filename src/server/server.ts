@@ -116,9 +116,6 @@ function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
 
-function isSandboxContainerPath(cwd?: string): boolean {
-	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
-}
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -2103,42 +2100,17 @@ async function handleApiRoute(
 		return cwd;
 	}
 
-	function sourceProjectRoot(projectId?: string): string | undefined {
-		return projectId ? projectRegistry.get(projectId)?.rootPath : undefined;
-	}
-
-	function duplicateSourceCwd(ps: any): string {
-		const projectRoot = sourceProjectRoot(ps.projectId);
-		if (ps.worktreePath && ps.repoPath && ps.cwd) {
-			const rel = path.relative(ps.worktreePath, ps.cwd);
-			if (rel && rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) {
-				return path.join(ps.repoPath, rel);
-			}
-			return ps.repoPath;
-		}
-		if (ps.sandboxed && isSandboxContainerPath(ps.cwd)) return projectRoot || config.defaultCwd;
-		return ps.cwd || projectRoot || config.defaultCwd;
-	}
-
-	async function duplicateSessionWorktreeOpts(ps: any, cwd: string): Promise<{ repoPath: string } | undefined> {
-		if (!ps.worktreePath && !ps.repoWorktrees) return undefined;
-		if (ps.repoPath) return { repoPath: ps.repoPath };
-		const projectRoot = sourceProjectRoot(ps.projectId);
-		if (projectRoot) return { repoPath: projectRoot };
-		try {
-			if (await isGitRepo(cwd)) return { repoPath: await getRepoRoot(cwd) };
-		} catch { /* ignore */ }
-		return undefined;
-	}
-
-	function isUnsupportedDuplicateSource(session: any, ps: any): string | null {
+	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
+	 * forked. The substrings (archived/terminated/delegate/child/read-only/team)
+	 * are load-bearing — the API E2E asserts on them. */
+	function isUnsupportedForkSource(session: any, ps: any): string | null {
 		if (!session || !ps) return "session not found";
-		if (ps.archived) return "archived sessions cannot be duplicated";
-		if (session.status === "terminated") return "terminated sessions cannot be duplicated";
-		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be duplicated";
-		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be duplicated";
-		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be duplicated";
-		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be duplicated";
+		if (ps.archived) return "archived sessions cannot be forked";
+		if (session.status === "terminated") return "terminated sessions cannot be forked";
+		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be forked";
+		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be forked";
+		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be forked";
+		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be forked";
 		return null;
 	}
 
@@ -6753,19 +6725,24 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/sessions/:id/duplicate — duplicate a live plain session without transcript/tool/proposal state.
-	const duplicateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/duplicate$/);
-	if (duplicateMatch && req.method === "POST") {
-		const sourceId = duplicateMatch[1];
-		await readBody(req).catch(() => ({}));
+	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
+	// transcript (and tool-content / proposal drafts) into a fresh session and
+	// preserve its project/goal/task/model/role context. The caller chooses
+	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
+	if (forkMatch && req.method === "POST") {
+		const sourceId = forkMatch[1];
+		const forkBody = await readBody(req).catch(() => ({} as any));
+		// Default to a NEW worktree when the flag is omitted.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
 
 		const source = sessionManager.getSession(sourceId);
 		const ps = sessionManager.getPersistedSession(sourceId);
 		if (!ps) { json({ error: "session not found" }, 404); return; }
-		if (ps.archived) { json({ error: "archived sessions cannot be duplicated" }, 422); return; }
-		if (!source) { json({ error: "only live sessions can be duplicated" }, 422); return; }
+		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
 
-		const unsupported = isUnsupportedDuplicateSource(source, ps);
+		const unsupported = isUnsupportedForkSource(source, ps);
 		if (unsupported) { json({ error: unsupported }, 422); return; }
 
 		const projectId = ps.projectId || source.projectId;
@@ -6780,14 +6757,77 @@ async function handleApiRoute(
 			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
 		}
 
-		const duplicateId = randomUUID();
-		const sourceCwd = goal?.cwd || duplicateSourceCwd({ ...ps, projectId });
-		const worktreeOpts = ps.goalId ? undefined : await duplicateSessionWorktreeOpts(ps, sourceCwd);
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+
+		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
+		// rows that never persisted `agentSessionFile`.
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+		if (!ps.sandboxed) {
+			try {
+				const st = fs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
+			} catch {
+				json({ error: "source transcript missing or empty" }, 404);
+				return;
+			}
+		}
+
+		const projCwd = projectRegistry.get(projectId)!.rootPath;
+		// Worktree choice:
+		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
+		//    (or a plain project-root session when the project isn't a git repo),
+		//    matching the Continue-Archived flow.
+		//  • newWorktree=false → reuse the source's existing worktree directly. Two
+		//    live sessions intentionally share the tree, so we deliberately do NOT
+		//    register worktree metadata on the fork — terminating either session
+		//    must never tear down the shared worktree/branch.
+		let sessionCwd: string;
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (newWorktree) {
+			sessionCwd = projCwd;
+			try {
+				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch { /* not a git repo — plain project-root session */ }
+		} else {
+			sessionCwd = ps.worktreePath || projCwd;
+			worktreeOpts = undefined;
+		}
+
+		const forkId = randomUUID();
+		// Use the project root for the cloned `.jsonl` slug (same as /continue);
+		// worktree-backed sessions rotate to the final cwd-derived file after the
+		// worktree is ready, adopting this clone via switch_session.
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+
+		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		try {
+			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+			return;
+		}
+		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+		}
+		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
 		const createOpts: any = {
-			sessionId: duplicateId,
+			sessionId: forkId,
 			projectId,
 			sandboxed: !!ps.sandboxed,
 			worktreeOpts,
+			preExistingAgentSessionFile: destJsonl,
 			taskId: ps.taskId,
 			reattemptGoalId: ps.reattemptGoalId,
 			staffId: ps.staffId,
@@ -6796,7 +6836,7 @@ async function handleApiRoute(
 		};
 		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-			createOpts.sandboxBranch = `session/${duplicateId.slice(0, 8)}`;
+			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
 		}
 
 		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
@@ -6824,23 +6864,24 @@ async function handleApiRoute(
 		}
 
 		try {
-			const duplicate = await sessionManager.createSession(sourceCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
 			const baseTitle = (ps.title || source.title || "session").trim() || "session";
-			const title = `Copy of ${baseTitle}`;
-			sessionManager.setTitle(duplicate.id, title, { markGenerated: true });
-			if (ps.staffId) duplicate.staffId = ps.staffId;
-			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(duplicate.id, ps.modelProvider, ps.modelId);
+			const title = `Fork: ${baseTitle}`;
+			sessionManager.setTitle(fork.id, title, { markGenerated: true });
+			if (ps.staffId) fork.staffId = ps.staffId;
+			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
 
 			json({
-				id: duplicate.id,
-				cwd: duplicate.cwd,
-				status: duplicate.status,
+				id: fork.id,
+				cwd: fork.cwd,
+				status: fork.status,
 				projectId,
 				goalId: ps.goalId,
-				assistantType: ps.assistantType,
+				title,
 			}, 201);
 		} catch (err) {
-			jsonError(500, err, { error: `failed to duplicate session: ${err instanceof Error ? err.message : String(err)}` });
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
 		}
 		return;
 	}

@@ -2181,44 +2181,48 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 	}
 }
 
-export type DuplicateSessionResponse = {
+export type ForkSessionResponse = {
 	id: string;
 	cwd: string;
 	status: string;
 	projectId?: string;
 	goalId?: string;
-	assistantType?: string;
+	title?: string;
 };
 
-export async function duplicateSession(source: GatewaySession): Promise<void> {
+/**
+ * Fork a live session: the server clones its conversation history into a new
+ * session and either spins up a fresh worktree (`newWorktree: true`, default)
+ * or reuses the source session's existing worktree (`newWorktree: false`).
+ */
+export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = source.goalId || null;
 	renderApp();
 	try {
-		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/duplicate`, { method: "POST" });
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
+			method: "POST",
+			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));
-			const err = new Error((data && data.error) || `Session duplicate failed: ${res.status}`);
+			const err = new Error((data && data.error) || `Session fork failed: ${res.status}`);
 			(err as any).code = data?.code;
 			(err as any).stack = data?.stack || (err as any).stack;
 			throw err;
 		}
-		const duplicate = await res.json() as DuplicateSessionResponse;
-		if (!duplicate?.id) throw new Error("Session duplicate response did not include an id");
+		const fork = await res.json() as ForkSessionResponse;
+		if (!fork?.id) throw new Error("Session fork response did not include an id");
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;
 		await refreshSessions();
-		await connectToSession(
-			duplicate.id,
-			false,
-			duplicate.assistantType ? { assistantType: duplicate.assistantType } : undefined,
-		);
+		await connectToSession(fork.id, false);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		const code = err && typeof err === "object" ? (err as any).code : undefined;
 		const stack = err instanceof Error ? err.stack : undefined;
-		showConnectionError("Failed to duplicate session", msg, { code, stack });
+		showConnectionError("Failed to fork session", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;
