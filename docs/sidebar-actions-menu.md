@@ -12,8 +12,12 @@ On desktop, each supported sidebar row keeps its existing hover-revealed action 
 - Focusing a quick action also reveals the strip via `:focus-within`, so the hamburger is reachable by keyboard tab order even without pointer hover.
 - The hamburger is a menu button with `aria-haspopup="menu"`, synchronized `aria-expanded`, and an entity-specific label (`Session actions` or `Goal actions`).
 - Opening the menu does not reparent the quick buttons. Their direct click behavior remains the same; the hamburger is additive.
+- While the menu is open, the hamburger trigger stays visible — only the quick-action buttons fade out (they animate into the menu via the FLIP transition below).
+- The action strip is a zero-footprint absolute sibling, so a row's idle activity-time keeps its original flush-right resting position whether or not the strip is revealed. The strip remains keyboard-focusable.
 
-The popover rows use the same action model as the quick buttons. This keeps labels, icons, destructive tone, and click handlers in one place.
+The popover rows use the same action model as the quick buttons. This keeps labels, icons, destructive tone, and click handlers in one place. Menu items are ordered so the right-most hover button maps to the top menu row.
+
+The popover is themed to match `ProjectPickerPopover` (8px radius, soft drop shadow, ~13px type honoring `--sidebar-font-scale`, `6px 10px` rows with `4px` radius, and `var(--accent)` hover background).
 
 ## Keyboard behavior
 
@@ -67,7 +71,7 @@ The `Fork` row has a trailing `New worktree` checkbox (`role="menuitemcheckbox"`
 - `Space` on the highlighted Fork row toggles the checkbox; `Enter` activates the fork. The checkbox is keyboard reachable and never dismisses the menu.
 - Checked → `newWorktree: true` (fresh worktree); unchecked → `newWorktree: false` (reuse the source worktree). The default resets to checked each time the menu opens.
 
-### Copy link and fallback
+### Copy link and toast
 
 Session copy uses the canonical hash route:
 
@@ -75,7 +79,14 @@ Session copy uses the canonical hash route:
 ${location.origin}${location.pathname}${location.search}#/session/<sessionId>
 ```
 
-The client first calls `navigator.clipboard.writeText`. If clipboard access is unavailable or rejected, it lazy-loads `copy-link-fallback-dialog` with the title `Copy session link` and a preselected readonly input containing the URL.
+The `Copy link` menu item uses the lucide `Link` icon, matching the session header's copy affordance. On select, `copySidebarLink` copies the URL and flashes a `Link copied` toast — it does **not** open a modal.
+
+Copying is resilient to insecure contexts:
+
+1. It first calls `navigator.clipboard.writeText`.
+2. If the async clipboard API is unavailable or rejects (for example over plain `http://`), it falls back to a hidden `<textarea>` plus `document.execCommand("copy")` so the link still copies.
+
+The toast reuses the session header's `showHeaderToast` mechanism (`data-testid="header-toast"`). When no session header is mounted, a standalone toast element is mounted so the confirmation still appears. The `CopyLinkFallbackDialog` modal is no longer used by the sidebar copy path.
 
 ### Fork session endpoint
 
@@ -104,11 +115,11 @@ The client helper `forkSession(source, { newWorktree })` posts to the endpoint, 
 
 | Action | Placement | Availability | Behavior |
 |---|---|---|---|
-| `Re-attempt` | Quick + menu | Goal has no active session | Starts the existing re-attempt flow. |
+| `Re-attempt` | Menu only | Goal has no active session | Starts the existing re-attempt flow. Popover-only — it is intentionally not a hover quick button. |
 | `Archive` | Quick + menu | Goal is not archived | Runs the existing archive/delete-goal handler. |
 | `Goal dashboard` | Quick + menu | Live goal row | Navigates to `#/goal/<goalId>`. |
 | `Copy link` | Menu only | Live goal row | Copies an absolute hash route for the goal. |
-| `Open on GitHub` | Menu only | A PR URL or GitHub branch URL can be resolved | Opens the PR or branch view in a new tab with `noopener` semantics. |
+| `Open on GitHub` | Menu only | Only when the goal-row PR badge is visible | Mirrors the goal-row PR badge — same state-coloured PR/merge icon — and opens the PR `url` in a new tab with `noopener` semantics. |
 
 Goal copy uses the canonical hash route:
 
@@ -116,18 +127,21 @@ Goal copy uses the canonical hash route:
 ${location.origin}${location.pathname}${location.search}#/goal/<goalId>
 ```
 
-Clipboard failure opens the same fallback dialog with the title `Copy goal link`.
+Goal copy behaves exactly like the session copy path above: it copies via `navigator.clipboard.writeText` with the `<textarea>` + `document.execCommand("copy")` fallback and flashes the `Link copied` toast. No modal is shown.
 
 ## GitHub link resolution
 
-`Open on GitHub` is shown only when the app can resolve a safe URL.
+`Open on GitHub` mirrors the goal-row PR badge — it is shown only in exactly the cases where that badge renders, and it links to the same PR URL.
 
 Client behavior:
 
-1. Use `state.prStatusCache.get(goal.id)?.url` immediately when present.
-2. Otherwise, when the goal menu opens, lazy-fetch `GET /api/goals/:id/github-link`.
-3. Cache positive responses briefly and negative responses for a shorter period, so no-remote states can refresh after a remote/branch appears.
-4. Refresh the open popover when an async fetch makes `Open on GitHub` newly available.
+1. The menu item is added only when the goal-row PR badge is visible. That badge requires a PR in `state.prStatusCache.get(goal.id)` with a `url`, and — for workflow goals — a fully-passed gate summary (`gs.passed === gs.total` with `gs.total > 0`). The shared `resolveGoalPrBadge` helper decides both the badge and the menu item, so they never diverge.
+2. The menu item reuses the goal row's state-coloured PR/merge SVG icon (MERGED `#a87fd4`; CLOSED / CHANGES_REQUESTED `#c47070`; APPROVED / default `#6bc485`; REVIEW_REQUIRED `#d4a04a`).
+3. Selecting it opens `pr.url` in a new tab with `noopener` semantics.
+
+The earlier branch-fallback menu item was removed. The browser no longer constructs a branch-only `Open on GitHub` entry; if no PR badge is showing, the item simply isn't present.
+
+The `GET /api/goals/:id/github-link` endpoint still exists (it returns a PR URL or a sanitized GitHub branch fallback, resolved through `execFile` argument arrays with no shell interpolation of branch names), but it no longer gates this menu item. The server-side resolution is documented below and in [REST API](rest-api.md#goal-github-link-endpoint).
 
 Server behavior:
 
@@ -172,7 +186,7 @@ When `prefers-reduced-motion: reduce` matches, FLIP and slide animations are ski
 For changes to this feature, run the focused coverage first:
 
 ```bash
-npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/sidebar-actions-flip.test.ts tests/sidebar-actions-server.test.ts
+npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/sidebar-actions-flip.test.ts
 npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts
 ```
 
@@ -184,4 +198,4 @@ npm run test:unit
 npm run test:e2e
 ```
 
-The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success/fallback, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), GitHub PR/branch/no-remote states, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression.
+The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`.
