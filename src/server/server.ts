@@ -24,6 +24,7 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
+import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
@@ -3803,12 +3804,12 @@ async function handleApiRoute(
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
-				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
-				if (isMulti && proj?.rootPath) {
-					worktreeOpts = { repoPath: proj.rootPath };
-				} else if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
+				// Single source of truth shared with the staff path
+				// (staff-manager.ts) and goal path (goal-manager.ts).
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				if (support.supported && support.repoPath) {
+					worktreeOpts = { repoPath: support.repoPath };
 				}
 			} catch {
 				// Not a git repo or git not available — silently ignore

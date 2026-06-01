@@ -449,11 +449,31 @@ export async function createWorktreeSet(
 		};
 	}
 
+	// Multi-repo: drop a non-git `.` container entry. In a poly-repo (non-git
+	// container root + git sub-repos) the component list may still carry a
+	// `repo: "."` entry pointing at the non-git container `rootPath`. Running
+	// `git worktree add` there fails with `fatal: not a git repository`, so it
+	// must never reach worktree creation. A `.` entry whose source IS a git repo
+	// (genuine container-root component) is kept. See docs/design/multi-repo-components.md.
+	const repoList: string[] = [];
+	for (const repo of repos) {
+		if (repo === "." && !(await isGitRepo(rootPath))) continue;
+		repoList.push(repo);
+	}
+
 	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
 	// `worktreeRoot` honors the project-level `worktree_root` override; falls back
 	// to `<rootPath>-wt/` when unset.
 	const wtRoot = wtRootHelper({ rootPath, worktreeRoot: opts?.worktreeRoot });
 	const container = path.join(wtRoot, slug);
+
+	// If no worktree-able repo remains after skipping the non-git container,
+	// short-circuit WITHOUT creating the container directory. Callers treat an
+	// empty `worktrees[]` as "no worktree-able repo" (graceful no-worktree).
+	if (repoList.length === 0) {
+		return { container, worktrees: [] };
+	}
+
 	if (!fs.existsSync(container)) {
 		fs.mkdirSync(container, { recursive: true });
 	}
@@ -461,7 +481,7 @@ export async function createWorktreeSet(
 	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 
 	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
-	for (const repo of repos) {
+	for (const repo of repoList) {
 		const repoSrc = path.join(rootPath, repo);
 		const wtPath = path.join(container, repo);
 		if (!fs.existsSync(repoSrc)) {
