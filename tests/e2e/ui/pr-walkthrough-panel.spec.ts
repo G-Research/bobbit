@@ -1181,6 +1181,64 @@ This is the author's source description with **markdown**.
 		await standalone.close();
 	});
 
+	test("standalone ready walkthrough exposes working fullscreen, collapse, and keyboard resize controls", async ({ page, context }) => {
+		// Reproduces the panel-resize bug: on the standalone (ready) walkthrough
+		// route the fullscreen button, the collapse button, and the panel
+		// keyboard shortcuts are all silent no-ops simultaneously (see
+		// docs/design/walkthrough-panel-resize-fix.md). The standalone route is
+		// rendered by a different code path that omits the resize toolbar, and
+		// the shortcut/collapse plumbing keys off the bare activeSessionId()
+		// (undefined here) instead of the route's walkthrough session id.
+		await setupWalkthrough(page, { width: 1600, height: 900 });
+
+		const openStandalone = page.locator(`${tid("side-panel-open-in-new-tab")}, ${tid("pr-walkthrough-open-in-new-tab")}, a[title*="Open walkthrough"], button[title*="Open walkthrough"]`).first();
+		await expect(openStandalone, "active walkthrough tabs should expose an open-in-new-tab toolbar affordance").toBeVisible({ timeout: 10_000 });
+		const [standalone] = await Promise.all([
+			context.waitForEvent("page"),
+			openStandalone.click(),
+		]);
+		await standalone.setViewportSize({ width: 1700, height: 1000 });
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(standalone, "standalone URL should preserve walkthrough/tab identity").toHaveURL(/walkthrough|pr-walkthrough/);
+		await expect(walkthroughPanel(standalone), "standalone route should render the ready walkthrough component").toBeVisible({ timeout: 15_000 });
+
+		const fullscreenState = () => standalone.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.previewPanelFullscreen === true;
+		});
+		const expandButton = () => standalone.locator(`${tid("preview-expand")}, button[title*="Expand preview"], button[title*="Expand walkthrough"]`).first();
+		const collapseButton = () => standalone.locator(`button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
+
+		// (1) Fullscreen control is present and clicking it enters fullscreen.
+		const fullscreenButton = standalone.locator(`${tid("pr-walkthrough-fullscreen")}, ${tid("side-panel-fullscreen")}, button[title*="Fullscreen"]`).first();
+		await expect(fullscreenButton, "standalone ready walkthrough must expose a fullscreen resize control").toBeVisible({ timeout: 10_000 });
+		await fullscreenButton.click();
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "clicking the standalone fullscreen control must enter fullscreen" }).toBe(true);
+
+		// (2) A keyboard shortcut operates on the standalone walkthrough panel.
+		// toggle-preview (Ctrl+]) steps fullscreen → split.
+		await standalone.keyboard.press("Control+]");
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "the toggle-preview keyboard shortcut must exit fullscreen on the standalone walkthrough panel" }).toBe(false);
+		await expect(walkthroughPanel(standalone), "exiting fullscreen should keep the standalone walkthrough in split view").toBeVisible({ timeout: 10_000 });
+
+		// (3) Collapse control is present and collapses the panel.
+		await expect(collapseButton(), "standalone ready walkthrough must expose a collapse resize control").toBeVisible({ timeout: 10_000 });
+		await collapseButton().click();
+		await expect(expandButton(), "collapsing the standalone walkthrough must reveal an expand control").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(standalone), "collapsed standalone walkthrough should hide the panel body").toBeHidden({ timeout: 10_000 });
+
+		// Collapsed state persists across reload.
+		await standalone.reload();
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(expandButton(), "collapsed standalone walkthrough state must persist across reload").toBeVisible({ timeout: 15_000 });
+
+		// Expanding restores the panel body.
+		await expandButton().click();
+		await expect(walkthroughPanel(standalone), "expanding should restore the standalone walkthrough panel body").toBeVisible({ timeout: 10_000 });
+
+		await standalone.close();
+	});
+
 	test("slash command creates a child session, waits for YAML, then applies interactive ready cards", async ({ page, context }) => {
 		const waiting = await setupWaitingWalkthrough(page, { width: 1920, height: 1080 }, "/walkthrough-pr 789");
 		await expect(page.getByTestId("pr-walkthrough-panel-root"), "child should remain in waiting state until YAML submission succeeds").toHaveAttribute("data-walkthrough-status", "waiting_for_yaml");
