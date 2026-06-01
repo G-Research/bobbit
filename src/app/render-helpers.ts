@@ -685,7 +685,10 @@ function canForkSidebarSession(session: GatewaySession): boolean {
 		&& !session.readOnly
 		&& !session.nonInteractive
 		&& !isChildSession(session)
-		&& !session.role
+		// Mirror the server guard isUnsupportedForkSource() in src/server/server.ts:
+		// among role-based sessions, only "team-lead" is non-forkable; "general" and
+		// "assistant" are forkable. Keep client and server consistent.
+		&& session.role !== "team-lead"
 		&& !session.teamGoalId
 		&& !session.teamLeadSessionId;
 }
