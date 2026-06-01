@@ -336,6 +336,13 @@ export class MessageEditor extends LitElement {
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
+		// IME composition guard (S3): while composing CJK/dead-key text, the Enter
+		// that COMMITS the candidate must not send the message. WebKit reports
+		// `isComposing===true` with key "Enter"; Chromium/Firefox report keyCode 229
+		// ("Process"). Bail before any Enter/Tab/slash handling so the composition
+		// commit is left to the IME. Zero effect for non-IME users.
+		if (e.isComposing || e.keyCode === 229) return;
+
 		// Slash autocomplete keyboard handling
 		if (this._slashMenuOpen) {
 			if (e.key === "ArrowDown") {
