@@ -787,7 +787,13 @@ function flattenDiffBlocks(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrW
 }
 
 function isDiffBlock(value: unknown): value is PrWalkthroughDiffBlock {
-	return isRecord(value) && typeof value.id === "string" && typeof value.filePath === "string" && Array.isArray(value.hunks);
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.filePath === "string" &&
+		Array.isArray(value.hunks) &&
+		value.hunks.every(hunk => isRecord(hunk) && typeof hunk.header === "string")
+	);
 }
 
 function selectLine(hunk: PrWalkthroughHunk, anchor: PrWalkthroughYamlAnchor): PrWalkthroughDiffLine | undefined {
