@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import {
 	parseBaseRef,
+	parseLsRemoteSymref,
 	resolveBaseRef,
 	resolveBaseRefWithExec,
 } from "../src/server/skills/git.ts";
@@ -86,6 +87,47 @@ describe("parseBaseRef", () => {
 		assert.equal(result.ref, "upstream/main");
 		assert.equal(result.branch, "upstream/main");
 		assert.equal(result.isRemote, false);
+	});
+});
+
+describe("parseLsRemoteSymref", () => {
+	it("master symref on first line → 'master'", () => {
+		assert.equal(parseLsRemoteSymref("ref: refs/heads/master\tHEAD"), "master");
+	});
+
+	it("nested-slash branch keeps inner slashes", () => {
+		assert.equal(parseLsRemoteSymref("ref: refs/heads/feature/x\tHEAD"), "feature/x");
+	});
+
+	it("multi-line (symref line + sha line) parses the symref", () => {
+		const out = "ref: refs/heads/main\tHEAD\n0123456789abcdef0123456789abcdef01234567\tHEAD";
+		assert.equal(parseLsRemoteSymref(out), "main");
+	});
+
+	it("space-separated columns are tolerated", () => {
+		assert.equal(parseLsRemoteSymref("ref: refs/heads/develop   HEAD"), "develop");
+	});
+
+	it("CRLF line endings are tolerated", () => {
+		const out = "ref: refs/heads/master\tHEAD\r\n0123abc\tHEAD\r\n";
+		assert.equal(parseLsRemoteSymref(out), "master");
+	});
+
+	it("symref line not first is still found", () => {
+		const out = "# comment\nref: refs/heads/release/2026.05\tHEAD";
+		assert.equal(parseLsRemoteSymref(out), "release/2026.05");
+	});
+
+	it("missing ref line → null", () => {
+		assert.equal(parseLsRemoteSymref("0123456789abcdef\tHEAD"), null);
+	});
+
+	it("empty string → null", () => {
+		assert.equal(parseLsRemoteSymref(""), null);
+	});
+
+	it("non-heads symref (e.g. tags) → null", () => {
+		assert.equal(parseLsRemoteSymref("ref: refs/tags/v1.0\tHEAD"), null);
 	});
 });
 

@@ -58,7 +58,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -2759,6 +2759,21 @@ async function handleApiRoute(
 					return c?.projectConfigStore.get("base_ref") || undefined;
 				});
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					if (detected && isValidBaseRefBranchGrammar(detected)) cfg.set("base_ref", detected);
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -2857,7 +2872,53 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
 			const promoted = projectRegistry.promote(projectId, { name });
+			// Pin base_ref from the live remote (best-effort) now that the
+			// promoted project's rootPath is a real git repo. Mirrors the
+			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
+			try {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				const rootPath = projectRegistry.get(projectId)?.rootPath;
+				const cfg = ctx?.projectConfigStore;
+				if (cfg && rootPath && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					if (detected && isValidBaseRefBranchGrammar(detected)) cfg.set("base_ref", detected);
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/base-ref/detect — read-only resolver helper.
+	// Returns { resolved, detected }:
+	//   resolved = what worktrees actually branch off right now
+	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
+	//   detected = live `git ls-remote --symref origin HEAD` result, or null on
+	//              failure (offline / no remote).
+	// Scoped to the project's pool/primary repo (same selection as add-time
+	// pinning). No mutation. See docs/design/base-ref.md.
+	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
+	if (baseRefDetectMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(baseRefDetectMatch[1]);
+		const rootPath = projectRegistry.get(baseRefDetectMatch[1])?.rootPath;
+		if (!ctx || !rootPath) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const cfg = ctx.projectConfigStore;
+			const comps = cfg.getComponents();
+			const isMultiRepo = comps.some(c => c.repo !== ".");
+			const primaryRepoPath = isMultiRepo
+				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+				: await getRepoRoot(rootPath);
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			const detected = await detectBaseRefFromRemote(primaryRepoPath);
+			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);
 		}
