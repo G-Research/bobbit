@@ -13,6 +13,14 @@ honors `state.previewPanelFullscreen` and the per-session collapse key
 identically, and **never auto-enters fullscreen** — fullscreen is only ever
 entered by an explicit user action (toolbar button or keyboard shortcut).
 
+Why this matters: the dead controls were never a missing-feature problem. The
+shared preview-panel plumbing already rendered the toolbar and bound the
+keyboard shortcuts for walkthrough tabs. The controls were inert only because a
+layer of walkthrough-specific logic kept overriding the shared state. Deleting
+that layer — rather than adding parallel walkthrough resize code — is what makes
+the panel behave like the preview panel, and it keeps a single resize code path
+instead of two that can drift.
+
 ## Background — the wrong first attempt (PR #677)
 
 PR #677 assumed the dead controls lived on the standalone `/walkthrough` pop-out
@@ -80,8 +88,19 @@ walkthrough-specific logic layered on top of the shared preview-panel plumbing:
 
 | Surface | Panel-level resize controls |
 |---|---|
-| In-app side panel (split with chat) | Fullscreen + collapse work via the unified toolbar and the keyboard shortcuts (`toggle-sidebar`, `sidebar-expand`, `toggle-fullscreen-preview`), identical to the HTML preview panel. Starts in split view; fullscreen only on user action; state persists across reload. |
+| In-app side panel (split with chat) | Fullscreen + collapse work via the unified toolbar and the keyboard shortcuts (`toggle-sidebar` = Ctrl+[, `toggle-preview` = Ctrl+], `toggle-fullscreen-preview` = Ctrl+#), identical to the HTML preview panel. Starts in split view; fullscreen only on user action; state persists across reload. |
 | Popped-out standalone `/walkthrough` | None — the walkthrough fills the window. The component's internal rail toggle still works. |
+
+### The internal rail toggle is a different control
+
+The walkthrough component's own review-rail collapse/expand button
+(`data-testid="pr-walkthrough-rail-toggle"` / `.rail-toggle`, using
+`PanelLeftClose`/`PanelLeftOpen`, in
+`src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`) is **not** part of the
+panel-level window chrome. It collapses the review rail *inside* the walkthrough,
+not the window-level panel, so it is present and functional on **both** surfaces.
+This goal only removed the panel-level fullscreen/collapse/expand chrome from the
+standalone route; the rail toggle was never touched.
 
 ## Tests
 

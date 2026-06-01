@@ -1,5 +1,14 @@
 # PR walkthrough agent session architecture
 
+> **Superseded behaviour:** this doc's references to switching the child to
+> fullscreen review mode "on success" / "on ready" describe the original design.
+> That auto-fullscreen-on-ready plumbing has since been **removed** — the
+> walkthrough panel now shares the HTML preview panel's resize logic and
+> fullscreen is strictly user-initiated. See
+> [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md). The rest of
+> this design (child session, bundle, YAML submission, persistence, export) is
+> still accurate.
+
 ## Summary
 
 Launching a PR walkthrough creates a first-class, read-only child agent session instead of resolving cards silently in the launching session. Before that child starts, the server resolves the PR metadata and diff once, sanitizes it, and persists a versioned analysis bundle for the job. The child session owns the walkthrough side panel, reports progress in chat, reads the persisted bundle through a scoped tool, submits one validated YAML document through a walkthrough-only tool, then stays alive for follow-up questions.
