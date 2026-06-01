@@ -1,5 +1,7 @@
 # Sidebar Actions Menu implementation plan
 
+> Superseded by design-doc Revision 2.1 — see docs/sidebar-actions-menu.md for the authoritative shipped behavior.
+
 ## Scope and ownership
 
 This document is the implementation handoff for the Sidebar Actions Menu goal. It is based on inspection of:
@@ -16,10 +18,10 @@ Implementation should be split by owner so parallel agents do not collide:
 
 | Area | Owner file(s) | Responsibility |
 |---|---|---|
-| Sidebar action modeling and row wiring | `src/app/render-helpers.ts` | Build session/goal action arrays, keep existing hover buttons, add hamburger trigger, mount/unmount popover, copy/duplicate/open handlers. |
-| Popover component and FLIP helper | `src/ui/components/SidebarActionsPopover.ts` plus optional `src/ui/components/sidebar-actions-flip.ts` | Render menu, keyboard nav, outside/Escape dismissal, positioning, shared-element animation. |
-| Session duplicate endpoint + helper | `src/server/server.ts`, `src/app/session-manager.ts` | Add dedicated `POST /api/sessions/:id/duplicate`, then export a client helper that calls that endpoint, refreshes session list, and connects. |
-| GitHub branch URL resolver | `src/server/server.ts` and `src/app/api.ts` | Add required `GET /api/goals/:id/github-link` branch fallback resolver for `Open on GitHub`. |
+| Sidebar action modeling and row wiring | `src/app/render-helpers.ts` | Build session/goal action arrays, keep existing hover buttons, add hamburger trigger, mount/unmount popover, copy/fork/open handlers, `canForkSidebarSession` guard. |
+| Popover component and FLIP helper | `src/ui/components/SidebarActionsPopover.ts` plus optional `src/ui/components/sidebar-actions-flip.ts` | Render menu, keyboard nav, outside/Escape dismissal, positioning, shared-element animation, Fork "New worktree" `menuitemcheckbox`. |
+| Session fork endpoint + helper | `src/server/server.ts`, `src/app/session-manager.ts` | Add dedicated `POST /api/sessions/:id/fork` (transcript clone + `newWorktree` body), then export a client helper that calls that endpoint, refreshes session list, and connects. |
+| GitHub link resolver | `src/server/server.ts` and `src/app/api.ts` | `GET /api/goals/:id/github-link` (`execFile`-based, sanitized) still exists but no longer gates the menu item; `Open on GitHub` mirrors the goal-row PR badge. |
 | Modal/open-popover suppression | `src/ui/components/AgentInterface.ts` | Add `sidebar-actions-popover` to the global Escape suppression selector. |
 | Tests | `tests/e2e/ui/sidebar-actions-menu.spec.ts` plus conditional unit test | Browser coverage for menu behavior; unit coverage is required whenever FLIP rect/delta logic is extracted to a helper. |
 
@@ -39,7 +41,7 @@ No `src/` or `tests/` changes are made by this research task.
 - Uses `.sidebar-actions hidden group-hover:flex` only on desktop; mobile renders the same `buttons` template inline.
 - Keeps the row click as session navigation: `connectToSession(session.id, true)`.
 
-`renderTeamLeadRow(session, childCount, expanded)` duplicates the same Modify + End team action strip, with termination routed through `terminateSession(session.id, { goalId, isTeamLead: true })`.
+`renderTeamLeadRow(session, childCount, expanded)` reuses the same Modify + End team action strip, with termination routed through `terminateSession(session.id, { goalId, isTeamLead: true })`. Team-lead rows expose `copy-link` in the menu but **never** `fork` (team sources are unsupported / `422`).
 
 Archived session rows do not currently expose hover actions. Leave them out of v1 unless explicitly expanded later.
 
@@ -48,9 +50,9 @@ Archived session rows do not currently expose hover actions. Leave them out of v
 `renderGoalGroup(goal: Goal)` currently:
 
 - Builds three possible hover actions:
-  - Re-attempt: `startReattempt(goal.id)`, only when `!hasActiveSession`.
-  - Archive: `deleteGoal(goal.id)`, only when `!goal.archived`.
-  - Goal dashboard: `setHashRoute("goal-dashboard", goal.id)`, always present in the current live goal header.
+  - Re-attempt: `startReattempt(goal.id)`, only when `!hasActiveSession`. **Popover-only (`quick: false`)** — intentionally not a hover quick-action button.
+  - Archive: `deleteGoal(goal.id)`, only when `!goal.archived`. Hover quick action.
+  - Goal dashboard: `setHashRoute("goal-dashboard", goal.id)`, always present. Hover quick action.
 - Uses `state.prStatusCache.get(goal.id)` for PR state/badge; entries have shape `{ state, url?, number?, reviewDecision?, mergeable? }`.
 - Uses canonical goal route `#/goal/<goalId>` through `setHashRoute("goal-dashboard", goal.id)` and `sidebar-nav.ts::navIdToHash()`.
 
@@ -117,11 +119,13 @@ function renderSidebarActionsTrigger(input: { kind: SidebarActionEntityKind; ent
 
 Use stable action ids for animation/test selectors:
 
-| Entity | Existing quick ids | New menu-only ids |
+| Entity | Existing quick ids (`quick: true`) | Menu-only ids (`quick: false`) |
 |---|---|---|
-| Session | `modify`, `terminate` | `copy-link`, `duplicate` |
-| Team lead | `modify`, `terminate` | `copy-link`; `duplicate` optional/hidden for v1 because team duplication semantics are unclear |
-| Goal | `reattempt`, `archive`, `dashboard` | `copy-link`, `open-github` |
+| Session | `modify`, `terminate` | `copy-link`, `fork` (only when `canForkSidebarSession`) |
+| Team lead | `modify`, `terminate` | `copy-link` — **no `fork`** (team sources are unsupported / `422`) |
+| Goal | `archive`, `dashboard` | `reattempt` (popover-only, when `!hasActiveSession`), `copy-link`, `open-github` (PR-badge-mirrored) |
+
+The `fork` popover row carries an optional trailing-toggle descriptor for its inline `role="menuitemcheckbox"` "New worktree" control (default checked). `canForkSidebarSession(session)` is the client availability guard — standalone live sessions only (not terminated/archived/read-only/non-interactive/child/role-bearing/team), kept in lockstep with the server `422` scope.
 
 Every rendered action button/menu row should carry:
 
@@ -255,7 +259,7 @@ Algorithm:
 4. Component renders final menu rows with matching `data-sidebar-action-id`.
 5. In `firstUpdated` / `updated(open)`, collect target icon rects for matching quick actions.
 6. If `matchMedia("(prefers-reduced-motion: reduce)").matches`, skip FLIP and only show final rows.
-7. Otherwise, for each matching quick action icon, animate the target icon from source to target using Web Animations. For menu-only actions (`copy-link`, `duplicate`, `open-github`), animate their rows with a short opacity + translateY fade/slide after a 40–70 ms delay so new actions visibly appear alongside the shared quick actions:
+7. Otherwise, for each matching quick action icon, animate the target icon from source to target using Web Animations. For menu-only actions (`copy-link`, `fork`, `reattempt`, `open-github`), animate their rows with a short opacity + translateY fade/slide after a 40–70 ms delay so new actions visibly appear alongside the shared quick actions:
 
 ```ts
 el.animate([
@@ -297,69 +301,62 @@ Use hash routes for sidebar copy links. The existing header copy button uses `${
 Copy helper:
 
 ```ts
-async function copySidebarLink(url: string, title: "Copy session link" | "Copy goal link"): Promise<void> {
+async function copySidebarLink(url: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(url);
-    showHeaderToast("Link copied");
   } catch {
-    const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
-    m.CopyLinkFallbackDialog.show(url, { title });
+    // Legacy fallback so links still copy in insecure http:// contexts.
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
   }
+  showHeaderToast("Link copied");
 }
 ```
 
-Update `CopyLinkFallbackDialog.show` to accept an optional context label so goal fallback wording is accurate:
+The sidebar copy path does **not** use the `CopyLinkFallbackDialog` modal. After copying (via the Clipboard API or the legacy `<textarea>` + `document.execCommand("copy")` fallback), flash a `Link copied` toast through `showHeaderToast` (`data-testid="header-toast"`; mount a standalone toast when no session header is present). The copy-link menu icon is the lucide `Link` icon.
 
-```ts
-CopyLinkFallbackDialog.show(url, { title: "Copy goal link" });
-```
+## Fork session decision
 
-Default remains `Copy session link` for existing callers. Sidebar session copy uses `Copy session link`; sidebar goal copy uses `Copy goal link`.
-
-## Duplicate session decision
-
-Decision: **add a dedicated `POST /api/sessions/:id/duplicate` endpoint for v1**. The goal requires “forks the session into a new one with the same project/goal/spec context”; the server owns the authoritative persisted session metadata and can preserve context more reliably than a client-side best-effort `POST /api/sessions` call. This endpoint duplicates context, not transcript history.
+Decision: **add a dedicated `POST /api/sessions/:id/fork` endpoint** (the prior `/duplicate` route is renamed to `/fork`). Fork **clones the source session's conversation history** — like the archived **Continue** flow — copying the `.jsonl` transcript plus the tool-content and proposal dirs, and spawning the new session with `preExistingAgentSessionFile`.
 
 Endpoint shape:
 
 ```http
-POST /api/sessions/:id/duplicate
+POST /api/sessions/:id/fork
 ```
 
-Response:
+Request body `{ newWorktree?: boolean }`, default `true`:
 
-```ts
-type DuplicateSessionResponse = {
-  id: string;
-  cwd: string;
-  status: string;
-  projectId?: string;
-  goalId?: string;
-  assistantType?: string;
-};
-```
+- `true` → create a fresh worktree/branch (or a plain project-root session when the project is not a git repo).
+- `false` → **reuse the source session's existing worktree** (new session `cwd` = source `worktreePath`, same repo/branch; no new worktree registered — the two live sessions intentionally share the tree).
 
 Server contract:
 
-1. Resolve the source from live sessions first. v1 UI calls this only for live sessions.
-2. Reject unsupported sources with `422`: `delegateOf`, `parentSessionId`, `teamGoalId`, `teamLeadSessionId`, `role === "team-lead"`, `readOnly`, and archived sessions.
-3. Read the persisted session record from the project session store so server-only fields are preserved: `projectId`, `cwd`, `goalId`, `assistantType`, `staffId`, `role`, `accessory`, `sandboxed`, model selection (`modelProvider`, `modelId`), and any persisted `reattemptGoalId` / spec-context fields already present on the record.
-4. If the session belongs to a goal, resolve the goal and pass the goal id/cwd/project id so the new session inherits the goal spec context through the existing goal-session creation path.
-5. If the session is staff-backed, preserve `staffId` and assistant/staff context.
-6. Create the new session with the same project/goal/spec context and normal fresh worktree/session lifecycle. Do not copy JSONL transcript, tool-content snapshots, read state, or proposal drafts.
-7. Persist the copied model selection when present using the same store path used by normal WS model persistence.
-8. Title the new session `Copy of <source title>` unless the session manager has a better title hook; never mutate the source.
+1. Resolve the source from live sessions first. v1 UI calls this only for standalone live sessions.
+2. Reject unsupported sources with `422`: archived, terminated, `delegateOf`, first-class child (`parentSessionId`), `teamGoalId`, `teamLeadSessionId`, `role === "team-lead"`, and `readOnly`. The client `canForkSidebarSession` guard agrees with this scope so no shown menu item ever errors server-side.
+3. Clone the source `.jsonl` transcript plus tool-content and proposal dirs, and spawn the new session with `preExistingAgentSessionFile`.
+4. Preserve `projectId`, `cwd`, `goalId`, `assistantType`, `staffId`, `role`, `accessory`, `sandboxed`, `modelProvider`/`modelId`, `reattemptGoalId`, and `taskId`.
+5. Honour the `newWorktree` flag per the body semantics above.
+6. Title the new session `Fork: <source title>`; never mutate the source.
+7. Preserve the prior duplicate route's sandbox allow-list / auth parity.
 
 Client helper signature in `src/app/session-manager.ts`:
 
 ```ts
-export async function duplicateSession(source: GatewaySession): Promise<void>;
+export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void>;
 ```
 
 Client behavior:
 
 ```ts
-const res = await gatewayFetch(`/api/sessions/${source.id}/duplicate`, { method: "POST" });
+const res = await gatewayFetch(`/api/sessions/${source.id}/fork`, {
+  method: "POST",
+  body: JSON.stringify({ newWorktree: opts.newWorktree }),
+});
 const { id } = await res.json();
 await refreshSessions();
 await connectToSession(id, false);
@@ -367,45 +364,27 @@ await connectToSession(id, false);
 
 Compatibility caveats:
 
-- Do **not** offer Duplicate for delegates, first-class children, team leads/team members, archived sessions, or read-only sessions in v1. Their lifecycle semantics are not equivalent to a plain session fork.
-- Do **not** use `POST /api/sessions/:id/continue`; that endpoint is archived-only, rejects live sources with `409`, and clones transcript context, which is a different mental model.
-- Browser E2E must assert context preservation, not just that a new session exists: at minimum the duplicated session has a different id and matching `projectId`, `cwd`, `goalId` when applicable, `assistantType`, and persisted model fields when available in the fixture.
+- Do **not** offer Fork for delegates, first-class children, team leads/team members, archived sessions, or read-only sessions. `canForkSidebarSession` must stay in lockstep with the server `422` scope.
+- Fork with `newWorktree=false` intentionally shares a worktree between two live sessions; terminating one must not delete the shared tree out from under the other.
+- Browser E2E must assert the transcript is cloned and metadata preserved, that `newWorktree=true` allocates a distinct worktree/branch, that `newWorktree=false` reuses the source worktree, and that unsupported sources are rejected with `422`.
 
 ## Open on GitHub decision
 
-Decision: **implement full spec support in v1 with a server-derived branch fallback**. The action must open an existing PR when one is known, otherwise open the goal branch view when the project has a GitHub remote, and be hidden only when no GitHub remote/branch can be resolved.
+Decision: **`Open on GitHub` mirrors the goal-row PR badge**. The menu item is shown **only when the goal-row PR badge is visible** — a PR exists in `state.prStatusCache.get(goal.id)` with a `pr.url`, and for workflow goals the gate summary is fully passed (`gs.passed === gs.total`, `gs.total > 0`). It opens `pr.url` and uses the same state-coloured PR/merge SVG as the goal row via the shared `resolveGoalPrBadge` helper (MERGED `#a87fd4`, CLOSED/CHANGES_REQUESTED `#c47070`, APPROVED/default `#6bc485`, REVIEW_REQUIRED `#d4a04a`). There is **no** client-visible branch-fallback menu item.
 
-Add a small server resolver because the client `Project` and `Goal` models do not contain the GitHub remote URL. The server already shells out to `git remote get-url origin` in sandbox/bootstrap and has token-stripping/parsing utilities; reuse that sanitization style and never construct GitHub URLs from unparsed client strings.
+The `GET /api/goals/:id/github-link` endpoint still exists (server-side resolver, `execFile` argv with no shell interpolation of branch names, sanitized GitHub branch fallback) but **no longer gates this menu item**. Keep it for callers that need a server-derived link; never construct GitHub branch URLs client-side from untrusted remotes.
 
-Endpoint:
+Endpoint (retained, not gating the menu item):
 
 ```http
 GET /api/goals/:id/github-link
 ```
 
-Response:
-
-```ts
-type GoalGithubLinkResponse =
-  | { available: true; url: string; kind: "pr" | "branch" }
-  | { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
-```
-
-Server behavior:
-
-1. Resolve goal across projects.
-2. If `prStatusStore` or fresh `_fetchPrStatus(goal.cwd, goal.branch)` has a PR URL, return `{ kind: "pr", url }`.
-3. Else require `goal.branch`.
-4. Run `git remote get-url origin` in `goal.repoPath || goal.cwd`.
-5. Parse GitHub HTTPS/SSH forms into `https://<host>/<owner>/<repo>/tree/<encoded-branch>`.
-6. Return unavailable for non-GitHub remotes.
-
 Client behavior:
 
-- When building goal menu actions, first use `state.prStatusCache.get(goal.id)?.url` if present so cached PRs open instantly.
-- If no PR URL exists, lazy-fetch `GET /api/goals/:id/github-link` when the menu opens and cache the result per goal id.
-- Render `Open on GitHub` when the resolver returns `available: true`; hide it for `available: false`.
-- Browser E2E must cover three states: PR URL opens PR, no PR + GitHub remote opens branch tree URL, and no GitHub remote hides the row.
+- When building goal menu actions, derive visibility from the same `resolveGoalPrBadge` state used by the goal row — show `Open on GitHub` only when that badge renders and a `pr.url` is present.
+- Use the badge's `pr.url` directly; do not lazy-fetch a branch fallback for the menu item.
+- Browser E2E must assert the item mirrors the badge: a coloured icon opens `pr.url` when the badge shows, and the item is hidden for gated/no-PR goals.
 
 ## Route-change dismissal
 
@@ -449,7 +428,7 @@ Acceptance criteria for mobile v1:
 
 - The hamburger trigger is hidden below the desktop breakpoint.
 - Existing mobile inline quick buttons remain visible and directly clickable.
-- Menu-only actions (Copy link, Duplicate session, Open on GitHub) are intentionally desktop-only in v1.
+- Menu-only actions (Copy link, Fork, Re-attempt, Open on GitHub) are intentionally desktop-only in v1.
 - Browser E2E must resize to mobile and assert the hamburger is absent while existing inline quick actions remain available.
 
 If mobile parity becomes mandatory later, use a bottom sheet instead of an anchored popover below 640 px; that is out of scope for this goal.
@@ -463,7 +442,7 @@ If mobile parity becomes mandatory later, use a bottom sheet instead of an ancho
 - **Animation orphaning:** avoid body-level floating clones unless lifecycle is airtight. Inverted target-icon animation is safer and still satisfies the visual intent.
 - **Reduced motion:** all FLIP and fade/slide animations must be skipped when `prefers-reduced-motion: reduce` matches.
 - **GitHub link trust:** never construct branch URLs from arbitrary remotes without parsing and stripping embedded credentials. Hide action for non-GitHub remotes.
-- **Duplicate semantics:** `POST /api/sessions/:id/duplicate` duplicates project/goal/spec context but not transcript history. If users expect lossless transcript continuation, that is a separate archived-continue style feature.
+- **Fork semantics:** `POST /api/sessions/:id/fork` clones the source transcript (`.jsonl` + tool-content + proposal dirs) and spawns with `preExistingAgentSessionFile`, like the archived Continue flow. `newWorktree=false` intentionally shares a worktree between two live sessions; terminating one must not delete the shared tree.
 - **Sidebar font scale:** hard-coded pixel font sizes in the popover will ignore `--sidebar-font-scale`; use em-relative sizing.
 
 ## Test plan for later implementation
@@ -478,14 +457,14 @@ Required browser E2E cases:
    - Assert existing Modify and Terminate quick buttons are visible.
    - Assert hamburger trigger is visible on desktop.
    - Click hamburger.
-   - Assert menu rows: Modify, Terminate, Copy link, Duplicate session.
+   - Assert menu rows: Modify, Terminate, Copy link, Fork (with the inline "New worktree" `menuitemcheckbox`).
 
 2. **Goal hamburger visibility and menu contents**
    - Create a goal with no active session.
    - Hover goal row.
-   - Assert quick actions remain visible: Re-attempt, Archive, Goal dashboard.
+   - Assert quick actions remain visible: Archive, Goal dashboard (Re-attempt is popover-only, not a hover quick action).
    - Click hamburger.
-   - Assert menu rows include Re-attempt, Archive, Goal dashboard, Copy link, and Open on GitHub only when a PR/link fixture is available.
+   - Assert menu rows include Re-attempt, Archive, Goal dashboard, Copy link, and Open on GitHub only when the goal-row PR badge is visible.
 
 3. **Existing quick actions still fire directly**
    - Click session Modify quick icon, assert rename dialog opens.
@@ -497,18 +476,18 @@ Required browser E2E cases:
    - Stub/grant clipboard and click menu Copy link for session.
    - Assert clipboard equals `${location.origin}${location.pathname}${location.search}#/session/<id>`.
    - Repeat for goal: `#/goal/<id>`.
-   - Force `navigator.clipboard.writeText` rejection and assert `copy-link-fallback-dialog` appears with the expected value in `[data-testid="copy-link-fallback-input"]`.
+   - Force `navigator.clipboard.writeText` rejection and assert the link still copies via the legacy `<textarea>`/`execCommand` fallback and the `Link copied` toast (`[data-testid="header-toast"]`) flashes — **no** `copy-link-fallback-dialog` modal is shown for the sidebar path.
 
 5. **Dismissal**
    - Open menu, click outside, assert removed.
    - Open menu, press Escape, assert removed.
    - Open menu, navigate route/hash, assert removed.
 
-6. **Duplicate session**
-   - Click Duplicate session from a plain live session menu.
-   - Wait for a `POST /api/sessions/:id/duplicate` response with `{ id, cwd, status, projectId?, goalId?, assistantType? }` and hash route `#/session/<newId>`.
-   - Assert new id differs and the new session has matching `projectId`, `cwd`, `goalId` when applicable, `assistantType`, and copied model fields when the fixture has them via `GET /api/sessions/:id`.
-   - Add one negative endpoint test or browser/API assertion for an unsupported source returning `422`.
+6. **Fork session**
+   - Toggle the inline "New worktree" `menuitemcheckbox` and assert it flips without firing Fork or closing the popover.
+   - Activate the Fork row and wait for a `POST /api/sessions/:id/fork` response (body `{ newWorktree }` per checkbox state) and hash route `#/session/<newId>`.
+   - Assert the transcript is cloned and metadata preserved (`projectId`, `cwd`, `goalId`, `assistantType`, model fields) via `GET /api/sessions/:id`; assert `newWorktree=true` allocates a distinct worktree/branch and `newWorktree=false` reuses the source worktree.
+   - Assert an unsupported source (archived/terminated/delegate/child/read-only/team/team-lead) returns `422`, matching `canForkSidebarSession`.
 
 7. **Mobile v1 acceptance**
    - Resize below 640 px.
@@ -529,9 +508,9 @@ Unit/file-fixture test requirement:
 1. Add `SidebarActionsPopover.ts` with static menu rendering, keyboard nav, positioning, and dismissal. No FLIP yet.
 2. Refactor `render-helpers.ts` action strips to action arrays and keep existing quick buttons byte-behavior equivalent.
 3. Add hamburger trigger and sidebar-owned popover mount/unmount.
-4. Add `CopyLinkFallbackDialog.show(url, { title })` support and Copy link handlers with accurate session/goal fallback titles.
-5. Add dedicated `POST /api/sessions/:id/duplicate` endpoint and client helper.
-6. Add required `GET /api/goals/:id/github-link` branch resolver plus goal menu Open on GitHub integration.
+4. Add Copy link handlers: Clipboard API + legacy `<textarea>`/`execCommand` fallback + `Link copied` toast via `showHeaderToast` (no modal).
+5. Add dedicated `POST /api/sessions/:id/fork` endpoint (transcript clone + `newWorktree` body) and client helper, plus the `canForkSidebarSession` guard and the Fork "New worktree" `menuitemcheckbox`.
+6. Wire goal menu Open on GitHub to mirror the goal-row PR badge (`resolveGoalPrBadge`, opens `pr.url`). `GET /api/goals/:id/github-link` remains available but does not gate the item.
 7. Add FLIP/reduced-motion animation.
 8. Add E2E/unit coverage, including mobile v1 acceptance and helper-level FLIP tests if helper logic exists.
 9. Add `sidebar-actions-popover` to `AgentInterface` Escape suppression.
