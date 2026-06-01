@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { resolveWorktreeSupport } from "./worktree-support.js";
 import type { WorkflowStore, Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
@@ -127,16 +128,16 @@ export class GoalManager {
 		let setupStatus: "ready" | "preparing" = "ready";
 
 		// Detect git repo root — needed for team operations even without a worktree.
-		// Multi-repo: override `repoPath` with the project's container root so the
-		// per-repo worktrees land beneath one shared `<rootPath>-wt/<branch>/`.
+		// Single source of truth shared with the session path (server.ts) and the
+		// staff path (staff-manager.ts): a multi-repo project resolves to its
+		// container root as `repoPath` (per-repo worktrees land beneath one shared
+		// `<rootPath>-wt/<branch>/`) ONLY when at least one component is a git repo
+		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
+		// and to no-worktree when that also fails (never throws).
 		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
-		const isMulti = !!components && components.some(c => c.repo !== ".");
 		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
-		if (isMulti && projectRoot) {
-			repoPath = projectRoot;
-		} else if (await isGitRepo(cwd)) {
-			repoPath = await getRepoRoot(cwd);
-		}
+		const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd);
+		if (support.supported) repoPath = support.repoPath;
 
 		// Compute worktree path and branch (but don't create yet)
 		if (worktree && repoPath) {
@@ -287,6 +288,21 @@ export class GoalManager {
 					? this.baseRefResolver(goal.projectId) : undefined;
 				if (isMulti && components) {
 					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
+					// Defense-in-depth: if no worktree-able git sub-repo remained
+					// (createWorktreeSet skips the non-git container and non-git
+					// sub-repos), fall back gracefully to no-worktree. The goal
+					// should run in its ORIGINAL project cwd with no worktree —
+					// the precomputed worktreePath/cwd point at a branch container
+					// that was never created, so restore the no-worktree state:
+					// clear worktreePath/repoWorktrees and reset cwd to the
+					// un-offset project cwd. resolveWorktreeSupport normally
+					// prevents reaching here (repoPath stays unset, so
+					// setupWorktree isn't called), but guard anyway.
+					if (set.worktrees.length === 0) {
+						this._restoreNoWorktree(goal, preliminaryOffset);
+						console.warn(`[goal-manager] No worktree-able repo for goal "${goal.title}" — proceeding without a worktree`);
+						return;
+					}
 					// Per-component setup commands run after the worktree set lands.
 					// Non-fatal on failure (worktree is still usable). See worktree-setup.ts.
 					try {
@@ -367,6 +383,34 @@ export class GoalManager {
 			setupError: String(lastError),
 		});
 		throw lastError;
+	}
+
+	/**
+	 * Restore a goal to a no-worktree state when worktree setup produced no
+	 * worktree (e.g. createWorktreeSet skipped every non-git sub-repo). The
+	 * precomputed worktreePath/cwd (set in createGoal) point at a branch
+	 * container that was never created, so we must:
+	 *   - clear worktreePath + repoWorktrees, and
+	 *   - reset cwd to the ORIGINAL project cwd (the un-offset goal cwd, before
+	 *     the worktree offset was applied) = repoPath + the same subdirectory
+	 *     offset that createGoal computed via path.relative(repoPath, cwd).
+	 * setupStatus becomes "ready" with no setupError. The goal then runs in its
+	 * original project cwd with no worktree — mirroring resolveWorktreeSupport
+	 * returning unsupported.
+	 *
+	 * `store.update` strips undefined values (so it can't clear fields); mutate
+	 * the live goal reference directly to delete worktreePath/repoWorktrees.
+	 */
+	private _restoreNoWorktree(goal: PersistedGoal, preliminaryOffset: string): void {
+		const originalCwd = preliminaryOffset && preliminaryOffset !== "."
+			? path.join(goal.repoPath!, preliminaryOffset)
+			: goal.repoPath!;
+		const live = this.store.get(goal.id);
+		if (live) {
+			delete live.worktreePath;
+			delete live.repoWorktrees;
+		}
+		this.store.update(goal.id, { cwd: originalCwd, setupStatus: "ready", setupError: undefined });
 	}
 
 	/**
