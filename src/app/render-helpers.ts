@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Copy, CopyPlus, Github, Goal as GoalIcon, LayoutDashboard, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, CopyPlus, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -394,7 +394,13 @@ function isSidebarActionsPopoverOpen(kind: SidebarActionEntityKind, entityId: st
 }
 
 function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActionsPopoverItem[] {
-	return actions.map(({ id, label, icon, tone, quick }) => ({ id, label, icon, tone, quick }));
+	// Quick actions render left→right in the hover strip, so the right-most quick
+	// action is the LAST quick item. In the popover we surface quick actions in
+	// reverse strip order (right-most first/top), followed by menu-only actions in
+	// their existing order. FLIP stays keyed by action id, so reordering is safe.
+	const quick = actions.filter((a) => a.quick).reverse();
+	const menuOnly = actions.filter((a) => !a.quick);
+	return [...quick, ...menuOnly].map(({ id, label, icon, tone, quick }) => ({ id, label, icon, tone, quick }));
 }
 
 function closeSidebarActionsPopover(render = true): void {
@@ -548,7 +554,7 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 		{
 			id: "copy-link",
 			label: "Copy link",
-			icon: icon(Copy, "xs"),
+			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
 		},
@@ -587,7 +593,7 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 		{
 			id: "copy-link",
 			label: "Copy link",
-			icon: icon(Copy, "xs"),
+			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
 		},
@@ -602,7 +608,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 			label: "Re-attempt",
 			title: "Re-attempt goal",
 			icon: icon(RotateCcw, "xs"),
-			quick: true,
+			quick: false,
 			run: (e: Event) => { e.stopPropagation(); startReattempt(goal.id); },
 		});
 	}
@@ -629,19 +635,24 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 		{
 			id: "copy-link",
 			label: "Copy link",
-			icon: icon(Copy, "xs"),
+			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(goalDeepLink(goal.id), "Copy goal link"); },
 		},
 	);
-	const githubLink = getCachedGoalGithubLink(goal.id);
-	if (githubLink?.available) {
+	// Mirror the goal-row PR badge exactly: only offer "Open on GitHub" when that
+	// coloured PR icon is actually rendered (PR present, and for workflow goals
+	// all gates passed) and a PR url exists to link to. Branch-only goals show no
+	// badge, so they get no menu item either.
+	const prBadge = resolveGoalPrBadge(goal);
+	if (prBadge.show && prBadge.url) {
+		const url = prBadge.url;
 		actions.push({
 			id: "open-github",
 			label: "Open on GitHub",
-			icon: icon(Github, "xs"),
+			icon: goalPrIconSvg(prBadge.color, "1.2em"),
 			quick: false,
-			run: (e: Event) => { e.stopPropagation(); openExternalUrl(githubLink.url); },
+			run: (e: Event) => { e.stopPropagation(); openExternalUrl(url); },
 		});
 	}
 	return actions;
@@ -1045,17 +1056,30 @@ export function renderGateStatusIcon(status: "pending" | "passed" | "failed" | "
 	}
 }
 
-/** Render a PR icon or gate status badge next to a goal in the sidebar. */
-function renderGoalBadge(goal: Goal) {
+interface GoalPrBadge {
+	show: boolean;
+	color: string;
+	url: string | null;
+	label: string;
+	hasConflicts: boolean;
+}
+
+/**
+ * Resolve whether the goal-row PR badge should render, and its derived color,
+ * url, and label. Single source of truth shared by `renderGoalBadge` (the
+ * sidebar row icon) and `buildGoalSidebarActions` (the "Open on GitHub" menu
+ * item) so the two never drift. Workflow progress is primary: PR status is
+ * only surfaced after a positive, fully-passed gate summary exists; before
+ * that, PR state must not mask incomplete/verifying/uncached workflow
+ * progress. Non-workflow goals have no gate summary to wait for, so they
+ * preserve the PR badge fallback.
+ */
+function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
+	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", hasConflicts: false };
 	const gs = state.gateStatusCache.get(goal.id);
-	const gateBadge = renderGateProgressBadge(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
 	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
-	// Workflow progress is primary. PR status is only shown after a positive,
-	// fully-passed gate summary exists; before that, do not let PR state mask
-	// incomplete/verifying/uncached workflow progress. Non-workflow goals have
-	// no gate summary to wait for, so preserve their PR badge fallback.
-	if (!pr || (hasWorkflowGates && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return gateBadge;
+	if (!pr || (hasWorkflowGates && (!gs || gs.total <= 0 || gs.passed !== gs.total))) return hidden;
 
 	let color: string;
 	if (pr.state === "MERGED") color = "#a87fd4";
@@ -1070,11 +1094,24 @@ function renderGoalBadge(goal: Goal) {
 		: "";
 	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
 	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-	const prIcon = html`<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
-	if (pr.url) {
-		return html`<a class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" href=${pr.url} target="_blank" rel="noopener" title=${label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+	return { show: true, color, url: pr.url ?? null, label, hasConflicts };
+}
+
+/** The goal-row pull-request SVG, in the state-derived stroke color. */
+function goalPrIconSvg(color: string, size = "12"): TemplateResult {
+	return html`<svg class="shrink-0" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/></svg>`;
+}
+
+/** Render a PR icon or gate status badge next to a goal in the sidebar. */
+function renderGoalBadge(goal: Goal) {
+	const gateBadge = renderGateProgressBadge(goal.id);
+	const badge = resolveGoalPrBadge(goal);
+	if (!badge.show) return gateBadge;
+	const prIcon = goalPrIconSvg(badge.color);
+	if (badge.url) {
+		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
 	}
-	return html`<span class="shrink-0 flex items-center ${hasConflicts ? "pr-conflict-pulse" : ""}" title=${label}>${prIcon}</span>`;
+	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" title=${badge.label}>${prIcon}</span>`;
 }
 
 /**

@@ -29,6 +29,12 @@ const VIEWPORT_PADDING = 8;
 const ANCHOR_GAP = 6;
 const OPEN_DURATION = 150;
 const CLOSE_DURATION = 120;
+// The shared-element FLIP travel runs slightly longer than the menu bloom so the
+// quick icons clearly read as leaving the row and arriving in the menu.
+const FLIP_OPEN_DURATION = 320;
+const FLIP_CLOSE_DURATION = 220;
+const FLIP_OPEN_EASING = "cubic-bezier(.22,.61,.36,1)"; // easeOutCubic-ish
+const FLIP_CLOSE_EASING = "cubic-bezier(.55,.06,.68,.19)"; // easeInCubic-ish
 
 export function computeSidebarActionsPopoverPosition(
 	anchorRect: DOMRectReadOnly,
@@ -270,9 +276,10 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	/**
-	 * The row's on-screen quick-action strip. We fade it out while the menu
-	 * blooms so its icons read as travelling into the popover (shared element),
-	 * then restore it on close. The strip lives in the light DOM next to the
+	 * The row's on-screen quick-action strip. While the menu blooms we fade ONLY
+	 * the quick-action buttons inside it so their icons read as travelling into
+	 * the popover (shared element). The hamburger trigger stays fully visible the
+	 * entire time the menu is open. The strip lives in the light DOM next to the
 	 * trigger; visibility is otherwise governed by group-hover/focus CSS.
 	 */
 	private _resolveRowStrip(): HTMLElement | null {
@@ -280,12 +287,14 @@ export class SidebarActionsPopover extends LitElement {
 		return root?.querySelector<HTMLElement>(".sidebar-actions") ?? null;
 	}
 
-	private _hideRowStrip(): void {
-		if (this._rowStrip) this._rowStrip.style.opacity = "0";
+	/** Quick-action buttons inside the row strip (excludes the hamburger trigger). */
+	private _rowQuickButtons(): HTMLElement[] {
+		if (!this._rowStrip) return [];
+		return [...this._rowStrip.querySelectorAll<HTMLElement>("[data-sidebar-action-quick='true']")];
 	}
 
 	private _restoreRowStrip(): void {
-		if (this._rowStrip) this._rowStrip.style.removeProperty("opacity");
+		for (const btn of this._rowQuickButtons()) btn.style.removeProperty("opacity");
 		this._rowStrip = null;
 	}
 
@@ -376,20 +385,19 @@ export class SidebarActionsPopover extends LitElement {
 		if (this._prefersReducedMotion()) return;
 		this._cancelAnimations();
 
-		// Fade the row's on-screen strip out so its icons appear to leave the row
-		// and arrive in the menu (shared-element illusion).
-		const strip = this._rowStrip;
-		if (strip && typeof strip.animate === "function") {
-			strip.style.opacity = "1";
-			const stripAnim = strip.animate([{ opacity: 1 }, { opacity: 0 }], {
+		// Fade ONLY the row's quick-action buttons out so their icons appear to leave
+		// the row and arrive in the menu (shared-element illusion). The hamburger
+		// trigger stays fully visible while the menu is open.
+		for (const btn of this._rowQuickButtons()) {
+			if (typeof btn.animate !== "function") { btn.style.opacity = "0"; continue; }
+			btn.style.opacity = "1";
+			const btnAnim = btn.animate([{ opacity: 1 }, { opacity: 0 }], {
 				duration: OPEN_DURATION,
 				easing: "ease-out",
 				fill: "forwards",
 			});
-			stripAnim.finished.then(() => this._hideRowStrip()).catch(() => undefined);
-			this._animations.push(stripAnim);
-		} else {
-			this._hideRowStrip();
+			btnAnim.finished.then(() => { btn.style.opacity = "0"; }).catch(() => undefined);
+			this._animations.push(btnAnim);
 		}
 
 		// Bloom the menu surface.
@@ -412,7 +420,7 @@ export class SidebarActionsPopover extends LitElement {
 			const animation = icon.animate([
 				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})` },
 				{ transform: "translate(0, 0) scale(1, 1)" },
-			], { duration: OPEN_DURATION + 60, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "backwards" });
+			], { duration: FLIP_OPEN_DURATION, easing: FLIP_OPEN_EASING, fill: "backwards" });
 			this._animations.push(animation);
 		}
 
@@ -448,7 +456,7 @@ export class SidebarActionsPopover extends LitElement {
 			animations.push(icon.animate([
 				{ transform: "translate(0, 0) scale(1, 1)" },
 				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})` },
-			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
+			], { duration: FLIP_CLOSE_DURATION, easing: FLIP_CLOSE_EASING, fill: "forwards" }));
 		}
 		for (const row of this._menuOnlyRows()) {
 			if (typeof row.animate !== "function") continue;
@@ -468,17 +476,18 @@ export class SidebarActionsPopover extends LitElement {
 			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
 		}
 
-		// Bring the row strip back as the popover unwinds.
-		const strip = this._rowStrip;
-		if (strip && typeof strip.animate === "function") {
-			strip.style.opacity = "0";
-			const stripAnim = strip.animate([{ opacity: 0 }, { opacity: 1 }], {
+		// Bring the row's quick-action buttons back as the popover unwinds. The
+		// hamburger trigger was never faded, so it needs no restore here.
+		for (const btn of this._rowQuickButtons()) {
+			if (typeof btn.animate !== "function") { btn.style.removeProperty("opacity"); continue; }
+			btn.style.opacity = "0";
+			const btnAnim = btn.animate([{ opacity: 0 }, { opacity: 1 }], {
 				duration: CLOSE_DURATION,
 				easing: "ease-in",
 				fill: "forwards",
 			});
-			stripAnim.finished.then(() => this._restoreRowStrip()).catch(() => undefined);
-			animations.push(stripAnim);
+			btnAnim.finished.then(() => btn.style.removeProperty("opacity")).catch(() => undefined);
+			animations.push(btnAnim);
 		}
 
 		this._animations = animations;
