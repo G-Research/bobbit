@@ -1315,4 +1315,57 @@ This is the author's source description with **markdown**.
 
 		await deleteComment(page, editedSuggestion);
 	});
+
+	test("renders cards and stays interactive when a diff hunk header is undefined (hunkSignature regression)", async ({ page }) => {
+		// Reproducing test for the panel-fragility defect: a single hunk whose `header`
+		// is `undefined` made hunkSignature(header).match(...) throw, which unwound the
+		// entire Lit render() and blanked the whole pane. After the fix the malformed
+		// hunk degrades locally (empty signature / per-block fallback) and the rest of
+		// the card + panel render and stay interactive. MUST FAIL pre-fix.
+		const consoleErrors: string[] = [];
+		const pageErrors: string[] = [];
+		page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
+		page.on("pageerror", (err) => pageErrors.push(err.message));
+
+		await setupWalkthrough(page, { width: 1920, height: 1080 });
+
+		// Clone the fixture cards in the TEST file (do NOT edit fixtures.ts) and blank
+		// one hunk's header so it arrives at the panel as `header === undefined` — the
+		// exact contract violation that crashed hunkSignature(header).match(...).
+		const cards = getFixturePrWalkthroughCards();
+		const headerlessCard = cards[0];
+		headerlessCard.id = "headerless-hunk-card";
+		headerlessCard.title = "Header-less hunk regression";
+		const targetHunk = headerlessCard.diffBlocks[0].hunks[0] as { header?: string };
+		delete targetHunk.header;
+
+		await page.evaluate(async (injectedCards) => {
+			const panel = document.querySelector("pr-walkthrough-panel") as any;
+			panel.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Header-less fixture", filesChanged: 1, additions: 1, deletions: 0 };
+			panel.cards = injectedCards;
+			panel.status = "ready";
+			// Pre-fix the synchronous Lit render throws inside this reactive update; swallow
+			// the rejection so the test can still assert on the rendered DOM and on the
+			// captured console/pageerror signal below.
+			try { await panel.updateComplete; } catch { /* surfaced via pageerror */ }
+		}, [headerlessCard]);
+
+		const card = activeCard(page);
+		await expect(card, "panel must still render a card when one hunk header is undefined").toBeVisible({ timeout: 10_000 });
+		await expect(card.getByTestId("pr-walkthrough-card-title")).toContainText("Header-less hunk regression");
+		await expect(card.getByTestId("pr-walkthrough-diff-block").first(), "the diff block for the header-less hunk should still render").toBeVisible({ timeout: 10_000 });
+
+		// The pane must stay interactive — diff-mode toggles still respond.
+		const chooser = card.getByTestId("pr-walkthrough-diff-mode-chooser");
+		if (await chooser.count()) {
+			await chooser.getByTestId("diff-mode-inline").click();
+			await expectActiveDiffMode(page, "inline");
+			await chooser.getByTestId("diff-mode-split").click();
+			await expectActiveDiffMode(page, "split");
+		}
+
+		const hunkSignatureErrors = [...consoleErrors, ...pageErrors].filter((message) =>
+			/Cannot read properties of undefined \(reading 'match'\)/.test(message) || /hunkSignature/.test(message));
+		expect(hunkSignatureErrors, `panel must not throw the hunkSignature TypeError: ${hunkSignatureErrors.join("\n")}`).toEqual([]);
+	});
 });
