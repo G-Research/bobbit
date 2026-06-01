@@ -9,10 +9,11 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
 import { SYSTEM_PROJECT_ID } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
-import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef, isGitRepo, getRepoRoot } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, cleanupWorktree, resolveBaseRef } from "../skills/git.js";
 import { runComponentSetups } from "../skills/worktree-setup.js";
 import { execShellCommand } from "./shell-util.js";
 import { shouldCreateWorktree } from "./worktree-decision.js";
+import { resolveWorktreeSupport } from "./worktree-support.js";
 
 const execFile = promisify(execFileCb);
 
@@ -195,25 +196,13 @@ export class StaffManager {
 		const ctx = this.pcm.getOrCreate(projectId);
 		if (!ctx) return { supported: false, multiRepo: false, components: [] };
 		const components = ctx.projectConfigStore.getComponents();
-		const multiRepo = ctx.projectConfigStore.isMultiRepo();
-		if (multiRepo) {
-			const repos = ctx.projectConfigStore.repoNames();
-			if (repos.length === 0) return { supported: false, multiRepo, components };
-			for (const repo of repos) {
-				const repoPath = path.join(ctx.project.rootPath, repo === "." ? "" : repo);
-				if (!await isGitRepo(repoPath)) {
-					return { supported: false, multiRepo, components };
-				}
-			}
-			return { supported: true, repoPath: ctx.project.rootPath, multiRepo, components };
-		}
-
-		try {
-			if (!await isGitRepo(cwd)) return { supported: false, multiRepo, components };
-			return { supported: true, repoPath: await getRepoRoot(cwd), multiRepo, components };
-		} catch {
-			return { supported: false, multiRepo, components };
-		}
+		// Single source of truth shared with the session path (server.ts) and the
+		// goal path (goal-manager.ts). A poly-repo (non-git container + git
+		// sub-repos) resolves `supported:true`, `repoPath = projectRoot`,
+		// `multiRepo:true` — identical to a regular session. A project with no
+		// worktree-able git repo resolves `supported:false` (graceful no-worktree).
+		const support = await resolveWorktreeSupport(components, ctx.project.rootPath, cwd);
+		return { ...support, components };
 	}
 
 	private async provisionStaffWorktree(projectId: string, name: string, id: string, cwd: string, worktree?: boolean): Promise<StaffWorktreePlan> {
@@ -236,6 +225,11 @@ export class StaffManager {
 
 		if (support.multiRepo) {
 			const set = await createWorktreeSet(support.repoPath, support.components, branchName, undefined, { worktreeRoot, configuredBaseRef });
+			// createWorktreeSet skips a non-git `.` container entry; if NO git
+			// sub-repo remained it returns an empty set (no container created).
+			// Fall back to no-worktree (session cwd unchanged) rather than pointing
+			// at a non-existent container.
+			if (set.worktrees.length === 0) return { sessionCwd: cwd };
 			worktreePath = set.container;
 			repoWorktrees = Object.fromEntries(set.worktrees.map(w => [w.repo, w.worktreePath]));
 		} else {
