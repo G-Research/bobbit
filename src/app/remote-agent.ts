@@ -1421,6 +1421,14 @@ export class RemoteAgent {
 						this._pendingEvents = [];
 						this._inResumeFallback = true;
 						this._highestSeq = 0;
+						// S9: also clear _seqInitialized so the NEXT live frame
+						// re-baselines _highestSeq (via the !_seqInitialized branch
+						// above). Without this, _highestSeq stays 0 while
+						// _seqInitialized remains true, so every subsequent large-seq
+						// frame re-buffers as a gap → the buffer refills to the cap →
+						// overflow fires forever and live streaming stalls until reload.
+						// Mirrors the resume_gap / _advanceTopLevelSeq recovery paths.
+						this._seqInitialized = false;
 						this.requestMessages();
 					}
 					this._drainOrderedEvents();

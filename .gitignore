@@ -45,6 +45,8 @@ tests/fixtures/user-message-image-render-bundle.js
 tests/fixtures/user-message-image-render-bundle.css
 tests/fixtures/message-editor-ime-bundle.js
 tests/fixtures/message-editor-ime-bundle.css
+tests/fixtures/remote-agent-seq-bundle.js
+tests/fixtures/remote-agent-seq-bundle.css
 .e2e-ui-pi
 .e2e-ui-bobbit
 tests/code-review-results.json
