@@ -144,6 +144,31 @@ test.describe("base_ref add-time pinning", () => {
 		expect(cfg.base_ref).toBe("origin/develop");
 	});
 
+	test("multi-repo detect: one component lacks the ref → detected is null (resolved still returned)", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-detect-miss-"));
+		// Primary (api) would detect origin/develop; web only has origin/master,
+		// so the live-detected value is not saveable → endpoint nulls it out.
+		makeMultiRepoProject(root, [
+			{ name: "api", branch: "develop" },
+			{ name: "web", branch: "master" },
+		]);
+		const proj = await registerProjectShared({
+			name: `baseref-detect-miss-${Date.now()}`,
+			rootPath: root,
+			components: [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			],
+		});
+
+		const res = await fetch(`${base()}/api/projects/${proj.id}/base-ref/detect`, { headers: headers() });
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.detected).toBe(null);
+		// resolved is still returned (the runtime fallback for the blank value).
+		expect(typeof body.resolved).toBe("string");
+	});
+
 	test("multi-repo: one component lacks the detected branch → base_ref stays blank", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-miss-"));
 		// Primary (api) detects origin/develop; web only has origin/master.
