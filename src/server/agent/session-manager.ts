@@ -2486,10 +2486,10 @@ export class SessionManager {
 			scheduledAt: Date.now(),
 			error: errMsg.slice(0, 200),
 		};
-		broadcast(session.clients, {
-			type: "event",
-			data: pendingEvent,
-		});
+		// WP4/RC3: route through emitSessionEvent so the frame gets a seq, enters
+		// the EventBuffer, and replays on resume — a reconnect during backoff no
+		// longer orphans a stale "Retrying…" banner (S5/S21).
+		emitSessionEvent(session, pendingEvent);
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = setTimeout(() => {
@@ -2523,10 +2523,8 @@ export class SessionManager {
 				reason,
 				cancelledAt: Date.now(),
 			};
-			broadcast(session.clients, {
-				type: "event",
-				data: cancelledEvent,
-			});
+			// WP4/RC3: seq + buffer + replay (see auto_retry_pending above).
+			emitSessionEvent(session, cancelledEvent);
 		}
 	}
 
@@ -5727,8 +5725,11 @@ export class SessionManager {
 		// at front so the post-respawn drainQueue redispatches them once.
 		this._reconcileAfterAbort(session);
 
-		// Emit agent_end so clients know streaming stopped
-		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
+		// Emit agent_end so clients know streaming stopped.
+		// WP4/RC3: route through emitSessionEvent so a client that resumes after a
+		// force-abort replays the agent_end (and clears its stale streaming partial)
+		// instead of relying on a later snapshot tick.
+		emitSessionEvent(session, { type: "agent_end", messages: [] });
 		broadcastStatus(session, "idle");
 
 		// Restart the agent process
