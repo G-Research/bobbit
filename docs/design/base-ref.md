@@ -55,7 +55,12 @@ at add time).
   with `isValidBaseRefBranchGrammar` (so a pinned value can never fail later
   save-time validation) and persisted.
 - **Multi-repo**: pinned from the **pool/primary repo only** (first declared
-  non-`.` component). Per-component overrides are not supported.
+  non-`.` component). Per-component overrides are not supported. The detected
+  ref is only persisted if it exists in **every** configured component repo
+  (`refExistsInRepo` per distinct repo, non-git paths skipped) — mirroring the
+  save-time validator, so a pinned value can never be one that a manual save
+  would have rejected or that would break worktree creation for a component
+  lacking the branch. If any component lacks the ref, `base_ref` stays blank.
 - **Failure handling**: if `git ls-remote` fails (offline, no remote, not a git
   repo), `detectBaseRefFromRemote` returns null and `base_ref` stays blank —
   identical to today's behaviour. Project creation/promotion never fails because

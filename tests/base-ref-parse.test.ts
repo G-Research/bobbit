@@ -16,6 +16,7 @@ import path from "node:path";
 import {
 	parseBaseRef,
 	parseLsRemoteSymref,
+	refExistsInRepo,
 	resolveBaseRef,
 	resolveBaseRefWithExec,
 } from "../src/server/skills/git.ts";
@@ -128,6 +129,27 @@ describe("parseLsRemoteSymref", () => {
 
 	it("non-heads symref (e.g. tags) → null", () => {
 		assert.equal(parseLsRemoteSymref("ref: refs/tags/v1.0\tHEAD"), null);
+	});
+});
+
+describe("refExistsInRepo", () => {
+	const cleanup: string[] = [];
+	after(() => { for (const d of cleanup) rmDir(d); });
+
+	it("returns true for an existing local branch ref", async () => {
+		const repo = makeTempRepo();
+		cleanup.push(repo);
+		assert.equal(await refExistsInRepo(repo, "master"), true);
+	});
+
+	it("returns false for a missing ref", async () => {
+		const repo = makeTempRepo();
+		cleanup.push(repo);
+		assert.equal(await refExistsInRepo(repo, "origin/develop"), false);
+	});
+
+	it("returns false (never throws) for a non-existent repo path", async () => {
+		assert.equal(await refExistsInRepo("/nonexistent/path", "master"), false);
 	});
 });
 

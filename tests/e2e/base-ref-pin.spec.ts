@@ -56,6 +56,25 @@ function makeRepoWithRemote(root: string, branch = "master"): string {
 	return clone;
 }
 
+/**
+ * Build a multi-repo project layout under `root`: each entry in `repos` becomes
+ * a component subdir cloned from a bare remote whose HEAD symref points at the
+ * given branch. Returns the project rootPath (the container dir holding the
+ * component subdirs). `git ls-remote --symref origin HEAD` in component[i]
+ * returns `ref: refs/heads/<repos[i].branch>`.
+ */
+function makeMultiRepoProject(root: string, repos: Array<{ name: string; branch: string }>): string {
+	for (const { name, branch } of repos) {
+		const src = path.join(root, `${name}-src`);
+		const bare = path.join(root, `${name}-remote.git`);
+		const clone = path.join(root, name);
+		gitInit(src, branch);
+		git(root, "clone", "--quiet", "--bare", src, bare);
+		git(root, "clone", "--quiet", bare, clone);
+	}
+	return root;
+}
+
 async function getConfig(id: string): Promise<any> {
 	const res = await fetch(`${base()}/api/projects/${id}/config`, { headers: headers() });
 	expect(res.status).toBe(200);
@@ -105,5 +124,42 @@ test.describe("base_ref add-time pinning", () => {
 	test("GET /base-ref/detect 404s for an unknown project", async () => {
 		const res = await fetch(`${base()}/api/projects/does-not-exist/base-ref/detect`, { headers: headers() });
 		expect(res.status).toBe(404);
+	});
+
+	test("multi-repo: all components have the detected branch → pins origin/<branch>", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-ok-"));
+		makeMultiRepoProject(root, [
+			{ name: "api", branch: "develop" },
+			{ name: "web", branch: "develop" },
+		]);
+		const proj = await registerProjectShared({
+			name: `baseref-multi-ok-${Date.now()}`,
+			rootPath: root,
+			components: [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			],
+		});
+		const cfg = await getConfig(proj.id);
+		expect(cfg.base_ref).toBe("origin/develop");
+	});
+
+	test("multi-repo: one component lacks the detected branch → base_ref stays blank", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-miss-"));
+		// Primary (api) detects origin/develop; web only has origin/master.
+		makeMultiRepoProject(root, [
+			{ name: "api", branch: "develop" },
+			{ name: "web", branch: "master" },
+		]);
+		const proj = await registerProjectShared({
+			name: `baseref-multi-miss-${Date.now()}`,
+			rootPath: root,
+			components: [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			],
+		});
+		const cfg = await getConfig(proj.id);
+		expect(cfg.base_ref === undefined || cfg.base_ref === "").toBe(true);
 	});
 });
