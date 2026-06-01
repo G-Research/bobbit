@@ -5661,7 +5661,13 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session) return;
 
-		// If not streaming, nothing to abort
+		// S40: cancel any pending auto-retry timer regardless of streaming state.
+		// An abort during the post-error backoff window (status "idle") would
+		// otherwise leave the timer to fire a spurious retry on a session someone
+		// just stopped (reachable via the team-abort route). No-op when none pending.
+		this.cancelPendingAutoRetry(session, "terminated");
+
+		// If not streaming, nothing more to abort
 		if (session.status !== "streaming") return;
 
 		// Broadcast aborting status so UI shows feedback during grace period
@@ -5690,12 +5696,15 @@ export class SessionManager {
 			}
 		});
 
-		// Try graceful abort first
-		try {
-			await session.rpcClient.abort();
-		} catch {
-			// Abort RPC itself may fail/timeout — proceed to force kill
-		}
+		// Try graceful abort, but do NOT serialize it ahead of the grace race
+		// (S8): rpcClient.abort() can block up to the 30s sendCommand timeout on a
+		// wedged bridge, which would delay the force-kill to ~30s instead of the
+		// intended gracePeriodMs (3s). Fire it un-awaited — wrapped in an async IIFE
+		// so a SYNCHRONOUS throw ("Agent process not running" when there is no
+		// stdin) becomes a caught rejection rather than escaping — and race it
+		// against the grace timer below. A fast agent_end still resolves settled=true
+		// and returns gracefully without force-kill.
+		void (async () => { await session.rpcClient.abort(); })().catch(() => {});
 
 		const settled = await settledPromise;
 
