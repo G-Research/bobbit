@@ -1,5 +1,7 @@
 # Sidebar Actions Menu UX
 
+> Superseded by design-doc Revision 2.1 — see docs/sidebar-actions-menu.md for the authoritative shipped behavior.
+
 ## Decision summary
 
 Add a unified row actions menu without removing the current fast path:
@@ -38,30 +40,35 @@ Session menu rows:
 | Terminate | Live non-team-lead session | Existing terminate handler |
 | End team | Live team lead | Existing team termination handler |
 | Copy link | All live sessions | New clipboard action |
-| Duplicate session | Live non-archived sessions | New duplicate action |
+| Fork | Standalone live sessions only, per `canForkSidebarSession` | New fork action |
 
-For archived sessions, v1 does not add the hamburger unless implementation finds it trivial. If added, only include `Copy link` and any existing safe archived action; do not expose terminate/duplicate.
+`Fork` is offered **only on standalone session rows** and only when `canForkSidebarSession(session)` is true — not terminated, not archived, not read-only, not non-interactive, not a child session, no role, and not part of a team (`!teamGoalId && !teamLeadSessionId`). It is therefore not present on team-lead rows, delegate/child rows, or team-member rows. The server independently rejects unsupported sources with `422`, so the client availability rule and the server guard agree.
+
+The Fork menu row carries an inline `role="menuitemcheckbox"` **"New worktree"** control at its right edge, default checked. Clicking the checkbox toggles it **without** firing Fork or closing the popover (Space toggles when the row is highlighted); activating the rest of the row forks using the current checkbox state. Fork is popover-only (`quick: false`).
+
+For archived sessions, v1 does not add the hamburger unless implementation finds it trivial. If added, only include `Copy link` and any existing safe archived action; never expose terminate or fork.
 
 ### Goal row
 
-Current hover strip order remains:
+Current hover strip order remains (Re-attempt is intentionally **not** a hover quick action — it is popover-only, `quick: false`):
 
-1. Re-attempt, when `!hasActiveSession`
-2. Archive, when `!goal.archived`
-3. Goal dashboard
-4. Actions menu hamburger
+1. Archive, when `!goal.archived`
+2. Goal dashboard
+3. Actions menu hamburger
 
 Goal menu rows:
 
 | Row | Availability | Source |
 |---|---|---|
-| Re-attempt | `!hasActiveSession` | Existing re-attempt handler |
+| Re-attempt | `!hasActiveSession`; popover-only (`quick: false`) | Existing re-attempt handler (`startReattempt(goal.id)`) |
 | Archive | `!goal.archived` | Existing archive handler |
 | Goal dashboard | Always | Existing dashboard route handler |
 | Copy link | Always | New clipboard action |
-| Open on GitHub | Only when a GitHub URL can be resolved | New external-link action |
+| Open on GitHub | Only when the goal-row PR badge is visible | New external-link action |
 
-For archived goals, v1 may omit the hamburger. If included, menu should contain `Goal dashboard`, `Copy link`, and `Open on GitHub` when resolvable; never show `Archive`.
+`Open on GitHub` is shown **only when the goal-row PR badge is visible** — a PR exists in `state.prStatusCache` and, for workflow goals, the gate summary is fully passed (`gs.passed === gs.total`, `gs.total > 0`) — and a `pr.url` is present. It uses the same state-coloured PR/merge icon as the goal row (shared `resolveGoalPrBadge` helper) and opens `pr.url`. There is no client-visible branch-fallback menu item.
+
+For archived goals, v1 may omit the hamburger. If included, menu should contain `Goal dashboard`, `Copy link`, and `Open on GitHub` when the PR badge shows; never show `Archive`.
 
 ## Menu layout
 
@@ -75,12 +82,12 @@ Structure:
 - Font: inherit from sidebar and size in `em`, so `--sidebar-font-scale` continues to scale the menu.
 - Width: compact but label-safe, about `14rem` with a max of available viewport width.
 - Destructive rows retain destructive hover/icon color only for `Terminate`, `End team`, and `Archive`.
-- Menu-only rows (`Copy link`, `Open on GitHub`, `Duplicate session`) appear after the existing hover-strip actions so users first recognize what moved.
+- Menu-only rows (`Copy link`, `Open on GitHub`, `Fork`, and popover-only `Re-attempt`) appear after the existing hover-strip actions so users first recognize what moved.
 
 Row text:
 
 - Prefer verbs users already saw in tooltips: `Modify`, `Edit staff`, `Terminate`, `End team`, `Re-attempt`, `Archive`, `Goal dashboard`.
-- New action labels: `Copy link`, `Open on GitHub`, `Duplicate session`.
+- New action labels: `Copy link`, `Open on GitHub`, `Fork`.
 - Avoid ellipses unless an action always opens a follow-up dialog.
 
 ## Clipboard and URL decisions
@@ -100,37 +107,43 @@ const goalUrl = `${location.origin}${location.pathname}#/goal/${goal.id}`;
 Action behavior:
 
 1. Try `navigator.clipboard.writeText(url)`.
-2. On success, show the existing header toast: `Link copied`.
-3. On rejection, lazy-load and show `CopyLinkFallbackDialog.show(url, { title })`.
+2. On rejection (e.g. insecure `http://` context), fall back to a legacy `<textarea>` + `document.execCommand("copy")` path so the link still copies.
+3. Flash a `Link copied` toast via the same `showHeaderToast` mechanism the session header uses (`data-testid="header-toast"`; a standalone toast is mounted when no session header is present).
 
-Implementation must extend the fallback dialog title API so wording is accurate: session links use `Copy session link`, goal links use `Copy goal link`.
+The sidebar copy path does **not** use the `CopyLinkFallbackDialog` modal. The copy-link menu icon is the lucide `Link` icon (matching the session header's copy affordance), not a copy icon.
 
 ## Open on GitHub decision
 
-Resolve target in this order:
+`Open on GitHub` mirrors the goal-row PR badge — it is shown **only when the badge is visible**:
 
-1. If `state.prStatusCache.get(goal.id)?.url` exists, open that PR URL.
-2. Else, if the goal has a branch and the project has a GitHub origin, open the branch view: `https://github.com/<owner>/<repo>/tree/<encoded-branch>`.
-3. Hide the row if neither URL is available.
+1. A PR exists in `state.prStatusCache.get(goal.id)` with a `pr.url`.
+2. For workflow goals, the gate summary is fully passed (`gs.passed === gs.total`, `gs.total > 0`).
+3. Otherwise the row is hidden.
 
-The menu row opens in a new tab with `target="_blank"` / `noopener` semantics. If a PR cache entry exists but has no URL, prefer branch view over showing a disabled item.
+It uses the **same state-coloured PR/merge SVG** as the goal row via the shared `resolveGoalPrBadge` helper (MERGED `#a87fd4`, CLOSED/CHANGES_REQUESTED `#c47070`, APPROVED/default `#6bc485`, REVIEW_REQUIRED `#d4a04a`) and opens `pr.url` in a new tab with `noopener` semantics. There is **no** client-visible branch-fallback menu item. The `GET /api/goals/:id/github-link` endpoint (server-side, `execFile`-based, sanitized) still exists but no longer gates this menu item.
 
-## Duplicate session decision
+## Fork session decision
 
-Expose `Duplicate session` only after the implementation has a reliable create/fork path. UX behavior:
+The session menu action is **Fork** (id `fork`), not "Duplicate session". It clones the source session's conversation history — like the archived **Continue** flow — copying the `.jsonl` transcript plus the tool-content and proposal dirs, and spawns the new session with `preExistingAgentSessionFile`. The new title is `Fork: <source title>` (never "Copy of"); the source is never mutated.
 
-1. Clicking closes the menu immediately.
-2. Row enters an optimistic app-level “creating session” affordance if one already exists; otherwise rely on the normal session creation row/status.
-3. On success, connect to the new session and title it `Copy of <source title>` unless server returns a generated title.
-4. On failure, show a toast with a short reason.
+UX behavior:
 
-Recommended API shape if needed:
+1. Activating the Fork row (anywhere except the inline checkbox) forks using the current "New worktree" state, closes the menu, and connects to the new session.
+2. Clicking the inline `role="menuitemcheckbox"` "New worktree" control toggles it **without** firing Fork or closing the popover (Space toggles when the row is highlighted). It defaults to checked.
+3. On failure, show a toast with a short reason.
+
+Endpoint:
 
 ```http
-POST /api/sessions/:id/duplicate
+POST /api/sessions/:id/fork
 ```
 
-The duplicate should carry project, goal, staff/spec context, role/accessory, model selection, sandbox/worktree policy, and initial prompt/spec context. It should not clone the live transcript unless product explicitly wants “continue from here”; that is a different mental model from duplicate.
+Request body `{ newWorktree?: boolean }`, default `true`:
+
+- `true` → create a fresh worktree/branch (or a plain project-root session when the project is not a git repo).
+- `false` → **reuse the source session's existing worktree** (new session `cwd` = source `worktreePath`, same repo/branch; no new worktree registered — the two live sessions intentionally share the tree).
+
+The fork preserves `projectId`, `cwd`, `goalId`, `assistantType`, `staffId`, `role`, `accessory`, `sandboxed`, `modelProvider`/`modelId`, `reattemptGoalId`, and `taskId`. The server rejects unsupported sources (archived/terminated/delegate/first-class-child/read-only/team/team-lead) with `422`, matching the client `canForkSidebarSession` availability rule.
 
 ## Shared-element / FLIP animation
 
@@ -141,7 +154,7 @@ The animation teaches that the menu contains the same actions users already know
 ### Open sequence
 
 1. On hamburger pointer/keyboard activation, collect the hover-strip action elements before mounting the popover:
-   - stable action id: `modify`, `terminate`, `reattempt`, `archive`, `dashboard`
+   - stable action id: `modify`, `terminate` (session/team-lead), `archive`, `dashboard` (goal) — i.e. only `quick: true` actions. `reattempt` is popover-only and is not part of the shared-element FLIP.
    - icon node or button bounding rect via `getBoundingClientRect()`
 2. Mount the popover with final menu rows rendered.
 3. After render, collect final icon rects inside matching menu rows.
@@ -252,7 +265,7 @@ Rationale:
 
 - Mobile rows already show inline actions persistently, so the discovery problem is desktop-specific.
 - Adding a hamburger would create redundant targets and increase accidental taps in a dense row.
-- Copy link / duplicate / GitHub are intentionally desktop-only in v1 and should be covered by a mobile acceptance test so this is not mistaken for a regression.
+- Copy link / Fork / GitHub are intentionally desktop-only in v1 and should be covered by a mobile acceptance test so this is not mistaken for a regression.
 
 Mobile acceptance criteria for this goal:
 
