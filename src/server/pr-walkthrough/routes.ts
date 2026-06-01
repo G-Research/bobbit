@@ -531,7 +531,12 @@ function flattenDiffBlocks(files: any[]): DiffBlock[] {
 }
 
 function isDiffBlock(value: any): value is DiffBlock {
-	return typeof value?.id === "string" && typeof value?.filePath === "string" && Array.isArray(value?.hunks);
+	return (
+		typeof value?.id === "string" &&
+		typeof value?.filePath === "string" &&
+		Array.isArray(value?.hunks) &&
+		value.hunks.every((hunk: any) => hunk !== null && typeof hunk === "object" && typeof hunk.header === "string")
+	);
 }
 
 async function resolveLocalFallback(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult> {

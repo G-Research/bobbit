@@ -283,10 +283,11 @@ function bundleFileFromDiffBlock(block: PrWalkthroughDiffBlock): PrWalkthroughAn
 }
 
 function bundleHunkFromDiffHunk(hunk: PrWalkthroughHunk): PrWalkthroughAnalysisBundleHunk {
-	const parsed = parseHunkHeader(hunk.header);
+	const header = typeof hunk.header === "string" ? hunk.header : "";
+	const parsed = parseHunkHeader(header);
 	return {
 		id: hunk.id,
-		header: hunk.header,
+		header,
 		...parsed,
 		lines: hunk.lines.map(line => ({
 			id: line.id,
@@ -312,18 +313,21 @@ function diffBlockFromBundleFile(file: PrWalkthroughAnalysisBundleFile): PrWalkt
 		blobUrl: file.blob_url,
 		rawUrl: file.raw_url,
 		contentsUrl: file.contents_url,
-		hunks: file.hunks.map(hunk => ({
-			id: hunk.id ?? `hunk-${hashText(`${file.path}\0${hunk.header}`).slice(0, 12)}`,
-			header: hunk.header,
+		hunks: file.hunks.map(hunk => {
+			const header = typeof hunk.header === "string" ? hunk.header : "";
+			return {
+			id: hunk.id ?? `hunk-${hashText(`${file.path}\0${header}`).slice(0, 12)}`,
+			header,
 			lines: hunk.lines.map((line, index): PrWalkthroughDiffLine => ({
-				id: line.id ?? `line-${hashText(`${file.path}\0${hunk.header}\0${index}`).slice(0, 12)}`,
+				id: line.id ?? `line-${hashText(`${file.path}\0${header}\0${index}`).slice(0, 12)}`,
 				side: line.side ?? (line.kind === "add" ? "new" : line.kind === "del" ? "old" : "context"),
 				oldLine: line.old_line,
 				newLine: line.new_line,
 				text: line.text,
 				kind: line.kind,
 			})),
-		})),
+			};
+		}),
 	};
 }
 
@@ -464,7 +468,13 @@ function numberValue(value: unknown): number | undefined {
 }
 
 function isDiffBlock(value: unknown): value is PrWalkthroughDiffBlock {
-	return isRecord(value) && typeof value.id === "string" && typeof value.filePath === "string" && Array.isArray(value.hunks);
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.filePath === "string" &&
+		Array.isArray(value.hunks) &&
+		value.hunks.every(hunk => isRecord(hunk) && typeof hunk.header === "string")
+	);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1216,7 +1216,7 @@ export class PrWalkthroughPanel extends LitElement {
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
 						${this.renderOriginalPrDescription(card)}
 					</section>
-					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
+					${card.diffBlocks.map(block => this.renderDiffBlockSafe(card, block))}
 					${this.renderCardComments(card)}
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
@@ -1251,6 +1251,19 @@ export class PrWalkthroughPanel extends LitElement {
 			}
 		}
 		return { additions, deletions };
+	}
+
+	private renderDiffBlockSafe(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
+		try {
+			return this.renderDiffBlock(card, block);
+		} catch (error) {
+			console.warn(`PrWalkthroughPanel: failed to render diff block for ${block?.filePath ?? "<unknown file>"}`, error);
+			return html`
+				<section class="diff-block diff-block-error" data-testid="pr-walkthrough-diff-block-error" data-file-path=${block?.filePath ?? ""}>
+					<p class="diff-error-note">Could not render the diff for <b>${block?.filePath ?? "this file"}</b>.</p>
+				</section>
+			`;
+		}
 	}
 
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
@@ -1352,12 +1365,13 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private hunkSignature(header: string): string {
-		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
+		const text = typeof header === "string" ? header : "";
+		return text.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? text;
 	}
 
 	private sectionSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffLineEntry, previousContext?: DiffContextEntry): string {
 		const scopedSignature = previousContext ? this.scopeSignatureBeforeIndex(hunk, entry.start) : undefined;
-		return scopedSignature ?? this.hunkSignature(hunk.header);
+		return scopedSignature ?? this.hunkSignature(hunk.header ?? "");
 	}
 
 	private scopeSignatureBeforeIndex(hunk: PrWalkthroughDiffBlock["hunks"][number], anchorIndex: number): string | undefined {
