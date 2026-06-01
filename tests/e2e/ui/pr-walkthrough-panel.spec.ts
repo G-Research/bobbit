@@ -1159,6 +1159,67 @@ This is the author's source description with **markdown**.
 		await expectActiveDiffMode(page, "inline");
 	});
 
+	test("in-app ready walkthrough panel resize controls are user-driven", async ({ page }) => {
+		// Reproduces the IN-APP side-panel resize bug. The walkthrough is hosted by
+		// a LIVE child session (setupWalkthrough), which is exactly the case
+		// `suppressFullscreenForLiveWalkthrough` (render.ts) force-resets to split on
+		// every render — so the toolbar fullscreen button silently bounces back and
+		// the panel can auto-fullscreen on its own. After the fix the in-app
+		// walkthrough panel behaves identically to the HTML preview panel: it starts
+		// in split view (no auto-fullscreen), the fullscreen/collapse toolbar buttons
+		// and the resize keyboard shortcuts all operate on it, and the state persists
+		// across reload. MUST FAIL on current HEAD at the fullscreen-enter assertion.
+		await setupWalkthrough(page, { width: 1600, height: 900 });
+
+		const fullscreenState = () => page.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.previewPanelFullscreen === true;
+		});
+		const fullscreenRoot = page.locator(".preview-fullscreen-prompt").first();
+		const fullscreenButton = page.locator(`${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
+		const collapseButton = () => page.locator(`.goal-preview-panel button[title*="Collapse preview"]`).first();
+		const expandButton = () => page.locator(`button[title*="Expand preview"]`).first();
+
+		// (1) No auto-fullscreen: a ready walkthrough must start in split view, with
+		// the chat prompt visible. Fullscreen is strictly user-initiated.
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "ready walkthrough panel must not auto-enter fullscreen — fullscreen is user-initiated only" }).toBe(false);
+		await expect(fullscreenRoot, "ready walkthrough must start in split view, not the chat-hiding fullscreen layout").toBeHidden({ timeout: 10_000 });
+		await expect(page.locator("textarea").first(), "split view should keep the chat prompt visible").toBeVisible({ timeout: 10_000 });
+
+		// (2) Fullscreen button works — THE core failing assertion on current HEAD.
+		// suppressFullscreenForLiveWalkthrough force-resets previewPanelFullscreen to
+		// false on the next render, so the chat-hiding fullscreen layout never sticks.
+		await expect(fullscreenButton, "in-app walkthrough toolbar must expose a fullscreen control").toBeVisible({ timeout: 10_000 });
+		await fullscreenButton.click();
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "clicking the in-app fullscreen control must enter fullscreen (chat hidden) — identical to the preview panel" }).toBe(true);
+		await expect(fullscreenRoot, "entering fullscreen must hide the chat and render the compact fullscreen prompt").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "walkthrough content must remain mounted in fullscreen").toBeVisible({ timeout: 10_000 });
+
+		// (4) Keyboard shortcut operates on the panel: toggle-preview (Ctrl+]) steps
+		// fullscreen → split.
+		await page.keyboard.press("Control+]");
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "the toggle-preview (Ctrl+]) shortcut must exit fullscreen on the in-app walkthrough panel" }).toBe(false);
+		await expect(fullscreenRoot, "exiting fullscreen via keyboard must restore the split chat layout").toBeHidden({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "exiting fullscreen should keep the walkthrough in split view").toBeVisible({ timeout: 10_000 });
+
+		// (3) Collapse works: the collapse button hides the panel body and reveals an
+		// expand control.
+		await expect(collapseButton(), "in-app walkthrough toolbar must expose a collapse control").toBeVisible({ timeout: 10_000 });
+		await collapseButton().click();
+		await expect(expandButton(), "collapsing the in-app walkthrough must reveal an expand control").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "collapsed in-app walkthrough should hide the panel body").toBeHidden({ timeout: 10_000 });
+
+		// (5) Persistence across reload: the collapsed state must survive a reload.
+		await page.reload();
+		await expect(expandButton(), "collapsed in-app walkthrough state must persist across reload").toBeVisible({ timeout: 20_000 });
+		await expect(walkthroughPanel(page), "collapsed walkthrough panel body should stay hidden after reload").toBeHidden({ timeout: 10_000 });
+
+		// Expanding restores the panel body.
+		await expandButton().click();
+		await expectWalkthroughOpened(page);
+		await expect(walkthroughPanel(page), "expanding should restore the in-app walkthrough panel body").toBeVisible({ timeout: 10_000 });
+	});
+
 	test("open-in-new-tab toolbar control renders the same walkthrough in a standalone wide route", async ({ page, context }) => {
 		const { tab } = await setupWalkthrough(page, { width: 1600, height: 900 });
 		const tabId = await tab.getAttribute("data-panel-tab-id");
