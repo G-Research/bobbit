@@ -148,6 +148,14 @@ export function setGoalDashboardRoute(
 	}
 }
 
+export function canonicalizePathSessionRoute(sessionId: string): void {
+	const expectedPath = `/session/${sessionId}`;
+	const expectedHash = `#/session/${sessionId}`;
+	if (window.location.pathname !== expectedPath || window.location.hash !== expectedHash) return;
+	// replaceState avoids a hashchange while cleaning up path-style deep links.
+	history.replaceState(history.state ?? {}, "", `/#/session/${sessionId}`);
+}
+
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {
 	let newHash: string;
 	if (view === "session" && id) {
