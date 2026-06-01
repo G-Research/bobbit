@@ -336,12 +336,41 @@ test.describe("Sidebar actions menu", () => {
 		goalIds.push(prGoal.id as string, gatedGoal.id as string, noPrGoal.id as string);
 
 		const PR_URL = "https://github.com/acme/widget/pull/123";
+
+		// "Open on GitHub" must mirror the goal-row PR badge exactly. The badge is
+		// derived from the same client caches `renderGoalBadge` reads: a PR entry,
+		// plus — for workflow goals — a fully-passed gate summary. Two async refresh
+		// paths race the menu-open and would otherwise clobber the injected caches:
+		//   • refreshPrStatusCache() deletes a PR entry on a 404 (api.ts).
+		//   • refreshGateStatusCache() overwrites the gate summary with the real
+		//     (un-signed-off → passed:0) status, suppressing the prGoal badge.
+		// Pin BOTH backing endpoints per-goal so any refresh re-AFFIRMS the desired
+		// state instead of clobbering it. This makes the open-github item — which
+		// reads the very same caches — deterministic regardless of refresh timing.
+		const prById: Record<string, { status: number; body: unknown }> = {
+			[prGoal.id as string]: { status: 200, body: { state: "OPEN", url: PR_URL } },
+			[gatedGoal.id as string]: { status: 200, body: { state: "OPEN", url: PR_URL } },
+			[noPrGoal.id as string]: { status: 404, body: { error: "no PR for goal" } },
+		};
+		const gateById: Record<string, unknown> = {
+			[prGoal.id as string]: { passed: 1, total: 1 }, // all gates passed → badge shown
+			[gatedGoal.id as string]: { passed: 0, total: 1 }, // gates pending → badge suppressed
+			[noPrGoal.id as string]: { passed: 1, total: 1 }, // gates passed, but no PR → hidden
+		};
+		const goalIdFromUrl = (url: string) => new URL(url).pathname.split("/")[3];
+		await page.route(/\/api\/goals\/[^/]+\/pr-status(\?|$)/, async (route) => {
+			const entry = prById[goalIdFromUrl(route.request().url())];
+			if (!entry) return route.continue();
+			await route.fulfill({ status: entry.status, contentType: "application/json", body: JSON.stringify(entry.body) });
+		});
+		await page.route(/\/api\/goals\/[^/]+\/gates\?[^/]*view=summary/, async (route) => {
+			const summary = gateById[goalIdFromUrl(route.request().url())];
+			if (!summary) return route.continue();
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(summary) });
+		});
+
 		await openApp(page);
-		// Stop session polling so the injected PR/gate caches that drive the badge
-		// aren't clobbered mid-test (same approach as notification-policy.spec.ts).
 		await page.evaluate(() => {
-			const state: any = (window as any).__bobbitState;
-			if (state?.sessionPollTimer) { clearInterval(state.sessionPollTimer); state.sessionPollTimer = null; }
 			(window as any).__sidebarOpenedUrls = [];
 			window.open = ((url: string | URL | undefined) => {
 				(window as any).__sidebarOpenedUrls.push(String(url));
@@ -349,13 +378,15 @@ test.describe("Sidebar actions menu", () => {
 			}) as any;
 		});
 
-		// "Open on GitHub" must mirror the goal-row PR badge exactly. The badge is
-		// derived from the same client caches `renderGoalBadge` reads: a PR entry,
-		// plus — for workflow goals — a fully-passed gate summary. Drive those caches
-		// directly (the established cross-surface pattern) so the contract is
-		// exercised without standing up real PRs or gate verification.
-		await page.evaluate(({ prId, gatedId, noPrId, url }) => {
+		// Drive the same client caches directly (the established cross-surface
+		// pattern) so the contract is exercised without standing up real PRs or
+		// gate verification. Also stop session polling — its piggybacked PR/gate
+		// refreshes are the loudest clobber source (same approach as
+		// notification-policy.spec.ts). Re-applied before each open so a prior
+		// in-flight async refresh can never win the race.
+		const injectBadgeCaches = () => page.evaluate(({ prId, gatedId, noPrId, url }) => {
 			const state: any = (window as any).bobbitState ?? (window as any).__bobbitState;
+			if (state?.sessionPollTimer) { clearInterval(state.sessionPollTimer); state.sessionPollTimer = null; }
 			const passed = { passed: 1, total: 1, verifying: false, verifyingCount: 0, awaitingSignoffCount: 0, awaitingHumanSignoff: false, runningGateIds: [], gates: [] };
 			const pending = { ...passed, passed: 0 };
 			// prGoal: PR present + all gates passed → badge (and menu item) shown.
@@ -366,12 +397,20 @@ test.describe("Sidebar actions menu", () => {
 			state.prStatusCache.set(gatedId, { state: "OPEN", url });
 			// noPrGoal: gates passed but no PR → no badge.
 			state.gateStatusCache.set(noPrId, passed);
+			state.prStatusCache.delete(noPrId);
 			(window as any).__bobbitRenderApp?.();
 		}, { prId: prGoal.id, gatedId: gatedGoal.id, noPrId: noPrGoal.id, url: PR_URL });
+		await injectBadgeCaches();
 
 		// PR goal: visible, uses the SAME coloured PR/merge SVG as the goal row
 		// (OPEN with no review decision → green #6bc485), and opens the PR url.
 		const prRow = await ensureGoalExpanded(page, prGoal.id as string);
+		// Gate on the goal ROW's PR badge actually rendering before opening the menu.
+		// The badge (`<a href="<PR_URL>">` from renderGoalBadge) and the open-github
+		// menu item are both derived from the now-pinned caches; once the badge is
+		// visible the menu item is guaranteed present.
+		await expect(prRow.locator(`a[href="${PR_URL}"]`), "prGoal row PR badge should render before opening the menu").toBeVisible({ timeout: 10_000 });
+		await injectBadgeCaches();
 		await openMenu(prRow, "goal", prGoal.id as string);
 		const ghItem = menuItem(page, "open-github");
 		await expect(ghItem).toBeVisible({ timeout: 10_000 });
@@ -381,6 +420,7 @@ test.describe("Sidebar actions menu", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).__sidebarOpenedUrls.at(-1))).toBe(PR_URL);
 
 		// Workflow goal with a PR but gates not fully passed: badge hidden → item hidden.
+		await injectBadgeCaches();
 		const gatedRow = await ensureGoalExpanded(page, gatedGoal.id as string);
 		await openMenu(gatedRow, "goal", gatedGoal.id as string);
 		await expect(menuItem(page, "open-github")).toHaveCount(0, { timeout: 2_000 });
@@ -388,6 +428,7 @@ test.describe("Sidebar actions menu", () => {
 		await expectNoPopover(page);
 
 		// Goal with no PR at all: hidden.
+		await injectBadgeCaches();
 		const noPrRow = await ensureGoalExpanded(page, noPrGoal.id as string);
 		await openMenu(noPrRow, "goal", noPrGoal.id as string);
 		await expect(menuItem(page, "open-github")).toHaveCount(0, { timeout: 2_000 });
