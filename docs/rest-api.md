@@ -204,12 +204,12 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
 | `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`) |
-| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback for sidebar `Open on GitHub`. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
+| `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`) |
 
 ### Goal GitHub link endpoint
 
-`GET /api/goals/:id/github-link` resolves the URL used by the sidebar **Open on GitHub** menu item.
+`GET /api/goals/:id/github-link` resolves a PR URL or a sanitized GitHub branch URL for a goal. It remains available, but the sidebar **Open on GitHub** menu item no longer depends on it: that item now mirrors the goal-row PR badge (a PR with a `url` in `prStatusCache`, and a fully-passed gate summary for workflow goals) and opens the PR URL directly. The endpoint is still useful for callers that want a server-sanitized link, including the branch fallback the menu item no longer surfaces.
 
 Success or unavailability both return `200` with a discriminated response:
 
@@ -227,7 +227,7 @@ Resolution order:
 4. Strip embedded credentials, accept only GitHub remotes, and build an encoded branch tree URL.
 5. Return `available: false` for missing goals, goals without branches, missing/non-GitHub remotes, or git lookup failures.
 
-The browser caches this endpoint separately from the PR-status cache and hides the menu item while the response is unavailable. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for the client behavior and cache freshness notes.
+Branch names are never interpolated into a shell command; PR lookup and remote resolution both go through `execFile` argument arrays. See [Sidebar Actions Menu](sidebar-actions-menu.md#github-link-resolution) for how the menu item mirrors the PR badge rather than calling this endpoint.
 
 ### Goal Tasks
 
