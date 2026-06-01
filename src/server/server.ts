@@ -24,19 +24,17 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
+import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
+import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
-	MAX_SELECTED_BYTES,
-	MAX_SELECTED_LINES,
 	TextSelectionError,
 	selectText,
-	truncateTextToBudget,
 	type TextSelectionMode,
 	type TextSelectionOptions,
-	type TextSelectionMetadata,
 } from "./utils/text-selection.js";
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections } from "./agent/system-prompt.js";
@@ -58,7 +56,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -69,6 +67,35 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+// Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
+// must exist in EVERY configured component repo before it is persisted — mirroring
+// the save-time validator (which rejects a ref missing in any component). Without
+// this, a multi-repo project whose primary repo's remote HEAD differs from another
+// component's available refs would persist a value that breaks worktree creation
+// for that component. Returns true only if at least one repo was checked AND every
+// checked git repo has the ref. Never throws. See docs/design/base-ref.md.
+async function detectedRefExistsInAllComponents(
+	rootPath: string,
+	comps: Array<{ repo: string }>,
+	ref: string,
+): Promise<boolean> {
+	try {
+		const seen = new Set<string>();
+		let checked = 0;
+		for (const c of comps.length > 0 ? comps : [{ repo: "." }]) {
+			if (seen.has(c.repo)) continue;
+			seen.add(c.repo);
+			const repoPath = path.join(rootPath, c.repo);
+			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			checked++;
+			if (!(await refExistsInRepo(repoPath, ref))) return false;
+		}
+		return checked > 0;
+	} catch {
+		return false;
+	}
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -1967,44 +1994,6 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
-interface GateInspectOutputStep {
-	output?: string;
-	selection?: TextSelectionMetadata;
-}
-
-function enforceGateInspectAggregateOutputBudget(steps: GateInspectOutputStep[]): { truncated: boolean; truncationReason?: string } {
-	let remainingLines = MAX_SELECTED_LINES;
-	let remainingBytes = MAX_SELECTED_BYTES;
-	let truncated = false;
-	let truncationReason: string | undefined;
-
-	for (const step of steps) {
-		if (typeof step.output !== "string" || step.output.length === 0) continue;
-		if (remainingLines <= 0 || remainingBytes <= 0) {
-			step.output = "";
-			truncated = true;
-			truncationReason = truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
-			if (step.selection) {
-				step.selection = { ...step.selection, truncated: true, truncationReason: truncationReason };
-			}
-			continue;
-		}
-		const capped = truncateTextToBudget(step.output, remainingLines, remainingBytes);
-		step.output = capped.text;
-		remainingLines -= capped.lines;
-		remainingBytes -= capped.bytes;
-		if (capped.truncated) {
-			truncated = true;
-			truncationReason = capped.truncationReason || `aggregate selected output exceeded ${MAX_SELECTED_LINES} line/${MAX_SELECTED_BYTES} byte budget`;
-			if (step.selection) {
-				step.selection = { ...step.selection, truncated: true, truncationReason };
-			}
-		}
-	}
-
-	return { truncated, truncationReason };
-}
-
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -2752,6 +2741,35 @@ async function handleApiRoute(
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			//
+			// MUST run BEFORE worktree-pool init below: the pool's baseRefResolver
+			// reads `base_ref` on each _fill()/startFilling(), so pinning the
+			// concrete value first prevents early pool entries from being created
+			// off the old `origin/HEAD` fallback.
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2899,7 +2917,75 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
 			const promoted = projectRegistry.promote(projectId, { name });
+			// Pin base_ref from the live remote (best-effort) now that the
+			// promoted project's rootPath is a real git repo. Mirrors the
+			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
+			try {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				const rootPath = projectRegistry.get(projectId)?.rootPath;
+				const cfg = ctx?.projectConfigStore;
+				if (cfg && rootPath && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Pin only if the detected ref exists in every component repo
+					// (mirrors save-time validation). See POST /api/projects above.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/base-ref/detect — read-only resolver helper.
+	// Returns { resolved, detected }:
+	//   resolved = what worktrees actually branch off right now
+	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
+	//   detected = live `git ls-remote --symref origin HEAD` result, but ONLY
+	//              when it is saveable (passes the same grammar + cross-component
+	//              existence checks add-time pinning applies); otherwise null
+	//              (offline / no remote / not saveable). Guarantees any non-null
+	//              `detected` the UI fills can be saved without rejection.
+	// Scoped to the project's pool/primary repo (same selection as add-time
+	// pinning). No mutation. See docs/design/base-ref.md.
+	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
+	if (baseRefDetectMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(baseRefDetectMatch[1]);
+		const rootPath = projectRegistry.get(baseRefDetectMatch[1])?.rootPath;
+		if (!ctx || !rootPath) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const cfg = ctx.projectConfigStore;
+			const comps = cfg.getComponents();
+			const isMultiRepo = comps.some(c => c.repo !== ".");
+			const primaryRepoPath = isMultiRepo
+				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+				: await getRepoRoot(rootPath);
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			// `detected` must be SAVEABLE — null it out unless it passes the same
+			// checks add-time pinning applies (grammar + cross-component existence).
+			// The Settings "Detect from remote" button fills this value, so a
+			// non-saveable value here would be rejected by the normal Save path.
+			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			if (
+				detected
+				&& (!isValidBaseRefBranchGrammar(detected)
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+			) {
+				detected = null;
+			}
+			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);
 		}
@@ -3845,12 +3931,12 @@ async function handleApiRoute(
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
-				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
-				if (isMulti && proj?.rootPath) {
-					worktreeOpts = { repoPath: proj.rootPath };
-				} else if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
+				// Single source of truth shared with the staff path
+				// (staff-manager.ts) and goal path (goal-manager.ts).
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				if (support.supported && support.repoPath) {
+					worktreeOpts = { repoPath: support.repoPath };
 				}
 			} catch {
 				// Not a git repo or git not available — silently ignore
@@ -5380,8 +5466,8 @@ async function handleApiRoute(
 		const def = goal?.workflow?.gates.find(wg => wg.id === gateId);
 		if (url.searchParams.get("view") === "summary") {
 			const latestSignal = gate.signals[gate.signals.length - 1];
-			const MAX_TAIL_LINES = 40;
 			const slim: Record<string, unknown> = {
+				goalId,
 				gateId: gate.gateId,
 				name: def?.name,
 				status: gate.status,
@@ -5393,23 +5479,26 @@ async function handleApiRoute(
 			};
 			if (gate.currentMetadata) slim.currentMetadata = gate.currentMetadata;
 			if (latestSignal) {
+				const verificationSnapshot = latestSignal.verification ? buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: latestSignal.id,
+					verification: latestSignal.verification,
+					activeVerification: verificationHarness.getActiveVerification(latestSignal.id),
+					selectionOptions: { implicitDefault: true },
+				}) : undefined;
 				slim.latestSignal = {
 					id: latestSignal.id,
 					sessionId: latestSignal.sessionId,
 					timestamp: latestSignal.timestamp,
 					commitSha: latestSignal.commitSha,
-					verification: latestSignal.verification ? {
-						status: latestSignal.verification.status,
-						steps: latestSignal.verification.steps.map(s => {
-							const base: Record<string, unknown> = { name: s.name, passed: s.passed };
-							if (!s.passed && !s.skipped && s.output) {
-								const lines = s.output.split("\n");
-								base.output = lines.length > MAX_TAIL_LINES
-									? lines.slice(-MAX_TAIL_LINES).join("\n")
-									: s.output;
-							}
-							return base;
-						}),
+					verification: verificationSnapshot ? {
+						status: verificationSnapshot.status,
+						summary: verificationSnapshot.summary,
+						counts: verificationSnapshot.counts,
+						active: verificationSnapshot.active,
+						steps: verificationSnapshot.steps,
+						selection: verificationSnapshot.selection,
 					} : undefined,
 				};
 			}
@@ -5476,35 +5565,25 @@ async function handleApiRoute(
 		if (section === "verification") {
 			const resolved = resolveSignal();
 			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
-			const v = resolved.signal.verification;
 			try {
-				let aggregateTotalLines = 0;
-				const steps = v ? v.steps.map(s => {
-					const rawOutput = typeof s.output === "string" ? s.output : "";
-					const selected = selectText(rawOutput, selectionOptions);
-					aggregateTotalLines += selected.selection.totalLines;
-					return {
-						name: s.name,
-						type: s.type,
-						passed: s.passed,
-						skipped: s.skipped || undefined,
-						duration_ms: s.duration_ms,
-						output: typeof s.output === "string" ? selected.text : undefined,
-						selection: selected.selection,
-					};
-				}) : [];
-				const aggregate = enforceGateInspectAggregateOutputBudget(steps);
+				const snapshot = buildGateVerificationSnapshot({
+					goalId,
+					gateId,
+					signalId: resolved.signal.id,
+					verification: resolved.signal.verification,
+					activeVerification: verificationHarness.getActiveVerification(resolved.signal.id),
+					selectionOptions,
+				});
 				json({
 					gateId, section: "verification",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
-					steps,
-					selection: {
-						mode: selectionOptions.mode ?? "tail",
-						totalLines: aggregateTotalLines,
-						truncated: aggregate.truncated,
-						truncationReason: aggregate.truncationReason,
-					},
+					status: snapshot.status,
+					summary: snapshot.summary,
+					counts: snapshot.counts,
+					active: snapshot.active,
+					steps: snapshot.steps,
+					selection: snapshot.selection,
 				});
 			} catch (err) {
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }

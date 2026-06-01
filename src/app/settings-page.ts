@@ -135,6 +135,54 @@ const _projectScopePending = new Map<string, Record<string, any>>();
  *  `{ field: "base_ref", error, details? }`. Cleared on successful save or when
  *  the field is edited. Rendered inline below the base_ref input. */
 const _baseRefErrors = new Map<string, { error: string; details?: Array<{ component: string; message: string }> }>();
+/** Per-project cache of `GET /api/projects/:id/base-ref/detect`.
+ *  `resolved` is exactly what worktrees branch off (shown as the placeholder
+ *  for a blank `base_ref`); `detected` is the live remote detection (used to
+ *  fill the input on "Detect from remote", null when offline). A `null` cache
+ *  entry means a fetch is in flight. Mirrors the `_baseRefErrors` Map pattern. */
+const _baseRefDetect = new Map<string, { resolved: string; detected: string | null } | null>();
+
+/** Lazily fetch the resolved/detected base ref for a project (cached). Triggers
+ *  a single fetch + re-render when missing, mirroring `loadWorktreePoolStatus`. */
+function loadBaseRefDetect(projectId: string): void {
+	if (_baseRefDetect.has(projectId)) return; // loaded or loading
+	_baseRefDetect.set(projectId, null); // mark in-flight
+	gatewayFetch(`/api/projects/${projectId}/base-ref/detect`).then(async (res) => {
+		if (res.ok) {
+			const data = await res.json();
+			_baseRefDetect.set(projectId, {
+				resolved: typeof data.resolved === "string" ? data.resolved : "",
+				detected: typeof data.detected === "string" ? data.detected : null,
+			});
+		} else {
+			_baseRefDetect.set(projectId, { resolved: "", detected: null });
+		}
+		renderApp();
+	}).catch(() => {
+		_baseRefDetect.set(projectId, { resolved: "", detected: null });
+		renderApp();
+	});
+}
+
+/** Force a re-fetch of the detect endpoint (used by the "Detect from remote"
+ *  button so a click always queries the live remote). Returns the fresh data. */
+async function refetchBaseRefDetect(projectId: string): Promise<{ resolved: string; detected: string | null }> {
+	try {
+		const res = await gatewayFetch(`/api/projects/${projectId}/base-ref/detect`);
+		if (res.ok) {
+			const data = await res.json();
+			const parsed = {
+				resolved: typeof data.resolved === "string" ? data.resolved : "",
+				detected: typeof data.detected === "string" ? data.detected : null,
+			};
+			_baseRefDetect.set(projectId, parsed);
+			return parsed;
+		}
+	} catch { /* fall through */ }
+	const fallback = { resolved: "", detected: null };
+	_baseRefDetect.set(projectId, fallback);
+	return fallback;
+}
 /** Per-project transient state for the "Add custom key" composer in the Project tab. */
 const _projectScopeNewKey = new Map<string, { key: string; value: string }>();
 
@@ -679,6 +727,14 @@ function renderWorktreeSection(
 	labelClass: string,
 ): import("lit").TemplateResult {
 	const baseRefError = _baseRefErrors.get(projectId);
+	const baseRefValue = pendingChanges.base_ref ?? resolved.base_ref?.value ?? "";
+	const baseRefBlank = !String(baseRefValue).trim();
+	// Only consult the detect endpoint for blank values — when a concrete value
+	// is set we don't clutter the field with the resolved-fallback hint.
+	if (baseRefBlank) loadBaseRefDetect(projectId);
+	const detect = baseRefBlank ? _baseRefDetect.get(projectId) : undefined;
+	const resolvedRef = detect?.resolved || "";
+	const detectedRef = detect?.detected ?? null;
 	return html`
 		<div class="flex flex-col gap-2">
 			<div class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Worktree</div>
@@ -706,8 +762,8 @@ function renderWorktreeSection(
 					data-testid="base-ref-input"
 					type="text"
 					class="${inputClass}"
-					placeholder="origin/master (default)"
-					.value=${pendingChanges.base_ref ?? resolved.base_ref?.value ?? ""}
+					placeholder=${baseRefBlank && resolvedRef ? resolvedRef : "origin/master (default)"}
+					.value=${baseRefValue}
 					@input=${(e: Event) => {
 						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
 						// Clear stale inline error as soon as the user edits the field.
@@ -718,6 +774,30 @@ function renderWorktreeSection(
 					}}
 				/>
 			</div>
+			${baseRefBlank ? html`
+				<div class="flex items-center gap-2 -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
+					<span data-testid="base-ref-using" class="text-[11px] text-muted-foreground">
+						using: <span class="font-mono">${resolvedRef || "origin/master"}</span>
+					</span>
+					<button
+						data-testid="base-ref-detect"
+						class="px-2 py-0.5 text-[11px] rounded-md border border-input text-foreground
+							hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+						?disabled=${detect != null && detectedRef == null}
+						title=${detect != null && detectedRef == null
+							? "No remote detected (offline or no origin)"
+							: "Query the remote and fill the field with origin/<branch>"}
+						@click=${async () => {
+							const fresh = await refetchBaseRefDetect(projectId);
+							if (fresh.detected) {
+								pendingChanges.base_ref = fresh.detected;
+								if (_baseRefErrors.has(projectId)) _baseRefErrors.delete(projectId);
+							}
+							renderApp();
+						}}
+					>Detect from remote</button>
+				</div>
+			` : ""}
 			<p class="text-[11px] text-muted-foreground -mt-1 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
 				Branch ref (local or <span class="font-mono">origin/...</span>) that new worktrees are based on and the
 				integration target for workflow gates. Empty = project primary. Per-component

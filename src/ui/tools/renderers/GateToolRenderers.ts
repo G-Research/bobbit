@@ -187,21 +187,22 @@ export class GateStatusRenderer implements ToolRenderer {
 			return { content: html`<div>${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono">${gateId}</span>`)}</div>`, isCustom: false };
 		}
 
-		const gateName = data.name || data.gateId || gateId;
+		const resolvedGateId = data.gateId || gateId;
+		const gateName = data.name || resolvedGateId;
 		const gateStatus = data.status || "pending";
 		const deps: string[] = data.dependsOn || [];
 		const signals: any[] = data.signals || [];
-		const goalId2 = data.goalId || "";
-
-		// Latest signal — use for verification display
-		const latestSignal = signals.length > 0 ? signals[signals.length - 1] : null;
+		const latestSignal = data.latestSignal || (signals.length > 0 ? signals[signals.length - 1] : null);
+		const verification = latestSignal?.verification;
 		const signalId = latestSignal?.id || "";
-		const signalStatus = latestSignal?.verification?.status || "";
+		const signalStatus = verification?.status || "";
+		const goalId2 = data.goalId || latestSignal?.goalId || "";
+		const shouldRenderLiveVerification = !!(latestSignal && verification && goalId2 && resolvedGateId && signalId);
 
 		// Show gate-level status only when no live verification is rendered —
 		// the <gate-verification-live> component shows its own reconciled status
 		// which may differ from the (stale) gate status in the tool result.
-		const statusSuffix = (gateStatus !== "pending" && !latestSignal)
+		const statusSuffix = (gateStatus !== "pending" && !shouldRenderLiveVerification)
 			? html` — <span class="${gateStatus === "passed" ? "text-green-600 dark:text-green-400" : gateStatus === "failed" ? "text-red-600 dark:text-red-400" : ""}">${gateStatus}</span>`
 			: "";
 
@@ -209,13 +210,13 @@ export class GateStatusRenderer implements ToolRenderer {
 			content: html`<div>
 				${renderHeader(state, ShieldCheck, html`Gate <span class="font-mono">${gateName}</span>${statusSuffix}`)}
 				${deps.length ? html`<div class="text-xs text-muted-foreground mt-1">Depends on: ${deps.join(", ")}</div>` : ""}
-				${latestSignal ? html`
+				${shouldRenderLiveVerification ? html`
 					<gate-verification-live
 						.goalId=${goalId2}
-						.gateId=${gateId}
+						.gateId=${resolvedGateId}
 						.signalId=${signalId}
 						.finalStatus=${signalStatus === "passed" || signalStatus === "failed" ? signalStatus : undefined}
-						.initialSteps=${latestSignal.verification?.steps || []}
+						.initialSteps=${verification?.steps || []}
 					></gate-verification-live>
 				` : ""}
 			</div>`,

@@ -33,8 +33,60 @@ base_ref: origin/develop
 | Type | string (optional) |
 | Accepted | a **branch** ref — local (`master`, `develop`) or remote (`origin/develop`, `origin/release/2026.05`) |
 | Whitespace | trimmed; empty after trim is treated as unset |
-| Default | unset → preserve today's behaviour (`resolveRemotePrimary()`) |
+| Default | pinned to live `origin/<branch>` at project-add time (see below); blank only when the remote was unreachable at add time, then falls back to `resolveRemotePrimary()` at runtime |
 | UI | Settings → General → Worktree section, immediately under `worktree_root` |
+
+### Add-time pinning (primary path)
+
+`base_ref` is **pinned to a concrete `origin/<branch>` at project-add time** so
+new projects never carry a blank, silently-resolved base. This is the primary
+way `base_ref` gets its value; the runtime resolver fallback below is back-compat
+only (for projects created before pinning, or when the remote was unreachable
+at add time).
+
+- **Where**: `POST /api/projects` and the provisional→promote path
+  `POST /api/projects/:id/promote` (`src/server/server.ts`). Both run a
+  best-effort pin, only when the stored `base_ref` is blank (an
+  explicitly-supplied value is respected). In `POST /api/projects` the pin runs
+  **before** worktree-pool initialisation — the pool's `baseRefResolver` reads
+  `base_ref` on each fill, so pinning the concrete value first prevents early
+  pool entries from being created off the old `origin/HEAD` fallback.
+- **How**: `detectBaseRefFromRemote(repoPath)` runs `git ls-remote --symref
+  origin HEAD` against the **live remote** (not the stale local `origin/HEAD`
+  cache), parses the first `ref: refs/heads/<branch>` line via the pure
+  `parseLsRemoteSymref`, and returns `origin/<branch>`. The result is validated
+  with `isValidBaseRefBranchGrammar` (so a pinned value can never fail later
+  save-time validation) and persisted.
+- **Multi-repo**: pinned from the **pool/primary repo only** (first declared
+  non-`.` component). Per-component overrides are not supported. The detected
+  ref is only persisted if it exists in **every** configured component repo
+  (`refExistsInRepo` per distinct repo, non-git paths skipped) — mirroring the
+  save-time validator, so a pinned value can never be one that a manual save
+  would have rejected or that would break worktree creation for a component
+  lacking the branch. If any component lacks the ref, `base_ref` stays blank.
+- **Failure handling**: if `git ls-remote` fails (offline, no remote, not a git
+  repo), `detectBaseRefFromRemote` returns null and `base_ref` stays blank —
+  identical to today's behaviour. Project creation/promotion never fails because
+  of pinning.
+- **Surfacing for existing blank projects**: the read-only endpoint
+  `GET /api/projects/:id/base-ref/detect` returns
+  `{ resolved, detected }` — `resolved` is `resolveBaseRef(primaryRepoPath,
+  storedValue).ref` (exactly what worktrees branch off right now), `detected` is
+  the live `detectBaseRefFromRemote` result **filtered to be saveable**: it is
+  nulled out unless it passes the same grammar + cross-component existence checks
+  add-time pinning applies. This guarantees any non-null `detected` the UI fills
+  via "Detect from remote" will pass save-time validation. Settings uses this to
+  show the resolved fallback as a placeholder and to drive a "Detect from remote"
+  action that fills and saves a concrete value.
+- **Reversible**: blanking the field in Settings opts back into the dynamic
+  runtime fallback (`resolveBaseRef`'s empty-config path).
+
+The two helpers `parseLsRemoteSymref` (pure) and `detectBaseRefFromRemote`
+(best-effort exec wrapper) live alongside the other resolvers in
+`src/server/skills/git.ts`. The runtime resolver chain
+(`parseBaseRef`/`resolveBaseRef`/`resolveBaseRefWithExec`/`resolveRemotePrimary`)
+is **unchanged** — pinning just stops the empty-config fallback from being the
+primary path for new projects.
 
 ### Save-time validation
 
@@ -523,5 +575,5 @@ Unit (`tests/base-ref-parse.spec.ts`):
 - `docs/dev-workflow.md` — branch namespaces and worktree story.
 - `docs/internals.md` — config cascade, sandbox, git-status pipeline.
 - `docs/goals-workflows-tasks.md` — workflow gate definitions.
-- `docs/rest-api.md` — project-config PUT validation rules.
+- `docs/rest-api.md` — project-config PUT validation rules, add-time pinning on `POST /api/projects`, and the `GET /api/projects/:id/base-ref/detect` endpoint.
 - `AGENTS.md` — reference list addition.

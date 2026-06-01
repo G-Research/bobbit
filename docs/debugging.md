@@ -271,6 +271,12 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
   4. Reload during preparing. The server replays current status on `auth_ok` (`src/server/ws/handler.ts`). If the banner still appears, the live-path bug is the regression; if it doesn't, the replay path also broke — inspect the `auth_ok` write path.
 - **Regression test**: `tests/e2e/ui/preparing-ux.spec.ts` (browser E2E). It artificially extends the preparing window so the banner is observable, asserts visibility + editor disabled, then asserts both clear once the session goes idle.
 
+## Staff/session creation in a poly-repo fails with `git worktree add ... fatal: not a git repository`, or staff silently gets no worktree
+
+- **Symptom**: creating a **staff** member (or session) in a **poly-repo** project — root is *not* a git repo, but contains git sub-repos registered as components with `repo != "."` — fails with a raw `Command failed: git worktree add -b ...` / `fatal: not a git repository`, or the staff agent silently lands with no worktree while a regular session for the same project gets one.
+- **Root cause**: worktree-capability resolution had diverged across the three creation paths. The staff path required **every** declared repo (including a non-git `.` container) to pass `isGitRepo`, so a poly-repo either bailed to unsupported or ran `git worktree add` against the non-git container root.
+- **Fix / where to look**: capability is now decided by the single source of truth `src/server/agent/worktree-support.ts::resolveWorktreeSupport(components, projectRoot, cwd)`, used identically by the session (`server.ts` `POST /api/sessions`), staff (`staff-manager.ts::projectSupportsWorktree`), and goal (`goal-manager.ts::createGoal`) paths. `createWorktreeSet` (`src/server/skills/git.ts`) keeps only component dirs that are git repo **roots** (via `isGitRepoRoot`, which distinguishes "is a repo root" from "inside a repo" — avoiding the nested-parent false positive), skipping the non-git container, data-only and missing dirs; if none remain it returns an empty set and callers fall back to no-worktree instead of throwing. Full rationale in [docs/design/multi-repo-components.md §4.4–4.5](design/multi-repo-components.md).
+
 ## Compaction
 
 - Check `_isCompacting` and `_usageStaleAfterCompaction` in `remote-agent.ts`. The compaction placeholder is a reducer action (`compaction-placeholder` / `compaction-result`) — see `src/app/message-reducer.ts`.
