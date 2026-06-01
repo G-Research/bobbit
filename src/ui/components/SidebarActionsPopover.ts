@@ -39,6 +39,16 @@ export interface SidebarActionsPopoverPosition {
 	placement: "bottom" | "top";
 }
 
+/**
+ * A single roving-focus stop. Every menu row is a stop; a row that owns a
+ * trailing checkbox contributes an extra `toggle` stop immediately after it so
+ * the checkbox is reachable as its own ArrowDown/ArrowUp target.
+ */
+interface SidebarActionsFocusStop {
+	kind: "row" | "toggle";
+	itemIndex: number;
+}
+
 const VIEWPORT_PADDING = 8;
 const ANCHOR_GAP = 6;
 const OPEN_DURATION = 150;
@@ -145,7 +155,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._cancelAnimations();
 		this._previousFocus = (document.activeElement as HTMLElement | null) ?? null;
 		this._rowStrip = this._resolveRowStrip();
-		this._highlightIndex = this.items.length > 0 ? this._clampIndex(this._highlightIndex) : -1;
+		this._highlightIndex = this._focusStops().length > 0 ? this._clampIndex(this._highlightIndex) : -1;
 		this._bindListeners();
 		this._syncPopoverOpenAttr();
 		void this._afterOpenRender(this._openedToken);
@@ -249,7 +259,7 @@ export class SidebarActionsPopover extends LitElement {
 			case "End":
 				ev.preventDefault();
 				ev.stopPropagation();
-				this._setHighlight(this.items.length - 1);
+				this._setHighlight(this._focusStops().length - 1);
 				return;
 			case "Enter":
 				ev.preventDefault();
@@ -335,15 +345,41 @@ export class SidebarActionsPopover extends LitElement {
 		else this.removeAttribute("data-popover-open");
 	}
 
+	/**
+	 * The flat list of roving-focus stops in visual order. Each item yields a
+	 * `row` stop; items with a trailing checkbox add a `toggle` stop right after.
+	 */
+	private _focusStops(): SidebarActionsFocusStop[] {
+		const stops: SidebarActionsFocusStop[] = [];
+		this.items.forEach((item, itemIndex) => {
+			stops.push({ kind: "row", itemIndex });
+			if (item.trailingToggle) stops.push({ kind: "toggle", itemIndex });
+		});
+		return stops;
+	}
+
+	private _activeStop(): SidebarActionsFocusStop | null {
+		const stops = this._focusStops();
+		if (this._highlightIndex < 0 || this._highlightIndex >= stops.length) return null;
+		return stops[this._highlightIndex];
+	}
+
+	/** Stop index for a given item's row / trailing toggle, or -1 if absent. */
+	private _stopIndexFor(itemIndex: number, kind: SidebarActionsFocusStop["kind"]): number {
+		return this._focusStops().findIndex((s) => s.kind === kind && s.itemIndex === itemIndex);
+	}
+
 	private _clampIndex(index: number): number {
-		if (this.items.length === 0) return -1;
-		return Math.min(Math.max(index, 0), this.items.length - 1);
+		const len = this._focusStops().length;
+		if (len === 0) return -1;
+		return Math.min(Math.max(index, 0), len - 1);
 	}
 
 	private _moveHighlight(delta: number): void {
-		if (this.items.length === 0) return;
+		const len = this._focusStops().length;
+		if (len === 0) return;
 		const current = this._highlightIndex < 0 ? 0 : this._highlightIndex;
-		this._setHighlight((current + delta + this.items.length) % this.items.length);
+		this._setHighlight((current + delta + len) % len);
 	}
 
 	private _setHighlight(index: number): void {
@@ -352,35 +388,46 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	private _focusHighlighted(): void {
-		const item = this._highlightedButton();
-		if (item) item.focus({ preventScroll: true });
+		const el = this._activeStopElement();
+		if (el) el.focus({ preventScroll: true });
 		else this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu")?.focus({ preventScroll: true });
 	}
 
-	private _highlightedButton(): HTMLButtonElement | null {
-		if (this._highlightIndex < 0) return null;
-		return this.querySelector<HTMLButtonElement>(`button[data-sidebar-actions-index="${this._highlightIndex}"]`);
+	private _activeStopElement(): HTMLElement | null {
+		const stop = this._activeStop();
+		if (!stop) return null;
+		if (stop.kind === "row") {
+			return this.querySelector<HTMLElement>(`button[data-sidebar-actions-index="${stop.itemIndex}"]`);
+		}
+		const item = this.items[stop.itemIndex];
+		if (!item) return null;
+		return this.querySelector<HTMLElement>(`[data-sidebar-actions-toggle][data-sidebar-action-id="${item.id}"]`);
 	}
 
 	private _selectHighlighted(event: Event): void {
-		const item = this.items[this._highlightIndex];
-		if (item) this._select(item.id, event);
+		const stop = this._activeStop();
+		if (!stop) return;
+		const item = this.items[stop.itemIndex];
+		if (!item) return;
+		// Enter on a focused checkbox toggles it without firing the row action.
+		if (stop.kind === "toggle") {
+			if (item.trailingToggle) item.trailingToggle.onToggle();
+			return;
+		}
+		this._select(item.id, event);
 	}
 
 	/**
-	 * Toggle a trailing checkbox from the keyboard. Targets the focused checkbox
-	 * control when one is focused, else the highlighted row's checkbox. Returns
-	 * true when a toggle fired (so the caller skips the row activation path).
+	 * Toggle a trailing checkbox from the keyboard. Fires when the active stop is
+	 * a checkbox, or when it's a row that owns a trailing checkbox (so Space on
+	 * the highlighted Fork row still toggles). Returns true when a toggle fired so
+	 * the caller skips the row activation path.
 	 */
 	private _toggleFromKeyboard(): boolean {
 		if (this._closeRequested) return false;
-		const active = document.activeElement as HTMLElement | null;
-		if (active && this.contains(active) && active.dataset?.sidebarActionsToggle != null) {
-			const id = active.dataset.sidebarActionId;
-			const fromControl = this.items.find((i) => i.id === id);
-			if (fromControl?.trailingToggle) { fromControl.trailingToggle.onToggle(); return true; }
-		}
-		const item = this.items[this._highlightIndex];
+		const stop = this._activeStop();
+		if (!stop) return false;
+		const item = this.items[stop.itemIndex];
 		if (item?.trailingToggle) { item.trailingToggle.onToggle(); return true; }
 		return false;
 	}
@@ -601,11 +648,17 @@ export class SidebarActionsPopover extends LitElement {
 	}
 
 	private _renderItem(item: SidebarActionsPopoverItem, index: number): TemplateResult {
-		const highlighted = index === this._highlightIndex;
+		const activeStop = this._activeStop();
+		const rowActive = activeStop?.kind === "row" && activeStop.itemIndex === index;
+		const toggleActive = activeStop?.kind === "toggle" && activeStop.itemIndex === index;
 		const danger = item.tone === "danger";
 		const color = danger ? "var(--negative, var(--destructive, currentColor))" : "inherit";
-		const background = highlighted ? "var(--accent, rgba(127,127,127,0.15))" : "transparent";
+		const accent = "var(--accent, rgba(127,127,127,0.15))";
+		const rowBackground = rowActive ? accent : "transparent";
 		const hasToggle = !!item.trailingToggle;
+		// In a toggle row the wrapper paints the row highlight so it covers the full
+		// width (button + checkbox); the button itself stays transparent.
+		const buttonBackground = hasToggle ? "transparent" : rowBackground;
 		const button = html`
 			<button
 				type="button"
@@ -614,10 +667,10 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-actions-index=${index}
 				data-sidebar-action-id=${item.id}
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
-				tabindex=${highlighted ? "0" : "-1"}
+				tabindex=${rowActive ? "0" : "-1"}
 				class="bobbit-sidebar-actions-row"
-				style=${`display:flex;align-items:center;gap:8px;${hasToggle ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
-				@mouseenter=${() => { this._highlightIndex = index; }}
+				style=${`display:flex;align-items:center;gap:8px;${hasToggle ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${buttonBackground};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
+				@mouseenter=${() => { this._highlightIndex = this._stopIndexFor(index, "row"); }}
 				@click=${(event: Event) => this._select(item.id, event)}
 			>
 				<span
@@ -631,12 +684,13 @@ export class SidebarActionsPopover extends LitElement {
 		`;
 		if (!hasToggle) return button;
 		const toggle = item.trailingToggle!;
+		const toggleBackground = toggleActive ? accent : "transparent";
 		return html`
 			<div
 				role="none"
 				class="bobbit-sidebar-actions-toggle-row"
-				style=${`display:flex;align-items:stretch;gap:2px;width:100%;min-width:0;border-radius:4px;background:${background};`}
-				@mouseenter=${() => { this._highlightIndex = index; }}
+				style=${`display:flex;align-items:stretch;gap:2px;width:100%;min-width:0;border-radius:4px;background:${rowBackground};`}
+				@mouseenter=${() => { this._highlightIndex = this._stopIndexFor(index, "row"); }}
 			>
 				${button}
 				<span
@@ -646,9 +700,9 @@ export class SidebarActionsPopover extends LitElement {
 					aria-checked=${toggle.checked ? "true" : "false"}
 					aria-label=${toggle.ariaLabel}
 					title=${toggle.ariaLabel}
-					tabindex="-1"
-					style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 10px 6px 8px;border-radius:4px;cursor:pointer;color:var(--muted-foreground, inherit);font:inherit;line-height:1.2;white-space:nowrap;"
-					@mouseenter=${(e: Event) => { e.stopPropagation(); }}
+					tabindex=${toggleActive ? "0" : "-1"}
+					style=${`display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 10px 6px 8px;border-radius:4px;cursor:pointer;color:var(--muted-foreground, inherit);font:inherit;line-height:1.2;white-space:nowrap;background:${toggleBackground};`}
+					@mouseenter=${(e: Event) => { e.stopPropagation(); this._highlightIndex = this._stopIndexFor(index, "toggle"); }}
 					@click=${(event: Event) => this._handleToggle(item, event)}
 					@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleToggle(item, event); }}
 				>

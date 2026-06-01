@@ -75,6 +75,12 @@ test.describe("sidebar actions server endpoints", () => {
 			expect(body.id).toBeTruthy();
 			expect(body.id).not.toBe(sourceId);
 			expect(body.cwd).toBeTruthy();
+			// Finding 1: a non-worktree source forked with newWorktree=false keeps its
+			// own cwd instead of landing in the project root.
+			const srcPs = gateway.sessionManager.getPersistedSession(sourceId);
+			expect(srcPs?.worktreePath).toBeFalsy();
+			expect(srcPs?.cwd).toBeTruthy();
+			expect(body.cwd).toBe(srcPs!.cwd);
 			expect(body.status).toBeTruthy();
 			expect(body.projectId).toBe(await defaultProjectId());
 			expect(body.title).toBe("Fork: Source session");
@@ -108,6 +114,18 @@ test.describe("sidebar actions server endpoints", () => {
 			const archivedRejected = await apiFetch(`/api/sessions/${archivedId}/fork`, { method: "POST", body: "{}" });
 			expect(archivedRejected.status).toBe(422);
 			expect((await json(archivedRejected)).error).toContain("archived");
+
+			// Finding 2: non-interactive sources are rejected, matching the client
+			// `canForkSidebarSession` guard that hides Fork for `session.nonInteractive`.
+			const nonInteractiveId = await createSession();
+			try {
+				gateway.sessionManager.getSessionStore(await defaultProjectId()).update(nonInteractiveId, { nonInteractive: true });
+				const niRejected = await apiFetch(`/api/sessions/${nonInteractiveId}/fork`, { method: "POST", body: "{}" });
+				expect(niRejected.status).toBe(422);
+				expect((await json(niRejected)).error).toContain("non-interactive");
+			} finally {
+				await deleteSession(nonInteractiveId);
+			}
 		} finally {
 			if (forkId) await deleteSession(forkId);
 			await deleteSession(sourceId);

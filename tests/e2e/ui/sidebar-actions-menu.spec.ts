@@ -396,6 +396,47 @@ test.describe("Sidebar actions menu", () => {
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toBe(`#/session/${navTarget}`);
 	});
 
+	test("the New worktree checkbox is a keyboard roving-focus stop; Space toggles it without dismissing", async ({ page }) => {
+		const sourceId = await createSession();
+		sessionIds.push(sourceId);
+		await waitForSessionStatus(sourceId, "idle");
+
+		const row = await openSession(page, sourceId);
+		await openMenu(row, "session", sourceId);
+
+		const forkRow = page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="fork"]').first();
+		const checkbox = page.locator('sidebar-actions-popover [role="menuitemcheckbox"][data-sidebar-action-id="fork"]').first();
+		const menu = page.locator("sidebar-actions-popover [role='menu']");
+		await expect(checkbox).toHaveAttribute("aria-checked", "true");
+
+		// Walk down to the Fork row: Terminate(0) > Modify(1) > Copy link(2) > Fork(3).
+		await page.keyboard.press("ArrowDown");
+		await page.keyboard.press("ArrowDown");
+		await page.keyboard.press("ArrowDown");
+		await expect(forkRow).toBeFocused();
+
+		// ArrowDown from the Fork row lands on its trailing checkbox (its own stop).
+		await page.keyboard.press("ArrowDown");
+		await expect(checkbox).toBeFocused();
+
+		// ArrowUp returns to the Fork row, ArrowDown comes back to the checkbox.
+		await page.keyboard.press("ArrowUp");
+		await expect(forkRow).toBeFocused();
+		await page.keyboard.press("ArrowDown");
+		await expect(checkbox).toBeFocused();
+
+		// Space on the focused checkbox toggles aria-checked WITHOUT firing Fork or
+		// dismissing the popover.
+		await page.keyboard.press(" ");
+		await expect(checkbox).toHaveAttribute("aria-checked", "false");
+		await expect(menu).toBeVisible();
+		await expect(checkbox).toBeFocused();
+
+		await page.keyboard.press(" ");
+		await expect(checkbox).toHaveAttribute("aria-checked", "true");
+		await expect(menu).toBeVisible();
+	});
+
 	test("Open on GitHub mirrors the goal-row PR badge: coloured PR icon + url only when the badge shows", async ({ page }) => {
 		const prGoal = await createGoal({ title: `GitHub PR goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		const gatedGoal = await createGoal({ title: `GitHub gated goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
