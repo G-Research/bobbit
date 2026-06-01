@@ -74,9 +74,17 @@ export interface ArchiveResult {
 // CONFIRM / ERROR DIALOGS
 // ============================================================================
 
-export function confirmAction(title: string, message: string, confirmLabel = "Confirm", destructive = false): Promise<boolean> {
+export function confirmAction(title: string, message: string, confirmLabel = "Confirm", destructive = false, zIndex?: number): Promise<boolean> {
 	return new Promise((resolve) => {
 		const container = document.createElement("div");
+		// When a stacking-context owner (e.g. an expanded bg-process popover at z-50)
+		// would otherwise paint over the dialog, callers pass an explicit zIndex. Making
+		// the container a positioned stacking context lifts the whole dialog — backdrop
+		// and panel — above that sibling regardless of their internal z-index values.
+		if (zIndex !== undefined) {
+			container.style.position = "relative";
+			container.style.zIndex = String(zIndex);
+		}
 		document.body.appendChild(container);
 
 		const cleanup = (result: boolean) => {

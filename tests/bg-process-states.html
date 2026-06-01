@@ -261,7 +261,33 @@ class BgProcessPill extends HTMLElement {
 
   _kill(e) {
     e.stopPropagation();
-    if (this._onKill) this._onKill(this._process.id);
+    if (!this._onKill) return;
+    this._confirmKill();
+  }
+
+  // Mirrors the real component's confirmAction(...) destructive modal: kill only
+  // fires onKill once the user confirms.
+  _confirmKill() {
+    const existing = document.querySelector('[data-kill-confirm]');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.setAttribute('data-kill-confirm', '');
+    // Mirror the real component: lift above the expanded popover portal (z-50).
+    modal.className = 'fixed';
+    modal.style.position = 'relative';
+    modal.style.zIndex = '60';
+    modal.innerHTML = `
+      <div class="bg-card border border-border rounded-lg p-2">
+        <div data-kill-confirm-msg>Kill "${this._escapeHTML(this._displayName())}" (pid ${this._process.pid})?</div>
+        <button data-kill-confirm-yes>Kill</button>
+        <button data-kill-confirm-no>Cancel</button>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('[data-kill-confirm-yes]').addEventListener('click', () => {
+      modal.remove();
+      if (this._onKill) this._onKill(this._process.id);
+    });
+    modal.querySelector('[data-kill-confirm-no]').addEventListener('click', () => modal.remove());
   }
 
   _dismiss(e) {
@@ -390,7 +416,7 @@ class BgProcessPill extends HTMLElement {
           style="font-size:10px; line-height:1; min-width:16px; align-self:stretch"
           data-x-btn
           title="${isRunning ? 'Kill process' : 'Remove'}"
-        >✕</button>
+        >${isRunning ? '<svg class="lucide lucide-skull w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><path d="M8 20v2h8v-2"/><path d="m12.5 17-.5-1-.5 1z"/><path d="M16 20a2 2 0 0 0 1.56-3.25 8 8 0 1 0-11.12 0A2 2 0 0 0 8 20"/></svg>' : '✕'}</button>
       </span>
     `;
 
@@ -446,6 +472,7 @@ function clearPills() {
   container.innerHTML = '';
   // Remove any portals
   document.querySelectorAll('[data-bg-portal]').forEach(el => el.remove());
+  document.querySelectorAll('[data-kill-confirm]').forEach(el => el.remove());
   clearFetchCalls();
 }
 
