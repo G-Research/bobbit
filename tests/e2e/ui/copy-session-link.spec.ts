@@ -28,6 +28,18 @@ async function expectSessionComposer(page: import("@playwright/test").Page, sess
 	).toBeVisible({ timeout: 10_000 });
 }
 
+async function expectCanonicalSessionHashUrl(page: import("@playwright/test").Page, sessionId: string, label: string): Promise<void> {
+	await expect
+		.poll(
+			() => page.evaluate(() => window.location.href),
+			{
+				message: `${label}: CANONICAL_SESSION_URL expected path-style entrypoint to settle as /#/session/${sessionId}`,
+				timeout: 5_000,
+			},
+		)
+		.toBe(`${base()}/#/session/${sessionId}`);
+}
+
 // Grant clipboard read/write permissions so navigator.clipboard works in
 // headless Chromium.
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });
@@ -79,7 +91,7 @@ test.describe("Copy session link button (UI)", () => {
 		}
 	});
 
-	test("direct /session path deep link opens the session and survives reload", async ({ page }) => {
+	test("direct /session path deep link opens the session, canonicalizes, and survives reload", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 
@@ -87,9 +99,11 @@ test.describe("Copy session link button (UI)", () => {
 			const token = await readE2ETokenAsync();
 			await page.goto(`${base()}/session/${sessionId}?token=${encodeURIComponent(token)}`);
 			await expectSessionComposer(page, sessionId, "direct path load");
+			await expectCanonicalSessionHashUrl(page, sessionId, "direct path load");
 
 			await page.reload();
-			await expectSessionComposer(page, sessionId, "direct path reload");
+			await expectSessionComposer(page, sessionId, "canonical hash reload");
+			await expectCanonicalSessionHashUrl(page, sessionId, "canonical hash reload");
 		} finally {
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
 		}
@@ -114,9 +128,46 @@ test.describe("Copy session link button (UI)", () => {
 			const token = await readE2ETokenAsync();
 			await freshPage.goto(`${copiedUrl}?token=${encodeURIComponent(token)}`);
 			await expectSessionComposer(freshPage, sessionId, "copied path link fresh load");
+			await expectCanonicalSessionHashUrl(freshPage, sessionId, "copied path link fresh load");
 		} finally {
 			await freshContext.close().catch(() => { /* best-effort */ });
 			await deleteSession(sessionId).catch(() => { /* best-effort */ });
+		}
+	});
+
+	test("hash session route takes precedence over conflicting path-style session entrypoint", async ({ page }) => {
+		const oldSessionId = await createSession();
+		const newSessionId = await createSession();
+		await waitForSessionStatus(oldSessionId, "idle");
+		await waitForSessionStatus(newSessionId, "idle");
+
+		try {
+			const token = await readE2ETokenAsync();
+			await page.goto(`${base()}/session/${oldSessionId}?token=${encodeURIComponent(token)}#/session/${newSessionId}`);
+			await expectSessionComposer(page, newSessionId, "hash precedence load");
+			await expect
+				.poll(
+					() => page.evaluate(() => window.location.hash),
+					{
+						message: `hash precedence load: HASH_PRECEDENCE_SESSION_URL expected hash route /session/${newSessionId} to remain active instead of old path session ${oldSessionId}`,
+						timeout: 5_000,
+					},
+				)
+				.toBe(`#/session/${newSessionId}`);
+			expect(
+				page.url(),
+				`hash precedence load: HASH_PRECEDENCE_SESSION_URL must not canonicalize conflicting path session ${oldSessionId}`,
+			).not.toBe(`${base()}/#/session/${oldSessionId}`);
+
+			const btn = page.locator('[data-testid="copy-session-link"] button').first();
+			await btn.click();
+			await expect(async () => {
+				const clip = await page.evaluate(() => navigator.clipboard.readText());
+				expect(clip).toBe(`${base()}/session/${newSessionId}`);
+			}).toPass({ timeout: 5_000 });
+		} finally {
+			await deleteSession(oldSessionId).catch(() => { /* best-effort */ });
+			await deleteSession(newSessionId).catch(() => { /* best-effort */ });
 		}
 	});
 });

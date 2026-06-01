@@ -35,11 +35,12 @@ const BLOCKED_EXECUTABLES = new Set([
 	"service", "systemctl", "nohup", "setsid",
 ]);
 
-const GIT_ALLOWED = new Set(["diff", "show", "log", "rev-parse", "status", "for-each-ref"]);
+const GIT_ALLOWED = new Set(["diff", "show", "log", "grep", "rev-parse", "status", "for-each-ref"]);
+const GIT_GREP_ESCAPE_FLAGS = new Set(["-O", "--open-files-in-pager", "--untracked", "--no-exclude-standard", "--recurse-submodules"]);
 const SEARCH_READ_ALLOWED = new Set(["rg", "grep", "ls", "cat", "head", "tail", "pwd"]);
 const PATH_READING_COMMANDS = new Set(["rg", "grep", "ls", "cat", "head", "tail", "find", "sed"]);
 const GH_PR_READ_ALLOWED = new Set(["view", "diff"]);
-const GENERIC_WRITE_OR_ESCAPE_FLAGS = new Set(["--output", "--output-file", "--pathspec-from-file", "--git-dir", "--work-tree", "-C"]);
+const GENERIC_WRITE_OR_ESCAPE_FLAGS = new Set(["--output", "--output-file", "--pathspec-from-file", "--git-dir", "--work-tree"]);
 const SAFE_HIDDEN_PATH_SEGMENTS = new Set([".", ".github"]);
 const SENSITIVE_PATH_SEGMENTS = new Set([".bobbit", ".git", ".ssh", ".gnupg", ".aws", ".azure", ".gcloud"]);
 const RG_HIDDEN_OR_IGNORE_OVERRIDE_FLAGS = new Set([
@@ -383,13 +384,26 @@ function allowGh(argv: string[], options?: WalkthroughReadonlyPolicyOptions): Wa
 	return block("gh api is limited to read-only pull request metadata, files, and commits endpoints", argv);
 }
 
+function gitGrepFlagReason(token: string): string | undefined {
+	const flag = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+	if (GIT_GREP_ESCAPE_FLAGS.has(flag)) return `${flag} is not allowed for git grep in read-only PR walkthrough sessions`;
+	if (/^-[^-]*O/.test(token)) return "git grep -O is not allowed in read-only PR walkthrough sessions because it opens matching files in a pager/editor";
+	return undefined;
+}
+
 function allowGit(argv: string[]): WalkthroughReadonlyDecision {
 	const common = commonArgumentPolicy(argv);
 	if (common) return common;
 	const sub = argv[1];
 	if (!sub || !GIT_ALLOWED.has(sub)) return block(`git ${sub ?? ""}`.trim() + " is not allowed in PR walkthrough sessions", argv);
 	if (argv.slice(2).some(arg => arg === "--no-index" || arg === "--ext-diff" || arg === "--external-diff" || arg === "--textconv" || arg === "--output" || arg.startsWith("--output="))) {
-		return block("git diff/show/log output, external diff, and arbitrary filesystem comparison flags are not allowed", argv);
+		return block("git diff/show/log/grep output, external diff, and arbitrary filesystem comparison flags are not allowed", argv);
+	}
+	if (sub === "grep") {
+		for (const arg of argv.slice(2)) {
+			const flagReason = gitGrepFlagReason(arg);
+			if (flagReason) return block(flagReason, argv);
+		}
 	}
 	if (sub === "status") {
 		const allowedStatusArgs = new Set(["--short", "-s", "--porcelain", "--porcelain=v1", "--porcelain=v2", "--branch", "-b", "--ignored", "--untracked-files", "-uno", "--ahead-behind"]);

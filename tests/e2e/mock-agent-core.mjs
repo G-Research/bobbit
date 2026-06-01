@@ -466,11 +466,31 @@ export class MockAgentCore {
 	}
 
 	/** Simulate a full agent turn: streaming start → tool calls → assistant text → end */
-	async handlePrompt(text) {
+	async handlePrompt(text, images) {
 		this.currentAbortController = new AbortController();
 
-		// Echo back the user message (real agent does this)
-		const userMsg = { role: "user", content: [{ type: "text", text }] };
+		// Echo back the user message (real agent does this).
+		//
+		// Image fidelity (WP0 / PR-0): the real pi-agent builds the user echo as
+		// {role:"user", content:[text, ...imageBlocks]} via normalizePromptInput
+		// (pi-agent-core/dist/agent.js:248-259) and persists it to .jsonl. The
+		// default mock echoed text-only and discarded forwarded images, which
+		// structurally excised the image round-trip from the e2e tier (hid
+		// S1/S6/S18/S26 — see docs/design/comms-stack/02-analysis.md §4 P0). Opt
+		// in via the ECHO_IMAGE_BLOCK trigger so the default path stays
+		// byte-identical for every existing test.
+		const echoImages = /ECHO_IMAGE_BLOCK/.test(text) && Array.isArray(images) && images.length
+			? images.map((im) => ({ type: "image", data: im.data, mimeType: im.mimeType || "image/png" }))
+			: [];
+		const userMsg = { role: "user", content: [{ type: "text", text }, ...echoImages] };
+		// Optional echo-delay knob to widen the optimistic→echo race window for
+		// timing tests (env MOCK_USER_ECHO_DELAY_MS, or inline USER_ECHO_DELAY=<ms>
+		// so it survives the spawned/in-process boundary). Default: synchronous.
+		const echoDelayMs = (() => {
+			const m = /USER_ECHO_DELAY=(\d+)/.exec(text);
+			return m ? parseInt(m[1], 10) : parseInt(this.env.MOCK_USER_ECHO_DELAY_MS || "0", 10);
+		})();
+		if (echoDelayMs > 0) await new Promise((r) => setTimeout(r, echoDelayMs));
 		this.conversationMessages.push(userMsg);
 		this.emit({ type: "message_end", message: userMsg });
 
@@ -1822,9 +1842,12 @@ export class MockAgentCore {
 				// rather than interleave (which would double-assign
 				// currentAbortController and scramble event ordering).
 				const text = msg.message || "";
+				// Forward images so the echo can build image content blocks under the
+				// ECHO_IMAGE_BLOCK trigger (default text-only echo discarded them).
+				const images = Array.isArray(msg.images) ? msg.images : undefined;
 				this._promptChain = this._promptChain
 					.catch(() => {})
-					.then(() => this.handlePrompt(text))
+					.then(() => this.handlePrompt(text, images))
 					.catch(err => {
 						console.error("[mock-agent-core] Prompt error:", err);
 					});

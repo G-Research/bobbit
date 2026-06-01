@@ -19,7 +19,9 @@ Users can open a walkthrough from these entry points:
 - **Standalone route** — `/walkthrough?session=<id>&tab=<walkthrough-tab-id>` opens an already-created walkthrough tab in a wide review surface.
 - **Compatibility resolver** — fixture and local SHA walkthroughs can still be resolved directly into a tab by the standalone/local resolver paths. Session-hosted walkthrough agents currently support GitHub PR targets only.
 
-For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. The UI switches/focuses the child session, expands the needed sidebar containers, and shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata. This nesting applies to ordinary sessions, goal sessions, team member sessions, and team-lead rows, and it is restored after reload from persisted session metadata and sidebar expansion state.
+For GitHub PR launches, the tab belongs to the child walkthrough session, not the launcher. Before that child exists, launch resolves and persists a sanitized analysis bundle containing the PR metadata, body, stats, diff hunks, warnings, limits, and export capability. The stored launch-time bundle is authoritative for the job; YAML submission maps against that bundle instead of re-fetching PR diff data.
+
+The UI switches/focuses the child session, expands the needed sidebar containers, and shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata. This nesting applies to ordinary sessions, goal sessions, team member sessions, and team-lead rows, and it is restored after reload from persisted session metadata and sidebar expansion state. Terminated or archived walkthrough children are hidden while **Show Archived** is off and reappear nested under their parent when it is on.
 
 The same ready walkthrough can be reviewed in:
 
@@ -36,11 +38,12 @@ The same ready walkthrough can be reviewed in:
 1. resolves the parent session and cwd;
 2. canonicalizes the GitHub target;
 3. checks for an existing job for the same `(parentSessionId, canonicalKey)`;
-4. creates a normal read-only child session with role `pr-walkthrough`;
-5. persists a walkthrough job with status `starting`, then `waiting_for_yaml`;
-6. opens the walkthrough tab in the child session and prompts the agent to investigate.
+4. creates a `starting` job record with stable job and child-session ids;
+5. resolves PR metadata and diff data, sanitizes it, and persists the launch-time analysis bundle;
+6. creates a normal read-only child session with role `pr-walkthrough` only after the bundle is usable;
+7. marks the job `waiting_for_yaml`, opens the walkthrough tab in the child session, and prompts the agent to investigate.
 
-The child title is `PR #<number> Walkthrough` when the PR number is known. If launch preflight fails, the failure is surfaced in the child transcript and panel as a structured job error.
+The child title is `PR #<number> Walkthrough` when the PR number is known. If launch-time target or bundle resolution fails, Bobbit returns the structured job error before child creation/focus so no waiting child is left without input.
 
 ### 2. Empty waiting panel
 
@@ -52,8 +55,11 @@ Progress is reported in chat by the agent, not by a panel progress bar. The pane
 
 Walkthrough sessions receive a narrow tool set:
 
-- `readonly_bash` for read-only PR/diff/file inspection;
+- `read_pr_walkthrough_bundle` for bounded reads of the scoped persisted launch-time PR metadata and diff bundle;
+- `readonly_bash` for additional read-only PR/diff/file inspection;
 - `submit_pr_walkthrough_yaml` for publishing the completed walkthrough.
+
+The agent prompt tells the agent to start with `read_pr_walkthrough_bundle` in manifest mode, then request bounded file/hunk reads as needed. The bundle tool validates the current `sessionId` and job id, reads only that walkthrough job's artifact, and does not loosen `readonly_bash` path or command policy.
 
 They do not receive unrestricted `bash`, file write/edit tools, build/test/install commands, commit/push tools, or GitHub review/comment submission tools.
 
@@ -61,10 +67,10 @@ They do not receive unrestricted `bash`, file write/edit tools, build/test/insta
 
 - `gh pr view` and `gh pr diff` for the launched PR;
 - scoped `gh api` reads for the launched repository and PR;
-- read-only `git diff`, `git show`, `git log`, `git rev-parse`, `git status`, and `git for-each-ref` for ref inspection;
+- read-only `git diff`, `git show`, `git log`, `git grep`, `git rev-parse`, `git status`, and `git for-each-ref` for ref inspection/search;
 - bounded file/search commands such as `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `pwd`, and `sed`.
 
-It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments. `git for-each-ref` is allowed only as read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`, `--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
+It blocks mutating commands, tests/builds, dependency installs, server starts, shell chaining/redirection, long-running follow modes, hidden/ignore override flags, unsafe `git grep` pager/editor or untracked/ignore-bypass flags, sensitive path reads, repo-local executable spoofing, cross-repository or cross-PR GitHub reads, and `gh` actions that would create reviews or comments. `git for-each-ref` is allowed only as read-only ref inspection; escape/output flags such as `--git-dir`, `--work-tree`, `--output`, `--shell`, `--perl`, `--python`, and `--tcl` remain blocked.
 
 ### 4. YAML submission is the completion path
 
@@ -77,9 +83,9 @@ The tool posts to the internal submit endpoint with the child `sessionId`, job i
 - YAML syntax and single-document shape;
 - required fields, enum values, size limits, and cross-field target consistency;
 - authoritative PR identity against the launched target;
-- hunk/file references against the fetched or local diff where possible.
+- hunk/file references against the stored launch-time analysis bundle where possible.
 
-On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
+On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the stored bundle is missing, corrupt, or unusable, submission fails deterministically with retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit time. Relaunch the walkthrough so launch can resolve and persist a fresh bundle. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
 
 On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, selects the child walkthrough tab, and enters fullscreen review mode when the child is active. The tool response tells the agent to stay available for follow-up questions.
 
@@ -164,6 +170,11 @@ The user can toggle either mode at any width. Split diffs use one shared horizon
 
 Deleted old-side lines and added new-side lines each have their own suggestions, saved comments, and active editor below the row. Context rows share a single detail area because both columns represent the same logical line.
 
+Diff rendering is defensive at two layers so a single malformed block can never blank the whole pane:
+
+- **Header coercion.** `PrWalkthroughHunk.header` is a required `string`, but the panel still treats it defensively: `hunkSignature` coerces a non-string header to `""` (rendering no signature label) instead of dereferencing it. The producer honors the same contract — the bundle-reconstruction path (`diffBlockFromBundleFile` and the writer `bundleHunkFromDiffHunk` in `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`) coerces `header` to a string, and the `isDiffBlock` guards require a string hunk `header` before admitting a block.
+- **Per-block error boundary.** Each diff block renders through `renderDiffBlockSafe`, which wraps `renderDiffBlock` in a `try/catch`; on a render throw it logs a warning and renders a small local fallback (`data-testid="pr-walkthrough-diff-block-error"`) naming the file, so the rest of the card and panel stay interactive. See [docs/design/pr-walkthrough-hunk-header-fix.md](design/pr-walkthrough-hunk-header-fix.md) for the regression this guards against.
+
 ## Comments, decisions, and draft review
 
 Review state is built from comments plus per-card decisions.
@@ -200,16 +211,17 @@ The draft can always be copied, even when provider export is unavailable.
 
 ## Persistence and reload
 
-Persistence has four layers:
+Persistence has five layers:
 
-- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only tool identity. The sidebar renders these first-class children under their parent even when the parent is a team lead or the goal/team session list filters out child sessions from the top-level roster.
-- **Walkthrough job record** — the PR walkthrough agent store persists status (`starting`, `waiting_for_yaml`, `validation_failed`, `ready`, or `error`), target, tab id, last validation error, warnings, submitted timestamp, payload timestamp, and a submit-proof hash. Sensitive values such as tokens and raw submit proofs are sanitized.
+- **Child session metadata** — the session store persists `parentSessionId`, `childKind: "pr-walkthrough"`, `readOnly`, `walkthroughJobId`, `walkthroughChangesetId`, and `walkthroughTargetKey` so reloads restore the visible child relationship and read-only tool identity. The sidebar renders these first-class children under their parent even when the parent is a team lead or the goal/team session list filters out child sessions from the top-level roster. Terminated or archived children are filtered out while **Show Archived** is off and shown again in the same nested location when it is on.
+- **Walkthrough job record** — the PR walkthrough agent store persists status (`starting`, `waiting_for_yaml`, `validation_failed`, `ready`, or `error`), target, tab id, last validation error, warnings, submitted timestamp, payload timestamp, an `analysisBundle` metadata block, and a submit-proof hash. Sensitive values such as tokens and raw submit proofs are sanitized.
+- **Analysis bundle store** — launch persists the sanitized, versioned PR metadata/diff bundle as a job artifact. The job's `analysisBundle` metadata records the artifact identity, schema/kind, checksum, generated timestamp, and file count; the full bundle remains separate from the final renderable payload.
 - **Resolved walkthrough payload** — after valid YAML, the existing walkthrough store persists final changeset/cards/diff blocks/warnings/export metadata under the `changesetId`.
 - **Reviewer interaction state** — the browser stores active card, diff mode, comments, decisions, completed cards, dismissed suggestions, and collapsed diff blocks under `bobbit:pr-walkthrough:<tab-id>`.
 
 When the app reloads or the user selects a walkthrough child, the UI calls `GET /api/pr-walkthrough/session/<childSessionId>` to restore waiting, validation-failed, ready, or error job state. Ready tabs then call `GET /api/pr-walkthrough/<changeset-id>` if cards are not already loaded.
 
-When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. This lets an interrupted waiting session continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
+When a PR walkthrough child session is restored, Bobbit rotates the submit proof and rehydrates the tool environment with `BOBBIT_SESSION_ID`, `BOBBIT_WALKTHROUGH_JOB_ID`, `BOBBIT_WALKTHROUGH_SUBMIT_PROOF`, and target-scoping variables. Restored waiting sessions retain scoped `read_pr_walkthrough_bundle` access for their own job and can continue to use `submit_pr_walkthrough_yaml` without persisting the raw proof.
 
 Because side panel, fullscreen, and standalone route all refer to the same tab id and persistence key, comments and decisions survive tab switching, wide review, standalone routing, and reload. Browser-local interaction state is not shared across browsers or devices.
 
@@ -249,6 +261,7 @@ Common warning/error categories:
 - **Permission failure** — GitHub `403` with remaining rate limit usually means the token cannot access the repository or PR.
 - **Rate limit** — GitHub `403` with no remaining quota reports rate limiting; configure a token or retry later.
 - **Validation failure** — invalid YAML keeps the panel empty and returns retryable field-level errors.
+- **Missing or unusable analysis bundle** — missing, corrupt, or unreadable launch bundle artifacts return retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; relaunch the walkthrough so launch resolves a fresh bundle before analysis.
 - **Agent runtime failure** — launch or runtime failures before YAML publication become job errors shown in the child session and panel.
 - **Large/truncated diffs** — local diff output, GitHub patch bytes, per-file line counts, or changed-file pages can be truncated. Warnings identify the affected files when possible.
 - **Generated files** — generated-looking paths are flagged as low-signal and grouped into edge-case cards.
@@ -263,10 +276,11 @@ Warnings are shown at the top of the panel and again in export preview when they
 
 The walkthrough API is internal to the Bobbit UI but useful for tests and integrations:
 
-- `POST /api/pr-walkthrough/launch` — create or focus a session-hosted GitHub PR walkthrough child. Returns the job, `childSessionId`, `changesetId`, tab id, status, and whether the job was newly created.
-- `GET /api/pr-walkthrough/jobs/<jobId>` — return the sanitized persisted job record.
+- `POST /api/pr-walkthrough/launch` — create or focus a session-hosted GitHub PR walkthrough child. For new GitHub jobs, launch resolves and persists the analysis bundle before child creation/focus; if resolution fails, the response contains the structured job error and no waiting child is created. Returns the job, `childSessionId`, `changesetId`, tab id, status, and whether the job was newly created.
+- `GET /api/pr-walkthrough/jobs/<jobId>` — return the sanitized persisted job record, including `analysisBundle` metadata when a bundle artifact exists.
 - `GET /api/pr-walkthrough/session/<childSessionId>` — return the sanitized job for a child session so the UI can restore waiting/failed/ready/error state.
-- `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; requires scoped session access and submit proof.
+- `GET /api/internal/pr-walkthrough/bundle` / `POST /api/internal/pr-walkthrough/bundle` — internal endpoint used only by `read_pr_walkthrough_bundle`; requires scoped session/job access and returns bounded manifest/file reads from the persisted launch bundle. `/api/internal/pr-walkthrough/analysis-bundle` is the compatibility alias.
+- `POST /api/internal/pr-walkthrough/submit-yaml` — internal tool endpoint used only by `submit_pr_walkthrough_yaml`; requires scoped session access and submit proof and maps against the stored launch bundle.
 - `POST /api/pr-walkthrough/resolve` — compatibility resolver for fixture/local/direct walkthrough payloads. Stores the resolved payload.
 - `GET /api/pr-walkthrough/<changeset-id>` — reload a stored ready payload.
 - `POST /api/pr-walkthrough/<changeset-id>/export/preview` — build a provider review preview from a draft.
@@ -306,6 +320,7 @@ For compatibility resolver model synthesis without a custom adapter, Bobbit uses
 - **Local changeset launch is unsupported** — use the standalone/local resolver flow for `baseSha` / `headSha` walkthroughs; session-hosted agents are GitHub-only.
 - **Panel stays empty** — the agent has not successfully called `submit_pr_walkthrough_yaml`; check the child transcript and validation state.
 - **YAML validation failed** — fix the field-level errors returned by the tool and call `submit_pr_walkthrough_yaml` again from the same child session.
+- **`PR_WALKTHROUGH_BUNDLE_MISSING` or unusable bundle** — the launch-time analysis bundle artifact is missing, corrupt, or no longer readable. This is retryable, but submission will not re-fetch the diff; relaunch the walkthrough so Bobbit resolves and persists a fresh bundle before creating a new waiting child.
 - **Private PR fails or shows permission errors** — set `GITHUB_TOKEN` or `GH_TOKEN` with repository read and pull request review permissions, then retry.
 - **Rate limited** — configure a token or wait for GitHub's rate limit reset.
 - **Export button only shows copy/preview** — the walkthrough is local, unauthenticated, missing a GitHub target, or export capability was disabled by the resolver.

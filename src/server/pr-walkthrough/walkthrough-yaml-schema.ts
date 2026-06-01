@@ -657,14 +657,18 @@ function mapRelevantHunks(hunks: PrWalkthroughYamlRelevantHunk[], mapper: DiffRe
 	const blocks: PrWalkthroughDiffBlock[] = [];
 	const notes: string[] = [];
 	hunks.forEach((hunk, index) => {
-		const match = mapper.findHunk(hunk.file, hunk.hunk_header);
+		const match = mapper.findHunkLenient(hunk.file, hunk.hunk_header);
 		if (match) {
 			blocks.push(match.block);
 			return;
 		}
 		const fileBlock = mapper.blockForFile(hunk.file);
-		if (fileBlock) blocks.push(fileBlock);
 		const message = `${hunk.file} ${hunk.hunk_header}: ${hunk.why_relevant}`;
+		if (fileBlock) {
+			blocks.push(fileBlock);
+			notes.push(`File-level fallback for hunk: ${message}`);
+			return;
+		}
 		warnings.push({ code: "unmapped_hunk", severity: "warning", message: `Could not map hunk reference at ${path}[${index}]: ${message}`, filePath: hunk.file });
 		notes.push(`Unmapped hunk: ${message}`);
 	});
@@ -677,7 +681,7 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 	chunk.suggested_concerns.forEach((concern, concernIndex) => {
 		let mapped = false;
 		concern.anchors.forEach((anchor, anchorIndex) => {
-			const match = mapper.findHunk(anchor.file, anchor.hunk_header);
+			const match = anchor.line != null || anchor.line_range ? mapper.findHunkLenient(anchor.file, anchor.hunk_header) : mapper.findHunk(anchor.file, anchor.hunk_header);
 			const line = match ? selectLine(match.hunk, anchor) : undefined;
 			if (match && line) {
 				mapped = true;
@@ -690,7 +694,9 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 				});
 				return;
 			}
-			warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${anchor.file} ${anchor.hunk_header}.`, filePath: anchor.file });
+			if (!mapper.blockForFile(anchor.file)) {
+				warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${anchor.file} ${anchor.hunk_header}.`, filePath: anchor.file });
+			}
 			notes.push(`Unmapped suggested comment anchor (${concern.severity}): ${concern.concern} — ${concern.suggested_comment}`);
 		});
 		if (!mapped && concern.anchors.length === 0) notes.push(`${concern.severity}: ${concern.concern} — ${concern.suggested_comment}`);
@@ -729,6 +735,16 @@ class DiffReferenceMapper {
 				if (coordinateMatch) return { block, hunk: coordinateMatch };
 			}
 		}
+		return undefined;
+	}
+
+	findHunkLenient(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
+		const strict = this.findHunk(file, hunkHeader);
+		if (strict) return strict;
+		const blocks = this.byFile.get(normalizePath(file)) ?? [];
+		const totalHunkCount = blocks.reduce((count, item) => count + item.hunks.length, 0);
+		const soleHunkBlock = totalHunkCount === 1 ? blocks.find(block => block.hunks.length === 1) : undefined;
+		if (soleHunkBlock?.hunks[0]) return { block: soleHunkBlock, hunk: soleHunkBlock.hunks[0] };
 		return undefined;
 	}
 }
@@ -771,7 +787,13 @@ function flattenDiffBlocks(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrW
 }
 
 function isDiffBlock(value: unknown): value is PrWalkthroughDiffBlock {
-	return isRecord(value) && typeof value.id === "string" && typeof value.filePath === "string" && Array.isArray(value.hunks);
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.filePath === "string" &&
+		Array.isArray(value.hunks) &&
+		value.hunks.every(hunk => isRecord(hunk) && typeof hunk.header === "string")
+	);
 }
 
 function selectLine(hunk: PrWalkthroughHunk, anchor: PrWalkthroughYamlAnchor): PrWalkthroughDiffLine | undefined {

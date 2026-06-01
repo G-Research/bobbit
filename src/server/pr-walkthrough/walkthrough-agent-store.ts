@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
+import type { PrWalkthroughAnalysisBundleMetadata } from "./walkthrough-analysis-bundle.js";
 import { storageKeyForChangesetId } from "./walkthrough-store.js";
 
 export const PR_WALKTHROUGH_AGENT_STORE_SCHEMA_VERSION = 1;
@@ -67,6 +68,7 @@ export interface PrWalkthroughJobRecord {
 	error?: PrWalkthroughJobError;
 	reminderCount?: number;
 	submissionProofHash?: string;
+	analysisBundle?: PrWalkthroughAnalysisBundleMetadata;
 }
 
 type StoredJobFile = Partial<PrWalkthroughJobRecord> & Record<string, unknown>;
@@ -230,6 +232,7 @@ function parseStoredJob(raw: StoredJobFile, expectedJobId?: string): PrWalkthrou
 		error: isRecord(raw.error) ? raw.error as PrWalkthroughJobError : undefined,
 		reminderCount: typeof raw.reminderCount === "number" ? raw.reminderCount : undefined,
 		submissionProofHash: typeof raw.submissionProofHash === "string" ? raw.submissionProofHash : undefined,
+		analysisBundle: isRecord(raw.analysisBundle) ? raw.analysisBundle as PrWalkthroughAnalysisBundleMetadata : undefined,
 	});
 }
 

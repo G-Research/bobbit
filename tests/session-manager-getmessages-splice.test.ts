@@ -166,4 +166,23 @@ describe("spliceInFlightSteers (steer continuity splice)", () => {
 		const notArr: any = { messages: [] };
 		assert.strictEqual(spliceInFlightSteers(notArr as any, ["x"]), notArr);
 	});
+
+	it("S42: two identical-text steers each splice a distinct row (multiset, not Set)", () => {
+		const out = spliceInFlightSteers([], ["reroute", "reroute"]);
+		// Master (Set-based) returned 1; multiset returns 2 distinct rows.
+		assert.strictEqual(out.length, 2);
+		assert.strictEqual(out[0].id, "inflight-steer:0:reroute");
+		assert.strictEqual(out[1].id, "inflight-steer:1:reroute");
+		assert.strictEqual(out[0].content[0].text, "reroute");
+		assert.strictEqual(out[1].content[0].text, "reroute");
+	});
+
+	it("S42: one identical text already in the snapshot consumes exactly one ledger entry", () => {
+		const messages = [{ role: "user", content: [{ type: "text", text: "reroute" }] }];
+		const out = spliceInFlightSteers(messages, ["reroute", "reroute"]);
+		// One real row + one spliced (the other is represented by the snapshot row).
+		assert.strictEqual(out.length, 2);
+		const synthetic = out.filter((m: any) => m._inFlightSteer);
+		assert.strictEqual(synthetic.length, 1);
+	});
 });

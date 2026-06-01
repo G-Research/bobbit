@@ -19,7 +19,7 @@ import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt
 import { errorDetails } from "./error-helpers.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { startTimeRefresh } from "./render-helpers.js";
-import { getRouteFromHash, setHashRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, canonicalizePathSessionRoute, saveSessionModel, loadSessionModel, clearSessionModel, isConfigPageRoute } from "./routing.js";
 import { sessionHueRotation, ACCESSORY_IDS } from "./session-colors.js";
 import { showConnectionError, confirmAction, checkOAuthStatus, openOAuthDialog } from "./dialogs-lazy.js";
 import { teardownMobileScrollTracking } from "./mobile-header.js";
@@ -1054,6 +1054,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Mark as visited so unseen indicators clear
 		markSessionVisited(sessionId);
+		canonicalizePathSessionRoute(sessionId);
 
 		// Refresh scope-gate fields + archived readOnly on the restored
 		// AgentInterface. Between disconnect and reconnect the session may
@@ -1713,6 +1714,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.remoteAgent = remote;
 		state.appView = "authenticated";
 		markSessionVisited(sessionId);
+		canonicalizePathSessionRoute(sessionId);
 
 		// Detect assistant type from cached session data. The cache may lag the
 		// gateway when a session was just created via a back-channel API call;

@@ -48,6 +48,30 @@ export interface QueuedMessage {
 
 @customElement("message-editor")
 export class MessageEditor extends LitElement {
+	/** Reject a send whose serialized prompt frame would exceed this (S31). Kept
+	 *  safely below the gateway's WS_MAX_PAYLOAD_BYTES (256 MiB) so an oversized
+	 *  multi-image send is reported with a clear error instead of tearing the
+	 *  socket down (close-1009). Static so tests can lower it without 200 MB of
+	 *  fixture data. */
+	static MAX_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
+
+	/** Bytes of the serialized prompt frame RemoteAgent.prompt() will send, given
+	 *  the current text + attachments. Mirrors that frame exactly: each image
+	 *  rides ~3× base64 (images[].data + attachments[].content + attachments[].preview).
+	 *  base64 is ASCII so JSON string length ≈ byte length. Pure — testable. */
+	static serializedSendBytes(text: string, attachments: Attachment[]): number {
+		const imageData = attachments
+			.filter((a) => a.type === "image" && a.content)
+			.map((a) => ({ type: "image", data: a.content, mimeType: a.mimeType }));
+		const frame = {
+			type: "prompt",
+			text,
+			...(imageData.length ? { images: imageData } : {}),
+			...(attachments.length ? { attachments } : {}),
+		};
+		return JSON.stringify(frame).length;
+	}
+
 	private _value = "";
 	private textareaRef = createRef<HTMLTextAreaElement>();
 
@@ -94,6 +118,9 @@ export class MessageEditor extends LitElement {
 
 	@state() processingFiles = false;
 	@state() isDragging = false;
+	/** Non-empty when the last send was rejected for exceeding the aggregate
+	 *  payload limit (S31). Shown as an inline error; cleared on the next edit. */
+	@state() private _sendSizeError = "";
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -331,11 +358,19 @@ export class MessageEditor extends LitElement {
 	private handleTextareaInput = (e: Event) => {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
+		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
 	};
 
 	private handleKeyDown = (e: KeyboardEvent) => {
+		// IME composition guard (S3): while composing CJK/dead-key text, the Enter
+		// that COMMITS the candidate must not send the message. WebKit reports
+		// `isComposing===true` with key "Enter"; Chromium/Firefox report keyCode 229
+		// ("Process"). Bail before any Enter/Tab/slash handling so the composition
+		// commit is left to the IME. Zero effect for non-IME users.
+		if (e.isComposing || e.keyCode === 229) return;
+
 		// Slash autocomplete keyboard handling
 		if (this._slashMenuOpen) {
 			if (e.key === "ArrowDown") {
@@ -453,6 +488,20 @@ export class MessageEditor extends LitElement {
 
 	private handleSend = () => {
 		const text = this.value;
+		// S31: reject an oversized send BEFORE anything irreversible (the
+		// 'message-send' event below tombstones the saved draft, and onSend clears
+		// the composer). Over the limit → inline error, retain everything.
+		if (this.attachments.length > 0) {
+			const limit = MessageEditor.MAX_SERIALIZED_SEND_BYTES;
+			const serializedBytes = MessageEditor.serializedSendBytes(text, this.attachments);
+			if (serializedBytes > limit) {
+				const mb = Math.ceil(serializedBytes / 1024 / 1024);
+				const capMb = Math.floor(limit / 1024 / 1024);
+				this._sendSizeError = `Attachments too large to send (${mb} MB > ${capMb} MB). Remove some and try again.`;
+				return;
+			}
+		}
+		this._sendSizeError = "";
 		// Dispatch a composed event that escapes shadow DOM — used by
 		// session-manager for draft cleanup without monkey-patching.
 		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
@@ -891,6 +940,13 @@ export class MessageEditor extends LitElement {
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
+				${this._sendSizeError
+					? html`<div
+							data-testid="composer-size-error"
+							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
+							role="alert"
+						>${this._sendSizeError}</div>`
+					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}
 					<textarea

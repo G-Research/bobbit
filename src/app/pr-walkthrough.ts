@@ -371,7 +371,16 @@ export function upsertPrWalkthroughJobPanel(
 	const sessionId = job.childSessionId;
 	const changeset = targetChangesetFromJob(job);
 	const changesetId = job.changesetId;
-	const tabId = job.tabId || walkthroughPanelTabId(changesetId);
+	const rawTabId = cleanString(job.tabId);
+	const requestedTabId = rawTabId && walkthroughChangesetIdFromPanelTabId(rawTabId) ? rawTabId : walkthroughPanelTabId(changesetId);
+	const existing = panelTabsForSession(state, sessionId);
+	const existingJobTab = existing.find((candidate) => {
+		if (candidate.kind !== "walkthrough") return false;
+		const source = (candidate.source || {}) as Record<string, unknown>;
+		const candidateState = (candidate.state || {}) as Record<string, unknown>;
+		return source.jobId === job.jobId || candidateState.jobId === job.jobId;
+	});
+	const tabId = existingJobTab?.id || requestedTabId;
 	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
 	const target = job.target || {};
 	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);
@@ -418,16 +427,25 @@ export function upsertPrWalkthroughJobPanel(
 		},
 	};
 
-	const existing = panelTabsForSession(state, sessionId);
 	const next = existing.some((candidate) => candidate.id === tabId)
-		? existing.map((candidate) => candidate.id === tabId
-			? {
+		? existing.map((candidate) => {
+			if (candidate.id !== tabId) return candidate;
+			const candidateState = (candidate.state || {}) as Record<string, unknown>;
+			const tabState = (tab.state || {}) as Record<string, unknown>;
+			const mergedState = { ...candidateState, ...tabState };
+			if (status === "ready" && Array.isArray(candidateState.cards) && !Array.isArray(tabState.cards)) {
+				mergedState.cards = candidateState.cards;
+				if (candidateState.changeset) mergedState.changeset = candidateState.changeset;
+				if (candidateState.exportCapability && !tabState.exportCapability) mergedState.exportCapability = candidateState.exportCapability;
+				if (candidateState.limits && !tabState.limits) mergedState.limits = candidateState.limits;
+			}
+			return {
 				...candidate,
 				...tab,
 				source: { ...(candidate.source as Record<string, unknown>), ...(tab.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
-				state: { ...(candidate.state || {}), ...(tab.state || {}) },
-			}
-			: candidate)
+				state: mergedState,
+			};
+		})
 		: [...existing, tab];
 	setPanelTabsForSession(state, sessionId, next);
 	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
@@ -435,7 +453,10 @@ export function upsertPrWalkthroughJobPanel(
 		if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, tabId);
 		else setActivePanelTabIdForSession(state, sessionId, tabId);
 		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
-		if (!liveSessionHosted) restorePrWalkthroughPanel(state, sessionId, tabId);
+		// A ready job broadcast carries job metadata, not the YAML-derived cards.
+		// Always hydrate the payload from the walkthrough store so live child
+		// panels and standalone tabs don't remain stuck on stale waiting content.
+		restorePrWalkthroughPanel(state, sessionId, tabId);
 	}
 	return tab;
 }

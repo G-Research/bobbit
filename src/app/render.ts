@@ -2243,6 +2243,9 @@ export function doRenderApp(): void {
 		const exportCapability = tabState.exportCapability;
 		const validationError = tabState.validationError || tabState.lastValidationError;
 		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
+		if (status === "ready" && !cards?.length) {
+			queueMicrotask(() => restorePrWalkthroughPanel(state, workspaceSessionId(), tab.id));
+		}
 		if (status === "ready" && tabState.fullscreenOnReady === true && !state.previewPanelFullscreen && !isLiveSessionHostedWalkthroughActive(tab)) {
 			queueMicrotask(() => {
 				if (activeSessionId() === workspaceSessionId() && !isLiveSessionHostedWalkthroughActive(tab)) {
@@ -2290,6 +2293,7 @@ export function doRenderApp(): void {
 				source: { type: "walkthrough" as const, sessionId: sid, title: "PR Walkthrough", changesetId: fallbackChangesetId },
 				state: { changesetId: fallbackChangesetId },
 			} as UnifiedContentTab;
+		if (route.walkthroughSessionId) restorePrWalkthroughJobForSession(state, sid);
 		if (storedTab) {
 			restorePrWalkthroughPanel(state, sid, storedTab.id);
 		} else if (fallbackChangesetId && fallbackChangesetId !== "fixture") {

@@ -134,7 +134,7 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(payload.changeset.headSha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 	});
 
-	it("preserves unmapped hunk and anchor references as warnings and card suggestions", () => {
+	it("preserves truly unmapped hunk references as warnings and file-fallback anchors as card suggestions", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
@@ -142,7 +142,7 @@ describe("PR walkthrough YAML schema", () => {
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
 		const warningCodes = payload.warnings.map(warning => warning.code);
 		assert.ok(warningCodes.includes("unmapped_hunk"));
-		assert.ok(warningCodes.includes("unmapped_anchor"));
+		assert.equal(warningCodes.includes("unmapped_anchor"), false);
 
 		const design = payload.cards.find(card => card.phaseId === "design");
 		assert.ok(design?.cardSuggestions?.some(note => /Unmapped hunk/.test(note)));
@@ -191,16 +191,29 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
 	});
 
-	it("keeps warning when hunk numeric ranges do not match", () => {
-		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -11,2 +10,3 @@ function renderExample"));
+	it("falls back to the only file hunk when YAML line coordinates are stale", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -371,7 +371,8 @@ stale location"));
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
 
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample")] });
 
-		assert.ok(payload.warnings.some(warning => warning.code === "unmapped_hunk" && warning.filePath === "src/context.ts"));
-		assert.ok(payload.warnings.some(warning => warning.code === "unmapped_anchor" && warning.filePath === "src/context.ts"));
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.equal(review?.suggestedComments?.length, 1);
+		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+	});
+
+	it("uses file-level fallback without global warnings when hunk numeric ranges do not match", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -11,2 +10,3 @@ function renderExample"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiHunkContextDiffBlock()] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
 		assert.equal(review?.suggestedComments?.length ?? 0, 0);
 	});
 
@@ -213,7 +226,7 @@ describe("PR walkthrough YAML schema", () => {
 		const review = payload.cards.find(card => card.id === "significant-context-review");
 
 		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
-		assert.ok(payload.warnings.some(warning => warning.code === "unmapped_hunk" && warning.filePath === "src/context.ts"));
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 	});
 });
 
@@ -264,6 +277,21 @@ function contextDiffBlock(header: string): PrWalkthroughDiffBlock {
 				{ id: "block-context:h0:l1", side: "new", newLine: 11, text: "  return <Example />;", kind: "add" },
 			],
 		}],
+	};
+}
+
+function multiHunkContextDiffBlock(): PrWalkthroughDiffBlock {
+	const block = contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample");
+	return {
+		...block,
+		hunks: [
+			...block.hunks,
+			{
+				id: "block-context:h1",
+				header: "@@ -30,1 +31,2 @@ anotherChange",
+				lines: [{ id: "block-context:h1:l0", side: "new", newLine: 31, text: "another", kind: "add" }],
+			},
+		],
 	};
 }
 
