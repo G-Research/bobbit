@@ -233,10 +233,15 @@ test.describe("Project Assistant Saved State", () => {
 
 		const termBtn2 = page.getByRole("button", { name: "Terminate Project Assistant" });
 		await termBtn2.click();
-		// Confirm dialog — destructive button labelled exactly "Terminate". The
-		// trigger button name is "Terminate Project Assistant" so we match by
-		// exact name to avoid clicking the same trigger again.
-		const confirmBtn = page.getByRole("button", { name: "Terminate" }).last();
+		// Confirm dialog — destructive button labelled EXACTLY "Terminate". Match by
+		// exact accessible name so we only ever resolve the dialog's confirm button,
+		// never the trigger "Terminate Project Assistant" (whose name contains
+		// "Terminate"). The old `{ name: "Terminate" }` was a substring match that
+		// also matched the trigger; `.last()` was a DOM-order gamble that
+		// intermittently resolved the re-rendering trigger button → "element not
+		// stable" click timeout (the flake). The confirm dialog is position:fixed
+		// and static, so once correctly targeted it is reliably clickable.
+		const confirmBtn = page.getByRole("button", { name: "Terminate", exact: true });
 		await expect(confirmBtn).toBeVisible({ timeout: 5_000 });
 		await confirmBtn.click();
 
