@@ -82,12 +82,12 @@ After a valid YAML submission:
 
 1. Persist the YAML-derived walkthrough payload under the child session/walkthrough id.
 2. Replace the waiting panel with the populated PR walkthrough cards.
-3. Automatically switch the child session to fullscreen review configuration.
-4. Keep chat available in the fullscreen compact prompt area so the user can ask follow-up questions with PR context still loaded.
+3. Leave the panel in the normal split view. The walkthrough panel does **not** automatically switch to fullscreen (superseded — was: "automatically switch the child session to fullscreen review configuration"); it shares the HTML preview panel's resize logic and fullscreen is strictly user-initiated.
+4. Keep chat available beside the panel so the user can ask follow-up questions with PR context still loaded.
 5. Add a concise success message in chat: `Walkthrough published. I can answer follow-up questions about any card or hunk.`
 6. Do not terminate or archive the walkthrough agent.
 
-The fullscreen transition should be a focus shift, not a modal trap: Escape/collapse returns to the normal split layout.
+Fullscreen is entered only when the user explicitly requests it (toolbar button or keyboard shortcut); Escape/collapse returns to the normal split layout. There is no automatic fullscreen transition on ready.
 
 ## Reload persistence
 
@@ -97,7 +97,7 @@ Reload should restore the user to the same mental state:
 - Child session restores its transcript and read-only status.
 - Waiting state persists if no valid YAML has been submitted.
 - Latest validation-failure summary persists if the last attempt failed.
-- Successful walkthrough payload restores the populated panel, active card, comments, decisions, and fullscreen state when it was active before reload.
+- Successful walkthrough payload restores the populated panel, active card, comments, decisions, and any user-initiated fullscreen state when it was active before reload (reload never forces fullscreen on its own).
 - Standalone walkthrough route continues to open the same persisted review surface for the child session.
 
 ## Duplicate prevention
