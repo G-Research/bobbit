@@ -87,35 +87,41 @@ export function spliceInFlightSteers(
 	if (!Array.isArray(messages)) return messages;
 	if (!inFlightSteerTexts || inFlightSteerTexts.length === 0) return messages;
 
-	// Collect every user-role plain text already present in the snapshot so we
+	// Count every user-role plain text already present in the snapshot so we
 	// don't double-up if the echo has already flushed to `.jsonl` by the time
-	// this splice runs (and the ledger hasn't been cleared yet — a race we
-	// don't try to reason about precisely, we just dedupe defensively).
-	const presentUserTexts = new Set<string>();
+	// this splice runs (and the ledger hasn't been cleared yet). MULTISET, not a
+	// Set (S42): two identical-text steers must each splice a row. The old
+	// Set + `add(text)` collapsed them — the second identical steer was skipped,
+	// so a resync in the dispatch→echo window dropped one of two same-text pills.
+	const presentCounts = new Map<string, number>();
 	for (const m of messages) {
 		if (!m) continue;
 		if (m.role !== "user" && m.role !== "user-with-attachments") continue;
 		const t = extractUserText(m);
-		if (t) presentUserTexts.add(t);
+		if (t) presentCounts.set(t, (presentCounts.get(t) ?? 0) + 1);
 	}
 
 	const additions: any[] = [];
 	let i = 0;
 	for (const text of inFlightSteerTexts) {
-		if (!text || presentUserTexts.has(text)) {
+		if (!text) { i++; continue; }
+		const remaining = presentCounts.get(text) ?? 0;
+		if (remaining > 0) {
+			// Already represented by a real snapshot row — consume one and skip.
+			presentCounts.set(text, remaining - 1);
 			i++;
 			continue;
 		}
 		additions.push({
 			// Stable, content-derived id so repeated `get_messages` calls during
 			// the same dispatch→echo window produce the same synthetic row. The
-			// real echo's id won't collide (agents use uuid-shaped ids).
+			// real echo's id won't collide (agents use uuid-shaped ids). The index
+			// prefix keeps two identical-text steers distinct.
 			id: `inflight-steer:${i}:${text.slice(0, 32)}`,
 			role: "user",
 			content: [{ type: "text", text }],
 			_inFlightSteer: true,
 		});
-		presentUserTexts.add(text);
 		i++;
 	}
 	if (additions.length === 0) return messages;

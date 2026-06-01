@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
@@ -140,6 +141,12 @@ export class RpcBridge {
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<typeof setTimeout> }>();
 	private eventListeners: RpcEventListener[] = [];
 	private lineBuffer = "";
+	/** Persistent UTF-8 decoders so a multibyte char split across two stdout/
+	 *  stderr reads is reassembled instead of corrupted into U+FFFD (S14 — the
+	 *  agent's own stdin reader uses StringDecoder; we mirror it here). A per-
+	 *  chunk `chunk.toString("utf-8")` would mojibake long CJK/emoji output. */
+	private stdoutDecoder = new StringDecoder("utf8");
+	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
 
@@ -297,13 +304,15 @@ export class RpcBridge {
 	 */
 	private _attachProcessHandlers(): void {
 		this.process!.stdout!.on("data", (chunk: Buffer) => {
-			this.handleData(chunk.toString("utf-8"));
+			// S14: decode through a persistent StringDecoder so a multibyte char
+			// straddling a chunk boundary is reassembled, not corrupted.
+			this.handleData(this.stdoutDecoder.write(chunk));
 		});
 
 		this.process!.stderr!.on("data", (chunk: Buffer) => {
 			process.stderr.write(chunk);
 			// Keep last 20 lines of stderr for diagnostics on unexpected exit
-			const lines = chunk.toString("utf-8").split("\n").filter(l => l.trim());
+			const lines = this.stderrDecoder.write(chunk).split("\n").filter(l => l.trim());
 			this.stderrTail.push(...lines);
 			if (this.stderrTail.length > 20) {
 				this.stderrTail = this.stderrTail.slice(-20);

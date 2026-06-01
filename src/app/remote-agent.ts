@@ -180,6 +180,10 @@ export interface QueuedMessage {
 	isSteered: boolean;
 	/** True if already dispatched mid-turn via steer RPC (kept in queue for UI) */
 	dispatched?: boolean;
+	/** True for a client-side outbox row not yet delivered to the server (S2):
+	 *  issued while the WS was reconnecting; flushed on auth_ok. Lets the pill
+	 *  strip render it distinctly ("waiting to send") and the client reconcile it. */
+	unsent?: boolean;
 	createdAt: number;
 }
 
@@ -193,6 +197,14 @@ export class RemoteAgent {
 	private _toolCallInputsById = new Map<string, unknown>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
+	// Client-side outbox for user-intent frames issued while the WS is not OPEN
+	// (S2 — VPN flap / reconnect): instead of silently dropping the frame (and
+	// clearing the composer as if it sent), queue it, surface it in the existing
+	// prompt-queue pill strip as a "pending/unsent" row, and flush FIFO on the
+	// next auth_ok. Bounded so a long offline period can't grow unbounded.
+	private _pendingOutbox: Array<{ frame: any; row?: QueuedMessage }> = [];
+	private static readonly OUTBOX_MAX = 50;
+	private static readonly OUTBOX_FRAME_TYPES = new Set(["prompt", "steer", "retry"]);
 	// Reducer-owned message state. The reducer is the single source of truth
 	// for transcript order; `_state.messages` is mirrored from `reducerState.messages`
 	// after every dispatch so existing UI bindings keep working.
@@ -669,6 +681,9 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
+						// S2: deliver any prompts/steers/retries the user issued while
+						// the socket was reconnecting, before resume/snapshot traffic.
+						this._flushOutbox();
 						// On reconnect, try a seq-based resume before falling back
 						// to a full snapshot. If the server still holds our last seen
 						// seq in its EventBuffer, it will replay only missed events
@@ -854,11 +869,11 @@ export class RemoteAgent {
 				: null;
 
 		// Add the user message optimistically so it renders immediately —
-		// but only when the agent is idle. If streaming, the prompt is queued
-		// server-side and the server will echo it in the correct position
-		// (interleaved with responses). Rendering it now would stack multiple
-		// user messages together before any response.
-		if (!this._state.isStreaming) {
+		// but only when the agent is idle AND the socket is open. If streaming,
+		// the prompt is queued server-side and echoed in the correct position. If
+		// the socket is NOT open (S2), the frame goes to the outbox and surfaces as
+		// a pending pill — rendering a transcript bubble would falsely look "sent".
+		if (!this._state.isStreaming && this.ws?.readyState === WebSocket.OPEN) {
 			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 			const optimisticMsg: any = {
 				role: attachments?.length || this._pendingSkillExpansions?.length
@@ -886,17 +901,20 @@ export class RemoteAgent {
 
 	steer(message: any): void {
 		const text = typeof message === "string" ? message : extractText(message);
-		// Add optimistic user message so it renders immediately in chat,
-		// matching the pattern used in prompt() for idle sends.
-		const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-		const optimisticMsg: any = {
-			role: "user",
-			content: [{ type: "text", text }],
-			timestamp: Date.now(),
-			id: optimisticId,
-		};
-		this.apply({ type: "optimistic-steer", message: optimisticMsg });
-		this.emit({ type: "message_end", message: optimisticMsg });
+		// Add optimistic user message so it renders immediately in chat — but only
+		// when the socket is open. Offline (S2), the steer goes to the outbox and
+		// shows as a pending pill instead of a falsely-"sent" bubble.
+		if (this.ws?.readyState === WebSocket.OPEN) {
+			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+			const optimisticMsg: any = {
+				role: "user",
+				content: [{ type: "text", text }],
+				timestamp: Date.now(),
+				id: optimisticId,
+			};
+			this.apply({ type: "optimistic-steer", message: optimisticMsg });
+			this.emit({ type: "message_end", message: optimisticMsg });
+		}
 		this.send({ type: "steer", text });
 	}
 
@@ -1220,12 +1238,16 @@ export class RemoteAgent {
 	clearFollowUpQueue(): void {}
 	clearAllQueues(): void {}
 	hasQueuedMessages(): boolean {
-		return this._serverQueue.length > 0;
+		return this._serverQueue.length > 0 || this._pendingOutbox.some((e) => !!e.row);
 	}
 
-	/** Get the current server-authoritative prompt queue. */
+	/** Get the prompt queue for the pill strip: the server-authoritative queue
+	 *  plus any client-side pending-unsent rows (S2), which sort after the server
+	 *  rows since they have not been delivered yet. */
 	getQueue(): QueuedMessage[] {
-		return this._serverQueue;
+		if (this._pendingOutbox.length === 0) return this._serverQueue;
+		const pendingRows = this._pendingOutbox.map((e) => e.row).filter((r): r is QueuedMessage => !!r);
+		return pendingRows.length ? [...this._serverQueue, ...pendingRows] : this._serverQueue;
 	}
 
 	/** Ask the server to promote a queued message to a steer. */
@@ -1233,8 +1255,15 @@ export class RemoteAgent {
 		this.send({ type: "steer_queued", messageId });
 	}
 
-	/** Ask the server to remove a message from the queue. */
+	/** Ask the server to remove a message from the queue. A pending-unsent
+	 *  outbox row (S2) is dropped locally — the server never saw it. */
 	removeQueued(messageId: string): void {
+		const idx = this._pendingOutbox.findIndex((e) => e.row?.id === messageId);
+		if (idx !== -1) {
+			this._pendingOutbox.splice(idx, 1);
+			this.onQueueUpdate?.(this.getQueue());
+			return;
+		}
 		this.send({ type: "remove_queued", messageId });
 	}
 
@@ -1253,9 +1282,45 @@ export class RemoteAgent {
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
-		} else {
-			console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
+			return;
 		}
+		// S2: queue user-intent frames instead of dropping them. A prompt/steer
+		// also gets a pending pill row (built from the frame) so it appears in the
+		// existing queue strip; retry has no text → no pill, but still resends.
+		if (RemoteAgent.OUTBOX_FRAME_TYPES.has(msg?.type)) {
+			if (this._pendingOutbox.length >= RemoteAgent.OUTBOX_MAX) this._pendingOutbox.shift();
+			let row: QueuedMessage | undefined;
+			if (typeof msg.text === "string") {
+				row = {
+					id: `outbox_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+					text: msg.text,
+					isSteered: msg.type === "steer",
+					unsent: true,
+					createdAt: Date.now(),
+					...(Array.isArray(msg.images) && msg.images.length ? { images: msg.images } : {}),
+					...(Array.isArray(msg.attachments) && msg.attachments.length ? { attachments: msg.attachments } : {}),
+				};
+			}
+			this._pendingOutbox.push({ frame: msg, row });
+			if (row) this.onQueueUpdate?.(this.getQueue());
+			return;
+		}
+		console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
+	}
+
+	/** Flush queued user-intent frames after the socket reopens (auth_ok). FIFO;
+	 *  the server then echoes/enqueues them and the normal queue_update
+	 *  reconciliation replaces the pending pills. (S2) */
+	private _flushOutbox(): void {
+		if (this._pendingOutbox.length === 0) return;
+		const pending = this._pendingOutbox;
+		this._pendingOutbox = [];
+		for (const entry of pending) {
+			if (this.ws?.readyState === WebSocket.OPEN) {
+				try { this.ws.send(JSON.stringify(entry.frame)); } catch { /* re-drop on a racing close; rare */ }
+			}
+		}
+		this.onQueueUpdate?.(this.getQueue());
 	}
 
 	private async handleServerMessage(msg: any) {
@@ -1421,6 +1486,14 @@ export class RemoteAgent {
 						this._pendingEvents = [];
 						this._inResumeFallback = true;
 						this._highestSeq = 0;
+						// S9: also clear _seqInitialized so the NEXT live frame
+						// re-baselines _highestSeq (via the !_seqInitialized branch
+						// above). Without this, _highestSeq stays 0 while
+						// _seqInitialized remains true, so every subsequent large-seq
+						// frame re-buffers as a gap → the buffer refills to the cap →
+						// overflow fires forever and live streaming stalls until reload.
+						// Mirrors the resume_gap / _advanceTopLevelSeq recovery paths.
+						this._seqInitialized = false;
 						this.requestMessages();
 					}
 					this._drainOrderedEvents();
@@ -1500,7 +1573,9 @@ export class RemoteAgent {
 
 			case "queue_update":
 				this._serverQueue = Array.isArray(msg.queue) ? msg.queue : [];
-				this.onQueueUpdate?.(this._serverQueue);
+				// Merge any pending-unsent outbox rows so a server queue update
+				// doesn't visually drop them before they flush (S2).
+				this.onQueueUpdate?.(this.getQueue());
 				break;
 
 			case "goal_setup_complete":
@@ -2197,12 +2272,22 @@ export class RemoteAgent {
 						this.streamingMessageId = undefined;
 
 						// Enrich echoed user messages with stashed attachments / skill expansions.
+						// The attachment slot is now a FALLBACK only (WP1 / RC2): when the
+						// echo already carries image content blocks, the reducer's
+						// enrichUserMessage derives the tiles from server-authoritative
+						// content — applying the slot too would double-attach. Use the slot
+						// only when the echo has no image block; clear it unconditionally
+						// (one-shot) so a later text-only prompt can't inherit stale images.
 						if (msg.role === "user" && this._pendingAttachments) {
-							msg = {
-								...msg,
-								role: "user-with-attachments",
-								attachments: this._pendingAttachments,
-							};
+							const echoHasImage = Array.isArray(msg.content)
+								&& msg.content.some((c: any) => c?.type === "image" && c?.data);
+							if (!echoHasImage) {
+								msg = {
+									...msg,
+									role: "user-with-attachments",
+									attachments: this._pendingAttachments,
+								};
+							}
 							this._pendingAttachments = null;
 						}
 						if (
