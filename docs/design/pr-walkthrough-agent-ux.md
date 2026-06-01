@@ -1,5 +1,11 @@
 # Session-hosted PR walkthrough agent UX
 
+> **Superseded behaviour:** the "automatically switch the child to fullscreen
+> review configuration" steps below describe the original design. Auto-fullscreen
+> on ready has since been **removed** — the walkthrough panel now shares the HTML
+> preview panel's resize logic and fullscreen is strictly user-initiated. See
+> [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md).
+
 ## Context from the current UI
 
 - Today `/walkthrough-pr <url|number>` is intercepted client-side and opens a `walkthrough:<changeset-id>` side-panel tab in the launching session.
