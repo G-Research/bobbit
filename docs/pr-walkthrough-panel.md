@@ -170,6 +170,11 @@ The user can toggle either mode at any width. Split diffs use one shared horizon
 
 Deleted old-side lines and added new-side lines each have their own suggestions, saved comments, and active editor below the row. Context rows share a single detail area because both columns represent the same logical line.
 
+Diff rendering is defensive at two layers so a single malformed block can never blank the whole pane:
+
+- **Header coercion.** `PrWalkthroughHunk.header` is a required `string`, but the panel still treats it defensively: `hunkSignature` coerces a non-string header to `""` (rendering no signature label) instead of dereferencing it. The producer honors the same contract — the bundle-reconstruction path (`diffBlockFromBundleFile` and the writer `bundleHunkFromDiffHunk` in `src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`) coerces `header` to a string, and the `isDiffBlock` guards require a string hunk `header` before admitting a block.
+- **Per-block error boundary.** Each diff block renders through `renderDiffBlockSafe`, which wraps `renderDiffBlock` in a `try/catch`; on a render throw it logs a warning and renders a small local fallback (`data-testid="pr-walkthrough-diff-block-error"`) naming the file, so the rest of the card and panel stay interactive. See [docs/design/pr-walkthrough-hunk-header-fix.md](design/pr-walkthrough-hunk-header-fix.md) for the regression this guards against.
+
 ## Comments, decisions, and draft review
 
 Review state is built from comments plus per-card decisions.

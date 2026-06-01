@@ -1,7 +1,43 @@
 # PR Walkthrough `hunkSignature` TypeError — Root-Cause Analysis
 
-> Status: analysis only. No production code changed by this document. Fix tasks
-> are described in **Proposed fix** and **Test plan** below.
+> Status: **fixed and merged.** Both defects below were resolved as described in
+> **Proposed fix**; the analysis is retained for context. See **Resolution**
+> immediately below for what landed and the regression tests that pin it.
+
+## Resolution
+
+Both fixes landed exactly as proposed; `PrWalkthroughHunk.header` stays required
+`string`.
+
+- **UI (`src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`)** —
+  `hunkSignature` coerces a non-string `header` to `""`
+  (`const text = typeof header === "string" ? header : ""`), `sectionSignature`
+  forwards `hunk.header ?? ""`, and a new per-block error boundary
+  `renderDiffBlockSafe(card, block)` wraps `renderDiffBlock` in a `try/catch`.
+  On throw it logs via `console.warn` and renders a local fallback
+  (`data-testid="pr-walkthrough-diff-block-error"`) naming `block.filePath`, so
+  one malformed block degrades locally instead of blanking the pane. `renderCard`
+  maps blocks through `renderDiffBlockSafe`.
+- **Producer (`src/server/pr-walkthrough/walkthrough-analysis-bundle.ts`)** —
+  both `diffBlockFromBundleFile` and the bundle writer `bundleHunkFromDiffHunk`
+  coerce `header` to a string (`typeof hunk.header === "string" ? hunk.header : ""`).
+  The `isDiffBlock` guard now also requires every hunk to be a record with a
+  string `header` (`value.hunks.every(hunk => isRecord(hunk) && typeof hunk.header === "string")`);
+  the three duplicate guards (`walkthrough-analysis-bundle.ts`,
+  `walkthrough-yaml-schema.ts`, `routes.ts`) were tightened in step.
+
+### Regression tests
+
+- **Server unit** — `tests/pr-walkthrough-bundle-hunk-header.test.ts`: feeds a
+  persisted bundle whose hunk omits `header` and asserts every reconstructed
+  hunk carries a string `header`; also pins that a present header is preserved
+  verbatim. Fails before the producer fix.
+- **Browser E2E** — `tests/e2e/ui/pr-walkthrough-panel.spec.ts`, test
+  *"renders cards and stays interactive when a diff hunk header is undefined
+  (hunkSignature regression)"*: clones the fixture cards in the test, blanks one
+  hunk's `header`, and asserts the card and diff block still render with no
+  `Cannot read properties of undefined (reading 'match')` / `hunkSignature`
+  console or page errors.
 
 ## Symptom
 
