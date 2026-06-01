@@ -58,7 +58,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -69,6 +69,35 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+// Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
+// must exist in EVERY configured component repo before it is persisted — mirroring
+// the save-time validator (which rejects a ref missing in any component). Without
+// this, a multi-repo project whose primary repo's remote HEAD differs from another
+// component's available refs would persist a value that breaks worktree creation
+// for that component. Returns true only if at least one repo was checked AND every
+// checked git repo has the ref. Never throws. See docs/design/base-ref.md.
+async function detectedRefExistsInAllComponents(
+	rootPath: string,
+	comps: Array<{ repo: string }>,
+	ref: string,
+): Promise<boolean> {
+	try {
+		const seen = new Set<string>();
+		let checked = 0;
+		for (const c of comps.length > 0 ? comps : [{ repo: "." }]) {
+			if (seen.has(c.repo)) continue;
+			seen.add(c.repo);
+			const repoPath = path.join(rootPath, c.repo);
+			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			checked++;
+			if (!(await refExistsInRepo(repoPath, ref))) return false;
+		}
+		return checked > 0;
+	} catch {
+		return false;
+	}
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -2771,7 +2800,16 @@ async function handleApiRoute(
 						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(body.rootPath);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath);
-					if (detected && isValidBaseRefBranchGrammar(detected)) cfg.set("base_ref", detected);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
 			json(project, 201);
@@ -2886,7 +2924,15 @@ async function handleApiRoute(
 						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 						: await getRepoRoot(rootPath);
 					const detected = await detectBaseRefFromRemote(primaryRepoPath);
-					if (detected && isValidBaseRefBranchGrammar(detected)) cfg.set("base_ref", detected);
+					// Pin only if the detected ref exists in every component repo
+					// (mirrors save-time validation). See POST /api/projects above.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);

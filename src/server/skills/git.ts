@@ -249,6 +249,16 @@ export async function detectBaseRefFromRemote(repoPath: string): Promise<string 
 	}
 }
 
+/** True iff `ref` resolves via `git rev-parse --verify` in repoPath. Never throws. */
+export async function refExistsInRepo(repoPath: string, ref: string): Promise<boolean> {
+	try {
+		await execGit(["rev-parse", "--verify", ref], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Check if a directory is inside a git repository. */
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	try {
