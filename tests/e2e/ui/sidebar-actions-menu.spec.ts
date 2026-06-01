@@ -566,6 +566,72 @@ test.describe("Sidebar actions menu", () => {
 		await expect.poll(() => page.evaluate(() => (window as any).__sidebarAnimateCalls)).toBe(0);
 	});
 
+	// Assign a role to an existing session via the real PATCH endpoint (which
+	// drives sessionManager.assignRole → respawn) and wait for the role to
+	// persist on the server session and the agent to return to idle. Mirrors
+	// how the product assigns roles; faithful to the bug because the sidebar
+	// Fork guard reads the persisted `session.role`.
+	async function assignSessionRole(sessionId: string, roleId: string): Promise<void> {
+		const resp = await apiFetch(`/api/sessions/${sessionId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ roleId }),
+		});
+		expect(resp.ok, `PATCH roleId=${roleId} should succeed (got ${resp.status})`).toBeTruthy();
+		// assignRole kills + respawns the agent; wait for it to settle back to idle.
+		await waitForSessionStatus(sessionId, "idle");
+		// Confirm the role actually persisted on the session — otherwise the
+		// test would not be exercising the role-gated Fork path at all.
+		await expect.poll(async () => {
+			const get = await apiFetch(`/api/sessions/${sessionId}`);
+			if (!get.ok) return undefined;
+			return (await get.json()).role;
+		}, { timeout: 15_000 }).toBe(roleId);
+	}
+
+	// REPRODUCING TEST (must FAIL on current code, PASS once canForkSidebarSession
+	// stops gating on `!session.role`). A standard session carrying the default
+	// `role: "general"` must still expose Fork — the server's
+	// isUnsupportedForkSource() permits forking role:"general", so the client
+	// must not hide it. On current code the `!session.role` clause suppresses
+	// Fork for ANY truthy role, so the Fork menu item is absent here.
+	test("standard role:general session still shows Fork in the sidebar menu", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		await assignSessionRole(sessionId, "general");
+
+		const row = await openSession(page, sessionId);
+		await openMenu(row, "session", sessionId);
+		// Sanity: the menu opened and lists the standard items.
+		await expect(menuItem(page, "copy-link")).toBeVisible();
+
+		const forkItem = menuItem(page, "fork");
+		await expect(
+			forkItem,
+			"Fork menu item must be VISIBLE for role:general sessions (server permits forking them; client must agree)",
+		).toBeVisible({ timeout: 5_000 });
+	});
+
+	// NEGATIVE (must PASS now and stay passing): a team-lead session is genuinely
+	// non-forkable — the server's isUnsupportedForkSource() rejects role:"team-lead"
+	// — so the client must hide Fork. This is the one role-based exclusion the fix
+	// must preserve.
+	test("role:team-lead session hides Fork in the sidebar menu", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		await assignSessionRole(sessionId, "team-lead");
+
+		const row = await openSession(page, sessionId);
+		await openMenu(row, "session", sessionId);
+		// The menu opened (standard item present) but Fork must be absent.
+		await expect(menuItem(page, "copy-link")).toBeVisible();
+		await expect(
+			menuItem(page, "fork"),
+			"Fork must stay hidden for team-lead sessions",
+		).toHaveCount(0, { timeout: 5_000 });
+	});
+
 	test("mobile v1 hides hamburger while keeping existing inline quick actions visible", async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 820 });
 		const sessionId = await createSession();
