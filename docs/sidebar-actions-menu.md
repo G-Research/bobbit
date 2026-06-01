@@ -60,9 +60,29 @@ This avoids adding a redundant dense tap target on mobile, where the quick actio
 | `Terminate` | Quick + menu | Plain live session | Opens the existing terminate confirmation. |
 | `End team` | Quick + menu | Team-lead session | Opens the existing team-end confirmation with goal context. |
 | `Copy link` | Menu only | Live session / team-lead row | Copies an absolute hash route for the session. |
-| `Fork` | Menu only | Plain live, non-archived, non-child, non-team, non-read-only sessions | Clones the session's conversation history into a new session and connects to it. Carries an inline **New worktree** checkbox (see below). |
+| `Fork` | Menu only | Forkable live session (see [Forkability policy](#forkability-policy)) | Clones the session's conversation history into a new session and connects to it. Carries an inline **New worktree** checkbox (see below). |
 
 Archived sessions and unsupported live session kinds do not expose `Fork`. The server also enforces this with `422` responses so clients cannot bypass UI availability checks.
+
+#### Forkability policy
+
+Forkability is one policy enforced in two places, and they **must agree** — otherwise the UI offers a Fork that the server rejects with `422` (or hides one the server would accept):
+
+- **Client** — `canForkSidebarSession()` in `src/app/render-helpers.ts` decides whether the `Fork` menu item renders.
+- **Server** — `isUnsupportedForkSource()` in `src/server/server.ts` is the authority; the `POST /api/sessions/:id/fork` handler calls it and returns `422` for unsupported sources.
+
+A live session is forkable **unless** it is one of the genuinely non-forkable kinds:
+
+| Not forkable | Why |
+|---|---|
+| terminated / archived | No live transcript to clone. |
+| read-only / non-interactive | Not an interactive session the user can continue. |
+| delegate / child (`isChildSession`) | Owned by a parent turn, not independently forkable. |
+| team sessions (`teamGoalId`, `teamLeadSessionId`, `role === "team-lead"`) | Bound to a team's lifecycle. |
+
+Everything else is forkable. In particular, **standard `role: "general"` sessions and `assistant` sessions are forkable** — `role` is *not* a blanket disqualifier. Among role-based sessions only `team-lead` is excluded; the client guard mirrors the server by checking `session.role !== "team-lead"` rather than `!session.role`.
+
+> Historical note: an earlier client guard blocked Fork for *any* session carrying a `role` (`!session.role`). Because normal user-started sessions persist the default `role: "general"`, Fork was wrongly hidden for them even though the server's `isUnsupportedForkSource()` already permitted forking them. Aligning the client check to the server's actual policy (`role !== "team-lead"`) fixed the client/server mismatch.
 
 The `Fork` row has a trailing `New worktree` checkbox (`role="menuitemcheckbox"`, default checked) at its right edge:
 
