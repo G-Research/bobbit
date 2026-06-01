@@ -1,6 +1,10 @@
 // Test entry — bundles the REAL <message-editor> Lit component to pin the S3
-// IME composition guard against production handleKeyDown (not a replica).
+// IME composition guard against production handleKeyDown (not a replica) and the
+// S31 aggregate-size guard against production handleSend.
 import "../../src/ui/components/MessageEditor.js";
+import { MessageEditor } from "../../src/ui/components/MessageEditor.js";
+(window as any).MessageEditorClass = MessageEditor;
+(window as any).__setAttachments = (el: any, atts: any[]) => { el.attachments = atts; };
 
 const sendCalls: Array<{ text: string }> = [];
 

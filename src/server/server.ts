@@ -192,6 +192,13 @@ import {
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
+/** Max WebSocket frame the gateway will accept (S31). The ws default is 100 MiB;
+ *  a multi-image prompt frame carries ~3x base64 per image and could silently
+ *  trip a close-1009 teardown. Set an explicit, generous cap ABOVE the composer's
+ *  aggregate-send guard (src/ui/components/MessageEditor.ts) so the composer
+ *  rejects an oversized send with a clear error BEFORE it can tear down the socket. */
+export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
+
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFileCb);
 
@@ -1068,7 +1075,7 @@ export function createGateway(config: GatewayConfig) {
 	// cluster (RP-18, CT-01-d, S-02) where the WS would briefly disconnect
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
-	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal.
 	// Recipients are the matching goal's session sockets plus explicit
