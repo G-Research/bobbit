@@ -57,16 +57,88 @@ export function goalDeepLink(goalId: string): string {
 	return absoluteHashUrl(`/goal/${encodeURIComponent(goalId)}`);
 }
 
-export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
+/** Copy text via the async Clipboard API, falling back to a legacy
+ *  execCommand("copy") path so links are still copied in insecure contexts
+ *  (e.g. plain http:// over NordLynx) where the Clipboard API is blocked. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
 	try {
-		if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-			throw new Error("Clipboard API unavailable");
+		if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return true;
 		}
-		await navigator.clipboard.writeText(url);
 	} catch {
-		const m = await import("../ui/dialogs/CopyLinkFallbackDialog.js");
-		m.CopyLinkFallbackDialog.show(url, { title });
+		// Clipboard API unavailable or rejected (insecure context) — fall through.
 	}
+	return legacyCopyText(text);
+}
+
+function legacyCopyText(text: string): boolean {
+	if (typeof document === "undefined") return false;
+	let ta: HTMLTextAreaElement | null = null;
+	try {
+		ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.style.position = "fixed";
+		ta.style.top = "-1000px";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		return document.execCommand("copy");
+	} catch {
+		return false;
+	} finally {
+		ta?.remove();
+	}
+}
+
+// Standalone toast fallback. `showHeaderToast` only renders inside the session
+// header (active-session view); the landing / no-active-session sidebar has no
+// header, so we surface the SAME toast (identical `.review-toast` styling and
+// `data-testid="header-toast"`) appended to <body> when no header is mounted.
+let _sidebarToastEl: HTMLDivElement | null = null;
+let _sidebarToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function mountStandaloneSidebarToast(text: string): void {
+	if (typeof document === "undefined") return;
+	if (!_sidebarToastEl || !_sidebarToastEl.isConnected) {
+		_sidebarToastEl = document.createElement("div");
+		_sidebarToastEl.className = "review-toast";
+		_sidebarToastEl.setAttribute("data-testid", "header-toast");
+		document.body.appendChild(_sidebarToastEl);
+	}
+	_sidebarToastEl.textContent = text;
+	if (_sidebarToastTimer) clearTimeout(_sidebarToastTimer);
+	_sidebarToastTimer = setTimeout(() => {
+		_sidebarToastEl?.remove();
+		_sidebarToastEl = null;
+		_sidebarToastTimer = null;
+	}, 2500);
+}
+
+/** Flash the same "Link copied" toast the session header uses. When a session
+ *  header is mounted, reuse `showHeaderToast`; otherwise (landing / no active
+ *  session) mount a standalone toast so the flash is visible in every sidebar
+ *  context. The header's `[data-testid="copy-session-link"]` button renders
+ *  under the exact same condition as the header toast, so its presence is a
+ *  reliable, synchronous signal that the header toast will be visible. */
+async function flashSidebarToast(text: string): Promise<void> {
+	try {
+		const { showHeaderToast } = await import("./render.js");
+		showHeaderToast(text);
+	} catch {
+		// best-effort toast
+	}
+	if (typeof document === "undefined") return;
+	if (document.querySelector('[data-testid="copy-session-link"]')) return;
+	mountStandaloneSidebarToast(text);
+}
+
+export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
+	const copied = await copyTextToClipboard(url);
+	if (!copied) console.warn(`[sidebar] ${title}: failed to copy link`, url);
+	await flashSidebarToast(copied ? "Link copied" : "Couldn't copy link");
 }
 
 export type GoalGithubLinkResponse =

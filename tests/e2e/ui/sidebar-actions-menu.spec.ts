@@ -215,6 +215,7 @@ test.describe("Sidebar actions menu", () => {
 		await menuItem(page, "copy-link").click();
 		await expectNoPopover(page);
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(await expectedHashUrl(page, `#/session/${sessionId}`));
+		await expect(page.locator('[data-testid="header-toast"]'), "session copy flashes the header toast").toHaveText("Link copied", { timeout: 5_000 });
 
 		await navigateToHash(page, "#/landing");
 		const gRow = await ensureGoalExpanded(page, goal.id as string);
@@ -222,36 +223,58 @@ test.describe("Sidebar actions menu", () => {
 		await menuItem(page, "copy-link").click();
 		await expectNoPopover(page);
 		await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(await expectedHashUrl(page, `#/goal/${goal.id}`));
+		await expect(page.locator('[data-testid="header-toast"]'), "goal copy flashes the toast even with no active session").toHaveText("Link copied", { timeout: 5_000 });
 	});
 
-	test("copy link falls back to the manual dialog with entity-specific titles", async ({ page }) => {
+	test("copy link falls back to legacy copy + toast (no modal) when the Clipboard API is blocked", async ({ page }) => {
 		const sessionId = await createSession();
 		sessionIds.push(sessionId);
 		await waitForSessionStatus(sessionId, "idle");
 		const goal = await createGoal({ title: `Sidebar fallback goal ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		goalIds.push(goal.id as string);
 
+		// Simulate an insecure context (http:// over NordLynx): the async
+		// Clipboard API rejects, so copySidebarLink must use the legacy
+		// execCommand("copy") path and still flash the toast — never a modal.
 		await page.addInitScript(() => {
 			Object.defineProperty(navigator, "clipboard", {
 				configurable: true,
 				value: { writeText: () => Promise.reject(new Error("forced clipboard failure")) },
 			});
+			(window as any).__execCopies = [];
+			const orig = document.execCommand?.bind(document);
+			document.execCommand = ((cmd: string, ...rest: unknown[]) => {
+				if (cmd === "copy") {
+					const el = document.activeElement as HTMLTextAreaElement | null;
+					const text = el && typeof el.value === "string" ? el.value : (window.getSelection?.()?.toString() ?? "");
+					(window as any).__execCopies.push(text);
+					return true;
+				}
+				return orig ? (orig as any)(cmd, ...rest) : false;
+			}) as typeof document.execCommand;
 		});
 
 		const row = await openSession(page, sessionId);
+		const sessionUrl = await expectedHashUrl(page, `#/session/${sessionId}`);
 		await openMenu(row, "session", sessionId);
 		await menuItem(page, "copy-link").click();
-		await expect(page.locator("copy-link-fallback-dialog")).toContainText("Copy session link", { timeout: 5_000 });
-		await expect(page.locator('[data-testid="copy-link-fallback-input"]')).toHaveValue(await expectedHashUrl(page, `#/session/${sessionId}`));
-		await page.locator("copy-link-fallback-dialog").getByText("Close", { exact: true }).click();
+		await expectNoPopover(page);
+		// No modal — the fallback dialog must never appear.
 		await expect(page.locator("copy-link-fallback-dialog")).toHaveCount(0, { timeout: 5_000 });
+		// The header toast flashes "Link copied".
+		await expect(page.locator('[data-testid="header-toast"]')).toHaveText("Link copied", { timeout: 5_000 });
+		// The link was still copied via the legacy execCommand path.
+		await expect.poll(() => page.evaluate(() => (window as any).__execCopies)).toContain(sessionUrl);
 
+		const goalUrl = await expectedHashUrl(page, `#/goal/${goal.id}`);
 		await navigateToHash(page, "#/landing");
 		const gRow = await ensureGoalExpanded(page, goal.id as string);
 		await openMenu(gRow, "goal", goal.id as string);
 		await menuItem(page, "copy-link").click();
-		await expect(page.locator("copy-link-fallback-dialog")).toContainText("Copy goal link", { timeout: 5_000 });
-		await expect(page.locator('[data-testid="copy-link-fallback-input"]')).toHaveValue(await expectedHashUrl(page, `#/goal/${goal.id}`));
+		await expectNoPopover(page);
+		await expect(page.locator("copy-link-fallback-dialog")).toHaveCount(0, { timeout: 5_000 });
+		await expect(page.locator('[data-testid="header-toast"]')).toHaveText("Link copied", { timeout: 5_000 });
+		await expect.poll(() => page.evaluate(() => (window as any).__execCopies)).toContain(goalUrl);
 	});
 
 	test("dismissal closes on outside click, Escape, route change, item selection, repeated toggle, and direct menu switch", async ({ page }) => {
