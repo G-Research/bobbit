@@ -65,6 +65,7 @@ export class SidebarActionsPopover extends LitElement {
 	@state() private _maxHeight = 320;
 
 	private _previousFocus: HTMLElement | null = null;
+	private _rowStrip: HTMLElement | null = null;
 	private _listenersBound = false;
 	private _animations: Animation[] = [];
 	private _closeRequested = false;
@@ -90,6 +91,7 @@ export class SidebarActionsPopover extends LitElement {
 		super.disconnectedCallback();
 		this._unbindListeners();
 		this._cancelAnimations();
+		this._restoreRowStrip();
 		this.removeAttribute("data-popover-open");
 	}
 
@@ -122,6 +124,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._closing = false;
 		this._cancelAnimations();
 		this._previousFocus = (document.activeElement as HTMLElement | null) ?? null;
+		this._rowStrip = this._resolveRowStrip();
 		this._highlightIndex = this.items.length > 0 ? this._clampIndex(this._highlightIndex) : -1;
 		this._bindListeners();
 		this._syncPopoverOpenAttr();
@@ -133,6 +136,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._closing = false;
 		this._unbindListeners();
 		this._cancelAnimations();
+		this._restoreRowStrip();
 		this._restoreFocus();
 		this._syncPopoverOpenAttr();
 	}
@@ -151,6 +155,7 @@ export class SidebarActionsPopover extends LitElement {
 		this._closeRequested = false;
 		this._closing = false;
 		this._cancelAnimations();
+		this._restoreRowStrip();
 		this._restoreFocus();
 		this._syncPopoverOpenAttr();
 		this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
@@ -257,10 +262,31 @@ export class SidebarActionsPopover extends LitElement {
 		this._closing = false;
 		this._closeRequested = false;
 		this._cancelAnimations();
+		this._restoreRowStrip();
 		this._syncPopoverOpenAttr();
 		if (restoreFocus) this._restoreFocus();
 		this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
 		queueMicrotask(() => { this._finishingInternalClose = false; });
+	}
+
+	/**
+	 * The row's on-screen quick-action strip. We fade it out while the menu
+	 * blooms so its icons read as travelling into the popover (shared element),
+	 * then restore it on close. The strip lives in the light DOM next to the
+	 * trigger; visibility is otherwise governed by group-hover/focus CSS.
+	 */
+	private _resolveRowStrip(): HTMLElement | null {
+		const root = this.anchorEl?.closest<HTMLElement>("[data-sidebar-actions-row-root]") ?? null;
+		return root?.querySelector<HTMLElement>(".sidebar-actions") ?? null;
+	}
+
+	private _hideRowStrip(): void {
+		if (this._rowStrip) this._rowStrip.style.opacity = "0";
+	}
+
+	private _restoreRowStrip(): void {
+		if (this._rowStrip) this._rowStrip.style.removeProperty("opacity");
+		this._rowStrip = null;
 	}
 
 	private _restoreFocus(): void {
@@ -349,55 +375,112 @@ export class SidebarActionsPopover extends LitElement {
 	private _animateOpen(): void {
 		if (this._prefersReducedMotion()) return;
 		this._cancelAnimations();
+
+		// Fade the row's on-screen strip out so its icons appear to leave the row
+		// and arrive in the menu (shared-element illusion).
+		const strip = this._rowStrip;
+		if (strip && typeof strip.animate === "function") {
+			strip.style.opacity = "1";
+			const stripAnim = strip.animate([{ opacity: 1 }, { opacity: 0 }], {
+				duration: OPEN_DURATION,
+				easing: "ease-out",
+				fill: "forwards",
+			});
+			stripAnim.finished.then(() => this._hideRowStrip()).catch(() => undefined);
+			this._animations.push(stripAnim);
+		} else {
+			this._hideRowStrip();
+		}
+
+		// Bloom the menu surface.
+		const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu");
+		if (menu && typeof menu.animate === "function") {
+			menu.style.transformOrigin = this._position.placement === "top" ? "bottom right" : "top right";
+			this._animations.push(menu.animate([
+				{ opacity: 0, transform: "scale(0.96)" },
+				{ opacity: 1, transform: "scale(1)" },
+			], { duration: OPEN_DURATION, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "backwards" }));
+		}
+
+		// Shared-element FLIP: each quick icon travels from its row position into
+		// its menu slot. Compounding with the menu scale is negligible at this size.
 		const targets = this._targetQuickIconRects();
 		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
 		for (const delta of deltas) {
 			const icon = this._quickIcon(delta.actionId);
 			if (!icon || typeof icon.animate !== "function") continue;
 			const animation = icon.animate([
-				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})`, opacity: 0.85 },
-				{ transform: "translate(0, 0) scale(1, 1)", opacity: 1 },
-			], { duration: OPEN_DURATION, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "none" });
+				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})` },
+				{ transform: "translate(0, 0) scale(1, 1)" },
+			], { duration: OPEN_DURATION + 60, easing: "cubic-bezier(.2, .8, .2, 1)", fill: "backwards" });
 			this._animations.push(animation);
 		}
-		for (const row of this._menuOnlyRows()) {
-			if (typeof row.animate !== "function") continue;
-			const animation = row.animate([
+
+		// Labels of quick rows catch up to the arriving icons.
+		this._quickRowLabels().forEach((label) => {
+			if (typeof label.animate !== "function") return;
+			this._animations.push(label.animate([
+				{ opacity: 0 },
+				{ opacity: 1 },
+			], { duration: OPEN_DURATION, delay: 50, easing: "ease-out", fill: "backwards" }));
+		});
+
+		// Menu-only rows (no row counterpart) stagger in alongside.
+		this._menuOnlyRows().forEach((row, index) => {
+			if (typeof row.animate !== "function") return;
+			this._animations.push(row.animate([
 				{ opacity: 0, transform: "translateY(-0.25em)" },
 				{ opacity: 1, transform: "translateY(0)" },
-			], { duration: OPEN_DURATION, delay: 55, easing: "ease-out", fill: "backwards" });
-			this._animations.push(animation);
-		}
+			], { duration: OPEN_DURATION, delay: 55 + index * 25, easing: "ease-out", fill: "backwards" }));
+		});
 	}
 
 	private async _animateClose(): Promise<void> {
 		this._cancelAnimations();
 		const animations: Animation[] = [];
+
+		// Reverse FLIP: icons travel back toward their row positions.
 		const targets = this._targetQuickIconRects();
 		const deltas = computeSidebarActionFlipDeltas(this.sourceRects, targets);
 		for (const delta of deltas) {
 			const icon = this._quickIcon(delta.actionId);
 			if (!icon || typeof icon.animate !== "function") continue;
-			const animation = icon.animate([
-				{ transform: "translate(0, 0) scale(1, 1)", opacity: 1 },
-				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})`, opacity: 0.8 },
-			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" });
-			animations.push(animation);
+			animations.push(icon.animate([
+				{ transform: "translate(0, 0) scale(1, 1)" },
+				{ transform: `translate(${delta.dx}px, ${delta.dy}px) scale(${delta.sx}, ${delta.sy})` },
+			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
 		}
 		for (const row of this._menuOnlyRows()) {
 			if (typeof row.animate !== "function") continue;
-			const animation = row.animate([
+			animations.push(row.animate([
 				{ opacity: 1, transform: "translateY(0)" },
 				{ opacity: 0, transform: "translateY(-0.25em)" },
-			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" });
-			animations.push(animation);
+			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
 		}
-		if (animations.length === 0) {
-			const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-layer");
-			if (menu && typeof menu.animate === "function") {
-				animations.push(menu.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
-			}
+
+		// Collapse the menu surface as the icons return to the row.
+		const menu = this.querySelector<HTMLElement>(".bobbit-sidebar-actions-menu");
+		if (menu && typeof menu.animate === "function") {
+			menu.style.transformOrigin = this._position.placement === "top" ? "bottom right" : "top right";
+			animations.push(menu.animate([
+				{ opacity: 1, transform: "scale(1)" },
+				{ opacity: 0, transform: "scale(0.96)" },
+			], { duration: CLOSE_DURATION, easing: "ease-in", fill: "forwards" }));
 		}
+
+		// Bring the row strip back as the popover unwinds.
+		const strip = this._rowStrip;
+		if (strip && typeof strip.animate === "function") {
+			strip.style.opacity = "0";
+			const stripAnim = strip.animate([{ opacity: 0 }, { opacity: 1 }], {
+				duration: CLOSE_DURATION,
+				easing: "ease-in",
+				fill: "forwards",
+			});
+			stripAnim.finished.then(() => this._restoreRowStrip()).catch(() => undefined);
+			animations.push(stripAnim);
+		}
+
 		this._animations = animations;
 		await Promise.allSettled(animations.map((animation) => animation.finished));
 	}
@@ -428,6 +511,10 @@ export class SidebarActionsPopover extends LitElement {
 		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-quick='false']")];
 	}
 
+	private _quickRowLabels(): HTMLElement[] {
+		return [...this.querySelectorAll<HTMLElement>("[data-sidebar-actions-row][data-sidebar-action-quick='true'] [data-sidebar-actions-label]")];
+	}
+
 	override render() {
 		if (!this.open && !this._closing) return nothing;
 
@@ -448,7 +535,7 @@ export class SidebarActionsPopover extends LitElement {
 					role="menu"
 					tabindex="-1"
 					data-placement=${position.placement}
-					style=${`box-sizing:border-box;display:flex;flex-direction:column;gap:0.125em;max-height:${this._maxHeight}px;overflow:auto;padding:0.25em;border:1px solid var(--border);border-radius:0.6em;background:var(--popover, var(--card, var(--background)));color:var(--popover-foreground, var(--foreground));box-shadow:0 0.5em 1.5em color-mix(in oklch, var(--foreground) 16%, transparent);font-size:calc(0.875em * var(--sidebar-font-scale, 1));outline:none;`}
+					style=${`box-sizing:border-box;display:flex;flex-direction:column;gap:2px;max-height:${this._maxHeight}px;overflow:auto;padding:4px;border:1px solid var(--border);border-radius:8px;background:var(--popover, var(--background));color:var(--popover-foreground, inherit);box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:calc(13px * var(--sidebar-font-scale, 1));outline:none;`}
 					@keydown=${(e: KeyboardEvent) => e.stopPropagation()}
 				>
 					${this.items.map((item, index) => this._renderItem(item, index))}
@@ -461,7 +548,7 @@ export class SidebarActionsPopover extends LitElement {
 		const highlighted = index === this._highlightIndex;
 		const danger = item.tone === "danger";
 		const color = danger ? "var(--negative, var(--destructive, currentColor))" : "inherit";
-		const background = highlighted ? "color-mix(in oklch, var(--foreground) 10%, transparent)" : "transparent";
+		const background = highlighted ? "var(--accent, rgba(127,127,127,0.15))" : "transparent";
 		return html`
 			<button
 				type="button"
@@ -472,7 +559,7 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
 				tabindex=${highlighted ? "0" : "-1"}
 				class="bobbit-sidebar-actions-row"
-				style=${`display:flex;align-items:center;gap:0.55em;width:100%;min-width:0;padding:0.45em 0.6em;border:0;border-radius:0.45em;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
+				style=${`display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
 				@mouseenter=${() => { this._highlightIndex = index; }}
 				@click=${(event: Event) => this._select(item.id, event)}
 			>
@@ -482,7 +569,7 @@ export class SidebarActionsPopover extends LitElement {
 					data-sidebar-action-quick=${item.quick ? "true" : "false"}
 					style="display:inline-flex;align-items:center;justify-content:center;width:1.2em;height:1.2em;flex:0 0 auto;transform-origin:top left;"
 				>${item.icon}</span>
-				<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.label}</span>
+				<span data-sidebar-actions-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.label}</span>
 			</button>
 		`;
 	}
