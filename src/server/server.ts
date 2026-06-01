@@ -2108,8 +2108,8 @@ async function handleApiRoute(
 	}
 
 	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
-	 * forked. The substrings (archived/terminated/delegate/child/read-only/team)
-	 * are load-bearing — the API E2E asserts on them. */
+	 * forked. The substrings (archived/terminated/delegate/child/read-only/team/
+	 * non-interactive) are load-bearing — the API E2E asserts on them. */
 	function isUnsupportedForkSource(session: any, ps: any): string | null {
 		if (!session || !ps) return "session not found";
 		if (ps.archived) return "archived sessions cannot be forked";
@@ -2117,6 +2117,7 @@ async function handleApiRoute(
 		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be forked";
 		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be forked";
 		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be forked";
+		if (session.nonInteractive || ps.nonInteractive) return "non-interactive sessions cannot be forked";
 		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be forked";
 		return null;
 	}
@@ -6803,7 +6804,10 @@ async function handleApiRoute(
 				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
 			} catch { /* not a git repo — plain project-root session */ }
 		} else {
-			sessionCwd = ps.worktreePath || projCwd;
+			// Prefer the source's own cwd when it has no worktree so a standalone
+			// non-worktree session keeps its working directory instead of landing
+			// in the project root.
+			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
 			worktreeOpts = undefined;
 		}
 
