@@ -11,6 +11,7 @@ import { completeModelText as defaultCompleteModelText } from "../agent/model-co
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
 import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
+import type { ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
 
 const execFile = promisify(execFileCb);
 const STORE_SCHEMA_VERSION = 1;
@@ -149,17 +150,30 @@ export async function handlePrWalkthroughApiRoute(
 ): Promise<boolean> {
 	const isPublicWalkthroughRoute = url.pathname.startsWith("/api/pr-walkthrough");
 	const isInternalSubmitRoute = url.pathname === "/api/internal/pr-walkthrough/submit-yaml";
-	if (!isPublicWalkthroughRoute && !isInternalSubmitRoute) return false;
+	const isInternalBundleRoute = url.pathname === "/api/internal/pr-walkthrough/bundle" || url.pathname === "/api/internal/pr-walkthrough/analysis-bundle";
+	if (!isPublicWalkthroughRoute && !isInternalSubmitRoute && !isInternalBundleRoute) return false;
 
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 		res.end(JSON.stringify(data));
 	};
 	const fail = (status: number, message: string, extra?: Record<string, unknown>) => {
-		json({ error: message, ...extra }, status);
+		json({ error: message, message, ...extra }, status);
 	};
 
 	try {
+		if (isInternalBundleRoute && (req.method === "GET" || req.method === "POST")) {
+			const body = req.method === "POST" ? await deps.readBody(req) : undefined;
+			const input = bundleReadRequestFrom(url, body);
+			if (deps.sandboxScope && (!input.sessionId || !deps.sandboxScope.sessionIds.has(input.sessionId))) {
+				fail(403, "Forbidden: PR walkthrough bundle read session is outside sandbox scope", { code: "SANDBOX_SESSION_OUT_OF_SCOPE" });
+				return true;
+			}
+			const manager = getWalkthroughAgentManager(deps);
+			json(manager.readBundle(input));
+			return true;
+		}
+
 		if (url.pathname === "/api/internal/pr-walkthrough/submit-yaml" && req.method === "POST") {
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object") {
@@ -517,7 +531,12 @@ function flattenDiffBlocks(files: any[]): DiffBlock[] {
 }
 
 function isDiffBlock(value: any): value is DiffBlock {
-	return typeof value?.id === "string" && typeof value?.filePath === "string" && Array.isArray(value?.hunks);
+	return (
+		typeof value?.id === "string" &&
+		typeof value?.filePath === "string" &&
+		Array.isArray(value?.hunks) &&
+		value.hunks.every((hunk: any) => hunk !== null && typeof hunk === "object" && typeof hunk.header === "string")
+	);
 }
 
 async function resolveLocalFallback(cwd: string, baseSha: string, headSha: string): Promise<WalkthroughResolveResult> {
@@ -889,10 +908,31 @@ function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function numberValue(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+	return undefined;
+}
+
 function headerValue(req: http.IncomingMessage, name: string): string | undefined {
 	const value = req.headers[name.toLowerCase()];
 	if (Array.isArray(value)) return stringValue(value[0]);
 	return stringValue(value);
+}
+
+function bundleReadRequestFrom(url: URL, body: unknown): ReadPrWalkthroughBundleRequest {
+	const record = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+	return {
+		sessionId: stringValue(record.sessionId) ?? stringValue(url.searchParams.get("sessionId")) ?? "",
+		jobId: stringValue(record.jobId) ?? stringValue(url.searchParams.get("jobId")) ?? "",
+		mode: (stringValue(record.mode) ?? stringValue(url.searchParams.get("mode"))) as ReadPrWalkthroughBundleRequest["mode"],
+		path: stringValue(record.path) ?? stringValue(record.file) ?? stringValue(url.searchParams.get("path")) ?? stringValue(url.searchParams.get("file")),
+		index: numberValue(record.index) ?? numberValue(url.searchParams.get("index")),
+		offset: numberValue(record.offset) ?? numberValue(url.searchParams.get("offset")),
+		limit: numberValue(record.limit) ?? numberValue(url.searchParams.get("limit")),
+		hunkOffset: numberValue(record.hunkOffset) ?? numberValue(url.searchParams.get("hunkOffset")),
+		hunkLimit: numberValue(record.hunkLimit) ?? numberValue(url.searchParams.get("hunkLimit")),
+	};
 }
 
 function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string): { owner: string; repo: string; number: string | number; url: string } | undefined {

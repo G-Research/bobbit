@@ -7,7 +7,14 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
-import { renderApp } from "./state.js";
+import {
+	expandedGoals,
+	renderApp,
+	saveExpandedGoals,
+	setArchivedParentExpanded,
+	setTeamLeadExpanded,
+	state as globalState,
+} from "./state.js";
 import type { state as appState } from "./state.js";
 import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "../ui/components/pr-walkthrough/types.js";
 
@@ -340,6 +347,22 @@ function labelForJob(job: WalkthroughJobRecord): string {
 	return labelForPrNumber(job.target?.number) || (job.target?.prUrl ? "PR" : "Walkthrough");
 }
 
+function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boolean {
+	const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+	return session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
+}
+
+function keepLiveWalkthroughPanelPromptable(state: AppState, sessionId: string, tabId?: string): void {
+	if (tabId) setActivePanelTabIdForSession(state, sessionId, tabId);
+	const tabs = panelTabsForSession(state, sessionId);
+	const nextTabs = tabs.map((tab) => tab.kind === "walkthrough" && tab.state?.fullscreenOnReady === true
+		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
+		: tab);
+	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
+	(state as any).previewPanelFullscreen = false;
+	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* non-browser/test */ }
+}
+
 export function upsertPrWalkthroughJobPanel(
 	state: AppState,
 	job: WalkthroughJobRecord,
@@ -348,10 +371,21 @@ export function upsertPrWalkthroughJobPanel(
 	const sessionId = job.childSessionId;
 	const changeset = targetChangesetFromJob(job);
 	const changesetId = job.changesetId;
-	const tabId = job.tabId || walkthroughPanelTabId(changesetId);
+	const rawTabId = cleanString(job.tabId);
+	const requestedTabId = rawTabId && walkthroughChangesetIdFromPanelTabId(rawTabId) ? rawTabId : walkthroughPanelTabId(changesetId);
+	const existing = panelTabsForSession(state, sessionId);
+	const existingJobTab = existing.find((candidate) => {
+		if (candidate.kind !== "walkthrough") return false;
+		const source = (candidate.source || {}) as Record<string, unknown>;
+		const candidateState = (candidate.state || {}) as Record<string, unknown>;
+		return source.jobId === job.jobId || candidateState.jobId === job.jobId;
+	});
+	const tabId = existingJobTab?.id || requestedTabId;
 	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
 	const target = job.target || {};
 	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);
+	const liveSessionHosted = !!job.parentSessionId || isLiveSessionHostedWalkthrough(state, sessionId);
+	const fullscreenOnReady = !!options.fullscreenOnReady && !liveSessionHosted;
 	const tab: PanelWorkspaceTab = {
 		id: tabId,
 		kind: "walkthrough",
@@ -389,26 +423,39 @@ export function upsertPrWalkthroughJobPanel(
 			prTitle: changeset.prTitle,
 			baseSha: changeset.baseSha,
 			headSha: changeset.headSha,
-			fullscreenOnReady: status === "ready" || undefined,
+			fullscreenOnReady: status === "ready" && fullscreenOnReady || undefined,
 		},
 	};
 
-	const existing = panelTabsForSession(state, sessionId);
 	const next = existing.some((candidate) => candidate.id === tabId)
-		? existing.map((candidate) => candidate.id === tabId
-			? {
+		? existing.map((candidate) => {
+			if (candidate.id !== tabId) return candidate;
+			const candidateState = (candidate.state || {}) as Record<string, unknown>;
+			const tabState = (tab.state || {}) as Record<string, unknown>;
+			const mergedState = { ...candidateState, ...tabState };
+			if (status === "ready" && Array.isArray(candidateState.cards) && !Array.isArray(tabState.cards)) {
+				mergedState.cards = candidateState.cards;
+				if (candidateState.changeset) mergedState.changeset = candidateState.changeset;
+				if (candidateState.exportCapability && !tabState.exportCapability) mergedState.exportCapability = candidateState.exportCapability;
+				if (candidateState.limits && !tabState.limits) mergedState.limits = candidateState.limits;
+			}
+			return {
 				...candidate,
 				...tab,
 				source: { ...(candidate.source as Record<string, unknown>), ...(tab.source as Record<string, unknown>) } as PanelWorkspaceTab["source"],
-				state: { ...(candidate.state || {}), ...(tab.state || {}) },
-			}
-			: candidate)
+				state: mergedState,
+			};
+		})
 		: [...existing, tab];
 	setPanelTabsForSession(state, sessionId, next);
 	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
 	if (status === "ready") {
-		setActivePanelTabIdForSession(state, sessionId, tabId);
-		if (options.fullscreenOnReady || (state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+		if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, tabId);
+		else setActivePanelTabIdForSession(state, sessionId, tabId);
+		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
+		// A ready job broadcast carries job metadata, not the YAML-derived cards.
+		// Always hydrate the payload from the walkthrough store so live child
+		// panels and standalone tabs don't remain stuck on stale waiting content.
 		restorePrWalkthroughPanel(state, sessionId, tabId);
 	}
 	return tab;
@@ -467,10 +514,14 @@ function patchWalkthroughTab(
 	const deduped = nextTabId !== tabId ? nextTabs.filter((tab, index, all) => tab.id !== nextTabId || all.findIndex((candidate) => candidate.id === nextTabId) === index) : nextTabs;
 	if (replaced) {
 		setPanelTabsForSession(state, sessionId, deduped);
+		const liveSessionHosted = isLiveSessionHostedWalkthrough(state, sessionId);
 		if (nextTabId !== tabId) setActivePanelTabIdForSession(state, sessionId, nextTabId);
 		if (patch.status === "ready") {
-			setActivePanelTabIdForSession(state, sessionId, nextTabId);
-			if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+			if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, nextTabId);
+			else {
+				setActivePanelTabIdForSession(state, sessionId, nextTabId);
+				if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
+			}
 		}
 	}
 	return updatedTabId;
@@ -558,6 +609,35 @@ function launchRequestForInput(sessionId: string, input: OpenPrWalkthroughInput)
 	return resolveRequestForInput(sessionId, input);
 }
 
+function expandWalkthroughSidebarContainers(childSessionId: string): void {
+	const sessions = [...globalState.gatewaySessions, ...globalState.archivedSessions];
+	const byId = new Map(sessions.map((session) => [session.id, session]));
+	const visited = new Set<string>();
+	let current = byId.get(childSessionId);
+	let savedGoalsChanged = false;
+
+	while (current && !visited.has(current.id)) {
+		visited.add(current.id);
+		const goalId = current.teamGoalId || current.goalId;
+		if (goalId && !expandedGoals.has(goalId)) {
+			expandedGoals.add(goalId);
+			savedGoalsChanged = true;
+		}
+
+		const teamLeadId = current.teamLeadSessionId;
+		if (teamLeadId) setTeamLeadExpanded(teamLeadId, true);
+
+		const parentId = current.parentSessionId || current.delegateOf;
+		if (!parentId) break;
+		setArchivedParentExpanded(parentId, true);
+		const parent = byId.get(parentId);
+		if (parent?.role === "team-lead") setTeamLeadExpanded(parentId, true);
+		current = parent;
+	}
+
+	if (savedGoalsChanged) saveExpandedGoals();
+}
+
 async function focusWalkthroughChildSession(childSessionId: string): Promise<void> {
 	try {
 		const [{ refreshSessions }, { connectToSession }] = await Promise.all([
@@ -565,15 +645,28 @@ async function focusWalkthroughChildSession(childSessionId: string): Promise<voi
 			import("./session-manager.js"),
 		]);
 		await refreshSessions();
-		await connectToSession(childSessionId, true, { readOnly: true });
+		expandWalkthroughSidebarContainers(childSessionId);
+		await connectToSession(childSessionId, true);
 	} catch {
 		// The launch already created the child tab state. Session polling will make
 		// the child visible if an immediate focus attempt races session refresh.
 	}
 }
 
+async function showWalkthroughLaunchToast(message: string): Promise<void> {
+	try {
+		const { showHeaderToast } = await import("./render.js");
+		showHeaderToast(message);
+	} catch { /* best-effort toast */ }
+}
+
 export async function launchPrWalkthroughAgent(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): Promise<PanelWorkspaceTab | undefined> {
 	const input = normalizeInput(state, rawInput);
+	if (!shouldResolveInput(input)) {
+		await showWalkthroughLaunchToast("Enter a PR URL or number: /walkthrough-pr <GitHub PR URL>");
+		renderApp();
+		return undefined;
+	}
 	try {
 		const data = await fetchWalkthroughJson("/api/pr-walkthrough/launch", {
 			method: "POST",
@@ -588,10 +681,7 @@ export async function launchPrWalkthroughAgent(state: AppState, sessionId: strin
 	} catch (error) {
 		const err = error as WalkthroughApiError;
 		console.error("[pr-walkthrough] launch failed", err);
-		try {
-			const { showHeaderToast } = await import("./render.js");
-			showHeaderToast(err.message || "Failed to launch PR walkthrough agent");
-		} catch { /* best-effort toast */ }
+		await showWalkthroughLaunchToast(err.message || "Failed to launch PR walkthrough agent");
 		renderApp();
 		return undefined;
 	}
@@ -606,6 +696,7 @@ const jobRestoreLastAttempt = new Map<string, number>();
 
 export function restorePrWalkthroughJobForSession(state: AppState, childSessionId: string): void {
 	if (!childSessionId) return;
+	if (isLiveSessionHostedWalkthrough(state, childSessionId)) keepLiveWalkthroughPanelPromptable(state, childSessionId);
 	const now = Date.now();
 	const last = jobRestoreLastAttempt.get(childSessionId) || 0;
 	if (jobRestoreInFlight.has(childSessionId) || now - last < 2_000) return;

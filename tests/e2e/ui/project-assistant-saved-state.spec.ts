@@ -233,10 +233,19 @@ test.describe("Project Assistant Saved State", () => {
 
 		const termBtn2 = page.getByRole("button", { name: "Terminate Project Assistant" });
 		await termBtn2.click();
-		// Confirm dialog — destructive button labelled exactly "Terminate". The
-		// trigger button name is "Terminate Project Assistant" so we match by
-		// exact name to avoid clicking the same trigger again.
-		const confirmBtn = page.getByRole("button", { name: "Terminate" }).last();
+		// Confirm dialog — destructive button labelled "Terminate". THREE buttons on
+		// the page share/contain that accessible name: the persistent toolbar
+		// "Terminate session" action (name "Terminate"), the panel trigger
+		// "Terminate Project Assistant", and this dialog's confirm. The old
+		// `{ name: "Terminate" }.last()` was a DOM-order gamble across them (the
+		// flake); `{ exact: true }` still matched two (toolbar + dialog) → strict
+		// violation. Scope to the confirm dialog via its unique Cancel + Terminate
+		// footer pair (the toolbar Terminate has no Cancel sibling) so we target
+		// ONLY the dialog confirm button, regardless of the others.
+		const confirmDialogFooter = page
+			.getByRole("button", { name: "Cancel", exact: true })
+			.locator("xpath=..");
+		const confirmBtn = confirmDialogFooter.getByRole("button", { name: "Terminate", exact: true });
 		await expect(confirmBtn).toBeVisible({ timeout: 5_000 });
 		await confirmBtn.click();
 

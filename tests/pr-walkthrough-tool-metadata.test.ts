@@ -24,6 +24,7 @@ describe("PR walkthrough tool metadata", () => {
 		assert.match(text, /params:\s*\[command, description\?, timeout\?\]/);
 		assert.match(text, /type:\s*bobbit-extension/);
 		assert.match(text, /extension:\s*extension\.ts/);
+		assert.equal(field(text, "renderer"), "src/ui/tools/renderers/BashRenderer.ts");
 		assert.match(text, /read-only/i);
 		assert.match(text, /Blocks writes/i);
 		assert.match(text, /cross-PR\/cross-repo GitHub reads/i);

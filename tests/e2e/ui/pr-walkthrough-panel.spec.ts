@@ -150,8 +150,8 @@ async function installFixtureWalkthroughPayloadRoute(page: Page, prNumber: strin
 		}
 		await route.fallback();
 	};
-	await page.route("**/api/pr-walkthrough/**", routeHandler);
-	await page.route("**/api/internal/pr-walkthrough/submit-yaml", routeHandler);
+	await page.context().route("**/api/pr-walkthrough/**", routeHandler);
+	await page.context().route("**/api/internal/pr-walkthrough/submit-yaml", routeHandler);
 }
 
 function validWalkthroughYaml(prNumber: string | number, title = "Resolved Walkthrough PR", prUrl = prUrlForNumber(prNumber)): string {
@@ -404,7 +404,8 @@ async function submitValidWalkthroughYaml(page: Page, job: { childSessionId: str
 	expect(response.ok, `valid YAML submit should succeed: ${response.status} ${response.text}`).toBe(true);
 	await focusChildWalkthroughSession(page, job.childSessionId);
 	await publishWalkthroughJobUpdate(page, job.childSessionId);
-	await expect(page.locator(".preview-fullscreen-prompt").first(), "successful YAML submission should automatically promote the child walkthrough to fullscreen review mode").toBeVisible({ timeout: 10_000 });
+	await expect(page.locator(".preview-fullscreen-prompt"), "live walkthrough child should stay in split view so chat remains promptable").toHaveCount(0);
+	await expect(page.locator("textarea").first(), "live walkthrough child should keep the chat prompt visible after YAML submission").toBeVisible({ timeout: 10_000 });
 	return expectWalkthroughOpened(page);
 }
 
@@ -1110,7 +1111,7 @@ This is the author's source description with **markdown**.
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft")).toContainText(revisedConcern);
 	});
 
-	test("fullscreen toolbar control promotes the active walkthrough tab to the wide review surface", async ({ page }) => {
+	test("fullscreen toolbar control keeps live child walkthroughs in split promptable view", async ({ page }) => {
 		await setupWalkthrough(page, { width: 1600, height: 900 }, WALKTHROUGH_URL_COMMAND);
 
 		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
@@ -1118,15 +1119,11 @@ This is the author's source description with **markdown**.
 		await fullscreen.click();
 
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
-		await expect(fullscreenRoot, "fullscreen walkthrough should render inside the preview-pane fullscreen shell").toBeVisible({ timeout: 10_000 });
-		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in fullscreen mode").toBeVisible();
-		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-link").locator("svg"), "fullscreen walkthrough GitHub button should include the GitHub mark").toBeVisible();
-		await expectActiveDiffMode(page, "split");
-
-		const collapse = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
-		await expect(collapse).toBeVisible();
-		await collapse.click();
-		await expect(page.locator(".goal-split-layout"), "collapsing fullscreen should return to chat + side-panel split layout").toBeVisible({ timeout: 10_000 });
+		await expect(fullscreenRoot, "live walkthrough children should not enter fullscreen and hide the main chat prompt").toBeHidden({ timeout: 10_000 });
+		await expect(walkthroughPanel(page), "walkthrough content should remain mounted in the side panel").toBeVisible();
+		await expect(page.locator("textarea").first(), "live walkthrough child prompt should remain visible").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-pr-link").locator("svg"), "walkthrough GitHub button should include the GitHub mark").toBeVisible();
+		await expectActiveDiffMode(page, "inline");
 	});
 
 	test("open-in-new-tab toolbar control renders the same walkthrough in a standalone wide route", async ({ page, context }) => {
@@ -1151,14 +1148,46 @@ This is the author's source description with **markdown**.
 		await standalone.close();
 	});
 
-	test("slash command creates a child session, waits for YAML, then applies ready cards", async ({ page }) => {
+	test("slash command creates a child session, waits for YAML, then applies interactive ready cards", async ({ page, context }) => {
 		const waiting = await setupWaitingWalkthrough(page, { width: 1920, height: 1080 }, "/walkthrough-pr 789");
 		await expect(page.getByTestId("pr-walkthrough-panel-root"), "child should remain in waiting state until YAML submission succeeds").toHaveAttribute("data-walkthrough-status", "waiting_for_yaml");
 		const { panel, tab } = await submitValidWalkthroughYaml(page, waiting);
+		const tabId = await tab.getAttribute("data-panel-tab-id");
 		await expect(tab).toHaveAttribute("data-panel-tab-id", /^walkthrough:/);
 		await expect(walkthroughPanel(page).locator(".title"), "header should switch from launch placeholder to resolved PR metadata").toContainText("PR #789: Resolved Walkthrough PR");
 		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "cards should come from the YAML-backed ready payload").toContainText("Separate walkthrough from chat");
 		await expect(panel.getByTestId("pr-walkthrough-waiting")).toHaveCount(0);
+
+		const firstCardId = await activeCard(page).getAttribute("data-card-id");
+		const like = activeCard(page).getByTestId("pr-walkthrough-like");
+		await like.click();
+		await expect(walkthroughPanel(page).locator(`${tid("pr-walkthrough-card-step")}[data-card-id="${firstCardId}"]`), "ready card like button should record a decision after YAML submission").toHaveClass(/liked/);
+		const diff = activeCard(page).getByTestId("pr-walkthrough-diff-block").first();
+		await diff.getByTestId("pr-walkthrough-diff-toggle").click();
+		await expect(diff, "diff block collapse should remain interactive after YAML submission").toHaveAttribute("data-expanded", "false");
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-rail-toggle").click();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-collapsed-rail"), "rail collapse should remain interactive after YAML submission").toBeVisible();
+
+		await page.evaluate(({ childSessionId, tabId }) => {
+			const storageKey = "bobbit-panel-tabs-by-session";
+			const bySession = JSON.parse(localStorage.getItem(storageKey) || "{}");
+			const tabs = Array.isArray(bySession[childSessionId]) ? bySession[childSessionId] : [];
+			bySession[childSessionId] = tabs.map((candidate: any) => candidate?.id === tabId
+				? { ...candidate, state: { ...(candidate.state || {}), status: "waiting_for_yaml", cards: undefined } }
+				: candidate);
+			localStorage.setItem(storageKey, JSON.stringify(bySession));
+		}, { childSessionId: waiting.childSessionId, tabId });
+
+		const openStandalone = page.getByTestId("pr-walkthrough-open-in-new-tab").first();
+		const [standalone] = await Promise.all([
+			context.waitForEvent("page"),
+			openStandalone.click(),
+		]);
+		await standalone.setViewportSize({ width: 1700, height: 1000 });
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(standalone.getByTestId("pr-walkthrough-panel-root"), "standalone route should hydrate submitted ready payload instead of stale waiting content").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 15_000 });
+		await expect(activeCard(standalone).getByTestId("pr-walkthrough-card-title"), "standalone route should render submitted cards").toContainText(/Separate walkthrough from chat|Changeset-agnostic model/);
+		await standalone.close();
 	});
 
 	test("invalid YAML submission keeps child panel in validation retry state", async ({ page }) => {
@@ -1285,5 +1314,58 @@ This is the author's source description with **markdown**.
 		await expect(panel.getByTestId("pr-walkthrough-comment").filter({ hasText: editedSuggestion })).toBeVisible();
 
 		await deleteComment(page, editedSuggestion);
+	});
+
+	test("renders cards and stays interactive when a diff hunk header is undefined (hunkSignature regression)", async ({ page }) => {
+		// Reproducing test for the panel-fragility defect: a single hunk whose `header`
+		// is `undefined` made hunkSignature(header).match(...) throw, which unwound the
+		// entire Lit render() and blanked the whole pane. After the fix the malformed
+		// hunk degrades locally (empty signature / per-block fallback) and the rest of
+		// the card + panel render and stay interactive. MUST FAIL pre-fix.
+		const consoleErrors: string[] = [];
+		const pageErrors: string[] = [];
+		page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
+		page.on("pageerror", (err) => pageErrors.push(err.message));
+
+		await setupWalkthrough(page, { width: 1920, height: 1080 });
+
+		// Clone the fixture cards in the TEST file (do NOT edit fixtures.ts) and blank
+		// one hunk's header so it arrives at the panel as `header === undefined` — the
+		// exact contract violation that crashed hunkSignature(header).match(...).
+		const cards = getFixturePrWalkthroughCards();
+		const headerlessCard = cards[0];
+		headerlessCard.id = "headerless-hunk-card";
+		headerlessCard.title = "Header-less hunk regression";
+		const targetHunk = headerlessCard.diffBlocks[0].hunks[0] as { header?: string };
+		delete targetHunk.header;
+
+		await page.evaluate(async (injectedCards) => {
+			const panel = document.querySelector("pr-walkthrough-panel") as any;
+			panel.changeset = { baseSha: "base", headSha: "head", provider: "github", title: "Header-less fixture", filesChanged: 1, additions: 1, deletions: 0 };
+			panel.cards = injectedCards;
+			panel.status = "ready";
+			// Pre-fix the synchronous Lit render throws inside this reactive update; swallow
+			// the rejection so the test can still assert on the rendered DOM and on the
+			// captured console/pageerror signal below.
+			try { await panel.updateComplete; } catch { /* surfaced via pageerror */ }
+		}, [headerlessCard]);
+
+		const card = activeCard(page);
+		await expect(card, "panel must still render a card when one hunk header is undefined").toBeVisible({ timeout: 10_000 });
+		await expect(card.getByTestId("pr-walkthrough-card-title")).toContainText("Header-less hunk regression");
+		await expect(card.getByTestId("pr-walkthrough-diff-block").first(), "the diff block for the header-less hunk should still render").toBeVisible({ timeout: 10_000 });
+
+		// The pane must stay interactive — diff-mode toggles still respond.
+		const chooser = card.getByTestId("pr-walkthrough-diff-mode-chooser");
+		if (await chooser.count()) {
+			await chooser.getByTestId("diff-mode-inline").click();
+			await expectActiveDiffMode(page, "inline");
+			await chooser.getByTestId("diff-mode-split").click();
+			await expectActiveDiffMode(page, "split");
+		}
+
+		const hunkSignatureErrors = [...consoleErrors, ...pageErrors].filter((message) =>
+			/Cannot read properties of undefined \(reading 'match'\)/.test(message) || /hunkSignature/.test(message));
+		expect(hunkSignatureErrors, `panel must not throw the hunkSignature TypeError: ${hunkSignatureErrors.join("\n")}`).toEqual([]);
 	});
 });

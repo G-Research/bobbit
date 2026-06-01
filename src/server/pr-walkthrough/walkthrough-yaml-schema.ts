@@ -657,14 +657,18 @@ function mapRelevantHunks(hunks: PrWalkthroughYamlRelevantHunk[], mapper: DiffRe
 	const blocks: PrWalkthroughDiffBlock[] = [];
 	const notes: string[] = [];
 	hunks.forEach((hunk, index) => {
-		const match = mapper.findHunk(hunk.file, hunk.hunk_header);
+		const match = mapper.findHunkLenient(hunk.file, hunk.hunk_header);
 		if (match) {
 			blocks.push(match.block);
 			return;
 		}
 		const fileBlock = mapper.blockForFile(hunk.file);
-		if (fileBlock) blocks.push(fileBlock);
 		const message = `${hunk.file} ${hunk.hunk_header}: ${hunk.why_relevant}`;
+		if (fileBlock) {
+			blocks.push(fileBlock);
+			notes.push(`File-level fallback for hunk: ${message}`);
+			return;
+		}
 		warnings.push({ code: "unmapped_hunk", severity: "warning", message: `Could not map hunk reference at ${path}[${index}]: ${message}`, filePath: hunk.file });
 		notes.push(`Unmapped hunk: ${message}`);
 	});
@@ -677,7 +681,7 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 	chunk.suggested_concerns.forEach((concern, concernIndex) => {
 		let mapped = false;
 		concern.anchors.forEach((anchor, anchorIndex) => {
-			const match = mapper.findHunk(anchor.file, anchor.hunk_header);
+			const match = anchor.line != null || anchor.line_range ? mapper.findHunkLenient(anchor.file, anchor.hunk_header) : mapper.findHunk(anchor.file, anchor.hunk_header);
 			const line = match ? selectLine(match.hunk, anchor) : undefined;
 			if (match && line) {
 				mapped = true;
@@ -690,7 +694,9 @@ function mapSuggestedConcerns(chunk: PrWalkthroughYamlReviewChunk, cardId: strin
 				});
 				return;
 			}
-			warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${anchor.file} ${anchor.hunk_header}.`, filePath: anchor.file });
+			if (!mapper.blockForFile(anchor.file)) {
+				warnings.push({ code: "unmapped_anchor", severity: "warning", message: `Could not map suggested concern anchor for chunk ${chunk.id}: ${anchor.file} ${anchor.hunk_header}.`, filePath: anchor.file });
+			}
 			notes.push(`Unmapped suggested comment anchor (${concern.severity}): ${concern.concern} — ${concern.suggested_comment}`);
 		});
 		if (!mapped && concern.anchors.length === 0) notes.push(`${concern.severity}: ${concern.concern} — ${concern.suggested_comment}`);
@@ -720,12 +726,53 @@ class DiffReferenceMapper {
 
 	findHunk(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
 		const normalizedHeader = normalizeHunkHeader(hunkHeader);
+		const coordinates = parseHunkCoordinates(hunkHeader);
 		for (const block of this.byFile.get(normalizePath(file)) ?? []) {
 			const hunk = block.hunks.find(candidate => candidate.header === hunkHeader || normalizeHunkHeader(candidate.header) === normalizedHeader);
 			if (hunk) return { block, hunk };
+			if (coordinates) {
+				const coordinateMatch = block.hunks.find(candidate => hunkCoordinatesEqual(parseHunkCoordinates(candidate.header), coordinates));
+				if (coordinateMatch) return { block, hunk: coordinateMatch };
+			}
 		}
 		return undefined;
 	}
+
+	findHunkLenient(file: string, hunkHeader: string): { block: PrWalkthroughDiffBlock; hunk: PrWalkthroughHunk } | undefined {
+		const strict = this.findHunk(file, hunkHeader);
+		if (strict) return strict;
+		const blocks = this.byFile.get(normalizePath(file)) ?? [];
+		const totalHunkCount = blocks.reduce((count, item) => count + item.hunks.length, 0);
+		const soleHunkBlock = totalHunkCount === 1 ? blocks.find(block => block.hunks.length === 1) : undefined;
+		if (soleHunkBlock?.hunks[0]) return { block: soleHunkBlock, hunk: soleHunkBlock.hunks[0] };
+		return undefined;
+	}
+}
+
+interface HunkCoordinates {
+	oldStart: number;
+	oldCount: number;
+	newStart: number;
+	newCount: number;
+}
+
+function parseHunkCoordinates(header: string): HunkCoordinates | undefined {
+	const match = /^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@(?:\s.*)?$/.exec(normalizeHunkHeader(header));
+	if (!match) return undefined;
+	return {
+		oldStart: Number(match[1]),
+		oldCount: match[2] === undefined ? 1 : Number(match[2]),
+		newStart: Number(match[3]),
+		newCount: match[4] === undefined ? 1 : Number(match[4]),
+	};
+}
+
+function hunkCoordinatesEqual(left: HunkCoordinates | undefined, right: HunkCoordinates): boolean {
+	return Boolean(left
+		&& left.oldStart === right.oldStart
+		&& left.oldCount === right.oldCount
+		&& left.newStart === right.newStart
+		&& left.newCount === right.newCount);
 }
 
 function flattenDiffBlocks(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrWalkthroughDiffBlock[] {
@@ -740,7 +787,13 @@ function flattenDiffBlocks(parsedDiff: WalkthroughParsedDiffForYamlMapping): PrW
 }
 
 function isDiffBlock(value: unknown): value is PrWalkthroughDiffBlock {
-	return isRecord(value) && typeof value.id === "string" && typeof value.filePath === "string" && Array.isArray(value.hunks);
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.filePath === "string" &&
+		Array.isArray(value.hunks) &&
+		value.hunks.every(hunk => isRecord(hunk) && typeof hunk.header === "string")
+	);
 }
 
 function selectLine(hunk: PrWalkthroughHunk, anchor: PrWalkthroughYamlAnchor): PrWalkthroughDiffLine | undefined {

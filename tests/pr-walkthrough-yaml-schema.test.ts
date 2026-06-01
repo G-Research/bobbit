@@ -134,7 +134,7 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(payload.changeset.headSha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 	});
 
-	it("preserves unmapped hunk and anchor references as warnings and card suggestions", () => {
+	it("preserves truly unmapped hunk references as warnings and file-fallback anchors as card suggestions", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);
 		if (!validation.ok) return;
@@ -142,12 +142,91 @@ describe("PR walkthrough YAML schema", () => {
 		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
 		const warningCodes = payload.warnings.map(warning => warning.code);
 		assert.ok(warningCodes.includes("unmapped_hunk"));
-		assert.ok(warningCodes.includes("unmapped_anchor"));
+		assert.equal(warningCodes.includes("unmapped_anchor"), false);
 
 		const design = payload.cards.find(card => card.phaseId === "design");
 		assert.ok(design?.cardSuggestions?.some(note => /Unmapped hunk/.test(note)));
 		const review = payload.cards.find(card => card.id === "significant-chunk-api");
 		assert.ok(review?.cardSuggestions?.some(note => /Unmapped suggested comment anchor/.test(note)));
+	});
+
+	it("maps relevant hunks and anchors by numeric range when YAML omits trailing hunk context", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample")] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const design = payload.cards.find(card => card.id === "design-context-design");
+		assert.deepEqual(design?.diffBlocks.map(block => block.id), ["block-context"]);
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.equal(review?.suggestedComments?.length, 1);
+		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+	});
+
+	it("maps relevant hunks and anchors by numeric range when YAML includes stale trailing hunk context", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@ staleRenderName"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ actualRenderName")] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.equal(review?.suggestedComments?.length, 1);
+		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+	});
+
+	it("maps relevant hunks and anchors by numeric range when parsed diff omits trailing hunk context", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@ renderExample"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@")] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.equal(review?.suggestedComments?.length, 1);
+		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+	});
+
+	it("falls back to the only file hunk when YAML line coordinates are stale", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -371,7 +371,8 @@ stale location"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample")] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.equal(review?.suggestedComments?.length, 1);
+		assert.equal(review?.suggestedComments?.[0]?.lineId, "block-context:h0:l1");
+	});
+
+	it("uses file-level fallback without global warnings when hunk numeric ranges do not match", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -11,2 +10,3 @@ function renderExample"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [multiHunkContextDiffBlock()] });
+
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
+		assert.equal(review?.suggestedComments?.length ?? 0, 0);
+	});
+
+	it("does not duplicate diff blocks when mapped hunks and file fallback overlap", () => {
+		const validation = validatePrWalkthroughYaml(hunkMappingYaml("@@ -10,2 +10,3 @@", "@@ -10,2 +10,3 @@", [{ header: "@@ -99,1 +99,1 @@", why: "Intentional fallback to the same file." }]));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: [contextDiffBlock("@@ -10,2 +10,3 @@")] });
+		const review = payload.cards.find(card => card.id === "significant-context-review");
+
+		assert.deepEqual(review?.diffBlocks.map(block => block.id), ["block-context"]);
+		assertNoUnmappedForFile(payload.warnings, "src/context.ts");
 	});
 });
 
@@ -183,6 +262,133 @@ function diffBlocks(): PrWalkthroughDiffBlock[] {
 			hunks: [{ id: "block-src-b:h0", header: "@@ -5,1 +5,2 @@", lines: [{ id: "block-src-b:h0:l0", side: "new", newLine: 5, text: "change", kind: "add" }] }],
 		},
 	];
+}
+
+function contextDiffBlock(header: string): PrWalkthroughDiffBlock {
+	return {
+		id: "block-context",
+		filePath: "src/context.ts",
+		status: "modified",
+		hunks: [{
+			id: "block-context:h0",
+			header,
+			lines: [
+				{ id: "block-context:h0:l0", side: "context", oldLine: 10, newLine: 10, text: "function renderExample() {", kind: "context" },
+				{ id: "block-context:h0:l1", side: "new", newLine: 11, text: "  return <Example />;", kind: "add" },
+			],
+		}],
+	};
+}
+
+function multiHunkContextDiffBlock(): PrWalkthroughDiffBlock {
+	const block = contextDiffBlock("@@ -10,2 +10,3 @@ function renderExample");
+	return {
+		...block,
+		hunks: [
+			...block.hunks,
+			{
+				id: "block-context:h1",
+				header: "@@ -30,1 +31,2 @@ anotherChange",
+				lines: [{ id: "block-context:h1:l0", side: "new", newLine: 31, text: "another", kind: "add" }],
+			},
+		],
+	};
+}
+
+function assertNoUnmappedForFile(warnings: Array<{ code: string; filePath?: string }>, filePath: string): void {
+	const matching = warnings.filter(warning => (warning.code === "unmapped_hunk" || warning.code === "unmapped_anchor") && warning.filePath === filePath);
+	assert.deepEqual(matching, []);
+}
+
+function hunkMappingYaml(hunkHeader: string, anchorHeader = hunkHeader, extraRelevantHunks: Array<{ header: string; why: string }> = []): string {
+	const relevantHunks = [
+		{ header: hunkHeader, why: "Primary mapped context change." },
+		...extraRelevantHunks,
+	].map(item => `        - file: src/context.ts
+          hunk_header: "${yamlDoubleQuoted(item.header)}"
+          why_relevant: ${item.why}`).join("\n");
+
+	return `schema_version: 1
+pr:
+  provider: github
+  owner: SuuBro
+  repo: bobbit
+  number: 42
+  title: Fix hunk mapping
+  url: https://github.com/SuuBro/bobbit/pull/42
+  base_sha: abcdef1234567890
+  head_sha: fedcba9876543210
+  original_description:
+    body: Test hunk mapping.
+    source: gh_api
+    fetched_at: "2026-05-30T00:00:00.000Z"
+  stats:
+    files_changed: 1
+    additions: 2
+    deletions: 1
+walkthrough:
+  context:
+    why_created: Fix noisy hunk mapping warnings.
+    problem_solved: Numeric hunk ranges should be authoritative.
+    why_worth_merging: It keeps walkthrough output actionable.
+    merge_concerns: Keep true misses visible.
+    author_intent: Match hunks despite unstable context labels.
+    reviewer_map: Review the context hunk.
+  merge_assessment:
+    recommendation: comment
+    confidence: high
+    summary: Hunk mapping should be stable.
+    blocking_concerns: []
+    non_blocking_concerns: []
+  design_decisions:
+    - id: context-design
+      title: Context mapping
+      explanation: Map a hunk reference to the parsed diff.
+      chosen_approach: Match file and numeric hunk coordinates.
+      alternatives_considered: []
+      tradeoffs: []
+      suggested_reviewer_concerns: []
+      relevant_hunks:
+${relevantHunks}
+  review_chunks:
+    - id: context-review
+      phase: significant
+      title: Context review
+      reviewer_goal: Check hunk references map without noisy warnings.
+      explanation: Suggested comments should anchor to the same hunk.
+      files:
+        - src/context.ts
+      relevant_hunks:
+${relevantHunks}
+      suggested_concerns:
+        - severity: question
+          concern: Is the hunk anchor stable?
+          suggested_comment: Please verify this anchor maps by numeric range.
+          anchors:
+            - file: src/context.ts
+              hunk_header: "${yamlDoubleQuoted(anchorHeader)}"
+              line: 11
+      positive_notes: []
+  omissions_and_followups: []
+  audit:
+    remaining_changed_areas: []
+    low_signal_or_mechanical_changes: []
+    generated_or_binary_files: []
+    reviewer_checklist:
+      - Confirm hunk mapping warnings are meaningful.
+  display:
+    phase_order:
+      - orientation
+      - design
+      - significant
+      - audit
+    chunk_order:
+      - context-review
+`;
+}
+
+function yamlDoubleQuoted(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
 }
 
 function validYaml(): string {

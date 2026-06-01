@@ -13,6 +13,7 @@ interface MockWalkthroughState {
 	previewCalls: unknown[];
 	submitCalls: unknown[];
 	resolveDelay?: Promise<void>;
+	unstableJobTabId?: boolean;
 	jobsByChildSession?: Map<string, Record<string, any>>;
 	jobsById?: Map<string, Record<string, any>>;
 }
@@ -135,6 +136,43 @@ function activeCard(page: Page): Locator {
 	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-card")}[data-active="true"]`).first();
 }
 
+async function activeCardId(page: Page): Promise<string> {
+	return activeCard(page).getAttribute("data-card-id").then(value => value || "");
+}
+
+function railCard(page: Page, title: string): Locator {
+	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-card-step")}[title="${title}"], ${tid("pr-walkthrough-card-dot")}[title*="${title}"]`).first();
+}
+
+async function recordWalkthroughDraftEvents(page: Page) {
+	await page.evaluate(() => {
+		(window as any).__walkthroughDraftEvents = [];
+		(window as any).__walkthroughCompleteEvents = [];
+		document.addEventListener("pr-walkthrough-draft-change", (event) => {
+			(window as any).__walkthroughDraftEvents.push((event as CustomEvent).detail);
+		});
+		document.addEventListener("pr-walkthrough-complete", (event) => {
+			(window as any).__walkthroughCompleteEvents.push((event as CustomEvent).detail);
+		});
+	});
+}
+
+async function submitAgentYamlForJob(page: Page, job: Record<string, any>) {
+	const response = await page.evaluate(async ({ sessionId, jobId }) => {
+		const resp = await fetch("/api/internal/pr-walkthrough/submit-yaml", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${localStorage.getItem("gateway.token") || "localhost"}` },
+			body: JSON.stringify({
+				sessionId,
+				jobId,
+				yaml: "schema_version: 1\nwalkthrough:\n  review_chunks: []\n",
+			}),
+		});
+		return { ok: resp.ok, status: resp.status, text: await resp.text().catch(() => "") };
+	}, { sessionId: job.childSessionId, jobId: job.jobId });
+	expect(response.ok, `agent-produced YAML submit should succeed: ${response.status} ${response.text}`).toBe(true);
+}
+
 async function installMockWalkthroughApi(page: Page, state: MockWalkthroughState) {
 	state.jobsByChildSession = new Map();
 	state.jobsById = new Map();
@@ -182,7 +220,7 @@ async function installMockWalkthroughApi(page: Page, state: MockWalkthroughState
 				cwd: "",
 				target: { provider: "github", owner: "SuuBro", repo: "bobbit", number: Number(prNumber), prUrl: requestBody.prUrl || REAL_PR_URL, canonicalKey: targetKey },
 				changesetId,
-				tabId: `walkthrough:${encodeURIComponent(changesetId)}`,
+				tabId: state.unstableJobTabId ? `walkthrough:${encodeURIComponent(targetKey)}` : `walkthrough:${encodeURIComponent(changesetId)}`,
 				status: state.mode === "missing" ? "error" : "waiting_for_yaml",
 				title: childTitle,
 				createdAt: new Date().toISOString(),
@@ -293,7 +331,7 @@ async function focusChildWalkthroughSession(page: Page, childSessionId: string) 
 	await expect.poll(() => selectedSessionId(page), { timeout: 10_000 }).toBe(childSessionId);
 }
 
-async function publishWalkthroughJobUpdate(page: Page, state: MockWalkthroughState, childSessionId: string) {
+async function publishWalkthroughJobUpdate(page: Page, state: MockWalkthroughState, childSessionId: string, options: { injectTab?: boolean } = {}) {
 	const job = state.jobsByChildSession?.get(childSessionId);
 	expect(job, `expected mock job for child session ${childSessionId}`).toBeTruthy();
 	const payload = job!.status === "ready" ? (state.mode === "warnings" ? warningPayload : successPayload) : undefined;
@@ -311,14 +349,15 @@ async function publishWalkthroughJobUpdate(page: Page, state: MockWalkthroughSta
 			changeset: payload?.changeset ?? { ...realChangeset, prNumber: job!.target?.number, prUrl: job!.target?.prUrl, externalUrl: job!.target?.prUrl, title: job!.title },
 			cards: payload?.cards,
 			warnings: payload?.warnings || [],
+			exportCapability: payload?.exportCapability ?? payload?.export,
 			error: job!.error?.message,
 			errorCode: job!.error?.code,
 		},
 	};
-	await page.evaluate(({ detail, tab }) => {
+	await page.evaluate(({ detail, tab, injectTab }) => {
 		document.dispatchEvent(new CustomEvent("pr-walkthrough-job-updated", { detail: { job: detail } }));
 		const s = (window as any).__bobbitState ?? (window as any).bobbitState;
-		if (s) {
+		if (injectTab && s) {
 			s.panelTabsBySession ||= {};
 			s.panelWorkspaceActiveBySession ||= {};
 			s.panelTabsBySession[detail.childSessionId] = [tab];
@@ -327,7 +366,7 @@ async function publishWalkthroughJobUpdate(page: Page, state: MockWalkthroughSta
 			s.activePanelTabId = tab.id;
 		}
 		(window as any).__bobbitRenderApp?.();
-	}, { detail: job, tab });
+	}, { detail: job, tab, injectTab: options.injectTab !== false });
 }
 
 async function markWalkthroughReady(page: Page, state: MockWalkthroughState, childSessionId: string) {
@@ -389,7 +428,7 @@ async function saveCardComment(page: Page, body: string) {
 
 
 test.describe("real PR walkthrough browser UX", () => {
-	test("loads mocked resolved cards and preserves comments through reload, fullscreen, and standalone", async ({ page, context }) => {
+	test("loads mocked resolved cards and preserves comments through reload, split panel, and standalone", async ({ page, context }) => {
 		let releaseResolve!: () => void;
 		const state: MockWalkthroughState = {
 			mode: "success",
@@ -421,15 +460,12 @@ test.describe("real PR walkthrough browser UX", () => {
 		await saveLineComment(page, commentBody);
 
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
-		if (!await fullscreenRoot.isVisible().catch(() => false)) {
-			const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
-			await expect(fullscreen).toBeVisible();
-			await fullscreen.click();
-		}
-		await expect(fullscreenRoot).toBeVisible({ timeout: 10_000 });
+		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
+		await expect(fullscreen).toBeVisible();
+		await fullscreen.click();
+		await expect(fullscreenRoot, "live walkthrough children should stay in split view so chat remains promptable").toBeHidden({ timeout: 10_000 });
+		await expect(page.locator("textarea").first(), "live walkthrough child prompt should remain visible after fullscreen click").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: commentBody })).toBeVisible();
-		const collapseFullscreen = page.locator(`${tid("side-panel-collapse-fullscreen")}, button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
-		if (await collapseFullscreen.isVisible().catch(() => false)) await collapseFullscreen.click();
 
 		await page.reload();
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-card-title"), "resolved card identity should survive full reload").toContainText("Resolved changeset overview", { timeout: 15_000 });
@@ -446,6 +482,74 @@ test.describe("real PR walkthrough browser UX", () => {
 		await expect(walkthroughPanel(standalone).getByTestId("pr-walkthrough-card-title"), "standalone route should render the same resolved cards").toContainText("Resolved changeset overview", { timeout: 15_000 });
 		await expect(walkthroughPanel(standalone).getByTestId("pr-walkthrough-comment").filter({ hasText: commentBody }), "standalone route should restore the same in-progress draft").toBeVisible();
 		await standalone.close();
+	});
+
+	test("agent-produced ready panel records Like decisions through reload and export", async ({ page }) => {
+		const state: MockWalkthroughState = {
+			mode: "success",
+			resolveCalls: [],
+			previewCalls: [],
+			submitCalls: [],
+			resolveDelay: new Promise<void>(() => undefined),
+			unstableJobTabId: true,
+		};
+		const job = await openRealWalkthrough(page, state);
+		await expect(page.getByTestId("pr-walkthrough-waiting"), "session-hosted walkthrough should remain waiting until the analysis agent submits YAML").toBeVisible({ timeout: 10_000 });
+
+		await submitAgentYamlForJob(page, job);
+		await publishWalkthroughJobUpdate(page, state, String(job.childSessionId), { injectTab: false });
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "agent-produced cards should open after submit_pr_walkthrough_yaml publishes the panel").toContainText("Resolved changeset overview", { timeout: 10_000 });
+		await expect.poll(() => activeCardId(page), { timeout: 5_000 }).toBe("real-orientation");
+		await recordWalkthroughDraftEvents(page);
+
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-like").first().click();
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "Like should advance the session-hosted walkthrough to the next card",
+		}).toBe("real-design");
+
+		await publishWalkthroughJobUpdate(page, state, String(job.childSessionId), { injectTab: false });
+		await expect.poll(() => activeCardId(page), {
+			timeout: 5_000,
+			message: "repeat ready job updates should keep the canonical panel and liked draft active",
+		}).toBe("real-design");
+
+		const firstRailStep = railCard(page, "Resolved changeset overview");
+		await expect(firstRailStep, "liked rail dot should mark the first agent-produced card as liked").toHaveClass(/liked/);
+		await expect(firstRailStep.locator(".card-dot-rail svg, svg.dot-icon"), "liked rail dot should render the thumbs-up status icon").toBeVisible();
+		await firstRailStep.click();
+		await expect.poll(() => activeCardId(page), { timeout: 5_000 }).toBe("real-orientation");
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-like"), "Like should mark the card selected after returning to it").toHaveClass(/decision-selected/);
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-like")).toHaveAttribute("aria-pressed", "true");
+		await expect.poll(() => page.evaluate(() => (window as any).__walkthroughDraftEvents?.some((draft: any) => draft?.decisions?.["real-orientation"]?.value === "liked") ?? false), {
+			timeout: 5_000,
+			message: "Like should emit a draft-change event containing the liked decision",
+		}).toBe(true);
+
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-like").first().click();
+		await expect.poll(() => activeCardId(page), { timeout: 5_000 }).toBe("real-design");
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-like").first().click();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-audit"), "liking every review card should complete into the audit draft").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-draft"), "audit draft should include accepted/liked context").toContainText(/approved|liked|accepted/i);
+		await expect.poll(() => page.evaluate(() => (window as any).__walkthroughCompleteEvents?.length ?? 0), {
+			timeout: 5_000,
+			message: "completing the agent-produced card set should emit a complete event",
+		}).toBeGreaterThan(0);
+
+		await page.reload();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-card-title"), "agent-produced walkthrough should restore after reload").toContainText("Audit and export", { timeout: 15_000 });
+		const restoredFirstRailStep = railCard(page, "Resolved changeset overview");
+		await expect(restoredFirstRailStep, "liked rail state should survive reload").toHaveClass(/liked/);
+		await restoredFirstRailStep.click();
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-like"), "liked decision selection should survive reload").toHaveClass(/decision-selected/);
+		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-like")).toHaveAttribute("aria-pressed", "true");
+
+		await railCard(page, "Audit and export").click();
+		await walkthroughPanel(page).getByTestId("pr-walkthrough-submit-review").click();
+		await expect(page.getByTestId("pr-walkthrough-export-preview"), "export preview should remain usable with the persisted liked draft").toBeVisible({ timeout: 10_000 });
+		await expect.poll(() => state.previewCalls.length, { timeout: 5_000 }).toBe(1);
+		expect((state.previewCalls[0] as any)?.decisions?.["real-orientation"]?.value, "export draft should include the persisted first-card Like decision").toBe("liked");
+		expect((state.previewCalls[0] as any)?.decisions?.["real-design"]?.value, "export draft should include the completed second-card Like decision").toBe("liked");
 	});
 
 	test("previews GitHub export and submits only after the explicit confirmation click", async ({ page }) => {

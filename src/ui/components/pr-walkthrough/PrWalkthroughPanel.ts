@@ -1216,7 +1216,7 @@ export class PrWalkthroughPanel extends LitElement {
 						${card.checklist?.length ? html`<ul class="checklist">${card.checklist.map(item => html`<li>${item}</li>`)}</ul>` : nothing}
 						${this.renderOriginalPrDescription(card)}
 					</section>
-					${card.diffBlocks.map(block => this.renderDiffBlock(card, block))}
+					${card.diffBlocks.map(block => this.renderDiffBlockSafe(card, block))}
 					${this.renderCardComments(card)}
 					${card.phaseId === "audit" ? this.renderAuditDraftSection() : nothing}
 					<div class="actions">
@@ -1251,6 +1251,19 @@ export class PrWalkthroughPanel extends LitElement {
 			}
 		}
 		return { additions, deletions };
+	}
+
+	private renderDiffBlockSafe(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
+		try {
+			return this.renderDiffBlock(card, block);
+		} catch (error) {
+			console.warn(`PrWalkthroughPanel: failed to render diff block for ${block?.filePath ?? "<unknown file>"}`, error);
+			return html`
+				<section class="diff-block diff-block-error" data-testid="pr-walkthrough-diff-block-error" data-file-path=${block?.filePath ?? ""}>
+					<p class="diff-error-note">Could not render the diff for <b>${block?.filePath ?? "this file"}</b>.</p>
+				</section>
+			`;
+		}
 	}
 
 	private renderDiffBlock(card: PrWalkthroughCard, block: PrWalkthroughDiffBlock): TemplateResult {
@@ -1352,12 +1365,13 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private hunkSignature(header: string): string {
-		return header.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? header;
+		const text = typeof header === "string" ? header : "";
+		return text.match(/^@@[^@]*@@\s*(.*)$/)?.[1]?.trim() ?? text;
 	}
 
 	private sectionSignature(hunk: PrWalkthroughDiffBlock["hunks"][number], entry: DiffLineEntry, previousContext?: DiffContextEntry): string {
 		const scopedSignature = previousContext ? this.scopeSignatureBeforeIndex(hunk, entry.start) : undefined;
-		return scopedSignature ?? this.hunkSignature(hunk.header);
+		return scopedSignature ?? this.hunkSignature(hunk.header ?? "");
 	}
 
 	private scopeSignatureBeforeIndex(hunk: PrWalkthroughDiffBlock["hunks"][number], anchorIndex: number): string | undefined {
@@ -2130,6 +2144,33 @@ export class PrWalkthroughPanel extends LitElement {
 		return this.cards.map(card => `${card.id}:${card.phaseId}:${card.diffBlocks.map(block => `${block.id}:${block.filePath}:${block.hunks.length}`).join("|")}`).join(";");
 	}
 
+	private hasCard(cardId: string | undefined): boolean {
+		return !!cardId && this.cards.some(card => card.id === cardId);
+	}
+
+	private hasLineAnchor(cardId: string, diffBlockId: string, lineId: string): boolean {
+		const card = this.cards.find(candidate => candidate.id === cardId);
+		return !!card?.diffBlocks.some(block => block.id === diffBlockId && block.hunks.some(hunk => hunk.lines.some(line => line.id === lineId)));
+	}
+
+	private canRestorePersistedState(parsed: PersistedPrWalkthroughState): boolean {
+		if (this.status === "fixture" || parsed.cardsChecksum === this.cardsChecksum()) return true;
+		const decisionIds = parsed.decisions && typeof parsed.decisions === "object" ? Object.keys(parsed.decisions) : [];
+		const completedIds = Array.isArray(parsed.completedCardIds) ? parsed.completedCardIds : [];
+		const commentCardIds = Array.isArray(parsed.comments) ? parsed.comments.map(comment => comment?.cardId) : [];
+		return [parsed.activeCardId, ...decisionIds, ...completedIds, ...commentCardIds].some(id => this.hasCard(id));
+	}
+
+	private restoreComments(parsed: PersistedPrWalkthroughState, checksumMatches: boolean): PrWalkthroughComment[] {
+		if (!Array.isArray(parsed.comments)) return [];
+		return parsed.comments.filter(comment => {
+			if (!comment || typeof comment.id !== "string" || typeof comment.cardId !== "string" || typeof comment.body !== "string") return false;
+			if (!this.hasCard(comment.cardId)) return false;
+			if (checksumMatches || !comment.diffBlockId || !comment.lineId) return true;
+			return this.hasLineAnchor(comment.cardId, comment.diffBlockId, comment.lineId);
+		});
+	}
+
 	private restorePersistedState(): void {
 		this.resetInteractionState();
 		const key = this.persistenceStorageKey();
@@ -2139,14 +2180,17 @@ export class PrWalkthroughPanel extends LitElement {
 			const raw = localStorage.getItem(key);
 			if (!raw) return;
 			const parsed = JSON.parse(raw) as PersistedPrWalkthroughState;
-			if (this.status !== "fixture" && parsed.cardsChecksum !== this.cardsChecksum()) return;
-			if (parsed.activeCardId && this.cards.some(card => card.id === parsed.activeCardId)) this._activeCardId = parsed.activeCardId;
+			if (!this.canRestorePersistedState(parsed)) return;
+			const checksumMatches = this.status === "fixture" || parsed.cardsChecksum === this.cardsChecksum();
+			if (this.hasCard(parsed.activeCardId)) this._activeCardId = parsed.activeCardId!;
 			if (parsed.diffModeOverride === "split" || parsed.diffModeOverride === "inline") this._diffModeOverride = parsed.diffModeOverride;
-			if (Array.isArray(parsed.comments)) this._comments = parsed.comments.filter(comment => comment && typeof comment.id === "string" && typeof comment.cardId === "string" && typeof comment.body === "string");
-			if (parsed.decisions && typeof parsed.decisions === "object") this._decisions = parsed.decisions;
-			if (Array.isArray(parsed.completedCardIds)) this._completedCardIds = parsed.completedCardIds.filter(id => this.cards.some(card => card.id === id));
+			this._comments = this.restoreComments(parsed, checksumMatches);
+			if (parsed.decisions && typeof parsed.decisions === "object") {
+				this._decisions = Object.fromEntries(Object.entries(parsed.decisions).filter(([cardId, decision]) => this.hasCard(cardId) && (decision?.value === "liked" || decision?.value === "disliked")));
+			}
+			if (Array.isArray(parsed.completedCardIds)) this._completedCardIds = parsed.completedCardIds.filter(id => this.hasCard(id));
 			if (Array.isArray(parsed.dismissedSuggestionIds)) this._dismissedSuggestionIds = parsed.dismissedSuggestionIds.filter(id => typeof id === "string");
-			if (Array.isArray(parsed.collapsedDiffBlockIds)) this._collapsedDiffBlockIds = parsed.collapsedDiffBlockIds.filter(id => typeof id === "string");
+			if (Array.isArray(parsed.collapsedDiffBlockIds)) this._collapsedDiffBlockIds = parsed.collapsedDiffBlockIds.filter(id => typeof id === "string" && this.cards.some(card => card.diffBlocks.some(block => block.id === id)));
 			this.reconcileDecisionCommentInvariants();
 		} catch (err) {
 			console.warn("[pr-walkthrough] failed to restore persisted state", err);

@@ -2486,10 +2486,10 @@ export class SessionManager {
 			scheduledAt: Date.now(),
 			error: errMsg.slice(0, 200),
 		};
-		broadcast(session.clients, {
-			type: "event",
-			data: pendingEvent,
-		});
+		// WP4/RC3: route through emitSessionEvent so the frame gets a seq, enters
+		// the EventBuffer, and replays on resume — a reconnect during backoff no
+		// longer orphans a stale "Retrying…" banner (S5/S21).
+		emitSessionEvent(session, pendingEvent);
 
 		if (session.pendingAutoRetryTimer) clearTimeout(session.pendingAutoRetryTimer);
 		session.pendingAutoRetryTimer = setTimeout(() => {
@@ -2523,10 +2523,8 @@ export class SessionManager {
 				reason,
 				cancelledAt: Date.now(),
 			};
-			broadcast(session.clients, {
-				type: "event",
-				data: cancelledEvent,
-			});
+			// WP4/RC3: seq + buffer + replay (see auto_retry_pending above).
+			emitSessionEvent(session, cancelledEvent);
 		}
 	}
 
@@ -5663,7 +5661,13 @@ export class SessionManager {
 		const session = this.sessions.get(id);
 		if (!session) return;
 
-		// If not streaming, nothing to abort
+		// S40: cancel any pending auto-retry timer regardless of streaming state.
+		// An abort during the post-error backoff window (status "idle") would
+		// otherwise leave the timer to fire a spurious retry on a session someone
+		// just stopped (reachable via the team-abort route). No-op when none pending.
+		this.cancelPendingAutoRetry(session, "terminated");
+
+		// If not streaming, nothing more to abort
 		if (session.status !== "streaming") return;
 
 		// Broadcast aborting status so UI shows feedback during grace period
@@ -5692,12 +5696,15 @@ export class SessionManager {
 			}
 		});
 
-		// Try graceful abort first
-		try {
-			await session.rpcClient.abort();
-		} catch {
-			// Abort RPC itself may fail/timeout — proceed to force kill
-		}
+		// Try graceful abort, but do NOT serialize it ahead of the grace race
+		// (S8): rpcClient.abort() can block up to the 30s sendCommand timeout on a
+		// wedged bridge, which would delay the force-kill to ~30s instead of the
+		// intended gracePeriodMs (3s). Fire it un-awaited — wrapped in an async IIFE
+		// so a SYNCHRONOUS throw ("Agent process not running" when there is no
+		// stdin) becomes a caught rejection rather than escaping — and race it
+		// against the grace timer below. A fast agent_end still resolves settled=true
+		// and returns gracefully without force-kill.
+		void (async () => { await session.rpcClient.abort(); })().catch(() => {});
 
 		const settled = await settledPromise;
 
@@ -5727,8 +5734,11 @@ export class SessionManager {
 		// at front so the post-respawn drainQueue redispatches them once.
 		this._reconcileAfterAbort(session);
 
-		// Emit agent_end so clients know streaming stopped
-		broadcast(session.clients, { type: "event", data: { type: "agent_end", messages: [] } });
+		// Emit agent_end so clients know streaming stopped.
+		// WP4/RC3: route through emitSessionEvent so a client that resumes after a
+		// force-abort replays the agent_end (and clears its stale streaming partial)
+		// instead of relying on a later snapshot tick.
+		emitSessionEvent(session, { type: "agent_end", messages: [] });
 		broadcastStatus(session, "idle");
 
 		// Restart the agent process

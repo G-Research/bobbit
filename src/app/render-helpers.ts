@@ -464,12 +464,8 @@ export function renderSessionRow(session: GatewaySession) {
 	const isActive = session.status === "streaming" || session.status === "busy" || session.isCompacting;
 
 	// Check for children (live delegates + first-class child sessions + archived children)
-	const _bypassFilters = !!state.searchQuery.trim();
-	const liveChildren = state.gatewaySessions.filter(s =>
-		sessionParentId(s) === session.id
-		&& (state.showArchived || s.status !== "terminated")
-		&& passesSidebarFilters(s, s.id === activeSessionId(), _bypassFilters));
-	const archivedChildren = state.showArchived ? state.archivedSessions.filter(s => sessionParentId(s) === session.id) : [];
+	const liveChildren = visibleLiveChildrenForParent(session.id);
+	const archivedChildren = state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
 	const autoExpanded = liveChildren.some(isFirstClassChildSession);
 	const childrenExpanded = hasChildren && (autoExpanded || isArchivedParentExpanded(session.id));
@@ -530,21 +526,36 @@ export function renderSessionRow(session: GatewaySession) {
 					</div>
 				</div>`}
 		</div>
-		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${renderArchivedDelegates(session.id)}` : ""}
+		${childrenExpanded ? html`${renderLiveDelegates(session.id)}${state.showArchived ? renderArchivedDelegates(session.id, true) : ""}` : ""}
 	`;
+}
+
+function isArchivedOrTerminalSession(session: GatewaySession): boolean {
+	return session.archived === true || session.status === "terminated" || session.status === "archived";
+}
+
+function visibleLiveChildrenForParent(parentSessionId: string): GatewaySession[] {
+	const bypassFilters = !!state.searchQuery.trim();
+	return state.gatewaySessions.filter(s =>
+		sessionParentId(s) === parentSessionId
+		&& (state.showArchived || !isArchivedOrTerminalSession(s))
+		&& (isFirstClassChildSession(s) || passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters)));
+}
+
+function archivedChildrenForParent(parentSessionId: string): GatewaySession[] {
+	const gatewayChildIds = new Set(state.gatewaySessions
+		.filter(s => sessionParentId(s) === parentSessionId)
+		.map(s => s.id));
+	return state.archivedSessions.filter(s => sessionParentId(s) === parentSessionId && !gatewayChildIds.has(s.id));
 }
 
 /** Render live delegate sessions nested under a parent session. */
 function renderLiveDelegates(parentSessionId: string): TemplateResult | string {
-	const bypassFilters = !!state.searchQuery.trim();
-	const children = state.gatewaySessions.filter(s =>
-		sessionParentId(s) === parentSessionId
-		&& (state.showArchived || s.status !== "terminated")
-		&& passesSidebarFilters(s, s.id === activeSessionId(), bypassFilters));
+	const children = visibleLiveChildrenForParent(parentSessionId);
 	if (children.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
-		${children.map(s => s.status === "terminated"
-			? html`${renderArchivedSessionRow(s)}${renderArchivedDelegates(s.id)}`
+		${children.map(s => isArchivedOrTerminalSession(s)
+			? html`${renderArchivedSessionRow(s)}${state.showArchived ? renderArchivedDelegates(s.id) : ""}`
 			: renderSessionRow(s))}
 	</div>`;
 }
@@ -557,7 +568,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 	const mobile = !isDesktop();
 	const active = activeSessionId() === session.id;
 	const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
-	const delegates = state.archivedSessions.filter(s => sessionParentId(s) === session.id);
+	const delegates = archivedChildrenForParent(session.id);
 	const hasChildren = delegates.length > 0 || extraChildren;
 	const expanded = hasChildren && isArchivedParentExpanded(session.id);
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
@@ -588,9 +599,10 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 }
 
 /** Render any archived delegate sessions nested under a parent session. */
-export function renderArchivedDelegates(parentSessionId: string): TemplateResult | string {
-	if (!isArchivedParentExpanded(parentSessionId)) return "";
-	const delegates = state.archivedSessions.filter(s => sessionParentId(s) === parentSessionId);
+export function renderArchivedDelegates(parentSessionId: string, forceExpanded = false): TemplateResult | string {
+	if (!state.showArchived) return "";
+	if (!forceExpanded && !isArchivedParentExpanded(parentSessionId)) return "";
+	const delegates = archivedChildrenForParent(parentSessionId);
 	if (delegates.length === 0) return "";
 	return html`<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 		${delegates.map(s => html`
@@ -641,6 +653,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 	const tlNavId = `session:${session.id}`;
 	return html`
 		<div
+			data-session-id="${session.id}"
 			data-nav-id=${tlNavId}
 			data-nav-active=${active ? "true" : "false"}
 			class="${mobile ? "" : "group relative"} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
@@ -912,8 +925,14 @@ export function renderGoalGroup(goal: Goal) {
 		const archivedForLiveLead = state.showArchived
 			? state.archivedSessions.filter(s => s.teamGoalId === goal.id && !isChildSession(s) && s.role !== "team-lead" && s.teamLeadSessionId === teamLead.id)
 			: [];
+		const liveLeadChildren = visibleLiveChildrenForParent(teamLead.id);
+		const archivedLeadChildren = state.showArchived ? archivedChildrenForParent(teamLead.id) : [];
+		const leadChildRowsExpanded = liveLeadChildren.some(isFirstClassChildSession)
+			|| archivedLeadChildren.length > 0
+			|| isArchivedParentExpanded(teamLead.id);
 		return html`
-			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length, tlExpanded)}
+			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
+			${leadChildRowsExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
