@@ -44,11 +44,52 @@ function isSkippedToolResult(result) {
 	return text.includes("Skipped due to queued user message");
 }
 
+function normalizeStatus(status) {
+	if (typeof status !== "string") return undefined;
+	const key = status.toLowerCase().replace(/_/g, "-");
+	if (key === "passed" || key === "success" || key === "completed") return "passed";
+	if (key === "failed" || key === "failure" || key === "error" || key === "timeout") return "failed";
+	if (key === "skipped") return "skipped";
+	if (key === "running" || key === "in-progress" || key === "starting") return "running";
+	if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
+	if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
+	return undefined;
+}
+
 function deriveStepStatus(step) {
+	const explicitStatus = normalizeStatus(step && step.status);
+	if (explicitStatus) return explicitStatus;
 	if (step.skipped) return "skipped";
 	if (step.passed === true) return "passed";
 	if (step.passed === false) return "failed";
 	return "running";
+}
+
+function shouldShowDuration(status, durationMs) {
+	if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) return false;
+	if ((status === "waiting" || status === "blocked" || status === "skipped") && durationMs <= 0) return false;
+	return status === "running" || status === "passed" || status === "failed" || durationMs > 0;
+}
+
+function formatCountSummary(counts) {
+	if (!counts) return "";
+	return ["passed", "failed", "running", "waiting", "blocked", "skipped"]
+		.map(function(status) { return Number(counts[status] || 0) > 0 ? Number(counts[status]) + " " + status : ""; })
+		.filter(Boolean)
+		.join(", ");
+}
+
+function verificationSummary(data, steps) {
+	if (typeof (data && data.summary) === "string") return data.summary;
+	const counts = data && (data.statusCounts || data.counts || (data.summary && data.summary.counts));
+	const explicit = formatCountSummary(counts);
+	if (explicit) return explicit;
+	const derived = {};
+	steps.forEach(function(step) {
+		const status = deriveStepStatus(step);
+		derived[status] = (derived[status] || 0) + 1;
+	});
+	return formatCountSummary(derived);
 }
 
 /**
@@ -94,6 +135,7 @@ function renderVerification(state, gateId, data) {
 	const signalIndex = (data && data.signalIndex != null) ? data.signalIndex : "?";
 	const signalId = (data && data.signalId) || "";
 	const steps = (data && data.steps) || [];
+	const summary = verificationSummary(data, steps);
 
 	const stepInfos = steps.map(function(step) {
 		const status = deriveStepStatus(step);
@@ -106,6 +148,7 @@ function renderVerification(state, gateId, data) {
 			isFailed: isFailed,
 			startsExpanded: isFailed,
 			durationMs: step.duration_ms,
+			showsDuration: shouldShowDuration(status, step.duration_ms),
 		};
 	});
 
@@ -114,6 +157,7 @@ function renderVerification(state, gateId, data) {
 		state, gateId,
 		signalIndex, signalId,
 		stepCount: steps.length,
+		summary: summary,
 		steps: stepInfos,
 	};
 }

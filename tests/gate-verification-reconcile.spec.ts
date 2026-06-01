@@ -211,6 +211,19 @@ test.describe("Gate verification reconciliation", () => {
 		expect(result.status).toBe("failed");
 	});
 
+	test("explicit waiting status overrides passed=false placeholder", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		const result = await page.evaluate(() => {
+			return (window as any).mapGateSignalStep({
+				name: "Review", type: "llm-review", status: "waiting", passed: false, output: "", duration_ms: 0,
+			}, "running");
+		});
+
+		expect(result.status).toBe("waiting");
+		expect(result.durationMs).toBe(0);
+	});
+
 	test("maps passed=null to status running", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
@@ -223,7 +236,7 @@ test.describe("Gate verification reconciliation", () => {
 		expect(result.status).toBe("running");
 	});
 
-	test("does not reconcile when REST signal verification is still running", async ({ page }) => {
+	test("does not reconcile running REST placeholders without explicit status", async ({ page }) => {
 		await page.goto(TEST_PAGE);
 
 		const result = await page.evaluate(() => {
@@ -239,7 +252,10 @@ test.describe("Gate verification reconciliation", () => {
 					id: "signal-still-running",
 					verification: {
 						status: "running",
-						steps: [],
+						steps: [
+							{ name: "Step 1", type: "command", passed: false, duration_ms: 0, output: "" },
+							{ name: "Step 2", type: "llm-review", passed: false, duration_ms: 0, output: "" },
+						],
 					},
 				}],
 			};
@@ -247,10 +263,43 @@ test.describe("Gate verification reconciliation", () => {
 			return (window as any).reconcileFromGateData(componentState, gateData, "signal-still-running");
 		});
 
-		// Should not change — REST also shows running
+		// Should not change — legacy seed rows must not flicker to failed/0ms.
 		expect(result.overallStatus).toBe("running");
 		expect(result.steps).toHaveLength(1);
 		expect(result.steps[0].status).toBe("running");
+	});
+
+	test("reconciles running REST active snapshot when explicit statuses are present", async ({ page }) => {
+		await page.goto(TEST_PAGE);
+
+		const result = await page.evaluate(() => {
+			const componentState = {
+				steps: [
+					{ name: "Step 1", type: "command", status: "running", startedAt: Date.now() - 2000 },
+				],
+				overallStatus: "running",
+			};
+
+			const gateData = {
+				signals: [{
+					id: "signal-active-snapshot",
+					verification: {
+						status: "running",
+						steps: [
+							{ name: "Typecheck", type: "command", status: "passed", passed: true, duration_ms: 1400, output: "OK" },
+							{ name: "Tests", type: "command", status: "running", passed: false, duration_ms: 2500, output: "tail" },
+							{ name: "Review", type: "llm-review", status: "waiting", passed: false, duration_ms: 0, output: "" },
+						],
+					},
+				}],
+			};
+
+			return (window as any).reconcileFromGateData(componentState, gateData, "signal-active-snapshot");
+		});
+
+		expect(result.overallStatus).toBe("running");
+		expect(result.steps.map((s: any) => s.status)).toEqual(["passed", "running", "waiting"]);
+		expect(result.steps[1].durationMs).toBe(2500);
 	});
 
 	test("maps skipped=true with passed=true to status skipped (optional step)", async ({ page }) => {
