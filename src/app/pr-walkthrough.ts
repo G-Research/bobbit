@@ -7,7 +7,6 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
-import { getRouteFromHash } from "./routing.js";
 import {
 	expandedGoals,
 	renderApp,
@@ -348,37 +347,10 @@ function labelForJob(job: WalkthroughJobRecord): string {
 	return labelForPrNumber(job.target?.number) || (job.target?.prUrl ? "PR" : "Walkthrough");
 }
 
-function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boolean {
-	const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
-	return session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
-}
-
-/** True when the dedicated, prompt-less standalone `/walkthrough` route is active. */
-function isStandaloneWalkthroughRoute(): boolean {
-	try { return getRouteFromHash().view === "walkthrough"; } catch { return false; }
-}
-
-function keepLiveWalkthroughPanelPromptable(state: AppState, sessionId: string, tabId?: string): void {
-	if (tabId) setActivePanelTabIdForSession(state, sessionId, tabId);
-	const tabs = panelTabsForSession(state, sessionId);
-	const nextTabs = tabs.map((tab) => tab.kind === "walkthrough" && tab.state?.fullscreenOnReady === true
-		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
-		: tab);
-	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
-	// Forcing split + clearing the collapse flag keeps the in-app chat prompt
-	// visible for a live child. The standalone /walkthrough route has no prompt
-	// and owns its own fullscreen/collapse state, so skip the reset there —
-	// otherwise the per-render job restore bounces the user out of fullscreen
-	// and wipes the persisted collapse flag on every paint.
-	if (isStandaloneWalkthroughRoute()) return;
-	(state as any).previewPanelFullscreen = false;
-	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* non-browser/test */ }
-}
-
 export function upsertPrWalkthroughJobPanel(
 	state: AppState,
 	job: WalkthroughJobRecord,
-	options: { select?: boolean; fullscreenOnReady?: boolean } = {},
+	options: { select?: boolean } = {},
 ): PanelWorkspaceTab {
 	const sessionId = job.childSessionId;
 	const changeset = targetChangesetFromJob(job);
@@ -396,8 +368,6 @@ export function upsertPrWalkthroughJobPanel(
 	const status: PrWalkthroughStatus = job.status === "starting" ? "waiting_for_yaml" : job.status;
 	const target = job.target || {};
 	const errorMessage = job.error?.message || (status === "validation_failed" ? validationMessage(job.lastValidationError) : undefined);
-	const liveSessionHosted = !!job.parentSessionId || isLiveSessionHostedWalkthrough(state, sessionId);
-	const fullscreenOnReady = !!options.fullscreenOnReady && !liveSessionHosted;
 	const tab: PanelWorkspaceTab = {
 		id: tabId,
 		kind: "walkthrough",
@@ -435,7 +405,6 @@ export function upsertPrWalkthroughJobPanel(
 			prTitle: changeset.prTitle,
 			baseSha: changeset.baseSha,
 			headSha: changeset.headSha,
-			fullscreenOnReady: status === "ready" && fullscreenOnReady || undefined,
 		},
 	};
 
@@ -462,9 +431,10 @@ export function upsertPrWalkthroughJobPanel(
 	setPanelTabsForSession(state, sessionId, next);
 	if (options.select) setActivePanelTabIdForSession(state, sessionId, tabId);
 	if (status === "ready") {
-		if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, tabId);
-		else setActivePanelTabIdForSession(state, sessionId, tabId);
-		if (fullscreenOnReady && !liveSessionHosted) (state as any).previewPanelFullscreen = true;
+		// Walkthrough panels share the HTML preview panel's resize semantics: ready
+		// just selects the tab. Fullscreen is strictly user-initiated, so never
+		// auto-enter it here.
+		setActivePanelTabIdForSession(state, sessionId, tabId);
 		// A ready job broadcast carries job metadata, not the YAML-derived cards.
 		// Always hydrate the payload from the walkthrough store so live child
 		// panels and standalone tabs don't remain stuck on stale waiting content.
@@ -526,15 +496,10 @@ function patchWalkthroughTab(
 	const deduped = nextTabId !== tabId ? nextTabs.filter((tab, index, all) => tab.id !== nextTabId || all.findIndex((candidate) => candidate.id === nextTabId) === index) : nextTabs;
 	if (replaced) {
 		setPanelTabsForSession(state, sessionId, deduped);
-		const liveSessionHosted = isLiveSessionHostedWalkthrough(state, sessionId);
 		if (nextTabId !== tabId) setActivePanelTabIdForSession(state, sessionId, nextTabId);
-		if (patch.status === "ready") {
-			if (liveSessionHosted) keepLiveWalkthroughPanelPromptable(state, sessionId, nextTabId);
-			else {
-				setActivePanelTabIdForSession(state, sessionId, nextTabId);
-				if ((state as any).selectedSessionId === sessionId) (state as any).previewPanelFullscreen = true;
-			}
-		}
+		// Ready selects the walkthrough tab but never auto-enters fullscreen — the
+		// panel shares the HTML preview panel's user-initiated resize semantics.
+		if (patch.status === "ready") setActivePanelTabIdForSession(state, sessionId, nextTabId);
 	}
 	return updatedTabId;
 }
@@ -686,7 +651,7 @@ export async function launchPrWalkthroughAgent(state: AppState, sessionId: strin
 		});
 		const job = jobRecordFromResponse(data);
 		if (!job) throw new Error("PR walkthrough launch returned an invalid response");
-		const tab = upsertPrWalkthroughJobPanel(state, job, { select: true, fullscreenOnReady: job.status === "ready" });
+		const tab = upsertPrWalkthroughJobPanel(state, job, { select: true });
 		renderApp();
 		void focusWalkthroughChildSession(job.childSessionId);
 		return tab;
@@ -708,7 +673,6 @@ const jobRestoreLastAttempt = new Map<string, number>();
 
 export function restorePrWalkthroughJobForSession(state: AppState, childSessionId: string): void {
 	if (!childSessionId) return;
-	if (isLiveSessionHostedWalkthrough(state, childSessionId)) keepLiveWalkthroughPanelPromptable(state, childSessionId);
 	const now = Date.now();
 	const last = jobRestoreLastAttempt.get(childSessionId) || 0;
 	if (jobRestoreInFlight.has(childSessionId) || now - last < 2_000) return;
@@ -718,7 +682,7 @@ export function restorePrWalkthroughJobForSession(state: AppState, childSessionI
 		.then((data) => {
 			const job = jobRecordFromResponse(data);
 			if (!job) return;
-			upsertPrWalkthroughJobPanel(state, job, { select: (state as any).selectedSessionId === childSessionId, fullscreenOnReady: job.status === "ready" });
+			upsertPrWalkthroughJobPanel(state, job, { select: (state as any).selectedSessionId === childSessionId });
 		})
 		.catch(() => { /* older server or no job for this session */ })
 		.finally(() => {

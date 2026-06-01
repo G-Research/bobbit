@@ -1,5 +1,14 @@
 # PR walkthrough agent session architecture
 
+> **Superseded behaviour:** this doc's references to switching the child to
+> fullscreen review mode "on success" / "on ready" describe the original design.
+> That auto-fullscreen-on-ready plumbing has since been **removed** — the
+> walkthrough panel now shares the HTML preview panel's resize logic and
+> fullscreen is strictly user-initiated. See
+> [walkthrough-panel-resize-fix.md](walkthrough-panel-resize-fix.md). The rest of
+> this design (child session, bundle, YAML submission, persistence, export) is
+> still accurate.
+
 ## Summary
 
 Launching a PR walkthrough creates a first-class, read-only child agent session instead of resolving cards silently in the launching session. Before that child starts, the server resolves the PR metadata and diff once, sanitizes it, and persists a versioned analysis bundle for the job. The child session owns the walkthrough side panel, reports progress in chat, reads the persisted bundle through a scoped tool, submits one validated YAML document through a walkthrough-only tool, then stays alive for follow-up questions.
@@ -40,7 +49,7 @@ Goals:
 3. Launch resolves and persists a sanitized, versioned analysis bundle before the analysis child session is created or prompted.
 4. The agent can only perform read-only PR investigation, starts from `read_pr_walkthrough_bundle`, and must submit valid YAML via `submit_pr_walkthrough_yaml` to populate the panel.
 5. Invalid YAML gives actionable retry feedback; no partial cards are rendered.
-6. Successful submission maps against the stored bundle, persists a YAML-derived payload, switches the child to fullscreen review mode, and leaves the agent alive.
+6. Successful submission maps against the stored bundle, persists a YAML-derived payload, selects the child's walkthrough tab, and leaves the agent alive. A ready walkthrough does **not** auto-enter fullscreen (superseded — was: "switches the child to fullscreen review mode"); fullscreen is strictly user-initiated via the toolbar button or keyboard shortcut, matching the HTML preview panel.
 7. Existing final review export remains explicit and user-confirmed.
 
 Non-goals:
@@ -360,14 +369,15 @@ The UI component loaded by `ensurePrWalkthroughPanel()` should render:
 - `ready`: existing card UI.
 - `error`: structured error with retry/follow-up guidance.
 
-On successful submission, set:
+On successful submission, select the walkthrough tab only — never set fullscreen:
 
 ```ts
 setActivePanelTabIdForSession(state, childSessionId, walkthroughPanelTabId(changesetId));
-state.previewPanelFullscreen = true;
+// Superseded — do NOT set state.previewPanelFullscreen here. Auto-fullscreen-on-ready
+// was removed; the panel stays in split view until the user initiates fullscreen.
 ```
 
-This should happen when the active UI session is the child. If the user is elsewhere, persist a desired fullscreen flag in job/session state and apply it when they open the child.
+This should happen when the active UI session is the child. Do not persist any "desired fullscreen" flag — there is no auto-fullscreen behaviour to defer; the panel shares the HTML preview panel's resize logic and only enters fullscreen on explicit user action.
 
 ## Sidebar behavior
 
@@ -660,7 +670,7 @@ Detailed ownership:
 | Launch-time PR metadata, parsed files/hunks, limits, warnings, and export capability | Analysis bundle store plus job `analysisBundle` metadata | `read_pr_walkthrough_bundle` and YAML mapper |
 | Final cards, parsed diff blocks, warnings, export capability | Existing `walkthrough-store.ts` payload | `GET /api/pr-walkthrough/:changesetId` |
 | Original PR body | Final payload `changeset.prBody` plus Orientation card metadata | Existing payload restore |
-| Active tab, fullscreen-on-ready intent | Panel workspace state plus job/session UI metadata | Session switch/job restore |
+| Active tab (no fullscreen-on-ready intent — superseded; ready never auto-fullscreens) | Panel workspace state plus job/session UI metadata | Session switch/job restore |
 | Comments, decisions, completed cards, diff mode | Existing browser draft state keyed by walkthrough tab/checksum | Existing panel local storage restore |
 | Agent transcript and follow-up context | Existing session transcript store | Normal child session restore |
 
@@ -689,7 +699,7 @@ Existing draft review state, comments, decisions, and standalone route should re
 
 - Update `open-pr-walkthrough` event handling to use launch flow.
 - Listen for `pr_walkthrough_job_updated` WebSocket/SSE messages and patch child session panel tabs.
-- On `ready` update for active child, set active walkthrough tab and `previewPanelFullscreen = true`.
+- On `ready` update for active child, select the active walkthrough tab only. Do **not** touch `previewPanelFullscreen` (superseded — was: "set `previewPanelFullscreen = true`"); auto-fullscreen-on-ready was removed and fullscreen is user-initiated.
 
 ### `src/app/panel-workspace.ts`
 
@@ -766,7 +776,7 @@ Status transitions and retry semantics:
 | `starting` | model unavailable or prompt dispatch fails after child persisted | `error` | Reuse existing child; retry can resend prompt after config/auth fix. |
 | `waiting_for_yaml` | invalid YAML tool call | `validation_failed` | Same child; agent retries tool call. |
 | `validation_failed` | another invalid YAML tool call | `validation_failed` | Update latest summary and reminder context. |
-| `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, fullscreen review, keep agent alive. |
+| `waiting_for_yaml` or `validation_failed` | valid YAML tool call | `ready` | Persist payload, select walkthrough tab (no auto-fullscreen — user-initiated only), keep agent alive. |
 | `waiting_for_yaml` or `validation_failed` | agent idle without successful tool call | same status | Enqueue rate-limited reminder; no cards rendered. |
 | `waiting_for_yaml` or `validation_failed` | stored analysis bundle is missing or unusable during bundle read or YAML submission | `error` with `PR_WALKTHROUGH_BUNDLE_MISSING` | Retryable, but requires relaunch; no submit-time diff re-fetch. |
 | `error` | duplicate launch of same parent/target | `error` or `waiting_for_yaml` after explicit retry | Focus existing child; do not create duplicate. |
@@ -779,7 +789,7 @@ Status transitions and retry semantics:
 3. Add `WalkthroughAgentManager.launch()` and launch API with launch-time bundle resolution before child creation.
 4. Update UI launch flow to create/focus child and show waiting panel.
 5. Add sidebar child-session metadata/rendering.
-6. Add idle reminder and fullscreen-on-success behavior.
+6. Add idle reminder behavior. (Superseded — the original plan included "fullscreen-on-success"; that auto-fullscreen behaviour was removed. Ready walkthroughs never auto-enter fullscreen.)
 7. Keep `/api/pr-walkthrough/resolve` tests passing while moving UI tests to launch/session flow.
 8. Later remove direct synthesis or retain it only as fixture/development fallback.
 
@@ -820,8 +830,8 @@ Browser E2E:
 - Selecting the child shows chat plus an empty waiting panel.
 - Agent progress chat text is visible while panel waits.
 - Validation failure appears in chat and panel banner; cards do not render.
-- Valid submission renders final cards and automatically enters fullscreen walkthrough review mode.
-- Reload preserves child nesting, waiting/validation/ready state, auth/rate-limit/model error states, and active fullscreen state when applicable.
+- Valid submission renders final cards in split view. Fullscreen is user-initiated only — the panel must **not** auto-enter fullscreen on becoming ready (superseded — was: "automatically enters fullscreen walkthrough review mode"). Pinning contract: assert no auto-fullscreen on ready, and that the toolbar button / keyboard shortcut still toggles fullscreen like the HTML preview panel.
+- Reload preserves child nesting, waiting/validation/ready state, auth/rate-limit/model error states, and any user-initiated fullscreen state when applicable.
 - Duplicate launch focuses the existing child.
 - Export preview remains explicit user-confirmed flow.
 

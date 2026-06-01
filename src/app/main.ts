@@ -75,16 +75,9 @@ function hasActiveProposalPanel(): boolean {
 }
 
 function hasActiveWalkthroughPanel(): boolean {
-	// On the standalone `/walkthrough` route there is no connected session, so
-	// the panel tab lives under the route's walkthrough session id (also carried
-	// in the URL `tab` param). Key detection off the same id the panel tab is
-	// stored under — not the bare (undefined) `activeSessionId()` — so the resize
-	// shortcuts find the walkthrough tab instead of falling through to a no-op.
-	const route = getRouteFromHash();
-	if (route.view === "walkthrough") {
-		const tabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, route.walkthroughSessionId);
-		return typeof tabId === "string" && tabId.startsWith("walkthrough:");
-	}
+	// Used by the in-app resize keyboard shortcuts to recognise the unified panel
+	// as a fullscreen-able walkthrough. The standalone `/walkthrough` route has no
+	// panel-level resize chrome, so it intentionally has no special-case here.
 	return activeSidePanelTabIdForSession(state, workspaceSessionId()).startsWith("walkthrough:");
 }
 

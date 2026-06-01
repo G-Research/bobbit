@@ -459,13 +459,23 @@ test.describe("real PR walkthrough browser UX", () => {
 		const commentBody = `persisted-real-comment-${Date.now()}`;
 		await saveLineComment(page, commentBody);
 
+		const fullscreenState = () => page.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.previewPanelFullscreen === true;
+		});
 		const fullscreenRoot = page.locator(`${tid("side-panel-fullscreen-root")}, ${tid("pr-walkthrough-fullscreen-root")}, .preview-fullscreen-prompt`).first();
 		const fullscreen = page.locator(`${tid("side-panel-fullscreen")}, ${tid("pr-walkthrough-fullscreen")}, button[title*="Fullscreen"]`).first();
 		await expect(fullscreen).toBeVisible();
 		await fullscreen.click();
-		await expect(fullscreenRoot, "live walkthrough children should stay in split view so chat remains promptable").toBeHidden({ timeout: 10_000 });
-		await expect(page.locator("textarea").first(), "live walkthrough child prompt should remain visible after fullscreen click").toBeVisible({ timeout: 10_000 });
+		// The in-app walkthrough panel now shares the preview panel's resize
+		// semantics: clicking fullscreen ENTERS fullscreen (user-initiated).
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "clicking fullscreen on a live child walkthrough must enter fullscreen" }).toBe(true);
+		await expect(fullscreenRoot, "entering fullscreen must hide the chat and render the compact fullscreen prompt").toBeVisible({ timeout: 10_000 });
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: commentBody })).toBeVisible();
+		// Return to split so the rest of the flow runs in the default layout.
+		await page.keyboard.press("Control+]");
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "toggle-preview (Ctrl+]) must exit fullscreen" }).toBe(false);
+		await expect(page.locator("textarea").first(), "exiting fullscreen restores the chat prompt").toBeVisible({ timeout: 10_000 });
 
 		await page.reload();
 		await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-card-title"), "resolved card identity should survive full reload").toContainText("Resolved changeset overview", { timeout: 15_000 });

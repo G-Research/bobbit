@@ -271,7 +271,7 @@ function handlePrWalkthroughJobUpdated(detail: unknown): void {
 	const job = (record?.job && typeof record.job === "object" ? record.job : record) as any;
 	if (!job?.jobId || !job?.childSessionId || !job?.changesetId || !job?.status) return;
 	const active = activeSessionId();
-	upsertPrWalkthroughJobPanel(state, job, { select: active === job.childSessionId, fullscreenOnReady: job.status === "ready" && active === job.childSessionId });
+	upsertPrWalkthroughJobPanel(state, job, { select: active === job.childSessionId });
 	renderApp();
 }
 
@@ -724,10 +724,10 @@ function currentAssistantProposalType(): ProposalType | null {
 export function workspaceSessionId(): string {
 	// On the standalone `/walkthrough` route there is no connected session
 	// (`activeSessionId()` is undefined), but the walkthrough's owning session
-	// is carried in the URL. Detection, the collapse localStorage key, and the
-	// canFullscreen predicate must all key off the SAME session id the panel
-	// tab is stored under — otherwise the resize controls read/write a key the
-	// renderer never sees and every affordance silently no-ops.
+	// is carried in the URL. The standalone panel content (e.g. the lazy payload
+	// restore in `walkthroughPanelContent`) must key off the SAME session id the
+	// panel tab is stored under — otherwise it reads a key the renderer never
+	// sees and the walkthrough never hydrates.
 	const route = getRouteFromHash();
 	if (route.view === "walkthrough" && route.walkthroughSessionId) {
 		return panelWorkspaceSessionKey(route.walkthroughSessionId);
@@ -2232,26 +2232,6 @@ export function doRenderApp(): void {
 		};
 	};
 
-	// A walkthrough is "live" — and so must stay in split/promptable view rather
-	// than entering fullscreen — only while its HOST session is genuinely a
-	// running pr-walkthrough child. A terminated/archived host (or one absent
-	// from gatewaySessions, e.g. the disconnected standalone route) is NOT live,
-	// so its ready walkthrough can be fullscreened. The previous fallback
-	// (`source.sessionId === activeId`) wrongly classified ANY walkthrough viewed
-	// in its owner session as live, suppressing fullscreen for terminated/ready
-	// children too.
-	const isLiveSessionHostedWalkthroughActive = (tab?: UnifiedContentTab) => {
-		const activeId = activeSessionId();
-		const source = tab?.source as Record<string, unknown> | undefined;
-		const hostId = (typeof source?.sessionId === "string" && source.sessionId) ? source.sessionId : activeId;
-		if (typeof hostId !== "string" || !hostId) return false;
-		if (tab && tab.kind !== "walkthrough") return false;
-		const archived = state.archivedSessions.some((candidate) => candidate.id === hostId || (candidate.parentSessionId === hostId && candidate.status === "terminated"));
-		if (archived) return false;
-		const session = state.gatewaySessions.find((candidate) => candidate.id === hostId);
-		return !!session && session.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
-	};
-
 	const walkthroughPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind !== "walkthrough") return "";
 		void ensurePrWalkthroughPanel();
@@ -2266,14 +2246,6 @@ export function doRenderApp(): void {
 		const jobId = typeof tabState.jobId === "string" ? tabState.jobId : undefined;
 		if (status === "ready" && !cards?.length) {
 			queueMicrotask(() => restorePrWalkthroughPanel(state, workspaceSessionId(), tab.id));
-		}
-		if (status === "ready" && tabState.fullscreenOnReady === true && !state.previewPanelFullscreen && !isLiveSessionHostedWalkthroughActive(tab)) {
-			queueMicrotask(() => {
-				if (activeSessionId() === workspaceSessionId() && !isLiveSessionHostedWalkthroughActive(tab)) {
-					state.previewPanelFullscreen = true;
-					renderApp();
-				}
-			});
 		}
 		return html`
 			<div class="flex-1 min-h-0 overflow-hidden" data-testid="pr-walkthrough-panel-root" data-panel-tab-id=${tab.id} data-walkthrough-status=${status}>
@@ -2321,47 +2293,12 @@ export function doRenderApp(): void {
 			setPanelTabsForSession(state, sid, [...panelTabsForSession(state, sid), tab as PanelWorkspaceTab]);
 			restorePrWalkthroughPanel(state, sid, tab.id);
 		}
-		// The standalone route is rendered by this branch instead of the unified
-		// panel, so it must surface the same resize affordances and honor the
-		// fullscreen/collapse state itself. There is no chat prompt to protect
-		// here, so (unlike the in-app panel) fullscreen is never suppressed for a
-		// live child — the standalone view is always fully promptless.
-		const collapsed = isPreviewCollapsed();
-		if (collapsed) {
-			return html`
-				<div class="flex-1 min-h-0 flex overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-					<div class="flex-1 min-w-0"></div>
-					${previewExpandButton()}
-				</div>
-			`;
-		}
-		const controlBar = (children: unknown) => html`
-			<div class="flex items-center justify-end gap-0.5 px-3 pt-1 pb-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
-				${children}
-			</div>
-		`;
-		if (state.previewPanelFullscreen) {
-			return html`
-				<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-					${controlBar(html`
-						<button @click=${() => { state.previewPanelFullscreen = false; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-							${icon(PanelRightClose, "sm")}
-						</button>
-					`)}
-					${walkthroughPanelContent(tab)}
-				</div>
-			`;
-		}
+		// A popped-out standalone walkthrough IS the whole window — there is no
+		// adjacent chat pane to hide — so it carries no panel-level fullscreen /
+		// collapse chrome. It simply fills the window. The component's own internal
+		// rail toggle (rendered inside <pr-walkthrough-panel>) still works.
 		return html`
 			<div class="flex-1 min-h-0 flex flex-col overflow-hidden" data-testid="pr-walkthrough-standalone" data-panel-tab-id=${tab.id}>
-				${controlBar(html`
-					<button @click=${() => { state.previewPanelFullscreen = true; renderApp(); }} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Fullscreen walkthrough${shortcutHint("toggle-sidebar")}`} data-testid="pr-walkthrough-fullscreen">
-						${icon(PanelRightOpen, "sm")}
-					</button>
-					<button @click=${togglePreviewCollapse} class="text-muted-foreground hover:text-foreground" style="background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;" title=${`Collapse preview${shortcutHint("toggle-preview")}`}>
-						${icon(PanelRightClose, "sm")}
-					</button>
-				`)}
 				${walkthroughPanelContent(tab)}
 			</div>
 		`;
@@ -2494,9 +2431,7 @@ export function doRenderApp(): void {
 			const fullscreenContent = fullscreenTab?.kind === "walkthrough"
 				? walkthroughPanelContent(fullscreenTab)
 				: htmlPreviewContent();
-			const suppressFullscreenForLiveWalkthrough = isLiveSessionHostedWalkthroughActive(fullscreenTab) && fullscreenTab?.kind === "walkthrough";
-			if (suppressFullscreenForLiveWalkthrough && state.previewPanelFullscreen) state.previewPanelFullscreen = false;
-			if (desktop && state.previewPanelFullscreen && !suppressFullscreenForLiveWalkthrough && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
+			if (desktop && state.previewPanelFullscreen && (fullscreenTab?.kind === "preview" || fullscreenTab?.kind === "walkthrough")) {
 				return html`
 					${reconnectBanner()}
 					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">

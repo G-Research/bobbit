@@ -25,77 +25,82 @@ The UI switches/focuses the child session, expands the needed sidebar containers
 
 The same ready walkthrough can be reviewed in:
 
-- the child session side panel beside chat;
-- fullscreen / wide review mode from the side-panel toolbar;
-- the standalone `/walkthrough?...` route opened from the toolbar.
+- the child session side panel beside chat (with user-initiated fullscreen /
+  collapse via the shared preview-panel toolbar — see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
+- the standalone `/walkthrough?...` route opened from the toolbar's
+  open-in-new-tab control (no panel-level resize chrome — it fills the window).
 
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
-The walkthrough panel shares the preview panel's three sizing affordances — a
-fullscreen (wide review) button, a collapse button, and the resize keyboard
-shortcuts (`toggle-sidebar`, `toggle-preview`, `toggle-fullscreen-preview`) —
-across both the in-app side panel and the standalone `/walkthrough` route. The
-standalone route is rendered by its own branch (`standaloneWalkthroughPanel()`
-in `src/app/render.ts`) rather than the unified preview panel, so it renders the
-same fullscreen/collapse toolbar itself and honors `state.previewPanelFullscreen`
-and the collapse flag.
+The in-app walkthrough side panel uses the **same** resize logic as the HTML
+preview panel — there is no walkthrough-specific resize code path. When a
+walkthrough is open beside chat it renders the shared unified toolbar with a
+fullscreen (wide review) button and a collapse button, and it honors
+`state.previewPanelFullscreen` plus the per-session collapse key
+(`bobbit-preview-collapsed-<id>`) identically to the preview panel. The same
+keyboard shortcuts drive it: `toggle-sidebar` (Ctrl+[, expand one level),
+`toggle-preview` (Ctrl+], collapse one level), and `toggle-fullscreen-preview`
+(Ctrl+#, jump to fullscreen or collapsed). State persists across reload.
+
+The panel **never auto-enters fullscreen**. Fullscreen is strictly
+user-initiated, via a toolbar button or one of those shortcuts. This matches the
+preview panel and is the behaviour the rest of the app expects — a panel that
+seizes the whole window on its own (for example when a walkthrough becomes ready)
+is disruptive and was the source of the original "dead controls" bug. See
+[design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
+for the full root-cause analysis and the special-casing that was removed.
+
+The walkthrough panel's **own internal rail sidebar toggle**
+(`data-testid="pr-walkthrough-rail-toggle"`, rendered inside
+`<pr-walkthrough-panel>` in `src/ui/components/pr-walkthrough/PrWalkthroughPanel.ts`)
+is a different control — it collapses/expands the review rail *within* the
+walkthrough, not the window-level panel. It works on every surface and is
+unaffected by the panel-level sizing logic.
+
+### Standalone `/walkthrough` route has no panel-level chrome
+
+A popped-out standalone walkthrough (opened with the toolbar's open-in-new-tab
+control) IS the whole browser window — there is no adjacent chat pane to hide —
+so "fullscreen", "collapse", and "expand" are meaningless there. The standalone
+branch (`standaloneWalkthroughPanel()` in `src/app/render.ts`) renders no
+panel-level fullscreen/collapse/expand chrome and does not read
+`state.previewPanelFullscreen` or the collapse flag; the walkthrough simply
+fills the window. The component's internal rail toggle still works.
 
 ### Single-source-of-truth session key (never bare `activeSessionId()`)
 
-Three pieces of plumbing must all agree on which session id the panel tab is
-stored under: the shortcut/detection gate (`hasActiveWalkthroughPanel()` in
-`src/app/main.ts`), the collapse `localStorage` key
-(`bobbit-preview-collapsed-<id>`), and the `canFullscreen` predicate. The single
-source of truth is **`workspaceSessionId()`** (in `src/app/render.ts`), which is
-route-aware: on the standalone `/walkthrough` route there is no connected session
-so `activeSessionId()` is `undefined`, and the walkthrough's owning session id is
-taken from the route (`route.walkthroughSessionId`) instead.
-
-The bug this guards against: if detection keys off `workspaceSessionId()` /
-`route.walkthroughSessionId` but the collapse key or `canFullscreen` predicate
-key off the bare `activeSessionId()`, the two keys diverge on the standalone
-route (`__no-session__` vs the real session id). Detection then finds no
-walkthrough tab and every affordance silently no-ops — the fullscreen button,
-the collapse button, and all three keyboard shortcuts die at once. **Always
-derive the walkthrough panel's session key from `workspaceSessionId()`, never
-from a bare `activeSessionId()`.**
-
-### Intentional live-child split-view exception
-
-Live child-session walkthroughs (a genuinely running `pr-walkthrough` child
-viewed beside its parent chat) must stay in split / promptable view and must
-**not** enter fullscreen, so the chat prompt for follow-up questions stays
-visible. This is enforced in-app by `keepLiveWalkthroughPanelPromptable()` (in
-`src/app/pr-walkthrough.ts`), which forces split view and clears the collapse
-flag. `isLiveSessionHostedWalkthroughActive()` (in `src/app/render.ts`) decides
-whether to suppress fullscreen, and it suppresses **only** when the host session
-is a genuinely live `pr-walkthrough` child — a terminated, archived, or absent
-host (including the disconnected standalone route) is not live, so its ready
-walkthrough can be fullscreened.
-
-The standalone route is exempt from the split-view reset:
-`keepLiveWalkthroughPanelPromptable()` returns early on the
-`/walkthrough` route because there is no chat prompt to protect, and the route
-owns its own fullscreen/collapse state. Skipping the reset matters because the
-per-render job restore would otherwise bounce the user out of fullscreen and wipe
-the persisted collapse flag on every paint.
+The in-app shortcut/detection gate (`hasActiveWalkthroughPanel()` in
+`src/app/main.ts`), the collapse `localStorage` key, and the `canFullscreen`
+predicate all key off **`workspaceSessionId()`** (in `src/app/render.ts`) rather
+than a bare `activeSessionId()`. `workspaceSessionId()` is route-aware: on the
+standalone `/walkthrough` route `activeSessionId()` is `undefined`, so it falls
+back to the walkthrough's owning session id carried in the URL
+(`route.walkthroughSessionId`). This keeps the standalone branch's lazy payload
+restore reading the same session key the panel tab is stored under, so the
+walkthrough hydrates correctly even with no connected session.
 
 ### Pinning tests
 
-These invariants are pinned by browser E2E and must not regress:
+These behaviours are pinned by browser E2E and must not regress:
 
-- **Standalone resize controls work** — `tests/e2e/ui/pr-walkthrough-panel.spec.ts`
-  covers the standalone (ready) walkthrough: the fullscreen button enters
-  fullscreen, the collapse button collapses the panel (and the collapsed state
-  persists across reload), and a resize keyboard shortcut operates on the panel.
-- **Live child stays split / promptable** — `tests/e2e/ui/pr-walkthrough-panel.spec.ts`
-  ("fullscreen toolbar control keeps live child walkthroughs in split promptable
-  view") and `tests/e2e/ui/pr-walkthrough-real.spec.ts`.
-- **Standalone preview panel sizing unchanged** —
-  `tests/e2e/ui/preview-fullscreen-controls.spec.ts`.
+- **In-app controls are user-driven** — `tests/e2e/ui/pr-walkthrough-panel.spec.ts`
+  ("in-app ready walkthrough panel resize controls are user-driven"): a ready
+  panel does not auto-enter fullscreen, the fullscreen/collapse buttons and the
+  `Ctrl+]` shortcut operate on it, and the collapsed state persists across
+  reload.
+- **Fullscreen is user-initiated, including on live children** — same file
+  ("fullscreen toolbar control enters fullscreen on live child walkthroughs
+  (user-initiated)") and `tests/e2e/ui/pr-walkthrough-real.spec.ts`.
+- **Standalone has no panel-level chrome but keeps its rail toggle** — same file
+  ("standalone ready walkthrough has no panel-level resize chrome but keeps its
+  internal rail toggle").
+- **HTML preview panel sizing unchanged** —
+  `tests/e2e/ui/preview-fullscreen-controls.spec.ts` (this fix does not touch the
+  preview panel).
 
-See [docs/design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
-for the verified root-cause analysis behind this fix.
+See [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
+for the root-cause analysis and the corrected design (this supersedes the
+incorrect first attempt in PR #677).
 
 ## Session-hosted GitHub PR flow
 
@@ -155,7 +160,7 @@ The tool posts to the internal submit endpoint with the child `sessionId`, job i
 
 On validation failure, the job moves to `validation_failed`, the panel remains unpopulated, and the tool returns field-level retry feedback such as `path` plus `message`. The agent can fix the YAML and call the tool again. If the stored bundle is missing, corrupt, or unusable, submission fails deterministically with retryable `PR_WALKTHROUGH_BUNDLE_MISSING`; Bobbit does not silently re-fetch the PR at submit time. Relaunch the walkthrough so launch can resolve and persist a fresh bundle. If the agent becomes idle without a valid submission, Bobbit steers it to call `submit_pr_walkthrough_yaml`; after a failed submission, the reminder includes the last validation errors.
 
-On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, selects the child walkthrough tab, and enters fullscreen review mode when the child is active. The tool response tells the agent to stay available for follow-up questions.
+On success, Bobbit maps the YAML into the existing `WalkthroughStorePayload`, persists it, marks the job `ready`, broadcasts the update, and selects the child walkthrough tab. It does **not** auto-enter fullscreen — the panel shares the preview panel's user-initiated resize semantics, so the reviewer enters fullscreen only by an explicit action (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts)). The tool response tells the agent to stay available for follow-up questions.
 
 ### 5. Follow-up chat remains live
 
@@ -404,8 +409,8 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 - read-only command policy and walkthrough tool metadata;
 - session child metadata, submit proof restore, job persistence, and duplicate launch behavior;
 - launch API, invalid/valid YAML submission, keeping the child alive after success, and job restore;
-- browser behavior for child session launch/focus, empty waiting panel, validation retry state, final cards, fullscreen on success, reload persistence, standalone route, and explicit export confirmation;
-- panel sizing on the standalone route (fullscreen, collapse, persistence across reload, resize shortcuts) and the live-child split-view guard (see "Panel sizing");
+- browser behavior for child session launch/focus, empty waiting panel, validation retry state, final cards, reload persistence, standalone route, and explicit export confirmation;
+- in-app panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, and the standalone route having no panel-level resize chrome while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
 Use these tests as the pinning contract when changing walkthrough launch, resolver compatibility, YAML mapping, persistence, readonly policy, or panel UX.
