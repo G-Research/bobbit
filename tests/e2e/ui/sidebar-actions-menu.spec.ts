@@ -155,6 +155,30 @@ test.describe("Sidebar actions menu", () => {
 		await expect(row, "cancel keeps the session row in the sidebar").toBeVisible();
 	});
 
+	test("idle activity-time stays flush right; the action strip reserves no layout width", async ({ page }) => {
+		const sessionId = await createSession();
+		sessionIds.push(sessionId);
+		await waitForSessionStatus(sessionId, "idle");
+		const row = await openSession(page, sessionId);
+
+		await page.mouse.move(1, 1); // ensure the row is not hovered
+		const strip = actionStrip(row);
+		// The strip must be absolutely positioned so it does not push the idle
+		// activity-time leftward (regression guard for the hover-strip layout).
+		await expect(strip).toHaveCSS("position", "absolute");
+		await expect(strip).toHaveCSS("opacity", "0");
+
+		const idleTime = row.locator('span[class*="group-hover:hidden"]').first();
+		await expect(idleTime).toBeVisible();
+		const gap = await idleTime.evaluate((el) => {
+			const rowRoot = el.closest("[data-sidebar-actions-row-root]") as HTMLElement;
+			return rowRoot.getBoundingClientRect().right - el.getBoundingClientRect().right;
+		});
+		// Time sits flush against the row's right padding rather than being shoved
+		// left by an always-laid-out action strip.
+		expect(Math.abs(gap)).toBeLessThanOrEqual(8);
+	});
+
 	test("desktop goal hamburger opens the menu and dashboard quick action routes directly", async ({ page }) => {
 		const goal = await createGoal({ title: `Sidebar goal actions ${Date.now()}`, cwd: nonGitCwd(), worktree: false, team: false });
 		goalIds.push(goal.id as string);
