@@ -708,7 +708,7 @@ export class SidebarActionsPopover extends LitElement {
 				>
 					<input
 						type="checkbox"
-						class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+						class="toggle-switch"
 						.checked=${toggle.checked}
 						aria-hidden="true"
 						tabindex="-1"

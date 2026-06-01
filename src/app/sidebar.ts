@@ -568,7 +568,7 @@ export function renderRolePickerDropdown() {
 			<!-- Worktree checkbox -->
 			<div class="border-t border-border/50 px-3 py-1.5 shrink-0">
 				<label class="flex items-center gap-2 cursor-pointer ${isFocused("worktree", "worktree") ? "ring-2 ring-ring rounded" : ""}">
-					<input type="checkbox" .checked=${_pickerWorktree}
+					<input type="checkbox" class="toggle-switch" .checked=${_pickerWorktree}
 						@change=${(e: Event) => { _pickerWorktree = (e.target as HTMLInputElement).checked; renderApp(); }} />
 					<span class="text-foreground/70" style="font-size: 0.9167em;">Create worktree</span>
 					<span title="Creates an isolated git branch and worktree for this session"
@@ -587,7 +587,7 @@ export function renderRolePickerDropdown() {
 								? `Sandbox image not found. Run: ${state.sandboxStatus?.buildCommand || "docker build -t bobbit-agent docker/"}`
 								: "Run agent in an isolated Docker container";
 						return html`
-					<input type="checkbox" .checked=${_pickerSandbox}
+					<input type="checkbox" class="toggle-switch" .checked=${_pickerSandbox}
 						@change=${(e: Event) => { _pickerSandbox = (e.target as HTMLInputElement).checked; renderApp(); }}
 						?disabled=${sandboxDisabled} />
 					<span class="text-foreground/70 ${sandboxDisabled ? 'opacity-50' : ''}" style="font-size: 0.9167em;">Sandbox (Docker)</span>
