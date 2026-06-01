@@ -1998,6 +1998,32 @@ export class MockAgentCore {
 			case "compact":
 				return { success: true };
 
+			case "switch_session": {
+				// Faithful to the real pi-agent CLI: rehydrate the conversation from
+				// the given `.jsonl` transcript. Used by restore, Continue-Archived,
+				// and Fork. Without this the mock would drop the cloned history and
+				// forked/continued sessions would open empty in the E2E tier (the
+				// real CLI loads it; the mock previously no-op'd here). The file is
+				// written by `get_state` as newline-delimited {type:"message",message}.
+				try {
+					const sp = msg.sessionPath;
+					if (sp && fs.existsSync(sp)) {
+						const loaded = [];
+						for (const line of fs.readFileSync(sp, "utf-8").split("\n")) {
+							const trimmed = line.trim();
+							if (!trimmed) continue;
+							try {
+								const parsed = JSON.parse(trimmed);
+								if (parsed && parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+							} catch { /* skip malformed line */ }
+						}
+						this.conversationMessages = loaded;
+						this.sessionFilePath = sp;
+					}
+				} catch { /* best-effort — leave existing conversation intact */ }
+				return { success: true };
+			}
+
 			default:
 				return { success: true };
 		}
