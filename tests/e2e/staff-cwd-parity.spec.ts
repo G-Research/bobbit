@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./in-process-harness.js";
-import { apiFetch, rawApiFetch, registerProject } from "./e2e-setup.js";
+import { apiFetch, rawApiFetch, registerProject, deleteSession } from "./e2e-setup.js";
+import { pollSessionUntil } from "./test-utils/pool-polling.mjs";
 
 type ProjectRecord = { id: string; rootPath: string; [key: string]: unknown };
 
@@ -59,6 +60,67 @@ async function createProject(name: string, rootPath: string): Promise<ProjectRec
 		rootPath,
 		seedWorkflows: false,
 	});
+}
+
+/**
+ * Register a multi-repo (poly-repo) project: a NON-git container `rootPath`
+ * with one git sub-repo per component. `components` declares the `repo`
+ * sub-directory names; a `repo: "."` container component may be included to
+ * exercise the exact poly-repo bug trigger.
+ */
+async function createMultiRepoProject(
+	name: string,
+	rootPath: string,
+	components: Array<{ name: string; repo: string }>,
+): Promise<ProjectRecord> {
+	return registerProject({
+		name,
+		rootPath,
+		components,
+		seedWorkflows: false,
+	});
+}
+
+async function getSession(id: string): Promise<any> {
+	const res = await apiFetch(`/api/sessions/${id}`);
+	expect(res.status, `session ${id} should be readable`).toBe(200);
+	return res.json();
+}
+
+/**
+ * Poll a session until its worktree set has actually been provisioned ON DISK.
+ *
+ * `worktreePath`/`branch` are assigned synchronously at session creation (the
+ * container path is pre-computed before `executeWorktreeAsync` runs), so they
+ * are NOT a reliable readiness signal. The async cold path only materialises
+ * the per-repo worktrees a moment later. We therefore poll until at least one
+ * expected sub-repo worktree directories exist on disk. Uses the canonical
+ * `pollSessionUntil` harness helper so the polling sleep stays in
+ * tests/e2e/test-utils/ (exempt from the no-new-sleeps lint).
+ */
+async function waitForSessionWorktree(id: string, expectedRepos: string[], timeoutMs = 30_000): Promise<any> {
+	const last = await pollSessionUntil(
+		id,
+		(row: any) => !!(row.worktreePath && row.branch)
+			&& expectedRepos.every(repo => existsSync(join(row.worktreePath, repo, ".git"))),
+		timeoutMs,
+	);
+	if (!last?.worktreePath || !last?.branch) {
+		throw new Error(`session ${id} did not provision a worktree within ${timeoutMs}ms (last=${JSON.stringify({ worktreePath: last?.worktreePath, branch: last?.branch, status: last?.status })})`);
+	}
+	return last;
+}
+
+/**
+ * The set of git sub-repos actually worktree'd under a branch container, as
+ * observed on disk. A worktree exists when `<container>/<repo>/.git` is
+ * present. The non-git container itself must NEVER carry a top-level `.git`
+ * (that would mean `git worktree add` ran against the container root).
+ */
+function worktreedReposOnDisk(container: string, candidateRepos: string[]): string[] {
+	return candidateRepos
+		.filter(repo => existsSync(join(container, repo, ".git")))
+		.sort();
 }
 
 async function postStaff(body: Record<string, unknown>): Promise<StaffCreateResult> {
@@ -117,12 +179,16 @@ function seedLegacySystemStaff(gateway: any, patch: Partial<any> = {}): any {
 
 test.describe("staff cwd parity regressions", () => {
 	let cleanupStaffIds: string[] = [];
+	let cleanupSessionIds: string[] = [];
 	let cleanupProjectIds: string[] = [];
 	let cleanupDirs: string[] = [];
 
 	test.afterEach(async () => {
 		for (const id of cleanupStaffIds.splice(0).reverse()) {
 			await deleteStaff(id);
+		}
+		for (const id of cleanupSessionIds.splice(0).reverse()) {
+			await deleteSession(id);
 		}
 		for (const id of cleanupProjectIds.splice(0).reverse()) {
 			await deleteProject(id);
@@ -384,6 +450,142 @@ test.describe("staff cwd parity regressions", () => {
 				`STAFF_CWD_PARITY_UPDATE_GUARD_PRESERVE: rejected ${label} must not mutate stored cwd`,
 			).toBe(normalisePath(originalCwd));
 		}
+	});
+
+	test("poly-repo staff creation matches session worktree shape and never worktrees the non-git container", async () => {
+		// ── Build a poly-repo project ──────────────────────────────────────
+		// A NON-git container root with two git sub-repos one level deep.
+		const root = makeTempRoot("polyrepo");
+		cleanupDirs.push(root);
+		cleanupDirs.push(`${root}-wt`);
+		makeGitRepo(root, "repo-a");
+		makeGitRepo(root, "repo-b");
+		// The container root itself is deliberately NOT a git repo.
+		expect(
+			existsSync(join(root, ".git")),
+			"STAFF_CWD_PARITY_POLYREPO: container root must NOT be a git repo (poly-repo precondition)",
+		).toBe(false);
+
+		// Register the project with the EXACT bug trigger: a `repo: "."` container
+		// component alongside the two git sub-repo components (multi-repo).
+		const project = await createMultiRepoProject(
+			`staff-cwd-polyrepo-${Date.now()}`,
+			root,
+			[
+				{ name: "container", repo: "." },
+				{ name: "a", repo: "repo-a" },
+				{ name: "b", repo: "repo-b" },
+			],
+		);
+		cleanupProjectIds.push(project.id);
+		const projectRoot = project.rootPath;
+		const wtRoot = `${projectRoot}-wt`;
+		const candidateRepos = ["repo-a", "repo-b"];
+
+		// ── Criterion 1 + 2: STAFF worktree shape ──────────────────────────
+		const created = await postStaff({
+			name: "Poly-repo staff",
+			systemPrompt: "Worktree each git sub-repo, never the non-git container.",
+			projectId: project.id,
+		});
+		if (created.status === 201 && created.json?.id) cleanupStaffIds.push(created.json.id);
+
+		expect(
+			created.status,
+			`STAFF_CWD_PARITY_POLYREPO: staff creation in a poly-repo must succeed (must not throw 'git worktree add' / 'not a git repository'). body=${created.text}`,
+		).toBe(201);
+
+		const staff = created.json;
+		expect(
+			staff.worktreePath,
+			"STAFF_CWD_PARITY_POLYREPO: poly-repo staff must allocate a branch container worktreePath",
+		).toBeTruthy();
+		expect(
+			isSameOrUnder(staff.worktreePath, wtRoot),
+			`STAFF_CWD_PARITY_POLYREPO: staff worktreePath=${staff.worktreePath} must be under the project worktree root ${wtRoot}`,
+		).toBe(true);
+
+		// Per-repo worktrees recorded on the staff record: exactly the two git
+		// sub-repos, NEVER the non-git "." container.
+		const staffRepoKeys = Object.keys((staff.repoWorktrees ?? {}) as Record<string, string>).sort();
+		expect(
+			staffRepoKeys,
+			`STAFF_CWD_PARITY_POLYREPO: staff.repoWorktrees must cover exactly the git sub-repos. got=${JSON.stringify(staff.repoWorktrees)}`,
+		).toEqual(["repo-a", "repo-b"]);
+		expect(
+			staffRepoKeys.includes("."),
+			"STAFF_CWD_PARITY_POLYREPO: the non-git '.' container must never appear in staff.repoWorktrees",
+		).toBe(false);
+
+		// On disk: each git sub-repo is worktree'd under the staff container; the
+		// container root was never worktree'd (no top-level .git).
+		const staffReposOnDisk = worktreedReposOnDisk(staff.worktreePath, candidateRepos);
+		expect(
+			staffReposOnDisk,
+			`STAFF_CWD_PARITY_POLYREPO: on-disk staff worktrees must be exactly the git sub-repos under ${staff.worktreePath}`,
+		).toEqual(["repo-a", "repo-b"]);
+		expect(
+			existsSync(join(staff.worktreePath, ".git")),
+			`STAFF_CWD_PARITY_POLYREPO: the non-git container ${staff.worktreePath} must never be worktree'd (no top-level .git)`,
+		).toBe(false);
+
+		// The permanent staff session runs inside the branch container.
+		const staffSession = await getSession(staff.currentSessionId);
+		expect(
+			isSameOrUnder(staffSession.cwd, staff.worktreePath),
+			`STAFF_CWD_PARITY_POLYREPO: staff session cwd=${staffSession.cwd} must run inside the staff branch container ${staff.worktreePath}`,
+		).toBe(true);
+
+		// ── Criterion 1 + 3: SESSION worktree shape (parity) ───────────────
+		const sessionRes = await rawApiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({
+				projectId: project.id,
+				worktree: true,
+			}),
+		});
+		const sessionCreate = await sessionRes.json();
+		if (sessionRes.status === 201 && sessionCreate?.id) cleanupSessionIds.push(sessionCreate.id);
+		expect(
+			sessionRes.status,
+			`STAFF_CWD_PARITY_POLYREPO: regular session creation in the same poly-repo must succeed. body=${JSON.stringify(sessionCreate)}`,
+		).toBe(201);
+
+		const session = await waitForSessionWorktree(sessionCreate.id, candidateRepos);
+		expect(
+			isSameOrUnder(session.worktreePath, wtRoot),
+			`STAFF_CWD_PARITY_POLYREPO: session worktreePath=${session.worktreePath} must be under the same project worktree root ${wtRoot}`,
+		).toBe(true);
+
+		const sessionReposOnDisk = worktreedReposOnDisk(session.worktreePath, candidateRepos);
+		expect(
+			sessionReposOnDisk,
+			`STAFF_CWD_PARITY_POLYREPO: on-disk session worktrees must be exactly the git sub-repos under ${session.worktreePath}`,
+		).toEqual(["repo-a", "repo-b"]);
+		expect(
+			existsSync(join(session.worktreePath, ".git")),
+			`STAFF_CWD_PARITY_POLYREPO: the non-git container ${session.worktreePath} must never be worktree'd for a session either`,
+		).toBe(false);
+
+		// ── Parity assertion ───────────────────────────────────────────────
+		// Staff and session must agree on WHICH repos get worktrees. They run on
+		// distinct branches (distinct containers under the same `<root>-wt/`), so
+		// parity is over the SET of worktree'd repos, not the absolute paths.
+		expect(
+			staffReposOnDisk,
+			`STAFF_CWD_PARITY_POLYREPO: staff and session must worktree the SAME set of repos. staff=${JSON.stringify(staffReposOnDisk)} session=${JSON.stringify(sessionReposOnDisk)}`,
+		).toEqual(sessionReposOnDisk);
+		expect(
+			staffRepoKeys,
+			"STAFF_CWD_PARITY_POLYREPO: staff.repoWorktrees keys must match the session's on-disk worktree set",
+		).toEqual(sessionReposOnDisk);
+
+		// Criterion 2 (belt-and-braces): the non-git container root itself was
+		// never turned into a git worktree by EITHER path.
+		expect(
+			existsSync(join(projectRoot, ".git")),
+			`STAFF_CWD_PARITY_POLYREPO: the registered non-git container root ${projectRoot} must remain non-git after staff + session creation`,
+		).toBe(false);
 	});
 
 	test("PUT /api/staff/:id accepts cwd inside the staff project", async () => {

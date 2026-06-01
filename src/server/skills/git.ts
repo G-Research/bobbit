@@ -208,6 +208,57 @@ export async function resolveBaseRefWithExec(
 	return { ref: "HEAD", branch: "HEAD", isRemote: false };
 }
 
+/**
+ * Parse the first `ref:` line of `git ls-remote --symref origin HEAD` output.
+ * Returns the bare branch name (strips `refs/heads/`) or null if absent.
+ * Pure parser — no exec, no disk access. Tolerant of tab/space separators and
+ * CRLF line endings.
+ *
+ * Examples:
+ *   "ref: refs/heads/master\tHEAD\n<sha>\tHEAD" → "master"
+ *   "ref: refs/heads/feature/x\tHEAD"           → "feature/x"
+ *   "<sha>\tHEAD"                               → null (no symref line)
+ *   ""                                          → null
+ */
+export function parseLsRemoteSymref(output: string): string | null {
+	for (const line of (output ?? "").split(/\r?\n/)) {
+		const m = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD/);
+		if (m) return m[1];
+	}
+	return null;
+}
+
+/**
+ * Best-effort: run `git ls-remote --symref origin HEAD` in `repoPath`, parse
+ * the symref, and return `origin/<branch>` — or null on ANY failure (offline,
+ * no remote, not a git repo, unparseable output). Never throws.
+ *
+ * Used to pin a concrete `base_ref` from the live remote at project-add time.
+ * See docs/design/base-ref.md.
+ */
+export async function detectBaseRefFromRemote(repoPath: string): Promise<string | null> {
+	try {
+		const { stdout } = await execGit(["ls-remote", "--symref", "origin", "HEAD"], {
+			cwd: repoPath,
+			timeout: 10_000,
+		});
+		const branch = parseLsRemoteSymref(stdout.toString());
+		return branch ? `origin/${branch}` : null;
+	} catch {
+		return null;
+	}
+}
+
+/** True iff `ref` resolves via `git rev-parse --verify` in repoPath. Never throws. */
+export async function refExistsInRepo(repoPath: string, ref: string): Promise<boolean> {
+	try {
+		await execGit(["rev-parse", "--verify", ref], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Check if a directory is inside a git repository. */
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	try {
@@ -222,6 +273,47 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
 export async function getRepoRoot(cwd: string): Promise<string> {
 	const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd });
 	return stdout.toString().trim();
+}
+
+/**
+ * Canonicalize a path for robust equality comparison: resolve to absolute,
+ * follow symlinks via `realpathSync.native` where possible (no-op when the
+ * path doesn't exist), and lowercase on win32 where the filesystem is
+ * case-insensitive. Mirrors the comparison style of
+ * `worktree-pool.ts::resolveRepoToplevel`.
+ */
+function canonicalizePath(p: string): string {
+	let resolved = path.resolve(p);
+	try {
+		resolved = fs.realpathSync.native(resolved);
+	} catch {
+		// realpath fails when the path doesn't exist — fall back to resolve().
+	}
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Whether `dir` is the TOPLEVEL of a git working tree (i.e. a git repo ROOT),
+ * NOT merely a directory nested somewhere inside one.
+ *
+ * `isGitRepo` (which runs `git rev-parse --is-inside-work-tree`) returns true
+ * for ANY path inside a repo — including a non-git container that happens to be
+ * nested under an unrelated parent git repo. That false-positive would cause
+ * `createWorktreeSet` to run `git worktree add` against the container root. This
+ * helper distinguishes the two by comparing the canonicalized
+ * `git rev-parse --show-toplevel` against the canonicalized input dir.
+ *
+ * Returns false on any error (not a git repo, missing dir, git failure).
+ */
+export async function isGitRepoRoot(dir: string): Promise<boolean> {
+	try {
+		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd: dir });
+		const toplevel = stdout.toString().trim();
+		if (!toplevel) return false;
+		return canonicalizePath(toplevel) === canonicalizePath(dir);
+	} catch {
+		return false;
+	}
 }
 
 export interface WorktreeResult {
@@ -449,11 +541,34 @@ export async function createWorktreeSet(
 		};
 	}
 
+	// Multi-repo: keep a distinct repo ONLY if its source dir is itself a git
+	// repo ROOT. This skips, in one rule:
+	//   • the non-git `.` container in a poly-repo (running `git worktree add`
+	//     there fails with `fatal: not a git repository`),
+	//   • the nested-parent false-positive — a non-git container nested under an
+	//     UNRELATED parent git repo (where `isGitRepo` would return true), and
+	//   • non-git sub-repos and missing source dirs (graceful no-worktree).
+	// A `.` entry whose source IS a git repo root (genuine container-root
+	// component) is kept. See docs/design/multi-repo-components.md.
+	const repoList: string[] = [];
+	for (const repo of repos) {
+		const repoSrc = path.join(rootPath, repo === "." ? "" : repo);
+		if (await isGitRepoRoot(repoSrc)) repoList.push(repo);
+	}
+
 	// Multi-repo: container at `<wtRoot>/<branchSlug>/`, per-repo worktrees underneath.
 	// `worktreeRoot` honors the project-level `worktree_root` override; falls back
 	// to `<rootPath>-wt/` when unset.
 	const wtRoot = wtRootHelper({ rootPath, worktreeRoot: opts?.worktreeRoot });
 	const container = path.join(wtRoot, slug);
+
+	// If no worktree-able repo remains after skipping the non-git container,
+	// short-circuit WITHOUT creating the container directory. Callers treat an
+	// empty `worktrees[]` as "no worktree-able repo" (graceful no-worktree).
+	if (repoList.length === 0) {
+		return { container, worktrees: [] };
+	}
+
 	if (!fs.existsSync(container)) {
 		fs.mkdirSync(container, { recursive: true });
 	}
@@ -461,7 +576,7 @@ export async function createWorktreeSet(
 	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 
 	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
-	for (const repo of repos) {
+	for (const repo of repoList) {
 		const repoSrc = path.join(rootPath, repo);
 		const wtPath = path.join(container, repo);
 		if (!fs.existsSync(repoSrc)) {

@@ -359,6 +359,16 @@ async function expectWalkthroughOpened(page: Page) {
 	return { tab, panel };
 }
 
+async function expectActiveWalkthroughSurface(page: Page) {
+	const root = page.getByTestId("pr-walkthrough-panel-root");
+	const panel = walkthroughPanel(page);
+	const draft = panel.getByTestId("pr-walkthrough-draft");
+	await expect(root, "ready walkthrough root should remain mounted in split or fullscreen mode").toHaveAttribute("data-walkthrough-status", "ready", { timeout: 10_000 });
+	await expect(root, "ready walkthrough root should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+	await expect(panel, "ready walkthrough panel should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+	await expect(draft, "audit draft should remain visible in split or fullscreen mode").toBeVisible({ timeout: 10_000 });
+}
+
 async function setupWaitingWalkthrough(
 	page: Page,
 	viewport: { width: number; height: number } = { width: 1920, height: 1080 },
@@ -589,6 +599,22 @@ async function selectCardById(page: Page, cardId: string) {
 	}).toBe(cardId);
 }
 
+function visibleCommentEditor(page: Page): Locator {
+	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-comment-editor")}:visible`).last();
+}
+
+async function waitForOpenCommentEditor(page: Page, message = "comment editor should be open") {
+	const editor = visibleCommentEditor(page);
+	await expect(editor, message).toBeVisible({ timeout: 5_000 });
+	const input = editor.getByTestId("pr-walkthrough-comment-input");
+	const save = editor.getByTestId("pr-walkthrough-comment-save");
+	await expect(input, "open comment editor input should be visible").toBeVisible({ timeout: 5_000 });
+	await expect(input, "open comment editor input should be enabled").toBeEnabled({ timeout: 5_000 });
+	await expect(save, "open comment editor save button should be visible").toBeVisible({ timeout: 5_000 });
+	await expect(save, "open comment editor save button should be enabled").toBeEnabled({ timeout: 5_000 });
+	return { editor, input, save };
+}
+
 async function openLineCommentEditor(page: Page) {
 	const line = activeCard(page).getByTestId("pr-walkthrough-diff-line").first();
 	await expect(line, "diff lines should be commentable").toBeVisible({ timeout: 10_000 });
@@ -604,14 +630,16 @@ async function openLineCommentEditor(page: Page) {
 		message: "line comment affordance should be visually/textually identifiable as +",
 	}).toMatch(/\+/);
 	await add.click();
-	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toBeVisible({ timeout: 5_000 });
+	await waitForOpenCommentEditor(page);
 }
 
 async function saveOpenComment(page: Page, body: string) {
-	const editor = page.getByTestId("pr-walkthrough-comment-editor");
-	await editor.getByTestId("pr-walkthrough-comment-input").fill(body);
-	await editor.getByTestId("pr-walkthrough-comment-save").click();
-	await expect(editor).toBeHidden({ timeout: 5_000 });
+	const { editor, input, save } = await waitForOpenCommentEditor(page, "a visible comment editor should be ready before saving");
+	await input.fill(body);
+	await expect(input, "comment editor input should contain the draft before save").toHaveValue(body, { timeout: 5_000 });
+	await expect(save, "comment editor save button should remain enabled after filling").toBeEnabled({ timeout: 5_000 });
+	await save.click();
+	await expect(editor, "saved comment editor should close").toBeHidden({ timeout: 5_000 });
 	await expect(walkthroughPanel(page).getByTestId("pr-walkthrough-comment").filter({ hasText: body })).toBeVisible({ timeout: 5_000 });
 }
 
@@ -625,7 +653,8 @@ async function createCommentOnDiffLine(page: Page, lineId: string, body: string)
 	await expect(line, `diff line ${lineId} should be visible and commentable`).toBeVisible({ timeout: 10_000 });
 	await line.hover();
 	await line.getByTestId("pr-walkthrough-line-comment-button").click();
-	await expect(page.getByTestId("pr-walkthrough-comment-editor")).toHaveAttribute("data-line-id", lineId, { timeout: 5_000 });
+	const { editor } = await waitForOpenCommentEditor(page, `comment editor for diff line ${lineId} should open`);
+	await expect(editor).toHaveAttribute("data-line-id", lineId, { timeout: 5_000 });
 	await saveOpenComment(page, body);
 }
 
@@ -645,7 +674,11 @@ async function deleteComment(page: Page, body: string) {
 }
 
 async function createCardComment(page: Page, body: string) {
-	await activeCard(page).getByTestId("pr-walkthrough-add-card-comment").click();
+	const addComment = activeCard(page).getByTestId("pr-walkthrough-add-card-comment");
+	await expect(addComment, "active card should expose a card-level comment affordance before adding a comment").toBeVisible({ timeout: 10_000 });
+	await expect(addComment, "card-level comment affordance should be enabled before adding a comment").toBeEnabled({ timeout: 5_000 });
+	await addComment.click();
+	await waitForOpenCommentEditor(page, "clicking the card-level comment affordance should open the comment editor");
 	await saveOpenComment(page, body);
 }
 
@@ -1041,7 +1074,7 @@ This is the author's source description with **markdown**.
 		const broadConcern = `broad-concern-${Date.now()}`;
 		const revisedConcern = `revised-concern-${Date.now()}`;
 
-		const { panel, tab } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
 
 		const dislike = panel.getByTestId("pr-walkthrough-dislike").first();
 		await expect(dislike, "Dislike should be disabled until the active card has a comment").toBeDisabled();
@@ -1102,7 +1135,7 @@ This is the author's source description with **markdown**.
 		await expect(draft, "Audit draft should include revised concerns after using Prev").toContainText(revisedConcern);
 		await expect(draft, "Audit draft should group accepted/liked context").toContainText(/approved|liked|accepted/i);
 		await expect(draft, "Audit draft should group concerns for disliked cards").toContainText(/concern|disliked|changes requested/i);
-		await expect(tab).toHaveClass(/goal-tab-pill--active/);
+		await expectActiveWalkthroughSurface(page);
 
 		await page.reload();
 		await expectWalkthroughOpened(page);
@@ -1145,6 +1178,64 @@ This is the author's source description with **markdown**.
 		await expect(standalone.getByTestId("pr-walkthrough-standalone").locator(":scope > .border-b"), "standalone route should not add a duplicate title bar above the walkthrough header").toHaveCount(0);
 		await expect(walkthroughPanel(standalone), "standalone tab should render the same walkthrough component").toBeVisible({ timeout: 15_000 });
 		await expectActiveDiffMode(standalone, "split");
+		await standalone.close();
+	});
+
+	test("standalone ready walkthrough exposes working fullscreen, collapse, and keyboard resize controls", async ({ page, context }) => {
+		// Reproduces the panel-resize bug: on the standalone (ready) walkthrough
+		// route the fullscreen button, the collapse button, and the panel
+		// keyboard shortcuts are all silent no-ops simultaneously (see
+		// docs/design/walkthrough-panel-resize-fix.md). The standalone route is
+		// rendered by a different code path that omits the resize toolbar, and
+		// the shortcut/collapse plumbing keys off the bare activeSessionId()
+		// (undefined here) instead of the route's walkthrough session id.
+		await setupWalkthrough(page, { width: 1600, height: 900 });
+
+		const openStandalone = page.locator(`${tid("side-panel-open-in-new-tab")}, ${tid("pr-walkthrough-open-in-new-tab")}, a[title*="Open walkthrough"], button[title*="Open walkthrough"]`).first();
+		await expect(openStandalone, "active walkthrough tabs should expose an open-in-new-tab toolbar affordance").toBeVisible({ timeout: 10_000 });
+		const [standalone] = await Promise.all([
+			context.waitForEvent("page"),
+			openStandalone.click(),
+		]);
+		await standalone.setViewportSize({ width: 1700, height: 1000 });
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(standalone, "standalone URL should preserve walkthrough/tab identity").toHaveURL(/walkthrough|pr-walkthrough/);
+		await expect(walkthroughPanel(standalone), "standalone route should render the ready walkthrough component").toBeVisible({ timeout: 15_000 });
+
+		const fullscreenState = () => standalone.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.previewPanelFullscreen === true;
+		});
+		const expandButton = () => standalone.locator(`${tid("preview-expand")}, button[title*="Expand preview"], button[title*="Expand walkthrough"]`).first();
+		const collapseButton = () => standalone.locator(`button[title*="Collapse preview"], button[title*="Collapse walkthrough"]`).first();
+
+		// (1) Fullscreen control is present and clicking it enters fullscreen.
+		const fullscreenButton = standalone.locator(`${tid("pr-walkthrough-fullscreen")}, ${tid("side-panel-fullscreen")}, button[title*="Fullscreen"]`).first();
+		await expect(fullscreenButton, "standalone ready walkthrough must expose a fullscreen resize control").toBeVisible({ timeout: 10_000 });
+		await fullscreenButton.click();
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "clicking the standalone fullscreen control must enter fullscreen" }).toBe(true);
+
+		// (2) A keyboard shortcut operates on the standalone walkthrough panel.
+		// toggle-preview (Ctrl+]) steps fullscreen → split.
+		await standalone.keyboard.press("Control+]");
+		await expect.poll(fullscreenState, { timeout: 10_000, message: "the toggle-preview keyboard shortcut must exit fullscreen on the standalone walkthrough panel" }).toBe(false);
+		await expect(walkthroughPanel(standalone), "exiting fullscreen should keep the standalone walkthrough in split view").toBeVisible({ timeout: 10_000 });
+
+		// (3) Collapse control is present and collapses the panel.
+		await expect(collapseButton(), "standalone ready walkthrough must expose a collapse resize control").toBeVisible({ timeout: 10_000 });
+		await collapseButton().click();
+		await expect(expandButton(), "collapsing the standalone walkthrough must reveal an expand control").toBeVisible({ timeout: 10_000 });
+		await expect(walkthroughPanel(standalone), "collapsed standalone walkthrough should hide the panel body").toBeHidden({ timeout: 10_000 });
+
+		// Collapsed state persists across reload.
+		await standalone.reload();
+		await standalone.waitForLoadState("domcontentloaded");
+		await expect(expandButton(), "collapsed standalone walkthrough state must persist across reload").toBeVisible({ timeout: 15_000 });
+
+		// Expanding restores the panel body.
+		await expandButton().click();
+		await expect(walkthroughPanel(standalone), "expanding should restore the standalone walkthrough panel body").toBeVisible({ timeout: 10_000 });
+
 		await standalone.close();
 	});
 

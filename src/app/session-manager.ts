@@ -12,6 +12,7 @@ import {
 	GW_URL_KEY,
 	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
+	type GatewaySession,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam } from "./api.js";
 import { formatProjectAssistantAutoPrompt } from "./project-assistant-autoprompt.js";
@@ -962,7 +963,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 // CONNECT TO SESSION (select + hydrate)
 // ============================================================================
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal" }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -1225,8 +1226,24 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			updateLocalSessionTitle(sessionId, newTitle);
 		};
 
+		// A freshly forked session may still be "preparing" (worktree + agent
+		// spin-up) when we connect, so the initial get_messages can race ahead of
+		// the cloned transcript being serveable. Re-request messages once the
+		// agent first reaches a ready (idle) state so the prior conversation
+		// reliably loads — mirrors how restored/continued sessions hydrate.
+		let refetchOnReady = options?.refetchMessagesOnReady === true;
+
 		remote.onStatusChange = (status: string) => {
 			updateLocalSessionStatus(sessionId, status);
+			if (refetchOnReady && status === "idle" && activeSessionId() === sessionId) {
+				// Keep re-requesting until the cloned transcript actually lands —
+				// the first get_messages can race the agent's switch_session adoption.
+				if (remote.state.messages.length === 0) {
+					remote.requestMessages();
+				} else {
+					refetchOnReady = false;
+				}
+			}
 			const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 			if (idx >= 0) {
 				state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], isAborting: remote.isAborting };
@@ -2175,6 +2192,60 @@ export async function createAndConnectSession(goalId?: string, roleId?: string, 
 		const code = err && typeof err === "object" ? (err as any).code : undefined;
 		const stack = err instanceof Error ? err.stack : undefined;
 		showConnectionError("Failed to create session", msg, { code, stack });
+	} finally {
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
+		renderApp();
+	}
+}
+
+export type ForkSessionResponse = {
+	id: string;
+	cwd: string;
+	status: string;
+	projectId?: string;
+	goalId?: string;
+	title?: string;
+};
+
+/**
+ * Fork a live session: the server clones its conversation history into a new
+ * session and either spins up a fresh worktree (`newWorktree: true`, default)
+ * or reuses the source session's existing worktree (`newWorktree: false`).
+ */
+export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
+	if (state.creatingSession) return;
+	state.creatingSession = true;
+	state.creatingSessionForGoalId = source.goalId || null;
+	renderApp();
+	try {
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
+			method: "POST",
+			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({} as any));
+			const err = new Error((data && data.error) || `Session fork failed: ${res.status}`);
+			(err as any).code = data?.code;
+			(err as any).stack = data?.stack || (err as any).stack;
+			throw err;
+		}
+		const fork = await res.json() as ForkSessionResponse;
+		if (!fork?.id) throw new Error("Session fork response did not include an id");
+		state.creatingSession = false;
+		state.creatingSessionForGoalId = null;
+		await refreshSessions();
+		// Connect as an existing session so the cloned conversation history is
+		// requested (get_messages) and rendered — same path restored/continued
+		// sessions use. The fork spins up a fresh worktree/agent, so it may be
+		// "preparing" at navigate time; refetchMessagesOnReady re-requests the
+		// transcript once the agent first reaches idle so history reliably shows.
+		await connectToSession(fork.id, true, { refetchMessagesOnReady: true });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		const code = err && typeof err === "object" ? (err as any).code : undefined;
+		const stack = err instanceof Error ? err.stack : undefined;
+		showConnectionError("Failed to fork session", msg, { code, stack });
 	} finally {
 		state.creatingSession = false;
 		state.creatingSessionForGoalId = null;

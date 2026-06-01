@@ -31,7 +31,7 @@ import { gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft } from "./session-manager.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
-import { doRenderApp } from "./render.js";
+import { doRenderApp, workspaceSessionId } from "./render.js";
 import { PROPOSAL_TYPES } from "./proposal-registry.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
 // See docs/design/ui-bundle-size-reduction.md (Task A).
@@ -46,7 +46,7 @@ function clearDashboardState(): void {
 	if (_goalDashboardModule) _goalDashboardModule.clearDashboardState();
 }
 import { registerShortcut, startListening, loadSavedBindings } from "./shortcut-registry.js";
-import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace, panelWorkspaceSessionKey } from "./panel-workspace.js";
+import { activeSidePanelTabIdForSession, loadPersistedPanelWorkspace } from "./panel-workspace.js";
 
 // ============================================================================
 // WIRE UP RENDER
@@ -75,8 +75,17 @@ function hasActiveProposalPanel(): boolean {
 }
 
 function hasActiveWalkthroughPanel(): boolean {
-	const sid = panelWorkspaceSessionKey(activeSessionId());
-	return activeSidePanelTabIdForSession(state, sid).startsWith("walkthrough:");
+	// On the standalone `/walkthrough` route there is no connected session, so
+	// the panel tab lives under the route's walkthrough session id (also carried
+	// in the URL `tab` param). Key detection off the same id the panel tab is
+	// stored under — not the bare (undefined) `activeSessionId()` — so the resize
+	// shortcuts find the walkthrough tab instead of falling through to a no-op.
+	const route = getRouteFromHash();
+	if (route.view === "walkthrough") {
+		const tabId = route.walkthroughTabId || activeSidePanelTabIdForSession(state, route.walkthroughSessionId);
+		return typeof tabId === "string" && tabId.startsWith("walkthrough:");
+	}
+	return activeSidePanelTabIdForSession(state, workspaceSessionId()).startsWith("walkthrough:");
 }
 
 // ============================================================================
@@ -586,7 +595,7 @@ async function initApp() {
 			const canFullscreen = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel());
 			const hasPanel = canFullscreen || (!state.assistantType && hasActiveProposalPanel());
 			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				const collapsed = localStorage.getItem(key) === "true";
 				if (collapsed) {
 					// level 0 → 1: uncollapse to half view
@@ -645,7 +654,7 @@ async function initApp() {
 		handler: () => {
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasActiveWalkthroughPanel() || hasActiveProposalPanel());
 			if (!hasPanel) return;
-			const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+			const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 			if (state.previewPanelFullscreen) {
 				// level 2 → 1: exit fullscreen, keep half view
 				state.previewPanelFullscreen = false;
@@ -670,7 +679,7 @@ async function initApp() {
 			const hasWalkthroughPanel = hasActiveWalkthroughPanel();
 			const hasPanel = !state.assistantType && (state.isPreviewSession || state.reviewPanelOpen || state.inboxPanelOpen || hasWalkthroughPanel || hasActiveProposalPanel());
 			if (hasPanel) {
-				const key = `bobbit-preview-collapsed-${activeSessionId()}`;
+				const key = `bobbit-preview-collapsed-${workspaceSessionId()}`;
 				if (state.previewPanelFullscreen) {
 					// level 2 → 0: exit fullscreen and collapse
 					state.previewPanelFullscreen = false;

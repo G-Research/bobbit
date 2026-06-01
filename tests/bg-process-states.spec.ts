@@ -275,7 +275,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		expect(await page.locator("#bg-process-dropdown [data-kill-btn]").count()).toBe(0);
 	});
 
-	test("Kill button fires onKill callback", async ({ page }) => {
+	test("Kill button fires onKill callback after confirmation", async ({ page }) => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
@@ -285,8 +285,28 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
 		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
 
+		// Confirmation modal appears; onKill must not fire until confirmed.
+		await expect(page.locator("[data-kill-confirm]")).toBeVisible();
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
+
+		await page.locator("[data-kill-confirm-yes]").click();
 		const killCalls = await page.evaluate(() => (window as any).__killCalls);
 		expect(killCalls).toEqual([RUNNING_PROCESS.id]);
+	});
+
+	test("cancelling the confirmation does not kill", async ({ page }) => {
+		await page.evaluate((p) => {
+			const pill = (window as any).createPill(p);
+			(window as any).__killCalls = [];
+			pill.onKill = (id) => (window as any).__killCalls.push(id);
+		}, RUNNING_PROCESS);
+
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
+		await page.locator("[data-kill-confirm-no]").click();
+
+		await expect(page.locator("[data-kill-confirm]")).toHaveCount(0);
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
 	});
 
 	test("Remove button fires onDismiss callback", async ({ page }) => {
@@ -303,7 +323,18 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		expect(dismissCalls).toEqual([EXITED_OK_PROCESS.id]);
 	});
 
-	test("pill X button kills running process", async ({ page }) => {
+	test("running pill action button shows a skull icon", async ({ page }) => {
+		await createPill(page, RUNNING_PROCESS);
+		await expect(page.locator("bg-process-pill [data-x-btn] svg.lucide-skull")).toBeVisible();
+	});
+
+	test("exited pill action button shows an X icon", async ({ page }) => {
+		await createPill(page, EXITED_OK_PROCESS);
+		await expect(page.locator("bg-process-pill [data-x-btn]")).toHaveText("✕");
+		expect(await page.locator("bg-process-pill [data-x-btn] svg").count()).toBe(0);
+	});
+
+	test("pill skull button kills running process after confirmation", async ({ page }) => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
@@ -311,9 +342,34 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		}, RUNNING_PROCESS);
 
 		await page.locator("bg-process-pill [data-x-btn]").click();
+		await expect(page.locator("[data-kill-confirm]")).toBeVisible();
+		expect(await page.evaluate(() => (window as any).__killCalls)).toEqual([]);
 
+		await page.locator("[data-kill-confirm-yes]").click();
 		const killCalls = await page.evaluate(() => (window as any).__killCalls);
 		expect(killCalls).toEqual([RUNNING_PROCESS.id]);
+	});
+
+	test("confirmation modal renders above the expanded popover", async ({ page }) => {
+		await page.evaluate((p) => {
+			const pill = (window as any).createPill(p);
+			pill.onKill = () => {};
+		}, RUNNING_PROCESS);
+
+		// Expand the popover (z-50 portal), then trigger kill from inside it.
+		await page.locator("bg-process-pill [data-toggle-btn]").click();
+		await expect(page.locator("#bg-process-dropdown")).toBeVisible();
+		await page.locator("#bg-process-dropdown [data-kill-btn]").click();
+
+		const modal = page.locator("[data-kill-confirm]");
+		await expect(modal).toBeVisible();
+
+		// The modal's effective stacking must sit above the popover portal.
+		const modalZ = await modal.evaluate((el) => Number(getComputedStyle(el).zIndex) || 0);
+		const dropdownZ = await page
+			.locator("#bg-process-dropdown")
+			.evaluate((el) => Number(getComputedStyle(el).zIndex) || 0);
+		expect(modalZ).toBeGreaterThan(dropdownZ);
 	});
 
 	test("pill X button dismisses exited process", async ({ page }) => {

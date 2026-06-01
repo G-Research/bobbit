@@ -7,6 +7,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
+import { getRouteFromHash } from "./routing.js";
 import {
 	expandedGoals,
 	renderApp,
@@ -352,6 +353,11 @@ function isLiveSessionHostedWalkthrough(state: AppState, sessionId: string): boo
 	return session?.childKind === "pr-walkthrough" && !session.archived && session.status !== "terminated" && session.status !== "archived";
 }
 
+/** True when the dedicated, prompt-less standalone `/walkthrough` route is active. */
+function isStandaloneWalkthroughRoute(): boolean {
+	try { return getRouteFromHash().view === "walkthrough"; } catch { return false; }
+}
+
 function keepLiveWalkthroughPanelPromptable(state: AppState, sessionId: string, tabId?: string): void {
 	if (tabId) setActivePanelTabIdForSession(state, sessionId, tabId);
 	const tabs = panelTabsForSession(state, sessionId);
@@ -359,6 +365,12 @@ function keepLiveWalkthroughPanelPromptable(state: AppState, sessionId: string, 
 		? { ...tab, state: { ...tab.state, fullscreenOnReady: false } }
 		: tab);
 	if (nextTabs.some((tab, index) => tab !== tabs[index])) setPanelTabsForSession(state, sessionId, nextTabs);
+	// Forcing split + clearing the collapse flag keeps the in-app chat prompt
+	// visible for a live child. The standalone /walkthrough route has no prompt
+	// and owns its own fullscreen/collapse state, so skip the reset there —
+	// otherwise the per-render job restore bounces the user out of fullscreen
+	// and wipes the persisted collapse flag on every paint.
+	if (isStandaloneWalkthroughRoute()) return;
 	(state as any).previewPanelFullscreen = false;
 	try { localStorage.removeItem(`bobbit-preview-collapsed-${sessionId}`); } catch { /* non-browser/test */ }
 }

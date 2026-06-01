@@ -121,11 +121,10 @@ test.describe("multi-repo flow API/data paths", () => {
 			const goal = await goalRes.json();
 			goalId = goal.id;
 
-			// Wait for setupStatus to settle — success or error. Phase 4a wiring
-			// for multi-repo goal worktrees is in progress; if the server didn't
-			// produce `repoWorktrees`, we just confirm the goal was created and
-			// move on (the API-level test in tests/e2e/multi-repo-goal.spec.ts
-			// will tighten once Phase 4a lands).
+			// Wait for setupStatus to settle — success or error. Multi-repo goal
+			// worktrees are wired: only git sub-repos get a worktree, while non-git
+			// data-only components are skipped. If the server didn't produce
+			// `repoWorktrees`, we just confirm the goal was created and move on.
 			const goalRecord: any = await pollUntil(
 				async () => {
 					const r = await apiFetch(`/api/goals/${goal.id}`);
@@ -137,8 +136,10 @@ test.describe("multi-repo flow API/data paths", () => {
 			expect(goalRecord.id).toBeTruthy();
 
 			if (goalRecord.repoWorktrees && Object.keys(goalRecord.repoWorktrees).length > 1) {
-				// Phase 4a has wired multi-repo goal worktrees — assert per-repo paths exist.
-				expect(Object.keys(goalRecord.repoWorktrees)).toEqual(expect.arrayContaining(["api", "web", "shared"]));
+				// Multi-repo goal worktrees are wired — only the git sub-repos get a
+				// worktree; the non-git data-only `shared` component is skipped.
+				expect(Object.keys(goalRecord.repoWorktrees).sort()).toEqual(["api", "web"]);
+				expect(goalRecord.repoWorktrees.shared).toBeUndefined();
 				for (const [, wtPath] of Object.entries(goalRecord.repoWorktrees as Record<string, string>)) {
 					expect(fs.existsSync(wtPath as string)).toBe(true);
 				}

@@ -62,9 +62,10 @@ export async function confirmAction(
 	message: string,
 	confirmLabel?: string,
 	destructive?: boolean,
+	zIndex?: number,
 ): Promise<boolean> {
 	const m = await load();
-	return m.confirmAction(title, message, confirmLabel, destructive);
+	return m.confirmAction(title, message, confirmLabel, destructive, zIndex);
 }
 
 export async function checkOAuthStatus(provider?: string): Promise<boolean> {

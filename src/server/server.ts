@@ -24,6 +24,7 @@ import { discoverSlashSkills, getSkillDirectories, getSlashSkill, buildSlashSkil
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { checkGateDependencies } from "./agent/gate-dependency-check.js";
 import { shouldCreateWorktree } from "./agent/worktree-decision.js";
+import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
@@ -55,7 +56,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -66,6 +67,35 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+// Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
+// must exist in EVERY configured component repo before it is persisted — mirroring
+// the save-time validator (which rejects a ref missing in any component). Without
+// this, a multi-repo project whose primary repo's remote HEAD differs from another
+// component's available refs would persist a value that breaks worktree creation
+// for that component. Returns true only if at least one repo was checked AND every
+// checked git repo has the ref. Never throws. See docs/design/base-ref.md.
+async function detectedRefExistsInAllComponents(
+	rootPath: string,
+	comps: Array<{ repo: string }>,
+	ref: string,
+): Promise<boolean> {
+	try {
+		const seen = new Set<string>();
+		let checked = 0;
+		for (const c of comps.length > 0 ? comps : [{ repo: "." }]) {
+			if (seen.has(c.repo)) continue;
+			seen.add(c.repo);
+			const repoPath = path.join(rootPath, c.repo);
+			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			checked++;
+			if (!(await refExistsInRepo(repoPath, ref))) return false;
+		}
+		return checked > 0;
+	} catch {
+		return false;
+	}
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -112,6 +142,7 @@ function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
 	const goalIds = ws.viewerGoalIds;
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
+
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -165,6 +196,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
+import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -263,6 +295,31 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+
+type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
+let _ghExecFileForTests: GhExecFileForTests | undefined;
+
+export function buildGhPrViewArgs(branch?: string): string[] {
+	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
+	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
+	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	return String(stdout);
+}
+
+export function __setGhExecFileForPrStatusTests(fn: GhExecFileForTests | undefined): void {
+	_ghExecFileForTests = fn;
+	__resetPrStatusCachesForTests();
+}
+
+export function __resetPrStatusCachesForTests(): void {
+	_prCache.clear();
+	_prInFlight.clear();
+	_repoPermCache.clear();
+}
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -272,9 +329,7 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
-			cwd, encoding: "utf-8", timeout: 10000,
-		});
+		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
 		_repoPermCache.set(cwd, { perm, ts: Date.now() });
 		return perm === "ADMIN";
@@ -286,15 +341,13 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
-	const branchArg = branch ? ` ${branch}` : "";
-	const cmd = `gh pr view${branchArg} ${ghFields}`;
+	const args = buildGhPrViewArgs(branch);
 
 	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
-			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
+			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
 			const viewerIsAdmin = await getViewerIsAdmin(dir);
 			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
@@ -307,6 +360,10 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 	}
 	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 	return null;
+}
+
+export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return getCachedPrStatus(cwd, branch, fallbackCwd);
 }
 
 async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -2039,6 +2096,21 @@ async function handleApiRoute(
 		return cwd;
 	}
 
+	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
+	 * forked. The substrings (archived/terminated/delegate/child/read-only/team/
+	 * non-interactive) are load-bearing — the API E2E asserts on them. */
+	function isUnsupportedForkSource(session: any, ps: any): string | null {
+		if (!session || !ps) return "session not found";
+		if (ps.archived) return "archived sessions cannot be forked";
+		if (session.status === "terminated") return "terminated sessions cannot be forked";
+		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be forked";
+		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be forked";
+		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be forked";
+		if (session.nonInteractive || ps.nonInteractive) return "non-interactive sessions cannot be forked";
+		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be forked";
+		return null;
+	}
+
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
 	function getGoalManagerForGoal(goalId: string): GoalManager {
 		const ctx = projectContextManager.getContextForGoal(goalId);
@@ -2669,6 +2741,35 @@ async function handleApiRoute(
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			//
+			// MUST run BEFORE worktree-pool init below: the pool's baseRefResolver
+			// reads `base_ref` on each _fill()/startFilling(), so pinning the
+			// concrete value first prevents early pool entries from being created
+			// off the old `origin/HEAD` fallback.
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2816,7 +2917,75 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
 			const promoted = projectRegistry.promote(projectId, { name });
+			// Pin base_ref from the live remote (best-effort) now that the
+			// promoted project's rootPath is a real git repo. Mirrors the
+			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
+			try {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				const rootPath = projectRegistry.get(projectId)?.rootPath;
+				const cfg = ctx?.projectConfigStore;
+				if (cfg && rootPath && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Pin only if the detected ref exists in every component repo
+					// (mirrors save-time validation). See POST /api/projects above.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/base-ref/detect — read-only resolver helper.
+	// Returns { resolved, detected }:
+	//   resolved = what worktrees actually branch off right now
+	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
+	//   detected = live `git ls-remote --symref origin HEAD` result, but ONLY
+	//              when it is saveable (passes the same grammar + cross-component
+	//              existence checks add-time pinning applies); otherwise null
+	//              (offline / no remote / not saveable). Guarantees any non-null
+	//              `detected` the UI fills can be saved without rejection.
+	// Scoped to the project's pool/primary repo (same selection as add-time
+	// pinning). No mutation. See docs/design/base-ref.md.
+	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
+	if (baseRefDetectMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(baseRefDetectMatch[1]);
+		const rootPath = projectRegistry.get(baseRefDetectMatch[1])?.rootPath;
+		if (!ctx || !rootPath) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const cfg = ctx.projectConfigStore;
+			const comps = cfg.getComponents();
+			const isMultiRepo = comps.some(c => c.repo !== ".");
+			const primaryRepoPath = isMultiRepo
+				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+				: await getRepoRoot(rootPath);
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			// `detected` must be SAVEABLE — null it out unless it passes the same
+			// checks add-time pinning applies (grammar + cross-component existence).
+			// The Settings "Detect from remote" button fills this value, so a
+			// non-saveable value here would be rejected by the normal Save path.
+			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			if (
+				detected
+				&& (!isValidBaseRefBranchGrammar(detected)
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+			) {
+				detected = null;
+			}
+			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);
 		}
@@ -3762,12 +3931,12 @@ async function handleApiRoute(
 			try {
 				const projCtx = resolvedProjectId ? projectContextManager.getOrCreate(resolvedProjectId) : undefined;
 				const proj = resolvedProjectId ? projectRegistry.get(resolvedProjectId) : undefined;
-				const isMulti = !!projCtx?.projectConfigStore.isMultiRepo();
-				if (isMulti && proj?.rootPath) {
-					worktreeOpts = { repoPath: proj.rootPath };
-				} else if (await isGitRepo(cwd)) {
-					const repoPath = await getRepoRoot(cwd);
-					worktreeOpts = { repoPath };
+				// Single source of truth shared with the staff path
+				// (staff-manager.ts) and goal path (goal-manager.ts).
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const support = await resolveWorktreeSupport(components, proj?.rootPath, cwd);
+				if (support.supported && support.repoPath) {
+					worktreeOpts = { repoPath: support.repoPath };
 				}
 			} catch {
 				// Not a git repo or git not available — silently ignore
@@ -6308,6 +6477,46 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/goals/:id/github-link — PR URL or sanitized GitHub branch fallback
+	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
+	if (goalGithubLinkMatch && req.method === "GET") {
+		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+
+		const cached = prStatusStore.get(goalId);
+		if (cached?.url) {
+			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
+			return;
+		}
+
+		if (goal.branch && fs.existsSync(goal.cwd)) {
+			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
+			if (fresh?.url) {
+				prStatusStore.set(goalId, fresh);
+				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
+				return;
+			}
+		}
+
+		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
+
+		const remoteCwd = goal.repoPath || goal.cwd;
+		try {
+			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+				cwd: remoteCwd,
+				encoding: "utf-8",
+				timeout: 5_000,
+			});
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
+			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
+		} catch {
+			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
+		}
+		return;
+	}
+
 	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
@@ -6601,6 +6810,170 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
+	// transcript (and tool-content / proposal drafts) into a fresh session and
+	// preserve its project/goal/task/model/role context. The caller chooses
+	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
+	if (forkMatch && req.method === "POST") {
+		const sourceId = forkMatch[1];
+		const forkBody = await readBody(req).catch(() => ({} as any));
+		// Default to a NEW worktree when the flag is omitted.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
+
+		const source = sessionManager.getSession(sourceId);
+		const ps = sessionManager.getPersistedSession(sourceId);
+		if (!ps) { json({ error: "session not found" }, 404); return; }
+		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
+
+		const unsupported = isUnsupportedForkSource(source, ps);
+		if (unsupported) { json({ error: unsupported }, 422); return; }
+
+		const projectId = ps.projectId || source.projectId;
+		if (!projectId || !projectRegistry.get(projectId)) {
+			json({ error: "source project no longer registered" }, 410);
+			return;
+		}
+
+		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
+		if (goal?.state === "todo") {
+			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		}
+
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+
+		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
+		// rows that never persisted `agentSessionFile`.
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+		if (!ps.sandboxed) {
+			try {
+				const st = fs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
+			} catch {
+				json({ error: "source transcript missing or empty" }, 404);
+				return;
+			}
+		}
+
+		const projCwd = projectRegistry.get(projectId)!.rootPath;
+		// Worktree choice:
+		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
+		//    (or a plain project-root session when the project isn't a git repo),
+		//    matching the Continue-Archived flow.
+		//  • newWorktree=false → reuse the source's existing worktree directly. Two
+		//    live sessions intentionally share the tree, so we deliberately do NOT
+		//    register worktree metadata on the fork — terminating either session
+		//    must never tear down the shared worktree/branch.
+		let sessionCwd: string;
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (newWorktree) {
+			sessionCwd = projCwd;
+			try {
+				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch { /* not a git repo — plain project-root session */ }
+		} else {
+			// Prefer the source's own cwd when it has no worktree so a standalone
+			// non-worktree session keeps its working directory instead of landing
+			// in the project root.
+			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
+			worktreeOpts = undefined;
+		}
+
+		const forkId = randomUUID();
+		// Use the project root for the cloned `.jsonl` slug (same as /continue);
+		// worktree-backed sessions rotate to the final cwd-derived file after the
+		// worktree is ready, adopting this clone via switch_session.
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+
+		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		try {
+			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+			return;
+		}
+		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+		}
+		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
+		const createOpts: any = {
+			sessionId: forkId,
+			projectId,
+			sandboxed: !!ps.sandboxed,
+			worktreeOpts,
+			preExistingAgentSessionFile: destJsonl,
+			taskId: ps.taskId,
+			reattemptGoalId: ps.reattemptGoalId,
+			staffId: ps.staffId,
+			allowedTools: ps.allowedTools,
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+		};
+		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+		}
+
+		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+		if (staff) {
+			let fullPrompt = staff.systemPrompt;
+			if (staff.memory) fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
+			createOpts.rolePrompt = fullPrompt;
+			createOpts.roleName = staff.roleId;
+			createOpts.accessory = staff.accessory;
+			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+		} else {
+			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			if (role) {
+				createOpts.rolePrompt = role.promptTemplate;
+				createOpts.roleName = role.name;
+				createOpts.role = role.name;
+				createOpts.accessory = role.accessory;
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+		}
+
+		try {
+			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			const baseTitle = (ps.title || source.title || "session").trim() || "session";
+			const title = `Fork: ${baseTitle}`;
+			sessionManager.setTitle(fork.id, title, { markGenerated: true });
+			if (ps.staffId) fork.staffId = ps.staffId;
+			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
+
+			json({
+				id: fork.id,
+				cwd: fork.cwd,
+				status: fork.status,
+				projectId,
+				goalId: ps.goalId,
+				title,
+			}, 201);
+		} catch (err) {
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+		}
+		return;
 	}
 
 	// POST /api/sessions/:id/wait — block until session becomes idle
