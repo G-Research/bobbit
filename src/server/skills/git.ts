@@ -208,6 +208,57 @@ export async function resolveBaseRefWithExec(
 	return { ref: "HEAD", branch: "HEAD", isRemote: false };
 }
 
+/**
+ * Parse the first `ref:` line of `git ls-remote --symref origin HEAD` output.
+ * Returns the bare branch name (strips `refs/heads/`) or null if absent.
+ * Pure parser — no exec, no disk access. Tolerant of tab/space separators and
+ * CRLF line endings.
+ *
+ * Examples:
+ *   "ref: refs/heads/master\tHEAD\n<sha>\tHEAD" → "master"
+ *   "ref: refs/heads/feature/x\tHEAD"           → "feature/x"
+ *   "<sha>\tHEAD"                               → null (no symref line)
+ *   ""                                          → null
+ */
+export function parseLsRemoteSymref(output: string): string | null {
+	for (const line of (output ?? "").split(/\r?\n/)) {
+		const m = line.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD/);
+		if (m) return m[1];
+	}
+	return null;
+}
+
+/**
+ * Best-effort: run `git ls-remote --symref origin HEAD` in `repoPath`, parse
+ * the symref, and return `origin/<branch>` — or null on ANY failure (offline,
+ * no remote, not a git repo, unparseable output). Never throws.
+ *
+ * Used to pin a concrete `base_ref` from the live remote at project-add time.
+ * See docs/design/base-ref.md.
+ */
+export async function detectBaseRefFromRemote(repoPath: string): Promise<string | null> {
+	try {
+		const { stdout } = await execGit(["ls-remote", "--symref", "origin", "HEAD"], {
+			cwd: repoPath,
+			timeout: 10_000,
+		});
+		const branch = parseLsRemoteSymref(stdout.toString());
+		return branch ? `origin/${branch}` : null;
+	} catch {
+		return null;
+	}
+}
+
+/** True iff `ref` resolves via `git rev-parse --verify` in repoPath. Never throws. */
+export async function refExistsInRepo(repoPath: string, ref: string): Promise<boolean> {
+	try {
+		await execGit(["rev-parse", "--verify", ref], { cwd: repoPath, timeout: 5_000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Check if a directory is inside a git repository. */
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	try {

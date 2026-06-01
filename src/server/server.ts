@@ -59,7 +59,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -70,6 +70,35 @@ function isValidBaseRefBranchGrammar(name: string): boolean {
 	if (name.includes("..") || name.includes("@{")) return false;
 	if (/[\x00-\x1f\x7f~^:?*\[\\]/.test(name)) return false;
 	return /^[A-Za-z0-9_./-]+$/.test(name);
+}
+
+// Best-effort guard for add-time `base_ref` pinning: a detected `origin/<branch>`
+// must exist in EVERY configured component repo before it is persisted — mirroring
+// the save-time validator (which rejects a ref missing in any component). Without
+// this, a multi-repo project whose primary repo's remote HEAD differs from another
+// component's available refs would persist a value that breaks worktree creation
+// for that component. Returns true only if at least one repo was checked AND every
+// checked git repo has the ref. Never throws. See docs/design/base-ref.md.
+async function detectedRefExistsInAllComponents(
+	rootPath: string,
+	comps: Array<{ repo: string }>,
+	ref: string,
+): Promise<boolean> {
+	try {
+		const seen = new Set<string>();
+		let checked = 0;
+		for (const c of comps.length > 0 ? comps : [{ repo: "." }]) {
+			if (seen.has(c.repo)) continue;
+			seen.add(c.repo);
+			const repoPath = path.join(rootPath, c.repo);
+			if (!(await isGitRepo(repoPath).catch(() => false))) continue;
+			checked++;
+			if (!(await refExistsInRepo(repoPath, ref))) return false;
+		}
+		return checked > 0;
+	} catch {
+		return false;
+	}
 }
 
 function normalizeApiRouteLabel(method: string | undefined, pathname: string): string {
@@ -2753,6 +2782,35 @@ async function handleApiRoute(
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			//
+			// MUST run BEFORE worktree-pool init below: the pool's baseRefResolver
+			// reads `base_ref` on each _fill()/startFilling(), so pinning the
+			// concrete value first prevents early pool entries from being created
+			// off the old `origin/HEAD` fallback.
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2900,7 +2958,75 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
 			const promoted = projectRegistry.promote(projectId, { name });
+			// Pin base_ref from the live remote (best-effort) now that the
+			// promoted project's rootPath is a real git repo. Mirrors the
+			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
+			try {
+				const ctx = projectContextManager.getOrCreate(projectId);
+				const rootPath = projectRegistry.get(projectId)?.rootPath;
+				const cfg = ctx?.projectConfigStore;
+				if (cfg && rootPath && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Pin only if the detected ref exists in every component repo
+					// (mirrors save-time validation). See POST /api/projects above.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			json(promoted);
+		} catch (err: any) {
+			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/base-ref/detect — read-only resolver helper.
+	// Returns { resolved, detected }:
+	//   resolved = what worktrees actually branch off right now
+	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
+	//   detected = live `git ls-remote --symref origin HEAD` result, but ONLY
+	//              when it is saveable (passes the same grammar + cross-component
+	//              existence checks add-time pinning applies); otherwise null
+	//              (offline / no remote / not saveable). Guarantees any non-null
+	//              `detected` the UI fills can be saved without rejection.
+	// Scoped to the project's pool/primary repo (same selection as add-time
+	// pinning). No mutation. See docs/design/base-ref.md.
+	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
+	if (baseRefDetectMatch && req.method === "GET") {
+		const ctx = projectContextManager.getOrCreate(baseRefDetectMatch[1]);
+		const rootPath = projectRegistry.get(baseRefDetectMatch[1])?.rootPath;
+		if (!ctx || !rootPath) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const cfg = ctx.projectConfigStore;
+			const comps = cfg.getComponents();
+			const isMultiRepo = comps.some(c => c.repo !== ".");
+			const primaryRepoPath = isMultiRepo
+				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+				: await getRepoRoot(rootPath);
+			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
+			// `detected` must be SAVEABLE — null it out unless it passes the same
+			// checks add-time pinning applies (grammar + cross-component existence).
+			// The Settings "Detect from remote" button fills this value, so a
+			// non-saveable value here would be rejected by the normal Save path.
+			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			if (
+				detected
+				&& (!isValidBaseRefBranchGrammar(detected)
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+			) {
+				detected = null;
+			}
+			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);
 		}
