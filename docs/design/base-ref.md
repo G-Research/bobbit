@@ -575,5 +575,5 @@ Unit (`tests/base-ref-parse.spec.ts`):
 - `docs/dev-workflow.md` — branch namespaces and worktree story.
 - `docs/internals.md` — config cascade, sandbox, git-status pipeline.
 - `docs/goals-workflows-tasks.md` — workflow gate definitions.
-- `docs/rest-api.md` — project-config PUT validation rules.
+- `docs/rest-api.md` — project-config PUT validation rules, add-time pinning on `POST /api/projects`, and the `GET /api/projects/:id/base-ref/detect` endpoint.
 - `AGENTS.md` — reference list addition.
