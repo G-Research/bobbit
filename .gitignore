@@ -38,6 +38,17 @@ binaries/binaries-*/bin/rg
 binaries/binaries-*/bin/rg.exe
 .e2e-real-pi
 .e2e-real-bobbit
+
+# Generated esbuild bundles for file:// Playwright fixtures.
+# Specs rebuild these on demand via tests/fixtures/build-bundle.ts or local beforeAll hooks.
+tests/fixtures/*-bundle.js
+
+# Heavy on-demand component-test bundle (Messages.ts pulls the app graph, ~9MB).
+# Built by tests/user-message-image-render.spec.ts::beforeAll when missing/stale.
+tests/fixtures/user-message-image-render-bundle.css
+tests/fixtures/message-editor-ime-bundle.css
+tests/fixtures/remote-agent-seq-bundle.css
+tests/fixtures/remote-agent-outbox-bundle.css
 .e2e-ui-pi
 .e2e-ui-bobbit
 tests/code-review-results.json
@@ -50,49 +61,27 @@ sessions_tmp.json
 .e2e-inproc-*/
 .e2e-resilience-*/
 .bobbit-manual-integration-*/
-tests/fixtures/markdown-throttle-bundle.js
 tests/fixtures/markdown-throttle-bundle.css
-tests/fixtures/bash-renderer-bundle.js
 tests/fixtures/bash-renderer-bundle.css
-tests/fixtures/find-renderer-bundle.js
 tests/fixtures/find-renderer-bundle.css
-tests/fixtures/compaction-widget-bundle.js
 tests/fixtures/compaction-widget-bundle.css
-tests/fixtures/ask-user-choices-renderer-bundle.js
 tests/fixtures/ask-user-choices-renderer-bundle.css
-tests/fixtures/settings-models-tab-bundle.js
 tests/fixtures/settings-models-tab-bundle.css
-tests/fixtures/preview-renderer-bundle.js
 tests/fixtures/preview-renderer-bundle.css
-tests/fixtures/api-error-forwarding-bundle.js
 tests/fixtures/api-error-forwarding-bundle.css
-tests/fixtures/spurious-idle-unread-bundle.js
 tests/fixtures/spurious-idle-unread-bundle.css
-tests/fixtures/notification-policy-bundle.js
 tests/fixtures/notification-policy-bundle.css
-tests/fixtures/review-tool-active-guard-bundle.js
 tests/fixtures/review-tool-active-guard-bundle.css
-tests/fixtures/components-editor-bundle.js
 tests/fixtures/components-editor-bundle.css
-tests/fixtures/project-proposal-views-bundle.js
 tests/fixtures/project-proposal-views-bundle.css
-tests/fixtures/proposal-panel-subsection-diff-bundle.js
 tests/fixtures/proposal-panel-subsection-diff-bundle.css
-tests/fixtures/verification-dedup-bundle.js
 tests/fixtures/verification-dedup-bundle.css
-tests/fixtures/follow-tail-bundle.js
 tests/fixtures/follow-tail-bundle.css
-tests/fixtures/streaming-message-container-bundle.js
 tests/fixtures/streaming-message-container-bundle.css
-tests/fixtures/streaming-bobbit-canvas-ref-bundle.js
 tests/fixtures/streaming-bobbit-canvas-ref-bundle.css
-tests/fixtures/lazy-renderer-placeholder-bundle.js
 tests/fixtures/lazy-renderer-placeholder-bundle.css
-tests/fixtures/defer-offscreen-render-bundle.js
 tests/fixtures/defer-offscreen-render-bundle.css
-tests/fixtures/shortcut-hint-titles-render-bundle.js
 tests/fixtures/shortcut-hint-titles-render-bundle.css
-tests/fixtures/inbox-renderer-bundle.js
 tests/fixtures/inbox-renderer-bundle.css
 .qa-test-state/
 

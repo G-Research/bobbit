@@ -1,32 +1,15 @@
 import { test, expect } from "@playwright/test";
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
+import { buildBundle } from "./fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/gate-status-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/gate-status-renderer-bundle.js");
 const ENTRY = path.resolve("tests/fixtures/gate-status-renderer-entry.ts");
 const RENDERER_SRC = path.resolve("src/ui/tools/renderers/GateToolRenderers.ts");
-function ensureBundle() {
-	const newestSource = Math.max(
-		fs.statSync(ENTRY).mtimeMs,
-		fs.statSync(RENDERER_SRC).mtimeMs,
-	);
-	const bundleExists = fs.existsSync(BUNDLE);
-	if (!bundleExists || fs.statSync(BUNDLE).mtimeMs < newestSource) {
-		execSync(
-			[
-				`npx esbuild ${ENTRY}`,
-				"--bundle --format=iife --target=es2022",
-				`--outfile=${BUNDLE}`,
-				"--tsconfig=tsconfig.web.json",
-			].join(" "),
-			{ stdio: "pipe" },
-		);
-	}
-}
 
-test.beforeAll(ensureBundle);
+test.beforeAll(() => {
+	buildBundle({ entry: ENTRY, outfile: BUNDLE, deps: [ENTRY, RENDERER_SRC] });
+});
 
 test.describe("GateStatusRenderer", () => {
 	test.describe.configure({ mode: "serial" });
