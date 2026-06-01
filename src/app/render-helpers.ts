@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, CopyPlus, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -20,7 +20,7 @@ import {
 } from "./state.js";
 import { statusBobbit } from "./session-colors.js";
 import { shortcutHint } from "./shortcut-registry.js";
-import { connectToSession, terminateSession, createAndConnectSession, startReattempt, duplicateSession } from "./session-manager.js";
+import { connectToSession, terminateSession, createAndConnectSession, startReattempt, forkSession } from "./session-manager.js";
 import { showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, sessionDeepLink, type GoalGithubLinkResponse } from "./api.js";
@@ -367,6 +367,14 @@ export const HEADER_CHEVRON_W = 20;
 
 export type SidebarActionEntityKind = "session" | "goal";
 
+export interface SidebarActionTrailingToggle {
+	id: string;
+	checked: boolean;
+	ariaLabel: string;
+	label?: string;
+	onToggle: () => void;
+}
+
 export interface SidebarActionItem {
 	id: string;
 	label: string;
@@ -375,7 +383,13 @@ export interface SidebarActionItem {
 	tone?: "default" | "danger";
 	quick: boolean;
 	run: (event: Event) => void | Promise<void>;
+	trailingToggle?: SidebarActionTrailingToggle;
 }
+
+// Fork's "New worktree" choice. Module-level so the popover checkbox toggle and
+// the Fork run handler share one source of truth; reset to the default (checked)
+// each time a session actions menu opens.
+let _forkNewWorktree = true;
 
 interface OpenSidebarActionsPopover {
 	kind: SidebarActionEntityKind;
@@ -400,7 +414,7 @@ function sidebarActionPopoverItems(actions: SidebarActionItem[]): SidebarActions
 	// their existing order. FLIP stays keyed by action id, so reordering is safe.
 	const quick = actions.filter((a) => a.quick).reverse();
 	const menuOnly = actions.filter((a) => !a.quick);
-	return [...quick, ...menuOnly].map(({ id, label, icon, tone, quick }) => ({ id, label, icon, tone, quick }));
+	return [...quick, ...menuOnly].map(({ id, label, icon, tone, quick, trailingToggle }) => ({ id, label, icon, tone, quick, trailingToggle }));
 }
 
 function closeSidebarActionsPopover(render = true): void {
@@ -498,8 +512,8 @@ function renderSidebarActionsTrigger(input: {
 		event.stopPropagation();
 		const trigger = event.currentTarget as HTMLElement;
 		const row = trigger.closest<HTMLElement>("[data-sidebar-actions-row-root]");
-		const actions = input.refresh();
 		input.onBeforeOpen?.();
+		const actions = input.refresh();
 		openSidebarActionsPopover({
 			kind: input.kind,
 			entityId: input.entityId,
@@ -559,13 +573,20 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
 		},
 	];
-	if (canDuplicateSidebarSession(session)) {
+	if (canForkSidebarSession(session)) {
 		actions.push({
-			id: "duplicate",
-			label: "Duplicate session",
-			icon: icon(CopyPlus, "xs"),
+			id: "fork",
+			label: "Fork",
+			icon: icon(GitFork, "xs"),
 			quick: false,
-			run: (e: Event) => { e.stopPropagation(); void duplicateSession(session); },
+			run: (e: Event) => { e.stopPropagation(); void forkSession(session, { newWorktree: _forkNewWorktree }); },
+			trailingToggle: {
+				id: "fork-new-worktree",
+				checked: _forkNewWorktree,
+				ariaLabel: _forkNewWorktree ? "New worktree (on) — fork into a fresh worktree" : "New worktree (off) — reuse the source worktree",
+				label: "New worktree",
+				onToggle: () => { _forkNewWorktree = !_forkNewWorktree; refreshOpenSidebarActionsPopover(); },
+			},
 		});
 	}
 	return actions;
@@ -658,7 +679,7 @@ function buildGoalSidebarActions(goal: Goal, input: { hasActiveSession: boolean;
 	return actions;
 }
 
-function canDuplicateSidebarSession(session: GatewaySession): boolean {
+function canForkSidebarSession(session: GatewaySession): boolean {
 	return session.status !== "terminated"
 		&& !session.archived
 		&& !session.readOnly
@@ -807,7 +828,7 @@ export function renderSessionRow(session: GatewaySession) {
 
 	const actions = buildSessionSidebarActions(session, displayTitle);
 	const actionRefresh = () => buildSessionSidebarActions(session, displayTitle);
-	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh })}`;
+	const buttons = html`${renderSidebarQuickActions(actions, { mobile, btnPad })}${renderSidebarActionsTrigger({ kind: "session", entityId: session.id, actions, mobile, btnPad, refresh: actionRefresh, onBeforeOpen: () => { _forkNewWorktree = true; } })}`;
 
 	const navId = `session:${session.id}`;
 	return html`

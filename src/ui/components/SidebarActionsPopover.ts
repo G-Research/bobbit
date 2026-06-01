@@ -7,12 +7,26 @@ import {
 
 export type { SidebarActionsFlipRect } from "./sidebar-actions-flip";
 
+/**
+ * Optional checkbox rendered at the right edge of a menu row. Toggling it must
+ * NOT activate the row's primary action and must NOT dismiss the popover —
+ * only the row's main click/Enter fires the action, reading the toggle state.
+ */
+export interface SidebarActionsTrailingToggle {
+	id: string;
+	checked: boolean;
+	ariaLabel: string;
+	label?: string;
+	onToggle: () => void;
+}
+
 export interface SidebarActionsPopoverItem {
 	id: string;
 	label: string;
 	icon: TemplateResult;
 	tone?: "default" | "danger";
 	quick: boolean;
+	trailingToggle?: SidebarActionsTrailingToggle;
 }
 
 export interface SidebarActionsSelectDetail {
@@ -238,9 +252,17 @@ export class SidebarActionsPopover extends LitElement {
 				this._setHighlight(this.items.length - 1);
 				return;
 			case "Enter":
+				ev.preventDefault();
+				ev.stopPropagation();
+				this._selectHighlighted(ev);
+				return;
 			case " ":
 				ev.preventDefault();
 				ev.stopPropagation();
+				// Space toggles the highlighted row's trailing checkbox when it has
+				// one (or the checkbox control itself when focused) without firing
+				// the row's action or closing the menu. Otherwise it activates.
+				if (this._toggleFromKeyboard()) return;
 				this._selectHighlighted(ev);
 				return;
 			case "Tab":
@@ -343,6 +365,31 @@ export class SidebarActionsPopover extends LitElement {
 	private _selectHighlighted(event: Event): void {
 		const item = this.items[this._highlightIndex];
 		if (item) this._select(item.id, event);
+	}
+
+	/**
+	 * Toggle a trailing checkbox from the keyboard. Targets the focused checkbox
+	 * control when one is focused, else the highlighted row's checkbox. Returns
+	 * true when a toggle fired (so the caller skips the row activation path).
+	 */
+	private _toggleFromKeyboard(): boolean {
+		if (this._closeRequested) return false;
+		const active = document.activeElement as HTMLElement | null;
+		if (active && this.contains(active) && active.dataset?.sidebarActionsToggle != null) {
+			const id = active.dataset.sidebarActionId;
+			const fromControl = this.items.find((i) => i.id === id);
+			if (fromControl?.trailingToggle) { fromControl.trailingToggle.onToggle(); return true; }
+		}
+		const item = this.items[this._highlightIndex];
+		if (item?.trailingToggle) { item.trailingToggle.onToggle(); return true; }
+		return false;
+	}
+
+	private _handleToggle(item: SidebarActionsPopoverItem, event: Event): void {
+		event.preventDefault();
+		event.stopPropagation();
+		if (this._closeRequested || !item.trailingToggle) return;
+		item.trailingToggle.onToggle();
 	}
 
 	private _select(actionId: string, event: Event): void {
@@ -558,7 +605,8 @@ export class SidebarActionsPopover extends LitElement {
 		const danger = item.tone === "danger";
 		const color = danger ? "var(--negative, var(--destructive, currentColor))" : "inherit";
 		const background = highlighted ? "var(--accent, rgba(127,127,127,0.15))" : "transparent";
-		return html`
+		const hasToggle = !!item.trailingToggle;
+		const button = html`
 			<button
 				type="button"
 				role="menuitem"
@@ -568,7 +616,7 @@ export class SidebarActionsPopover extends LitElement {
 				data-sidebar-action-quick=${item.quick ? "true" : "false"}
 				tabindex=${highlighted ? "0" : "-1"}
 				class="bobbit-sidebar-actions-row"
-				style=${`display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
+				style=${`display:flex;align-items:center;gap:8px;${hasToggle ? "flex:1;" : "width:100%;"}min-width:0;padding:6px 10px;border:0;border-radius:4px;background:${background};color:${color};font:inherit;line-height:1.2;text-align:left;cursor:pointer;`}
 				@mouseenter=${() => { this._highlightIndex = index; }}
 				@click=${(event: Event) => this._select(item.id, event)}
 			>
@@ -580,6 +628,37 @@ export class SidebarActionsPopover extends LitElement {
 				>${item.icon}</span>
 				<span data-sidebar-actions-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.label}</span>
 			</button>
+		`;
+		if (!hasToggle) return button;
+		const toggle = item.trailingToggle!;
+		return html`
+			<div
+				role="none"
+				class="bobbit-sidebar-actions-toggle-row"
+				style=${`display:flex;align-items:stretch;gap:2px;width:100%;min-width:0;border-radius:4px;background:${background};`}
+				@mouseenter=${() => { this._highlightIndex = index; }}
+			>
+				${button}
+				<span
+					role="menuitemcheckbox"
+					data-sidebar-actions-toggle
+					data-sidebar-action-id=${item.id}
+					aria-checked=${toggle.checked ? "true" : "false"}
+					aria-label=${toggle.ariaLabel}
+					title=${toggle.ariaLabel}
+					tabindex="-1"
+					style="display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 10px 6px 8px;border-radius:4px;cursor:pointer;color:var(--muted-foreground, inherit);font:inherit;line-height:1.2;white-space:nowrap;"
+					@mouseenter=${(e: Event) => { e.stopPropagation(); }}
+					@click=${(event: Event) => this._handleToggle(item, event)}
+					@keydown=${(event: KeyboardEvent) => { if (event.key === " " || event.key === "Enter") this._handleToggle(item, event); }}
+				>
+					<span
+						aria-hidden="true"
+						style=${`display:inline-flex;align-items:center;justify-content:center;width:1em;height:1em;flex:0 0 auto;border:1px solid var(--border, currentColor);border-radius:3px;background:${toggle.checked ? "var(--primary, currentColor)" : "transparent"};color:var(--primary-foreground, var(--background, #fff));font-size:0.85em;line-height:1;`}
+					>${toggle.checked ? "✓" : ""}</span>
+					${toggle.label ? html`<span style="overflow:hidden;text-overflow:ellipsis;">${toggle.label}</span>` : nothing}
+				</span>
+			</div>
 		`;
 	}
 }
