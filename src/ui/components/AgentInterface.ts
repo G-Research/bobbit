@@ -462,6 +462,7 @@ export class AgentInterface extends LitElement {
 				"verification-output-modal",
 				"annotation-popover",
 				"project-picker-popover",
+				"sidebar-actions-popover",
 				"continue-session-chooser",
 				"copy-link-fallback-dialog",
 			].join(",");

@@ -11,7 +11,7 @@ import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
 
-test.describe("Sidebar goal actions & staff @quarantine", () => {
+test.describe("Sidebar goal actions & staff", () => {
 	const goalIds: string[] = [];
 
 	test.afterAll(async () => {
@@ -55,6 +55,8 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		// Archive the goal
 		await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" });
 
+		// Desktop viewport so the sidebar-actions hamburger trigger renders
+		await page.setViewportSize({ width: 1280, height: 900 });
 		await openApp(page);
 
 		// Open the Filters popover and toggle Show Archived ON
@@ -71,10 +73,16 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
 		await goalRow.hover();
 
-		// Find and click the re-attempt button (title="Re-attempt goal")
-		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
-		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
-		await reattemptBtn.click();
+		// Re-attempt is now popover-only (quick:false). Open the sidebar actions
+		// popover via the hamburger trigger, then click the Re-attempt menu item.
+		const trigger = page.locator(
+			`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="goal"][data-sidebar-actions-id="${goal.id}"]`,
+		);
+		await expect(trigger).toBeVisible({ timeout: 5_000 });
+		await trigger.click();
+
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		// Should open a goal assistant session with a textarea
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
@@ -97,6 +105,8 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goal = await createGoal({ title: "SB22b Fresh Reattempt", cwd: nonGitCwd() });
 		goalIds.push(goal.id);
 
+		// Desktop viewport so the sidebar-actions hamburger trigger renders
+		await page.setViewportSize({ width: 1280, height: 900 });
 		await openApp(page);
 
 		const goalTitle = page.getByText("SB22b Fresh Reattempt", { exact: false }).first();
@@ -105,9 +115,15 @@ test.describe("Sidebar goal actions & staff @quarantine", () => {
 		const goalRow = goalTitle.locator("xpath=ancestor::div[contains(@class,'group')]").first();
 		await goalRow.hover();
 
-		const reattemptBtn = goalRow.locator("button[title='Re-attempt goal']");
-		await expect(reattemptBtn).toBeVisible({ timeout: 5_000 });
-		await reattemptBtn.click();
+		// Re-attempt is now popover-only (quick:false). Drive it through the popover.
+		const trigger = page.locator(
+			`[data-testid="sidebar-actions-trigger"][data-sidebar-actions-kind="goal"][data-sidebar-actions-id="${goal.id}"]`,
+		);
+		await expect(trigger).toBeVisible({ timeout: 5_000 });
+		await trigger.click();
+
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		await page.locator('sidebar-actions-popover [role="menuitem"][data-sidebar-action-id="reattempt"]').click();
 
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 

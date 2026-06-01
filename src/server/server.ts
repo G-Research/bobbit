@@ -115,6 +115,7 @@ function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
 	const goalIds = ws.viewerGoalIds;
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
+
 import { runBatchGitStatusNative } from "./skills/git-status-native.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
@@ -168,6 +169,7 @@ import { GoalManager } from "./agent/goal-manager.js";
 import { detectHostTokens, resolveHostTokenValue, sandboxTokenPolicyAllowsCodexAuth } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult } from "./agent/gate-store.js";
+import { buildGithubBranchUrl, type GoalGithubLinkResponse } from "./sidebar-actions.js";
 import { migrateToPerProjectState, recoverPreMigrationData } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -266,6 +268,31 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,reviewDecision";
+
+type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
+let _ghExecFileForTests: GhExecFileForTests | undefined;
+
+export function buildGhPrViewArgs(branch?: string): string[] {
+	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
+}
+
+async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
+	if (_ghExecFileForTests) return _ghExecFileForTests(args, { cwd, timeout });
+	const { stdout } = await execFileAsync("gh", [...args], { cwd, encoding: "utf-8", timeout });
+	return String(stdout);
+}
+
+export function __setGhExecFileForPrStatusTests(fn: GhExecFileForTests | undefined): void {
+	_ghExecFileForTests = fn;
+	__resetPrStatusCachesForTests();
+}
+
+export function __resetPrStatusCachesForTests(): void {
+	_prCache.clear();
+	_prInFlight.clear();
+	_repoPermCache.clear();
+}
 
 // Cache viewer permission per repo (rarely changes, long TTL)
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
@@ -275,9 +302,7 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	const cached = _repoPermCache.get(cwd);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const { stdout } = await execAsync("gh repo view --json viewerPermission", {
-			cwd, encoding: "utf-8", timeout: 10000,
-		});
+		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
 		_repoPermCache.set(cwd, { perm, ts: Date.now() });
 		return perm === "ADMIN";
@@ -289,15 +314,13 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 
 async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
-	const ghFields = "--json state,url,number,title,mergeable,headRefName,reviewDecision";
-	const branchArg = branch ? ` ${branch}` : "";
-	const cmd = `gh pr view${branchArg} ${ghFields}`;
+	const args = buildGhPrViewArgs(branch);
 
 	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
-			const { stdout } = await execAsync(cmd, { cwd: dir, encoding: "utf-8", timeout: 10000 });
+			const stdout = await execGh(args, dir);
 			const pr = JSON.parse(stdout);
 			const viewerIsAdmin = await getViewerIsAdmin(dir);
 			const data = { number: pr.number, url: pr.url, title: pr.title, state: pr.state, mergeable: pr.mergeable, headRefName: pr.headRefName, reviewDecision: pr.reviewDecision || null, viewerIsAdmin };
@@ -310,6 +333,10 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 	}
 	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
 	return null;
+}
+
+export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return getCachedPrStatus(cwd, branch, fallbackCwd);
 }
 
 async function getCachedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -2078,6 +2105,21 @@ async function handleApiRoute(
 			if (ctx) return ctx.project.rootPath;
 		}
 		return cwd;
+	}
+
+	/** Guard shared by the Fork endpoint: reject source sessions that cannot be
+	 * forked. The substrings (archived/terminated/delegate/child/read-only/team/
+	 * non-interactive) are load-bearing — the API E2E asserts on them. */
+	function isUnsupportedForkSource(session: any, ps: any): string | null {
+		if (!session || !ps) return "session not found";
+		if (ps.archived) return "archived sessions cannot be forked";
+		if (session.status === "terminated") return "terminated sessions cannot be forked";
+		if (session.delegateOf || ps.delegateOf) return "delegate sessions cannot be forked";
+		if (session.parentSessionId || ps.parentSessionId || session.childKind || ps.childKind) return "child sessions cannot be forked";
+		if (session.readOnly || ps.readOnly) return "read-only sessions cannot be forked";
+		if (session.nonInteractive || ps.nonInteractive) return "non-interactive sessions cannot be forked";
+		if (session.teamGoalId || ps.teamGoalId || session.teamLeadSessionId || ps.teamLeadSessionId || session.role === "team-lead" || ps.role === "team-lead") return "team sessions cannot be forked";
+		return null;
 	}
 
 	/** Get a GoalManager for the project that owns the given goal. Throws if not found. */
@@ -6356,6 +6398,46 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/goals/:id/github-link — PR URL or sanitized GitHub branch fallback
+	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
+	if (goalGithubLinkMatch && req.method === "GET") {
+		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal) { json({ available: false, reason: "goal-not-found" } satisfies GoalGithubLinkResponse); return; }
+
+		const cached = prStatusStore.get(goalId);
+		if (cached?.url) {
+			json({ available: true, kind: "pr", url: cached.url } satisfies GoalGithubLinkResponse);
+			return;
+		}
+
+		if (goal.branch && fs.existsSync(goal.cwd)) {
+			const fresh = await getCachedPrStatus(goal.cwd, goal.branch, process.cwd()).catch(() => null);
+			if (fresh?.url) {
+				prStatusStore.set(goalId, fresh);
+				json({ available: true, kind: "pr", url: fresh.url } satisfies GoalGithubLinkResponse);
+				return;
+			}
+		}
+
+		if (!goal.branch) { json({ available: false, reason: "no-branch" } satisfies GoalGithubLinkResponse); return; }
+
+		const remoteCwd = goal.repoPath || goal.cwd;
+		try {
+			const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+				cwd: remoteCwd,
+				encoding: "utf-8",
+				timeout: 5_000,
+			});
+			const branchUrl = buildGithubBranchUrl(stripTokenFromGitUrl(stdout.trim()), goal.branch);
+			if (!branchUrl) { json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse); return; }
+			json({ available: true, kind: "branch", url: branchUrl } satisfies GoalGithubLinkResponse);
+		} catch {
+			json({ available: false, reason: "no-github-remote" } satisfies GoalGithubLinkResponse);
+		}
+		return;
+	}
+
 	// POST /api/goals/:id/pr-cache-bust — invalidate PR cache for a goal
 	const goalPrCacheBustMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/pr-cache-bust$/);
 	if (req.method === 'POST' && goalPrCacheBustMatch) {
@@ -6649,6 +6731,170 @@ async function handleApiRoute(
 			json({ ok: true });
 			return;
 		}
+	}
+
+	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
+	// transcript (and tool-content / proposal drafts) into a fresh session and
+	// preserve its project/goal/task/model/role context. The caller chooses
+	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
+	if (forkMatch && req.method === "POST") {
+		const sourceId = forkMatch[1];
+		const forkBody = await readBody(req).catch(() => ({} as any));
+		// Default to a NEW worktree when the flag is omitted.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
+
+		const source = sessionManager.getSession(sourceId);
+		const ps = sessionManager.getPersistedSession(sourceId);
+		if (!ps) { json({ error: "session not found" }, 404); return; }
+		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
+
+		const unsupported = isUnsupportedForkSource(source, ps);
+		if (unsupported) { json({ error: unsupported }, 422); return; }
+
+		const projectId = ps.projectId || source.projectId;
+		if (!projectId || !projectRegistry.get(projectId)) {
+			json({ error: "source project no longer registered" }, 410);
+			return;
+		}
+
+		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
+		if (goal?.state === "todo") {
+			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		}
+
+		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+
+		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
+		// rows that never persisted `agentSessionFile`.
+		let sourceJsonl = ps.agentSessionFile;
+		if (!sourceJsonl) {
+			const recovered = sessionManager.recoverSessionFile(ps);
+			if (recovered) sourceJsonl = recovered;
+		}
+		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+		if (!ps.sandboxed) {
+			try {
+				const st = fs.statSync(sourceJsonl);
+				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
+			} catch {
+				json({ error: "source transcript missing or empty" }, 404);
+				return;
+			}
+		}
+
+		const projCwd = projectRegistry.get(projectId)!.rootPath;
+		// Worktree choice:
+		//  • newWorktree=true  → create a fresh worktree/branch off the project repo
+		//    (or a plain project-root session when the project isn't a git repo),
+		//    matching the Continue-Archived flow.
+		//  • newWorktree=false → reuse the source's existing worktree directly. Two
+		//    live sessions intentionally share the tree, so we deliberately do NOT
+		//    register worktree metadata on the fork — terminating either session
+		//    must never tear down the shared worktree/branch.
+		let sessionCwd: string;
+		let worktreeOpts: { repoPath: string } | undefined;
+		if (newWorktree) {
+			sessionCwd = projCwd;
+			try {
+				if (await isGitRepo(projCwd)) worktreeOpts = { repoPath: await getRepoRoot(projCwd) };
+			} catch { /* not a git repo — plain project-root session */ }
+		} else {
+			// Prefer the source's own cwd when it has no worktree so a standalone
+			// non-worktree session keeps its working directory instead of landing
+			// in the project root.
+			sessionCwd = ps.worktreePath || ps.cwd || projCwd;
+			worktreeOpts = undefined;
+		}
+
+		const forkId = randomUUID();
+		// Use the project root for the cloned `.jsonl` slug (same as /continue);
+		// worktree-backed sessions rotate to the final cwd-derived file after the
+		// worktree is ready, adopting this clone via switch_session.
+		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+
+		const copyCtx = { sandboxed: !!ps.sandboxed, projectId };
+		try {
+			await sessionFileCopy(copyCtx, sourceJsonl, copyCtx, destJsonl, sandboxManager ?? null);
+		} catch (err) {
+			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+			return;
+		}
+		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+		}
+		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+		}
+
+		const createOpts: any = {
+			sessionId: forkId,
+			projectId,
+			sandboxed: !!ps.sandboxed,
+			worktreeOpts,
+			preExistingAgentSessionFile: destJsonl,
+			taskId: ps.taskId,
+			reattemptGoalId: ps.reattemptGoalId,
+			staffId: ps.staffId,
+			allowedTools: ps.allowedTools,
+			skipAutoModel: !!(ps.modelProvider && ps.modelId),
+		};
+		if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
+		if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+			createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+		}
+
+		const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+		if (staff) {
+			let fullPrompt = staff.systemPrompt;
+			if (staff.memory) fullPrompt += "\n\n---\n\n## Pinned Context\n\n" + staff.memory;
+			createOpts.rolePrompt = fullPrompt;
+			createOpts.roleName = staff.roleId;
+			createOpts.accessory = staff.accessory;
+			createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+		} else {
+			const role = ps.role ? roleManager.getRole(ps.role) : undefined;
+			if (role) {
+				createOpts.rolePrompt = role.promptTemplate;
+				createOpts.roleName = role.name;
+				createOpts.role = role.name;
+				createOpts.accessory = role.accessory;
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+		}
+
+		try {
+			const fork = await sessionManager.createSession(sessionCwd, undefined, ps.goalId, ps.assistantType, createOpts);
+			const baseTitle = (ps.title || source.title || "session").trim() || "session";
+			const title = `Fork: ${baseTitle}`;
+			sessionManager.setTitle(fork.id, title, { markGenerated: true });
+			if (ps.staffId) fork.staffId = ps.staffId;
+			if (ps.modelProvider && ps.modelId) sessionManager.persistSessionModel(fork.id, ps.modelProvider, ps.modelId);
+
+			json({
+				id: fork.id,
+				cwd: fork.cwd,
+				status: fork.status,
+				projectId,
+				goalId: ps.goalId,
+				title,
+			}, 201);
+		} catch (err) {
+			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+		}
+		return;
 	}
 
 	// POST /api/sessions/:id/wait — block until session becomes idle

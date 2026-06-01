@@ -37,6 +37,208 @@ export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
 }
 
+export type SidebarCopyLinkTitle = "Copy session link" | "Copy goal link";
+
+export function absoluteHashUrl(hash: string): string {
+	const route = hash.startsWith("#")
+		? hash
+		: hash.startsWith("/")
+			? `#${hash}`
+			: `#/${hash}`;
+	if (typeof location === "undefined") return route;
+	return `${location.origin}${location.pathname}${location.search}${route}`;
+}
+
+export function sessionDeepLink(sessionId: string): string {
+	return absoluteHashUrl(`/session/${encodeURIComponent(sessionId)}`);
+}
+
+export function goalDeepLink(goalId: string): string {
+	return absoluteHashUrl(`/goal/${encodeURIComponent(goalId)}`);
+}
+
+/** Copy text via the async Clipboard API, falling back to a legacy
+ *  execCommand("copy") path so links are still copied in insecure contexts
+ *  (e.g. plain http:// over NordLynx) where the Clipboard API is blocked. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+	try {
+		if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch {
+		// Clipboard API unavailable or rejected (insecure context) — fall through.
+	}
+	return legacyCopyText(text);
+}
+
+function legacyCopyText(text: string): boolean {
+	if (typeof document === "undefined") return false;
+	let ta: HTMLTextAreaElement | null = null;
+	try {
+		ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.style.position = "fixed";
+		ta.style.top = "-1000px";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		return document.execCommand("copy");
+	} catch {
+		return false;
+	} finally {
+		ta?.remove();
+	}
+}
+
+// Standalone toast fallback. `showHeaderToast` only renders inside the session
+// header (active-session view); the landing / no-active-session sidebar has no
+// header, so we surface the SAME toast (identical `.review-toast` styling and
+// `data-testid="header-toast"`) appended to <body> when no header is mounted.
+let _sidebarToastEl: HTMLDivElement | null = null;
+let _sidebarToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function mountStandaloneSidebarToast(text: string): void {
+	if (typeof document === "undefined") return;
+	if (!_sidebarToastEl || !_sidebarToastEl.isConnected) {
+		_sidebarToastEl = document.createElement("div");
+		_sidebarToastEl.className = "review-toast";
+		_sidebarToastEl.setAttribute("data-testid", "header-toast");
+		document.body.appendChild(_sidebarToastEl);
+	}
+	_sidebarToastEl.textContent = text;
+	if (_sidebarToastTimer) clearTimeout(_sidebarToastTimer);
+	_sidebarToastTimer = setTimeout(() => {
+		_sidebarToastEl?.remove();
+		_sidebarToastEl = null;
+		_sidebarToastTimer = null;
+	}, 2500);
+}
+
+/** Flash the same "Link copied" toast the session header uses. When a session
+ *  header is mounted, reuse `showHeaderToast`; otherwise (landing / no active
+ *  session) mount a standalone toast so the flash is visible in every sidebar
+ *  context. The header's `[data-testid="copy-session-link"]` button renders
+ *  under the exact same condition as the header toast, so its presence is a
+ *  reliable, synchronous signal that the header toast will be visible. */
+async function flashSidebarToast(text: string): Promise<void> {
+	try {
+		const { showHeaderToast } = await import("./render.js");
+		showHeaderToast(text);
+	} catch {
+		// best-effort toast
+	}
+	if (typeof document === "undefined") return;
+	if (document.querySelector('[data-testid="copy-session-link"]')) return;
+	mountStandaloneSidebarToast(text);
+}
+
+export async function copySidebarLink(url: string, title: SidebarCopyLinkTitle): Promise<void> {
+	const copied = await copyTextToClipboard(url);
+	if (!copied) console.warn(`[sidebar] ${title}: failed to copy link`, url);
+	await flashSidebarToast(copied ? "Link copied" : "Couldn't copy link");
+}
+
+export type GoalGithubLinkResponse =
+	| { available: true; url: string; kind: "pr" | "branch" }
+	| { available: false; reason: "no-branch" | "no-github-remote" | "goal-not-found" };
+
+const GOAL_GITHUB_LINK_POSITIVE_TTL_MS = 60_000;
+const GOAL_GITHUB_LINK_NEGATIVE_TTL_MS = 10_000;
+
+type GoalGithubLinkCacheEntry = {
+	value: GoalGithubLinkResponse;
+	fetchedAt: number;
+};
+
+const goalGithubLinkCache = new Map<string, GoalGithubLinkCacheEntry>();
+const goalGithubLinkInFlight = new Map<string, Promise<GoalGithubLinkResponse>>();
+
+function sameGoalGithubLink(a: GoalGithubLinkResponse | undefined, b: GoalGithubLinkResponse): boolean {
+	if (!a || a.available !== b.available) return false;
+	if (a.available && b.available) return a.url === b.url && a.kind === b.kind;
+	if (!a.available && !b.available) return a.reason === b.reason;
+	return false;
+}
+
+function isGoalGithubLinkCacheEntryFresh(entry: GoalGithubLinkCacheEntry): boolean {
+	const ttl = entry.value.available ? GOAL_GITHUB_LINK_POSITIVE_TTL_MS : GOAL_GITHUB_LINK_NEGATIVE_TTL_MS;
+	return Date.now() - entry.fetchedAt < ttl;
+}
+
+function getFreshGoalGithubLinkCacheEntry(goalId: string): GoalGithubLinkCacheEntry | undefined {
+	const entry = goalGithubLinkCache.get(goalId);
+	if (!entry) return undefined;
+	if (isGoalGithubLinkCacheEntryFresh(entry)) return entry;
+	goalGithubLinkCache.delete(goalId);
+	return undefined;
+}
+
+function cacheGoalGithubLink(goalId: string, value: GoalGithubLinkResponse, skipRender = false): GoalGithubLinkResponse {
+	const changed = !sameGoalGithubLink(goalGithubLinkCache.get(goalId)?.value, value);
+	goalGithubLinkCache.set(goalId, { value, fetchedAt: Date.now() });
+	if (changed && !skipRender) renderApp();
+	return value;
+}
+
+function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
+	if (!value || typeof value !== "object") throw new Error("Invalid GitHub link response");
+	const data = value as Partial<GoalGithubLinkResponse>;
+	if (data.available === true) {
+		const url = (data as { url?: unknown }).url;
+		const kind = (data as { kind?: unknown }).kind;
+		if (typeof url === "string" && (kind === "pr" || kind === "branch")) return { available: true, url, kind };
+	}
+	if (data.available === false) {
+		const reason = (data as { reason?: unknown }).reason;
+		if (reason === "no-branch" || reason === "no-github-remote" || reason === "goal-not-found") return { available: false, reason };
+	}
+	throw new Error("Invalid GitHub link response");
+}
+
+export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
+	return getFreshGoalGithubLinkCacheEntry(goalId)?.value;
+}
+
+export function clearGoalGithubLinkCache(goalId?: string): void {
+	if (goalId) {
+		goalGithubLinkCache.delete(goalId);
+		goalGithubLinkInFlight.delete(goalId);
+	} else {
+		goalGithubLinkCache.clear();
+		goalGithubLinkInFlight.clear();
+	}
+}
+
+export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
+	const prUrl = state.prStatusCache.get(goalId)?.url;
+	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
+
+	if (!opts?.force) {
+		const cached = getFreshGoalGithubLinkCacheEntry(goalId)?.value;
+		if (cached) return cached;
+		const inFlight = goalGithubLinkInFlight.get(goalId);
+		if (inFlight) return inFlight;
+	}
+
+	const request = (async () => {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/github-link`);
+		if (res.status === 404) return cacheGoalGithubLink(goalId, { available: false, reason: "goal-not-found" }, opts?.skipRender);
+		if (!res.ok) throw new Error(`Failed to fetch goal GitHub link: ${res.status}`);
+		return cacheGoalGithubLink(goalId, parseGoalGithubLinkResponse(await res.json()), opts?.skipRender);
+	})();
+	goalGithubLinkInFlight.set(goalId, request);
+	try {
+		return await request;
+	} finally {
+		if (goalGithubLinkInFlight.get(goalId) === request) goalGithubLinkInFlight.delete(goalId);
+	}
+}
+
 // dialogs.ts imports from api.ts, so we use dynamic import to break the cycle
 async function showConnectionError(title: string, message: string, opts?: { code?: string; stack?: string }): Promise<void> {
 	const { showConnectionError: show } = await import("./dialogs.js");
@@ -217,6 +419,10 @@ export async function refreshSessions(): Promise<void> {
 					(g) => g.archived && !incomingIds.has(g.id),
 				);
 				state.goals = [...incoming, ...preservedArchived];
+				// Goal branch/repo metadata drives the GitHub menu link; invalidate lazy
+				// lookups whenever the goal list changes so negative entries don't stick
+				// after a branch or remote becomes available.
+				clearGoalGithubLinkCache();
 				// Auto-expand only newly discovered goals that have sessions — never
 				// re-expand a goal the user has already seen (and may have collapsed).
 				for (const g of incoming) {

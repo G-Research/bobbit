@@ -861,6 +861,20 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	outline: 2px solid var(--color-ring, hsl(var(--ring)));
 	outline-offset: 2px;
 }
+.toggle-switch--sm {
+	width: 22px;
+	height: 13px;
+	border-radius: 7px;
+}
+.toggle-switch--sm::after {
+	width: 10px;
+	height: 10px;
+	top: 1.5px;
+	left: 1.5px;
+}
+.toggle-switch--sm:checked::after {
+	transform: translateX(9px);
+}
 
 /* ============================================================================
  * SUGGEST GOAL BUTTON — subtle CTA on agent messages with <suggest_goal/>
