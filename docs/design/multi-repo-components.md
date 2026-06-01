@@ -44,6 +44,8 @@ multi-repo:    <rootPath>/                 ← container dir (NOT a repo)
 
 The agent's cwd in multi-repo is `<branchSlug>/` (the per-branch container), mirroring `rootPath`'s structure exactly.
 
+A single resolver — `worktree-support.ts::resolveWorktreeSupport` — decides worktree capability for the session, staff, and goal paths alike, and `createWorktreeSet` only worktrees component dirs that are real git repo roots (skipping the non-git poly-repo container). See §4.4 / §4.5.
+
 ---
 
 ## 1. Project model — components as first-class
@@ -463,6 +465,41 @@ In multi-repo, the container directory is created (`mkdir -p`) but is not itself
 ### 4.3 Existing call sites to refactor
 
 All paths in `src/server/agent/{goal-manager,session-manager,session-setup,worktree-pool}.ts` and `src/server/skills/git.ts` that currently compute `<repoPath>-wt/<branchSlug>` must call `branchContainer()` / `repoWorktreePath()` instead. Search guard: grep for `-wt`, `path.basename(repoPath)`, `path.resolve(repoPath, "..")` — replace with helpers.
+
+### 4.4 Worktree-capability resolution — single source of truth
+
+**Problem.** "Does this project support a worktree, and what is the container `repoPath`?" was answered in three places with three different rules — the session REST path (`server.ts` `POST /api/sessions`), the staff path (`staff-manager.ts`), and the goal path (`goal-manager.ts::createGoal`). The staff rule was the buggy outlier: it iterated `repoNames()` and required **every** declared repo — including a non-git `.` container in a poly-repo — to pass `isGitRepo`. In a poly-repo (a project whose root is *not* a git repo but contains git sub-repos as components), that either bailed to `supported:false` or, worse, drove `git worktree add` against the non-git container root and failed with `fatal: not a git repository`. Staff creation diverged from session creation for the same project — the opposite of the stated staff↔session parity premise.
+
+**Fix.** `src/server/agent/worktree-support.ts::resolveWorktreeSupport(components, projectRoot, cwd)` is now the single source of truth. It returns `{ supported, repoPath?, multiRepo }` and is called identically by all three paths (session, staff, goal). Centralising the decision is the whole point: a poly-repo now resolves the same way no matter who asks, so staff behaves exactly like a regular session.
+
+The decision rule:
+
+- **Multi-repo** (any component `repo !== "."`): worktrees anchor at `projectRoot` **only**. `supported` is true iff `projectRoot` is known **and** at least one distinct component repo resolves to a git repo **root** beneath it (probed with `isGitRepoRoot`, see §4.5). On success: `repoPath = projectRoot`, `multiRepo: true`. Multi-repo **never** falls through to a `cwd`/ancestor probe — doing so would let a non-git container nested inside an *unrelated* parent git repo resolve to that parent and reintroduce the bug.
+- **Single-repo** (no component `repo !== "."`): if `cwd` is inside a git repo, `repoPath = getRepoRoot(cwd)`, `multiRepo: false`, `supported: true`; otherwise unsupported.
+- **Otherwise unsupported** → callers proceed with **no worktree** (run in the original `cwd`), never throw.
+
+Call sites: `server.ts` (session) sets `worktreeOpts.repoPath` from `support.repoPath` when supported; `staff-manager.ts::projectSupportsWorktree` delegates wholesale and forwards `components`; `goal-manager.ts::createGoal` sets `repoPath` from it.
+
+### 4.5 `createWorktreeSet` skips non-git component dirs; graceful no-worktree fallback
+
+**`isGitRepoRoot` vs `isGitRepo` (`src/server/skills/git.ts`).** `isGitRepo(dir)` runs `git rev-parse --is-inside-work-tree`, which returns true for **any** path *inside* a repo — including a non-git poly-repo container that merely happens to sit under an unrelated parent git repo (the "nested-parent false positive"). `isGitRepoRoot(dir)` instead compares the canonicalized `git rev-parse --show-toplevel` against the canonicalized input dir, so it is true **only when `dir` is itself a repo root** (canonicalization is win32 case-insensitive). The distinction matters because acting on the false positive would run `git worktree add` against a directory that is not a worktree-able repo.
+
+**Skip rule.** In multi-repo mode, `createWorktreeSet(rootPath, components, branch, …)` now keeps a distinct repo only if its source dir (`<rootPath>/<repo>`) passes `isGitRepoRoot`. One rule covers four cases that must all be skipped:
+
+- the non-git `.` container in a poly-repo (the original `fatal: not a git repository` crash),
+- the nested-parent false positive (non-git container under an unrelated parent git repo),
+- non-git, data-only components, and
+- components whose source dir is missing.
+
+A `.` entry whose source *is* a git repo root (a genuine single-repo / container-root component) is still kept, so single-repo and normal all-git multi-repo behaviour is unchanged.
+
+**Graceful no-worktree fallback.** If no worktree-able git repo remains after the skip pass, `createWorktreeSet` short-circuits and returns an empty `worktrees: []` **without creating the container directory** — it never runs `git worktree add` against the non-git root. Each caller treats an empty set (or `supported:false` from §4.4) as "no worktree": run in the original `cwd`, leave `worktreePath` / `repoWorktrees` unset.
+
+- `staff-manager.ts::provisionStaffWorktree` → returns `{ sessionCwd: cwd }`.
+- `session-setup.ts::executeWorktreeAsync` → sets `noWorktreeFallback`, skips per-component setup and sandbox-branch wiring, leaves `plan.cwd` unchanged.
+- `goal-manager.ts::_doSetupWorktree` → calls `_restoreNoWorktree`, which clears the precomputed `worktreePath`/`repoWorktrees` and resets the goal `cwd` to its original (un-offset) project path.
+
+**Net effect.** Staff creation in a poly-repo now produces one worktree per git sub-repo under the branch container — byte-for-byte the same shape a regular session produces for the same project. Projects with no worktree-able git repo fall back to no-worktree instead of throwing.
 
 ---
 
