@@ -290,12 +290,16 @@ export class GoalManager {
 					const set = await createWorktreeSet(goal.repoPath!, components, goal.branch!, undefined, { worktreeRoot: worktreeRootOverride, configuredBaseRef });
 					// Defense-in-depth: if no worktree-able git sub-repo remained
 					// (createWorktreeSet skips the non-git container and non-git
-					// sub-repos), fall back gracefully to no-worktree — mark ready
-					// with cwd unchanged rather than throwing. resolveWorktreeSupport
-					// normally prevents reaching here (repoPath stays unset, so
+					// sub-repos), fall back gracefully to no-worktree. The goal
+					// should run in its ORIGINAL project cwd with no worktree —
+					// the precomputed worktreePath/cwd point at a branch container
+					// that was never created, so restore the no-worktree state:
+					// clear worktreePath/repoWorktrees and reset cwd to the
+					// un-offset project cwd. resolveWorktreeSupport normally
+					// prevents reaching here (repoPath stays unset, so
 					// setupWorktree isn't called), but guard anyway.
 					if (set.worktrees.length === 0) {
-						this.store.update(goal.id, { setupStatus: "ready", setupError: undefined });
+						this._restoreNoWorktree(goal, preliminaryOffset);
 						console.warn(`[goal-manager] No worktree-able repo for goal "${goal.title}" — proceeding without a worktree`);
 						return;
 					}
@@ -379,6 +383,34 @@ export class GoalManager {
 			setupError: String(lastError),
 		});
 		throw lastError;
+	}
+
+	/**
+	 * Restore a goal to a no-worktree state when worktree setup produced no
+	 * worktree (e.g. createWorktreeSet skipped every non-git sub-repo). The
+	 * precomputed worktreePath/cwd (set in createGoal) point at a branch
+	 * container that was never created, so we must:
+	 *   - clear worktreePath + repoWorktrees, and
+	 *   - reset cwd to the ORIGINAL project cwd (the un-offset goal cwd, before
+	 *     the worktree offset was applied) = repoPath + the same subdirectory
+	 *     offset that createGoal computed via path.relative(repoPath, cwd).
+	 * setupStatus becomes "ready" with no setupError. The goal then runs in its
+	 * original project cwd with no worktree — mirroring resolveWorktreeSupport
+	 * returning unsupported.
+	 *
+	 * `store.update` strips undefined values (so it can't clear fields); mutate
+	 * the live goal reference directly to delete worktreePath/repoWorktrees.
+	 */
+	private _restoreNoWorktree(goal: PersistedGoal, preliminaryOffset: string): void {
+		const originalCwd = preliminaryOffset && preliminaryOffset !== "."
+			? path.join(goal.repoPath!, preliminaryOffset)
+			: goal.repoPath!;
+		const live = this.store.get(goal.id);
+		if (live) {
+			delete live.worktreePath;
+			delete live.repoWorktrees;
+		}
+		this.store.update(goal.id, { cwd: originalCwd, setupStatus: "ready", setupError: undefined });
 	}
 
 	/**

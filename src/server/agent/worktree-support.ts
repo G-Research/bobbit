@@ -11,13 +11,16 @@
  * goal used a different rule. This helper unifies them.
  *
  * Decision (identical for session, staff, and goal):
- *   1. Multi-repo (any component `repo !== "."`) AND a known project root ⇒
- *      `supported`, `repoPath = projectRoot`, `multiRepo:true`. The root need
- *      NOT itself be a git repo — per-repo worktrees land beneath it and
- *      `createWorktreeSet` skips any non-git `.` container entry.
- *   2. Else, if `cwd` is inside a git repo ⇒ `supported`, `repoPath =
- *      getRepoRoot(cwd)`, `multiRepo:false`.
- *   3. Else ⇒ not supported (caller proceeds with no worktree — never throws).
+ *   - Multi-repo (any component `repo !== "."`): worktrees anchor at
+ *     `projectRoot` ONLY. Supported iff a known `projectRoot` exists AND at
+ *     least one distinct component repo resolves to a git repo ROOT beneath it.
+ *     `repoPath = projectRoot`, `multiRepo:true`. Multi-repo NEVER falls
+ *     through to the `cwd`/ancestor probe — otherwise a non-git container
+ *     nested inside an UNRELATED parent git repo would resolve to that parent
+ *     and `createWorktreeSet` could run `git worktree add` against it.
+ *   - Single-repo (no component `repo !== "."`): if `cwd` is inside a git repo
+ *     ⇒ `supported`, `repoPath = getRepoRoot(cwd)`, `multiRepo:false`; else not
+ *     supported (caller proceeds with no worktree — never throws).
  *
  * See docs/design/multi-repo-components.md §4 + §5.
  */
@@ -62,24 +65,31 @@ export async function resolveWorktreeSupport(
 ): Promise<WorktreeSupport> {
 	const multiRepo = components.some(c => c.repo !== ".");
 
-	if (multiRepo && projectRoot) {
-		// Poly-repo: the container root IS the repoPath even when it isn't itself
-		// a git repo. `createWorktreeSet` worktrees each git sub-repo and skips a
-		// non-git `.` container entry. BUT only claim multi-repo support if at
-		// least one distinct component repo actually resolves to a git repo ROOT
-		// under projectRoot — otherwise there is nothing to worktree and claiming
-		// support would make `createWorktreeSet` (and downstream callers) operate
-		// on a non-existent container. Fall through to the single-repo probe.
-		const distinct = new Set<string>();
-		for (const c of components) {
-			if (distinct.has(c.repo)) continue;
-			distinct.add(c.repo);
-			const repoSrc = path.join(projectRoot, c.repo === "." ? "" : c.repo);
-			if (await deps.isGitRepoRoot(repoSrc)) {
-				return { supported: true, repoPath: projectRoot, multiRepo: true };
+	if (multiRepo) {
+		// Multi-repo worktrees anchor at `projectRoot` ONLY. Supported iff at
+		// least one distinct component repo resolves to a git repo ROOT beneath
+		// projectRoot. `createWorktreeSet` worktrees each such git sub-repo and
+		// skips a non-git `.` container entry. Multi-repo NEVER probes
+		// `cwd`/ancestor — probing it would let a non-git container nested inside
+		// an unrelated parent git repo resolve to that parent and reintroduce the
+		// nested-parent false positive (acceptance criterion 3).
+		try {
+			if (projectRoot) {
+				const distinct = new Set<string>();
+				for (const c of components) {
+					if (distinct.has(c.repo)) continue;
+					distinct.add(c.repo);
+					const repoSrc = path.join(projectRoot, c.repo === "." ? "" : c.repo);
+					if (await deps.isGitRepoRoot(repoSrc)) {
+						return { supported: true, repoPath: projectRoot, multiRepo: true };
+					}
+				}
 			}
+		} catch {
+			return { supported: false, multiRepo: true };
 		}
-		// No git repo root among the declared components — fall through.
+		// No projectRoot, or no git repo root among the declared components.
+		return { supported: false, multiRepo: true };
 	}
 
 	try {
