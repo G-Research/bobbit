@@ -2739,6 +2739,35 @@ async function handleApiRoute(
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
 			}
+			// Pin base_ref from the live remote so new projects never have a blank,
+			// silently-resolved base. Best-effort: failures leave it blank (today's
+			// behaviour). See docs/design/base-ref.md (add-time pinning).
+			//
+			// MUST run BEFORE worktree-pool init below: the pool's baseRefResolver
+			// reads `base_ref` on each _fill()/startFilling(), so pinning the
+			// concrete value first prevents early pool entries from being created
+			// off the old `origin/HEAD` fallback.
+			try {
+				const cfg = newCtx?.projectConfigStore;
+				if (cfg && !(cfg.get("base_ref") || "").trim()) {
+					const comps = cfg.getComponents();
+					const isMultiRepo = comps.some(c => c.repo !== ".");
+					const primaryRepoPath = isMultiRepo
+						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
+						: await getRepoRoot(body.rootPath);
+					const detected = await detectBaseRefFromRemote(primaryRepoPath);
+					// Only pin when the detected ref is grammar-valid AND present in
+					// every component repo — otherwise a manual save would reject it
+					// and it could break worktree creation for the lacking component.
+					if (
+						detected
+						&& isValidBaseRefBranchGrammar(detected)
+						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
+					) {
+						cfg.set("base_ref", detected);
+					}
+				}
+			} catch { /* best-effort — leave base_ref blank */ }
 			// Initialize worktree pool if the new project is a git repo.
 			// Respect BOBBIT_SKIP_WORKTREE_POOL for E2E/CI.
 			if (!process.env.BOBBIT_SKIP_WORKTREE_POOL) {
@@ -2788,30 +2817,6 @@ async function handleApiRoute(
 					return c?.projectConfigStore.get("base_ref") || undefined;
 				});
 			}
-			// Pin base_ref from the live remote so new projects never have a blank,
-			// silently-resolved base. Best-effort: failures leave it blank (today's
-			// behaviour). See docs/design/base-ref.md (add-time pinning).
-			try {
-				const cfg = newCtx?.projectConfigStore;
-				if (cfg && !(cfg.get("base_ref") || "").trim()) {
-					const comps = cfg.getComponents();
-					const isMultiRepo = comps.some(c => c.repo !== ".");
-					const primaryRepoPath = isMultiRepo
-						? path.join(body.rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
-						: await getRepoRoot(body.rootPath);
-					const detected = await detectBaseRefFromRemote(primaryRepoPath);
-					// Only pin when the detected ref is grammar-valid AND present in
-					// every component repo — otherwise a manual save would reject it
-					// and it could break worktree creation for the lacking component.
-					if (
-						detected
-						&& isValidBaseRefBranchGrammar(detected)
-						&& (await detectedRefExistsInAllComponents(body.rootPath, comps, detected))
-					) {
-						cfg.set("base_ref", detected);
-					}
-				}
-			} catch { /* best-effort — leave base_ref blank */ }
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -2946,8 +2951,11 @@ async function handleApiRoute(
 	// Returns { resolved, detected }:
 	//   resolved = what worktrees actually branch off right now
 	//              (resolveBaseRef(primaryRepoPath, storedValue).ref)
-	//   detected = live `git ls-remote --symref origin HEAD` result, or null on
-	//              failure (offline / no remote).
+	//   detected = live `git ls-remote --symref origin HEAD` result, but ONLY
+	//              when it is saveable (passes the same grammar + cross-component
+	//              existence checks add-time pinning applies); otherwise null
+	//              (offline / no remote / not saveable). Guarantees any non-null
+	//              `detected` the UI fills can be saved without rejection.
 	// Scoped to the project's pool/primary repo (same selection as add-time
 	// pinning). No mutation. See docs/design/base-ref.md.
 	const baseRefDetectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/base-ref\/detect$/);
@@ -2963,7 +2971,18 @@ async function handleApiRoute(
 				? path.join(rootPath, comps.find(c => c.repo !== ".")?.repo ?? ".")
 				: await getRepoRoot(rootPath);
 			const resolved = (await resolveBaseRef(primaryRepoPath, cfg.get("base_ref"))).ref;
-			const detected = await detectBaseRefFromRemote(primaryRepoPath);
+			// `detected` must be SAVEABLE — null it out unless it passes the same
+			// checks add-time pinning applies (grammar + cross-component existence).
+			// The Settings "Detect from remote" button fills this value, so a
+			// non-saveable value here would be rejected by the normal Save path.
+			let detected = await detectBaseRefFromRemote(primaryRepoPath);
+			if (
+				detected
+				&& (!isValidBaseRefBranchGrammar(detected)
+					|| !(await detectedRefExistsInAllComponents(rootPath, comps, detected)))
+			) {
+				detected = null;
+			}
 			json({ resolved, detected });
 		} catch (err: any) {
 			jsonError(400, err);

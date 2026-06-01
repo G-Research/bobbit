@@ -46,8 +46,11 @@ at add time).
 
 - **Where**: `POST /api/projects` and the provisional→promote path
   `POST /api/projects/:id/promote` (`src/server/server.ts`). Both run a
-  best-effort pin before responding, only when the stored `base_ref` is blank
-  (an explicitly-supplied value is respected).
+  best-effort pin, only when the stored `base_ref` is blank (an
+  explicitly-supplied value is respected). In `POST /api/projects` the pin runs
+  **before** worktree-pool initialisation — the pool's `baseRefResolver` reads
+  `base_ref` on each fill, so pinning the concrete value first prevents early
+  pool entries from being created off the old `origin/HEAD` fallback.
 - **How**: `detectBaseRefFromRemote(repoPath)` runs `git ls-remote --symref
   origin HEAD` against the **live remote** (not the stale local `origin/HEAD`
   cache), parses the first `ref: refs/heads/<branch>` line via the pure
@@ -69,7 +72,10 @@ at add time).
   `GET /api/projects/:id/base-ref/detect` returns
   `{ resolved, detected }` — `resolved` is `resolveBaseRef(primaryRepoPath,
   storedValue).ref` (exactly what worktrees branch off right now), `detected` is
-  the live `detectBaseRefFromRemote` result (null offline). Settings uses this to
+  the live `detectBaseRefFromRemote` result **filtered to be saveable**: it is
+  nulled out unless it passes the same grammar + cross-component existence checks
+  add-time pinning applies. This guarantees any non-null `detected` the UI fills
+  via "Detect from remote" will pass save-time validation. Settings uses this to
   show the resolved fallback as a placeholder and to drive a "Detect from remote"
   action that fills and saves a concrete value.
 - **Reversible**: blanking the field in Settings opts back into the dynamic
