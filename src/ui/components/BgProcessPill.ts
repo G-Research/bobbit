@@ -1,6 +1,8 @@
 import { html, LitElement, nothing, render as litRender } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
+import { icon } from "@mariozechner/mini-lit";
+import { Skull } from "lucide";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 import "./LiveTimer.js";
 
@@ -152,9 +154,20 @@ export class BgProcessPill extends LitElement {
 		}
 	}
 
-	private _kill = (e: MouseEvent) => {
+	private _kill = async (e: MouseEvent) => {
 		e.stopPropagation();
-		if (this.onKill) this.onKill(this.process.id);
+		if (!this.onKill) return;
+		const { confirmAction } = await import("../../app/dialogs-lazy.js");
+		const confirmed = await confirmAction(
+			"Kill process",
+			`Kill "${this._displayName()}" (pid ${this.process.pid})? This stops the running background process.`,
+			"Kill",
+			true,
+			// Lift above the expanded popover portal (z-50) so the modal is never hidden.
+			60,
+		);
+		if (!confirmed) return;
+		this.onKill(this.process.id);
 	};
 
 	private _dismiss = (e: MouseEvent) => {
@@ -297,7 +310,7 @@ export class BgProcessPill extends LitElement {
 					style="font-size:11px; line-height:1; min-width:16px; align-self:stretch"
 					@click=${isRunning ? this._kill : this._dismiss}
 					title=${isRunning ? "Kill process" : "Remove"}
-				>✕</button>
+				>${isRunning ? icon(Skull, "xs") : "✕"}</button>
 			</span>
 		`;
 	}
