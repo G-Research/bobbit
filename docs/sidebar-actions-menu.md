@@ -43,6 +43,7 @@ Mobile suppresses the hamburger entirely. Existing inline quick actions stay vis
 Menu-only actions are intentionally desktop-only in v1:
 
 - Session `Copy link`
+- Session `Open in new window`
 - Session `Fork`
 - Goal `Copy link`
 - Goal `Open on GitHub`
@@ -60,6 +61,7 @@ This avoids adding a redundant dense tap target on mobile, where the quick actio
 | `Terminate` | Quick + menu | Plain live session | Opens the existing terminate confirmation. |
 | `End team` | Quick + menu | Team-lead session | Opens the existing team-end confirmation with goal context. |
 | `Copy link` | Menu only | Live session / team-lead row | Copies an absolute hash route for the session. |
+| `Open in new window` | Menu only | Live session / team-lead row | Opens the session's deep link in a new browser window/tab (see [Open in new window](#open-in-new-window-and-middle-click)). |
 | `Fork` | Menu only | Forkable live session (see [Forkability policy](#forkability-policy)) | Clones the session's conversation history into a new session and connects to it. Carries an inline **New worktree** checkbox (see below). |
 
 Archived sessions and unsupported live session kinds do not expose `Fork`. The server also enforces this with `422` responses so clients cannot bypass UI availability checks.
@@ -107,6 +109,21 @@ Copying is resilient to insecure contexts:
 2. If the async clipboard API is unavailable or rejects (for example over plain `http://`), it falls back to a hidden `<textarea>` plus `document.execCommand("copy")` so the link still copies.
 
 The toast reuses the session header's `showHeaderToast` mechanism (`data-testid="header-toast"`). When no session header is mounted, a standalone toast element is mounted so the confirmation still appears. The `CopyLinkFallbackDialog` modal is no longer used by the sidebar copy path.
+
+### Open in new window and middle-click
+
+Bobbit is single-page — clicking a session row swaps the active session in place. `Open in new window` lets the user keep their current session open while viewing another, which is useful for comparing two sessions or watching a team-lead and a delegate side by side.
+
+The `Open in new window` menu item uses the lucide `ExternalLink` icon (matching the session header's open-in-new-tab affordance) and sits right after `Copy link`. Selecting it opens the session's deep link (`#/session/<id>`) in a new browser window/tab. Both paths go through the same helpers in `src/app/render-helpers.ts`:
+
+- `openSessionInNewWindow(sessionId)` → `openExternalUrl(sessionDeepLink(sessionId))`.
+- `openExternalUrl(url)` calls `window.open(url, "_blank", "noopener")` and nulls out `opener`, so the popup cannot reach back into the originating window.
+
+The same action is bound to **middle-click** anywhere on a session row. The row root carries an `@auxclick` handler that fires on `event.button === 1`, calls `preventDefault()` / `stopPropagation()` so the row's normal left-click navigation does **not** also run, and then opens the new window. The result: middle-clicking a row opens that session in a new window/tab *without* changing the currently active session in the current window — matching the browser-wide convention that middle-click opens links in the background.
+
+Both the menu item and the middle-click shortcut are wired for regular session rows and team-lead rows (`buildSessionSidebarActions()` / `buildTeamLeadSidebarActions()` for the menu item; the `@auxclick` handlers on the row roots in `renderSessionRow()` / `renderTeamLeadRow()`), so child/delegate rows that render through `renderSessionRow` get it too.
+
+This is intentionally **mouse-only** — there is no keyboard shortcut and no entry in `shortcut-registry.ts`, so the menu label carries no `shortcutHint()`.
 
 ### Fork session endpoint
 
@@ -218,4 +235,4 @@ npm run test:unit
 npm run test:e2e
 ```
 
-The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`.
+The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut both opening the session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, and mobile v1 hamburger suppression. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`.

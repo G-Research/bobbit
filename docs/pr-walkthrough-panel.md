@@ -23,6 +23,22 @@ For GitHub PR launches, the tab belongs to the child walkthrough session, not th
 
 The UI switches/focuses the child session, expands the needed sidebar containers, and shows the child underneath the launching session using first-class `parentSessionId` / `childKind: "pr-walkthrough"` metadata, not delegate-session metadata. This nesting applies to ordinary sessions, goal sessions, team member sessions, and team-lead rows, and it is restored after reload from persisted session metadata and sidebar expansion state. Terminated or archived walkthrough children are hidden while **Show Archived** is off and reappear nested under their parent when it is on.
 
+## Sidebar expansion state
+
+A first-class child (PR walkthrough: `parentSessionId` set, no `delegateOf`) is shown nested under its parent and the parent gets an expand/collapse chevron. Whether that chevron actually hides the child is governed by one of **three** independent sidebar expansion models, all defined in `src/app/state.ts` and consulted by the row renderers in `src/app/render-helpers.ts` (`renderSessionRow`, `renderTeamGroup`). They differ in default state and in whether the persisted set records expansions or collapses:
+
+| Model | State + accessors | localStorage key | Semantics | Default | Governs |
+|---|---|---|---|---|---|
+| Archived / delegate | `expandedDelegateParents`, `isArchivedParentExpanded` / `setArchivedParentExpanded` / `toggleArchivedParentExpanded` | `bobbit-expanded-delegate-parents` | **opt-in** — set holds IDs that are expanded | collapsed | delegate-session children and archived-parent nesting |
+| Team lead | `collapsedTeamLeadSessions`, `isTeamLeadExpanded` / `setTeamLeadExpanded` / `toggleTeamLeadExpanded` | `bobbit-collapsed-team-leads` | **opt-out** — set holds IDs that are collapsed | expanded | a team lead's team members |
+| First-class parent | `collapsedFirstClassParents`, `isFirstClassParentExpanded` / `setFirstClassParentExpanded` / `toggleFirstClassParentExpanded` | `bobbit-collapsed-first-class-parents` | **opt-out** — set holds IDs that are collapsed | expanded | a parent's first-class (PR walkthrough) children |
+
+**Why first-class parents use the opt-out model.** A PR walkthrough child is launched on purpose and the user almost always wants to watch it, so it must be **visible by default** — exactly like team members under a team lead. But the chevron must still work: the user can collapse the nesting and that choice must persist across reload. The opt-in `expandedDelegateParents` model can't express "expanded by default", so first-class parents get their own opt-out set modeled on `collapsedTeamLeadSessions`.
+
+This third model fixed two chevron bugs. Previously `renderSessionRow` force-expanded any parent with a first-class child (an `autoExpanded` short-circuit), making its chevron a no-op; it now routes both the chevron glyph and child visibility through `isFirstClassParentExpanded`. And `renderTeamGroup` gated the team lead's first-class children on an independent always-on condition, so collapsing the lead never hid its PR-walkthrough child; the lead's first-class children are now gated on the same `tlExpanded` (i.e. `isTeamLeadExpanded`) that gates the team members, so the lead's chevron collapses members and the walkthrough child together.
+
+All three sets are pruned for archived session IDs in `resetArchivedExpandState()` so explicit per-session choices don't leak back when a session is archived and its ID is later reused.
+
 The same ready walkthrough can be reviewed in:
 
 - the child session side panel beside chat (with user-initiated fullscreen /

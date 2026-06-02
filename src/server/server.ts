@@ -53,6 +53,7 @@ import type { TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
@@ -9162,9 +9163,8 @@ async function handleApiRoute(
 		const controller = new AbortController();
 		bgProcessManager.registerWait(sessionId, controller);
 		try {
-			const result = await bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal);
-			if (!result) { json({ error: "Process not found" }, 404); return; }
-			json(result);
+			await streamBgWaitResponse(res, () =>
+				bgProcessManager.waitForExit(sessionId, processId, timeout * 1000, controller.signal));
 		} finally {
 			bgProcessManager.unregisterWait(sessionId, controller);
 		}

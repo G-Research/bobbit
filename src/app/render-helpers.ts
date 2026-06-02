@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, ExternalLink, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -12,6 +12,8 @@ import {
 	isTeamLeadExpanded,
 	toggleArchivedParentExpanded,
 	isArchivedParentExpanded,
+	toggleFirstClassParentExpanded,
+	isFirstClassParentExpanded,
 	isArchivedSectionExpanded,
 	setArchivedSectionExpanded,
 	type GatewaySession,
@@ -572,6 +574,13 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
 		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
+		},
 	];
 	if (canForkSidebarSession(session)) {
 		actions.push({
@@ -617,6 +626,13 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
 }
@@ -696,6 +712,10 @@ function canForkSidebarSession(session: GatewaySession): boolean {
 function openExternalUrl(url: string): void {
 	const opened = window.open(url, "_blank", "noopener");
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
+}
+
+function openSessionInNewWindow(sessionId: string): void {
+	openExternalUrl(sessionDeepLink(sessionId));
 }
 
 function prefetchGoalGithubLink(goalId: string): void {
@@ -823,8 +843,10 @@ export function renderSessionRow(session: GatewaySession) {
 	const liveChildren = visibleLiveChildrenForParent(session.id);
 	const archivedChildren = state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
-	const autoExpanded = liveChildren.some(isFirstClassChildSession);
-	const childrenExpanded = hasChildren && (autoExpanded || isArchivedParentExpanded(session.id));
+	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession);
+	const childrenExpanded = hasChildren && (hasFirstClassChild
+		? isFirstClassParentExpanded(session.id)
+		: isArchivedParentExpanded(session.id));
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
@@ -845,11 +867,12 @@ export function renderSessionRow(session: GatewaySession) {
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;font-size: 1em;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); if (hasFirstClassChild) toggleFirstClassParentExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
@@ -997,6 +1020,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${chevron}
 			<div class="shrink-0 flex items-center justify-center">
@@ -1274,12 +1298,9 @@ export function renderGoalGroup(goal: Goal) {
 			: [];
 		const liveLeadChildren = visibleLiveChildrenForParent(teamLead.id);
 		const archivedLeadChildren = state.showArchived ? archivedChildrenForParent(teamLead.id) : [];
-		const leadChildRowsExpanded = liveLeadChildren.some(isFirstClassChildSession)
-			|| archivedLeadChildren.length > 0
-			|| isArchivedParentExpanded(teamLead.id);
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
-			${leadChildRowsExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
+			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
