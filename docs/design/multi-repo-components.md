@@ -667,6 +667,8 @@ export function readHandoff(task: PersistedTask, repo: string):
 - `GET /api/goals/:id/git-diff?repo=<name>` → diff scoped to a repo. Without `?repo=`, returns concatenated diff with per-repo headers.
 - `batchGitStatus()` (existing) is reused per-repo and aggregated.
 
+The matching **session-context** endpoints (`GET /api/sessions/:id/git-status` and `git-diff`) reached parity in a follow-up — see §13 for the session envelope, the synthesized aggregate for non-git branch containers, per-repo diff routing, and the container-diff security hardening.
+
 ### 6.3 PR-per-repo
 
 Existing PR helpers (`pr-status-store.ts`, `gh pr list/create` in workflow `ready-to-merge` gates) operate per-repo. The bobbit appendix workflow uses pure-`run` steps (`git push origin {{branch}}:refs/heads/{{branch}}`, `gh pr list …`) that already act on whatever cwd the step runs in. For multi-repo, the assistant generates one set of these steps per repo, each with `component:` set to the appropriate component:
@@ -942,6 +944,62 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 1. **Manual gates (§3.6)** — UI affordance is "Mark passed" button. Confirm whether we want a comment field on manual-pass for an audit trail. Default: yes, store `metadata.note`.
 2. **Pool sizing for multi-repo** — `worktree_pool_size` is per-set today. For an N-repo project, this means N×size physical worktrees. If memory/disk pressure becomes an issue we can introduce `worktree_pool_repo_concurrency` later.
 3. **`worktree_root` + sandbox** — currently warned and ignored. If users push back, we can mount a host bind under `/workspace-wt-host` and reroute. Not in the AC.
+
+---
+
+## 13. Session git-status / git-diff parity (addendum, 2026-06)
+
+§6.2 described the **goal** dashboard's aggregated git status/diff. This section documents the matching **session-context** work: the per-session pill + popover above the composer now show the same multi-repo aggregate that the goal dashboard does. Goal and single-repo behaviour are byte-for-byte unchanged; only the session code path gained multi-repo awareness.
+
+**Why this was needed.** A polyrepo session's worktrees live one level under a non-git *branch container* (see §4.2). The session widget previously statused only the container `cwd` and rendered a flat single-repo result — so a true polyrepo session showed just a branch name with no per-repo breakdown and no aggregated dirty/ahead/behind/diff counts. The goal path already solved this; sessions were the remaining gap.
+
+### 13.1 Envelope shape (`GET /api/sessions/:id/git-status`)
+
+The handler in `src/server/server.ts` (the `/api/sessions/:id/git-status` branch) mirrors the goal handler's envelope:
+
+- **Single-repo / no `repoWorktrees`** → unchanged flat shape plus back-compat keys: `{ ...result, aggregate: result, repos: { ".": result } }`. The existing 400 `{ error: "Not a git repository" }` and 500 paths are preserved, and the auto-push of unpushed feature/`session/…` branches still runs on `result`.
+- **Multi-repo** (`session.repoWorktrees.length > 1`) → `{ ...aggregate, aggregate, repos }`, where `repos` is keyed by **repo name** and each entry is a full `GitStatusResult`.
+
+**Shape note.** In-memory `session.repoWorktrees` is an **array** `Array<{ repo, repoPath, worktreePath }>` (see `session-manager.ts`), unlike the goal's `Record<string, string>` (`goal.repoWorktrees`). The session handler iterates the array and statuses each entry's `worktreePath` (sandboxed sessions route through the container via the `containerId` argument, exactly as the flat path does). Per-repo failures are swallowed (`try/catch`, skip the entry) so one broken sub-repo cannot 500 the whole status. Each per-repo `batchGitStatus` call honours the project `base_ref` config (`configuredBaseRef`), matching the goal handler and `docs/design/base-ref.md` §5.
+
+### 13.2 Synthesized aggregate for non-git containers
+
+The root container status comes from `batchGitStatus(cwd, …)`. In a **true polyrepo** the container `cwd` is *not* itself a git repo (§4.2), so this returns `null` / throws. That is **non-fatal in multi-repo mode** — the per-repo worktrees are the source of truth. The aggregate is resolved as:
+
+1. **Root `result` exists** (the container is itself a git repo — e.g. a `repo: "."` component, or a single-repo collapse) → use it as the aggregate, for back-compat with the flat shape.
+2. **Root `result` is null** (genuine non-git container) → **synthesize** an aggregate from the per-repo results. All sub-repos share the same session branch, so `branch` / `primaryBranch` / `primaryRef` / `isOnPrimary` / `hasUpstream` / `mergedIntoPrimary` are taken from the **first** repo, while the numeric counters (`ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `insertionsVsPrimary`, `deletionsVsPrimary`) are **summed** across repos. `clean` is the **AND** across repos (clean only if every repo is clean), `unpushed` is the **OR**, `status` is `[]` (the flat file list is suppressed — the per-repo popover sections are authoritative), and `summary` is `"<N> repos"`.
+
+If neither a root `result` nor any per-repo result is available, the handler returns the same 400 `{ error: "Not a git repository" }` as the flat path.
+
+**Why synthesize rather than 400.** Without the synthesized aggregate, a polyrepo session whose container is non-git would have no top-level status object at all, so the pill would fall back to rendering only the branch name — the exact gap this work closes. Synthesizing lets the pill show real aggregated stats even though the directory the agent's `cwd` points at is not a git repo.
+
+**Auto-push** only runs when the root `result` exists. For a non-git-container polyrepo there is no root repo to push, and the individual session branches are already published at worktree-claim time (§5.2 / `docs/design/remove-session-worktree-rename.md`), so skipping container auto-push is correct.
+
+### 13.3 Per-repo diff routing (`GET /api/sessions/:id/git-diff`)
+
+Clicking a file inside a per-repo popover section opens that repo's diff. The widget's `_openDiffModal(file, repo?)` (`src/ui/components/GitStatusWidget.ts`) appends `?repo=<name>` to the diff URL when the file came from a multi-repo section. The session `git-diff` handler resolves `?repo=` against `session.repoWorktrees` (find the array entry whose `repo` matches) and diffs that entry's `worktreePath`; an absent or `.` repo param (or an unknown name) falls back to the container `cwd`. This mirrors the goal `git-diff` handler's `?repo=` resolution.
+
+### 13.4 Container-path security: argument-vector exec
+
+`getGitDiff`'s container branch previously built a `/bin/sh -c "git diff … -- <file>"` string with the user-supplied `file` interpolated in, a command-injection vector. It now uses **argument-vector execution** via `execGitArgsSafe` → `execGitArgs`, which runs `docker exec -w <cwd> <containerId> git <args…>` with `file` passed as a distinct argv element — never parsed by a shell. (Path-traversal / absolute / drive-letter `file` values are still rejected up front with `INVALID_PATH`.)
+
+**Why argv instead of a shell string.** Passing `file` through `/bin/sh -c` meant any shell metacharacters in the filename were interpreted by the container's shell. Argv execution removes the shell entirely, so the diff target is always treated as literal data regardless of its contents — closing the injection vector without changing behaviour for legitimate paths.
+
+### 13.5 Widget rendering
+
+`src/ui/components/GitStatusWidget.ts` already rendered per-repo sections and a multi-repo pill label; this work completed the aggregation:
+
+- **Pill** — in multi-repo mode (`repos` has >1 entry) the pill shows `"<N> changed across <M> repos"` (dirty-file count summed across repos, `M` = count of dirty repos) **plus** full aggregated primary-comparison segments. `_aggregatePrimaryStats()` sums `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` across the `repos` envelope entries, and `_segmentSpans()` renders the shared coloured `↓behind ↑ahead +ins -del` markup (the same helper the flat `_pillSegments()` uses, so styling never diverges).
+- **Clean collapse** — multi-repo clean state (every repo clean *and* all summed primary stats zero, with no PR) collapses to the single green "clean" indicator. This is derived from the **aggregate**, **independent of `isOnPrimary`** — a clean `session/…` branch must still collapse to "clean" even though it is not on the primary branch. Flat/single-repo collapse logic is unchanged (it still considers `isOnPrimary` / `mergedIntoPrimary`).
+- **Popover** — `_renderMultiRepoSections()` renders one collapsible section per repo with per-repo counts; dirty repos auto-expand, clean ones stay collapsed.
+
+The per-repo envelope entries already carried `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` (added by the line-counts work in `docs/design/git-status-widget-reliability.md` §13), so the pill aggregation reuses those fields directly rather than recomputing anything server-side.
+
+### 13.6 Tests
+
+- **Widget unit / file-fixture** — the `git-status-widget-multi-repo` bundle (`tests/fixtures/build-bundle.ts`) covers the full-aggregate pill (summed dirty + ahead/behind/+/−) and the clean-collapse case.
+- **API E2E** — `GET /api/sessions/:id/git-status` returns `{ repos, aggregate }` for a multi-repo session and the unchanged flat + `repos: { ".": result }` shape for single-repo.
+- **Browser E2E** (`tests/e2e/ui/`) — a polyrepo session shows aggregated pill stats; the popover shows one section per repo with correct counts; a clean repo renders collapsed; clicking a file opens that repo's diff; state persists across reload.
 
 ---
 
