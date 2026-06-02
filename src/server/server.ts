@@ -7772,7 +7772,27 @@ async function handleApiRoute(
 		}
 		if (!result) { json({ error: "Not a git repository" }, 400); return; }
 
-		json(result);
+		// Multi-repo aware envelope (parity with the goal git-status handler):
+		// include a `repos` map + `aggregate` for back-compat. `session.repoWorktrees`
+		// is an ARRAY `Array<{repo, repoPath, worktreePath}>` (session-manager.ts),
+		// unlike the goal's `Record<string,string>`.
+		const sessRepoWorktrees = session.repoWorktrees;
+		if (sessRepoWorktrees && sessRepoWorktrees.length > 1) {
+			const repos: Record<string, typeof result> = {};
+			for (const { repo, worktreePath } of sessRepoWorktrees) {
+				try {
+					if (cid || fs.existsSync(worktreePath)) {
+						const r = await batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
+						if (r) repos[repo] = r;
+					}
+				} catch { /* per-repo failure non-fatal */ }
+			}
+			json({ ...result, aggregate: result, repos });
+		} else {
+			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
+			// `repos: { ".": result }, aggregate: result`.
+			json({ ...result, aggregate: result, repos: { ".": result } });
+		}
 
 		// Auto-push: for feature branches with unpushed commits, publish the current
 		// branch to its matching remote ref regardless of inherited upstream config.
@@ -7966,8 +7986,16 @@ async function handleApiRoute(
 		const cid = session.sandboxed ? session.containerId : undefined;
 		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const file = url.searchParams.get("file") || undefined;
+		// Per-repo diff routing (multi-repo sessions). `session.repoWorktrees` is
+		// an array; resolve the requested repo's worktree path, else fall back to cwd.
+		const repoParam = url.searchParams.get("repo") || undefined;
+		let diffCwd = cwd;
+		if (repoParam && repoParam !== ".") {
+			const entry = session.repoWorktrees?.find(w => w.repo === repoParam);
+			if (entry) diffCwd = entry.worktreePath;
+		}
 		try {
-			const diff = await getGitDiff(cwd, file, cid);
+			const diff = await getGitDiff(diffCwd, file, cid);
 			json({ diff });
 		} catch (err: any) {
 			if (err.message === "INVALID_PATH") { json({ error: "Invalid file path" }, 400); return; }

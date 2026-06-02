@@ -76,6 +76,83 @@ test.describe("GitStatusWidget — multi-repo collapsibles", () => {
 		await expect(pillAggregate).toHaveText(/4 changed across 2 repos/);
 	});
 
+	test("multi-repo pill shows summed ahead/behind/+/- segments across repos", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...baseProps,
+			repos: {
+				api: {
+					statusFiles: [
+						{ file: "src/a.ts", status: "M" },
+						{ file: "src/b.ts", status: "M" },
+					],
+					aheadOfPrimary: 2,
+					behindPrimary: 1,
+					insertionsVsPrimary: 10,
+					deletionsVsPrimary: 3,
+				},
+				web: {
+					statusFiles: [{ file: "index.html", status: "M" }],
+					aheadOfPrimary: 1,
+					behindPrimary: 0,
+					insertionsVsPrimary: 5,
+					deletionsVsPrimary: 2,
+				},
+			},
+		});
+
+		const pill = page.locator("git-status-widget button");
+		// Dirty label: 3 changed across 2 repos.
+		await expect(page.locator('git-status-widget [data-testid="pill-multi-repo-aggregate"]'))
+			.toHaveText(/3 changed across 2 repos/);
+		// Summed segments: ↓1 ↑3 +15 -5.
+		const pillText = await pill.innerText();
+		expect(pillText).toContain("↓1");
+		expect(pillText).toContain("↑3");
+		expect(pillText).toContain("+15");
+		expect(pillText).toContain("-5");
+		// 'clean' must NOT appear when stats are non-zero.
+		expect(pillText).not.toMatch(/\bclean\b/);
+	});
+
+	test("clean multi-repo with non-zero summed ahead/behind still shows segments, not 'clean'", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...baseProps,
+			clean: true,
+			statusFiles: [],
+			repos: {
+				api: { statusFiles: [], clean: true, aheadOfPrimary: 2, behindPrimary: 0, insertionsVsPrimary: 0, deletionsVsPrimary: 0 },
+				web: { statusFiles: [], clean: true, aheadOfPrimary: 1, behindPrimary: 0, insertionsVsPrimary: 0, deletionsVsPrimary: 0 },
+			},
+		});
+		const pillText = await page.locator("git-status-widget button").innerText();
+		// No dirty label (all clean) but summed ahead = 3 segment present.
+		await expect(page.locator('git-status-widget [data-testid="pill-multi-repo-aggregate"]')).toHaveCount(0);
+		expect(pillText).toContain("↑3");
+		expect(pillText).not.toMatch(/\bclean\b/);
+	});
+
+	test("fully clean multi-repo (no dirty, no stats) collapses to single 'clean' indicator", async ({ page }) => {
+		await gotoAndWait(page);
+		await mount(page, {
+			...baseProps,
+			clean: true,
+			isOnPrimary: true,
+			statusFiles: [],
+			repos: {
+				api: { statusFiles: [], clean: true, aheadOfPrimary: 0, behindPrimary: 0, insertionsVsPrimary: 0, deletionsVsPrimary: 0 },
+				web: { statusFiles: [], clean: true, aheadOfPrimary: 0, behindPrimary: 0, insertionsVsPrimary: 0, deletionsVsPrimary: 0 },
+			},
+		});
+		// No aggregate label, no segments — collapses to a single 'clean'.
+		await expect(page.locator('git-status-widget [data-testid="pill-multi-repo-aggregate"]')).toHaveCount(0);
+		const pillText = await page.locator("git-status-widget button").innerText();
+		expect(pillText).toMatch(/\bclean\b/);
+		expect(pillText).not.toContain("↑");
+		expect(pillText).not.toContain("↓");
+	});
+
 	test("single-repo (one entry) does NOT trigger multi-repo rendering", async ({ page }) => {
 		await gotoAndWait(page);
 		await mount(page, {
