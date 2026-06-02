@@ -665,10 +665,10 @@ export function canonicalizeTarget(input: LaunchWalkthroughRequest): PrWalkthrou
 		const canonicalKey = host === "github.com"
 			? `github:${owner}/${repo}#${number}`
 			: `github:${host}/${owner}/${repo}#${number}`;
-		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, canonicalKey };
+		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, host, canonicalKey };
 	}
 	if (number !== undefined) {
-		return { provider: "github", prUrl, number, baseSha, headSha, canonicalKey: `github:unknown/unknown#${number}` };
+		return { provider: "github", prUrl, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
 	}
 	if (baseSha && headSha) {
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };
@@ -706,13 +706,26 @@ async function inferGithubRepository(cwd: string): Promise<{ owner: string; repo
 	}
 }
 
+// Centralized prefix rule for github changeset ids: github.com (and
+// www.github.com) keep the historical un-prefixed shape for back-compat with
+// already-persisted jobs/tabs; every other host is qualified by the normalized
+// host so two trusted enterprise hosts sharing owner/repo/number do not collide
+// on the same tabId / stored-payload path / export lookup.
+function githubChangesetHostPrefix(host: string | undefined): string {
+	const normalized = normalizeGithubHost(host);
+	return normalized === "github.com" ? "" : `${normalized}/`;
+}
+
 function changesetIdForTarget(target: PrWalkthroughTarget): string {
 	if (target.provider === "github") {
 		const repo = target.owner && target.repo ? `${target.owner}/${target.repo}` : "unknown/unknown";
-		return `github:${repo}#${target.number ?? "unknown"}`;
+		const prefix = githubChangesetHostPrefix(target.host);
+		return `github:${prefix}${repo}#${target.number ?? "unknown"}`;
 	}
 	return `${shortSha(target.baseSha ?? "unknown")}..${shortSha(target.headSha ?? "unknown")}`;
 }
+
+export const changesetIdForTargetForTesting = changesetIdForTarget;
 
 function titleForTarget(target: PrWalkthroughTarget): string {
 	return target.provider === "github" && target.number !== undefined ? `PR #${target.number} Walkthrough` : "Changeset Walkthrough";
