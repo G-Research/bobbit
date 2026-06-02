@@ -1,8 +1,13 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "../../../src/ui/components/pr-walkthrough/fixtures.js";
+import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards, getGuidedOrientationFixtureCards } from "../../../src/ui/components/pr-walkthrough/fixtures.js";
 import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+
+// Tests in the guided-orientation describe block set this to inject cards whose
+// orientation card uses the `sections` (guided step-through) model. Cleared after
+// each test so the rest of the suite keeps the default fixture cards.
+let fixtureCardsOverride: ReturnType<typeof getFixturePrWalkthroughCards> | undefined;
 
 const WALKTHROUGH_COMMAND = "/walkthrough-pr 123";
 const WALKTHROUGH_URL = "https://github.com/SuuBro/bobbit/pull/637";
@@ -46,7 +51,7 @@ function resolvedWalkthroughPayload(prNumber: string | number, title = "Resolved
 			prBody,
 			title: `PR #${prNumber}: ${title}`,
 		},
-		cards: getFixturePrWalkthroughCards(),
+		cards: fixtureCardsOverride ?? getFixturePrWalkthroughCards(),
 		warnings: [{ code: "test-warning", severity: "info", message: "Resolver warning surfaced." }],
 		export: { provider: "github", available: true },
 	};
@@ -1508,5 +1513,105 @@ This is the author's source description with **markdown**.
 		const hunkSignatureErrors = [...consoleErrors, ...pageErrors].filter((message) =>
 			/Cannot read properties of undefined \(reading 'match'\)/.test(message) || /hunkSignature/.test(message));
 		expect(hunkSignatureErrors, `panel must not throw the hunkSignature TypeError: ${hunkSignatureErrors.join("\n")}`).toEqual([]);
+	});
+});
+
+function guideCounter(page: Page): Locator {
+	return walkthroughPanel(page).getByTestId("pr-walkthrough-guide-counter");
+}
+
+function orientationStep(page: Page, beatIndex: number): Locator {
+	return walkthroughPanel(page).locator(`${tid("pr-walkthrough-orientation-step")}[data-beat-index="${beatIndex}"]`);
+}
+
+test.describe("PR walkthrough orientation guided steps", () => {
+	test.beforeEach(() => {
+		fixtureCardsOverride = getGuidedOrientationFixtureCards();
+	});
+	test.afterEach(() => {
+		fixtureCardsOverride = undefined;
+	});
+
+	test("orientation renders as guided beats with a counter, Back/Next, and synced rail circles", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+
+		const guide = panel.getByTestId("pr-walkthrough-orientation-guide");
+		await expect(guide, "guided orientation card should render the step-through instead of a wall of text").toBeVisible({ timeout: 10_000 });
+		await expect(guide.getByTestId("pr-walkthrough-guide-eyebrow")).toContainText("Phase 0 · Orientation");
+		await expect(guideCounter(page), "guide should expose a 1-based step counter").toHaveText("1 / 6");
+		await expect(guide.getByTestId("pr-walkthrough-beat-verdict"), "first beat should lead with the verdict badge").toBeVisible();
+		await expect(guide.getByTestId("pr-walkthrough-beat-stats"), "at-a-glance beat should surface diff stats").toBeVisible();
+
+		const back = guide.getByTestId("pr-walkthrough-guide-back");
+		const next = guide.getByTestId("pr-walkthrough-guide-next");
+		await expect(back, "Back should be disabled on the first beat").toBeDisabled();
+		await expect(next, "Next should read forward on non-final beats").toContainText("Next");
+
+		// Rail circles reflect the current beat.
+		const rail = panel.getByTestId("pr-walkthrough-orientation-rail");
+		await expect(rail.getByTestId("pr-walkthrough-orientation-step"), "one rail circle per orientation beat").toHaveCount(6);
+		await expect(orientationStep(page, 0), "first circle should be current").toHaveAttribute("data-state", "current");
+		await expect(orientationStep(page, 1), "later circles should start upcoming").toHaveAttribute("data-state", "upcoming");
+
+		await next.click();
+		await expect(guideCounter(page)).toHaveText("2 / 6");
+		await expect(orientationStep(page, 0), "advancing should mark the prior beat visited").toHaveAttribute("data-state", "visited");
+		await expect(orientationStep(page, 1), "the new beat should become current").toHaveAttribute("data-state", "current");
+		await expect(back, "Back should enable once past the first beat").toBeEnabled();
+
+		await back.click();
+		await expect(guideCounter(page)).toHaveText("1 / 6");
+		await expect(orientationStep(page, 0)).toHaveAttribute("data-state", "current");
+	});
+
+	test("clicking a rail circle jumps to that beat and the merge beat reframes the recommendation", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		await expect(panel.getByTestId("pr-walkthrough-orientation-guide")).toBeVisible({ timeout: 10_000 });
+
+		await orientationStep(page, 3).click();
+		await expect(guideCounter(page)).toHaveText("4 / 6");
+		await expect(panel.getByTestId("pr-walkthrough-beat-heading"), "the reframed merge beat must lead with the question").toHaveText("Should it be merged?");
+
+		await orientationStep(page, 4).click();
+		await expect(guideCounter(page)).toHaveText("5 / 6");
+		await expect(panel.getByTestId("pr-walkthrough-beat-heading")).toHaveText("What to scrutinise");
+		await expect(panel.getByTestId("pr-walkthrough-beat-concern-count"), "concerns beat should show the blocking/non-blocking tally").toContainText(/\d+ blocking, \d+ non-blocking/);
+		await expect(panel.getByTestId("pr-walkthrough-beat-concern").first()).toBeVisible();
+
+		await orientationStep(page, 5).click();
+		await expect(guideCounter(page)).toHaveText("6 / 6");
+		await expect(panel.getByTestId("pr-walkthrough-beat-filemap"), "where-to-look beat should render the file → role map").toBeVisible();
+		await expect(panel.getByTestId("pr-walkthrough-guide-next"), "final beat advances into the review").toContainText("Start review");
+	});
+
+	test("finishing the last beat completes orientation and advances to the first review card", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		await expect(panel.getByTestId("pr-walkthrough-orientation-guide")).toBeVisible({ timeout: 10_000 });
+
+		await orientationStep(page, 5).click();
+		await expect(guideCounter(page)).toHaveText("6 / 6");
+		await panel.getByTestId("pr-walkthrough-guide-next").click();
+
+		await expect(activeCard(page), "Start review should move to the next review card").toHaveAttribute("data-card-id", "design-resize", { timeout: 10_000 });
+		await expect(activeCard(page).getByTestId("pr-walkthrough-card-title"), "follow-on card keeps the full descriptive title in its heading").toContainText("render.ts: fullscreen predicate");
+
+		// Returning to a completed orientation shows every circle as visited.
+		await panel.getByTestId("pr-walkthrough-phase-button").filter({ hasText: "Orientation" }).click();
+		await expect(panel.getByTestId("pr-walkthrough-orientation-guide")).toBeVisible();
+		await expect(orientationStep(page, 0)).toHaveAttribute("data-state", "current");
+		await expect(orientationStep(page, 5), "beats after the cursor stay upcoming when re-entering at beat 0").toHaveAttribute("data-state", "upcoming");
+	});
+
+	test("every sidebar rail label stays short enough to avoid truncation", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		await expect(panel.getByTestId("pr-walkthrough-labelled-rail")).toBeVisible({ timeout: 10_000 });
+
+		const overflowing = await panel.locator(".card-title").evaluateAll((nodes) =>
+			nodes
+				.map((node) => ({ text: (node.textContent || "").trim(), scroll: node.scrollWidth, client: node.clientWidth }))
+				.filter((entry) => entry.scroll > entry.client + 1)
+				.map((entry) => entry.text),
+		);
+		expect(overflowing, `rail labels should not overflow/truncate: ${overflowing.join(", ")}`).toEqual([]);
 	});
 });

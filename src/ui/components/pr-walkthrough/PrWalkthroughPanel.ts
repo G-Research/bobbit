@@ -2,10 +2,11 @@ import { icon } from "@mariozechner/mini-lit";
 import { css, html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { PanelLeftClose, PanelLeftOpen } from "lucide";
-import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
+import { buildPrWalkthroughDraft, cardRequiresCommentForDislike, defaultDiffModeForWidth, type PrWalkthroughCard, type PrWalkthroughCardSection, type PrWalkthroughChangesetRef, type PrWalkthroughComment, type PrWalkthroughDecision, type PrWalkthroughDiffBlock, type PrWalkthroughDiffLine, type PrWalkthroughDiffMode, type PrWalkthroughOrientationConcern, type PrWalkthroughOrientationFileRole, type PrWalkthroughOrientationVerdict, type PrWalkthroughPhaseId, type PrWalkthroughReviewDraft, type PrWalkthroughSuggestedComment } from "./types.js";
 import { fixturePrWalkthroughChangeset, getFixturePrWalkthroughCards } from "./fixtures.js";
 import { gatewayFetch } from "../../../app/gateway-fetch.js";
 import { safeExternalUrl } from "../../../shared/pr-walkthrough/url-safety.js";
+import { deriveNavLabel } from "../../../shared/pr-walkthrough/nav-label.js";
 
 const PHASES: Array<{ id: PrWalkthroughPhaseId; label: string }> = [
 	{ id: "orientation", label: "Orientation" },
@@ -139,6 +140,7 @@ export class PrWalkthroughPanel extends LitElement {
 	@property({ attribute: "persistence-key" }) persistenceKey = "";
 
 	@state() private _activeCardId = "";
+	@state() private _orientationBeatIndex = 0;
 	@state() private _panelWidth = 1024;
 	@state() private _observedNarrow = false;
 	@state() private _railCollapsed = false;
@@ -671,12 +673,71 @@ export class PrWalkthroughPanel extends LitElement {
 		.body.narrow .actions { gap: 6px; justify-content: flex-end; }
 		.body.narrow .actions button { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; }
 
+		/* ===== Orientation guided steps ===== */
+		.guide-card .inner { min-height: 100%; }
+		.guide { max-width: 720px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column; flex: 1 1 auto; }
+		.guide-top { display: flex; align-items: center; gap: 12px; }
+		.guide .eyebrow { display: inline-block; padding: 3px 9px; border-radius: 5px; background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 14%, transparent); color: var(--chart-1, var(--primary, Highlight)); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+		.guide-count { margin-left: auto; color: var(--muted-foreground, GrayText); font-size: 11px; font-weight: 600; }
+		.guide-stage { flex: 1 1 auto; display: grid; align-content: start; gap: 14px; padding: 26px 2px 10px; }
+		.beat { display: grid; gap: 12px; animation: pr-walkthrough-beat-in 180ms ease; }
+		@keyframes pr-walkthrough-beat-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+		.beat h2 { margin: 4px 0 0; font-size: 26px; line-height: 1.18; letter-spacing: -0.015em; }
+		.beat p { margin: 0; font-size: 15px; line-height: 1.7; color: color-mix(in oklch, var(--foreground, CanvasText) 88%, var(--muted-foreground, GrayText)); max-width: 640px; }
+		.beat-verdict { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+		.beat-stats { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-foreground, GrayText); font-size: 12px; }
+		.beat-stats .stat-add { color: var(--positive, var(--chart-3, green)); font-weight: 700; }
+		.beat-stats .stat-del { color: var(--negative, var(--chart-5, red)); font-weight: 700; }
+		.verdict { display: inline-flex; align-items: center; gap: 10px; padding: 7px 12px 7px 10px; border: 1px solid color-mix(in oklch, var(--positive, green) 40%, var(--border, ButtonBorder)); border-radius: 999px; background: color-mix(in oklch, var(--positive, green) 12%, transparent); }
+		.verdict .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--positive, green); }
+		.verdict b { color: var(--positive, green); font-weight: 800; letter-spacing: 0.04em; }
+		.verdict .conf { color: var(--muted-foreground, GrayText); font-size: 12px; }
+		.verdict.verdict-request_changes { border-color: color-mix(in oklch, var(--negative, red) 40%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, red) 12%, transparent); }
+		.verdict.verdict-request_changes .dot, .verdict.verdict-request_changes b { background: var(--negative, red); color: var(--negative, red); }
+		.verdict.verdict-comment { border-color: color-mix(in oklch, var(--warning, orange) 40%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--warning, orange) 12%, transparent); }
+		.verdict.verdict-comment .dot, .verdict.verdict-comment b { background: var(--warning, orange); color: var(--warning, orange); }
+		.verdict.verdict-unknown { border-color: var(--border, ButtonBorder); background: color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent); }
+		.verdict.verdict-unknown .dot { background: var(--muted-foreground, GrayText); }
+		.verdict.verdict-unknown b { color: var(--muted-foreground, GrayText); }
+		.sec-label { color: var(--muted-foreground, GrayText); font-size: 10.5px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+		.concern-list { display: grid; gap: 8px; }
+		.filemap { display: grid; gap: 6px; }
+		.filerow { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 10px; padding: 8px 10px; border: 1px solid var(--border, ButtonBorder); border-radius: 9px; background: var(--card, Canvas); }
+		.filerow code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--foreground, CanvasText); }
+		.filerow .role { font-size: 10px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+		.filerow .role.core { color: var(--chart-1, var(--primary, Highlight)); background: color-mix(in oklch, var(--chart-1, var(--primary, Highlight)) 15%, transparent); }
+		.filerow .role.support { color: var(--chart-2, var(--info, Highlight)); background: color-mix(in oklch, var(--chart-2, var(--info, Highlight)) 16%, transparent); }
+		.filerow .role.verify { color: var(--chart-3, var(--positive, green)); background: color-mix(in oklch, var(--chart-3, var(--positive, green)) 16%, transparent); }
+		.filerow .role.docs { color: var(--muted-foreground, GrayText); background: color-mix(in oklch, var(--muted-foreground, GrayText) 14%, transparent); }
+		.filerow .note { grid-column: 2; color: var(--muted-foreground, GrayText); font-size: 12px; }
+		.concern { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 10px 12px; border: 1px solid var(--border, ButtonBorder); border-left-width: 3px; border-radius: 8px; background: var(--card, Canvas); }
+		.concern.blocking { border-left-color: var(--negative, red); }
+		.concern.non-blocking { border-left-color: var(--info, var(--primary, Highlight)); }
+		.concern.q { border-left-color: var(--warning, orange); }
+		.concern.nit { border-left-color: var(--muted-foreground, GrayText); }
+		.concern .tag { align-self: start; margin-top: 1px; font-size: 9.5px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; }
+		.concern.blocking .tag { color: var(--negative, red); background: color-mix(in oklch, var(--negative, red) 14%, transparent); }
+		.concern.non-blocking .tag { color: var(--info, var(--primary, Highlight)); background: color-mix(in oklch, var(--info, var(--primary, Highlight)) 16%, transparent); }
+		.concern.q .tag { color: var(--warning, orange); background: color-mix(in oklch, var(--warning, orange) 16%, transparent); }
+		.concern.nit .tag { color: var(--muted-foreground, GrayText); background: color-mix(in oklch, var(--muted-foreground, GrayText) 14%, transparent); }
+		.concern p { margin: 0; line-height: 1.55; }
+		.guide-nav { display: flex; align-items: center; gap: 10px; padding: 14px 0 4px; border-top: 1px solid var(--border, ButtonBorder); }
+		.guide-nav .spacer { flex: 1 1 auto; }
+		.guide-nav button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 7px 14px; border: 1px solid var(--border, ButtonBorder); border-radius: 9px; background: var(--card, Canvas); color: inherit; font: inherit; font-weight: 600; }
+		.guide-nav button:hover:not(:disabled) { background: color-mix(in oklch, var(--primary, Highlight) 10%, transparent); }
+		.guide-nav button:disabled { opacity: 0.45; cursor: not-allowed; }
+		.guide-nav .next { border-color: color-mix(in oklch, var(--primary, Highlight) 55%, var(--border, ButtonBorder)); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
+		.guide-nav .ghost { border-color: transparent; background: transparent; color: var(--muted-foreground, GrayText); }
+		/* Per-beat orientation rail circles */
+		.rail:not(.collapsed) .card-dot.orientation-dot.done { background-color: color-mix(in oklch, var(--primary, Highlight) 60%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 60%, transparent); color: var(--primary-foreground, HighlightText); opacity: 1; }
+
 		@media (max-width: 760px) {
 			.header { padding: 12px; }
 			.title-row { display: grid; }
 			.progress-wrap { min-width: 0; }
 			.progress-label { text-align: left; }
 			.content { padding: 12px; }
+			.beat h2 { font-size: 22px; }
 		}
 	`;
 
@@ -696,6 +757,9 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	protected override willUpdate(changed: PropertyValues<this>): void {
+		if (changed.has("jobId") || changed.has("cards")) {
+			this._orientationBeatIndex = 0;
+		}
 		if (changed.has("persistenceKey")) {
 			this.restorePersistedState();
 			return;
@@ -753,8 +817,65 @@ export class PrWalkthroughPanel extends LitElement {
 		return (this.reviewCards[0] ?? this.cards[0])?.id ?? "";
 	}
 
+	private get orientationCard(): PrWalkthroughCard | undefined {
+		return this.cards.find(card => card.phaseId === "orientation");
+	}
+
+	/** True when the orientation card uses the guided step-through (`sections`) model. */
+	private get isOrientationGuided(): boolean {
+		return !!this.orientationCard?.sections?.length;
+	}
+
+	private isGuidedOrientationCard(card: PrWalkthroughCard | undefined): boolean {
+		return !!card && card.phaseId === "orientation" && !!card.sections?.length;
+	}
+
+	private clampBeatIndex(index: number): number {
+		const count = this.orientationCard?.sections?.length ?? 0;
+		if (count <= 0) return 0;
+		return Math.max(0, Math.min(count - 1, index));
+	}
+
+	private selectOrientationBeat(index: number): void {
+		const orientation = this.orientationCard;
+		if (!orientation) return;
+		this._orientationBeatIndex = this.clampBeatIndex(index);
+		if (this._activeCardId !== orientation.id) {
+			this.selectCard(orientation.id);
+		} else {
+			this.persistState();
+		}
+	}
+
+	private goOrientationBack = (): void => {
+		this._orientationBeatIndex = this.clampBeatIndex(this._orientationBeatIndex - 1);
+	};
+
+	private goOrientationNext = (): void => {
+		const sections = this.orientationCard?.sections ?? [];
+		if (this._orientationBeatIndex >= sections.length - 1) {
+			this.completeOrientationAndAdvance();
+			return;
+		}
+		this._orientationBeatIndex = this.clampBeatIndex(this._orientationBeatIndex + 1);
+	};
+
+	private completeOrientationAndAdvance(): void {
+		const orientation = this.orientationCard;
+		if (!orientation) return;
+		if (!this._completedCardIds.includes(orientation.id)) {
+			this._completedCardIds = [...this._completedCardIds, orientation.id];
+			this.emitDraftChange();
+		}
+		this.persistState();
+		const next = this.nextCardId(orientation.id);
+		if (next) this.selectCard(next);
+		else this.emitComplete();
+	}
+
 	private resetInteractionState(): void {
 		this._activeCardId = this.firstAvailableCardId();
+		this._orientationBeatIndex = 0;
 		this._diffModeOverride = undefined;
 		this._comments = [];
 		this._decisions = {};
@@ -948,12 +1069,13 @@ export class PrWalkthroughPanel extends LitElement {
 					if (cards.length === 0) return nothing;
 					const phaseActive = cards.some(card => card.id === this.activeCard?.id);
 					const complete = cards.every(card => this._completedCardIds.includes(card.id) || card.phaseId === "audit");
+					const guidedOrientationPhase = phase.id === "orientation" && this.isOrientationGuided;
 					return html`
 						<section class="phase ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-phase-id=${phase.id}>
-							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => this.selectCard(cards[0].id)} title=${`Phase ${index}: ${phase.label}`}>
+							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => guidedOrientationPhase ? this.selectOrientationBeat(0) : this.selectCard(cards[0].id)} title=${`Phase ${index}: ${phase.label}`}>
 								<span class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" aria-hidden="true">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
 							</button>
-							<div class="phase-cards">${cards.map(card => this.renderRailCardButton(card))}</div>
+							<div class="phase-cards">${guidedOrientationPhase ? this.renderOrientationRailCircles() : cards.map(card => this.renderRailCardButton(card))}</div>
 						</section>
 					`;
 				})}
@@ -1044,9 +1166,40 @@ export class PrWalkthroughPanel extends LitElement {
 		return html`
 			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
 				<span class="card-dot card-dot-rail ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" aria-hidden="true">${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</span>
-				<span class="card-title">${card.title}</span>
+				<span class="card-title">${card.navLabel ?? deriveNavLabel(card.title)}</span>
 				<span class="card-decision">${comments ? comments : decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>
 			</button>
+		`;
+	}
+
+	private renderOrientationRailCircles(): TemplateResult | typeof nothing {
+		const orientation = this.orientationCard;
+		const sections = orientation?.sections ?? [];
+		if (!orientation || sections.length === 0) return nothing;
+		const orientationActive = this.activeCard?.id === orientation.id;
+		const orientationComplete = this._completedCardIds.includes(orientation.id);
+		const beatIndex = this.clampBeatIndex(this._orientationBeatIndex);
+		return html`
+			<div class="phase-cards orientation-steps" data-testid="pr-walkthrough-orientation-rail">
+				${sections.map((section, idx) => {
+					const current = orientationActive && idx === beatIndex;
+					const done = orientationActive ? idx < beatIndex : orientationComplete;
+					return html`
+						<button
+							class="card-button orientation-step ${current ? "active" : ""}"
+							data-testid="pr-walkthrough-orientation-step"
+							data-beat-index=${idx}
+							data-state=${current ? "current" : done ? "visited" : "upcoming"}
+							type="button"
+							title=${section.heading}
+							@click=${() => this.selectOrientationBeat(idx)}
+						>
+							<span class="card-dot orientation-dot ${current ? "active" : ""} ${done && !current ? "done" : ""}" aria-hidden="true">${done && !current ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg>` : nothing}</span>
+							<span class="card-title">${section.navLabel}</span>
+						</button>
+					`;
+				})}
+			</div>
 		`;
 	}
 
@@ -1197,6 +1350,7 @@ export class PrWalkthroughPanel extends LitElement {
 	}
 
 	private renderCard(card: PrWalkthroughCard): TemplateResult {
+		if (this.isGuidedOrientationCard(card)) return this.renderOrientationGuideCard(card);
 		const phaseIndex = PHASES.findIndex(item => item.id === card.phaseId);
 		const phase = PHASES[phaseIndex]?.label ?? card.phaseId;
 		const dislikeDisabled = cardRequiresCommentForDislike({ comments: this._comments }, card.id);
@@ -1227,6 +1381,125 @@ export class PrWalkthroughPanel extends LitElement {
 					</div>
 				</div>
 			</article>
+		`;
+	}
+
+	private renderOrientationGuideCard(card: PrWalkthroughCard): TemplateResult {
+		const sections = card.sections ?? [];
+		const index = this.clampBeatIndex(this._orientationBeatIndex);
+		const section = sections[index];
+		const isLast = index >= sections.length - 1;
+		return html`
+			<article class="card guide-card" data-testid="pr-walkthrough-card" data-active="true" data-card-id=${card.id} data-phase-id=${card.phaseId}>
+				<div class="inner">
+					<div class="guide" data-testid="pr-walkthrough-orientation-guide">
+						<div class="guide-top">
+							<span class="eyebrow" data-testid="pr-walkthrough-guide-eyebrow">Phase 0 · Orientation</span>
+							<span class="guide-count" data-testid="pr-walkthrough-guide-counter">${index + 1} / ${sections.length}</span>
+						</div>
+						<div class="guide-stage">
+							${section ? this.renderOrientationBeat(card, section) : nothing}
+						</div>
+						<div class="guide-nav" data-testid="pr-walkthrough-guide-nav">
+							<button class="ghost" data-testid="pr-walkthrough-guide-back" type="button" ?disabled=${index === 0} @click=${this.goOrientationBack}>‹ Back</button>
+							<div class="spacer"></div>
+							<button class="next" data-testid="pr-walkthrough-guide-next" type="button" @click=${this.goOrientationNext}>${isLast ? "Start review →" : "Next →"}</button>
+						</div>
+					</div>
+				</div>
+			</article>
+		`;
+	}
+
+	private renderOrientationBeat(card: PrWalkthroughCard, section: PrWalkthroughCardSection): TemplateResult {
+		const paragraphs = (section.body ?? "").split(/\n{2,}|\n/).map(part => part.trim()).filter(Boolean);
+		return html`
+			<div class="beat show" data-testid="pr-walkthrough-beat" data-beat-id=${section.id}>
+				${section.verdict ? this.renderOrientationVerdict(section.verdict, section.showStats === true) : section.showStats ? html`<div class="beat-verdict">${this.renderOrientationStats()}</div>` : nothing}
+				${section.eyebrow ? html`<span class="sec-label" data-testid="pr-walkthrough-beat-eyebrow">${section.eyebrow}</span>` : nothing}
+				<h2 data-testid="pr-walkthrough-beat-heading">${section.heading}</h2>
+				${paragraphs.map(text => html`<p>${text}</p>`)}
+				${section.concerns?.length ? this.renderOrientationConcerns(section.concerns) : nothing}
+				${section.fileRoles?.length ? this.renderOrientationFileRoles(section.fileRoles) : nothing}
+				${section.showOriginalDescription ? this.renderOriginalPrDescription(card) : nothing}
+			</div>
+		`;
+	}
+
+	private renderOrientationVerdict(verdict: PrWalkthroughOrientationVerdict, showStats: boolean): TemplateResult {
+		const label = verdict.recommendation === "approve" ? "APPROVE"
+			: verdict.recommendation === "request_changes" ? "REQUEST CHANGES"
+			: verdict.recommendation === "comment" ? "COMMENT"
+			: "UNKNOWN";
+		return html`
+			<div class="beat-verdict">
+				<span class="verdict verdict-${verdict.recommendation}" data-testid="pr-walkthrough-beat-verdict">
+					<span class="dot" aria-hidden="true"></span>
+					<b>${label}</b>
+					<span class="conf">· ${verdict.confidence} confidence</span>
+				</span>
+				${showStats ? this.renderOrientationStats() : nothing}
+			</div>
+		`;
+	}
+
+	private renderOrientationStats(): TemplateResult {
+		const stats = this.changesetStats;
+		return html`
+			<span class="beat-stats" data-testid="pr-walkthrough-beat-stats">
+				<span class="stat-files">${stats.files} files</span>
+				<span class="stat-sep" aria-hidden="true">·</span>
+				<span class="stat-add">+${this.formatNumber(stats.additions)}</span>
+				<span class="stat-del">-${this.formatNumber(stats.deletions)}</span>
+			</span>
+		`;
+	}
+
+	private renderOrientationConcerns(concerns: PrWalkthroughOrientationConcern[]): TemplateResult {
+		const blocking = concerns.filter(concern => concern.severity === "blocking").length;
+		const nonBlocking = concerns.length - blocking;
+		const severityClass: Record<PrWalkthroughOrientationConcern["severity"], string> = {
+			blocking: "blocking",
+			non_blocking: "non-blocking",
+			question: "q",
+			nit: "nit",
+		};
+		const severityTag: Record<PrWalkthroughOrientationConcern["severity"], string> = {
+			blocking: "Blocking",
+			non_blocking: "Non-blocking",
+			question: "Question",
+			nit: "Nit",
+		};
+		return html`
+			<div class="concern-list" data-testid="pr-walkthrough-beat-concerns">
+				<span class="sec-label" data-testid="pr-walkthrough-beat-concern-count">${blocking} blocking, ${nonBlocking} non-blocking</span>
+				${concerns.map(concern => html`
+					<div class="concern ${severityClass[concern.severity]}" data-testid="pr-walkthrough-beat-concern" data-severity=${concern.severity}>
+						<span class="tag">${severityTag[concern.severity]}</span>
+						<p>${concern.text}</p>
+					</div>
+				`)}
+			</div>
+		`;
+	}
+
+	private renderOrientationFileRoles(fileRoles: PrWalkthroughOrientationFileRole[]): TemplateResult {
+		const roleLabel: Record<PrWalkthroughOrientationFileRole["role"], string> = {
+			core: "Core",
+			support: "Support",
+			verify: "Verify",
+			docs: "Docs",
+		};
+		return html`
+			<div class="filemap" data-testid="pr-walkthrough-beat-filemap">
+				${fileRoles.map(entry => html`
+					<div class="filerow" data-testid="pr-walkthrough-beat-filerow">
+						<span class="role ${entry.role}">${roleLabel[entry.role]}</span>
+						<code>${entry.file}</code>
+						${entry.note ? html`<span class="note">${entry.note}</span>` : nothing}
+					</div>
+				`)}
+			</div>
 		`;
 	}
 

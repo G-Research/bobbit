@@ -1,4 +1,4 @@
-import type { PrWalkthroughCard, PrWalkthroughChangesetRef } from "./types.js";
+import type { PrWalkthroughCard, PrWalkthroughCardSection, PrWalkthroughChangesetRef } from "./types.js";
 
 export const fixturePrWalkthroughChangeset: PrWalkthroughChangesetRef = {
 	baseSha: "9f4c2a1",
@@ -273,6 +273,148 @@ export function getFixturePrWalkthroughCards(): PrWalkthroughCard[] {
 					diffBlockId: "audit-remaining-lines",
 					lineId: "ar-3",
 					body: "Audit generated changeset IDs against URL and PR-number launches so review state does not collide between walkthrough tabs.",
+				},
+			],
+		},
+	];
+}
+
+const guidedOrientationSections: PrWalkthroughCardSection[] = [
+	{
+		id: "at-a-glance",
+		navLabel: "At a glance",
+		heading: "A net-deletion UI fix",
+		verdict: { recommendation: "approve", confidence: "medium", summary: "Shares the preview panel resize path." },
+		body: "The in-app walkthrough panel now resizes exactly like the HTML preview panel — one shared code path instead of two.",
+		showStats: true,
+	},
+	{
+		id: "why-it-exists",
+		navLabel: "Why it exists",
+		eyebrow: "The problem",
+		heading: "Why it exists",
+		body: "The in-app walkthrough side-panel's resize controls were dead. The previous attempt patched the standalone pop-out route, where the controls are meaningless.",
+	},
+	{
+		id: "what-it-changes",
+		navLabel: "What it changes",
+		eyebrow: "The change",
+		heading: "What it actually does",
+		body: "Deletes walkthrough-specific fullscreen special-casing so the panel shares the preview panel's rules and the standalone route reverts to chromeless.",
+	},
+	{
+		id: "should-merge",
+		navLabel: "Should we merge",
+		eyebrow: "The decision",
+		heading: "Should it be merged?",
+		body: "Yes — approve, medium confidence. Two resize code paths collapse into one, backed by a reproducing E2E that fails before and passes after.",
+	},
+	{
+		id: "what-to-watch",
+		navLabel: "What to watch",
+		heading: "What to scrutinise",
+		concerns: [
+			{ severity: "non_blocking", text: "A live walkthrough child can now be fullscreened, which hides the chat prompt. Confirm that is acceptable." },
+			{ severity: "question", text: "All coverage is E2E. Confirm CI runs the browser specs for UI-only PRs." },
+			{ severity: "nit", text: "A fullscreenState helper is duplicated across the spec files." },
+		],
+	},
+	{
+		id: "where-to-look",
+		navLabel: "Where to look",
+		heading: "Where to look",
+		body: "Start in render.ts, then pr-walkthrough.ts, then the specs.",
+		fileRoles: [
+			{ role: "core", file: "src/app/render.ts", note: "fullscreen branch + standalone panel rendering" },
+			{ role: "core", file: "src/app/pr-walkthrough.ts", note: "job upsert / patch ready handling" },
+			{ role: "support", file: "src/app/main.ts", note: "keyboard-shortcut detection" },
+			{ role: "verify", file: "tests/e2e/ui/pr-walkthrough-*.spec.ts", note: "new + inverted tests" },
+		],
+		showOriginalDescription: true,
+	},
+];
+
+/**
+ * Fixture cards where the orientation card uses the guided step-through `sections`
+ * model, plus follow-on cards with long titles and explicit short `navLabel`s.
+ * Used to exercise the orientation stepper and rail-circle navigation in tests.
+ */
+export function getGuidedOrientationFixtureCards(): PrWalkthroughCard[] {
+	return [
+		{
+			id: "orientation-scope",
+			phaseId: "orientation",
+			title: "Fix in-app PR walkthrough panel resize controls",
+			navLabel: "Orientation",
+			summary: "Shares the preview panel resize path so the walkthrough panel stops special-casing fullscreen.",
+			sections: guidedOrientationSections,
+			diffBlocks: [],
+		},
+		{
+			id: "design-resize",
+			phaseId: "design",
+			title: "render.ts: fullscreen predicate and standalone panel simplification",
+			navLabel: "Resize logic",
+			summary: "Reuses the preview panel's resize logic instead of walkthrough-specific fullscreen handling.",
+			diffBlocks: [
+				{
+					id: "design-resize-block",
+					filePath: "src/app/render.ts",
+					hunks: [
+						{
+							id: "design-resize-h1",
+							header: "@@ -100,6 +100,8 @@ function prWalkthroughPanel()",
+							lines: [
+								{ id: "dz-1", side: "context", oldLine: 100, newLine: 100, kind: "context", text: "const status = tab.state.status;" },
+								{ id: "dz-2", side: "new", newLine: 101, kind: "add", text: "const fullscreen = previewPanelFullscreen(state);" },
+							],
+						},
+					],
+				},
+			],
+		},
+		{
+			id: "significant-ready",
+			phaseId: "significant",
+			title: "pr-walkthrough.ts: job upsert and ready handling",
+			navLabel: "Ready handling",
+			summary: "Patches job upsert so the ready payload hydrates the panel without resetting fullscreen.",
+			diffBlocks: [
+				{
+					id: "significant-ready-block",
+					filePath: "src/app/pr-walkthrough.ts",
+					hunks: [
+						{
+							id: "significant-ready-h1",
+							header: "@@ -120,6 +120,9 @@ export function upsertWalkthroughJob()",
+							lines: [
+								{ id: "sr-1", side: "context", oldLine: 120, newLine: 120, kind: "context", text: "const existing = jobs.get(jobId);" },
+								{ id: "sr-2", side: "new", newLine: 121, kind: "add", text: "if (existing?.status === \"ready\") return mergeReady(existing, patch);" },
+							],
+						},
+					],
+				},
+			],
+		},
+		{
+			id: "audit-checklist",
+			phaseId: "audit",
+			title: "E2E: reproducing test and audit review checklist",
+			navLabel: "Audit checklist",
+			summary: "Remaining lines and the reproducing E2E feed the final review draft.",
+			diffBlocks: [
+				{
+					id: "audit-checklist-block",
+					filePath: "tests/e2e/ui/pr-walkthrough-real.spec.ts",
+					hunks: [
+						{
+							id: "audit-checklist-h1",
+							header: "@@ -10,0 +11,4 @@",
+							lines: [
+								{ id: "ac-1", side: "new", newLine: 11, kind: "add", text: "test(\"resize controls are user-initiated\", async ({ page }) => {" },
+							],
+						},
+					],
 				},
 			],
 		},
