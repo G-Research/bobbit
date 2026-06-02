@@ -6,14 +6,18 @@ export const NAV_LABEL_MAX_WORDS = 3;
 export const NAV_LABEL_MAX_CHARS = 24;
 
 const NAV_LABEL_ERROR = `nav_label must be ≤${NAV_LABEL_MAX_WORDS} words and ≤${NAV_LABEL_MAX_CHARS} characters.`;
+const NAV_LABEL_EMPTY_ERROR = "nav_label must not be empty.";
 
 /**
- * Validate a nav label: ≤3 words AND ≤24 chars after trim.
- * Returns an actionable error string, or null when valid.
+ * Validate a nav label: non-empty after trim AND ≤3 words AND ≤24 chars.
+ * Returns an actionable error string, or null when valid. An empty or
+ * whitespace-only label is invalid so callers that validate-then-fallback
+ * derive a compact label from the title instead of rendering a blank rail entry.
  */
 export function navLabelError(value: string): string | null {
 	const trimmed = value.trim();
-	const wordCount = trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
+	if (trimmed.length === 0) return NAV_LABEL_EMPTY_ERROR;
+	const wordCount = trimmed.split(/\s+/).length;
 	if (wordCount > NAV_LABEL_MAX_WORDS || trimmed.length > NAV_LABEL_MAX_CHARS) return NAV_LABEL_ERROR;
 	return null;
 }

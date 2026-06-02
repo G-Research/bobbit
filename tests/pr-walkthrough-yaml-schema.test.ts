@@ -186,6 +186,16 @@ describe("PR walkthrough YAML schema", () => {
 		if (!tooLong.ok) assertError(tooLong.summary.errors, "$.walkthrough.review_chunks[0].nav_label", /24 characters/);
 	});
 
+	it("treats an empty nav_label as omitted and falls back to the derived label", () => {
+		const validation = validatePrWalkthroughYaml(validYaml().replace("title: Agent submits YAML", "title: Agent submits YAML\n      nav_label: \"\""));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
+		const design = payload.cards.find(card => card.phaseId === "design");
+		assert.equal(design?.navLabel, "Agent submits YAML");
+	});
+
 	it("preserves authoritative resolved changeset SHAs over YAML SHAs", () => {
 		const validation = validatePrWalkthroughYaml(validYaml());
 		assert.equal(validation.ok, true);

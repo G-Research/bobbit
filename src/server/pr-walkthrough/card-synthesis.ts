@@ -3,7 +3,7 @@
 // module can be validated independently when the shared file is not present yet.
 // @ts-ignore Upstream shared model may be absent on this parallel task branch.
 import type { PrWalkthroughCard as SharedPrWalkthroughCard, PrWalkthroughChangesetRef as SharedPrWalkthroughChangesetRef, PrWalkthroughDiffBlock as SharedPrWalkthroughDiffBlock, PrWalkthroughDiffLine as SharedPrWalkthroughDiffLine, PrWalkthroughHunk as SharedPrWalkthroughHunk, PrWalkthroughPhaseId as SharedPrWalkthroughPhaseId, PrWalkthroughSuggestedComment as SharedPrWalkthroughSuggestedComment, WalkthroughWarning as SharedWalkthroughWarning } from "../../shared/pr-walkthrough/types.js";
-import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
+import { deriveNavLabel, navLabelError } from "../../shared/pr-walkthrough/nav-label.js";
 
 type PreserveShared<T> = unknown extends T ? unknown : T;
 type LocalPhaseId = "orientation" | "design" | "significant" | "other" | "audit";
@@ -187,7 +187,7 @@ export function validateSynthesisedCards(raw: unknown, files: WalkthroughParsedF
 			id,
 			phaseId,
 			title,
-			navLabel: stringValue(candidate.navLabel) ?? deriveNavLabel(title),
+			navLabel: resolveNavLabel(candidate.navLabel, title),
 			summary,
 			rationale: stringValue(candidate.rationale),
 			diffBlocks,
@@ -537,6 +537,15 @@ function compactText(value: string | undefined, maxLength = 220): string {
 
 function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+// Use an LLM/candidate-provided nav label only when it satisfies the ≤3-word /
+// ≤24-char invariant; otherwise (missing, empty, or overlong) derive a compact
+// label from the title so the rail never renders a blank or overflowing entry.
+function resolveNavLabel(candidate: unknown, title: string): string {
+	const provided = stringValue(candidate);
+	if (provided && navLabelError(provided) === null) return provided;
+	return deriveNavLabel(title);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

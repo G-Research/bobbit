@@ -12,8 +12,12 @@ describe("PR walkthrough nav label", () => {
 	it("accepts labels within the word and character limits", () => {
 		assert.equal(navLabelError("At a glance"), null);
 		assert.equal(navLabelError("Orientation"), null);
-		assert.equal(navLabelError(""), null);
 		assert.equal(navLabelError("  Where to look  "), null);
+	});
+
+	it("rejects empty or whitespace-only labels so callers fall back to the derived label", () => {
+		assert.match(navLabelError("") ?? "", /empty/);
+		assert.match(navLabelError("   ") ?? "", /empty/);
 	});
 
 	it("rejects labels with more than three words", () => {

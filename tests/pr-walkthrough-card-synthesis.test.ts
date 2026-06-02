@@ -115,6 +115,21 @@ describe("PR walkthrough card synthesis", () => {
 		assert.equal(cards[1].navLabel, "Check resolver behaviour");
 	});
 
+	it("replaces an overlong or empty LLM navLabel with the derived label", () => {
+		const cards = validateSynthesisedCards({
+			cards: [
+				{ phaseId: "significant", title: "Check resolver behaviour and edges", navLabel: "This label is far too long to fit", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
+				{ phaseId: "other", title: "Review smaller remaining files", navLabel: "   ", summary: "Smaller files.", diffBlockIds: ["b"] },
+			],
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)]), file("src/b.ts", "modified", [block("b", "src/b.ts", 2)])]);
+
+		assert.equal(cards.length, 2);
+		// Overlong model label is rejected and replaced by the ≤3-word derived label.
+		assert.equal(cards[0].navLabel, "Check resolver behaviour");
+		// Whitespace-only model label falls back to the derived label.
+		assert.equal(cards[1].navLabel, "Review smaller remaining");
+	});
+
 	it("validates LLM card schema and drops suggested comments with bad anchors", () => {
 		const files = [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])];
 		const cards = validateSynthesisedCards({

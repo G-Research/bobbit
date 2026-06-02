@@ -990,6 +990,9 @@ function optionalString(root: Record<string, unknown>, key: string, errors: PrWa
 function parseNavLabel(root: Record<string, unknown>, errors: PrWalkthroughValidationError[], prefix: string): string | undefined {
 	const value = optionalString(root, "nav_label", errors, prefix);
 	if (value === undefined) return undefined;
+	// An empty / whitespace-only nav_label is treated as omitted so the caller
+	// falls back to deriveNavLabel(title) instead of failing validation.
+	if (value.trim().length === 0) return undefined;
 	const error = navLabelError(value);
 	if (error) {
 		addError(errors, `${prefix}nav_label`, error);
