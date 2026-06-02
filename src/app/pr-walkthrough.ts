@@ -7,7 +7,6 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
-import { confirmAction } from "./dialogs-lazy.js";
 import {
 	expandedGoals,
 	renderApp,
@@ -711,6 +710,7 @@ async function promptTrustAndRetryLaunch(
 	rawInput: OpenPrWalkthroughInput,
 	host: string,
 ): Promise<PanelWorkspaceTab | undefined> {
+	const { confirmAction } = await import("./dialogs-lazy.js");
 	const confirmed = await confirmAction(
 		"Trust GitHub host?",
 		`${host} is not in your trusted GitHub hosts. Adding it lets Bobbit fetch repository and pull-request content (metadata and diffs) from ${host}. Only continue if you trust this host.`,
