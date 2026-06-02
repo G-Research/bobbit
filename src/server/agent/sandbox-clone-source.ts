@@ -15,6 +15,7 @@
  *   container path (`/workspace-src`) and clone from `file:///workspace-src`.
  */
 
+import { fileURLToPath } from "node:url";
 import { stripTokenFromGitUrl } from "../skills/git.js";
 
 /** Fixed container-internal mount point for the remote-less bind-mount source. */
@@ -27,24 +28,62 @@ export type SandboxCloneSource =
 	| { kind: "mounted"; hostPath: string; mountPath: string; cloneUrl: string };
 
 /**
+ * True network/transport remote schemes git can reach from inside the container.
+ * Anything else (file://, absolute/relative paths, drive-letter paths) is a
+ * LOCAL source that must be bind-mounted — never handed to git as-is.
+ */
+const REMOTE_SCHEME_RE = /^(https?|git|ssh|git\+ssh):\/\//i;
+/** scp-style remote: `user@host:path` (no scheme). */
+const SCP_REMOTE_RE = /^[^/@\s]+@[^/:\s]+:/;
+/** Windows drive-letter path: `C:\...` or `C:/...`. Checked BEFORE scp so it is never misparsed. */
+const WINDOWS_DRIVE_RE = /^[A-Za-z]:[\\/]/;
+
+/**
  * Resolve the clone source for a sandbox container.
  *
- * @param opts.originUrl  The project's `origin` remote URL (or null/empty/undefined when absent).
- * @param opts.repoPath   The host repo root — used only as the bind-mount host path when origin is absent.
+ * @param opts.originUrl   The project's `origin` remote URL (or null/empty/undefined when absent).
+ * @param opts.repoPath    The host repo root — used as the bind-mount host path when origin is absent.
+ * @param opts.mountPath   Container-internal mount point (default `/workspace-src`). Multi-repo
+ *                         callers pass a per-repo path like `/workspace-src/web`.
+ *
+ * Classification:
+ * - A TRUE remote (http(s)/git/ssh/git+ssh scheme, or scp-style `user@host:path`)
+ *   → `{ kind: "remote", cloneUrl }` cloned directly.
+ * - Everything else — empty origin, `file://` URL, absolute POSIX path, Windows
+ *   drive-letter path, UNC path, or relative path — is a LOCAL source. The host
+ *   directory is bind-mounted read-only and cloned via `file://<mountPath>`.
  *
  * Invariant: the returned `cloneUrl` is NEVER a raw host path or a Windows
- * drive-letter string. A remote-less project always becomes a `mounted` source
- * cloned via `file:///workspace-src`.
+ * drive-letter string (git misparses `C:/...` as scp/SSH syntax → `cannot run
+ * ssh` / `unable to fork`). It is always either a true remote URL or
+ * `file://<mountPath>`.
  */
-export function resolveSandboxCloneSource(opts: { originUrl?: string | null; repoPath: string }): SandboxCloneSource {
+export function resolveSandboxCloneSource(opts: {
+	originUrl?: string | null;
+	repoPath: string;
+	mountPath?: string;
+}): SandboxCloneSource {
 	const origin = (opts.originUrl ?? "").trim();
-	if (origin) {
+	const mountPath = opts.mountPath ?? MOUNTED_SRC_PATH;
+	const cloneUrl = `file://${mountPath}`;
+
+	// True remote → clone directly (Windows-drive check first so `C:/...` is never
+	// classified as an scp `host:path` remote — that misparse was the original bug).
+	if (origin && !WINDOWS_DRIVE_RE.test(origin) && (REMOTE_SCHEME_RE.test(origin) || SCP_REMOTE_RE.test(origin))) {
 		return { kind: "remote", cloneUrl: stripTokenFromGitUrl(origin) };
 	}
-	return {
-		kind: "mounted",
-		hostPath: opts.repoPath,
-		mountPath: MOUNTED_SRC_PATH,
-		cloneUrl: MOUNTED_SRC_CLONE_URL,
-	};
+
+	// Local source → bind-mount. Decode `file://` origins to a filesystem path;
+	// use the origin path string directly when it's a local path; fall back to
+	// the repo root when origin is absent.
+	let hostPath: string;
+	if (!origin) {
+		hostPath = opts.repoPath;
+	} else if (/^file:\/\//i.test(origin)) {
+		hostPath = fileURLToPath(origin);
+	} else {
+		hostPath = origin;
+	}
+
+	return { kind: "mounted", hostPath, mountPath, cloneUrl };
 }

@@ -1594,12 +1594,15 @@ export function createGateway(config: GatewayConfig) {
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
 						// Same resolution as the single-repo path: never fall back to a
-						// raw host path. Remote-less repos get a `file://` bind-mount
-						// source at a per-repo container mount path.
-						const src = resolveSandboxCloneSource({ originUrl: await resolveOrigin(rp), repoPath: rp });
-						const perRepoSrc: SandboxCloneSource = src.kind === "mounted"
-							? { ...src, mountPath: `/workspace-src/${c.repo}`, cloneUrl: `file:///workspace-src/${c.repo}` }
-							: src;
+						// raw host path. Local-origin/remote-less repos get a `file://`
+						// bind-mount source at a per-repo container mount path; the
+						// resolver derives the correct per-repo cloneUrl and decodes the
+						// real on-host source dir (from a file:// origin or the repo path).
+						const perRepoSrc = resolveSandboxCloneSource({
+							originUrl: await resolveOrigin(rp),
+							repoPath: rp,
+							mountPath: `/workspace-src/${c.repo}`,
+						});
 						cloneSourceByName[c.repo] = perRepoSrc;
 						repoUrlByName[c.repo] = perRepoSrc.cloneUrl;
 					}
