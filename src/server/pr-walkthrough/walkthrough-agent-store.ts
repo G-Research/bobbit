@@ -18,6 +18,13 @@ export type PrWalkthroughTarget = {
 	number?: number;
 	baseSha?: string;
 	headSha?: string;
+	/**
+	 * Normalized GitHub host for github-provider targets ("github.com" for
+	 * github.com/www.github.com, the real host otherwise). Used to host-qualify
+	 * changeset ids so two enterprise hosts sharing owner/repo/number do not
+	 * collide on the same tabId / stored-payload path / export lookup.
+	 */
+	host?: string;
 	canonicalKey: string;
 };
 

@@ -332,7 +332,7 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 		const gh = parseGithubRef(prUrl, prNumber, cwd, extraHosts);
 		const head = shortSha(local.changeset.headSha);
 		const number = prNumber ?? gh?.number;
-		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${number ?? "unknown"}:${head}`;
+		const changesetId = gh ? changesetIdForGithub(gh.host, gh.owner, gh.repo, gh.number, head) : `github:unknown#${number ?? "unknown"}:${head}`;
 		const title = prTitle
 			? (number != null && !/^PR\s+#/i.test(prTitle) ? `PR #${number}: ${prTitle}` : prTitle)
 			: gh ? `PR #${gh.number}: ${local.changeset.title ?? "Walkthrough"}` : local.changeset.title;
@@ -906,8 +906,12 @@ function changesetIdForLocal(baseSha: string, headSha: string): string {
 	return `${shortSha(baseSha)}..${shortSha(headSha)}`;
 }
 
-function changesetIdForGithub(owner: string, repo: string, number: string | number, headSha?: string): string {
-	return `github:${owner}/${repo}#${number}:${headSha || "unknown"}`;
+// github.com / www.github.com keep the legacy un-prefixed id; other hosts are
+// host-qualified so enterprise PRs sharing owner/repo/number do not collide.
+function changesetIdForGithub(host: string | undefined, owner: string, repo: string, number: string | number, headSha?: string): string {
+	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
+	const prefix = normalized === "github.com" || normalized === "www.github.com" ? "" : `${normalized}/`;
+	return `github:${prefix}${owner}/${repo}#${number}:${headSha || "unknown"}`;
 }
 
 function shortSha(sha: string): string {
@@ -950,7 +954,7 @@ function bundleReadRequestFrom(url: URL, body: unknown): ReadPrWalkthroughBundle
 	};
 }
 
-function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string, extraHosts: string[] = []): { owner: string; repo: string; number: string | number; url: string } | undefined {
+function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string, extraHosts: string[] = []): { owner: string; repo: string; number: string | number; url: string; host: string } | undefined {
 	if (prUrl) {
 		let parsed: URL;
 		try {
@@ -964,7 +968,8 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 		const safeUrl = safeExternalUrl(prUrl, extraHosts);
 		const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
 		if (safeUrl && match) {
-			return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]).replace(/\.git$/i, ""), number: prNumber ?? match[3], url: safeUrl };
+			const host = parsed.hostname.replace(/\.$/, "").toLowerCase();
+			return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]).replace(/\.git$/i, ""), number: prNumber ?? match[3], url: safeUrl, host };
 		}
 	}
 	void cwd;

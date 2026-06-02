@@ -281,7 +281,7 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		trustedHosts,
 	});
 	const prUrl = safeGithubUrl(pr.html_url, trustedHosts) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`, trustedHosts) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
-	const changesetId = changesetIdForGithub(owner, repo, number, pr.head.sha);
+	const changesetId = changesetIdForGithub(host, owner, repo, number, pr.head.sha);
 	const exportAvailable = Boolean(token);
 
 	return {
@@ -693,9 +693,15 @@ function isTrustedGithubHost(host: string, trustedHosts?: string[]): boolean {
 	return isTrustedExternalHost(normalizeHost(host), trustedHosts ?? []);
 }
 
-function changesetIdForGithub(owner: string, repo: string, number: number, headSha?: string): string {
-	return `github:${owner}/${repo}#${number}:${shortSha(headSha) ?? "unknown"}`;
+// github.com / www.github.com keep the legacy un-prefixed id; other hosts are
+// host-qualified so enterprise PRs sharing owner/repo/number do not collide.
+function changesetIdForGithub(host: string, owner: string, repo: string, number: number, headSha?: string): string {
+	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
+	const prefix = normalized === "github.com" || normalized === "www.github.com" ? "" : `${normalized}/`;
+	return `github:${prefix}${owner}/${repo}#${number}:${shortSha(headSha) ?? "unknown"}`;
 }
+
+export const changesetIdForGithubForTesting = changesetIdForGithub;
 
 function stableBlockId(filePath: string, oldPath: string | undefined): string {
 	const raw = oldPath && oldPath !== filePath ? `${oldPath}->${filePath}` : filePath;

@@ -16,8 +16,8 @@ import os from "node:os";
 import path from "node:path";
 
 const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
-const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
-const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr } = await import("../src/server/pr-walkthrough/github-adapter.ts");
+const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../src/server/pr-walkthrough/github-adapter.ts");
 const { parseGithubRefForTesting } = await import("../src/server/pr-walkthrough/routes.ts");
 
 let tempDir = "";
@@ -95,6 +95,53 @@ describe("canonicalizeTarget host-qualified identity", () => {
 		const a = canonicalizeTarget({ prUrl: "https://ghe-a.corp/acme/widgets/pull/42" });
 		const b = canonicalizeTarget({ prUrl: "https://ghe-b.corp/acme/widgets/pull/42" });
 		assert.notEqual(a.canonicalKey, b.canonicalKey);
+	});
+
+	it("populates the normalized host on the target", () => {
+		assert.equal(canonicalizeTarget({ prUrl: "https://github.com/acme/widgets/pull/42" }).host, "github.com");
+		assert.equal(canonicalizeTarget({ prUrl: "https://www.github.com/acme/widgets/pull/42" }).host, "github.com");
+		assert.equal(canonicalizeTarget({ prUrl: "https://GitHub.Example.Com./acme/widgets/pull/42" }).host, "github.example.com");
+	});
+});
+
+describe("changesetIdForTarget host-qualified ids", () => {
+	it("keeps the legacy un-prefixed id for github.com and www.github.com", () => {
+		const gh = canonicalizeTarget({ prUrl: "https://github.com/acme/widgets/pull/42" });
+		assert.equal(changesetIdForTargetForTesting(gh), "github:acme/widgets#42");
+		const www = canonicalizeTarget({ prUrl: "https://www.github.com/acme/widgets/pull/42" });
+		assert.equal(changesetIdForTargetForTesting(www), "github:acme/widgets#42");
+	});
+
+	it("host-qualifies the id for an enterprise host", () => {
+		const ent = canonicalizeTarget({ prUrl: "https://github.example.com/acme/widgets/pull/42" });
+		assert.equal(changesetIdForTargetForTesting(ent), "github:github.example.com/acme/widgets#42");
+	});
+
+	it("yields DIFFERENT changeset ids for two enterprise hosts sharing owner/repo/number", () => {
+		const a = canonicalizeTarget({ prUrl: "https://ghe-a.corp/acme/widgets/pull/42" });
+		const b = canonicalizeTarget({ prUrl: "https://ghe-b.corp/acme/widgets/pull/42" });
+		assert.notEqual(changesetIdForTargetForTesting(a), changesetIdForTargetForTesting(b));
+		assert.equal(changesetIdForTargetForTesting(a), "github:ghe-a.corp/acme/widgets#42");
+		assert.equal(changesetIdForTargetForTesting(b), "github:ghe-b.corp/acme/widgets#42");
+	});
+});
+
+describe("changesetIdForGithub host-qualified ids", () => {
+	const HEAD = "fedcba9876543210fedcba9876543210fedcba98";
+
+	it("keeps the legacy un-prefixed id for github.com and www.github.com", () => {
+		assert.equal(changesetIdForGithubForTesting("github.com", "acme", "widgets", 42, HEAD), "github:acme/widgets#42:fedcba9");
+		assert.equal(changesetIdForGithubForTesting("www.github.com", "acme", "widgets", 42, HEAD), "github:acme/widgets#42:fedcba9");
+	});
+
+	it("host-qualifies the id for an enterprise host", () => {
+		assert.equal(changesetIdForGithubForTesting("github.example.com", "acme", "widgets", 42, HEAD), "github:github.example.com/acme/widgets#42:fedcba9");
+	});
+
+	it("yields DIFFERENT changeset ids for two enterprise hosts sharing owner/repo/number", () => {
+		const a = changesetIdForGithubForTesting("ghe-a.corp", "acme", "widgets", 42, HEAD);
+		const b = changesetIdForGithubForTesting("ghe-b.corp", "acme", "widgets", 42, HEAD);
+		assert.notEqual(a, b);
 	});
 });
 
