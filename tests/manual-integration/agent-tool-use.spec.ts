@@ -624,8 +624,14 @@ test.describe.serial("Agent tool use", () => {
 	test("4. interrupt mid tool-use — pivot", async ({ page }) => {
 		const id = await createFreshSession(gw);
 
-		// Kick off a long-running bash command. Use a portable node one-liner
-		// to avoid POSIX/Windows shell quoting traps inside the prompt.
+		// Kick off a long-running bash command. Use a BOUNDED shell loop (not an
+		// infinite one): a never-terminating command combined with "don't reply
+		// until it finishes" is a contradiction that current models resolve by
+		// declining to call bash at all (turn ends idle, zero tool cards) — which
+		// is exactly the false-negative this canary used to suffer. A finite
+		// ~2-minute loop runs long enough for us to interrupt mid-execution while
+		// reading as a legitimate task the model will actually run. The sandbox
+		// shell is Linux bash, so a `for`/`sleep` loop needs no node/quoting gymnastics.
 		await page.goto(sessionUrl(gw, id));
 		await page.waitForSelector("textarea", { timeout: 30_000 });
 		await page.waitForTimeout(500);
@@ -633,9 +639,9 @@ test.describe.serial("Agent tool use", () => {
 		// long-running bash invocation (not any prior or later card).
 		const loopTag = `LOOPTAG_${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 		const longPrompt =
-			`Use the bash tool exactly once to run this command (do not modify it):\n` +
-			`bash -c 'node -e "let i=0;setInterval(()=>{require(\\"fs\\").writeFileSync(\\"step.txt\\",String(++i));console.log(\\"${loopTag}\\",i)},1000)"'\n` +
-			`Do not reply or summarise until the command finishes.`;
+			`Use the bash tool exactly once to run this command verbatim (do not modify it):\n` +
+			`bash -c 'for i in $(seq 1 120); do echo "${loopTag} $i"; sleep 1; done'\n` +
+			`It prints progress once a second for about two minutes. Start it now and let it run — do not summarise or reply while it is still running.`;
 		await page.fill("textarea", longPrompt);
 		await page.press("textarea", "Enter");
 
