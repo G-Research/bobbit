@@ -96,8 +96,9 @@
     // autoExpanded is permanently true whenever a PR-walkthrough child exists,
     // so the chevron toggle has no visible effect.
     function computeSessionRowChildrenExpanded({ sessionId, hasChildren, hasFirstClassChild }) {
-      const autoExpanded = !!hasFirstClassChild;
-      return !!hasChildren && (autoExpanded || isArchivedParentExpanded(sessionId));
+      return !!hasChildren && (hasFirstClassChild
+        ? isFirstClassParentExpanded(sessionId)
+        : isArchivedParentExpanded(sessionId));
     }
 
     // Bug #2 — renderTeamGroup (render-helpers.ts:1277-1282):
@@ -107,11 +108,7 @@
     // First term is permanently true when a PR-walkthrough child exists, so the
     // team-lead chevron (tlExpanded) never hides the first-class child.
     function computeTeamLeadFirstClassChildExpanded({ leadId, hasFirstClassChild, archivedLeadChildrenCount }) {
-      return (
-        !!hasFirstClassChild ||
-        (archivedLeadChildrenCount || 0) > 0 ||
-        isArchivedParentExpanded(leadId)
-      );
+      return isTeamLeadExpanded(leadId);
     }
 
     window.__chevron = {

@@ -585,6 +585,25 @@ export function isTeamLeadExpanded(sessionId: string): boolean {
 	return !collapsedTeamLeadSessions.has(sessionId);
 }
 
+const COLLAPSED_FIRST_CLASS_PARENTS_KEY = "bobbit-collapsed-first-class-parents";
+export let collapsedFirstClassParents: Set<string> = new Set(
+	JSON.parse(localStorage.getItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY) || "[]"),
+);
+
+export function setFirstClassParentExpanded(sessionId: string, expanded: boolean): void {
+	if (expanded) collapsedFirstClassParents.delete(sessionId);
+	else collapsedFirstClassParents.add(sessionId);
+	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
+}
+
+export function toggleFirstClassParentExpanded(sessionId: string): void {
+	setFirstClassParentExpanded(sessionId, collapsedFirstClassParents.has(sessionId));
+}
+
+export function isFirstClassParentExpanded(sessionId: string): boolean {
+	return !collapsedFirstClassParents.has(sessionId);
+}
+
 const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
 const expandedDelegateParents: Set<string> = new Set(
 	JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]"),
@@ -619,6 +638,10 @@ export function resetArchivedExpandState(): void {
 	// (archived team leads that were explicitly collapsed — remove them so they return to default)
 	for (const id of archivedSessionIds) collapsedTeamLeadSessions.delete(id);
 	localStorage.setItem(COLLAPSED_TEAM_LEADS_KEY, JSON.stringify([...collapsedTeamLeadSessions]));
+
+	// Reset archived first-class parent sessions from collapsedFirstClassParents
+	for (const id of archivedSessionIds) collapsedFirstClassParents.delete(id);
+	localStorage.setItem(COLLAPSED_FIRST_CLASS_PARENTS_KEY, JSON.stringify([...collapsedFirstClassParents]));
 
 	// Free memory — archived sessions will be re-fetched on next toggle-on
 	state.archivedSessions = [];
