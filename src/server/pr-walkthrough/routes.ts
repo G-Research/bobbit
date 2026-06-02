@@ -10,6 +10,8 @@ import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
 import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
+import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
+import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 import type { ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
 
@@ -46,6 +48,8 @@ type WalkthroughCard = {
 	checklist?: string[];
 	cardSuggestions?: string[];
 	suggestedComments?: Array<{ id: string; cardId: string; diffBlockId: string; lineId: string; body: string }>;
+	navLabel?: string;
+	sections?: PrWalkthroughCardSection[];
 };
 
 type WalkthroughChangeset = {
@@ -483,7 +487,7 @@ export async function createModelBackedSynthesisAdapter(deps: PrWalkthroughRoute
 	};
 }
 
-const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. The orientation card is special: it should explain PR context for reviewers (why the PR was raised, context/background needed to understand it, testing strategy, and useful PR-description details) and may use an empty diffBlockIds array. Do not make orientation a summary of the walkthrough process. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
+const PR_WALKTHROUGH_SYNTHESIS_SYSTEM_PROMPT = `You synthesize concise PR walkthrough review cards from parsed diffs. Return only JSON with a top-level "cards" array. Each card must include phaseId (orientation, design, significant, other, or audit), title, summary, and diffBlockIds referencing only provided IDs. Each card may also include navLabel: a compact sidebar label of at most 3 words and 24 characters so the navigation rail never truncates; keep the full descriptive title in title. Omit navLabel to auto-derive it from the title. The orientation card is special: it should explain PR context for reviewers (why the PR was raised, context/background needed to understand it, testing strategy, and useful PR-description details) and may use an empty diffBlockIds array. Do not make orientation a summary of the walkthrough process. Suggested comments may include diffBlockId, lineId, and body. Do not invent file paths, block ids, or line ids.`;
 
 async function resolveSynthesisModelPref(deps: PrWalkthroughRouteDeps, sessionId: string | undefined): Promise<string | undefined> {
 	if (sessionId && deps.resolveSessionModel) {
@@ -661,14 +665,23 @@ function applyNameStatus(blocks: DiffBlock[], nameStatus: string): void {
 
 function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlock[], warnings: WalkthroughWarning[]): WalkthroughCard[] {
 	const prContext = stringValue(changeset.prBody);
+	const why = prContext ? prContext.replace(/\s+/g, " ").slice(0, 220) : changeset.prTitle ?? changeset.title ?? "No PR description was available.";
+	const context = changeset.prTitle ?? changeset.title ?? "No additional PR context was provided.";
 	const cards: WalkthroughCard[] = [{
 		id: "orientation-summary",
 		phaseId: "orientation",
 		title: "PR context",
-		summary: `Why this PR was raised: ${prContext ? prContext.replace(/\s+/g, " ").slice(0, 220) : changeset.prTitle ?? changeset.title ?? "No PR description was available."}`,
-		rationale: `Context to understand the PR: ${changeset.prTitle ?? changeset.title ?? "No additional PR context was provided."}`,
+		navLabel: "Orientation",
+		summary: `Why this PR was raised: ${why}`,
+		rationale: `Context to understand the PR: ${context}`,
 		diffBlocks: [],
 		checklist: ["Testing strategy: No testing strategy was specified in the PR description.", ...warnings.slice(0, 2).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message)],
+		sections: [
+			{ id: "at-a-glance", navLabel: "At a glance", heading: "At a glance", body: `Why this PR was raised: ${why}`, showStats: true },
+			{ id: "why-it-exists", navLabel: "Why it exists", eyebrow: "The problem", heading: "Why it exists", body: why },
+			{ id: "what-it-changes", navLabel: "What it changes", eyebrow: "The change", heading: "What it changes", body: context },
+			{ id: "where-to-look", navLabel: "Where to look", heading: "Where to look", body: context, showOriginalDescription: true },
+		],
 	}];
 	if (files.length > 0) {
 		const reviewBlocks = files.filter(file => file.status !== "binary");
@@ -676,6 +689,7 @@ function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlo
 			id: "significant-files",
 			phaseId: "significant",
 			title: "Changed files",
+			navLabel: deriveNavLabel("Changed files"),
 			summary: `Review ${reviewBlocks.length || files.length} diff-backed file${(reviewBlocks.length || files.length) === 1 ? "" : "s"}.`,
 			diffBlocks: reviewBlocks.length ? reviewBlocks : files,
 		});
@@ -683,6 +697,7 @@ function synthesizeFallbackCards(changeset: WalkthroughChangeset, files: DiffBlo
 			id: "audit-coverage",
 			phaseId: "audit",
 			title: "Audit remaining coverage",
+			navLabel: deriveNavLabel("Audit remaining coverage"),
 			summary: "Final pass over the resolved diff and any unreviewable files.",
 			diffBlocks: files,
 			cardSuggestions: warnings.map(warning => warning.message),

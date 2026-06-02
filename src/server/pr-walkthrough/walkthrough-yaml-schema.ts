@@ -1,12 +1,16 @@
 import { parseAllDocuments } from "yaml";
 
 import { changesetIdForGithub } from "../../shared/pr-walkthrough/ids.js";
+import { deriveNavLabel, navLabelError } from "../../shared/pr-walkthrough/nav-label.js";
 import type {
 	PrWalkthroughCard,
+	PrWalkthroughCardSection,
 	PrWalkthroughChangesetRef,
 	PrWalkthroughDiffBlock,
 	PrWalkthroughDiffLine,
 	PrWalkthroughHunk,
+	PrWalkthroughOrientationConcern,
+	PrWalkthroughOrientationFileRole,
 	PrWalkthroughPhaseId,
 	PrWalkthroughSuggestedComment,
 	WalkthroughWarning,
@@ -116,6 +120,7 @@ export interface PrWalkthroughYamlRelevantHunk {
 export interface PrWalkthroughYamlDesignDecision {
 	id: string;
 	title: string;
+	nav_label?: string;
 	explanation: string;
 	chosen_approach: string;
 	alternatives_considered: Array<{ option: string; pros: string[]; cons: string[] }>;
@@ -128,6 +133,7 @@ export interface PrWalkthroughYamlReviewChunk {
 	id: string;
 	phase: "significant" | "other" | "audit";
 	title: string;
+	nav_label?: string;
 	reviewer_goal: string;
 	explanation: string;
 	files: string[];
@@ -249,6 +255,7 @@ export function mapYamlToWalkthroughPayload(
 			id: uniqueCardId(`design-${decision.id}`, cards),
 			phaseId: "design",
 			title: decision.title,
+			navLabel: decision.nav_label ?? deriveNavLabel(decision.title),
 			summary: decision.explanation,
 			rationale: compactJoin([
 				`Chosen approach: ${decision.chosen_approach}`,
@@ -276,6 +283,7 @@ export function mapYamlToWalkthroughPayload(
 			id: cardId,
 			phaseId: chunk.phase,
 			title: chunk.title,
+			navLabel: chunk.nav_label ?? deriveNavLabel(chunk.title),
 			summary: chunk.explanation,
 			rationale: compactJoin([`Reviewer goal: ${chunk.reviewer_goal}`, formatList("Positive notes", chunk.positive_notes)]),
 			diffBlocks: diffBlocksForCard,
@@ -425,6 +433,7 @@ function parseDesignDecisions(items: unknown[], errors: PrWalkthroughValidationE
 		}
 		const id = requiredStableId(item, "id", errors, `${path}.`);
 		const title = requiredString(item, "title", errors, `${path}.`);
+		const navLabel = parseNavLabel(item, errors, `${path}.`);
 		const explanation = requiredString(item, "explanation", errors, `${path}.`);
 		const chosenApproach = requiredString(item, "chosen_approach", errors, `${path}.`);
 		const alternatives = parseAlternatives(requiredArray(item, "alternatives_considered", errors, `${path}.`) ?? [], errors, `${path}.alternatives_considered`);
@@ -432,7 +441,7 @@ function parseDesignDecisions(items: unknown[], errors: PrWalkthroughValidationE
 		const concerns = requiredStringArray(item, "suggested_reviewer_concerns", errors, `${path}.`);
 		const hunks = parseRelevantHunks(requiredArray(item, "relevant_hunks", errors, `${path}.`) ?? [], errors, `${path}.relevant_hunks`, false);
 		if (id && title && explanation && chosenApproach && alternatives && tradeoffs && concerns && hunks) {
-			out.push({ id, title, explanation, chosen_approach: chosenApproach, alternatives_considered: alternatives, tradeoffs, suggested_reviewer_concerns: concerns, relevant_hunks: hunks });
+			out.push({ id, title, ...(navLabel !== undefined ? { nav_label: navLabel } : {}), explanation, chosen_approach: chosenApproach, alternatives_considered: alternatives, tradeoffs, suggested_reviewer_concerns: concerns, relevant_hunks: hunks });
 		}
 	});
 	validateUniqueIds(out, "$.walkthrough.design_decisions", errors);
@@ -450,6 +459,7 @@ function parseReviewChunks(items: unknown[], errors: PrWalkthroughValidationErro
 		const id = requiredStableId(item, "id", errors, `${path}.`);
 		const phase = requiredEnum(item, "phase", REVIEW_PHASES, errors, `${path}.`) as PrWalkthroughYamlReviewChunk["phase"] | undefined;
 		const title = requiredString(item, "title", errors, `${path}.`);
+		const navLabel = parseNavLabel(item, errors, `${path}.`);
 		const reviewerGoal = requiredString(item, "reviewer_goal", errors, `${path}.`);
 		const explanation = requiredString(item, "explanation", errors, `${path}.`);
 		const files = requiredStringArray(item, "files", errors, `${path}.`);
@@ -457,7 +467,7 @@ function parseReviewChunks(items: unknown[], errors: PrWalkthroughValidationErro
 		const suggestedConcerns = parseSuggestedConcerns(requiredArray(item, "suggested_concerns", errors, `${path}.`) ?? [], errors, `${path}.suggested_concerns`);
 		const positiveNotes = requiredStringArray(item, "positive_notes", errors, `${path}.`);
 		if (id && phase && title && reviewerGoal && explanation && files && hunks && suggestedConcerns && positiveNotes) {
-			out.push({ id, phase, title, reviewer_goal: reviewerGoal, explanation, files, relevant_hunks: hunks, suggested_concerns: suggestedConcerns, positive_notes: positiveNotes });
+			out.push({ id, phase, title, ...(navLabel !== undefined ? { nav_label: navLabel } : {}), reviewer_goal: reviewerGoal, explanation, files, relevant_hunks: hunks, suggested_concerns: suggestedConcerns, positive_notes: positiveNotes });
 		}
 	});
 	validateUniqueIds(out, "$.walkthrough.review_chunks", errors);
@@ -599,11 +609,10 @@ function buildOrientationCard(document: PrWalkthroughYamlDocument): PrWalkthroug
 		id: "orientation-summary",
 		phaseId: "orientation",
 		title: "PR context",
-		summary: compactJoin([
-			`Why created: ${context.why_created}`,
-			`Problem solved: ${context.problem_solved}`,
-			`Why worth merging: ${context.why_worth_merging}`,
-		]),
+		navLabel: "Orientation",
+		// Back-compat: legacy renderers / stored payloads read summary/rationale/checklist.
+		// The redesigned panel prefers `sections` (the guided beats below).
+		summary: assessment.summary,
 		rationale: compactJoin([
 			`Author intent: ${context.author_intent}`,
 			`Reviewer map: ${context.reviewer_map}`,
@@ -616,8 +625,94 @@ function buildOrientationCard(document: PrWalkthroughYamlDocument): PrWalkthroug
 			...assessment.non_blocking_concerns.map(item => `Non-blocking concern: ${item}`),
 			`Original PR description source: ${document.pr.original_description.source} at ${document.pr.original_description.fetched_at}`,
 		]),
+		sections: buildOrientationSections(document),
 		cardSuggestions: compactArray([context.merge_concerns, ...assessment.blocking_concerns, ...assessment.non_blocking_concerns]),
 	};
+}
+
+function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkthroughCardSection[] {
+	const context = document.walkthrough.context;
+	const assessment = document.walkthrough.merge_assessment;
+
+	const concerns: PrWalkthroughOrientationConcern[] = [
+		...assessment.blocking_concerns.map((text): PrWalkthroughOrientationConcern => ({ severity: "blocking", text })),
+		...assessment.non_blocking_concerns.map((text): PrWalkthroughOrientationConcern => ({ severity: "non_blocking", text })),
+	];
+	if (context.merge_concerns.trim().length > 0) concerns.push({ severity: "question", text: context.merge_concerns });
+
+	const fileRoles = parseReviewerMapRoles(context.reviewer_map);
+
+	return [
+		{
+			id: "at-a-glance",
+			navLabel: "At a glance",
+			heading: "At a glance",
+			body: assessment.summary,
+			verdict: { recommendation: assessment.recommendation, confidence: assessment.confidence, summary: assessment.summary },
+			showStats: true,
+		},
+		{
+			id: "why-it-exists",
+			navLabel: "Why it exists",
+			eyebrow: "The problem",
+			heading: "Why it exists",
+			body: context.why_created,
+		},
+		{
+			id: "what-it-changes",
+			navLabel: "What it changes",
+			eyebrow: "The change",
+			heading: "What it changes",
+			body: context.problem_solved,
+		},
+		{
+			id: "should-merge",
+			navLabel: "Should we merge",
+			eyebrow: "The decision",
+			heading: "Should it be merged?",
+			body: compactJoin([mergeAnswerLine(assessment.recommendation, assessment.confidence), context.why_worth_merging]),
+		},
+		{
+			id: "what-to-watch",
+			navLabel: "What to watch",
+			heading: "What to scrutinise",
+			concerns,
+		},
+		{
+			id: "where-to-look",
+			navLabel: "Where to look",
+			heading: "Where to look",
+			body: context.reviewer_map,
+			...(fileRoles.length > 0 ? { fileRoles } : {}),
+			showOriginalDescription: true,
+		},
+	];
+}
+
+function mergeAnswerLine(recommendation: PrWalkthroughYamlWalkthrough["merge_assessment"]["recommendation"], confidence: string): string {
+	switch (recommendation) {
+		case "approve": return `Yes — approve, ${confidence} confidence.`;
+		case "request_changes": return `Not yet — request changes, ${confidence} confidence.`;
+		case "comment": return `Maybe — comment, ${confidence} confidence.`;
+		default: return "Recommendation unclear.";
+	}
+}
+
+function parseReviewerMapRoles(reviewerMap: string): PrWalkthroughOrientationFileRole[] {
+	const roles: PrWalkthroughOrientationFileRole[] = [];
+	for (const rawLine of reviewerMap.split(/\r?\n/)) {
+		const match = /^\s*(core|support|verify|docs)\s*[:\-]\s*(.+)$/i.exec(rawLine);
+		if (!match) continue;
+		const role = match[1].toLowerCase() as PrWalkthroughOrientationFileRole["role"];
+		const rest = match[2].trim();
+		const noteSep = /\s[—-]\s/.exec(rest);
+		if (noteSep && rest.slice(0, noteSep.index).trim().length > 0) {
+			roles.push({ role, file: rest.slice(0, noteSep.index).trim(), note: rest.slice(noteSep.index + noteSep[0].length).trim() });
+		} else {
+			roles.push({ role, file: rest });
+		}
+	}
+	return roles;
 }
 
 function buildOmissionsCard(omissions: PrWalkthroughYamlOmission[], existingCards: PrWalkthroughCard[]): PrWalkthroughCard | null {
@@ -626,6 +721,7 @@ function buildOmissionsCard(omissions: PrWalkthroughYamlOmission[], existingCard
 		id: uniqueCardId("other-omissions-followups", existingCards),
 		phaseId: "other",
 		title: "Omissions and follow-ups",
+		navLabel: deriveNavLabel("Omissions and follow-ups"),
 		summary: omissions.map(item => `${item.category}: ${item.concern}`).join("\n"),
 		rationale: omissions.map(item => `${item.expected_artifact} — evidence checked: ${item.evidence_checked}`).join("\n"),
 		diffBlocks: [],
@@ -640,6 +736,7 @@ function buildAuditCard(document: PrWalkthroughYamlDocument, remainingBlocks: Pr
 		id: uniqueCardId("audit-checklist", existingCards),
 		phaseId: "audit",
 		title: "Audit and review checklist",
+		navLabel: deriveNavLabel("Audit and review checklist"),
 		summary: compactJoin([
 			formatList("Remaining changed areas", audit.remaining_changed_areas),
 			remainingBlocks.length > 0 ? `Unassigned diff blocks: ${remainingBlocks.map(block => block.filePath).join(", ")}` : undefined,
@@ -885,6 +982,17 @@ function optionalString(root: Record<string, unknown>, key: string, errors: PrWa
 	if (value === undefined) return undefined;
 	if (typeof value !== "string") {
 		addError(errors, `${prefix}${key}`, "Expected a string.");
+		return undefined;
+	}
+	return value;
+}
+
+function parseNavLabel(root: Record<string, unknown>, errors: PrWalkthroughValidationError[], prefix: string): string | undefined {
+	const value = optionalString(root, "nav_label", errors, prefix);
+	if (value === undefined) return undefined;
+	const error = navLabelError(value);
+	if (error) {
+		addError(errors, `${prefix}nav_label`, error);
 		return undefined;
 	}
 	return value;

@@ -3,6 +3,7 @@
 // module can be validated independently when the shared file is not present yet.
 // @ts-ignore Upstream shared model may be absent on this parallel task branch.
 import type { PrWalkthroughCard as SharedPrWalkthroughCard, PrWalkthroughChangesetRef as SharedPrWalkthroughChangesetRef, PrWalkthroughDiffBlock as SharedPrWalkthroughDiffBlock, PrWalkthroughDiffLine as SharedPrWalkthroughDiffLine, PrWalkthroughHunk as SharedPrWalkthroughHunk, PrWalkthroughPhaseId as SharedPrWalkthroughPhaseId, PrWalkthroughSuggestedComment as SharedPrWalkthroughSuggestedComment, WalkthroughWarning as SharedWalkthroughWarning } from "../../shared/pr-walkthrough/types.js";
+import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 
 type PreserveShared<T> = unknown extends T ? unknown : T;
 type LocalPhaseId = "orientation" | "design" | "significant" | "other" | "audit";
@@ -89,6 +90,7 @@ export interface WalkthroughLlmCardCandidate {
 	id?: unknown;
 	phaseId?: unknown;
 	title?: unknown;
+	navLabel?: unknown;
 	summary?: unknown;
 	rationale?: unknown;
 	diffBlockIds?: unknown;
@@ -185,6 +187,7 @@ export function validateSynthesisedCards(raw: unknown, files: WalkthroughParsedF
 			id,
 			phaseId,
 			title,
+			navLabel: stringValue(candidate.navLabel) ?? deriveNavLabel(title),
 			summary,
 			rationale: stringValue(candidate.rationale),
 			diffBlocks,
@@ -246,10 +249,17 @@ function buildOrientationCard(
 		id: "orientation-summary",
 		phaseId: "orientation",
 		title: "PR context",
+		navLabel: "Orientation",
 		summary: `Why this PR was raised: ${why}${warningSummary}`,
 		rationale: `Context to understand the PR: ${context}`,
 		diffBlocks: [],
 		checklist: [`Testing strategy: ${testing}`, ...warnings.slice(0, 2).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message)],
+		sections: [
+			{ id: "at-a-glance", navLabel: "At a glance", heading: "At a glance", body: `Why this PR was raised: ${why}${warningSummary}`, showStats: true },
+			{ id: "why-it-exists", navLabel: "Why it exists", eyebrow: "The problem", heading: "Why it exists", body: why },
+			{ id: "what-it-changes", navLabel: "What it changes", eyebrow: "The change", heading: "What it changes", body: context },
+			{ id: "where-to-look", navLabel: "Where to look", heading: "Where to look", body: `Testing strategy: ${testing}`, showOriginalDescription: true },
+		],
 		cardSuggestions: warnings.slice(0, 3).map(warning => warning.filePath ? `${warning.filePath}: ${warning.message}` : warning.message),
 	};
 }
@@ -259,10 +269,12 @@ function buildGroupCard(phaseId: PrWalkthroughPhaseId, group: BlockGroup, assign
 	for (const item of blocks) assigned.add(item.block.id);
 	const fileList = unique(blocks.map(item => item.file.filePath));
 	const titlePrefix = phaseId === "design" ? "Review architecture changes" : phaseId === "other" ? "Review edge-case files" : "Review significant changes";
+	const title = `${titlePrefix} in ${group.label}`;
 	return {
 		id: stableCardId(`${phaseId}-${group.key}`),
 		phaseId,
-		title: `${titlePrefix} in ${group.label}`,
+		title,
+		navLabel: deriveNavLabel(title),
 		summary: `${formatCount(blocks.length, "diff block")} covering ${formatCount(fileList.length, "file")} with ${group.weight} changed lines.`,
 		rationale: phaseId === "design"
 			? "This top-level area carries the largest change weight and should be checked for design-level implications."
@@ -279,6 +291,7 @@ function buildOtherSmallChangesCard(groups: BlockGroup[], assigned: Set<string>)
 		id: "other-small-changes",
 		phaseId: "other",
 		title: "Review smaller remaining files",
+		navLabel: deriveNavLabel("Review smaller remaining files"),
 		summary: `${formatCount(blocks.length, "diff block")} from lower-risk or smaller path groups.`,
 		rationale: "Small changes are grouped together to keep the walkthrough concise while preserving review anchors.",
 		diffBlocks: blocks.map(item => item.block),
@@ -288,10 +301,12 @@ function buildOtherSmallChangesCard(groups: BlockGroup[], assigned: Set<string>)
 
 function buildAuditCard(remaining: WeightedBlock[]): PrWalkthroughCard {
 	const blocks = selectBlocks(remaining, MAX_BLOCKS_PER_FALLBACK_CARD);
+	const title = blocks.length > 0 ? "Audit remaining representative hunks" : "Audit walkthrough coverage";
 	return {
 		id: "audit-remaining-hunks",
 		phaseId: "audit",
-		title: blocks.length > 0 ? "Audit remaining representative hunks" : "Audit walkthrough coverage",
+		title,
+		navLabel: deriveNavLabel(title),
 		summary: blocks.length > 0
 			? `${formatCount(blocks.length, "remaining diff block")} were not assigned to earlier logical cards and should receive a final pass.`
 			: "All reviewable diff blocks were assigned to earlier cards; use this step to verify decisions and draft review output.",

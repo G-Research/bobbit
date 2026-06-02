@@ -98,11 +98,13 @@ describe("PR walkthrough YAML schema", () => {
 		assert.equal(payload.changeset.prBody, "## Why\nFixes review scope.");
 		assert.deepEqual(payload.cards.map(card => card.phaseId), ["orientation", "design", "significant", "other", "audit", "audit"]);
 		assert.equal(payload.cards[0]?.title, "PR context");
-		assert.match(payload.cards[0]?.summary ?? "", /Why created/);
+		assert.equal(payload.cards[0]?.navLabel, "Orientation");
+		assert.equal(payload.cards[0]?.summary, "Good direction with follow-up checks.");
 		assert.match(payload.cards[0]?.rationale ?? "", /Author intent/);
 
 		const design = payload.cards.find(card => card.phaseId === "design");
 		assert.ok(design);
+		assert.equal(design.navLabel, "Agent submits YAML");
 		assert.deepEqual(design.diffBlocks.map(block => block.id), ["block-src-a"]);
 
 		const review = payload.cards.find(card => card.id === "significant-chunk-api");
@@ -115,6 +117,73 @@ describe("PR walkthrough YAML schema", () => {
 		assert.ok(payload.cards.some(card => card.title === "Omissions and follow-ups"));
 		assert.ok(payload.cards.some(card => card.title === "Audit and review checklist"));
 		assert.ok(payload.warnings.some(warning => warning.code === "existing"));
+	});
+
+	it("renders the orientation card as six guided beats with the reframed merge heading", () => {
+		const validation = validatePrWalkthroughYaml(validYaml());
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
+		const sections = payload.cards[0]?.sections;
+		assert.ok(sections);
+		assert.deepEqual(sections.map(section => section.id), [
+			"at-a-glance",
+			"why-it-exists",
+			"what-it-changes",
+			"should-merge",
+			"what-to-watch",
+			"where-to-look",
+		]);
+		assert.deepEqual(sections.map(section => section.navLabel), [
+			"At a glance",
+			"Why it exists",
+			"What it changes",
+			"Should we merge",
+			"What to watch",
+			"Where to look",
+		]);
+
+		const atAGlance = sections.find(section => section.id === "at-a-glance");
+		assert.equal(atAGlance?.showStats, true);
+		assert.equal(atAGlance?.verdict?.recommendation, "comment");
+		assert.equal(atAGlance?.verdict?.confidence, "medium");
+
+		const merge = sections.find(section => section.id === "should-merge");
+		assert.equal(merge?.heading, "Should it be merged?");
+		assert.match(merge?.body ?? "", /^Maybe — comment, medium confidence\./);
+		assert.match(merge?.body ?? "", /It makes review safer\./);
+
+		const watch = sections.find(section => section.id === "what-to-watch");
+		assert.ok(watch?.concerns?.some(concern => concern.severity === "non_blocking" && /reload persistence/i.test(concern.text)));
+		assert.ok(watch?.concerns?.some(concern => concern.severity === "question"));
+
+		const whereToLook = sections.find(section => section.id === "where-to-look");
+		assert.equal(whereToLook?.showOriginalDescription, true);
+		assert.match(whereToLook?.body ?? "", /Start with API chunk/);
+	});
+
+	it("derives a nav_label fallback from the title and carries an explicit nav_label through", () => {
+		const validation = validatePrWalkthroughYaml(validYaml().replace("title: API submission flow", "title: API submission flow\n      nav_label: API flow"));
+		assert.equal(validation.ok, true);
+		if (!validation.ok) return;
+
+		const payload = mapYamlToWalkthroughPayload(validation.document, { files: diffBlocks() });
+		const review = payload.cards.find(card => card.id === "significant-chunk-api");
+		assert.equal(review?.navLabel, "API flow");
+
+		const design = payload.cards.find(card => card.phaseId === "design");
+		assert.equal(design?.navLabel, "Agent submits YAML");
+	});
+
+	it("rejects nav_label values that exceed the word or character cap", () => {
+		const tooManyWords = validatePrWalkthroughYaml(validYaml().replace("title: Agent submits YAML", "title: Agent submits YAML\n      nav_label: one two three four"));
+		assert.equal(tooManyWords.ok, false);
+		if (!tooManyWords.ok) assertError(tooManyWords.summary.errors, "$.walkthrough.design_decisions[0].nav_label", /3 words/);
+
+		const tooLong = validatePrWalkthroughYaml(validYaml().replace("title: API submission flow", "title: API submission flow\n      nav_label: abcdefghijklmnopqrstuvwxyz"));
+		assert.equal(tooLong.ok, false);
+		if (!tooLong.ok) assertError(tooLong.summary.errors, "$.walkthrough.review_chunks[0].nav_label", /24 characters/);
 	});
 
 	it("preserves authoritative resolved changeset SHAs over YAML SHAs", () => {
