@@ -1575,7 +1575,7 @@ test.describe("PR walkthrough orientation guided steps", () => {
 		await orientationStep(page, 4).click();
 		await expect(guideCounter(page)).toHaveText("5 / 6");
 		await expect(panel.getByTestId("pr-walkthrough-beat-heading")).toHaveText("What to scrutinise");
-		await expect(panel.getByTestId("pr-walkthrough-beat-concern-count"), "concerns beat should show the blocking/non-blocking tally").toContainText(/\d+ blocking, \d+ non-blocking/);
+		await expect(panel.getByTestId("pr-walkthrough-beat-concern-count"), "tally must count only blocking + non_blocking severities, not question/nit rows").toHaveText("0 blocking, 1 non-blocking");
 		await expect(panel.getByTestId("pr-walkthrough-beat-concern").first()).toBeVisible();
 
 		await orientationStep(page, 5).click();

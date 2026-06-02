@@ -693,9 +693,11 @@ export class PrWalkthroughPanel extends LitElement {
 		.verdict b { color: var(--positive, green); font-weight: 800; letter-spacing: 0.04em; }
 		.verdict .conf { color: var(--muted-foreground, GrayText); font-size: 12px; }
 		.verdict.verdict-request_changes { border-color: color-mix(in oklch, var(--negative, red) 40%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--negative, red) 12%, transparent); }
-		.verdict.verdict-request_changes .dot, .verdict.verdict-request_changes b { background: var(--negative, red); color: var(--negative, red); }
+		.verdict.verdict-request_changes .dot { background: var(--negative, red); }
+		.verdict.verdict-request_changes b { color: var(--negative, red); }
 		.verdict.verdict-comment { border-color: color-mix(in oklch, var(--warning, orange) 40%, var(--border, ButtonBorder)); background: color-mix(in oklch, var(--warning, orange) 12%, transparent); }
-		.verdict.verdict-comment .dot, .verdict.verdict-comment b { background: var(--warning, orange); color: var(--warning, orange); }
+		.verdict.verdict-comment .dot { background: var(--warning, orange); }
+		.verdict.verdict-comment b { color: var(--warning, orange); }
 		.verdict.verdict-unknown { border-color: var(--border, ButtonBorder); background: color-mix(in oklch, var(--muted-foreground, GrayText) 10%, transparent); }
 		.verdict.verdict-unknown .dot { background: var(--muted-foreground, GrayText); }
 		.verdict.verdict-unknown b { color: var(--muted-foreground, GrayText); }
@@ -1457,7 +1459,7 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderOrientationConcerns(concerns: PrWalkthroughOrientationConcern[]): TemplateResult {
 		const blocking = concerns.filter(concern => concern.severity === "blocking").length;
-		const nonBlocking = concerns.length - blocking;
+		const nonBlocking = concerns.filter(concern => concern.severity === "non_blocking").length;
 		const severityClass: Record<PrWalkthroughOrientationConcern["severity"], string> = {
 			blocking: "blocking",
 			non_blocking: "non-blocking",
