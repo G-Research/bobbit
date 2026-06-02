@@ -50,8 +50,9 @@ export function normalizeTrustedHost(value: unknown): string | undefined {
 	// Reject anything that is not a bare hostname (paths, whitespace, creds, ports).
 	if (/[\s/@:]/.test(candidate) || candidate.includes("://")) return undefined;
 	if (!HOSTNAME_PATTERN.test(candidate)) return undefined;
-	// Require at least one non-empty label (rejects "." / ".." / "-." style junk).
-	if (!candidate.split(".").some(label => label.length > 0)) return undefined;
+	// Require EVERY label to be a valid DNS label: non-empty, <=63 chars, and no
+	// leading/trailing hyphen. Rejects ".example.com", "example..com", "-x.com", etc.
+	if (!candidate.split(".").every(label => label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"))) return undefined;
 	return candidate;
 }
 
@@ -71,6 +72,9 @@ export function normalizeTrustedHosts(value: unknown): string[] {
 	for (const entry of raw) {
 		const normalized = normalizeTrustedHost(entry);
 		if (!normalized || seen.has(normalized)) continue;
+		// Managed list holds only EXTRA hosts; baseline DEFAULT_TRUSTED_HOSTS are
+		// always trusted via isTrustedExternalHost regardless of this list.
+		if (DEFAULT_TRUSTED_HOSTS.has(normalized)) continue;
 		seen.add(normalized);
 		result.push(normalized);
 	}

@@ -40,6 +40,17 @@ describe("normalizeTrustedHost", () => {
 		assert.equal(normalizeTrustedHost(42 as unknown), undefined);
 		assert.equal(normalizeTrustedHost(null), undefined);
 	});
+
+	it("rejects hosts with empty, over-long, or hyphen-edged labels", () => {
+		assert.equal(normalizeTrustedHost(".example.com"), undefined);
+		assert.equal(normalizeTrustedHost("example.com."), "example.com"); // trailing dot stripped, then valid
+		assert.equal(normalizeTrustedHost("example..com"), undefined);
+		assert.equal(normalizeTrustedHost("-example.com"), undefined);
+		assert.equal(normalizeTrustedHost("example-.com"), undefined);
+		assert.equal(normalizeTrustedHost("foo.-bar.com"), undefined);
+		assert.equal(normalizeTrustedHost(`${"a".repeat(64)}.com`), undefined);
+		assert.equal(normalizeTrustedHost(`${"a".repeat(63)}.com`), `${"a".repeat(63)}.com`);
+	});
 });
 
 describe("normalizeTrustedHosts", () => {
@@ -51,7 +62,17 @@ describe("normalizeTrustedHosts", () => {
 			"https://ent.corp/x",
 			"GITHUB.EXAMPLE.COM",
 		]);
-		assert.deepEqual(result, ["github.com", "github.example.com", "ent.corp"]);
+		// github.com is a DEFAULT baseline host and is filtered from the managed
+		// (extra-hosts) list; it stays trusted via isTrustedExternalHost regardless.
+		assert.deepEqual(result, ["github.example.com", "ent.corp"]);
+	});
+
+	it("filters DEFAULT baseline hosts from the managed list", () => {
+		assert.deepEqual(
+			normalizeTrustedHosts(["github.com", "www.github.com", "api.github.com", "raw.githubusercontent.com", "ent.corp"]),
+			["ent.corp"],
+		);
+		assert.deepEqual(normalizeTrustedHosts(["GitHub.com", "github.example.com"]), ["github.example.com"]);
 	});
 
 	it("accepts a comma-separated string (back-compat parsing)", () => {

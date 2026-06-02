@@ -958,9 +958,12 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 		} catch {
 			return undefined;
 		}
+		// Accept any host that safeExternalUrl already approved (DEFAULT baseline +
+		// managed enterprise hosts). Previously this hardcoded github.com, discarding
+		// owner/repo/number/url for trusted enterprise hosts (github:unknown metadata).
 		const safeUrl = safeExternalUrl(prUrl, extraHosts);
 		const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
-		if (safeUrl && parsed.hostname.replace(/\.$/, "").toLowerCase() === "github.com" && match) {
+		if (safeUrl && match) {
 			return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]).replace(/\.git$/i, ""), number: prNumber ?? match[3], url: safeUrl };
 		}
 	}
@@ -969,6 +972,7 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 }
 
 export const resolveWalkthroughForTesting = resolveWalkthrough;
+export const parseGithubRefForTesting = parseGithubRef;
 
 function fixtureWalkthrough(): WalkthroughResolveResult {
 	const changeset: WalkthroughChangeset = {

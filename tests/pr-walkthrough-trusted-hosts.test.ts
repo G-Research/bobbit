@@ -18,6 +18,7 @@ import path from "node:path";
 const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
 const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr } = await import("../src/server/pr-walkthrough/github-adapter.ts");
+const { parseGithubRefForTesting } = await import("../src/server/pr-walkthrough/routes.ts");
 
 let tempDir = "";
 
@@ -127,6 +128,124 @@ describe("github-adapter trust threading", () => {
 			() => resolveGithubPr({ prUrl: "https://github.example.com/acme/widgets/pull/42" }),
 			(error: unknown) => error instanceof GithubPrAdapterError && error.code === "untrusted_github_host" && error.host === "github.example.com",
 		);
+	});
+
+	it("trusts www.github.com (a DEFAULT baseline host) without any managed hosts", () => {
+		const parsed = parseGithubPrReference({ prUrl: "https://www.github.com/acme/widgets/pull/7" });
+		assert.equal(parsed.host, "www.github.com");
+		assert.equal(parsed.owner, "acme");
+		assert.equal(parsed.repo, "widgets");
+		assert.equal(parsed.number, 7);
+	});
+});
+
+function jsonResponse(body: unknown, status = 200): any {
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		statusText: "OK",
+		headers: { get: () => null },
+		json: async () => body,
+		text: async () => JSON.stringify(body),
+	};
+}
+
+function makeCapturingFetch(host: string): { fetch: any; urls: string[]; auth: Array<string | undefined> } {
+	const urls: string[] = [];
+	const auth: Array<string | undefined> = [];
+	const fetch = async (url: string, init?: { headers?: Record<string, string> }) => {
+		urls.push(url);
+		auth.push(init?.headers?.Authorization);
+		if (/\/files\?/.test(url)) return jsonResponse([]);
+		return jsonResponse({
+			number: 1,
+			title: "Title",
+			html_url: `https://${host}/acme/widgets/pull/1`,
+			base: { sha: "a".repeat(40) },
+			head: { sha: "b".repeat(40) },
+		});
+	};
+	return { fetch, urls, auth };
+}
+
+describe("parseGithubRef enterprise resolve path", () => {
+	it("returns full owner/repo/number/url for a trusted enterprise host", () => {
+		const ref = parseGithubRefForTesting("https://github.example.com/acme/widgets/pull/42", undefined, "/tmp", ["github.example.com"]);
+		assert.ok(ref);
+		assert.equal(ref.owner, "acme");
+		assert.equal(ref.repo, "widgets");
+		assert.equal(ref.number, "42");
+		assert.equal(ref.url, "https://github.example.com/acme/widgets/pull/42");
+	});
+
+	it("still parses github.com and rejects untrusted enterprise hosts", () => {
+		const gh = parseGithubRefForTesting("https://github.com/acme/widgets/pull/3", undefined, "/tmp", []);
+		assert.equal(gh?.owner, "acme");
+		assert.equal(gh?.number, "3");
+		assert.equal(parseGithubRefForTesting("https://github.example.com/acme/widgets/pull/3", undefined, "/tmp", []), undefined);
+	});
+});
+
+describe("resolveGithubPr host routing and token scoping", () => {
+	let savedGithubToken: string | undefined;
+	let savedGhToken: string | undefined;
+	let savedGhCommand: string | undefined;
+
+	beforeEach(() => {
+		savedGithubToken = process.env.GITHUB_TOKEN;
+		savedGhToken = process.env.GH_TOKEN;
+		savedGhCommand = process.env.BOBBIT_GH_COMMAND;
+		// Force the gh CLI fallback to fail deterministically so host-scoped token
+		// resolution returns undefined unless an env/explicit token applies.
+		process.env.BOBBIT_GH_COMMAND = "bobbit-nonexistent-gh-binary-xyz";
+	});
+	afterEach(() => {
+		if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = savedGithubToken;
+		if (savedGhToken === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = savedGhToken;
+		if (savedGhCommand === undefined) delete process.env.BOBBIT_GH_COMMAND; else process.env.BOBBIT_GH_COMMAND = savedGhCommand;
+	});
+
+	it("routes www.github.com to the public api.github.com base URL", async () => {
+		delete process.env.GITHUB_TOKEN;
+		delete process.env.GH_TOKEN;
+		const { fetch, urls } = makeCapturingFetch("www.github.com");
+		await resolveGithubPr({ prUrl: "https://www.github.com/acme/widgets/pull/1", fetch });
+		assert.ok(urls[0].startsWith("https://api.github.com/repos/acme/widgets/pulls/1"), urls[0]);
+	});
+
+	it("forwards the env token only for github.com", async () => {
+		process.env.GITHUB_TOKEN = "env-token";
+		delete process.env.GH_TOKEN;
+		const { fetch, urls, auth } = makeCapturingFetch("github.com");
+		await resolveGithubPr({ prUrl: "https://github.com/acme/widgets/pull/1", fetch });
+		assert.ok(urls[0].startsWith("https://api.github.com/"), urls[0]);
+		assert.ok(auth.some(h => h === "Bearer env-token"));
+	});
+
+	it("does NOT forward the env token to an enterprise host", async () => {
+		process.env.GITHUB_TOKEN = "env-token";
+		delete process.env.GH_TOKEN;
+		const { fetch, urls, auth } = makeCapturingFetch("github.example.com");
+		await resolveGithubPr({
+			prUrl: "https://github.example.com/acme/widgets/pull/1",
+			trustedHosts: ["github.example.com"],
+			fetch,
+		});
+		assert.ok(urls[0].startsWith("https://github.example.com/api/v3/"), urls[0]);
+		assert.ok(auth.every(h => h === undefined), `enterprise host must not receive github.com env token: ${JSON.stringify(auth)}`);
+	});
+
+	it("honors an explicit options.token for any host", async () => {
+		delete process.env.GITHUB_TOKEN;
+		delete process.env.GH_TOKEN;
+		const { fetch, auth } = makeCapturingFetch("github.example.com");
+		await resolveGithubPr({
+			prUrl: "https://github.example.com/acme/widgets/pull/1",
+			trustedHosts: ["github.example.com"],
+			token: "explicit-token",
+			fetch,
+		});
+		assert.ok(auth.some(h => h === "Bearer explicit-token"));
 	});
 });
 

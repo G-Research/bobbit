@@ -1,5 +1,5 @@
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
-import { safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
+import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
 import { execFileSafe } from "../exec-file-safe.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
@@ -626,9 +626,15 @@ function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["statu
 async function resolveGithubToken(options: ResolveGithubPrOptions, host: string): Promise<string | undefined> {
 	const explicit = cleanString(options.token);
 	if (explicit) return explicit;
-	const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
-	if (envToken) return envToken;
-	return githubCliAuthToken(options.cwd, host);
+	// The global GITHUB_TOKEN/GH_TOKEN env tokens are github.com credentials. Never
+	// forward them to enterprise hosts (that would leak a github.com secret). For any
+	// non-github.com host, fall through to the host-scoped gh CLI token instead.
+	const normalized = normalizeHost(host);
+	if (normalized === "github.com") {
+		const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
+		if (envToken) return envToken;
+	}
+	return githubCliAuthToken(options.cwd, normalized);
 }
 
 async function githubCliAuthToken(cwd: string | undefined, host: string): Promise<string | undefined> {
@@ -671,7 +677,9 @@ function githubHeaders(token: string | undefined): Record<string, string> {
 }
 
 function apiBaseUrlForHost(host: string): string {
-	return host.toLowerCase() === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
+	const normalized = normalizeHost(host);
+	// Treat both github.com and its www alias as the public GitHub API host.
+	return normalized === "github.com" || normalized === "www.github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
 }
 
 function normalizeHost(host: string | undefined): string {
@@ -679,8 +687,10 @@ function normalizeHost(host: string | undefined): string {
 }
 
 function isTrustedGithubHost(host: string, trustedHosts?: string[]): boolean {
-	const trusted = new Set(["github.com", ...(trustedHosts ?? [])].map(normalizeHost));
-	return trusted.has(normalizeHost(host));
+	// Delegate to the shared allowlist so ALL DEFAULT_TRUSTED_HOSTS (github.com,
+	// www.github.com, api.github.com, raw/gist hosts) plus managed extra hosts are
+	// honored. Keeps this check in lockstep with the synchronous launch trust-check.
+	return isTrustedExternalHost(normalizeHost(host), trustedHosts ?? []);
 }
 
 function changesetIdForGithub(owner: string, repo: string, number: number, headSha?: string): string {
