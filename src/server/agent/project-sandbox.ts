@@ -850,15 +850,21 @@ export class ProjectSandbox {
 		// (defense-in-depth — auth is via the GITHUB_TOKEN credential helper).
 		const repoUrl = this.options.cloneSource?.cloneUrl ?? stripTokenFromGitUrl(this.options.repoUrl);
 
+		// Mark all paths as safe for git BEFORE cloning. When the clone source is a
+		// `file://` bind-mount (remote-less project — see resolveSandboxCloneSource),
+		// the mounted source repo is owned by the host UID, not the container `node`
+		// user, so git's dubious-ownership guard rejects the clone
+		// ("fatal: detected dubious ownership in repository at '/workspace-src/.git'")
+		// unless safe.directory is configured first. The multi-repo init path
+		// (`_runInitSequenceMultiRepo`) already orders this before its clones.
+		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
+
 		// Clone the repo
 		console.log(`[project-sandbox] Cloning ${repoUrl} into /workspace...`);
 		await this._dockerExec(this.containerId, ["git", "clone", repoUrl, "."], {
 			cwd: "/workspace",
 			timeout: 120_000,
 		});
-
-		// Mark /workspace-wt as safe for git
-		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
 
 		// npm ci if package-lock.json exists
 		try {
