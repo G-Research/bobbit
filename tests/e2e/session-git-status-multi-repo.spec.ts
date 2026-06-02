@@ -264,6 +264,45 @@ test.describe.serial("session git-status multi-repo envelope", () => {
 		expect(b.repos.web).toBeUndefined();
 	});
 
+	test("git-diff ?repo= resolves server-side to the matching sub-repo worktree", async () => {
+		// Seed a unique untracked file in each sub-repo's worktree so the real
+		// (non-sandboxed) getGitDiff produces a deterministic diff per repo. This
+		// exercises the server-side `?repo=` → session.repoWorktrees resolution
+		// (the UI test mocks the browser route and bypasses this resolution).
+		const apiMarker = `api-marker-${process.pid}.txt`;
+		const webMarker = `web-marker-${process.pid}.txt`;
+		fs.writeFileSync(path.join(apiWt, apiMarker), "API_SUBREPO_DIFF_MARKER\n");
+		fs.writeFileSync(path.join(webWt, webMarker), "WEB_SUBREPO_DIFF_MARKER\n");
+
+		// ?repo=api selects the api worktree → its marker diff is returned.
+		const apiResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?repo=api&file=${apiMarker}`);
+		expect(apiResp.status).toBe(200);
+		expect((await apiResp.json()).diff).toContain("API_SUBREPO_DIFF_MARKER");
+
+		// ?repo=web selects the web worktree → its marker diff is returned.
+		const webResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?repo=web&file=${webMarker}`);
+		expect(webResp.status).toBe(200);
+		expect((await webResp.json()).diff).toContain("WEB_SUBREPO_DIFF_MARKER");
+
+		// Cross-repo: the api-only file does NOT exist in the web worktree, so
+		// ?repo=web must resolve to web's path and find no diff (404), proving the
+		// repo param truly switches the diff cwd rather than always using session.cwd.
+		const crossResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?repo=web&file=${apiMarker}`);
+		expect(crossResp.status).toBe(404);
+
+		// Unknown repo falls back to session.cwd. The main session's cwd is the
+		// api worktree, so a bogus repo resolves there and finds the api marker.
+		const sessCwd = (await (await apiFetch(`/api/sessions/${sessionId}`)).json()).cwd;
+		expect(sessCwd).toBe(apiWt);
+		const fallbackResp = await apiFetch(`/api/sessions/${sessionId}/git-diff?repo=does-not-exist&file=${apiMarker}`);
+		expect(fallbackResp.status).toBe(200);
+		expect((await fallbackResp.json()).diff).toContain("API_SUBREPO_DIFF_MARKER");
+
+		// Cleanup seeded files so they don't perturb later cache/status checks.
+		try { fs.rmSync(path.join(apiWt, apiMarker)); } catch { /* ignore */ }
+		try { fs.rmSync(path.join(webWt, webMarker)); } catch { /* ignore */ }
+	});
+
 	test("single-repo session returns flat shape + repos:{'.':result}", async () => {
 		// A session with no multi-repo worktrees (arbitrary cwd) must keep the
 		// back-compat flat envelope.

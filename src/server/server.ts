@@ -405,6 +405,10 @@ async function execGitArgs(args: string[], cwd: string, timeout = 5000, containe
 	const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf-8", timeout });
 	return stdout.trim();
 }
+// Argument-vector variant of execGitSafe: never passes user input through a shell.
+async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string): Promise<string> {
+	try { return await execGitArgs(args, cwd, 5000, containerId); } catch { return fallback; }
+}
 
 function branchPublishGitArgs(branch: string): {
 	push: string[];
@@ -646,14 +650,15 @@ async function getGitDiff(cwd: string, file?: string, containerId?: string): Pro
 		}
 		if (containerId) {
 			// Run git diff inside container
+			// Argument-vector execution — `file` is never parsed by a shell.
 			if (hasHead) {
-				diff = await execGitSafe(`git diff HEAD -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "HEAD", "--", file], cwd, "", containerId);
 			} else {
-				diff = await execGitSafe(`git diff --cached -- ${file}`, cwd, "", containerId)
-					+ await execGitSafe(`git diff -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--cached", "--", file], cwd, "", containerId)
+					+ await execGitArgsSafe(["diff", "--", file], cwd, "", containerId);
 			}
 			if (!diff.trim()) {
-				diff = await execGitSafe(`git diff --no-index /dev/null -- ${file}`, cwd, "", containerId);
+				diff = await execGitArgsSafe(["diff", "--no-index", "/dev/null", "--", file], cwd, "", containerId);
 			}
 		} else if (hasHead) {
 			const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--", file], opts);
