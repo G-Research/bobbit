@@ -155,5 +155,5 @@ a literal specifier per entry.
   pass that introduced route splitting, lazy MarkdownBlock, etc.
 - `docs/design/shrink-main-ui-manualchunks.md` — the app-seam
   `manualChunks` pass that split the app-shell SCC out of the entry
-  chunk (the lever in "When lazy-loading can't help" below).
+  chunk (the lever in "When lazy-loading can't help" above).
 - `docs/dev-workflow.md` — cross-linked from the dev-workflow guide.

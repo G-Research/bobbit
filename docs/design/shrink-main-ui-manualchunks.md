@@ -96,5 +96,4 @@ that point is the refactor, not raising the budget.
   budget-bump policy.
 - `vite.config.ts` — `build.rollupOptions.output.manualChunks`, where
   the app-seam and vendor rules live.
-</content>
-</invoke>
+
