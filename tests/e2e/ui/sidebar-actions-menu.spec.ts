@@ -135,12 +135,12 @@ test.describe("Sidebar actions menu", () => {
 		// then the menu-only actions in their declared order. The Fork row carries
 		// a trailing "New worktree" checkbox, but only its `[role=menuitem]` label
 		// counts here (the checkbox is a sibling `[role=menuitemcheckbox]`).
-		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Fork"]);
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Open in new window", "Fork"]);
 		await page.keyboard.press("Escape");
 		await expectNoPopover(page);
 
 		await openMenu(row, "session", sessionId);
-		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Fork"]);
+		await expect.poll(() => menuLabels(page)).toEqual(["Terminate", "Modify", "Copy link", "Open in new window", "Fork"]);
 		await expect(triggerFor(row, "session", sessionId), "hamburger trigger stays visible while the menu is open").toBeVisible();
 
 		await page.keyboard.press("Escape");
@@ -409,7 +409,8 @@ test.describe("Sidebar actions menu", () => {
 		const menu = page.locator("sidebar-actions-popover [role='menu']");
 		await expect(checkbox).toHaveAttribute("aria-checked", "true");
 
-		// Walk down to the Fork row: Terminate(0) > Modify(1) > Copy link(2) > Fork(3).
+		// Walk down to the Fork row: Terminate(0) > Modify(1) > Copy link(2) > Open in new window(3) > Fork(4).
+		await page.keyboard.press("ArrowDown");
 		await page.keyboard.press("ArrowDown");
 		await page.keyboard.press("ArrowDown");
 		await page.keyboard.press("ArrowDown");
