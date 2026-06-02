@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, ExternalLink, GitFork, Goal as GoalIcon, LayoutDashboard, Link, Menu, Pencil, RotateCcw, Trash2 } from "lucide";
 import {
 	state,
 	renderApp,
@@ -572,6 +572,13 @@ function buildSessionSidebarActions(session: GatewaySession, displayTitle: strin
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
 		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
+		},
 	];
 	if (canForkSidebarSession(session)) {
 		actions.push({
@@ -617,6 +624,13 @@ function buildTeamLeadSidebarActions(session: GatewaySession, displayTitle: stri
 			icon: icon(Link, "xs"),
 			quick: false,
 			run: (e: Event) => { e.stopPropagation(); void copySidebarLink(sessionDeepLink(session.id), "Copy session link"); },
+		},
+		{
+			id: "open-new-window",
+			label: "Open in new window",
+			icon: icon(ExternalLink, "xs"),
+			quick: false,
+			run: (e: Event) => { e.stopPropagation(); openSessionInNewWindow(session.id); },
 		},
 	];
 }
@@ -696,6 +710,10 @@ function canForkSidebarSession(session: GatewaySession): boolean {
 function openExternalUrl(url: string): void {
 	const opened = window.open(url, "_blank", "noopener");
 	try { if (opened) opened.opener = null; } catch { /* ignore */ }
+}
+
+function openSessionInNewWindow(sessionId: string): void {
+	openExternalUrl(sessionDeepLink(sessionId));
 }
 
 function prefetchGoalGithubLink(goalId: string): void {
@@ -845,6 +863,7 @@ export function renderSessionRow(session: GatewaySession) {
 			style="padding-left:${CHEVRON_W}px;"
 			${mobile ? "" : html``}
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
@@ -997,6 +1016,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 				${active ? "bg-secondary text-foreground sidebar-session-active" : connecting ? "bg-secondary/30 text-muted-foreground" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style="padding-left:${CHEVRON_W}px;"
 			@click=${() => { if (!active && !connecting) connectToSession(session.id, true); }}
+			@auxclick=${(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); openSessionInNewWindow(session.id); } }}
 		>
 			${chevron}
 			<div class="shrink-0 flex items-center justify-center">
