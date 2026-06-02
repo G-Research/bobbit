@@ -2,9 +2,11 @@
  * Bundle-size regression guard for the UI build.
  *
  * Asserts that:
- *   - the main `index-*.js` chunk is ≤ 600 KB gzipped
- *   - no non-worker `.js`/`.mjs` chunk exceeds 500 KB gzipped, except
- *     the unavoidable `pdf.worker.min-*.mjs` chunk.
+ *   - the main `index-*.js` chunk is ≤ 250 KB gzipped
+ *   - no non-worker `.js`/`.mjs` chunk exceeds 200 KB gzipped, except
+ *     the unavoidable `pdf.worker.min-*.mjs` chunk
+ *   - no non-worker `.js`/`.mjs` chunk exceeds 600 KB raw (pins Vite's
+ *     `chunkSizeWarningLimit: 600`).
  *
  * Reads chunks from `dist/ui/assets/` and gzips each via `node:zlib`.
  * **Does not run a build itself** — that would double CI time. The test

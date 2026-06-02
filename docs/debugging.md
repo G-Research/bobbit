@@ -1058,8 +1058,7 @@ If the popup window closes without the UI advancing, poll `GET /api/oauth/flow-s
 
 ## Bundle-size assertion fails
 
-`tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and asserts ≤ 600 kB gzipped, plus ≤ 500 kB gzipped for any non-worker chunk. Check `dist/ui/.vite/manifest.j
- manifest.json` exists; ensure `npm run build:ui` ran first; the test reads gzipped sizes directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. See [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md).
+`tests/bundle-size.test.ts` reads `dist/ui/.vite/manifest.json` to find the entry chunk and enforces three budgets: entry ≤ 250 kB gzipped, any non-worker chunk ≤ 200 kB gzipped, and no non-worker chunk > 600 kB raw (the raw guard pins Vite's `chunkSizeWarningLimit: 600`). Ensure `dist/ui/.vite/manifest.json` exists (`npm run build:ui` first — the test is skipped when `dist/ui` is absent); sizes are read directly from `dist/ui/assets/`. The `pdf.worker.min-*.mjs` chunk is whitelisted. Run the build-then-assert in one shot with `npm run test:bundle`. **Raw-guard regression?** The usual cause is the app-shell SCC growing back past 600 kB raw — split a stable app seam into its own chunk via `manualChunks` rather than raising the budget. Profile with [docs/perf/bundle-profile.md](perf/bundle-profile.md); see the bundle-shrink history in [docs/design/ui-bundle-size-reduction.md](design/ui-bundle-size-reduction.md) → [shrink-initial-bundle.md](design/shrink-initial-bundle.md) → [shrink-main-ui-manualchunks.md](design/shrink-main-ui-manualchunks.md).
 
 ## Markdown not rendering in chat / proposal panel
 

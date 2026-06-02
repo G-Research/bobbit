@@ -64,7 +64,7 @@ npm run build     # compile server + bundle UI
 npm start         # start gateway on :3001
 ```
 
-The UI build enforces a **600 kB gzipped budget** on the main `index-*.js` chunk (and 500 kB per non-worker chunk) via `tests/bundle-size.test.ts`. Run `npm run test:bundle` to build and assert in one shot. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md) for the route-splitting and lazy-loading patterns that keep the bundle small.
+The UI build enforces bundle budgets via `tests/bundle-size.test.ts`: the main `index-*.js` chunk ≤ **250 kB gzipped**, every non-worker chunk ≤ **200 kB gzipped**, and no non-worker chunk over **600 kB raw** (which pins Vite's `chunkSizeWarningLimit`). Run `npm run test:bundle` to build and assert in one shot. See [docs/design/ui-bundle-size-reduction.md](docs/design/ui-bundle-size-reduction.md) for the route-splitting and lazy-loading patterns that keep the bundle small.
 
 ### From global install
 

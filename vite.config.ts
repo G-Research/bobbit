@@ -369,6 +369,23 @@ export default defineConfig(({ mode }) => ({
 					if (normalizedId.endsWith("/src/app/message-reducer.ts")) return "app-message-reducer";
 					if (normalizedId.endsWith("/src/app/panel-workspace.ts")) return "app-panel-workspace";
 					if (normalizedId.endsWith("/src/app/routing.ts")) return "app-routing";
+					// Additional stable app seams peeled out of the entry chunk to keep
+					// its raw size under the 600 KB budget (see tests/bundle-size.test.ts).
+					// These stay in the eager import graph (entry chunk imports them);
+					// modulePreload covers the extra requests. Packaging change only.
+					if (normalizedId.endsWith("/src/app/session-manager.ts") || normalizedId.endsWith("/src/app/remote-agent.ts")) return "app-session-runtime";
+					if (normalizedId.endsWith("/src/app/pr-walkthrough.ts")) return "app-pr-walkthrough";
+					if (
+						normalizedId.endsWith("/src/app/review-sources.ts") ||
+						normalizedId.endsWith("/src/app/preview-panel.ts") ||
+						normalizedId.endsWith("/src/ui/components/review/ReviewPane.ts") ||
+						normalizedId.endsWith("/src/ui/components/review/AnnotationStore.ts")
+					) return "app-review";
+					if (
+						normalizedId.endsWith("/src/ui/inbox/InboxPanel.ts") ||
+						normalizedId.endsWith("/src/ui/inbox/AddToInboxDialog.ts") ||
+						normalizedId.endsWith("/src/ui/inbox/InboxEntry.ts")
+					) return "app-inbox";
 					if (!normalizedId.includes("node_modules")) return;
 					if (normalizedId.includes("/@sinclair/typebox/")) return "vendor-typebox";
 					if (normalizedId.includes("/marked")) return "vendor-marked";
