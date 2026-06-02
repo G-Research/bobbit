@@ -8,7 +8,6 @@ import {
 } from "./panel-workspace.js";
 import { gatewayFetch } from "./gateway-fetch.js";
 import { confirmAction } from "./dialogs-lazy.js";
-import { normalizeTrustedHost } from "../shared/pr-walkthrough/url-safety.js";
 import {
 	expandedGoals,
 	renderApp,
@@ -640,6 +639,30 @@ async function showWalkthroughLaunchToast(message: string): Promise<void> {
 }
 
 const UNTRUSTED_HOST_CODE = "untrusted_github_host";
+
+/**
+ * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
+ * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
+ * server re-normalizes defensively on save, so this is only used to avoid storing junk/duplicates.
+ */
+function normalizeTrustedHost(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	let candidate = value.trim();
+	if (!candidate) return undefined;
+	if (candidate.includes("://")) {
+		try {
+			candidate = new URL(candidate).hostname;
+		} catch {
+			return undefined;
+		}
+	}
+	candidate = candidate.replace(/\.$/, "").toLowerCase();
+	if (!candidate) return undefined;
+	if (/[/\s@:]/.test(candidate)) return undefined;
+	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
+	if (!candidate.split(".").every((label) => label.length > 0)) return undefined;
+	return candidate;
+}
 
 /** Extract the offending host from an untrusted-host launch error (body code/host, then message regex). */
 function untrustedHostFromError(err: WalkthroughApiError): string | undefined {
