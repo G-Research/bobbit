@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # Install build tools, git, curl, gh CLI, ripgrep.
 #
@@ -111,7 +111,7 @@ LABEL bobbit.pi-ai-bedrock-ua-patch=1
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
-# Run as non-root user. node:20-slim includes a 'node' user (uid=1000).
+# Run as non-root user. node:22-slim includes a 'node' user (uid=1000).
 # This ensures files created in /workspace via bind mount are owned by uid=1000
 # on the host, matching typical developer user IDs.
 USER node
