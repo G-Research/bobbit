@@ -12,6 +12,8 @@ import {
 	isTeamLeadExpanded,
 	toggleArchivedParentExpanded,
 	isArchivedParentExpanded,
+	toggleFirstClassParentExpanded,
+	isFirstClassParentExpanded,
 	isArchivedSectionExpanded,
 	setArchivedSectionExpanded,
 	type GatewaySession,
@@ -823,8 +825,10 @@ export function renderSessionRow(session: GatewaySession) {
 	const liveChildren = visibleLiveChildrenForParent(session.id);
 	const archivedChildren = state.showArchived ? archivedChildrenForParent(session.id) : [];
 	const hasChildren = liveChildren.length > 0 || archivedChildren.length > 0;
-	const autoExpanded = liveChildren.some(isFirstClassChildSession);
-	const childrenExpanded = hasChildren && (autoExpanded || isArchivedParentExpanded(session.id));
+	const hasFirstClassChild = liveChildren.some(isFirstClassChildSession);
+	const childrenExpanded = hasChildren && (hasFirstClassChild
+		? isFirstClassParentExpanded(session.id)
+		: isArchivedParentExpanded(session.id));
 
 	const rowPy = mobile ? "py-1" : SESSION_ROW_PY;
 	const btnPad = mobile ? "p-1.5" : "p-0.5";
@@ -849,7 +853,7 @@ export function renderSessionRow(session: GatewaySession) {
 			${hasChildren ? html`<span
 				class="absolute left-0 top-0 bottom-0 flex items-center justify-center text-muted-foreground select-none cursor-pointer"
 				style="width:${CHEVRON_W}px;font-size: 1em;"
-				@click=${(e: Event) => { e.stopPropagation(); toggleArchivedParentExpanded(session.id); renderApp(); }}
+				@click=${(e: Event) => { e.stopPropagation(); if (hasFirstClassChild) toggleFirstClassParentExpanded(session.id); else toggleArchivedParentExpanded(session.id); renderApp(); }}
 			>${childrenExpanded ? "▾" : "▸"}</span>` : ""}
 			<div class="shrink-0 flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">
 				${connecting || preparing
@@ -1274,12 +1278,9 @@ export function renderGoalGroup(goal: Goal) {
 			: [];
 		const liveLeadChildren = visibleLiveChildrenForParent(teamLead.id);
 		const archivedLeadChildren = state.showArchived ? archivedChildrenForParent(teamLead.id) : [];
-		const leadChildRowsExpanded = liveLeadChildren.some(isFirstClassChildSession)
-			|| archivedLeadChildren.length > 0
-			|| isArchivedParentExpanded(teamLead.id);
 		return html`
 			${renderTeamLeadRow(teamLead, teamChildren.length + archivedForLiveLead.length + liveLeadChildren.length + archivedLeadChildren.length, tlExpanded)}
-			${leadChildRowsExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
+			${tlExpanded ? html`${renderLiveDelegates(teamLead.id)}${state.showArchived ? renderArchivedDelegates(teamLead.id, true) : ""}` : ""}
 			${tlExpanded ? html`
 				<div class="flex flex-col gap-0.5" style="padding-left:${INDENT}px;">
 					${teamChildren.map(renderSessionRow)}
