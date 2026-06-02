@@ -212,7 +212,7 @@ Validated YAML is mapped into the existing card model:
 - `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card, including the six structured guided `sections` (see [Guided orientation step-through](#guided-orientation-step-through)).
 - `design_decisions` become Key design choices cards with trade-offs, alternatives, suggested concerns, and linked hunks.
 - `review_chunks` become significant, other, or audit review cards with diff-backed hunks and suggested concerns.
-- Each card's `nav_label` (optional, supplied by the agent) becomes the card `navLabel`; when omitted or invalid the server derives a compact label from the title. See [Short navigation labels](#short-navigation-labels).
+- Each card's `nav_label` (optional, supplied by the agent) becomes the card `navLabel`; when missing or empty/whitespace-only the server derives a compact label from the title, whereas a non-empty over-cap label (>3 words / >24 chars) is rejected with a validation error. See [Short navigation labels](#short-navigation-labels).
 - `omissions_and_followups` feed Other + omissions guidance and card-level suggested comments.
 - `audit` feeds the final Audit card and draft reviewer checklist.
 - `display.phase_order` and `display.chunk_order` influence visible ordering while preserving the known phase set.
