@@ -105,6 +105,30 @@ provider SDK chunks pi-ai emits (`mistral-*.js`, `google-shared-*.js`,
 etc.) — they're already on a dynamic-import boundary inside the
 package and only load when the user selects that provider.
 
+## When lazy-loading can't help (the SCC case)
+
+Sometimes the biggest rectangle in the entry chunk is not one
+heavy module but a **cycle** of app-shell modules that import each
+other (`render` ↔ `sidebar` ↔ `AgentInterface` ↔ `session-manager`
+↔ `remote-agent`, …). Rollup cannot split a strongly-connected
+component by reachability, so it collapses the whole cycle into one
+chunk. Converting any single member to `await import()` does nothing —
+its earliest static importer drags it right back in.
+
+The lever here is **app-seam `manualChunks`**: pin stable members (or
+whole feature seams like PR-walkthrough, review, inbox) into named
+chunks in `build.rollupOptions.output.manualChunks`. This is a
+packaging change, not lazy deferral — the modules stay in the eager
+import graph and `modulePreload` covers the extra parallel requests, so
+there is no behavioral change. It shrinks the entry chunk without
+touching source.
+
+The floor is the SCC itself: you cannot split a cycle finer than its
+members (Rollup emits a `Circular chunk` warning and folds them back
+together). Going below that requires a source-level refactor to break
+the import cycle. See
+[`docs/design/shrink-main-ui-manualchunks.md`](../design/shrink-main-ui-manualchunks.md).
+
 ## Adding a per-language chunk emission
 
 `src/ui/tools/highlight-core.ts` uses a static `LAZY_GRAMMARS` map so
@@ -129,4 +153,7 @@ a literal specifier per entry.
   the current set of lazy-load boundaries.
 - `docs/design/ui-bundle-size-reduction.md` — the earlier reduction
   pass that introduced route splitting, lazy MarkdownBlock, etc.
+- `docs/design/shrink-main-ui-manualchunks.md` — the app-seam
+  `manualChunks` pass that split the app-shell SCC out of the entry
+  chunk (the lever in "When lazy-loading can't help" below).
 - `docs/dev-workflow.md` — cross-linked from the dev-workflow guide.

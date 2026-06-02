@@ -23,7 +23,7 @@ Follow-on bug fixes during stabilisation:
 
 A pre-existing PWA-resume cold-offline test was skipped (verified flaky on `master` at `94143ba8`) and is tracked separately.
 
-**Follow-up:** a second pass landed in [shrink-initial-bundle.md](./shrink-initial-bundle.md) (HEAD `ed850b65`) that dropped the entry chunk further to ~150 kB gz and the artifacts chunk to ~44 kB gz — lazy `pi-ai` catalog, `highlight.js` core + lazy grammars, lazy `qrcode` / `jszip`, vendor-chunk split, and a proposal-panels extraction.
+**Follow-up:** a second pass landed in [shrink-initial-bundle.md](./shrink-initial-bundle.md) (HEAD `ed850b65`) that dropped the entry chunk further to ~150 kB gz and the artifacts chunk to ~44 kB gz — lazy `pi-ai` catalog, `highlight.js` core + lazy grammars, lazy `qrcode` / `jszip`, vendor-chunk split, and a proposal-panels extraction. A third pass — [shrink-main-ui-manualchunks.md](./shrink-main-ui-manualchunks.md) (HEAD `11278c43`) — later peeled the app-shell SCC out of the entry chunk with app-seam `manualChunks` rules after it regressed past the 600 kB raw budget.
 
 ## Problem
 
