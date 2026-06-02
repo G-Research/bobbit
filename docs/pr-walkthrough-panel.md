@@ -401,7 +401,7 @@ Important launch fields:
 
 - `GITHUB_TOKEN` / `GH_TOKEN` — used for GitHub API requests and required for review submission.
 - `BOBBIT_GITHUB_API_BASE_URL` — overrides the GitHub API base URL, useful for GitHub Enterprise or tests.
-- `BOBBIT_GITHUB_TRUSTED_HOSTS` — comma-separated allowlist for additional trusted GitHub hosts.
+- **Trusted GitHub hosts** — extra trusted hosts (beyond the always-trusted `github.com`/`api.github.com`/`raw.githubusercontent.com` baseline) are managed in **System → General → Trusted GitHub hosts**, persisted in the server preferences store under `githubTrustedHosts`. This is the only source for extra hosts; the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read. Launching a walkthrough against an untrusted host surfaces a risk-warning dialog that can add the host and retry.
 - `BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER` — optional module path for compatibility resolver synthesis.
 
 For compatibility resolver model synthesis without a custom adapter, Bobbit uses the selected session model when available, then the default review model, then the default session model. The session-hosted GitHub flow instead relies on the child walkthrough agent and validated YAML submission.
@@ -428,7 +428,7 @@ For compatibility resolver model synthesis without a custom adapter, Bobbit uses
 - **Export button only shows copy/preview** — the walkthrough is local, unauthenticated, missing a GitHub target, or export capability was disabled by the resolver.
 - **Some comments are unmappable** — check whether the comment is card-level, attached to a binary/truncated file, or anchored to a line GitHub cannot review.
 - **Reload loses comments after a PR update** — the card checksum changed, so Bobbit intentionally avoids restoring comments onto a different diff. Re-resolve and review the updated cards.
-- **GitHub Enterprise URL is rejected** — add the host to the trusted host allowlist and configure the matching API base URL.
+- **GitHub Enterprise URL is rejected** — add the host under System → General → Trusted GitHub hosts (or confirm the risk-warning dialog on launch), and configure the matching API base URL.
 
 ## Testing notes
 
