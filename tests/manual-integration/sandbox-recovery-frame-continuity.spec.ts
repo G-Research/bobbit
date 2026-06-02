@@ -147,15 +147,10 @@ function initRepo(dir: string) {
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "p", version: "1.0.0" }, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Add a real origin so project-sandbox can clone the repo via https inside
-	// the Linux container. Without this, server.ts falls back to repoUrl =
-	// repoPath (a Windows host path like "C:/Users/..."), which git inside
-	// the container interprets as an ssh-style URL because of the colon and
-	// fails with "cannot run ssh: No such file or directory".
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — exercising the working mounted-clone path on
+	// every OS (no scp/ssh misparse of a host path, no unreachable host path).
 	const srcConfig = join(PROJECT_ROOT, ".bobbit", "config");
 	const dstConfig = join(dir, ".bobbit", "config");
 	if (existsSync(srcConfig)) {

@@ -316,6 +316,58 @@ export async function isGitRepoRoot(dir: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Resolve the canonical main-repo working directory to bind-mount as the sandbox
+ * clone source.
+ *
+ * A linked git worktree's `.git` is a gitdir-FILE pointing at the main repo's
+ * object store, not a real `.git` directory. Bind-mounting and `git clone`ing
+ * just the worktree dir fails because the objects live in the main repo, which
+ * isn't mounted. So we resolve the canonical MAIN repo root via
+ * `git rev-parse --git-common-dir` and mount that instead.
+ *
+ * Returns the realpath of the main working tree (parent of the resolved
+ * `.git`), or the realpath of the common dir itself for a bare repo. On any
+ * failure, falls back to `canonicalizePath(repoPath)`. Always resolves symlinks
+ * (defense in depth: the mount source is never an un-canonicalized path).
+ */
+export async function resolveSandboxMountRoot(repoPath: string): Promise<string> {
+	const realpath = async (p: string): Promise<string> => {
+		try {
+			return await fs.promises.realpath(p);
+		} catch {
+			return path.resolve(p);
+		}
+	};
+	try {
+		let commonDir: string;
+		try {
+			const { stdout } = await execGit(
+				["-C", repoPath, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+				{ timeout: 5_000 },
+			);
+			commonDir = stdout.toString().trim();
+		} catch {
+			// Older git without --path-format: result may be relative to repoPath.
+			const { stdout } = await execGit(["-C", repoPath, "rev-parse", "--git-common-dir"], {
+				timeout: 5_000,
+			});
+			commonDir = stdout.toString().trim();
+		}
+		if (!commonDir) return canonicalizePath(repoPath);
+		if (!path.isAbsolute(commonDir)) commonDir = path.resolve(repoPath, commonDir);
+		const realCommon = await realpath(commonDir);
+		// A non-bare repo's common dir ends in `.git` — the main working tree is its parent.
+		if (path.basename(realCommon) === ".git") {
+			return await realpath(path.dirname(realCommon));
+		}
+		// Bare repo — the common dir itself is the canonical source.
+		return realCommon;
+	} catch {
+		return canonicalizePath(repoPath);
+	}
+}
+
 export interface WorktreeResult {
 	worktreePath: string;
 	branchName: string;

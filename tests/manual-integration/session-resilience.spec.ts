@@ -442,10 +442,12 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — exercising the working mounted-clone path. This
+	// is the safe default: a remote-less project is always its own clone source.
+	// (Adding an external `file://` bare-repo origin would now be rejected by the
+	// resolver as a local path outside the project root — a data-exposure guard.)
 
 	// Copy config files (workflows, roles, tools, etc.) so the gateway has them.
 	// Exclude project.yaml since we write our own.

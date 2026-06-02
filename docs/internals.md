@@ -1922,7 +1922,7 @@ Bobbit server                           /workspace        (repo clone, native Li
 ```
 
 - **One container per project**, created when sandbox is enabled, lives until disabled/removed
-- **Container clones its own repo** from the real remote - no host-side clone, no cross-OS bind mounts for workspace
+- **Container clones its own repo** — from the real remote when one exists, otherwise from a read-only bind-mount of the host repo root (see [Sandbox clone source](#sandbox-clone-source)). No host-side clone; the `/workspace` clone itself is always a native Linux clone, never a bind-mounted host directory
 - **`npm ci`, Playwright install, and build happen inside the container** on native Linux filesystem
 - **Agents use git worktrees** inside the container - identical to non-sandbox mode
 - **One scoped token per project container** (not per-agent/session)
@@ -1971,7 +1971,7 @@ A sandbox is never created for a project that has not asked for one. The image b
    - **Found running** → reconnect (reuse container ID)
    - **Found stopped** → restart via `docker start`
    - **Not found** → create new container with named Docker volumes (`bobbit-workspace-<projectId>` for `/workspace`, `bobbit-worktrees-<projectId>` for `/workspace-wt`)
-3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`
+3. On first create, the container runs an init sequence: `git clone <repoUrl>`, `npm ci`, optional Playwright install, `npm run build`. `<repoUrl>` is chosen by the clone-source resolver — see [Sandbox clone source](#sandbox-clone-source) for how a remote, remote-less, or local-only project each resolve.
 4. Container runs with `--restart=unless-stopped` so it survives Docker daemon restarts
 
 **Agent spawn:**
@@ -1985,6 +1985,23 @@ A sandbox is never created for a project that has not asked for one. The image b
 **Session termination:**
 
 1. `ProjectSandbox.removeWorktree(name)` removes the worktree inside the container via `docker exec git worktree remove`
+
+### Sandbox clone source
+
+The sandbox container is a native Linux box with its own filesystem and its own git ref visibility — it does **not** share the host's working tree. So before the init sequence can `git clone`, the host has to answer one question: *what source can git reach from inside the container?* That decision lives in `resolveSandboxCloneSource` (`src/server/agent/sandbox-clone-source.ts`), called from the `sandboxBootstrap` closure in `server.ts`. The resolver is pure (no filesystem access) and returns one of three outcomes.
+
+**1. Network `origin` remote → clone it directly.** If `origin` is an `https`/`ssh`/`git`/`git+ssh` URL or scp-style `[user@]host:path`, the container clones that URL. The token is stripped from the URL before it lands in `.git/config` (so credentials never persist in the clone); the container's git credential helper supplies auth from `GITHUB_TOKEN` at runtime instead. This is the common case and is unchanged from the project's normal behaviour.
+
+**2. No `origin` → bind-mount the main repo root and clone via `file://`.** When the project has no `origin` remote, there is no URL to clone, so the host's canonical **main repo root** is bind-mounted **read-only** into the container at a fixed path (`/workspace-src`) and cloned via `file:///workspace-src`. Two subtleties:
+
+- The mount source is the *main* repo root, not the session's worktree. A session runs in a **linked git worktree** whose `.git` is a gitdir-*file* pointing at the main repo's object store; bind-mounting just the worktree would clone successfully but find no objects. `resolveSandboxMountRoot` (`src/server/skills/git.ts`) resolves the canonical main working tree via `git rev-parse --git-common-dir` (and always returns a realpath), so the clone works regardless of which worktree triggered the sandbox.
+- **Multi-repo** projects mount each component's main root at a per-repo path (`/workspace-src/<repo>`) and clone each from its own `file://` URL. `_createContainer` de-dupes mounts by container path so two components can't collide.
+
+  *Tradeoff:* the read-only mount exposes the project's **entire working tree — including untracked files** — to the sandbox. That is intentional for remote-less projects (it is the only reachable source), but it means the sandbox sees more than a clean clone of committed history would. Projects that want strict isolation should configure a network remote.
+
+**3. Local-only `origin` (a `file://` URL or any absolute/relative/UNC/drive-letter path) → fail fast.** The resolver throws a clear, actionable error instead of attempting the clone. This is the bug fix that motivated this design: the old code silently fell back to the **raw host path** as the clone URL. On Windows, a drive-letter path (`C:/Users/...`) was misparsed by git as scp/SSH syntax (`host:path`) and failed with `cannot run ssh` / `unable to fork`; on any OS the host path was simply unreachable from inside the container. Failing fast with "configure a clonable network remote, or remove the origin to use the mounted project repo" is far more useful than an opaque clone failure. Note the resolver never derives a mount path from the `origin` value — only from the caller-canonicalized repo root — which also closes the door on an in-repo symlink being used to bind-mount an arbitrary host path.
+
+**Failure isolation.** A sandbox that can't initialise must never take down the gateway for *other* projects' sessions. `ProjectSandbox.init()` exposes its readiness through an internal `_readyPromise` that only `getContainerId()` awaits; when init fails with no concurrent awaiter, that promise would reject with no handler and surface as a global `unhandledRejection` — which under load was observed to wedge the gateway for unrelated sessions. The fix attaches a no-op `.catch` to `_readyPromise` so the rejection is always "handled", while the real error is still re-thrown on the **awaited** `init()` boundary. Session setup observes it there, records a setup failure, and ends the session cleanly. The same guarantee holds at the manager level: `SandboxManager.ensureForProject` rejects on the awaited boundary, clears its in-flight entry (so the project can be retried), and a different project's sandbox keeps working. Pinned by `tests/sandbox-init-rejection.test.ts` and `tests/sandbox-manager-init-failure.test.ts`.
 
 ### Network
 
