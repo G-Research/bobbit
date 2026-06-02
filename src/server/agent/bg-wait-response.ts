@@ -15,24 +15,58 @@ export type BgWaitResult = { info: BgProcessInfo; timedOut: boolean; aborted: bo
  * writes a heartbeat newline on `heartbeatMs` ticks while the wait is pending,
  * then ends with the final JSON payload.
  *
- * NOTE: this is the behaviour-preserving extraction step — it still replicates
- * the CURRENT broken behaviour (await the result first, then write headers +
- * body in one shot). The `heartbeatMs` seam exists but is unused here; the fix
- * lands in a later step.
+ * Header flush is LAZY — driven by the first heartbeat tick — rather than
+ * eager. This is deliberate: `waitForExit` returns `null` synchronously (on the
+ * first microtask) for an unknown process id, which resolves long before the
+ * first heartbeat fires. By deferring the head until that first tick we can
+ * still send a genuine `404` for the not-found case (no bytes written yet),
+ * while a real pending wait flushes a `200`/chunked head on the first heartbeat
+ * — well inside undici's ~300s `headersTimeout`, so it can never trip.
  */
 export async function streamBgWaitResponse(
 	res: ServerResponse,
 	waitForExit: () => Promise<BgWaitResult>,
-	_opts?: { heartbeatMs?: number },
+	opts?: { heartbeatMs?: number },
 ): Promise<void> {
-	const result = await waitForExit();
-	if (!result) {
-		const body = JSON.stringify({ error: "Process not found" });
-		res.writeHead(404, { "Content-Type": "application/json" });
-		res.end(body);
-		return;
+	const heartbeatMs = opts?.heartbeatMs ?? 60_000;
+	let headWritten = false;
+	const ensureHead = (): void => {
+		if (headWritten) return;
+		headWritten = true;
+		res.writeHead(200, {
+			"Content-Type": "application/json",
+			"Transfer-Encoding": "chunked",
+			"Cache-Control": "no-cache",
+		});
+	};
+
+	// Heartbeat newline keeps the long-poll connection alive past undici's
+	// default headersTimeout. The first tick also flushes the chunked head.
+	const heartbeat = setInterval(() => {
+		try {
+			ensureHead();
+			res.write("\n");
+		} catch { /* ignore — connection may already be torn down */ }
+	}, heartbeatMs);
+
+	try {
+		const result = await waitForExit();
+		if (!result) {
+			if (!headWritten) {
+				// No bytes written yet → safe to emit a real 404, preserving the
+				// original not-found contract.
+				res.writeHead(404, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "Process not found" }));
+				return;
+			}
+			// Head already flushed (200/chunked) — can't change status now, so put
+			// the error in the body, mirroring the session /wait endpoint.
+			res.end(JSON.stringify({ error: "Process not found" }));
+			return;
+		}
+		ensureHead();
+		res.end(JSON.stringify(result));
+	} finally {
+		clearInterval(heartbeat);
 	}
-	const body = JSON.stringify(result);
-	res.writeHead(200, { "Content-Type": "application/json" });
-	res.end(body);
 }
