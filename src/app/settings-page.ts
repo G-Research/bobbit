@@ -45,6 +45,7 @@ import { openOAuthDialog } from "./dialogs.js";
 import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
+import { normalizeTrustedHost } from "../shared/pr-walkthrough/url-safety.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
 import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
 
@@ -122,30 +123,6 @@ const SKILLS_CATALOG_BUDGET_MAX_BYTES = 131072;
 let settingsGithubTrustedHosts: string[] = [];
 let settingsGithubTrustedHostInput = "";
 let customisePromptStatus = "";
-
-/**
- * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
- * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
- * server re-normalizes defensively on save, so this is purely for input validation/dedupe UX.
- */
-function normalizeTrustedHost(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	let candidate = value.trim();
-	if (!candidate) return undefined;
-	if (candidate.includes("://")) {
-		try {
-			candidate = new URL(candidate).hostname;
-		} catch {
-			return undefined;
-		}
-	}
-	candidate = candidate.replace(/\.$/, "").toLowerCase();
-	if (!candidate) return undefined;
-	if (/[/\s@:]/.test(candidate)) return undefined;
-	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
-	if (!candidate.split(".").every((label) => label.length > 0)) return undefined;
-	return candidate;
-}
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
