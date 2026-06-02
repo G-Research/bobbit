@@ -262,6 +262,39 @@ export class GitStatusWidget extends LitElement {
         }
     }
 
+    /** Colored ahead/behind/insertion/deletion segment spans, shared by the flat
+     *  pill (`_pillSegments`) and the multi-repo aggregate pill so styling never
+     *  diverges. Order: ↓behind (red), ↑ahead (blue), +ins (green), -del (red). */
+    private _segmentSpans(stats: { ahead: number; behind: number; ins: number; del: number }) {
+        const spans = [];
+        if (stats.behind > 0) {
+            spans.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">↓${stats.behind}</span>`);
+        }
+        if (stats.ahead > 0) {
+            spans.push(html`<span class="text-blue-600 dark:text-blue-400 shrink-0" style="font-weight:500">↑${stats.ahead}</span>`);
+        }
+        if (stats.ins > 0) {
+            spans.push(html`<span class="text-green-600 dark:text-green-400 shrink-0" style="font-weight:500">+${stats.ins}</span>`);
+        }
+        if (stats.del > 0) {
+            spans.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">-${stats.del}</span>`);
+        }
+        return spans;
+    }
+
+    /** Sum of primary-comparison stats across all repos (multi-repo mode). */
+    private _aggregatePrimaryStats(): { ahead: number; behind: number; ins: number; del: number } {
+        const acc = { ahead: 0, behind: 0, ins: 0, del: 0 };
+        if (!this.repos) return acc;
+        for (const info of Object.values(this.repos)) {
+            if (typeof info.aheadOfPrimary === 'number') acc.ahead += info.aheadOfPrimary;
+            if (typeof info.behindPrimary === 'number') acc.behind += info.behindPrimary;
+            if (typeof info.insertionsVsPrimary === 'number') acc.ins += info.insertionsVsPrimary;
+            if (typeof info.deletionsVsPrimary === 'number') acc.del += info.deletionsVsPrimary;
+        }
+        return acc;
+    }
+
     /** Pill segments: ~N dirty, ↓N behind primary (red), ↑N ahead primary (blue) */
     private _pillSegments() {
         const segments = [];
@@ -269,21 +302,14 @@ export class GitStatusWidget extends LitElement {
         if (!this.clean && this.statusFiles.length > 0) {
             segments.push(html`<span class="text-amber-600 dark:text-amber-400 shrink-0" style="font-weight:500">~${this.statusFiles.length}</span>`);
         }
-        // Behind primary (red)
-        if (!this.isOnPrimary && this.behindPrimary > 0) {
-            segments.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">↓${this.behindPrimary}</span>`);
-        }
-        // Ahead of primary (blue)
-        if (!this.isOnPrimary && this.aheadOfPrimary > 0) {
-            segments.push(html`<span class="text-blue-600 dark:text-blue-400 shrink-0" style="font-weight:500">↑${this.aheadOfPrimary}</span>`);
-        }
-        // Insertions vs primary (green)
-        if (!this.isOnPrimary && this.insertionsVsPrimary > 0) {
-            segments.push(html`<span class="text-green-600 dark:text-green-400 shrink-0" style="font-weight:500">+${this.insertionsVsPrimary}</span>`);
-        }
-        // Deletions vs primary (red)
-        if (!this.isOnPrimary && this.deletionsVsPrimary > 0) {
-            segments.push(html`<span class="text-red-600 dark:text-red-400 shrink-0" style="font-weight:500">-${this.deletionsVsPrimary}</span>`);
+        // Ahead/behind/insertions/deletions vs primary (shared markup).
+        if (!this.isOnPrimary) {
+            segments.push(...this._segmentSpans({
+                ahead: this.aheadOfPrimary,
+                behind: this.behindPrimary,
+                ins: this.insertionsVsPrimary,
+                del: this.deletionsVsPrimary,
+            }));
         }
         return segments;
     }
@@ -652,7 +678,7 @@ export class GitStatusWidget extends LitElement {
         }));
     }
 
-    private async _openDiffModal(file: string) {
+    private async _openDiffModal(file: string, repo?: string) {
         this._modalFile = file;
         this._loadingDiff = file;
         this._diffContent = null;
@@ -662,7 +688,8 @@ export class GitStatusWidget extends LitElement {
         const base = this.sessionId
             ? `/api/sessions/${this.sessionId}/git-diff`
             : `/api/goals/${this.goalId}/git-diff`;
-        const url = `${base}?file=${encodeURIComponent(file)}`;
+        let url = `${base}?file=${encodeURIComponent(file)}`;
+        if (repo && repo !== '.') url += `&repo=${encodeURIComponent(repo)}`;
         try {
             const headers: Record<string, string> = {};
             if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
@@ -904,7 +931,8 @@ export class GitStatusWidget extends LitElement {
                             ${files.length > 0
                                 ? html`<div class="flex flex-col gap-0.5 px-2 pb-2 pt-1">
                                     ${files.map(f => html`
-                                        <div class="flex items-center gap-2 py-0.5 min-w-0">
+                                        <div class="flex items-center gap-2 py-0.5 min-w-0 rounded px-1 -mx-1 ${(this.sessionId || this.goalId) ? 'cursor-pointer hover:bg-muted/50' : ''}"
+                                             @click=${() => (this.sessionId || this.goalId) ? this._openDiffModal(f.file, repoName) : undefined}>
                                             <span class="${this._statusColor(f.status)} font-mono w-[60px] shrink-0 text-right text-[11px]" title=${this._statusLabel(f.status)}>${this._statusLabel(f.status)}</span>
                                             <span class="text-foreground truncate text-[12px]" title=${f.file}>${f.file}</span>
                                         </div>
@@ -1017,11 +1045,20 @@ export class GitStatusWidget extends LitElement {
                 return `${total} changed across ${dirtyRepos} repo${dirtyRepos === 1 ? '' : 's'}`;
             })()
             : null;
-        // Show 'clean' only when no other indicators are present and no PR
-        const showClean = this.clean && segments.length === 0 && !this.prState
-            && (this.isOnPrimary || this.mergedIntoPrimary)
-            && (this.isOnPrimary || this.aheadOfPrimary === 0)
-            && !aggregateLabel;
+        // Multi-repo: colored segments for stats summed across all repos
+        // (↓behind / ↑ahead / +ins / -del), reusing the flat pill styling.
+        const aggregateStats = multiRepoMode ? this._aggregatePrimaryStats() : null;
+        const aggregateSegments = aggregateStats ? this._segmentSpans(aggregateStats) : [];
+        // Show 'clean' only when no other indicators are present and no PR.
+        // Multi-repo mode derives clean-collapse from the AGGREGATE (every
+        // repo clean + all summed primary stats zero), INDEPENDENT of
+        // `isOnPrimary` — a clean `session/...` branch must still collapse to
+        // the single green "clean". Flat/single-repo behavior is unchanged.
+        const showClean = multiRepoMode
+            ? (this.clean && !this.prState && !aggregateLabel && aggregateSegments.length === 0)
+            : (this.clean && segments.length === 0 && !this.prState
+                && (this.isOnPrimary || this.mergedIntoPrimary)
+                && (this.isOnPrimary || this.aheadOfPrimary === 0));
 
         const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
         const refreshDot = this.loading
@@ -1040,8 +1077,10 @@ export class GitStatusWidget extends LitElement {
                 <span class="shrink-0 relative" style="display:inline-block">⎇${refreshDot}</span>
                 <span class="truncate">${this.branch}</span>
                 ${showClean ? html`<span class="text-green-600 dark:text-green-400 font-medium shrink-0">clean</span>` : nothing}
-                ${aggregateLabel
-                    ? html`<span class="text-amber-600 dark:text-amber-400 font-medium shrink-0" data-testid="pill-multi-repo-aggregate">${aggregateLabel}</span>`
+                ${multiRepoMode
+                    ? html`${aggregateLabel
+                        ? html`<span class="text-amber-600 dark:text-amber-400 font-medium shrink-0" data-testid="pill-multi-repo-aggregate">${aggregateLabel}</span>`
+                        : nothing}${aggregateSegments}`
                     : segments}
                 ${this._prPillIcon()}
             </button>
