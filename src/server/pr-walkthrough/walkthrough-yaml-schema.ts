@@ -682,8 +682,9 @@ function buildOrientationSections(document: PrWalkthroughYamlDocument): PrWalkth
 			id: "where-to-look",
 			navLabel: "Where to look",
 			heading: "Where to look",
-			body: context.reviewer_map,
-			...(fileRoles.length > 0 ? { fileRoles } : {}),
+			// When the reviewer map parses into a structured file→role list, render only that
+			// list — keeping the raw prose body too would duplicate every entry on screen.
+			...(fileRoles.length > 0 ? { fileRoles } : { body: context.reviewer_map }),
 			showOriginalDescription: true,
 		},
 	];

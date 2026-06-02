@@ -340,7 +340,6 @@ export class PrWalkthroughPanel extends LitElement {
 			gap: 14px;
 			padding: 12px 6px;
 		}
-		.collapsed-phase { display: grid; justify-items: center; gap: 6px; }
 		.phase-pip {
 			width: 12px;
 			height: 12px;
@@ -597,11 +596,14 @@ export class PrWalkthroughPanel extends LitElement {
 		.rail-toggle svg { width: 16px; height: 16px; }
 		.walkthrough-rail-resize-handle { position: absolute; top: 0; right: -2px; width: 6px; height: 100%; z-index: 5; cursor: col-resize; background: transparent; transition: background 120ms ease; touch-action: none; }
 		.walkthrough-rail-resize-handle:hover, .walkthrough-rail-resize-handle:active { background: color-mix(in oklch, var(--primary, Highlight) 25%, transparent); }
+		/* Collapsed rail reuses the labelled rail DOM; it only centres the column and hides text. */
 		.rail.collapsed { gap: 6px; padding: 6px 3px; overflow-x: hidden; }
-		.collapsed-phase { width: 100%; display: grid; justify-items: center; gap: 5px; padding: 0 0 5px; border-radius: 6px; }
-		.collapsed-phase::before { content: ""; width: 22px; height: 1px; background: var(--border, ButtonBorder); opacity: 0.75; }
-		.rail.collapsed .collapsed-phase:first-child::before { content: none; display: none; }
-		.collapsed-phase.active { background: transparent; }
+		.rail.collapsed .phase { justify-items: center; }
+		.rail.collapsed .phase:first-of-type::before { content: none; display: none; }
+		.rail.collapsed .phase-button { justify-content: center; gap: 0; }
+		.rail.collapsed .phase-cards { padding: 0; justify-items: center; }
+		.rail.collapsed .card-button { justify-content: center; gap: 0; min-height: 18px; }
+		.rail.collapsed .phase-name, .rail.collapsed .card-title { display: none; }
 		.rail.collapsed .phase-pip { width: 24px; height: 13px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0 !important; border-radius: 0; outline: 0; box-shadow: none; background: transparent; color: var(--muted-foreground, GrayText); font-size: 9px; font-weight: 900; letter-spacing: 0.08em; }
 		.rail.collapsed .phase-pip.active, .rail.collapsed .phase-pip.complete { background: transparent; color: var(--muted-foreground, GrayText); }
 		.rail.collapsed .card-dot { position: relative; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-width: 2px; border-style: solid; border-color: currentColor; background-color: transparent; color: var(--foreground, CanvasText); opacity: 0.95; padding: 0; }
@@ -730,8 +732,8 @@ export class PrWalkthroughPanel extends LitElement {
 		.guide-nav button:disabled { opacity: 0.45; cursor: not-allowed; }
 		.guide-nav .next { border-color: color-mix(in oklch, var(--primary, Highlight) 55%, var(--border, ButtonBorder)); background: var(--primary, Highlight); color: var(--primary-foreground, HighlightText); }
 		.guide-nav .ghost { border-color: transparent; background: transparent; color: var(--muted-foreground, GrayText); }
-		/* Per-beat orientation rail circles */
-		.rail:not(.collapsed) .card-dot.orientation-dot.done { background-color: color-mix(in oklch, var(--primary, Highlight) 60%, transparent); border-color: color-mix(in oklch, var(--primary, Highlight) 60%, transparent); color: var(--primary-foreground, HighlightText); opacity: 1; }
+		/* Per-beat orientation rail circles: visited beats use a clean transparent tick (no filled disc). */
+		.rail .card-dot.orientation-dot.done { background-color: transparent; border-color: color-mix(in oklch, var(--primary, Highlight) 65%, transparent); color: var(--primary, Highlight); opacity: 1; }
 
 		@media (max-width: 760px) {
 			.header { padding: 12px; }
@@ -1048,24 +1050,10 @@ export class PrWalkthroughPanel extends LitElement {
 
 	private renderRail(): TemplateResult {
 		if (!this.cards.length && (this.status === "loading" || this.status === "waiting_for_yaml" || this.status === "validation_failed" || this.status === "error" || this.status === "ready")) return this.renderPlaceholderRail();
-		return this.isRailCollapsed ? this.renderCollapsedRail() : this.renderLabelledRail();
-	}
-
-	private renderPlaceholderRail(): TemplateResult {
+		const collapsed = this.isRailCollapsed;
 		return html`
-			<nav class="rail ${this.isRailCollapsed ? "collapsed" : ""}" data-testid=${this.isRailCollapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
-				${this.isRailCollapsed ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
-					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "waiting_for_yaml" || this.status === "validation_failed" ? "Waiting for walkthrough" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
-				`}
-				${this.renderRailControls()}
-			</nav>
-		`;
-	}
-
-	private renderLabelledRail(): TemplateResult {
-		return html`
-			<nav class="rail" data-testid="pr-walkthrough-labelled-rail" aria-label="PR walkthrough phases">
-				<div class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" title="Drag to resize walkthrough sidebar" @pointerdown=${this.onRailResizePointerDown} @dblclick=${this.resetRailWidth}></div>
+			<nav class="rail ${collapsed ? "collapsed" : ""}" data-testid=${collapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
+				${collapsed ? nothing : html`<div class="walkthrough-rail-resize-handle" data-testid="pr-walkthrough-rail-resize" title="Drag to resize walkthrough sidebar" @pointerdown=${this.onRailResizePointerDown} @dblclick=${this.resetRailWidth}></div>`}
 				${PHASES.map((phase, index) => {
 					const cards = this.cardsForPhase(phase.id);
 					if (cards.length === 0) return nothing;
@@ -1074,10 +1062,10 @@ export class PrWalkthroughPanel extends LitElement {
 					const guidedOrientationPhase = phase.id === "orientation" && this.isOrientationGuided;
 					return html`
 						<section class="phase ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-phase-id=${phase.id}>
-							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" @click=${() => guidedOrientationPhase ? this.selectOrientationBeat(0) : this.selectCard(cards[0].id)} title=${`Phase ${index}: ${phase.label}`}>
-								<span class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" aria-hidden="true">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
+							<button class="phase-button ${phaseActive ? "active" : ""}" data-testid="pr-walkthrough-phase-button" type="button" aria-label=${`Open ${phase.label}`} title=${`Phase ${index}: ${phase.label}`} @click=${() => guidedOrientationPhase ? this.selectOrientationBeat(0) : this.selectCard(cards[0].id)}>
+								<span class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-testid="pr-walkthrough-phase-pip" aria-hidden="true">${index}</span><span class="phase-name">${phase.label}</span><span class="phase-count">${cards.filter(card => this._completedCardIds.includes(card.id)).length}/${cards.length}</span>
 							</button>
-							<div class="phase-cards">${guidedOrientationPhase ? this.renderOrientationRailCircles() : cards.map(card => this.renderRailCardButton(card))}</div>
+							<div class="phase-cards ${guidedOrientationPhase ? "orientation-steps" : ""}" data-testid=${guidedOrientationPhase ? "pr-walkthrough-orientation-rail" : nothing}>${guidedOrientationPhase ? this.renderOrientationRailSteps() : cards.map(card => this.renderRailCardButton(card))}</div>
 						</section>
 					`;
 				})}
@@ -1086,33 +1074,12 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
-	private renderCollapsedRail(): TemplateResult {
+	private renderPlaceholderRail(): TemplateResult {
 		return html`
-			<nav class="rail collapsed" data-testid="pr-walkthrough-collapsed-rail" aria-label="PR walkthrough phases">
-				${PHASES.map((phase, index) => {
-					const cards = this.cardsForPhase(phase.id);
-					if (cards.length === 0) return nothing;
-					const phaseActive = cards.some(card => card.id === this.activeCard?.id);
-					const complete = cards.every(card => this._completedCardIds.includes(card.id) || card.phaseId === "audit");
-					return html`
-						<div class="collapsed-phase ${phaseActive ? "active" : ""}" title=${phase.label}>
-							<button class="phase-pip ${phaseActive ? "active" : ""} ${complete && !phaseActive ? "complete" : ""}" data-testid="pr-walkthrough-phase-pip" type="button" aria-label=${`Open ${phase.label}`} title=${phase.label} @click=${() => this.selectCard(cards[0].id)}>${index}</button>
-							${cards.map(card => {
-								const decision = this._decisions[card.id]?.value;
-								return html`
-									<button
-										class="card-dot ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}"
-										data-testid="pr-walkthrough-card-dot"
-										type="button"
-										aria-label=${`Open ${phase.label} card: ${card.title}`}
-										title=${`${phase.label}: ${card.title}${this.commentCountForCard(card.id) ? ` · ${this.commentCountForCard(card.id)} comment(s)` : ""}`}
-										@click=${() => this.selectCard(card.id)}
-									>${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</button>
-								`;
-							})}
-						</div>
-					`;
-				})}
+			<nav class="rail ${this.isRailCollapsed ? "collapsed" : ""}" data-testid=${this.isRailCollapsed ? "pr-walkthrough-collapsed-rail" : "pr-walkthrough-labelled-rail"} aria-label="PR walkthrough phases">
+				${this.isRailCollapsed ? html`<span class="phase-pip ${this.status === "error" ? "error" : "active"}" title=${this.status}>!</span>` : html`
+					<div class="empty">${this.status === "loading" ? "Resolving changeset…" : this.status === "waiting_for_yaml" || this.status === "validation_failed" ? "Waiting for walkthrough" : this.status === "error" ? "Walkthrough unavailable" : "No changed files"}</div>
+				`}
 				${this.renderRailControls()}
 			</nav>
 		`;
@@ -1166,7 +1133,7 @@ export class PrWalkthroughPanel extends LitElement {
 		const decision = this._decisions[card.id]?.value;
 		const comments = this.commentCountForCard(card.id);
 		return html`
-			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" title=${card.title} @click=${() => this.selectCard(card.id)}>
+			<button class="card-button ${card.id === this.activeCard?.id ? "active" : ""} ${this._completedCardIds.includes(card.id) ? "complete" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" data-testid="pr-walkthrough-card-step" data-card-id=${card.id} type="button" aria-label=${card.title} title=${card.title} @click=${() => this.selectCard(card.id)}>
 				<span class="card-dot card-dot-rail ${card.id === this.activeCard?.id ? "active" : ""} ${decision === "liked" ? "liked" : ""} ${decision === "disliked" ? "disliked" : ""}" aria-hidden="true">${decision === "liked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10v12"></path><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path></svg>` : decision === "disliked" ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17 14V2"></path><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path></svg>` : nothing}</span>
 				<span class="card-title">${card.navLabel ?? deriveNavLabel(card.title)}</span>
 				<span class="card-decision">${comments ? comments : decision ? decision : card.phaseId === "audit" ? "draft" : "pending"}</span>
@@ -1174,35 +1141,32 @@ export class PrWalkthroughPanel extends LitElement {
 		`;
 	}
 
-	private renderOrientationRailCircles(): TemplateResult | typeof nothing {
+	private renderOrientationRailSteps(): TemplateResult | typeof nothing {
 		const orientation = this.orientationCard;
 		const sections = orientation?.sections ?? [];
 		if (!orientation || sections.length === 0) return nothing;
 		const orientationActive = this.activeCard?.id === orientation.id;
 		const orientationComplete = this._completedCardIds.includes(orientation.id);
 		const beatIndex = this.clampBeatIndex(this._orientationBeatIndex);
-		return html`
-			<div class="phase-cards orientation-steps" data-testid="pr-walkthrough-orientation-rail">
-				${sections.map((section, idx) => {
-					const current = orientationActive && idx === beatIndex;
-					const done = orientationActive ? idx < beatIndex : orientationComplete;
-					return html`
-						<button
-							class="card-button orientation-step ${current ? "active" : ""}"
-							data-testid="pr-walkthrough-orientation-step"
-							data-beat-index=${idx}
-							data-state=${current ? "current" : done ? "visited" : "upcoming"}
-							type="button"
-							title=${section.heading}
-							@click=${() => this.selectOrientationBeat(idx)}
-						>
-							<span class="card-dot orientation-dot ${current ? "active" : ""} ${done && !current ? "done" : ""}" aria-hidden="true">${done && !current ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg>` : nothing}</span>
-							<span class="card-title">${section.navLabel}</span>
-						</button>
-					`;
-				})}
-			</div>
-		`;
+		return html`${sections.map((section, idx) => {
+			const current = orientationActive && idx === beatIndex;
+			const done = orientationActive ? idx < beatIndex : orientationComplete;
+			return html`
+				<button
+					class="card-button orientation-step ${current ? "active" : ""}"
+					data-testid="pr-walkthrough-orientation-step"
+					data-beat-index=${idx}
+					data-state=${current ? "current" : done ? "visited" : "upcoming"}
+					type="button"
+					title=${section.heading}
+					aria-label=${section.navLabel}
+					@click=${() => this.selectOrientationBeat(idx)}
+				>
+					<span class="card-dot orientation-dot ${current ? "active" : ""} ${done && !current ? "done" : ""}" aria-hidden="true">${done && !current ? html`<svg class="dot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg>` : nothing}</span>
+					<span class="card-title">${section.navLabel}</span>
+				</button>
+			`;
+		})}`;
 	}
 
 	private renderMainContent(active: PrWalkthroughCard | undefined): TemplateResult {
