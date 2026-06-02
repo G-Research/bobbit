@@ -6,6 +6,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
+import { live } from "lit/directives/live.js";
 import { ArrowLeft, Brain, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import {
 	getShortcuts,
@@ -116,7 +117,35 @@ let settingsSkillsCatalogBudget: number | null = null;
 const SKILLS_CATALOG_BUDGET_DEFAULT_BYTES = 16384;
 const SKILLS_CATALOG_BUDGET_MIN_BYTES = 1024;
 const SKILLS_CATALOG_BUDGET_MAX_BYTES = 131072;
+// Extra trusted GitHub hosts for PR walkthroughs. Persisted under the `githubTrustedHosts`
+// preferences key; github.com and its API/raw hosts are always trusted by the server baseline.
+let settingsGithubTrustedHosts: string[] = [];
+let settingsGithubTrustedHostInput = "";
 let customisePromptStatus = "";
+
+/**
+ * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
+ * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
+ * server re-normalizes defensively on save, so this is purely for input validation/dedupe UX.
+ */
+function normalizeTrustedHost(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	let candidate = value.trim();
+	if (!candidate) return undefined;
+	if (candidate.includes("://")) {
+		try {
+			candidate = new URL(candidate).hostname;
+		} catch {
+			return undefined;
+		}
+	}
+	candidate = candidate.replace(/\.$/, "").toLowerCase();
+	if (!candidate) return undefined;
+	if (/[/\s@:]/.test(candidate)) return undefined;
+	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
+	if (!candidate.split(".").every((label) => label.length > 0)) return undefined;
+	return candidate;
+}
 
 // ── Per-project scope config state ──
 const projectScopeConfigCache = new Map<string, {
@@ -2065,6 +2094,9 @@ function loadGeneralSettings() {
 					settingsPlayFinishSound = prefs.playAgentFinishSound !== false;
 					const raw = prefs.skillsCatalogBudget;
 					settingsSkillsCatalogBudget = (typeof raw === "number" && Number.isFinite(raw)) ? raw : null;
+					settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
+						? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
+						: [];
 					renderApp();
 				}
 			} catch {}
@@ -2126,6 +2158,35 @@ async function resetSkillsCatalogBudget(): Promise<void> {
 			body: JSON.stringify({ skillsCatalogBudget: null }),
 		});
 	} catch {}
+}
+
+async function persistGithubTrustedHosts(): Promise<void> {
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ githubTrustedHosts: settingsGithubTrustedHosts }),
+		});
+	} catch {}
+}
+
+async function addTrustedHost(): Promise<void> {
+	const normalized = normalizeTrustedHost(settingsGithubTrustedHostInput);
+	if (!normalized || settingsGithubTrustedHosts.includes(normalized)) {
+		// Invalid or duplicate — clear the input and re-render without persisting.
+		settingsGithubTrustedHostInput = "";
+		renderApp();
+		return;
+	}
+	settingsGithubTrustedHosts = [...settingsGithubTrustedHosts, normalized];
+	settingsGithubTrustedHostInput = "";
+	renderApp();
+	await persistGithubTrustedHosts();
+}
+
+async function removeTrustedHost(host: string): Promise<void> {
+	settingsGithubTrustedHosts = settingsGithubTrustedHosts.filter((h) => h !== host);
+	renderApp();
+	await persistGithubTrustedHosts();
 }
 
 async function togglePlayFinishSound(): Promise<void> {
@@ -2250,6 +2311,43 @@ function renderGeneralTab() {
 						?disabled=${settingsSkillsCatalogBudget === null}
 						@click=${resetSkillsCatalogBudget}
 					>Reset to default</button>
+				</div>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<span class="text-sm font-medium text-foreground">Trusted GitHub hosts</span>
+				<p class="text-xs text-muted-foreground">
+					PR walkthroughs fetch repository and pull-request data (metadata and diffs) from these hosts.
+					github.com and its API/raw hosts are always trusted. Only add hosts you trust.
+				</p>
+				<div class="flex flex-col gap-1.5" data-testid="github-trusted-hosts-list">
+					${settingsGithubTrustedHosts.length === 0 ? html`
+						<p class="text-xs text-muted-foreground italic">No additional hosts trusted.</p>
+					` : settingsGithubTrustedHosts.map((host) => html`
+						<div class="flex items-center gap-2" data-testid="github-trusted-host-row" data-host=${host}>
+							<code class="text-sm text-foreground flex-1 truncate">${host}</code>
+							<button
+								class="text-xs text-muted-foreground hover:text-destructive underline"
+								data-testid="github-trusted-host-remove"
+								@click=${() => removeTrustedHost(host)}
+							>Remove</button>
+						</div>
+					`)}
+				</div>
+				<div class="flex items-center gap-2">
+					<input
+						type="text"
+						placeholder="ghe.example.com"
+						data-testid="github-trusted-host-input"
+						class="flex-1 px-2 py-1 rounded border border-input bg-background text-sm"
+						.value=${live(settingsGithubTrustedHostInput)}
+						@input=${(e: Event) => { settingsGithubTrustedHostInput = (e.target as HTMLInputElement).value; }}
+						@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); void addTrustedHost(); } }}
+					/>
+					<button
+						class="px-3 py-1.5 rounded border border-input text-sm hover:bg-secondary"
+						data-testid="github-trusted-host-add"
+						@click=${() => void addTrustedHost()}
+					>Add</button>
 				</div>
 			</div>
 			<div class="flex flex-col gap-1.5">
