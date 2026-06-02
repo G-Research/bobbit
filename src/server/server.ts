@@ -169,6 +169,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion } from "./agent/sandbox-status.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieTryAuth } from "./auth/cookie.js";
@@ -1541,16 +1542,24 @@ export function createGateway(config: GatewayConfig) {
 				}
 				const repoPath = await getRepoRoot(projectDir);
 
-				// Repo URL for cloning inside the container. Strip embedded tokens so
-				// they don't leak into .git/config; the container's credential helper
-				// reads GITHUB_TOKEN from env instead.
-				let repoUrl: string;
-				try {
-					const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: repoPath, timeout: 5000 });
-					repoUrl = stripTokenFromGitUrl(stdout.trim());
-				} catch {
-					repoUrl = repoPath;
-				}
+				// Resolve the clone source for the container. Resolving via
+				// `resolveSandboxCloneSource` guarantees we NEVER hand git a raw host
+				// path (e.g. a Windows drive-letter path, which git misparses as scp
+				// syntax → `cannot run ssh`) or an otherwise-unreachable host path.
+				// With an `origin` remote we clone the remote URL (tokens stripped so
+				// they don't leak into .git/config — the container's credential helper
+				// reads GITHUB_TOKEN from env instead). Without one, the host repo is
+				// bind-mounted read-only and cloned via `file://`.
+				const resolveOrigin = async (cwd: string): Promise<string | null> => {
+					try {
+						const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
+						return stdout.trim() || null;
+					} catch {
+						return null;
+					}
+				};
+				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), repoPath });
+				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
 				try {
@@ -1575,19 +1584,24 @@ export function createGateway(config: GatewayConfig) {
 				// a remote configured (the bootstrap will then clone the same repo
 				// into multiple paths — only useful as a defensive default).
 				let repoUrlByName: Record<string, string> | undefined;
+				let cloneSourceByName: Record<string, SandboxCloneSource> | undefined;
 				if (components.some(c => c.repo !== ".")) {
 					repoUrlByName = {};
+					cloneSourceByName = {};
 					const seen = new Set<string>();
 					for (const c of components) {
 						if (c.repo === "." || seen.has(c.repo)) continue;
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
-						try {
-							const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: rp, timeout: 5000 });
-							repoUrlByName[c.repo] = stripTokenFromGitUrl(stdout.trim());
-						} catch {
-							repoUrlByName[c.repo] = repoUrl;
-						}
+						// Same resolution as the single-repo path: never fall back to a
+						// raw host path. Remote-less repos get a `file://` bind-mount
+						// source at a per-repo container mount path.
+						const src = resolveSandboxCloneSource({ originUrl: await resolveOrigin(rp), repoPath: rp });
+						const perRepoSrc: SandboxCloneSource = src.kind === "mounted"
+							? { ...src, mountPath: `/workspace-src/${c.repo}`, cloneUrl: `file:///workspace-src/${c.repo}` }
+							: src;
+						cloneSourceByName[c.repo] = perRepoSrc;
+						repoUrlByName[c.repo] = perRepoSrc.cloneUrl;
 					}
 				}
 
@@ -1596,6 +1610,7 @@ export function createGateway(config: GatewayConfig) {
 					projectId,
 					projectDir,
 					repoUrl,
+					cloneSource,
 					image: imageName,
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
@@ -1606,6 +1621,7 @@ export function createGateway(config: GatewayConfig) {
 					toolManager: ctx.toolManager,
 					components,
 					repoUrlByName,
+					cloneSourceByName,
 					// Resolver is invoked at worktree-creation time inside the container, so it always
 					// reads the current project-config-store value rather than a snapshot taken at
 					// sandbox bootstrap. Same shape as the worktree-pool baseRefResolver.

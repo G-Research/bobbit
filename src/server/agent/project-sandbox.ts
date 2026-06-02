@@ -25,6 +25,7 @@ import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
 import { stripTokenFromGitUrl, shouldSkipRemotePush, resolveBaseRefWithExec } from "../skills/git.js";
 import type { Component } from "./project-config-store.js";
+import type { SandboxCloneSource } from "./sandbox-clone-source.js";
 
 const execFileAsync = promisify(execFileCb);
 const DOCKER_BIN = "docker";
@@ -151,6 +152,13 @@ export interface ProjectSandboxOptions {
 	projectId: string;
 	projectDir: string;        // host project root
 	repoUrl: string;           // git remote URL to clone inside container (single-repo)
+	/**
+	 * Resolved clone source for the single-repo clone. When `kind === "mounted"`
+	 * the host repo is bind-mounted read-only into the container and cloned via
+	 * `file://`, never a raw host path. Falls back to `repoUrl` when absent.
+	 * See `resolveSandboxCloneSource` and `docs/design/...`.
+	 */
+	cloneSource?: SandboxCloneSource;
 	image: string;             // Docker image name
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
@@ -174,6 +182,13 @@ export interface ProjectSandboxOptions {
 	 * remote prefix and the host can resolve them via `git remote get-url`).
 	 */
 	repoUrlByName?: Record<string, string>;
+	/**
+	 * Multi-repo: optional per-repo resolved clone sources. When a repo has no
+	 * `origin`, the resolver yields a `mounted` source so the container clones
+	 * via `file://` instead of an unreachable host path. Each `mounted` source's
+	 * host path is bind-mounted read-only at its `mountPath`.
+	 */
+	cloneSourceByName?: Record<string, SandboxCloneSource>;
 	/**
 	 * Live resolver for the project's `base_ref` setting. Called fresh on every
 	 * `createWorktree` / `createWorktreeSet` so the container path adopts the
@@ -221,6 +236,13 @@ export class ProjectSandbox {
 			this._readyResolve = resolve;
 			this._readyReject = reject;
 		});
+		// Always "handle" the ready promise so a failed init with no concurrent
+		// awaiter (only `getContainerId()` awaits it) never surfaces as a global
+		// `unhandledRejection` — which under load can wedge the gateway for other
+		// sessions. The real rejection is still observed by `getContainerId()`
+		// (which awaits the same promise) and re-thrown on the awaited `init()`
+		// boundary below. See tests/sandbox-init-rejection.test.ts.
+		this._readyPromise.catch(() => {});
 
 		try {
 			await this._initContainer();
@@ -718,6 +740,21 @@ export class ProjectSandbox {
 			dockerLimits?.memBytes,
 		);
 
+		// Collect read-only bind mounts for any `mounted` clone sources (remote-less
+		// repos). The host repo is mounted at a fixed container path so the init
+		// sequence clones it via `file://<mountPath>` instead of an unreachable
+		// host path. De-dupe by mountPath so multi-repo sources can't collide.
+		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
+		const seenMountPaths = new Set<string>();
+		const addMount = (src?: SandboxCloneSource): void => {
+			if (src?.kind === "mounted" && !seenMountPaths.has(src.mountPath)) {
+				seenMountPaths.add(src.mountPath);
+				extraReadonlyMounts.push({ hostPath: src.hostPath, mountPath: src.mountPath });
+			}
+		};
+		addMount(this.options.cloneSource);
+		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
+
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused — named volume instead
@@ -734,6 +771,7 @@ export class ProjectSandbox {
 			sandboxAgentAuthPrefs,
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
+			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		});
 
 		// Inject GITHUB_TOKEN for git push/PR inside container
@@ -805,9 +843,12 @@ export class ProjectSandbox {
 			// .git doesn't exist — need to clone
 		}
 
-		// Strip any embedded token from the URL (defense-in-depth).
-		// Auth is handled by the credential helper reading GITHUB_TOKEN from env.
-		const repoUrl = stripTokenFromGitUrl(this.options.repoUrl);
+		// Resolve the clone source. Prefer the pre-resolved `cloneSource`
+		// (which is guaranteed to never be a raw host path — remote-less repos
+		// become a `file://` bind-mount source). Fall back to the legacy
+		// `repoUrl` for backward compatibility, stripping any embedded token
+		// (defense-in-depth — auth is via the GITHUB_TOKEN credential helper).
+		const repoUrl = this.options.cloneSource?.cloneUrl ?? stripTokenFromGitUrl(this.options.repoUrl);
 
 		// Clone the repo
 		console.log(`[project-sandbox] Cloning ${repoUrl} into /workspace...`);
@@ -874,7 +915,8 @@ export class ProjectSandbox {
 	private async _runInitSequenceMultiRepo(repoNames: string[]): Promise<void> {
 		if (!this.containerId) return;
 		const urlMap = this.options.repoUrlByName ?? {};
-		const defaultUrl = stripTokenFromGitUrl(this.options.repoUrl);
+		const cloneSourceMap = this.options.cloneSourceByName ?? {};
+		const defaultUrl = this.options.cloneSource?.cloneUrl ?? stripTokenFromGitUrl(this.options.repoUrl);
 
 		// Mark all of /workspace as a safe directory for git
 		await this._dockerExec(this.containerId, ["git", "config", "--global", "--add", "safe.directory", "*"]);
@@ -888,7 +930,9 @@ export class ProjectSandbox {
 				continue;
 			} catch { /* not cloned yet */ }
 
-			const url = stripTokenFromGitUrl(urlMap[repo] ?? defaultUrl);
+			// Prefer the pre-resolved per-repo clone source (never a raw host
+			// path); fall back to the legacy per-repo URL map, then the default.
+			const url = cloneSourceMap[repo]?.cloneUrl ?? stripTokenFromGitUrl(urlMap[repo] ?? defaultUrl);
 			try {
 				await this._dockerExec(this.containerId, ["sh", "-c", `mkdir -p ${dest}`]);
 			} catch { /* will be created by clone */ }

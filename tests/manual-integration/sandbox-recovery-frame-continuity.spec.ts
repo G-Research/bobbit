@@ -40,6 +40,7 @@ import {
 	cpSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
@@ -147,15 +148,17 @@ function initRepo(dir: string) {
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "p", version: "1.0.0" }, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Add a real origin so project-sandbox can clone the repo via https inside
-	// the Linux container. Without this, server.ts falls back to repoUrl =
-	// repoPath (a Windows host path like "C:/Users/..."), which git inside
-	// the container interprets as an ssh-style URL because of the colon and
-	// fails with "cannot run ssh: No such file or directory".
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Add a real, reachable `origin` so project-sandbox can clone the repo
+	// inside the Linux container. We use a local bare repo cloned via a
+	// `file://` URL rather than copying PROJECT_ROOT's GitHub origin: the
+	// GitHub origin is unreachable from inside the container, and on Windows
+	// the host path (`C:/Users/...`) misparses as ssh-style syntax and fails
+	// with "cannot run ssh: No such file or directory".
+	const bareRepo = `${dir}.origin.git`;
+	rmSync(bareRepo, { recursive: true, force: true });
+	execFileSync("git", ["init", "--bare", bareRepo], { stdio: "ignore" });
+	execFileSync("git", ["remote", "add", "origin", pathToFileURL(bareRepo).href], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: dir, stdio: "ignore" });
 	const srcConfig = join(PROJECT_ROOT, ".bobbit", "config");
 	const dstConfig = join(dir, ".bobbit", "config");
 	if (existsSync(srcConfig)) {

@@ -26,6 +26,7 @@ import {
 	cpSync,
 } from "node:fs";
 import { join, resolve, normalize } from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
@@ -442,10 +443,16 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	try {
-		const origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: PROJECT_ROOT, encoding: "utf-8", timeout: 5_000 }).trim();
-		execFileSync("git", ["remote", "add", "origin", origin], { cwd: dir, stdio: "ignore" });
-	} catch {}
+	// Give the fixture a real, reachable `origin`: a local bare repo cloned via
+	// a `file://` URL. The old code copied PROJECT_ROOT's GitHub origin, which
+	// is unreachable from inside the sandbox container; on Windows the host path
+	// also misparses as scp/ssh syntax (`cannot run ssh`). A local bare repo
+	// works on every OS and exercises the real clone path.
+	const bareRepo = `${dir}.origin.git`;
+	rmSync(bareRepo, { recursive: true, force: true });
+	execFileSync("git", ["init", "--bare", bareRepo], { stdio: "ignore" });
+	execFileSync("git", ["remote", "add", "origin", pathToFileURL(bareRepo).href], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: dir, stdio: "ignore" });
 
 	// Copy config files (workflows, roles, tools, etc.) so the gateway has them.
 	// Exclude project.yaml since we write our own.

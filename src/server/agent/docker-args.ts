@@ -92,6 +92,16 @@ export interface DockerRunConfig {
 	sandboxAgentAuthPrefs?: PreferencesStore | null;
 	/** Scope for the generated auth.json file; defaults to projectId when present. */
 	sandboxAgentAuthScope?: string;
+
+	/**
+	 * Extra read-only bind mounts as `{ hostPath, mountPath }` pairs. Used for
+	 * the remote-less sandbox clone source: the host repo is mounted read-only
+	 * at a container-internal path so `git clone file://<mountPath>` works
+	 * without ever passing a raw host path (or Windows drive letter) to git.
+	 * Host paths are rewritten via `toDockerPath` for Docker Desktop on
+	 * Windows/macOS.
+	 */
+	extraReadonlyMounts?: Array<{ hostPath: string; mountPath: string }>;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────
@@ -103,6 +113,7 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 		projectId, stateDir, sessionId,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
+		extraReadonlyMounts,
 	} = config;
 
 	const toolsDir = TOOLS_DIR;
@@ -219,6 +230,14 @@ export function buildDockerRunArgs(config: DockerRunConfig): string[] {
 	const sessionPromptsDir = path.join(bobbitDir(), "state", "session-prompts");
 	fs.mkdirSync(sessionPromptsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(sessionPromptsDir)}:/tmp/session-prompts`);
+
+	// Extra read-only bind mounts (e.g. remote-less sandbox clone source).
+	if (extraReadonlyMounts) {
+		for (const { hostPath, mountPath } of extraReadonlyMounts) {
+			if (!hostPath || !mountPath) continue;
+			args.push("-v", `${toDockerPath(hostPath)}:${mountPath}:ro`);
+		}
+	}
 
 	// User-configured mounts
 	if (sandboxMounts) {
