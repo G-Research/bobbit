@@ -684,16 +684,35 @@ async function resolveNumberOnlyGithubTarget(target: PrWalkthroughTarget, cwd: s
 			retryable: false,
 		});
 	}
+	if (target.number === undefined) return target;
+	return numberOnlyTargetFromInferred(target, inferred);
+}
+
+/**
+ * Pure transform (no git) shared by the number-only launch path: applies the
+ * inferred owner/repo/host to the target and host-qualifies the canonical key
+ * for non-github.com hosts, mirroring canonicalizeTarget. Exported for testing.
+ */
+export function numberOnlyTargetFromInferred(
+	target: PrWalkthroughTarget,
+	inferred: { owner: string; repo: string; host?: string },
+): PrWalkthroughTarget {
 	const number = target.number;
 	if (number === undefined) return target;
-	const host = inferred.host || "github.com";
+	const host = normalizeGithubHost(inferred.host);
 	const prUrl = target.prUrl ?? `https://${host}/${inferred.owner}/${inferred.repo}/pull/${number}`;
+	// Mirror canonicalizeTarget: github.com keeps the historical unqualified key,
+	// other hosts include the host so number-only enterprise launches do not collide.
+	const canonicalKey = host === "github.com"
+		? `github:${inferred.owner}/${inferred.repo}#${number}`
+		: `github:${host}/${inferred.owner}/${inferred.repo}#${number}`;
 	return {
 		...target,
 		owner: inferred.owner,
 		repo: inferred.repo,
 		prUrl,
-		canonicalKey: `github:${inferred.owner}/${inferred.repo}#${number}`,
+		host,
+		canonicalKey,
 	};
 }
 

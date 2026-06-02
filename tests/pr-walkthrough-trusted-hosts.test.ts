@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { WalkthroughAgentStore } = await import("../src/server/pr-walkthrough/walkthrough-agent-store.ts");
-const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { WalkthroughAgentManager, canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../src/server/pr-walkthrough/github-adapter.ts");
 const { parseGithubRefForTesting } = await import("../src/server/pr-walkthrough/routes.ts");
 
@@ -123,6 +123,33 @@ describe("changesetIdForTarget host-qualified ids", () => {
 		assert.notEqual(changesetIdForTargetForTesting(a), changesetIdForTargetForTesting(b));
 		assert.equal(changesetIdForTargetForTesting(a), "github:ghe-a.corp/acme/widgets#42");
 		assert.equal(changesetIdForTargetForTesting(b), "github:ghe-b.corp/acme/widgets#42");
+	});
+});
+
+describe("numberOnlyTargetFromInferred host-qualified identity", () => {
+	const numberOnlyTarget = (number) => ({ provider: "github", number, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` });
+
+	it("keeps the legacy key/id for an inferred github.com origin", () => {
+		const t = numberOnlyTargetFromInferred(numberOnlyTarget(42), { owner: "acme", repo: "widgets", host: "github.com" });
+		assert.equal(t.canonicalKey, "github:acme/widgets#42");
+		assert.equal(t.host, "github.com");
+		assert.equal(changesetIdForTargetForTesting(t), "github:acme/widgets#42");
+		assert.equal(t.prUrl, "https://github.com/acme/widgets/pull/42");
+	});
+
+	it("host-qualifies identity for an inferred enterprise origin", () => {
+		const t = numberOnlyTargetFromInferred(numberOnlyTarget(42), { owner: "acme", repo: "widgets", host: "GHE.Corp." });
+		assert.equal(t.host, "ghe.corp");
+		assert.equal(t.canonicalKey, "github:ghe.corp/acme/widgets#42");
+		assert.equal(changesetIdForTargetForTesting(t), "github:ghe.corp/acme/widgets#42");
+		assert.equal(t.prUrl, "https://ghe.corp/acme/widgets/pull/42");
+	});
+
+	it("does not collide two enterprise origins sharing owner/repo/number", () => {
+		const a = numberOnlyTargetFromInferred(numberOnlyTarget(42), { owner: "acme", repo: "widgets", host: "ghe-a.corp" });
+		const b = numberOnlyTargetFromInferred(numberOnlyTarget(42), { owner: "acme", repo: "widgets", host: "ghe-b.corp" });
+		assert.notEqual(a.canonicalKey, b.canonicalKey);
+		assert.notEqual(changesetIdForTargetForTesting(a), changesetIdForTargetForTesting(b));
 	});
 });
 
