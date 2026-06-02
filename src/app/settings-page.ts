@@ -123,10 +123,23 @@ let settingsGithubTrustedHosts: string[] = [];
 let settingsGithubTrustedHostInput = "";
 let customisePromptStatus = "";
 
+// Always-trusted baseline hosts (mirror of DEFAULT_TRUSTED_HOSTS in
+// src/shared/pr-walkthrough/url-safety.ts). Kept as a local copy — NOT imported —
+// to preserve UI chunk independence (pr-walkthrough has a circular-chunk hazard).
+const GITHUB_DEFAULT_TRUSTED_HOSTS = new Set([
+	"github.com",
+	"www.github.com",
+	"api.github.com",
+	"raw.githubusercontent.com",
+	"gist.githubusercontent.com",
+]);
+
 /**
  * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
  * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
- * server re-normalizes defensively on save, so this is purely for input validation/dedupe UX.
+ * rules MUST match the shared normalizer exactly so the UI never optimistically shows entries the
+ * server would silently drop. Baseline DEFAULT hosts are filtered out (the managed list holds only
+ * EXTRA hosts; baseline hosts are always trusted server-side regardless of this list).
  */
 function normalizeTrustedHost(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -139,11 +152,16 @@ function normalizeTrustedHost(value: unknown): string | undefined {
 			return undefined;
 		}
 	}
-	candidate = candidate.replace(/\.$/, "").toLowerCase();
+	candidate = candidate.trim().toLowerCase().replace(/\.$/, "");
 	if (!candidate) return undefined;
-	if (/[/\s@:]/.test(candidate)) return undefined;
+	// Reject anything that is not a bare hostname (paths, whitespace, creds, ports).
+	if (/[\s/@:]/.test(candidate) || candidate.includes("://")) return undefined;
 	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
-	if (!candidate.split(".").every((label) => label.length > 0)) return undefined;
+	// Require EVERY label to be a valid DNS label: non-empty, <=63 chars, and no
+	// leading/trailing hyphen. Rejects ".example.com", "example..com", "-x.com", "bad-.example", etc.
+	if (!candidate.split(".").every((label) => label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"))) return undefined;
+	// Managed list holds only EXTRA hosts; baseline hosts are always trusted server-side.
+	if (GITHUB_DEFAULT_TRUSTED_HOSTS.has(candidate)) return undefined;
 	return candidate;
 }
 
@@ -2166,6 +2184,16 @@ async function persistGithubTrustedHosts(): Promise<void> {
 			method: "PUT",
 			body: JSON.stringify({ githubTrustedHosts: settingsGithubTrustedHosts }),
 		});
+		// The server normalize-and-stores (lossy); the GET readback is authoritative.
+		// Re-fetch so the UI never shows an entry the server silently dropped.
+		const res = await gatewayFetch("/api/preferences");
+		if (res.ok) {
+			const prefs = await res.json();
+			settingsGithubTrustedHosts = Array.isArray(prefs.githubTrustedHosts)
+				? prefs.githubTrustedHosts.filter((h: unknown): h is string => typeof h === "string")
+				: [];
+			renderApp();
+		}
 	} catch {}
 }
 
