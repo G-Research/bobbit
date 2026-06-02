@@ -742,6 +742,7 @@ walkthrough:
   design_decisions:
     - id: stable-id
       title: string
+      nav_label: short label (≤3 words, ≤24 chars)
       explanation: string
       chosen_approach: string
       alternatives_considered:
@@ -762,6 +763,7 @@ walkthrough:
     - id: stable-id
       phase: significant|other|audit
       title: string
+      nav_label: short label (≤3 words, ≤24 chars)
       reviewer_goal: string
       explanation: string
       files:
@@ -807,6 +809,8 @@ walkthrough:
     chunk_order:
       - review_chunk_id
 \`\`\`
+
+nav_label is the compact sidebar label; keep it ≤3 words / ≤24 chars so it never truncates. Omit to auto-derive from title.
 
 The fenced block above is only a prompt example for readability; the submit_pr_walkthrough_yaml tool argument must be the raw YAML document without code fences.`;
 

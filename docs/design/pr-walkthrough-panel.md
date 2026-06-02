@@ -32,6 +32,20 @@ Each walkthrough consists of phases:
 
 Cards are LLM-synthesised logical change sets, not raw files/hunks. A card may contain multiple code blocks, including the audit card.
 
+## Guided orientation beats (Phase 0 redesign)
+
+> This supersedes the original "single orientation card" treatment. The orientation card previously joined its structured context fields into two `\n`-joined paragraphs; CSS collapsed the newlines into one space, producing an intimidating wall of text with the verdict, concerns, and reviewer file-map all buried. Phase 0 is now a guided step-through of bite-size beats. The production reference is the validated mockup `guided.html`; see [pr-walkthrough-panel.md](../pr-walkthrough-panel.md#guided-orientation-step-through) for the shipped behaviour.
+
+**Structured `sections` model.** The orientation card carries an optional `sections: PrWalkthroughCardSection[]` array of single-idea "beats" (defined in `src/shared/pr-walkthrough/types.ts`). Each section has an `id`, a ≤3-word `navLabel`, a `heading`, optional `eyebrow`, `body`, and beat-specific payloads: `verdict` (recommendation + confidence + summary), `concerns` (severity-tagged rows), `fileRoles` (Core/Support/Verify/Docs), `showStats`, and `showOriginalDescription`. The server builds the six beats from the existing YAML `walkthrough.context` + `merge_assessment` — no new agent content is required — and the panel renders them as a stepper with Back/Next, a step counter, and per-beat rail circles (visited ✓ / current ring / upcoming hollow).
+
+The six server-defined beats: **At a glance** (verdict badge + summary + diff stats), **Why it exists** (`why_created`), **What it changes** (`problem_solved`), **Should it be merged?**, **What to scrutinise** (concerns), **Where to look** (reviewer map + collapsible original PR description).
+
+**Reframed merge beat.** The fourth beat is reframed from "Why it's worth merging" to the question **"Should it be merged?"** with answer-first copy: a recommendation line (`Yes — approve, medium confidence.` / `Not yet — request changes, …` / `Maybe — comment, …` / `Recommendation unclear.`) derived from `merge_assessment`, followed by `why_worth_merging`. The reviewer gets the verdict before the rationale.
+
+**Compact rail labels.** Every rail entry uses a short label (`card.navLabel ?? deriveNavLabel(card.title)`) so titles never truncate in the narrow rail; the full title stays in the card `<h2>` and the rail tooltip. The agent may supply an optional `nav_label` per card in YAML (≤3 words / ≤24 chars), with a graceful server-derived fallback — see [pr-walkthrough-agent-ux.md](pr-walkthrough-agent-ux.md#compact-navigation-labels-nav_label).
+
+`sections`, `navLabel`, and `nav_label` are all **optional and backward-compatible**: the `submit_pr_walkthrough_yaml` contract is unchanged and an orientation card without `sections` falls back to the legacy single-card body.
+
 ## Layout
 
 - Header:

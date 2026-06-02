@@ -24,6 +24,8 @@ describe("PR walkthrough card synthesis", () => {
 		]);
 
 		assert.deepEqual(cards.map(card => card.phaseId), ["orientation", "design", "significant", "other", "audit"]);
+		for (const card of cards) assert.ok(card.navLabel && card.navLabel.trim().length > 0, `expected navLabel on ${card.id}`);
+		assert.equal(cards[0].navLabel, "Orientation");
 		const design = cards.find(card => card.phaseId === "design");
 		assert.ok(design);
 		assert.deepEqual(design.diffBlocks.map(block => block.id), ["server-a", "server-b"]);
@@ -74,6 +76,9 @@ describe("PR walkthrough card synthesis", () => {
 		assert.match(orientation.rationale ?? "", /Context to understand the PR: GitHub remains the source of truth/);
 		assert.ok(orientation.checklist?.some(item => /Testing strategy: Run typecheck plus targeted walkthrough browser coverage/.test(item)));
 		assert.doesNotMatch(`${orientation.summary} ${orientation.rationale}`, /confirming scope|review generated cards|walkthrough process/i);
+		assert.deepEqual(orientation.sections?.map(section => section.id), ["at-a-glance", "why-it-exists", "what-it-changes", "where-to-look"]);
+		assert.equal(orientation.sections?.find(section => section.id === "at-a-glance")?.showStats, true);
+		assert.equal(orientation.sections?.find(section => section.id === "where-to-look")?.showOriginalDescription, true);
 	});
 
 	it("keeps deterministic PR-context phase 0 even when LLM synthesis returns walkthrough instructions", async () => {
@@ -97,14 +102,32 @@ describe("PR walkthrough card synthesis", () => {
 	it("validates LLM orientation cards without requiring diff blocks", () => {
 		const cards = validateSynthesisedCards({
 			cards: [
-				{ phaseId: "orientation", title: "PR context", summary: "Why: fixes review context", diffBlockIds: [], checklist: ["Testing strategy: npm test"] },
-				{ phaseId: "significant", title: "Check resolver", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
+				{ phaseId: "orientation", title: "PR context", navLabel: "Orientation", summary: "Why: fixes review context", diffBlockIds: [], checklist: ["Testing strategy: npm test"] },
+				{ phaseId: "significant", title: "Check resolver behaviour and edges", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
 			],
 		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)])]);
 
 		assert.equal(cards.length, 2);
 		assert.equal(cards[0].phaseId, "orientation");
+		assert.equal(cards[0].navLabel, "Orientation");
 		assert.deepEqual(cards[0].diffBlocks, []);
+		// navLabel is derived from the title when the candidate omits it.
+		assert.equal(cards[1].navLabel, "Check resolver behaviour");
+	});
+
+	it("replaces an overlong or empty LLM navLabel with the derived label", () => {
+		const cards = validateSynthesisedCards({
+			cards: [
+				{ phaseId: "significant", title: "Check resolver behaviour and edges", navLabel: "This label is far too long to fit", summary: "Resolver behavior changed.", diffBlockIds: ["a"] },
+				{ phaseId: "other", title: "Review smaller remaining files", navLabel: "   ", summary: "Smaller files.", diffBlockIds: ["b"] },
+			],
+		}, [file("src/a.ts", "modified", [block("a", "src/a.ts", 2)]), file("src/b.ts", "modified", [block("b", "src/b.ts", 2)])]);
+
+		assert.equal(cards.length, 2);
+		// Overlong model label is rejected and replaced by the ≤3-word derived label.
+		assert.equal(cards[0].navLabel, "Check resolver behaviour");
+		// Whitespace-only model label falls back to the derived label.
+		assert.equal(cards[1].navLabel, "Review smaller remaining");
 	});
 
 	it("validates LLM card schema and drops suggested comments with bad anchors", () => {

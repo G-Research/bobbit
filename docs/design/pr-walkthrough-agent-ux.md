@@ -65,6 +65,30 @@ The server has already resolved the authoritative input at launch. The agent sta
 
 Progress is intentionally approximate. It should help the user trust the process without introducing a second panel-level loader.
 
+## Compact navigation labels (`nav_label`)
+
+The review rail is narrow (~240px). Full descriptive card titles overflow and truncate there, so every rail entry uses a short label distinct from the title. The agent communicates that label through an optional `nav_label` field on each `design_decisions[]` and `review_chunks[]` entry in the submitted YAML.
+
+Contract (also stated in the schema prompt the agent receives):
+
+- `nav_label` is **optional**. Keep it **≤3 words and ≤24 characters** so it never truncates in the rail.
+- The full descriptive title stays in `title` (it is used for the card `<h2>` header).
+- **Omit it to auto-derive** a compact label from the title. The server derives one (text before the first `:`/`—`/` - ` separator, first ≤3 words, hard-truncated to 23 chars + `…` if needed).
+
+Server behaviour (`navLabelError` / `deriveNavLabel` in `src/shared/pr-walkthrough/nav-label.ts`, enforced in `walkthrough-yaml-schema.ts`):
+
+- A present `nav_label` that violates the ≤3-word / ≤24-char rule fails validation with `nav_label must be ≤3 words and ≤24 characters.`, so the agent gets actionable retry feedback.
+- An empty or whitespace-only `nav_label` is treated as omitted (it falls back to the derived label rather than failing), so the agent never produces a blank rail entry.
+- `nav_label` is optional and the fallback is graceful, so the `submit_pr_walkthrough_yaml` contract is unbroken for existing clients and partial/legacy YAML still renders.
+
+The orientation card does not take a `nav_label` from the agent — its rail label and per-beat labels are server-defined (see [Structured orientation beats](#structured-orientation-beats)).
+
+## Structured orientation beats
+
+The orientation card is rendered as a guided six-beat step-through (see [pr-walkthrough-panel.md](pr-walkthrough-panel.md) for the panel-side design). The beats are **server-derived from the existing YAML** — the agent does **not** author them and no new orientation fields are required. The server maps `walkthrough.context` + `merge_assessment` into the structured `sections` (At a glance, Why it exists, What it changes, Should it be merged?, What to scrutinise, Where to look). The merge beat is reframed to **"Should it be merged?"** with an answer-first line derived from `merge_assessment.recommendation` + `confidence`.
+
+Because the beats are derived server-side, the agent's job is unchanged: populate the existing `walkthrough.context` and `merge_assessment` fields accurately and the guided step-through follows automatically.
+
 ## YAML validation retry state
 
 Validation failures are part of the child session experience, not hidden infrastructure errors.

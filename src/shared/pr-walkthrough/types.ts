@@ -58,6 +58,40 @@ export interface PrWalkthroughSuggestedComment {
 	body: string;
 }
 
+export type PrWalkthroughOrientationConcernSeverity = "blocking" | "non_blocking" | "question" | "nit";
+export type PrWalkthroughOrientationFileRoleKind = "core" | "support" | "verify" | "docs";
+
+export interface PrWalkthroughOrientationConcern {
+	severity: PrWalkthroughOrientationConcernSeverity;
+	text: string;
+}
+
+export interface PrWalkthroughOrientationFileRole {
+	role: PrWalkthroughOrientationFileRoleKind;
+	file: string;
+	note?: string;
+}
+
+export interface PrWalkthroughOrientationVerdict {
+	recommendation: "approve" | "comment" | "request_changes" | "unknown";
+	confidence: "low" | "medium" | "high";
+	summary?: string;
+}
+
+/** A single-idea "beat" in the orientation guided step-through. */
+export interface PrWalkthroughCardSection {
+	id: string;
+	navLabel: string;
+	eyebrow?: string;
+	heading: string;
+	body?: string;
+	verdict?: PrWalkthroughOrientationVerdict;
+	concerns?: PrWalkthroughOrientationConcern[];
+	fileRoles?: PrWalkthroughOrientationFileRole[];
+	showStats?: boolean;
+	showOriginalDescription?: boolean;
+}
+
 export interface PrWalkthroughCard {
 	id: string;
 	phaseId: PrWalkthroughPhaseId;
@@ -68,6 +102,10 @@ export interface PrWalkthroughCard {
 	suggestedComments?: PrWalkthroughSuggestedComment[];
 	cardSuggestions?: string[];
 	checklist?: string[];
+	/** Compact (≤3-word) sidebar rail label; falls back to a derived label from `title`. */
+	navLabel?: string;
+	/** Orientation guided-step "beats"; only set on the orientation card. */
+	sections?: PrWalkthroughCardSection[];
 }
 
 export interface PrWalkthroughComment {

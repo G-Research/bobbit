@@ -200,7 +200,7 @@ Key concepts:
 - **Diff block** — one reviewable file block with `filePath`, optional `oldPath`, status, generated/binary/truncated flags, external links, and hunks.
 - **Hunk** — original hunk header plus ordered line records.
 - **Line** — stable id, kind (`context`, `add`, `del`), side (`context`, `new`, `old`), text, and old/new line numbers for review anchors.
-- **Card** — a logical review unit in one of the walkthrough phases. A card can contain multiple diff blocks across one or more files.
+- **Card** — a logical review unit in one of the walkthrough phases. A card can contain multiple diff blocks across one or more files. Each card also carries an optional `navLabel` (a compact ≤3-word sidebar label distinct from the full `title`) and the Orientation card carries optional `sections` (the guided "beats" — see [Guided orientation step-through](#guided-orientation-step-through)). Both are optional, so legacy/partial payloads still render.
 - **Warning** — visible ingestion, mapping, validation, or export issue with a severity, code, message, and optional file path.
 
 The UI never needs to know whether cards came from the session-hosted YAML flow or the compatibility resolver. It renders the same cards, warnings, comments, decisions, draft review, and export preview for every provider.
@@ -209,9 +209,10 @@ The UI never needs to know whether cards came from the session-hosted YAML flow 
 
 Validated YAML is mapped into the existing card model:
 
-- `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card.
+- `walkthrough.context`, `merge_assessment`, and `pr.original_description.body` become the Orientation card, including the six structured guided `sections` (see [Guided orientation step-through](#guided-orientation-step-through)).
 - `design_decisions` become Key design choices cards with trade-offs, alternatives, suggested concerns, and linked hunks.
 - `review_chunks` become significant, other, or audit review cards with diff-backed hunks and suggested concerns.
+- Each card's `nav_label` (optional, supplied by the agent) becomes the card `navLabel`; when missing or empty/whitespace-only the server derives a compact label from the title, whereas a non-empty over-cap label (>3 words / >24 chars) is rejected with a validation error. See [Short navigation labels](#short-navigation-labels).
 - `omissions_and_followups` feed Other + omissions guidance and card-level suggested comments.
 - `audit` feeds the final Audit card and draft reviewer checklist.
 - `display.phase_order` and `display.chunk_order` influence visible ordering while preserving the known phase set.
@@ -224,13 +225,41 @@ The older model-backed synthesis and deterministic grouping remain compatibility
 
 The walkthrough is organised into five phases:
 
-1. **Orientation** — confirms scope, refs, provider metadata, stats, warnings, original PR body, inferred author intent, and merge assessment.
+1. **Orientation** — confirms scope, refs, provider metadata, stats, warnings, original PR body, inferred author intent, and merge assessment. Rendered as a guided six-beat step-through rather than a single card body (see [Guided orientation step-through](#guided-orientation-step-through)).
 2. **Key design choices** — highlights architecture or product decisions and their trade-offs.
 3. **Significant changes** — reviews high-signal implementation diffs.
 4. **Other + omissions** — covers smaller changes, expected artifacts, and follow-up concerns.
 5. **Audit** — checks remaining coverage and renders the final draft review.
 
 Every phase can contain normal diff-backed cards. A card can span multiple files or hunks when that better matches the reviewer story. Audit cards use the same line comments, card comments, suggestions, diff expansion, and Like/Dislike controls as other cards, then render the copyable draft review.
+
+## Guided orientation step-through
+
+Phase 0 (Orientation) is rendered as a **guided step-through** rather than a single card body. This exists because the orientation card previously joined the structured context fields (`why_created`, `problem_solved`, `why_worth_merging`, `author_intent`, `reviewer_map`, `merge_assessment`, `merge_concerns`) into two `\n`-joined `<p>` blobs. CSS collapses those newlines into a single space, so the reviewer faced an intimidating wall of text with the verdict, concerns, and reviewer file-map all buried. The redesign breaks orientation into six single-idea **beats**, each readable in under ~20 seconds, with Back/Next navigation and a step counter.
+
+The six beats are **server-defined** and sourced entirely from the existing YAML `walkthrough.context` + `merge_assessment` — no new agent fields are required:
+
+1. **At a glance** — a verdict badge (`recommendation` + `confidence`, e.g. `APPROVE · medium confidence`), the one-line summary, and the diff stats.
+2. **Why it exists** — `why_created` (eyebrow "The problem").
+3. **What it changes** — `problem_solved` (eyebrow "The change").
+4. **Should it be merged?** — reframed from "Why it's worth merging" to lead with the recommendation: an answer-first line (`Yes — approve, medium confidence.` / `Not yet — request changes, …` / `Maybe — comment, …` / `Recommendation unclear.`) followed by `why_worth_merging`.
+5. **What to scrutinise** — blocking and non-blocking concerns as severity-tagged rows, with a `N blocking, M non-blocking` tally. Blocking and non-blocking are counted by explicit `severity`; `question`/`nit` rows (e.g. a `merge_concerns` note) are excluded from the non-blocking count.
+6. **Where to look** — the reviewer map rendered as a file → role list (Core / Support / Verify / Docs, best-effort parsed from `reviewer_map` lines), plus the collapsible original PR description.
+
+Navigation:
+
+- **Back** is disabled on the first beat. **Next** advances one beat; on the last beat it reads **"Start review →"** and advances to the next card, marking the orientation card complete.
+- **Per-section rail circles.** Under the Phase 0 rail entry, the panel renders one circle per beat with the beat's ≤3-word label below it. Visited beats show a filled `✓`, the current beat a ringed primary dot, and upcoming beats a hollow circle. Clicking a circle jumps to that beat; Back/Next keep the rail circles in sync. When orientation is not the active card, all circles render done if it was completed, else hollow.
+
+Both `sections` and the per-beat model are **optional and backward-compatible**: an orientation card without `sections` (legacy or partial YAML) falls back to the legacy single card-button in the rail and the generic card body. The legacy `summary`/`rationale`/`checklist` fields are still populated so older renderers and stored payloads keep working; the redesigned panel prefers `sections`.
+
+## Short navigation labels
+
+Every sidebar rail entry uses a compact label distinct from the card's full descriptive title. This exists because full titles (e.g. `render.ts: fullscreen predicate and standalone panel simplification`) overflow and truncate badly in the ~240px rail. The full title is retained for the card `<h2>` header and the rail `title=` tooltip; the rail itself shows the short label.
+
+- The rail renders `card.navLabel ?? deriveNavLabel(card.title)` for every card, and the beat's own `navLabel` for orientation circles.
+- `deriveNavLabel` and `navLabelError` live in `src/shared/pr-walkthrough/nav-label.ts` (shared by server and UI). The cap is `NAV_LABEL_MAX_WORDS = 3` and `NAV_LABEL_MAX_CHARS = 24`. `deriveNavLabel` takes the text before the first `:` / `—` / ` - ` separator (when non-empty), keeps the first ≤3 words, and hard-truncates to 23 chars + `…` if still over the char cap. `navLabelError` rejects empty/whitespace-only, >3-word, or >24-char labels.
+- The LLM review agent may supply an optional `nav_label` per card in its submitted YAML (see [PR walkthrough agent UX](design/pr-walkthrough-agent-ux.md)). In the `submit_pr_walkthrough_yaml` path the server derives a label from the title when `nav_label` is **missing or empty/whitespace-only**; a non-empty `nav_label` that exceeds the caps (>3 words or >24 chars) is **rejected with a validation error** rather than silently truncated, so the agent fixes it and resubmits. (The derive-on-invalid fallback applies only to the internal LLM card-synthesis path, not to submitted YAML.) Either way, existing and partial YAML always render a non-truncating rail label.
 
 ## Diff behaviour
 
