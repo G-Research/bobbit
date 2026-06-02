@@ -2,6 +2,13 @@
 
 Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: team-lead
 
+> **Follow-up:** a later pass —
+> [`shrink-main-ui-manualchunks.md`](./shrink-main-ui-manualchunks.md)
+> (HEAD `11278c43`) — peeled the app-shell SCC (`session-manager`,
+> `remote-agent`, PR-walkthrough, review, inbox) out of the entry chunk
+> with four more app-seam `manualChunks` rules after it crept back over
+> the 600 KB raw budget. Packaging-only; no lazy deferral.
+
 ## Outcome
 
 All planned tasks shipped. `npm run build:ui` now emits **no chunk-size
