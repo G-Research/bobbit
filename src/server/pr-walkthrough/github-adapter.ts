@@ -1,5 +1,5 @@
 import { isLikelyGeneratedPath } from "../../shared/pr-walkthrough/generated-path.js";
-import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
+import { isTrustedExternalHost, safeExternalUrl } from "../../shared/pr-walkthrough/url-safety.js";
 import { execFileSafe } from "../exec-file-safe.js";
 
 export type GithubDiffLineSide = "old" | "new" | "context";
@@ -117,6 +117,7 @@ export interface ResolveGithubPrOptions {
 	maxFiles?: number;
 	maxPatchBytes?: number;
 	maxLinesPerFile?: number;
+	trustedHosts?: string[];
 }
 
 export interface ParsedGithubPrReference {
@@ -179,17 +180,19 @@ export class GithubPrAdapterError extends Error {
 	readonly status: number;
 	readonly code: string;
 	readonly warnings: GithubWalkthroughWarning[];
+	readonly host?: string;
 
-	constructor(message: string, options: { status?: number; code?: string; warnings?: GithubWalkthroughWarning[] } = {}) {
+	constructor(message: string, options: { status?: number; code?: string; warnings?: GithubWalkthroughWarning[]; host?: string } = {}) {
 		super(message);
 		this.name = "GithubPrAdapterError";
 		this.status = options.status ?? 500;
 		this.code = options.code ?? "github_pr_error";
 		this.warnings = options.warnings ?? [];
+		this.host = options.host;
 	}
 }
 
-export function parseGithubPrReference(input: { prUrl?: string; prNumber?: string | number }): ParsedGithubPrReference {
+export function parseGithubPrReference(input: { prUrl?: string; prNumber?: string | number }, trustedHosts?: string[]): ParsedGithubPrReference {
 	const number = normalizePrNumber(input.prNumber);
 	const prUrl = cleanString(input.prUrl);
 	if (!prUrl) return { number };
@@ -202,8 +205,8 @@ export function parseGithubPrReference(input: { prUrl?: string; prNumber?: strin
 	}
 
 	const host = normalizeHost(parsed.hostname);
-	if (!isTrustedGithubHost(host)) {
-		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host" });
+	if (!isTrustedGithubHost(host, trustedHosts)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host", host });
 	}
 
 	const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
@@ -216,7 +219,7 @@ export function parseGithubPrReference(input: { prUrl?: string; prNumber?: strin
 		repo: stripGitSuffix(decodeURIComponent(match[2])),
 		number: Number(match[3]),
 		host,
-		url: safeGithubUrl(prUrl),
+		url: safeGithubUrl(prUrl, trustedHosts),
 	};
 }
 
@@ -237,15 +240,16 @@ export function parseGithubRemoteUrl(remoteUrl: string): { owner: string; repo: 
 
 export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<GithubResolvedPr> {
 	const warnings: GithubWalkthroughWarning[] = [];
-	const parsed = parseGithubPrReference(options);
+	const trustedHosts = options.trustedHosts;
+	const parsed = parseGithubPrReference(options, trustedHosts);
 	const inferred = parsed.owner && parsed.repo ? undefined : await inferGithubRepository(options.cwd);
 	const owner = parsed.owner ?? inferred?.owner;
 	const repo = parsed.repo ?? inferred?.repo;
 	const host = normalizeHost(parsed.host ?? inferred?.host ?? "github.com");
 	const number = parsed.number;
 
-	if (!isTrustedGithubHost(host)) {
-		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host" });
+	if (!isTrustedGithubHost(host, trustedHosts)) {
+		throw new GithubPrAdapterError(`Untrusted GitHub PR host: ${host}`, { status: 400, code: "untrusted_github_host", host });
 	}
 
 	if (!owner || !repo) {
@@ -274,9 +278,10 @@ export async function resolveGithubPr(options: ResolveGithubPrOptions): Promise<
 		warnings,
 		maxPatchBytes: options.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES,
 		maxLinesPerFile: options.maxLinesPerFile ?? DEFAULT_MAX_LINES_PER_FILE,
+		trustedHosts,
 	});
-	const prUrl = safeGithubUrl(pr.html_url) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
-	const changesetId = changesetIdForGithub(owner, repo, number, pr.head.sha);
+	const prUrl = safeGithubUrl(pr.html_url, trustedHosts) ?? parsed.url ?? safeGithubUrl(`https://${host}/${owner}/${repo}/pull/${number}`, trustedHosts) ?? `https://github.com/${owner}/${repo}/pull/${number}`;
+	const changesetId = changesetIdForGithub(host, owner, repo, number, pr.head.sha);
 	const exportAvailable = Boolean(token);
 
 	return {
@@ -384,7 +389,9 @@ async function enrichFilesWithDiffs(input: {
 	warnings: GithubWalkthroughWarning[];
 	maxPatchBytes: number;
 	maxLinesPerFile: number;
+	trustedHosts?: string[];
 }): Promise<GithubWalkthroughFile[]> {
+	const trustedHosts = input.trustedHosts;
 	const localDiffAvailable = await hasLocalCommit(input.cwd, input.baseSha) && await hasLocalCommit(input.cwd, input.headSha);
 	const enriched: GithubWalkthroughFile[] = [];
 	for (const file of input.files) {
@@ -402,10 +409,10 @@ async function enrichFilesWithDiffs(input: {
 			status,
 			isGenerated,
 			maxLinesPerFile: input.maxLinesPerFile,
-			externalUrl: safeGithubUrl(file.blob_url),
-			blobUrl: safeGithubUrl(file.blob_url),
-			rawUrl: safeGithubUrl(file.raw_url),
-			contentsUrl: safeGithubUrl(file.contents_url),
+			externalUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			blobUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			rawUrl: safeGithubUrl(file.raw_url, trustedHosts),
+			contentsUrl: safeGithubUrl(file.contents_url, trustedHosts),
 		});
 		const likelyTruncated = isPatchLikelyTruncated(file, block, patch);
 		if (normalized.truncated || likelyTruncated || block.truncated) block.isTruncated = true;
@@ -428,9 +435,9 @@ async function enrichFilesWithDiffs(input: {
 			deletions: file.deletions ?? 0,
 			changes: file.changes ?? ((file.additions ?? 0) + (file.deletions ?? 0)),
 			patch,
-			blobUrl: safeGithubUrl(file.blob_url),
-			rawUrl: safeGithubUrl(file.raw_url),
-			contentsUrl: safeGithubUrl(file.contents_url),
+			blobUrl: safeGithubUrl(file.blob_url, trustedHosts),
+			rawUrl: safeGithubUrl(file.raw_url, trustedHosts),
+			contentsUrl: safeGithubUrl(file.contents_url, trustedHosts),
 			isBinary: status === "binary",
 			isGenerated,
 			isTruncated: block.isTruncated === true,
@@ -619,9 +626,15 @@ function normalizeGithubFileStatus(status: string): GithubWalkthroughFile["statu
 async function resolveGithubToken(options: ResolveGithubPrOptions, host: string): Promise<string | undefined> {
 	const explicit = cleanString(options.token);
 	if (explicit) return explicit;
-	const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
-	if (envToken) return envToken;
-	return githubCliAuthToken(options.cwd, host);
+	// The global GITHUB_TOKEN/GH_TOKEN env tokens are github.com credentials. Never
+	// forward them to enterprise hosts (that would leak a github.com secret). For any
+	// non-github.com host, fall through to the host-scoped gh CLI token instead.
+	const normalized = normalizeHost(host);
+	if (normalized === "github.com") {
+		const envToken = cleanString(process.env.GITHUB_TOKEN) ?? cleanString(process.env.GH_TOKEN);
+		if (envToken) return envToken;
+	}
+	return githubCliAuthToken(options.cwd, normalized);
 }
 
 async function githubCliAuthToken(cwd: string | undefined, host: string): Promise<string | undefined> {
@@ -664,28 +677,31 @@ function githubHeaders(token: string | undefined): Record<string, string> {
 }
 
 function apiBaseUrlForHost(host: string): string {
-	return host.toLowerCase() === "github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
+	const normalized = normalizeHost(host);
+	// Treat both github.com and its www alias as the public GitHub API host.
+	return normalized === "github.com" || normalized === "www.github.com" ? "https://api.github.com" : `https://${host}/api/v3`;
 }
 
 function normalizeHost(host: string | undefined): string {
 	return (host ?? "github.com").trim().replace(/\.$/, "").toLowerCase();
 }
 
-function isTrustedGithubHost(host: string): boolean {
-	const trusted = new Set(["github.com", ...trustedGithubHostAllowlist()]);
-	return trusted.has(normalizeHost(host));
+function isTrustedGithubHost(host: string, trustedHosts?: string[]): boolean {
+	// Delegate to the shared allowlist so ALL DEFAULT_TRUSTED_HOSTS (github.com,
+	// www.github.com, api.github.com, raw/gist hosts) plus managed extra hosts are
+	// honored. Keeps this check in lockstep with the synchronous launch trust-check.
+	return isTrustedExternalHost(normalizeHost(host), trustedHosts ?? []);
 }
 
-function trustedGithubHostAllowlist(): string[] {
-	return (process.env.BOBBIT_GITHUB_TRUSTED_HOSTS ?? "")
-		.split(",")
-		.map(host => normalizeHost(host))
-		.filter(Boolean);
+// github.com / www.github.com keep the legacy un-prefixed id; other hosts are
+// host-qualified so enterprise PRs sharing owner/repo/number do not collide.
+function changesetIdForGithub(host: string, owner: string, repo: string, number: number, headSha?: string): string {
+	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
+	const prefix = normalized === "github.com" || normalized === "www.github.com" ? "" : `${normalized}/`;
+	return `github:${prefix}${owner}/${repo}#${number}:${shortSha(headSha) ?? "unknown"}`;
 }
 
-function changesetIdForGithub(owner: string, repo: string, number: number, headSha?: string): string {
-	return `github:${owner}/${repo}#${number}:${shortSha(headSha) ?? "unknown"}`;
-}
+export const changesetIdForGithubForTesting = changesetIdForGithub;
 
 function stableBlockId(filePath: string, oldPath: string | undefined): string {
 	const raw = oldPath && oldPath !== filePath ? `${oldPath}->${filePath}` : filePath;
@@ -709,8 +725,8 @@ function cleanString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function safeGithubUrl(value: unknown): string | undefined {
-	return safeExternalUrl(value, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+function safeGithubUrl(value: unknown, trustedHosts?: string[]): string | undefined {
+	return safeExternalUrl(value, trustedHosts ?? []);
 }
 
 function stripGitSuffix(repo: string): string {

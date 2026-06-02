@@ -637,7 +637,108 @@ async function showWalkthroughLaunchToast(message: string): Promise<void> {
 	} catch { /* best-effort toast */ }
 }
 
-export async function launchPrWalkthroughAgent(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput): Promise<PanelWorkspaceTab | undefined> {
+const UNTRUSTED_HOST_CODE = "untrusted_github_host";
+
+/**
+ * Client-side mirror of the server's `normalizeTrustedHost` (src/shared/pr-walkthrough/url-safety.ts).
+ * Accepts a bare host or a pasted URL; returns a normalized host or undefined when invalid. The
+ * server re-normalizes defensively on save, so this is only used to avoid storing junk/duplicates.
+ */
+function normalizeTrustedHost(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	let candidate = value.trim();
+	if (!candidate) return undefined;
+	if (candidate.includes("://")) {
+		try {
+			candidate = new URL(candidate).hostname;
+		} catch {
+			return undefined;
+		}
+	}
+	candidate = candidate.replace(/\.$/, "").toLowerCase();
+	if (!candidate) return undefined;
+	if (/[/\s@:]/.test(candidate)) return undefined;
+	if (!/^[a-z0-9.-]+$/.test(candidate)) return undefined;
+	if (!candidate.split(".").every((label) => label.length > 0)) return undefined;
+	return candidate;
+}
+
+/** Extract the offending host from an untrusted-host launch error (body code/host, then message regex). */
+function untrustedHostFromError(err: WalkthroughApiError): string | undefined {
+	const body = err.body && typeof err.body === "object" ? err.body as Record<string, unknown> : undefined;
+	const isUntrusted = body?.code === UNTRUSTED_HOST_CODE || /Untrusted GitHub PR host:/i.test(err.message || "");
+	if (!isUntrusted) return undefined;
+	if (body && typeof body.host === "string" && body.host) return body.host;
+	const match = /Untrusted GitHub PR host:\s*(\S+)/i.exec(err.message || "");
+	return match?.[1];
+}
+
+/** Defensive: a launch may succeed (201) but return a job already in an untrusted-host error state. */
+function untrustedHostFromJob(job: WalkthroughJobRecord): string | undefined {
+	if (job.error?.code !== UNTRUSTED_HOST_CODE) return undefined;
+	const host = typeof job.error?.host === "string" ? job.error.host as string : undefined;
+	if (host) return host;
+	const fromMessage = /Untrusted GitHub PR host:\s*(\S+)/i.exec(job.error?.message || "");
+	if (fromMessage?.[1]) return fromMessage[1];
+	const prUrl = job.target?.prUrl || job.target?.url;
+	if (typeof prUrl === "string") {
+		try { return new URL(prUrl).hostname; } catch { /* ignore */ }
+	}
+	return undefined;
+}
+
+/** Read the current managed trusted-host list from preferences (best-effort). */
+async function fetchTrustedHosts(): Promise<string[]> {
+	try {
+		const res = await gatewayFetch("/api/preferences");
+		if (!res.ok) return [];
+		const prefs = await res.json() as Record<string, unknown>;
+		const hosts = prefs.githubTrustedHosts;
+		return Array.isArray(hosts) ? hosts.filter((h): h is string => typeof h === "string") : [];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Prompt the user to add an untrusted host to the allowlist and retry the launch. Returns the
+ * resulting tab on confirm+success, or undefined on cancel / persistence failure.
+ */
+async function promptTrustAndRetryLaunch(
+	state: AppState,
+	sessionId: string,
+	rawInput: OpenPrWalkthroughInput,
+	host: string,
+): Promise<PanelWorkspaceTab | undefined> {
+	const { confirmAction } = await import("./dialogs-lazy.js");
+	const confirmed = await confirmAction(
+		"Trust GitHub host?",
+		`${host} is not in your trusted GitHub hosts. Adding it lets Bobbit fetch repository and pull-request content (metadata and diffs) from ${host}. Only continue if you trust this host.`,
+		"Add & continue",
+	).catch(() => false);
+	if (!confirmed) {
+		await showWalkthroughLaunchToast("Walkthrough cancelled");
+		renderApp();
+		return undefined;
+	}
+	const normalized = normalizeTrustedHost(host) ?? host;
+	const current = await fetchTrustedHosts();
+	const next = current.includes(normalized) ? current : [...current, normalized];
+	try {
+		await gatewayFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ githubTrustedHosts: next }),
+		});
+	} catch {
+		await showWalkthroughLaunchToast(`Failed to add ${host} to trusted GitHub hosts`);
+		renderApp();
+		return undefined;
+	}
+	// Retry once with the same input — the one-shot guard prevents loops if it still fails.
+	return launchPrWalkthroughAgent(state, sessionId, rawInput, true);
+}
+
+export async function launchPrWalkthroughAgent(state: AppState, sessionId: string, rawInput: OpenPrWalkthroughInput, alreadyRetried = false): Promise<PanelWorkspaceTab | undefined> {
 	const input = normalizeInput(state, rawInput);
 	if (!shouldResolveInput(input)) {
 		await showWalkthroughLaunchToast("Enter a PR URL or number: /walkthrough-pr <GitHub PR URL>");
@@ -651,12 +752,27 @@ export async function launchPrWalkthroughAgent(state: AppState, sessionId: strin
 		});
 		const job = jobRecordFromResponse(data);
 		if (!job) throw new Error("PR walkthrough launch returned an invalid response");
+		// Defensive: a 201 success can still carry an untrusted-host error job. Do not render
+		// a stale error tab for it — surface the same risk dialog instead.
+		const jobUntrustedHost = untrustedHostFromJob(job);
+		if (jobUntrustedHost) {
+			if (alreadyRetried) {
+				await showWalkthroughLaunchToast(job.error?.message || `Untrusted GitHub PR host: ${jobUntrustedHost}`);
+				renderApp();
+				return undefined;
+			}
+			return promptTrustAndRetryLaunch(state, sessionId, rawInput, jobUntrustedHost);
+		}
 		const tab = upsertPrWalkthroughJobPanel(state, job, { select: true });
 		renderApp();
 		void focusWalkthroughChildSession(job.childSessionId);
 		return tab;
 	} catch (error) {
 		const err = error as WalkthroughApiError;
+		const untrustedHost = untrustedHostFromError(err);
+		if (untrustedHost && !alreadyRetried) {
+			return promptTrustAndRetryLaunch(state, sessionId, rawInput, untrustedHost);
+		}
 		console.error("[pr-walkthrough] launch failed", err);
 		await showWalkthroughLaunchToast(err.message || "Failed to launch PR walkthrough agent");
 		renderApp();

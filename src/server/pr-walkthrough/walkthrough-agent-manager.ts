@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { bobbitStateDir } from "../bobbit-dir.js";
 import { execFileSafe } from "../exec-file-safe.js";
+import { isTrustedExternalHost, normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
 import { resolveGithubPr, GithubPrAdapterError, parseGithubRemoteUrl } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import {
@@ -84,6 +85,7 @@ export type WalkthroughAgentManagerDeps = {
 	resolveSessionCwd?: (sessionId: string) => string | undefined | Promise<string | undefined>;
 	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
 	store?: WalkthroughAgentStore;
+	preferencesStore?: { get(key: string): unknown };
 	broadcast?: (event: Record<string, unknown>) => void;
 	preflightGithubLaunch?: boolean | ((job: PrWalkthroughJobRecord) => Promise<void> | void);
 	validateYaml?: (yamlText: string, job: PrWalkthroughJobRecord) => Promise<WalkthroughYamlValidationResult> | WalkthroughYamlValidationResult;
@@ -440,6 +442,7 @@ export class WalkthroughAgentManager {
 			cwd: job.cwd,
 			prUrl: job.target.prUrl,
 			prNumber: job.target.number,
+			trustedHosts: this.getManagedTrustedHosts(),
 		});
 		return {
 			changeset: resolved.changeset,
@@ -516,6 +519,29 @@ export class WalkthroughAgentManager {
 		return stringValue(parent?.worktreePath) ?? stringValue(parent?.cwd) ?? this.deps.defaultCwd;
 	}
 
+	private getManagedTrustedHosts(): string[] {
+		return normalizeTrustedHosts(this.deps.preferencesStore?.get("githubTrustedHosts"));
+	}
+
+	/**
+	 * Synchronous host trust check run BEFORE any job/child session is created, so an
+	 * untrusted host aborts the launch cleanly (no stale walkthrough tab). The HTTP
+	 * response carries { code: "untrusted_github_host", host } so the UI can prompt to
+	 * add the host and retry.
+	 */
+	private assertTrustedGithubTarget(target: PrWalkthroughTarget): void {
+		if (target.provider !== "github" || !target.prUrl) return;
+		let host: string;
+		try {
+			host = new URL(target.prUrl).hostname.replace(/\.$/, "").toLowerCase();
+		} catch {
+			return;
+		}
+		if (!isTrustedExternalHost(host, this.getManagedTrustedHosts())) {
+			throw routeError(400, `Untrusted GitHub PR host: ${host}`, { code: "untrusted_github_host", host, retryable: false });
+		}
+	}
+
 	private async resolveLaunchTarget(input: LaunchWalkthroughRequest, cwd: string): Promise<PrWalkthroughTarget> {
 		const target = canonicalizeTarget(input);
 		if (target.provider === "local") {
@@ -524,8 +550,11 @@ export class WalkthroughAgentManager {
 				retryable: false,
 			});
 		}
-		if (target.provider !== "github" || (target.owner && target.repo)) return target;
-		return resolveNumberOnlyGithubTarget(target, cwd);
+		const resolved = (target.provider !== "github" || (target.owner && target.repo))
+			? target
+			: await resolveNumberOnlyGithubTarget(target, cwd);
+		this.assertTrustedGithubTarget(resolved);
+		return resolved;
 	}
 
 	private async resolveParentInitialModel(parentSessionId: string, parent: SessionLike | PersistedSessionLike | undefined): Promise<string | undefined> {
@@ -628,11 +657,18 @@ export function canonicalizeTarget(input: LaunchWalkthroughRequest): PrWalkthrou
 	const baseSha = stringValue(input.baseSha);
 	const headSha = stringValue(input.headSha);
 	if (owner && repo && number !== undefined) {
-		const url = prUrl ?? `https://github.com/${owner}/${repo}/pull/${number}`;
-		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, canonicalKey: `github:${owner}/${repo}#${number}` };
+		const host = normalizeGithubHost(parsed?.host);
+		const url = prUrl ?? `https://${host}/${owner}/${repo}/pull/${number}`;
+		// github.com keeps its historical key shape for back-compat with persisted
+		// jobs/tabs; other hosts include the host in identity to avoid cross-host
+		// dedup collisions for the same owner/repo/number.
+		const canonicalKey = host === "github.com"
+			? `github:${owner}/${repo}#${number}`
+			: `github:${host}/${owner}/${repo}#${number}`;
+		return { provider: "github", prUrl: url, owner, repo, number, baseSha, headSha, host, canonicalKey };
 	}
 	if (number !== undefined) {
-		return { provider: "github", prUrl, number, baseSha, headSha, canonicalKey: `github:unknown/unknown#${number}` };
+		return { provider: "github", prUrl, number, baseSha, headSha, host: "github.com", canonicalKey: `github:unknown/unknown#${number}` };
 	}
 	if (baseSha && headSha) {
 		return { provider: "local", baseSha, headSha, canonicalKey: `local:${baseSha}..${headSha}` };
@@ -648,16 +684,35 @@ async function resolveNumberOnlyGithubTarget(target: PrWalkthroughTarget, cwd: s
 			retryable: false,
 		});
 	}
+	if (target.number === undefined) return target;
+	return numberOnlyTargetFromInferred(target, inferred);
+}
+
+/**
+ * Pure transform (no git) shared by the number-only launch path: applies the
+ * inferred owner/repo/host to the target and host-qualifies the canonical key
+ * for non-github.com hosts, mirroring canonicalizeTarget. Exported for testing.
+ */
+export function numberOnlyTargetFromInferred(
+	target: PrWalkthroughTarget,
+	inferred: { owner: string; repo: string; host?: string },
+): PrWalkthroughTarget {
 	const number = target.number;
 	if (number === undefined) return target;
-	const host = inferred.host || "github.com";
+	const host = normalizeGithubHost(inferred.host);
 	const prUrl = target.prUrl ?? `https://${host}/${inferred.owner}/${inferred.repo}/pull/${number}`;
+	// Mirror canonicalizeTarget: github.com keeps the historical unqualified key,
+	// other hosts include the host so number-only enterprise launches do not collide.
+	const canonicalKey = host === "github.com"
+		? `github:${inferred.owner}/${inferred.repo}#${number}`
+		: `github:${host}/${inferred.owner}/${inferred.repo}#${number}`;
 	return {
 		...target,
 		owner: inferred.owner,
 		repo: inferred.repo,
 		prUrl,
-		canonicalKey: `github:${inferred.owner}/${inferred.repo}#${number}`,
+		host,
+		canonicalKey,
 	};
 }
 
@@ -670,13 +725,26 @@ async function inferGithubRepository(cwd: string): Promise<{ owner: string; repo
 	}
 }
 
+// Centralized prefix rule for github changeset ids: github.com (and
+// www.github.com) keep the historical un-prefixed shape for back-compat with
+// already-persisted jobs/tabs; every other host is qualified by the normalized
+// host so two trusted enterprise hosts sharing owner/repo/number do not collide
+// on the same tabId / stored-payload path / export lookup.
+function githubChangesetHostPrefix(host: string | undefined): string {
+	const normalized = normalizeGithubHost(host);
+	return normalized === "github.com" ? "" : `${normalized}/`;
+}
+
 function changesetIdForTarget(target: PrWalkthroughTarget): string {
 	if (target.provider === "github") {
 		const repo = target.owner && target.repo ? `${target.owner}/${target.repo}` : "unknown/unknown";
-		return `github:${repo}#${target.number ?? "unknown"}`;
+		const prefix = githubChangesetHostPrefix(target.host);
+		return `github:${prefix}${repo}#${target.number ?? "unknown"}`;
 	}
 	return `${shortSha(target.baseSha ?? "unknown")}..${shortSha(target.headSha ?? "unknown")}`;
 }
+
+export const changesetIdForTargetForTesting = changesetIdForTarget;
 
 function titleForTarget(target: PrWalkthroughTarget): string {
 	return target.provider === "github" && target.number !== undefined ? `PR #${target.number} Walkthrough` : "Changeset Walkthrough";
@@ -896,11 +964,14 @@ function classifyAgentError(error: unknown, fallbackCode: string): PrWalkthrough
 	return { code, message, retryable: true };
 }
 
-function classifyDiffResolutionError(error: unknown): PrWalkthroughJobError {
+export function classifyDiffResolutionError(error: unknown): PrWalkthroughJobError {
 	if (isRecord(error) && isRecord(error.extra) && typeof error.extra.code === "string") {
 		return { code: error.extra.code, message: error instanceof Error ? error.message : String(error), retryable: error.extra.retryable !== false };
 	}
 	if (error instanceof GithubPrAdapterError) {
+		if (error.code === "untrusted_github_host") {
+			return { code: "untrusted_github_host", message: error.message, retryable: false, host: error.host };
+		}
 		if (error.status === 401 || error.code === "github_auth_failed") {
 			return { code: "GITHUB_AUTH_REQUIRED", message: "GitHub rejected the configured credentials. Check GITHUB_TOKEN/GH_TOKEN or run gh auth status, then retry the walkthrough.", retryable: true };
 		}
@@ -972,17 +1043,22 @@ function routeError(status: number, message: string, extra?: Record<string, unkn
 	return error;
 }
 
-function parseGithubPrUrl(input: string): { owner: string; repo: string; number: number } | undefined {
+function parseGithubPrUrl(input: string): { owner: string; repo: string; number: number; host: string } | undefined {
 	try {
 		const url = new URL(input);
-		if (url.hostname !== "github.com") return undefined;
+		const host = url.hostname.replace(/\.$/, "").toLowerCase();
 		const parts = url.pathname.split("/").filter(Boolean);
 		if (parts.length >= 4 && parts[2] === "pull") {
 			const number = Number(parts[3]);
-			if (Number.isInteger(number) && number > 0) return { owner: parts[0], repo: parts[1], number };
+			if (Number.isInteger(number) && number > 0) return { owner: parts[0], repo: parts[1], number, host };
 		}
 	} catch { /* not a URL */ }
 	return undefined;
+}
+
+function normalizeGithubHost(host: string | undefined): string {
+	const normalized = (host ?? "github.com").replace(/\.$/, "").toLowerCase();
+	return normalized === "www.github.com" ? "github.com" : normalized;
 }
 
 function numberValue(value: unknown): number | undefined {
