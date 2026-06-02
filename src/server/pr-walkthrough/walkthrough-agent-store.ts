@@ -45,6 +45,7 @@ export type PrWalkthroughJobError = {
 	code: string;
 	message: string;
 	retryable?: boolean;
+	host?: string;
 };
 
 export interface PrWalkthroughJobRecord {

@@ -9,7 +9,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 import type { SandboxScope } from "../auth/sandbox-token.js";
 import { completeModelText as defaultCompleteModelText } from "../agent/model-completion.js";
 import { getAvailableModels as defaultGetAvailableModels, type ApiModel } from "../agent/model-registry.js";
-import { safeExternalUrl, trustedHostsFromEnv } from "../../shared/pr-walkthrough/url-safety.js";
+import { safeExternalUrl, normalizeTrustedHosts } from "../../shared/pr-walkthrough/url-safety.js";
 import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import { WalkthroughAgentManager, type LaunchWalkthroughRequest, type SubmitWalkthroughYamlRequest, type WalkthroughAgentManagerDeps, type WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
@@ -128,6 +128,7 @@ function getWalkthroughAgentManager(deps: PrWalkthroughRouteDeps): WalkthroughAg
 		sessionManager: deps.sessionManager,
 		broadcast: deps.broadcast,
 		preflightGithubLaunch: deps.preflightGithubLaunch,
+		preferencesStore: deps.preferencesStore,
 	});
 	if (deps.sessionManager && typeof deps.sessionManager === "object") {
 		let manager = agentManagersBySessionManager.get(deps.sessionManager);
@@ -238,7 +239,8 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Invalid resolve request");
 				return true;
 			}
-			const result = sanitizeResolveResult(await resolveWalkthrough(body, deps));
+			const extraHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
+			const result = sanitizeResolveResult(await resolveWalkthrough(body, deps, extraHosts), extraHosts);
 			await storeWalkthrough(result);
 			json(result);
 			return true;
@@ -306,7 +308,7 @@ export async function handlePrWalkthroughApiRoute(
 	}
 }
 
-async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthroughRouteDeps): Promise<WalkthroughResolveResult> {
+async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthroughRouteDeps, extraHosts: string[] = []): Promise<WalkthroughResolveResult> {
 	if (body.fixture === true) return fixtureWalkthrough();
 
 	const sessionId = stringValue(body.sessionId);
@@ -320,14 +322,14 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	const wantsGithub = Boolean(prUrl || prNumber || body.provider === "github");
 
 	if (wantsGithub && (!baseSha || !headSha)) {
-		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber }, deps, context);
+		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber, trustedHosts: extraHosts }, deps, context);
 		if (delegated) return delegated;
 		throw new Error("GitHub PR resolution is unavailable without local baseSha/headSha or the GitHub adapter");
 	}
 
 	if (wantsGithub && baseSha && headSha) {
 		const local = await resolveLocalWithDelegation(cwd, baseSha, headSha, deps, context);
-		const gh = parseGithubRef(prUrl, prNumber, cwd);
+		const gh = parseGithubRef(prUrl, prNumber, cwd, extraHosts);
 		const head = shortSha(local.changeset.headSha);
 		const number = prNumber ?? gh?.number;
 		const changesetId = gh ? changesetIdForGithub(gh.owner, gh.repo, gh.number, head) : `github:unknown#${number ?? "unknown"}:${head}`;
@@ -779,21 +781,21 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 
 export const submitExportForTesting = submitExport;
 
-function sanitizeResolveResult(payload: WalkthroughResolveResult): WalkthroughResolveResult {
+function sanitizeResolveResult(payload: WalkthroughResolveResult, extraHosts: string[] = []): WalkthroughResolveResult {
 	return {
 		...payload,
-		changeset: sanitizeChangesetUrls(payload.changeset),
+		changeset: sanitizeChangesetUrls(payload.changeset, extraHosts),
 		cards: payload.cards.map(card => ({
 			...card,
-			diffBlocks: card.diffBlocks.map(sanitizeDiffBlockUrls),
+			diffBlocks: card.diffBlocks.map(block => sanitizeDiffBlockUrls(block, extraHosts)),
 		})),
-		export: payload.export ? sanitizeExportUrls(payload.export) : payload.export,
+		export: payload.export ? sanitizeExportUrls(payload.export, extraHosts) : payload.export,
 	};
 }
 
-function sanitizeChangesetUrls(changeset: WalkthroughChangeset): WalkthroughChangeset {
-	const externalUrl = safeExternalUrl(changeset.externalUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
-	const prUrl = safeExternalUrl(changeset.prUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+function sanitizeChangesetUrls(changeset: WalkthroughChangeset, extraHosts: string[] = []): WalkthroughChangeset {
+	const externalUrl = safeExternalUrl(changeset.externalUrl, extraHosts);
+	const prUrl = safeExternalUrl(changeset.prUrl, extraHosts);
 	return {
 		...changeset,
 		...(externalUrl ? { externalUrl } : { externalUrl: undefined }),
@@ -801,8 +803,7 @@ function sanitizeChangesetUrls(changeset: WalkthroughChangeset): WalkthroughChan
 	};
 }
 
-function sanitizeDiffBlockUrls(block: DiffBlock): DiffBlock {
-	const extraHosts = trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS);
+function sanitizeDiffBlockUrls(block: DiffBlock, extraHosts: string[] = []): DiffBlock {
 	return {
 		...block,
 		externalUrl: safeExternalUrl(block.externalUrl, extraHosts),
@@ -812,8 +813,7 @@ function sanitizeDiffBlockUrls(block: DiffBlock): DiffBlock {
 	};
 }
 
-function sanitizeExportUrls(exportCapability: WalkthroughExportCapability): WalkthroughExportCapability {
-	const extraHosts = trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS);
+function sanitizeExportUrls(exportCapability: WalkthroughExportCapability, extraHosts: string[] = []): WalkthroughExportCapability {
 	const sanitized: WalkthroughExportCapability = { ...exportCapability };
 	for (const key of ["url", "previewUrl", "submitUrl"] as const) {
 		if (typeof sanitized[key] === "string") sanitized[key] = safeExternalUrl(sanitized[key], extraHosts);
@@ -950,7 +950,7 @@ function bundleReadRequestFrom(url: URL, body: unknown): ReadPrWalkthroughBundle
 	};
 }
 
-function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string): { owner: string; repo: string; number: string | number; url: string } | undefined {
+function parseGithubRef(prUrl: string | undefined, prNumber: string | number | undefined, cwd: string, extraHosts: string[] = []): { owner: string; repo: string; number: string | number; url: string } | undefined {
 	if (prUrl) {
 		let parsed: URL;
 		try {
@@ -958,7 +958,7 @@ function parseGithubRef(prUrl: string | undefined, prNumber: string | number | u
 		} catch {
 			return undefined;
 		}
-		const safeUrl = safeExternalUrl(prUrl, trustedHostsFromEnv(process.env.BOBBIT_GITHUB_TRUSTED_HOSTS));
+		const safeUrl = safeExternalUrl(prUrl, extraHosts);
 		const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/i.exec(parsed.pathname);
 		if (safeUrl && parsed.hostname.replace(/\.$/, "").toLowerCase() === "github.com" && match) {
 			return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]).replace(/\.git$/i, ""), number: prNumber ?? match[3], url: safeUrl };

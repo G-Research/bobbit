@@ -176,6 +176,7 @@ import { CookieStore, issueIfMissing as issueCookieIfMissing, tryAuth as cookieT
 import { handlePreviewRequest } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { WalkthroughAgentManager } from "./pr-walkthrough/walkthrough-agent-manager.js";
+import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import * as previewMount from "./preview/mount.js";
@@ -1317,6 +1318,7 @@ export function createGateway(config: GatewayConfig) {
 		defaultCwd: config.defaultCwd,
 		stateDir,
 		sessionManager,
+		preferencesStore,
 		broadcast: broadcastToAll,
 		preflightGithubLaunch: true,
 		resolveSessionCwd: (sessionId: string) => {
@@ -4611,7 +4613,13 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 		for (const [key, value] of Object.entries(body)) {
-			if (value === null || value === undefined) {
+			if (key === "githubTrustedHosts") {
+				// Normalize-and-store the accepted subset (lossy, no 4xx). GET readback is
+				// authoritative. An empty/invalid list removes the key entirely.
+				const normalized = normalizeTrustedHosts(value);
+				if (normalized.length === 0) preferencesStore.remove(key);
+				else preferencesStore.set(key, normalized);
+			} else if (value === null || value === undefined) {
 				preferencesStore.remove(key);
 			} else {
 				preferencesStore.set(key, value);
