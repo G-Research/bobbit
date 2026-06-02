@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PR Walkthrough Chevron Test Fixture</title>
+  <script type="module">
+    // ========================================================================
+    // Fixture for the "PR walkthrough chevrons" bug.
+    //
+    // Inlines:
+    //   1. The CURRENT (buggy) decision logic from src/app/render-helpers.ts
+    //      (renderSessionRow line ~826, renderTeamGroup line ~1277).
+    //   2. The opt-out state model the fix will add to src/app/state.ts
+    //      (collapsedFirstClassParents + set/toggle/is helpers), modeled on the
+    //      existing team-lead opt-out functions.
+    //   3. The existing team-lead opt-out + delegate-parent opt-in state models,
+    //      mirrored faithfully so the decision helpers behave like production.
+    //
+    // The spec asserts the DESIRED (post-fix) behavior, so the buggy decision
+    // helpers below will make the collapse assertions FAIL — that is the point.
+    // ========================================================================
+
+    // --- NEW opt-out state: first-class (PR walkthrough) parents ------------
+    // Default expanded; collapsed IDs persisted. (The fix adds this to state.ts.)
+    const COLLAPSED_FIRST_CLASS_KEY = "bobbit-collapsed-first-class-parents";
+    let collapsedFirstClassParents = new Set(
+      JSON.parse(localStorage.getItem(COLLAPSED_FIRST_CLASS_KEY) || "[]")
+    );
+
+    function isFirstClassParentExpanded(sessionId) {
+      // Opt-out: not in the collapsed set => expanded (default true).
+      return !collapsedFirstClassParents.has(sessionId);
+    }
+
+    function setFirstClassParentExpanded(sessionId, expanded) {
+      if (expanded) collapsedFirstClassParents.delete(sessionId);
+      else collapsedFirstClassParents.add(sessionId);
+      localStorage.setItem(
+        COLLAPSED_FIRST_CLASS_KEY,
+        JSON.stringify([...collapsedFirstClassParents])
+      );
+    }
+
+    function toggleFirstClassParentExpanded(sessionId) {
+      // Mirrors toggleTeamLeadExpanded: expand if currently collapsed.
+      setFirstClassParentExpanded(sessionId, collapsedFirstClassParents.has(sessionId));
+    }
+
+    // --- Existing opt-out state: team-lead sessions -------------------------
+    const COLLAPSED_TEAM_LEADS_KEY = "bobbit-collapsed-team-leads";
+    let collapsedTeamLeadSessions = new Set(
+      JSON.parse(localStorage.getItem(COLLAPSED_TEAM_LEADS_KEY) || "[]")
+    );
+
+    function isTeamLeadExpanded(sessionId) {
+      return !collapsedTeamLeadSessions.has(sessionId);
+    }
+
+    function setTeamLeadExpanded(sessionId, expanded) {
+      if (expanded) collapsedTeamLeadSessions.delete(sessionId);
+      else collapsedTeamLeadSessions.add(sessionId);
+      localStorage.setItem(
+        COLLAPSED_TEAM_LEADS_KEY,
+        JSON.stringify([...collapsedTeamLeadSessions])
+      );
+    }
+
+    // --- Existing opt-in state: delegate/archived parents -------------------
+    const EXPANDED_DELEGATE_PARENTS_KEY = "bobbit-expanded-delegate-parents";
+    let expandedDelegateParents = new Set(
+      JSON.parse(localStorage.getItem(EXPANDED_DELEGATE_PARENTS_KEY) || "[]")
+    );
+
+    function isArchivedParentExpanded(sessionId) {
+      // Opt-in: in the set => expanded (default false).
+      return expandedDelegateParents.has(sessionId);
+    }
+
+    function setArchivedParentExpanded(sessionId, expanded) {
+      if (expanded) expandedDelegateParents.add(sessionId);
+      else expandedDelegateParents.delete(sessionId);
+      localStorage.setItem(
+        EXPANDED_DELEGATE_PARENTS_KEY,
+        JSON.stringify([...expandedDelegateParents])
+      );
+    }
+
+    function toggleArchivedParentExpanded(sessionId) {
+      setArchivedParentExpanded(sessionId, !expandedDelegateParents.has(sessionId));
+    }
+
+    // --- CURRENT (buggy) decision logic -------------------------------------
+
+    // Bug #1 — renderSessionRow (render-helpers.ts:826-827):
+    //   const autoExpanded = liveChildren.some(isFirstClassChildSession);
+    //   const childrenExpanded = hasChildren && (autoExpanded || isArchivedParentExpanded(session.id));
+    // autoExpanded is permanently true whenever a PR-walkthrough child exists,
+    // so the chevron toggle has no visible effect.
+    function computeSessionRowChildrenExpanded({ sessionId, hasChildren, hasFirstClassChild }) {
+      const autoExpanded = !!hasFirstClassChild;
+      return !!hasChildren && (autoExpanded || isArchivedParentExpanded(sessionId));
+    }
+
+    // Bug #2 — renderTeamGroup (render-helpers.ts:1277-1282):
+    //   const leadChildRowsExpanded = liveLeadChildren.some(isFirstClassChildSession)
+    //       || archivedLeadChildren.length > 0
+    //       || isArchivedParentExpanded(teamLead.id);
+    // First term is permanently true when a PR-walkthrough child exists, so the
+    // team-lead chevron (tlExpanded) never hides the first-class child.
+    function computeTeamLeadFirstClassChildExpanded({ leadId, hasFirstClassChild, archivedLeadChildrenCount }) {
+      return (
+        !!hasFirstClassChild ||
+        (archivedLeadChildrenCount || 0) > 0 ||
+        isArchivedParentExpanded(leadId)
+      );
+    }
+
+    window.__chevron = {
+      // first-class (PR walkthrough) opt-out state
+      isFirstClassParentExpanded,
+      setFirstClassParentExpanded,
+      toggleFirstClassParentExpanded,
+      // team-lead opt-out state
+      isTeamLeadExpanded,
+      setTeamLeadExpanded,
+      // delegate/archived opt-in state
+      isArchivedParentExpanded,
+      setArchivedParentExpanded,
+      toggleArchivedParentExpanded,
+      // buggy decision helpers
+      computeSessionRowChildrenExpanded,
+      computeTeamLeadFirstClassChildExpanded,
+    };
+  </script>
+</head>
+<body>
+  <div id="fixture">PR Walkthrough Chevron Test Fixture</div>
+</body>
+</html>
