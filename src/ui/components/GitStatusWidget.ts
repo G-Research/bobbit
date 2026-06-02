@@ -1050,13 +1050,15 @@ export class GitStatusWidget extends LitElement {
         const aggregateStats = multiRepoMode ? this._aggregatePrimaryStats() : null;
         const aggregateSegments = aggregateStats ? this._segmentSpans(aggregateStats) : [];
         // Show 'clean' only when no other indicators are present and no PR.
-        // In multi-repo mode, a non-zero summed ahead/behind/ins/del also
-        // suppresses 'clean' (via aggregateSegments) alongside the dirty label.
-        const showClean = this.clean && segments.length === 0 && !this.prState
-            && (this.isOnPrimary || this.mergedIntoPrimary)
-            && (this.isOnPrimary || this.aheadOfPrimary === 0)
-            && !aggregateLabel
-            && aggregateSegments.length === 0;
+        // Multi-repo mode derives clean-collapse from the AGGREGATE (every
+        // repo clean + all summed primary stats zero), INDEPENDENT of
+        // `isOnPrimary` — a clean `session/...` branch must still collapse to
+        // the single green "clean". Flat/single-repo behavior is unchanged.
+        const showClean = multiRepoMode
+            ? (this.clean && !this.prState && !aggregateLabel && aggregateSegments.length === 0)
+            : (this.clean && segments.length === 0 && !this.prState
+                && (this.isOnPrimary || this.mergedIntoPrimary)
+                && (this.isOnPrimary || this.aheadOfPrimary === 0));
 
         const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
         const refreshDot = this.loading

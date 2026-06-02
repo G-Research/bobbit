@@ -169,6 +169,85 @@ test.describe.serial("session git-status multi-repo envelope", () => {
 		expect(b.repos["."]).toBeUndefined();
 	});
 
+	test("true polyrepo (non-git container cwd) still emits { repos, aggregate } with synthesized summed stats", async () => {
+		// In a TRUE polyrepo the session's cwd IS the branch container dir,
+		// which is NOT itself a git repo (no `repo: "."` component) — so
+		// `batchGitStatus(container)` returns null. Provision a session whose
+		// cwd is the project root (offset "") so session.cwd === container.
+		// Ensure the pool replenished a warm worktree after the first claim —
+		// a cold-claim fallback would NOT populate repoWorktrees (multi-repo
+		// claims are pool-only), so wait for a ready entry first.
+		await waitForPool(projectId, 1);
+		const polyResp = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: root, projectId, worktree: true }),
+		});
+		expect(polyResp.status).toBe(201);
+		const polyId = (await polyResp.json()).id;
+		try {
+			const settled = await pollSessionUntil(
+				polyId,
+				(row: any) => typeof row.branch === "string" && row.branch.startsWith("session/") && typeof row.cwd === "string",
+				15_000,
+			);
+			const polyBranch: string = settled.branch;
+			const polyContainer = path.join(`${root}-wt`, polyBranch.replace(/\//g, "-"));
+			const polyApiWt = path.join(polyContainer, "api");
+			const polyWebWt = path.join(polyContainer, "web");
+			// session.cwd must be the container itself (non-git), not a sub-repo.
+			expect(settled.cwd).toBe(polyContainer);
+
+			serverModule.__setGitStatusFake(async (cwd: string) => {
+				if (cwd === polyApiWt) {
+					return okResult({
+						branch: polyBranch,
+						status: [{ file: "src/a.ts", status: "M" }, { file: "src/b.ts", status: "M" }],
+						clean: false,
+						aheadOfPrimary: 2,
+						insertionsVsPrimary: 10,
+						deletionsVsPrimary: 3,
+					});
+				}
+				if (cwd === polyWebWt) {
+					return okResult({
+						branch: polyBranch,
+						status: [{ file: "index.html", status: "M" }],
+						clean: false,
+						aheadOfPrimary: 1,
+						insertionsVsPrimary: 5,
+						deletionsVsPrimary: 1,
+					});
+				}
+				// Container cwd (and anything else): not a git repo.
+				return null;
+			});
+			for (const p of [polyContainer, polyApiWt, polyWebWt]) serverModule.invalidateGitStatusCache(p);
+
+			const r = await apiFetch(`/api/sessions/${polyId}/git-status?fetch=true`);
+			expect(r.status).toBe(200);
+			const b = await r.json();
+
+			// Envelope present with both per-repo entries — no 400/500.
+			expect(b.repos).toBeTruthy();
+			expect(Object.keys(b.repos).sort()).toEqual(["api", "web"]);
+			expect(b.repos["."]).toBeUndefined();
+
+			// Synthesized aggregate sums numeric fields across repos.
+			expect(b.aggregate).toBeTruthy();
+			expect(b.aggregate.aheadOfPrimary).toBe(3);
+			expect(b.aggregate.insertionsVsPrimary).toBe(15);
+			expect(b.aggregate.deletionsVsPrimary).toBe(4);
+			expect(b.aggregate.clean).toBe(false);
+			expect(Array.isArray(b.aggregate.status)).toBe(true);
+			expect(b.aggregate.status.length).toBe(0);
+			// Flat fields mirror the aggregate.
+			expect(b.aheadOfPrimary).toBe(3);
+			expect(b.insertionsVsPrimary).toBe(15);
+		} finally {
+			await deleteSession(polyId).catch(() => {});
+		}
+	});
+
 	test("per-repo git failure is non-fatal — no 500, broken sub-repo skipped", async () => {
 		serverModule.__setGitStatusFake(async (cwd: string) => {
 			if (cwd === webWt) throw new Error("fake web git failure");

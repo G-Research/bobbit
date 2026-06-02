@@ -7762,41 +7762,104 @@ async function handleApiRoute(
 		// Windows) and errors are not cached, so the client retry loop in
 		// `git-status-refresh.ts` (4 attempts × 0/500/2000/5000 ms backoff) is
 		// the resilience layer for transient failures.
+		// `session.repoWorktrees` is an ARRAY `Array<{repo, repoPath, worktreePath}>`
+		// (session-manager.ts), unlike the goal's `Record<string,string>`.
+		const sessRepoWorktrees = session.repoWorktrees;
+		const isMultiRepo = !!(sessRepoWorktrees && sessRepoWorktrees.length > 1);
+
+		// Root container status. In a TRUE polyrepo (no `repo: "."` git-root
+		// component) the container `cwd` is NOT itself a git repo, so this is
+		// null/throws — that is non-fatal in multi-repo mode (the per-repo
+		// worktrees below are the source of truth). For single-repo it must
+		// keep the existing 400/500 behavior.
 		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
 		try {
 			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
 		} catch (err: any) {
-			console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
-			return;
-		}
-		if (!result) { json({ error: "Not a git repository" }, 400); return; }
-
-		// Multi-repo aware envelope (parity with the goal git-status handler):
-		// include a `repos` map + `aggregate` for back-compat. `session.repoWorktrees`
-		// is an ARRAY `Array<{repo, repoPath, worktreePath}>` (session-manager.ts),
-		// unlike the goal's `Record<string,string>`.
-		const sessRepoWorktrees = session.repoWorktrees;
-		if (sessRepoWorktrees && sessRepoWorktrees.length > 1) {
-			const repos: Record<string, typeof result> = {};
-			for (const { repo, worktreePath } of sessRepoWorktrees) {
-				try {
-					if (cid || fs.existsSync(worktreePath)) {
-						const r = await batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
-						if (r) repos[repo] = r;
-					}
-				} catch { /* per-repo failure non-fatal */ }
+			if (!isMultiRepo) {
+				console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
+				jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
+				return;
 			}
-			json({ ...result, aggregate: result, repos });
-		} else {
+			// Multi-repo: container-cwd failure is expected/non-fatal.
+			result = undefined;
+		}
+
+		if (!isMultiRepo) {
 			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
 			// `repos: { ".": result }, aggregate: result`.
+			if (!result) { json({ error: "Not a git repository" }, 400); return; }
 			json({ ...result, aggregate: result, repos: { ".": result } });
+
+			// Auto-push: for feature branches with unpushed commits, publish the
+			// current branch to its matching remote ref regardless of inherited
+			// upstream config.
+			if (!shouldSkipRemotePush()) {
+				if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
+					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
+				} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
+					// Session branches without upstream: publish safely, then set tracking.
+					publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid, setUpstream: true }).catch(() => {});
+				}
+			}
+			return;
 		}
 
-		// Auto-push: for feature branches with unpushed commits, publish the current
-		// branch to its matching remote ref regardless of inherited upstream config.
-		if (!shouldSkipRemotePush()) {
+		// Multi-repo aware envelope (parity with the goal git-status handler):
+		// emit a `repos` map keyed by repo name + an `aggregate`.
+		const repos: Record<string, GitStatusResult> = {};
+		for (const { repo, worktreePath } of sessRepoWorktrees!) {
+			try {
+				if (cid || fs.existsSync(worktreePath)) {
+					const r = await batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
+					if (r) repos[repo] = r;
+				}
+			} catch { /* per-repo failure non-fatal */ }
+		}
+
+		const repoResults = Object.values(repos);
+		// Aggregate: prefer the root container status when it IS a git repo
+		// (e.g. a `repo: "."` component) for back-compat; otherwise synthesize
+		// one from the per-repo results. All sub-repos share the same session
+		// branch, so branch/primary fields come from the first repo while the
+		// numeric counters are summed and `clean` is the AND across repos.
+		let aggregate: GitStatusResult | undefined = result ?? undefined;
+		if (!aggregate) {
+			if (repoResults.length === 0) { json({ error: "Not a git repository" }, 400); return; }
+			const base = repoResults[0];
+			const sum = (pick: (r: GitStatusResult) => number) =>
+				repoResults.reduce((acc, r) => acc + (typeof pick(r) === "number" ? pick(r) : 0), 0);
+			const ahead = sum(r => r.ahead);
+			const behind = sum(r => r.behind);
+			const insertionsVsPrimary = sum(r => r.insertionsVsPrimary);
+			const deletionsVsPrimary = sum(r => r.deletionsVsPrimary);
+			aggregate = {
+				branch: base.branch,
+				primaryBranch: base.primaryBranch,
+				primaryRef: base.primaryRef,
+				isOnPrimary: base.isOnPrimary,
+				hasUpstream: base.hasUpstream,
+				mergedIntoPrimary: base.mergedIntoPrimary,
+				status: [], // multi-repo mode suppresses the flat list; per-repo sections are authoritative
+				ahead,
+				behind,
+				aheadOfPrimary: sum(r => r.aheadOfPrimary),
+				behindPrimary: sum(r => r.behindPrimary),
+				insertionsVsPrimary,
+				deletionsVsPrimary,
+				clean: repoResults.every(r => r.clean),
+				unpushed: repoResults.some(r => r.unpushed),
+				summary: `${repoResults.length} repos`,
+				untrackedIncluded: sessUntracked,
+			};
+		}
+
+		json({ ...aggregate, aggregate, repos });
+
+		// Auto-push only when the root container IS a git repo. Session branches
+		// are published at worktree-claim time, so skipping container auto-push
+		// for a true (non-git-container) polyrepo is fine.
+		if (result && !shouldSkipRemotePush()) {
 			if (!result.isOnPrimary && result.ahead > 0 && result.hasUpstream && result.branch) {
 				publishCurrentBranchToOrigin(cwd, result.branch, { containerId: cid }).catch(() => {});
 			} else if (!result.isOnPrimary && !result.hasUpstream && result.branch && /^session\//.test(result.branch)) {
