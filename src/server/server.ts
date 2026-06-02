@@ -56,7 +56,7 @@ import { BgProcessManager } from "./agent/bg-process-manager.js";
 import { sessionFileRead, type SessionFsContext } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
 
-import { isGitRepo, getRepoRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
+import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo } from "./skills/git.js";
 // Helper used by PUT /api/projects/:id/config to validate `base_ref` branch grammar.
 // Mirrors git's `check-ref-format` predicate in pure JS so the API can respond
 // without an exec round-trip. See docs/design/base-ref.md.
@@ -1548,8 +1548,11 @@ export function createGateway(config: GatewayConfig) {
 				// syntax → `cannot run ssh`) or an otherwise-unreachable host path.
 				// With an `origin` remote we clone the remote URL (tokens stripped so
 				// they don't leak into .git/config — the container's credential helper
-				// reads GITHUB_TOKEN from env instead). Without one, the host repo is
-				// bind-mounted read-only and cloned via `file://`.
+				// reads GITHUB_TOKEN from env instead). Without one, the canonical main
+				// repo root (resolved via `resolveSandboxMountRoot`, which handles linked
+				// worktrees) is bind-mounted read-only and cloned via `file://`. A LOCAL
+				// origin throws here — propagating through the awaited bootstrap so
+				// `ensureForProject` rejects on the awaited boundary (no fire-and-forget).
 				const resolveOrigin = async (cwd: string): Promise<string | null> => {
 					try {
 						const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 5000 });
@@ -1558,7 +1561,8 @@ export function createGateway(config: GatewayConfig) {
 						return null;
 					}
 				};
-				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), repoPath });
+				const mountSourcePath = await resolveSandboxMountRoot(repoPath);
+				const cloneSource = resolveSandboxCloneSource({ originUrl: await resolveOrigin(repoPath), mountSourcePath });
 				const repoUrl = cloneSource.cloneUrl;
 
 				let poolMounts: string[] = [];
@@ -1594,13 +1598,14 @@ export function createGateway(config: GatewayConfig) {
 						seen.add(c.repo);
 						const rp = path.join(projectDir, c.repo);
 						// Same resolution as the single-repo path: never fall back to a
-						// raw host path. Local-origin/remote-less repos get a `file://`
-						// bind-mount source at a per-repo container mount path; the
-						// resolver derives the correct per-repo cloneUrl and decodes the
-						// real on-host source dir (from a file:// origin or the repo path).
+						// raw host path. Remote-less repos bind-mount their canonical main
+						// repo root (resolved via `resolveSandboxMountRoot`, which handles
+						// linked worktrees) at a per-repo container mount path and clone
+						// via `file://`. A local origin throws (caller's awaited boundary).
+						const perRepoMountSource = await resolveSandboxMountRoot(rp);
 						const perRepoSrc = resolveSandboxCloneSource({
 							originUrl: await resolveOrigin(rp),
-							repoPath: rp,
+							mountSourcePath: perRepoMountSource,
 							mountPath: `/workspace-src/${c.repo}`,
 						});
 						cloneSourceByName[c.repo] = perRepoSrc;

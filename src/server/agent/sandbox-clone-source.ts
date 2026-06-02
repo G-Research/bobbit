@@ -9,18 +9,22 @@
  * (`host:path`) → `cannot run ssh` / `unable to fork`; on any OS the host path
  * is unreachable from inside the container.
  *
- * The fix: this resolver NEVER emits a raw host path as the clone URL.
+ * The fix: this resolver NEVER emits a raw host path as the clone URL, and
+ * NEVER derives a bind-mount source from the `origin` value.
  * - With a network `origin` remote → clone the remote URL directly.
- * - With no origin → bind-mount the declared project repo (the sandbox's own
- *   source — always safe) at a fixed container path and clone from `file://`.
+ * - With no origin → bind-mount the CALLER-supplied canonical main-repo root
+ *   (`mountSourcePath`) at a fixed container path and clone from `file://`.
+ *   The resolver never touches the filesystem and never derives any path from
+ *   `origin` — this removes the entire local-origin→mount attack surface (an
+ *   in-root symlink pointing outside can no longer escape, because no path is
+ *   ever derived from `origin`).
  * - With a LOCAL origin (file://, absolute/relative/UNC/drive-letter path):
- *   only mount it when it resolves to a path inside the project root. Any
- *   local origin pointing OUTSIDE the project root throws — bind-mounting an
- *   arbitrary host path into the sandbox is a data-exposure risk (security).
+ *   THROW a clear, actionable error. A local origin cannot be cloned into the
+ *   container (the host path is unreachable / a drive-letter is misparsed as
+ *   scp), so the caller must configure a clonable network remote or remove the
+ *   origin to fall back to the mounted project repo.
  */
 
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { stripTokenFromGitUrl } from "../skills/git.js";
 
 /** Fixed container-internal mount point for the remote-less bind-mount source. */
@@ -74,49 +78,30 @@ function isNetworkRemote(origin: string): boolean {
 }
 
 /**
- * True if `p` is an absolute path on any OS: POSIX-absolute (`/foo`), a Windows
- * drive path (`C:\` / `C:/`), or a UNC path (`\\host` / `//host`). We detect
- * Windows-style forms explicitly so a drive-letter origin is never (mis)treated
- * as relative-to-repoPath when this code runs on a POSIX host.
- */
-function isAbsoluteLike(p: string): boolean {
-	return path.isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) || /^[\\/]{2}[^\\/]/.test(p);
-}
-
-/** True if `candidate` is `root` or a descendant of `root` (cross-platform). */
-function isWithinRoot(root: string, candidate: string): boolean {
-	const rel = path.relative(path.resolve(root), path.resolve(candidate));
-	// Empty rel → same path. Otherwise it must not escape (`..`) and must not be
-	// absolute (which path.relative returns when the two are on different roots,
-	// e.g. different Windows drives).
-	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-/**
  * Resolve the clone source for a sandbox container.
  *
- * @param opts.originUrl   The project's `origin` remote URL (or null/empty/undefined when absent).
- * @param opts.repoPath    The host repo root. Bind-mounted when origin is absent;
- *                         also the security root for local-origin validation.
- * @param opts.mountPath   Container-internal mount point (default `/workspace-src`). Multi-repo
- *                         callers pass a per-repo path like `/workspace-src/web`.
+ * @param opts.originUrl       The project's `origin` remote URL (or null/empty/undefined when absent).
+ * @param opts.mountSourcePath The CANONICAL main-repo working directory to bind-mount when origin
+ *                             is absent. Required. The caller resolves this (see
+ *                             `resolveSandboxMountRoot`) — the resolver NEVER derives a path from
+ *                             `origin` and NEVER touches the filesystem.
+ * @param opts.mountPath       Container-internal mount point (default `/workspace-src`). Multi-repo
+ *                             callers pass a per-repo path like `/workspace-src/web`.
  *
  * Classification:
  * - A network remote (URL scheme or scp-style `[user@]host:path`) →
  *   `{ kind: "remote", cloneUrl: stripTokenFromGitUrl(origin) }`, cloned directly.
- * - Absent/empty origin → bind-mount the declared `repoPath` (always safe — it's
- *   the sandbox's own source) and clone via `file://<mountPath>`.
- * - A LOCAL origin (file://, absolute/relative/UNC/drive-letter) is resolved to a
- *   canonical filesystem path. If it is inside `repoPath` it is bind-mounted;
- *   otherwise this THROWS — bind-mounting an arbitrary host path is a data-exposure
- *   risk.
+ * - Absent/empty origin → bind-mount `mountSourcePath` (the caller-canonicalized
+ *   main repo root — always safe) and clone via `file://<mountPath>`.
+ * - A LOCAL origin (file://, absolute/relative/UNC/drive-letter) → THROW. A local
+ *   origin can never be cloned into the container.
  *
  * Invariant: the returned `cloneUrl` is NEVER a raw host path or a Windows
  * drive-letter string. It is always a network remote URL or `file://<mountPath>`.
  */
 export function resolveSandboxCloneSource(opts: {
 	originUrl?: string | null;
-	repoPath: string;
+	mountSourcePath: string;
 	mountPath?: string;
 }): SandboxCloneSource {
 	const origin = (opts.originUrl ?? "").trim();
@@ -128,33 +113,21 @@ export function resolveSandboxCloneSource(opts: {
 		return { kind: "remote", cloneUrl: stripTokenFromGitUrl(origin) };
 	}
 
-	// Absent origin → mount the declared repo (the sandbox's own source).
+	// Absent origin → mount the caller-supplied canonical main repo root (the
+	// sandbox's own source). No path is derived from `origin`, so an in-root
+	// symlink can never be used to escape and bind-mount an arbitrary host path.
 	if (!origin) {
-		return { kind: "mounted", hostPath: opts.repoPath, mountPath, cloneUrl };
+		return { kind: "mounted", hostPath: opts.mountSourcePath, mountPath, cloneUrl };
 	}
 
-	// Local origin → resolve to a canonical absolute filesystem path.
-	let hostPath: string;
-	if (/^file:\/\//i.test(origin)) {
-		hostPath = fileURLToPath(origin);
-	} else if (isAbsoluteLike(origin)) {
-		// Already absolute (POSIX / drive-letter / UNC) — keep it; never join with repoPath.
-		hostPath = path.resolve(origin);
-	} else {
-		// Relative origin resolves against the repo root.
-		hostPath = path.resolve(opts.repoPath, origin);
-	}
-
-	// Security: only mount local origins that live inside the project root.
-	// Bind-mounting an arbitrary host path (e.g. `file:///some/other/private/repo`)
-	// would expose it inside the sandbox.
-	if (!isWithinRoot(opts.repoPath, hostPath)) {
-		throw new Error(
-			`[sandbox] origin "${origin}" is a local path outside the project root ` +
-				`(${opts.repoPath}) and cannot be safely cloned into the sandbox. ` +
-				`Configure a clonable network remote (https/ssh) or remove the local origin.`,
-		);
-	}
-
-	return { kind: "mounted", hostPath, mountPath, cloneUrl };
+	// Non-empty LOCAL origin (file://, absolute/relative/UNC/drive-letter). We do
+	// NOT mount anything derived from `origin` — bind-mounting an origin-derived
+	// path is the attack surface this fix removes. A local origin cannot be
+	// cloned into the container (host path unreachable; a drive-letter is
+	// misparsed as scp), so fail fast with an actionable message.
+	throw new Error(
+		`[sandbox] origin "${origin}" is a local path, which cannot be cloned into the sandbox. ` +
+			`Configure a clonable network remote (https/ssh), or remove the origin to use the ` +
+			`project's own repository as the mounted clone source.`,
+	);
 }
