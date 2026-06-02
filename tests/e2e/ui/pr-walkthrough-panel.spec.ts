@@ -541,27 +541,30 @@ async function expectPrototypeCardHierarchy(page: Page) {
 async function expectCollapsedRailPipsAndDots(panel: Locator) {
 	const collapsedRail = panel.getByTestId("pr-walkthrough-collapsed-rail");
 	await expect(collapsedRail, "narrow panel should show the thin collapsed rail").toBeVisible({ timeout: 10_000 });
-	const pips = collapsedRail.getByTestId("pr-walkthrough-phase-pip");
-	await expect(pips.first(), "collapsed rail should show visible phase pips").toBeVisible();
-	await expect(pips.first(), "phase pips should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
-	await expect.poll(() => pips.first().evaluate(el => getComputedStyle(el.parentElement as HTMLElement, "::before").content), { message: "first collapsed phase should not render a leading divider" }).toBe("none");
-	const unreviewedPip = pips.nth(1);
-	await expect(unreviewedPip, "collapsed rail phases should render as compact muted headers").toBeVisible();
-	await expect.poll(() => unreviewedPip.evaluate(el => {
-		const style = getComputedStyle(el as HTMLElement);
-		const divider = getComputedStyle(el.parentElement as HTMLElement, "::before");
-		return { borderWidth: style.borderTopWidth, background: style.backgroundColor, dividerHeight: divider.height };
-	}), { message: "phase headers should use dividers instead of status-filled pips" }).toMatchObject({ borderWidth: "0px", background: /rgba\(0, 0, 0, 0\)|transparent/i, dividerHeight: /[1-9]/ });
+	// The collapsed rail reuses the labelled rail DOM (phase buttons + card steps); only text is hidden.
+	const phases = collapsedRail.getByTestId("pr-walkthrough-phase-button");
+	await expect(phases.first(), "collapsed rail should show visible phase headers").toBeVisible();
+	await expect(phases.first(), "phase headers should expose native tooltip text").toHaveAttribute("title", /orientation|phase/i);
+	await expect.poll(() => phases.first().evaluate(el => getComputedStyle(el.closest(".phase") as HTMLElement, "::before").content), { message: "first collapsed phase should not render a leading divider" }).toBe("none");
+	const secondPhase = phases.nth(1);
+	await expect(secondPhase, "collapsed rail phases should render as compact muted headers").toBeVisible();
+	await expect.poll(() => secondPhase.evaluate(el => {
+		const pip = getComputedStyle(el.querySelector(".phase-pip") as HTMLElement);
+		const name = getComputedStyle(el.querySelector(".phase-name") as HTMLElement);
+		const divider = getComputedStyle(el.closest(".phase") as HTMLElement, "::before");
+		return { borderWidth: pip.borderTopWidth, background: pip.backgroundColor, nameDisplay: name.display, dividerHeight: divider.height };
+	}), { message: "phase headers should hide labels and use dividers instead of status-filled pips" }).toMatchObject({ borderWidth: "0px", background: /rgba\(0, 0, 0, 0\)|transparent/i, nameDisplay: "none", dividerHeight: /[1-9]/ });
 
-	const dot = collapsedRail.getByTestId("pr-walkthrough-card-dot").nth(1);
-	await expect(dot, "collapsed rail should expose clickable card-dot substeps").toBeVisible();
-	await expect(dot, "card dots should have aria labels for narrow navigation").toHaveAttribute("aria-label", /card|orientation|design|significant|audit/i);
-	await expect(dot, "card dots should expose tooltip text").toHaveAttribute("title", /\S+/);
-	await expect.poll(() => dot.evaluate(el => {
-		const style = getComputedStyle(el as HTMLElement);
-		return { borderWidth: style.borderTopWidth, border: style.borderTopColor, background: style.backgroundColor, text: (el.textContent || "").trim() };
-	}), { message: "unreviewed collapsed rail card dots should render as visible hollow circles" }).toMatchObject({ borderWidth: /[1-9]/, border: /^(?!rgba\(0, 0, 0, 0\))/i, background: /rgba\(0, 0, 0, 0\)|transparent/i, text: "" });
-	return dot;
+	const step = collapsedRail.getByTestId("pr-walkthrough-card-step").nth(1);
+	await expect(step, "collapsed rail should expose clickable card substeps").toBeVisible();
+	await expect(step, "card substeps should have aria labels for narrow navigation").toHaveAttribute("aria-label", /\S+/);
+	await expect(step, "card substeps should expose tooltip text").toHaveAttribute("title", /\S+/);
+	await expect.poll(() => step.evaluate(el => {
+		const dot = getComputedStyle(el.querySelector(".card-dot") as HTMLElement);
+		const title = getComputedStyle(el.querySelector(".card-title") as HTMLElement);
+		return { borderWidth: dot.borderTopWidth, border: dot.borderTopColor, background: dot.backgroundColor, titleDisplay: title.display };
+	}), { message: "unreviewed collapsed rail card dots should render as visible hollow circles with hidden labels" }).toMatchObject({ borderWidth: /[1-9]/, border: /^(?!rgba\(0, 0, 0, 0\))/i, background: /rgba\(0, 0, 0, 0\)|transparent/i, titleDisplay: "none" });
+	return step;
 }
 
 async function expectDiffExpandCollapseIfExposed(page: Page) {
@@ -851,27 +854,29 @@ This is the author's source description with **markdown**.
 	test("collapsed rail card dots encode liked and disliked review decisions", async ({ page }) => {
 		const { panel } = await setupWalkthrough(page, { width: 1100, height: 820 });
 		await panel.getByTestId("pr-walkthrough-like").first().click();
-		const likedDot = panel.getByTestId("pr-walkthrough-card-dot").first();
+		const likedStep = panel.getByTestId("pr-walkthrough-card-step").first();
+		const likedDot = likedStep.locator(".card-dot");
 		await expect(likedDot.locator("svg"), "liked cards should show a thumbs-up icon").toBeVisible();
 		await expect(likedDot.locator("svg path").first()).toHaveAttribute("d", "M7 10v12");
 		await expect(likedDot, "liked cards should use primary filled-circle styling").toHaveClass(/liked/);
 		await expect.poll(() => likedDot.evaluate(el => getComputedStyle(el as HTMLElement).backgroundColor), { message: "liked sidebar dots should use a filled status circle" }).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/i);
-		await likedDot.click();
+		await likedStep.click();
 		await expect.poll(() => likedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected liked dots should keep the active glow" }).not.toBe("none");
 
-		const secondDot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
-		await secondDot.click();
+		const secondStep = panel.getByTestId("pr-walkthrough-card-step").nth(1);
+		await secondStep.click();
 		await createCardComment(page, `collapsed-dislike-${Date.now()}`);
 		await panel.getByTestId("pr-walkthrough-dislike").first().click();
-		const dislikedDot = panel.getByTestId("pr-walkthrough-card-dot").nth(1);
+		const dislikedStep = panel.getByTestId("pr-walkthrough-card-step").nth(1);
+		const dislikedDot = dislikedStep.locator(".card-dot");
 		await expect(dislikedDot.locator("svg"), "disliked cards should show a thumbs-down icon").toBeVisible();
 		await expect(dislikedDot.locator("svg path").first()).toHaveAttribute("d", "M17 14V2");
 		await expect(dislikedDot, "disliked cards should use danger filled-circle styling").toHaveClass(/disliked/);
 		await expect.poll(() => dislikedDot.evaluate(el => getComputedStyle(el as HTMLElement).backgroundColor), { message: "disliked sidebar dots should use a filled status circle" }).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/i);
-		await dislikedDot.click();
+		await dislikedStep.click();
 		await expect.poll(() => dislikedDot.evaluate(el => getComputedStyle(el as HTMLElement).boxShadow), { message: "selected disliked dots should keep the active glow" }).not.toBe("none");
 
-		const pendingDot = panel.getByTestId("pr-walkthrough-card-dot").nth(2);
+		const pendingDot = panel.getByTestId("pr-walkthrough-card-step").nth(2).locator(".card-dot");
 		await expect(pendingDot, "pending cards should stay hollow").toHaveText("");
 		await expect(pendingDot).not.toHaveClass(/liked|disliked/);
 	});
@@ -1600,6 +1605,23 @@ test.describe("PR walkthrough orientation guided steps", () => {
 		await expect(panel.getByTestId("pr-walkthrough-orientation-guide")).toBeVisible();
 		await expect(orientationStep(page, 0)).toHaveAttribute("data-state", "current");
 		await expect(orientationStep(page, 5), "beats after the cursor stay upcoming when re-entering at beat 0").toHaveAttribute("data-state", "upcoming");
+	});
+
+	test("collapsed rail keeps the orientation beats navigable as card dots", async ({ page }) => {
+		const { panel } = await setupWalkthrough(page, { width: 1920, height: 1080 });
+		await expect(panel.getByTestId("pr-walkthrough-orientation-guide")).toBeVisible({ timeout: 10_000 });
+
+		await panel.getByTestId("pr-walkthrough-rail-toggle").click();
+		const collapsedRail = panel.getByTestId("pr-walkthrough-collapsed-rail");
+		await expect(collapsedRail, "collapsing the rail should switch to the thin rail").toBeVisible();
+
+		const steps = collapsedRail.getByTestId("pr-walkthrough-orientation-step");
+		await expect(steps, "phase 0 beats should remain present in the collapsed rail").toHaveCount(6);
+		await expect(steps.first().locator(".card-title"), "collapsed rail should hide the beat label text").toBeHidden();
+		await expect(steps.first().locator(".card-dot"), "collapsed rail should still render the beat status dot").toBeVisible();
+
+		await steps.nth(2).click();
+		await expect(guideCounter(page), "clicking a collapsed beat dot should jump to that beat").toHaveText("3 / 6");
 	});
 
 	test("every sidebar rail label stays short enough to avoid truncation", async ({ page }) => {
