@@ -30,6 +30,18 @@ The same ready walkthrough can be reviewed in:
 - the standalone `/walkthrough?...` route opened from the toolbar's
   open-in-new-tab control (no panel-level resize chrome — it fills the window).
 
+### Untrusted-host launch dialog
+
+A launch against a host that is neither in the always-trusted baseline nor the managed [trusted-host allowlist](#trusted-github-hosts) is rejected **before** any job, child session, or tab is created, so a failed launch never leaves a stale waiting tab. The host trust check is synchronous: `POST /api/pr-walkthrough/launch` returns HTTP `400` with body `{ code: "untrusted_github_host", host }`.
+
+The UI detects the `untrusted_github_host` code (carried through `fetchWalkthroughJson` error handling, with the offending host taken from the response body and a message-regex fallback) and, instead of toasting the raw error, shows a security-aware confirmation dialog that:
+
+- names the specific host that is not trusted;
+- warns that adding it lets Bobbit fetch repository and pull-request content (metadata and diffs) from that host, and to continue only if the host is trusted;
+- offers **Add & continue** and **Cancel**.
+
+On **Add & continue**, Bobbit normalizes the host, persists it to `githubTrustedHosts` via `PUT /api/preferences`, and retries the launch once with the same input (a one-shot guard prevents retry loops if it still fails). Because the allowlist is read live per request, the retry succeeds without a server restart or re-entering the PR. On **Cancel**, the launch aborts cleanly — no walkthrough child, no tab. A defensive path also catches a `201` launch whose job is already in the `untrusted_github_host` error state and routes it through the same dialog rather than rendering an error tab.
+
 ## Panel sizing: fullscreen, collapse, and shortcuts
 
 The in-app walkthrough side panel uses the **same** resize logic as the HTML
@@ -170,8 +182,10 @@ A successful YAML submission does not terminate the child session. The user can 
 
 GitHub PR targets are canonicalized so repeated launches focus the same child instead of duplicating work:
 
-- Full PR URL: `github:<owner>/<repo>#<number>`.
-- Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key.
+- Full PR URL: `github:<owner>/<repo>#<number>` for github.com, or `github:<host>/<owner>/<repo>#<number>` for a trusted enterprise host.
+- Number-only launch: Bobbit infers `<owner>/<repo>` from the launching session's GitHub `origin` remote and then uses the same canonical key (host-qualified for non-github.com remotes).
+
+The host is included in the canonical key for non-github.com hosts so two trusted enterprise hosts sharing the same owner/repo/PR number do not collide into one job; github.com keeps its legacy unqualified key. See [Enterprise host identity and token scoping](#enterprise-host-identity-and-token-scoping).
 
 A number-only target fails with an actionable error when the session worktree has no GitHub `origin` remote. Passing a full PR URL avoids that dependency.
 
@@ -370,7 +384,7 @@ Common warning/error categories:
 - **Binary files** — binary changes have no reviewable text hunks and cannot receive GitHub line comments.
 - **Renamed/deleted/copied files** — status and old paths are preserved so reviewers can understand the file movement and export can map valid line anchors.
 - **Empty diffs** — resolve to an orientation-only walkthrough with zero changed files.
-- **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs.
+- **Untrusted PR hosts** — non-allowlisted hosts are rejected before fetching metadata or rendering clickable URLs. On launch the rejection is synchronous (before any job/tab is created) and surfaces the risk-warning [untrusted-host dialog](#untrusted-host-launch-dialog) that can add the host to the [trusted-host allowlist](#trusted-github-hosts) and retry.
 
 Warnings are shown at the top of the panel and again in export preview when they affect submission.
 
@@ -399,12 +413,28 @@ Important launch fields:
 
 ## Credentials and configuration
 
-- `GITHUB_TOKEN` / `GH_TOKEN` — used for GitHub API requests and required for review submission.
+- `GITHUB_TOKEN` / `GH_TOKEN` — used for github.com API requests and required for review submission to github.com.
 - `BOBBIT_GITHUB_API_BASE_URL` — overrides the GitHub API base URL, useful for GitHub Enterprise or tests.
-- **Trusted GitHub hosts** — extra trusted hosts (beyond the always-trusted `github.com`/`api.github.com`/`raw.githubusercontent.com` baseline) are managed in **System → General → Trusted GitHub hosts**, persisted in the server preferences store under `githubTrustedHosts`. This is the only source for extra hosts; the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read. Launching a walkthrough against an untrusted host surfaces a risk-warning dialog that can add the host and retry.
 - `BOBBIT_PR_WALKTHROUGH_SYNTHESIS_ADAPTER` — optional module path for compatibility resolver synthesis.
 
 For compatibility resolver model synthesis without a custom adapter, Bobbit uses the selected session model when available, then the default review model, then the default session model. The session-hosted GitHub flow instead relies on the child walkthrough agent and validated YAML submission.
+
+### Trusted GitHub hosts
+
+A walkthrough fetches PR metadata and diffs over the network, so Bobbit only talks to an allowlist of trusted hosts. The allowlist is the **only** source for extra hosts; the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read anywhere.
+
+- **Always-trusted baseline.** `DEFAULT_TRUSTED_HOSTS` in `src/shared/pr-walkthrough/url-safety.ts` (`github.com`, `www.github.com`, `api.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`) is trusted regardless of settings and cannot be removed. The managed list only adds **extra** hosts on top — typically GitHub Enterprise hosts.
+- **Where it lives.** The extra hosts are managed in **System → General → Trusted GitHub hosts** and persisted in the server-side global preferences store under the key `githubTrustedHosts: string[]` — the same store behind `GET`/`PUT /api/preferences` that holds `skillsCatalogBudget`. Storing it server-side (rather than per-browser) means the allowlist is shared across clients and is readable by the server code that performs the fetches.
+- **Live per request.** The server reads `githubTrustedHosts` from the preferences store on each launch/resolve, not at boot, so adding a host takes effect for the immediate retry **without a server restart**.
+- **Normalization and validation on save.** `PUT /api/preferences` runs `normalizeTrustedHosts` over the submitted value. Each entry is lowercased, has any trailing dot stripped, and — if a full URL is pasted — reduced to its host. Entries with a path, whitespace, credentials, a port, or an invalid DNS label are rejected, the list is deduped (first-seen order preserved), and any baseline host is dropped so the managed list shows only true extras. Saving is lossy and never returns a 4xx: the server stores the accepted subset and the UI re-fetches because the `GET` readback is authoritative. An empty or all-invalid list removes the key entirely.
+- **Adding a host from the failed launch.** Launching against an untrusted host surfaces a risk-warning confirmation dialog (see [Untrusted-host launch dialog](#untrusted-host-launch-dialog)) that can add the host and retry without re-entering the PR.
+
+### Enterprise host identity and token scoping
+
+Trusted non-`github.com` hosts are carried through identity and credentials differently from github.com:
+
+- **Changeset / canonical identity includes the host.** For github.com the identity keeps its legacy unqualified shape (`github:<owner>/<repo>#<number>`); for any other trusted host the host is included (`github:<host>/<owner>/<repo>#<number>`). This prevents two trusted hosts that share the same owner/repo/PR number from colliding into the same job, tab, or stored changeset.
+- **Tokens are host-scoped.** The global `GITHUB_TOKEN` / `GH_TOKEN` are github.com credentials and are **never** forwarded to a non-github.com host (that would leak a github.com secret to an enterprise server). Enterprise hosts authenticate only via the host-scoped GitHub CLI token (`gh auth token --hostname <host>`); github.com may still use the env tokens or the unscoped CLI token.
 
 ## Limitations
 
