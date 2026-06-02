@@ -40,7 +40,6 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
@@ -299,15 +298,9 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Real, reachable `origin`: a local bare repo cloned via a `file://` URL.
-	// The old code copied PROJECT_ROOT's GitHub origin, which is unreachable
-	// from inside the sandbox container (and a Windows host path misparses as
-	// scp/ssh syntax). A local bare repo works on every OS.
-	const bareRepo = `${dir}.origin.git`;
-	rmSync(bareRepo, { recursive: true, force: true });
-	execFileSync("git", ["init", "--bare", bareRepo], { stdio: "ignore" });
-	execFileSync("git", ["remote", "add", "origin", pathToFileURL(bareRepo).href], { cwd: dir, stdio: "ignore" });
-	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: dir, stdio: "ignore" });
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — the working mounted-clone path on every OS.
 	const srcConfig = join(PROJECT_ROOT, ".bobbit", "config");
 	const dstConfig = join(dir, ".bobbit", "config");
 	if (existsSync(srcConfig)) {

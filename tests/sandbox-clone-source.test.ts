@@ -1,141 +1,156 @@
 /**
- * Regression test for the Docker sandbox clone-fallback bug.
+ * Contract test for the Docker sandbox clone-source resolver.
  *
- * When a project has no `origin` remote, the old code fell back to using the
- * raw HOST directory path as the `git clone` source inside the Linux
- * container. On Windows the drive-letter path (`C:/Users/...`) is misparsed by
- * git as scp/SSH syntax; on any OS the host path is unreachable from inside the
- * container.
+ * `resolveSandboxCloneSource()` decides what `git clone` uses *inside* the
+ * Linux sandbox container. It must NEVER emit a raw host path as the clone URL
+ * (a Windows drive-letter path like `C:/Users/...` is misparsed by git as
+ * scp/SSH syntax → `cannot run ssh` / `unable to fork`; any host path is
+ * unreachable from inside the container).
  *
- * The fix introduces a pure `resolveSandboxCloneSource()` that NEVER emits a
- * raw host path as the clone URL — the remote-less case becomes a read-only
- * bind-mount cloned via `file:///workspace-src`.
+ * Two security/quality invariants this test pins:
  *
- * This test pins that contract. It fails (red) on the current branch because
- * the module/function does not exist yet.
+ *  - Classification mirrors git's heuristic: a URL scheme OR scp-style
+ *    `[user@]host:path` (host not a single drive letter) is a network remote;
+ *    everything else is local.
+ *  - A LOCAL origin is only bind-mounted when it resolves INSIDE the project
+ *    root. A local origin pointing outside the root throws — bind-mounting an
+ *    arbitrary host path into the sandbox is a data-exposure risk.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveSandboxCloneSource } from "../src/server/agent/sandbox-clone-source.js";
 
-describe("resolveSandboxCloneSource", () => {
-	it("returns a remote source when origin is present", () => {
+// An absolute repo root for the running platform (drive-rooted on Windows).
+const REPO_ROOT = path.resolve(process.platform === "win32" ? "C:/proj/app" : "/proj/app");
+
+describe("resolveSandboxCloneSource — network remotes", () => {
+	it("classifies an https:// origin as a remote (token stripped)", () => {
 		const result = resolveSandboxCloneSource({
 			originUrl: "https://github.com/foo/bar.git",
-			repoPath: "/some/path",
+			repoPath: REPO_ROOT,
 		});
-		assert.deepEqual(result, {
-			kind: "remote",
-			cloneUrl: "https://github.com/foo/bar.git",
-		});
+		assert.deepEqual(result, { kind: "remote", cloneUrl: "https://github.com/foo/bar.git" });
 	});
 
-	it("returns a mounted source when origin is absent (Windows host path)", () => {
+	it("classifies an scp-style origin with user (git@host:path) as a remote", () => {
 		const result = resolveSandboxCloneSource({
-			originUrl: undefined,
-			repoPath: "C:/Users/jsubr/proj",
+			originUrl: "git@github.com:foo/bar.git",
+			repoPath: REPO_ROOT,
 		});
-		assert.equal(result.kind, "mounted");
-		assert.equal(result.cloneUrl, "file:///workspace-src");
-		assert.equal((result as { mountPath: string }).mountPath, "/workspace-src");
-		assert.equal((result as { hostPath: string }).hostPath, "C:/Users/jsubr/proj");
+		assert.equal(result.kind, "remote");
+		// stripTokenFromGitUrl leaves scp-style host:path remotes intact here.
+		assert.equal(result.cloneUrl, "git@github.com:foo/bar.git");
 	});
 
-	it("NEVER emits the raw host path as the clone URL (the heart of the bug)", () => {
-		const repoPath = "C:/Users/jsubr/proj";
-		const result = resolveSandboxCloneSource({ originUrl: undefined, repoPath });
+	it("classifies an scp-style origin WITHOUT user (host:path) as a remote", () => {
+		// This is the Finding-1 regression: a host-without-user scp remote was
+		// previously misclassified as a local/mounted source.
+		const result = resolveSandboxCloneSource({
+			originUrl: "github.example.com:team/repo.git",
+			repoPath: REPO_ROOT,
+		});
+		assert.equal(result.kind, "remote");
+		assert.equal(result.cloneUrl, "github.example.com:team/repo.git");
+	});
 
-		// Must not be the raw host path.
+	it("classifies an ssh:// origin as a remote", () => {
+		const result = resolveSandboxCloneSource({
+			originUrl: "ssh://git@host/foo.git",
+			repoPath: REPO_ROOT,
+		});
+		assert.equal(result.kind, "remote");
+		assert.ok(/^ssh:\/\//.test(result.cloneUrl));
+	});
+});
+
+describe("resolveSandboxCloneSource — absent origin (mount the declared repo)", () => {
+	for (const [label, originUrl] of [
+		["undefined", undefined],
+		["null", null],
+		["empty string", ""],
+	] as const) {
+		it(`mounts the project repo when origin is ${label}`, () => {
+			const result = resolveSandboxCloneSource({ originUrl, repoPath: REPO_ROOT });
+			assert.equal(result.kind, "mounted");
+			assert.equal((result as { hostPath: string }).hostPath, REPO_ROOT);
+			assert.equal((result as { mountPath: string }).mountPath, "/workspace-src");
+			assert.equal(result.cloneUrl, "file:///workspace-src");
+		});
+	}
+
+	it("NEVER emits a raw host path or drive-letter as the clone URL", () => {
+		const repoPath = process.platform === "win32" ? "C:/Users/jsubr/proj" : "/home/dev/proj";
+		const result = resolveSandboxCloneSource({ originUrl: undefined, repoPath });
 		assert.notEqual(result.cloneUrl, repoPath);
-		// Must not look like a Windows drive-letter path (which git misparses as
-		// scp/SSH syntax → `cannot run ssh` / `unable to fork`).
 		assert.ok(
 			!/^[A-Za-z]:/.test(result.cloneUrl),
 			`cloneUrl must not be a Windows drive-letter path, got: ${result.cloneUrl}`,
 		);
-	});
-
-	it("never emits an scp-style remote for a POSIX host path either", () => {
-		const repoPath = "/home/dev/project-without-origin";
-		const result = resolveSandboxCloneSource({ originUrl: null, repoPath });
-		assert.equal(result.kind, "mounted");
-		assert.equal(result.cloneUrl, "file:///workspace-src");
-		assert.notEqual(result.cloneUrl, repoPath);
-	});
-
-	it("treats an empty-string origin as absent", () => {
-		const result = resolveSandboxCloneSource({ originUrl: "", repoPath: "/x" });
-		assert.equal(result.kind, "mounted");
 		assert.equal(result.cloneUrl, "file:///workspace-src");
 	});
+});
 
-	it("treats an scp-style origin as a true remote", () => {
-		const result = resolveSandboxCloneSource({
-			originUrl: "git@github.com:foo/bar.git",
-			repoPath: "/some/path",
-		});
-		assert.deepEqual(result, { kind: "remote", cloneUrl: "git@github.com:foo/bar.git" });
-	});
-
-	it("treats an ssh:// origin as a true remote", () => {
-		const result = resolveSandboxCloneSource({
-			originUrl: "ssh://git@host/foo.git",
-			repoPath: "/some/path",
-		});
-		assert.equal(result.kind, "remote");
-		// stripTokenFromGitUrl removes the `git@` userinfo; the scheme stays ssh://.
-		assert.ok(/^ssh:\/\//.test(result.cloneUrl));
-	});
-
-	it("classifies a file:// origin as a mounted source with a decoded host path", () => {
-		// Build the file:// origin from an OS-appropriate absolute path so the test
-		// is cross-platform (a drive-less `file:///tmp/...` throws on Windows).
-		const hostDir = process.platform === "win32" ? "C:/tmp/foo.git" : "/tmp/foo.git";
-		const origin = pathToFileURL(hostDir).href;
-		const result = resolveSandboxCloneSource({ originUrl: origin, repoPath: "/unused" });
+describe("resolveSandboxCloneSource — local origins inside the project root", () => {
+	it("mounts a file:// origin that points inside repoPath", () => {
+		const inside = path.join(REPO_ROOT, "sub");
+		const origin = pathToFileURL(inside).href;
+		const result = resolveSandboxCloneSource({ originUrl: origin, repoPath: REPO_ROOT });
 		assert.equal(result.kind, "mounted");
-		assert.equal(result.cloneUrl, "file:///workspace-src");
-		// Cross-platform: compare against fileURLToPath rather than a hardcoded path.
 		assert.equal((result as { hostPath: string }).hostPath, fileURLToPath(origin));
-		// Must never be a file:// URL — it has to be a real filesystem path to bind-mount.
+		assert.equal(result.cloneUrl, "file:///workspace-src");
+		// hostPath must be a real filesystem path, never a file:// URL.
 		assert.ok(!/^file:\/\//i.test((result as { hostPath: string }).hostPath));
 	});
 
-	it("classifies a local absolute POSIX path origin as mounted", () => {
-		const result = resolveSandboxCloneSource({
-			originUrl: "/srv/repos/foo.git",
-			repoPath: "/unused",
-		});
+	it("mounts a relative origin resolved against repoPath", () => {
+		const result = resolveSandboxCloneSource({ originUrl: "./vendored", repoPath: REPO_ROOT });
 		assert.equal(result.kind, "mounted");
-		assert.equal((result as { hostPath: string }).hostPath, "/srv/repos/foo.git");
+		assert.equal((result as { hostPath: string }).hostPath, path.resolve(REPO_ROOT, "./vendored"));
 		assert.equal(result.cloneUrl, "file:///workspace-src");
 	});
+});
 
-	it("classifies a Windows drive-letter origin as mounted, NOT a remote", () => {
-		const result = resolveSandboxCloneSource({
-			originUrl: "C:/Users/jsubr/foo.git",
-			repoPath: "/unused",
-		});
-		assert.equal(result.kind, "mounted");
-		assert.equal((result as { hostPath: string }).hostPath, "C:/Users/jsubr/foo.git");
-		// cloneUrl must never be a drive-letter path (the scp misparse bug).
-		assert.ok(
-			!/^[A-Za-z]:/.test(result.cloneUrl),
-			`cloneUrl must not be a Windows drive-letter path, got: ${result.cloneUrl}`,
+describe("resolveSandboxCloneSource — local origins OUTSIDE the project root throw", () => {
+	it("throws for a file:// origin outside repoPath (security)", () => {
+		const outside = process.platform === "win32" ? "C:/some/other/private/repo" : "/some/other/private/repo";
+		const origin = pathToFileURL(outside).href;
+		assert.throws(
+			() => resolveSandboxCloneSource({ originUrl: origin, repoPath: REPO_ROOT }),
+			/outside the project root/,
 		);
-		assert.equal(result.cloneUrl, "file:///workspace-src");
 	});
 
-	it("honours a per-repo mountPath for multi-repo callers", () => {
+	it("throws for an absolute path origin outside repoPath", () => {
+		const outside = process.platform === "win32" ? "C:/srv/repos/foo.git" : "/srv/repos/foo.git";
+		assert.throws(
+			() => resolveSandboxCloneSource({ originUrl: outside, repoPath: REPO_ROOT }),
+			/outside the project root/,
+		);
+	});
+
+	it("throws (NOT classified as remote) for a Windows drive path not under repoPath", () => {
+		// A bare drive-letter path must be treated as a local path, never as an
+		// scp `host:path` remote (single-letter host). Outside the root → throw.
+		const repoPath = process.platform === "win32" ? "C:/totally/unrelated/root" : "/totally/unrelated/root";
+		assert.throws(
+			() => resolveSandboxCloneSource({ originUrl: "C:/Users/jsubr/foo.git", repoPath }),
+			/outside the project root/,
+		);
+	});
+});
+
+describe("resolveSandboxCloneSource — per-repo mountPath", () => {
+	it("honours a custom mountPath for multi-repo callers", () => {
 		const result = resolveSandboxCloneSource({
 			originUrl: undefined,
-			repoPath: "/host/web",
+			repoPath: REPO_ROOT,
 			mountPath: "/workspace-src/web",
 		});
 		assert.equal(result.kind, "mounted");
 		assert.equal((result as { mountPath: string }).mountPath, "/workspace-src/web");
 		assert.equal(result.cloneUrl, "file:///workspace-src/web");
-		assert.equal((result as { hostPath: string }).hostPath, "/host/web");
+		assert.equal((result as { hostPath: string }).hostPath, REPO_ROOT);
 	});
 });

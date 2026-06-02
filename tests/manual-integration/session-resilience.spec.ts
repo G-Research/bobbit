@@ -26,7 +26,6 @@ import {
 	cpSync,
 } from "node:fs";
 import { join, resolve, normalize } from "node:path";
-import { pathToFileURL } from "node:url";
 import { buildDefaultWorkflows } from "../../src/server/state-migration/seed-default-workflows.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 
@@ -443,16 +442,12 @@ function initRepo(dir: string) {
 	}, null, 2));
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" });
-	// Give the fixture a real, reachable `origin`: a local bare repo cloned via
-	// a `file://` URL. The old code copied PROJECT_ROOT's GitHub origin, which
-	// is unreachable from inside the sandbox container; on Windows the host path
-	// also misparses as scp/ssh syntax (`cannot run ssh`). A local bare repo
-	// works on every OS and exercises the real clone path.
-	const bareRepo = `${dir}.origin.git`;
-	rmSync(bareRepo, { recursive: true, force: true });
-	execFileSync("git", ["init", "--bare", bareRepo], { stdio: "ignore" });
-	execFileSync("git", ["remote", "add", "origin", pathToFileURL(bareRepo).href], { cwd: dir, stdio: "ignore" });
-	execFileSync("git", ["push", "-u", "origin", "master"], { cwd: dir, stdio: "ignore" });
+	// Deliberately leave this repo WITHOUT an `origin` remote. With no origin the
+	// sandbox bind-mounts the project repo read-only at `/workspace-src` and
+	// clones it via `file://` — exercising the working mounted-clone path. This
+	// is the safe default: a remote-less project is always its own clone source.
+	// (Adding an external `file://` bare-repo origin would now be rejected by the
+	// resolver as a local path outside the project root — a data-exposure guard.)
 
 	// Copy config files (workflows, roles, tools, etc.) so the gateway has them.
 	// Exclude project.yaml since we write our own.
