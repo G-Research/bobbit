@@ -2457,7 +2457,7 @@ Background process pills render live state from `BgProcessManager` snapshots, no
 ### Surfaces
 
 - `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
-- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited. This is a long-poll — it streams chunked with a periodic heartbeat to survive undici's ~300 s `headersTimeout` (see [Long-poll heartbeat (chunked keep-alive)](#long-poll-heartbeat-chunked-keep-alive)).
 - `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
 - `bg_process_exited` carries `processId`, `exitCode`, and `endTime` so the client can freeze an existing pill immediately.
 
@@ -2513,6 +2513,26 @@ Net result: `bgProcessManager.abortAllWaits(sessionId)` has exactly two call sit
 | `defaults/tools/shell/extension.ts` | Translates `aborted: true` into the user-facing "wait interrupted by steer" tool_result |
 | `tests/bg-process-manager.test.ts` | Unit tests (abort before exit, abort after exit no-op, abort after timeout no-op) |
 | `tests/e2e/bg-wait-steer-abort.spec.ts` | API E2E: long-sleep bg process + concurrent steer, asserts fast abort and process still running |
+
+---
+
+## Long-poll heartbeat (chunked keep-alive)
+
+Several endpoints hold an HTTP request open for minutes while they wait for a server-side event. The HTTP client (undici, used both by the in-process agent tools and by tests) enforces a default `headersTimeout` of ~300 s: if the server writes **no bytes** before that elapses, undici aborts the request and the caller sees `TypeError: fetch failed`. A handler that simply `await`s and then writes a single JSON response can therefore never safely block for ~300 s or longer.
+
+**Pattern.** A long-poll handler must flush a response head early and keep the socket warm:
+
+- Respond with `Transfer-Encoding: chunked` and write a heartbeat newline (`\n`) on a periodic interval (60 s) while the work is pending. Leading whitespace before a JSON value is valid JSON, so a client that does `res.json()` parses the body unchanged regardless of how many heartbeat newlines preceded it.
+- Send the terminal payload with `res.end(JSON.stringify(...))` once the awaited work resolves (or times out), and clear the heartbeat interval in a `finally`.
+
+**Why heartbeat at 60 s, head before 300 s.** The heartbeat interval only needs to be comfortably below undici's ~300 s `headersTimeout`; 60 s keeps the connection alive across the full configurable wait timeout, not just the first 300 s. Once a single byte (or the head) has been written, the client's headers timer is satisfied and can never fire for the rest of the request.
+
+**Consumers.** Two endpoints implement this pattern (both in `src/server/server.ts`):
+
+- `POST /api/sessions/:id/wait` — blocks on `SessionManager.waitForIdle` and writes the head eagerly (it always returns a `200`). This is the original consumer.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` — blocks on `BgProcessManager.waitForExit`; the response logic lives in `src/server/agent/bg-wait-response.ts::streamBgWaitResponse` (`heartbeatMs` is injectable for tests). Here the head flush is **lazy** — driven by the first heartbeat tick rather than written eagerly — specifically so the not-found case can still return a real `404`: `waitForExit` resolves `null` synchronously for an unknown pid, long before the first tick, so no bytes have been written and the status can still be set. A real pending wait flushes the `200`/chunked head on the first 60 s tick, well inside undici's timeout. See [debugging.md — `bash_bg wait` returns `fetch failed`](debugging.md#bash_bg-wait-returns-fetch-failed-on-long-running-processes).
+
+The bg-wait endpoint was the second consumer and originally shipped without the heartbeat (it post-dated the session `/wait` fix), which is why `bash_bg wait` on a ≥300 s process threw `fetch failed` until `streamBgWaitResponse` brought it in line. Regression coverage: `tests/bg-wait-response.test.ts` pins the mechanism (head flushed, heartbeat on tick, terminal JSON parses, `404` preserved) in milliseconds with an injected interval — never on a real ~300 s wall clock.
 
 ---
 
