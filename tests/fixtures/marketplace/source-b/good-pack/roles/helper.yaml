@@ -1,0 +1,7 @@
+name: helper
+label: Helper
+accessory: none
+createdAt: 0
+updatedAt: 0
+promptTemplate: |-
+  A valid role whose YAML name matches the declared entity name.

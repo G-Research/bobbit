@@ -1,0 +1,8 @@
+name: something-else
+label: Something Else
+accessory: none
+createdAt: 0
+updatedAt: 0
+promptTemplate: |-
+  Declared as entity "mismatch" but the YAML name is "something-else" — this
+  must make the pack invalid (the name is the cascade resolution key).

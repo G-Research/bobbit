@@ -118,6 +118,16 @@ export class InstallService {
 			for (const e of installed) byKey.set(`${e.type}/${e.name}`, e);
 			recordEntities = [...byKey.values()];
 		}
+		// Overwrite install may have rewritten the bytes of an entity another pack
+		// previously installed at this scope. Transfer ownership of everything we
+		// actually wrote away from those other records so uninstall stays symmetric
+		// (the prior pack must not delete an entity it no longer owns).
+		provenance.supersedeEntities(
+			installed.map((e) => ({ type: e.type, name: e.name })),
+			source.id,
+			pack.packId,
+		);
+
 		const installMode = this.resolveInstallMode(pack, recordEntities);
 		const record = this.buildRecord(scope, projectId, source, pack, recordEntities, installMode);
 		provenance.upsert(record);
@@ -197,6 +207,14 @@ export class InstallService {
 			provenance.remove(source.id, pack.packId);
 			return { record: null, results: [], skipped: [] };
 		}
+
+		// Re-copying the tracked entities rewrites their bytes, reclaiming ownership
+		// from any other pack that had superseded them in the interim.
+		provenance.supersedeEntities(
+			installed.map((e) => ({ type: e.type, name: e.name })),
+			source.id,
+			pack.packId,
+		);
 
 		// Preserve the original install intent — update never flips pack↔subset.
 		const record = this.buildRecord(scope, projectId, source, pack, installed, existing.installMode);

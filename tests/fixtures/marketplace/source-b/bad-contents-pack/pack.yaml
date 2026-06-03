@@ -1,0 +1,9 @@
+apiVersion: 1
+id: bad-contents-pack
+name: Bad Contents Pack
+description: A supported contents key (tools) is a string, not an array.
+version: 1.0.0
+contents:
+  roles:
+    - good-role
+  tools: oops-not-an-array
