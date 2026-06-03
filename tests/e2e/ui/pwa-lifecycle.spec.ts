@@ -61,8 +61,52 @@ async function injectReloadSeamOnly(page: Page): Promise<void> {
 	});
 }
 
+/**
+ * Standalone + a reload observer whose counter lives in `sessionStorage`
+ * (key `__test_reload_count`) so it SURVIVES a real `page.reload()`. The
+ * window-scoped `__reloadCount` used by the same-instance tests is reset to 0
+ * on every navigation; the persistent counter is the only seam that can prove
+ * the `sessionStorage` cooldown guard (not the in-memory `reloaded` flag)
+ * blocked a second reload after the module was torn down and re-created.
+ *
+ * addInitScript re-runs on every navigation (incl. after `page.reload()`), so
+ * the hook is re-installed on the freshly-loaded page. The hook still does NOT
+ * navigate.
+ */
+async function injectStandaloneAndPersistentReloadSeam(page: Page): Promise<void> {
+	await page.addInitScript(() => {
+		(window as any).__bobbitReloadHook = () => {
+			const prev = Number(sessionStorage.getItem("__test_reload_count") || "0");
+			sessionStorage.setItem("__test_reload_count", String(prev + 1));
+		};
+		const orig = window.matchMedia.bind(window);
+		window.matchMedia = (q: string): MediaQueryList => {
+			if (q === "(display-mode: standalone)") {
+				return {
+					matches: true,
+					media: q,
+					onchange: null,
+					addEventListener() {},
+					removeEventListener() {},
+					addListener() {},
+					removeListener() {},
+					dispatchEvent() { return false; },
+				} as unknown as MediaQueryList;
+			}
+			return orig(q);
+		};
+		try {
+			Object.defineProperty(navigator, "standalone", { configurable: true, value: true });
+		} catch { /* ignore */ }
+	});
+}
+
 const reloadCount = (page: Page): Promise<number> =>
 	page.evaluate(() => (window as any).__reloadCount || 0);
+
+/** Read the reload counter that persists across a real reload (sessionStorage). */
+const persistentReloadCount = (page: Page): Promise<number> =>
+	page.evaluate(() => Number(sessionStorage.getItem("__test_reload_count") || "0"));
 
 test.describe("PWA lifecycle recovery", () => {
 	test("pageshow persisted forces exactly one reload in standalone, and writes the cooldown guard", async ({ page }) => {
@@ -96,6 +140,40 @@ test.describe("PWA lifecycle recovery", () => {
 			window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
 		});
 		expect(await reloadCount(page)).toBe(1);
+	});
+
+	test("sessionStorage cooldown guard survives a real reload and blocks a second reload", async ({ page }) => {
+		await injectStandaloneAndPersistentReloadSeam(page);
+		await openApp(page);
+
+		// First persisted pageshow → one reload requested; the cooldown guard is
+		// written to sessionStorage (and survives the upcoming real reload).
+		await page.evaluate(() => {
+			window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+		});
+		await expect.poll(() => persistentReloadCount(page)).toBe(1);
+		const guard = await page.evaluate(() => sessionStorage.getItem("bobbit-pwa-reload-at"));
+		expect(guard).not.toBeNull();
+		expect(Number(guard)).toBeGreaterThan(0);
+
+		// Perform a REAL reload: the JS module is torn down and re-created, so the
+		// in-memory `reloaded` flag resets to false. sessionStorage (the cooldown
+		// guard AND our counter) survives. A Playwright reload + openApp completes
+		// well within the 10s cooldown, so the guard is still active.
+		await page.reload();
+		await openApp(page);
+
+		// Fire a persisted pageshow on the freshly-loaded page. The module flag is
+		// false now, so only the persisted sessionStorage cooldown guard can block
+		// the reload. Assert the count is STILL 1 — proving the guard, not the
+		// module flag, prevented the second reload.
+		await page.evaluate(() => {
+			window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+		});
+		// pageshow handling is synchronous, but poll briefly to rule out any race
+		// before asserting no additional reload occurred.
+		await expect.poll(() => persistentReloadCount(page)).toBe(1);
+		expect(await persistentReloadCount(page)).toBe(1);
 	});
 
 	test("non-standalone page never reloads on persisted pageshow", async ({ page }) => {
@@ -149,8 +227,10 @@ test.describe("PWA lifecycle recovery", () => {
 		await injectStandaloneAndReloadSeam(page);
 		await openApp(page);
 
-		// markAppBooted() runs right after the first renderApp() and clears the
-		// index.html boot watchdog. No reload should have been requested.
+		// markAppBooted() defers clearing the index.html boot watchdog until #app
+		// actually receives child content (a MutationObserver fires once Lit mounts
+		// real content), so the watchdog clears shortly after the first paint. No
+		// reload should have been requested.
 		await expect
 			.poll(() => page.evaluate(() => (window as any).__bobbitBootWatchdog ?? null))
 			.toBeNull();
