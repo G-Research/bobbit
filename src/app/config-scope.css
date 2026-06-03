@@ -33,6 +33,31 @@
 	color: hsl(142 71% 65%);
 }
 
+.config-origin-user {
+	background: hsl(280 65% 60% / 0.12);
+	color: hsl(280 65% 40%);
+}
+
+:root.dark .config-origin-user {
+	background: hsl(280 65% 60% / 0.15);
+	color: hsl(280 65% 75%);
+}
+
+/* Pack-origin chip — shown next to the scope badge for market-pack entities */
+.config-origin-pack {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	font-size: 10px;
+	font-weight: 500;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: nowrap;
+	background: color-mix(in oklch, var(--chart-1) 14%, transparent);
+	color: var(--chart-1);
+	border: 1px solid color-mix(in oklch, var(--chart-1) 30%, transparent);
+}
+
 .config-origin-overrides {
 	font-size: 10px;
 	color: var(--muted-foreground);

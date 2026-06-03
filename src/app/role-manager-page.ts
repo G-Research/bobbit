@@ -430,7 +430,7 @@ function renderRoleRow(role: RoleData, index: number): TemplateResult {
 			${idleBlob(role.accessory ?? "none", 42, index, index)}
 			<div class="role-row-info">
 				<span class="role-row-label">${role.label}</span>
-				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides)}</span>
+				<span class="role-row-slug">${role.name} ${renderOriginBadge(origin, overrides, (role as any).originPackName)}</span>
 			</div>
 			<div class="role-row-actions">
 				<button class="role-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(role); }} title="Edit">
@@ -649,7 +649,7 @@ function renderEditView(): TemplateResult {
 					<div class="flex items-center justify-between">
 						<h2 class="roles-section-title">Identity</h2>
 						<span class="inline-flex items-center gap-2">
-							${renderOriginBadge((selectedRole as any)?.origin, (selectedRole as any)?.overrides)}
+							${renderOriginBadge((selectedRole as any)?.origin, (selectedRole as any)?.overrides, (selectedRole as any)?.originPackName)}
 							${renderCustomizeRevertButtons()}
 						</span>
 					</div>

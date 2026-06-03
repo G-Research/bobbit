@@ -715,7 +715,7 @@ function renderToolRow(tool: ToolInfo): TemplateResult {
 		<div class="tool-row ${inherited ? "config-item-inherited" : ""}" tabindex="0" role="button"
 			@click=${() => showEdit(tool)}
 			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showEdit(tool); } }}>
-			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides)}</span>
+			<span class="tool-row-name">${tool.name} ${renderOriginBadge(origin, overrides, (tool as any).originPackName)}</span>
 			<span class="tool-row-desc">${tool.description}</span>
 			<div class="tool-row-actions">
 				<button class="tool-row-action-btn" @click=${(e: Event) => { e.stopPropagation(); showEdit(tool); }} title="Edit">
@@ -945,7 +945,7 @@ function renderEditView(): TemplateResult {
 			<div class="tools-edit-main">
 				<!-- Compact identity rows -->
 				<div class="tools-identity-section">
-					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides)}${renderCustomizeRevertButtons()}</div>` : ""}
+					${(selectedTool as any).origin ? html`<div class="mb-1 inline-flex items-center gap-2">${renderOriginBadge((selectedTool as any).origin, (selectedTool as any).overrides, (selectedTool as any).originPackName)}${renderCustomizeRevertButtons()}</div>` : ""}
 					<div class="tools-identity-row">
 						<label class="tools-field-label">Name</label>
 						<div class="tools-field-readonly">${selectedTool.name}</div>
