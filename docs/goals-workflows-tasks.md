@@ -50,6 +50,31 @@ The goal-assistant accept flow (both the goal-preview panel handler and the `pro
 
 On failure (any rejection from `createGoal`), the assistant session, chat history, draft, `gatewaySessions` entry, and form state are left intact. The standard `showConnectionError("Failed to create goal", …)` toast surfaces the error message — the user can edit the proposal (e.g. pick a different workflow, fix the title) and click Accept again, or ask the assistant to revise. This avoids the prior failure mode where a 400 response (typically `Workflow not found: …` or `NO_WORKFLOWS_MSG`) would dismiss the assistant and force the user to start over with no context. Re-attempt sessions (with `reattemptGoalId`) go through the same accept handler and benefit from the same guarantee. Browser E2E coverage lives in [`tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts`](../tests/e2e/ui/goal-accept-failure-keeps-assistant.spec.ts).
 
+#### Validating a proposed workflow at proposal time
+
+The goal assistant emits a goal via the `propose_goal` tool, which names a `workflow` ID and optional `options` (comma-separated optional-step names). Because the assistant's prompt is seeded with the project's workflow list at session-creation time, that list can go stale — a project's workflows may be renamed or removed after the session started — and an LLM can hallucinate IDs outright. **Why this matters:** without validation a stale or invented workflow silently produces a broken proposal that only fails much later at goal-creation submit, by which point the assistant has already torn down its rationale. Worse, the `propose_goal` tool used to swallow the rejection and report a false `"Proposal submitted"` ack, so the agent never learned it needed to correct itself.
+
+Validation now happens **at seed time**, the moment the proposal is written. The `POST /api/sessions/:id/proposal/goal/seed` handler (which the tool calls to persist the draft) resolves the session's project workflows — mirroring goal creation: `configCascade.resolveWorkflows(projectId)`, falling back to the project context `workflowStore` — and runs `validateGoalProposalWorkflow()` **before** writing the file, so an invalid workflow never produces a draft at all.
+
+Rejections are structured `400` JSON so the agent can self-correct:
+
+- **`UNKNOWN_WORKFLOW`** — `workflow` is explicitly named but is not a configured workflow ID. The body carries `availableWorkflows: [{id, name}]` and a `message` listing the valid IDs.
+- **`UNKNOWN_OPTIONAL_STEP`** — one or more `options` names don't match an optional step of the chosen workflow. The body carries `validOptionalSteps: string[]` and a `message` listing them. Optional steps are matched **only by the canonical `step.name`** of `verify` steps with `optional: true` — the same identifier the verification runtime (`verification-logic.ts`) and the goal-creation UI key on (see [Optional verify steps](#optional-verify-steps)). Accepting an `optionalLabel`/`label` here would be a false success that later fails to enable the step. When `workflow` is omitted, `options` are validated against the project's default (first) workflow, consistent with [Default workflow resolution](#default-workflow-resolution).
+
+**Validation is skipped** (no error) when:
+
+- The session has no resolvable `projectId` — workflows can't be resolved, so there is nothing to check.
+- The project has **zero workflows** — the empty-workflows state is preserved (see [Goal creation in a zero-workflow project](#goal-creation-in-a-zero-workflow-project)); the UI dropdown supplies a default.
+- `workflow` is **empty or omitted** — not an error; the UI dropdown supplies the default, so only explicitly-named unknown IDs are rejected.
+
+On the tool side, `propose_goal` (in `defaults/tools/proposals/extension.ts`) surfaces a seed rejection as an `isError` tool result whose text is the server's `message` — including the available-workflow list or valid optional-step names — so the agent sees the correction it needs. The other `propose_*` tools keep their log-and-ack behaviour; only `propose_goal` validates a workflow. The happy-path ack and the `__proposal_rev_v1__:<rev>` success contract are unchanged. Coverage: [`tests/e2e/proposal-goal-workflow-validation.spec.ts`](../tests/e2e/proposal-goal-workflow-validation.spec.ts) (API) and [`tests/proposal-tools-goal-validation.test.ts`](../tests/proposal-tools-goal-validation.test.ts) (tool-level).
+
+#### Phantom workflow IDs in the proposal panel
+
+A second failure mode lived in the proposal panel's workflow `<select>` (`src/app/proposal-panels.ts`). The dropdown binds its value to the proposed workflow ID. When that ID isn't among the project's loaded workflows, no `<option>` matches, so the browser visually falls back to the first option while the form state still holds the **phantom** (not-in-list) value. Re-selecting the displayed option fires no `change` event, so the phantom persists and Create submits the invalid workflow — the dropdown appears to "have no effect."
+
+The fix is `normalizeWorkflowSelections()`: once the workflow list is loaded, any empty or phantom selection is reset to the first available ID so the rendered option and the underlying state always agree. A value already present in the list is never clobbered. It runs from the cached and async paths of `ensureWorkflowsLoaded`, from `syncProposalFormState()` (the inline goal-proposal panel's `_proposalWorkflowId`), and from `setSelectedWorkflowId()` (the assistant preview panel's `_selectedWorkflowId`). Because workflows load asynchronously, the post-load pass is the safety net for a phantom ID present before the list arrived; stale async loads for a project the user has navigated away from never clobber the active selection. Browser E2E for both panels: [`tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts`](../tests/e2e/ui/goal-proposal-invalid-workflow.spec.ts).
+
 **Removed runtime concepts:**
 
 - `.bobbit/config/workflows/<id>.yaml` is no longer read at runtime. The first-boot migration in `migrate-project-yaml.ts` folds any pre-existing files into the inline `workflows:` block and removes the directory.
