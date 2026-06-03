@@ -1,0 +1,11 @@
+name: web_dig
+description: "Deep web research helper — fetch + summarize a URL"
+summary: "Dig into a web page"
+params: [url]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Research
+docs: |-
+  Fetches a URL and extracts the salient research content. Example tool shipped
+  by the Research Pack fixture.

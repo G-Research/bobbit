@@ -1,0 +1,16 @@
+apiVersion: 1
+id: research-pack
+name: Research Pack
+description: Research-focused roles, a web-digging tool, and a deep-research skill.
+version: 1.2.0
+author: jane@example.com
+homepage: https://example.com/research-pack
+license: MIT
+minBobbit: "0.80.0"
+contents:
+  roles:
+    - researcher
+  tools:
+    - research
+  skills:
+    - deep-research

@@ -1,0 +1,202 @@
+/**
+ * Marketplace MVP — entity-type handler registry (§8.1).
+ *
+ * Each entity type (role / tool / skill, and future panel/workflow/staff)
+ * provides one handler. The scanner, install engine, and the "executable
+ * code" check all iterate `ENTITY_HANDLERS` rather than hardcoding types, so
+ * adding a new entity type is one new handler + one registry entry — no
+ * changes to the scan/install/uninstall control flow.
+ */
+
+import fs from "node:fs";
+import path from "node:path";
+import YAML from "yaml";
+import { copyDirRecursive } from "../agent/tool-manager.js";
+import {
+	parseCustomDirectories,
+	saveCustomDirectories,
+	type ProjectConfigWriter,
+} from "../agent/config-directories.js";
+import type { EntityType, InstallCtx, InstalledEntity } from "./types.js";
+
+export interface ValidationResult {
+	ok: boolean;
+	error?: string;
+}
+
+export interface EntityTypeHandler {
+	type: EntityType;
+	/** key under pack.yaml `contents`. */
+	manifestKey: string;
+	/** does this type carry executable code? drives the §9 warning. */
+	carriesCode: boolean;
+	/** absolute payload path within a pack dir (file for role, dir for tool/skill). */
+	payloadPath(packDir: string, name: string): string;
+	/** verify the declared entity exists / parses in a pack dir. */
+	validate(packDir: string, name: string): ValidationResult;
+	/** primary destination path used for conflict detection. */
+	destPath(ctx: InstallCtx, name: string): string;
+	/** resolve the destination for a scope and copy; returns installedPaths + side-effects. */
+	install(ctx: InstallCtx, packDir: string, name: string): InstalledEntity;
+	/** remove exactly what install wrote (given the provenance entity). */
+	uninstall(ctx: InstallCtx, entity: InstalledEntity): void;
+}
+
+function roleConfigDir(ctx: InstallCtx): string {
+	return path.join(ctx.configDir, "roles");
+}
+
+function toolConfigDir(ctx: InstallCtx): string {
+	return path.join(ctx.configDir, "tools");
+}
+
+/** Idempotently add `dir` to the project's config_directories (type "skills"). */
+function ensureCustomSkillDir(store: ProjectConfigWriter, dir: string): void {
+	const resolved = path.resolve(dir);
+	const dirs = parseCustomDirectories(store);
+	const existing = dirs.find((d) => path.resolve(d.path) === resolved);
+	if (existing) {
+		if (!existing.types.includes("skills")) {
+			existing.types = [...existing.types, "skills"];
+			saveCustomDirectories(store, dirs);
+		}
+		return;
+	}
+	dirs.push({ path: resolved, types: ["skills"] });
+	saveCustomDirectories(store, dirs);
+}
+
+/** Remove `dir` from config_directories if it carries only the "skills" type. */
+function removeCustomSkillDir(store: ProjectConfigWriter, dir: string): void {
+	const resolved = path.resolve(dir);
+	const dirs = parseCustomDirectories(store);
+	const next = dirs.filter((d) => path.resolve(d.path) !== resolved);
+	if (next.length !== dirs.length) saveCustomDirectories(store, next);
+}
+
+const roleHandler: EntityTypeHandler = {
+	type: "role",
+	manifestKey: "roles",
+	carriesCode: false,
+	payloadPath: (packDir, name) => path.join(packDir, "roles", `${name}.yaml`),
+	validate(packDir, name) {
+		const p = this.payloadPath(packDir, name);
+		if (!fs.existsSync(p)) return { ok: false, error: `role file missing: roles/${name}.yaml` };
+		try {
+			const parsed = YAML.parse(fs.readFileSync(p, "utf-8"));
+			if (!parsed || typeof parsed !== "object" || typeof parsed.name !== "string" || !parsed.name.trim()) {
+				return { ok: false, error: `role roles/${name}.yaml has no valid name field` };
+			}
+		} catch (err) {
+			return { ok: false, error: `role roles/${name}.yaml failed to parse: ${(err as Error).message}` };
+		}
+		return { ok: true };
+	},
+	destPath: (ctx, name) => path.join(roleConfigDir(ctx), `${name}.yaml`),
+	install(ctx, packDir, name) {
+		const src = this.payloadPath(packDir, name);
+		const dest = this.destPath(ctx, name);
+		fs.mkdirSync(path.dirname(dest), { recursive: true });
+		fs.copyFileSync(src, dest);
+		ctx.invalidateRoles?.();
+		return { type: "role", name, installedPaths: [dest] };
+	},
+	uninstall(ctx, entity) {
+		for (const p of entity.installedPaths) {
+			try { fs.rmSync(p, { force: true }); } catch { /* best-effort */ }
+		}
+		ctx.invalidateRoles?.();
+	},
+};
+
+const toolHandler: EntityTypeHandler = {
+	type: "tool",
+	manifestKey: "tools",
+	carriesCode: true,
+	payloadPath: (packDir, name) => path.join(packDir, "tools", name),
+	validate(packDir, name) {
+		const dir = this.payloadPath(packDir, name);
+		let stat: fs.Stats;
+		try { stat = fs.statSync(dir); } catch { return { ok: false, error: `tool group missing: tools/${name}/` }; }
+		if (!stat.isDirectory()) return { ok: false, error: `tools/${name} is not a directory` };
+		let yamlWithName = 0;
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.endsWith(".yaml")) continue;
+			try {
+				const parsed = YAML.parse(fs.readFileSync(path.join(dir, entry.name), "utf-8"));
+				if (parsed && typeof parsed === "object" && typeof parsed.name === "string" && parsed.name.trim()) {
+					yamlWithName++;
+				}
+			} catch { /* skip unparseable */ }
+		}
+		if (yamlWithName === 0) return { ok: false, error: `tool group tools/${name}/ has no *.yaml with a name field` };
+		return { ok: true };
+	},
+	destPath: (ctx, name) => path.join(toolConfigDir(ctx), name),
+	install(ctx, packDir, name) {
+		const src = this.payloadPath(packDir, name);
+		const dest = this.destPath(ctx, name);
+		copyDirRecursive(src, dest);
+		ctx.invalidateTools?.();
+		return { type: "tool", name, installedPaths: [dest] };
+	},
+	uninstall(ctx, entity) {
+		for (const p of entity.installedPaths) {
+			try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+		ctx.invalidateTools?.();
+	},
+};
+
+const skillHandler: EntityTypeHandler = {
+	type: "skill",
+	manifestKey: "skills",
+	carriesCode: false,
+	payloadPath: (packDir, name) => path.join(packDir, "skills", name),
+	validate(packDir, name) {
+		const skillFile = path.join(this.payloadPath(packDir, name), "SKILL.md");
+		if (!fs.existsSync(skillFile)) return { ok: false, error: `skill missing: skills/${name}/SKILL.md` };
+		return { ok: true };
+	},
+	destPath: (ctx, name) => path.join(ctx.skillInstallDir, name),
+	install(ctx, packDir, name) {
+		const src = this.payloadPath(packDir, name);
+		const dest = this.destPath(ctx, name);
+		copyDirRecursive(src, dest);
+		const entity: InstalledEntity = { type: "skill", name, installedPaths: [dest] };
+		// Project scope: register the (absolute) skills dir so discoverSlashSkills
+		// resolves it cross-worktree. System scope (~/.bobbit/skills) is always scanned.
+		if (ctx.scope === "project" && ctx.projectConfigStore) {
+			ensureCustomSkillDir(ctx.projectConfigStore, ctx.skillInstallDir);
+			entity.customDirRegistered = path.resolve(ctx.skillInstallDir);
+		}
+		return entity;
+	},
+	uninstall(ctx, entity) {
+		for (const p of entity.installedPaths) {
+			try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
+		// Deregister the custom skill dir if it is now empty.
+		if (ctx.scope === "project" && ctx.projectConfigStore && entity.customDirRegistered) {
+			const dir = entity.customDirRegistered;
+			let empty = true;
+			try { empty = fs.readdirSync(dir).length === 0; } catch { empty = true; }
+			if (empty) {
+				removeCustomSkillDir(ctx.projectConfigStore, dir);
+				try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			}
+		}
+	},
+};
+
+/** The entity-type registry. Adding a type = one handler + one entry here. */
+export const ENTITY_HANDLERS: Record<EntityType, EntityTypeHandler> = {
+	role: roleHandler,
+	tool: toolHandler,
+	skill: skillHandler,
+};
+
+/** Look up a handler by manifest key (e.g. "roles" → roleHandler). */
+export function handlerForManifestKey(key: string): EntityTypeHandler | undefined {
+	return Object.values(ENTITY_HANDLERS).find((h) => h.manifestKey === key);
+}
