@@ -27,7 +27,9 @@ import { shouldCreateWorktree } from "./agent/worktree-decision.js";
 import { resolveWorktreeSupport } from "./agent/worktree-support.js";
 import { RoleStore } from "./agent/role-store.js";
 import { RoleManager } from "./agent/role-manager.js";
-import { ToolManager, copyDirRecursive } from "./agent/tool-manager.js";
+import { ToolManager, copyDirRecursive, __resetToolScanCache } from "./agent/tool-manager.js";
+import { MarketplaceService, ConflictError as MarketplaceConflictError } from "./marketplace/service.js";
+import type { ConflictMode, EntityRef, InstallScope } from "./marketplace/types.js";
 import { buildGateStatusSummary } from "./gate-status-summary.js";
 import { buildGateVerificationSnapshot } from "./gate-verification-snapshot.js";
 import {
@@ -876,6 +878,27 @@ export function createGateway(config: GatewayConfig) {
 	}, projectContextManager);
 	sessionManager.configCascade = configCascade;
 
+	// Marketplace MVP — source registry + sync + install engine. Server-global
+	// sources live under <stateDir>/marketplace; installs land in the exact
+	// dirs ConfigCascade / skill discovery already read. See
+	// docs/design/marketplace-mvp.md.
+	const marketplaceService = new MarketplaceService({
+		stateDir,
+		systemConfigDir: configDir,
+		resolveProject: (projectId: string) => {
+			const ctx = projectContextManager.getOrCreate(projectId);
+			if (!ctx) return null;
+			return {
+				configDir: ctx.configDir,
+				projectConfigStore: ctx.projectConfigStore,
+				invalidateTools: () => __resetToolScanCache(),
+				invalidateRoles: () => ctx.roleStore.reload(),
+			};
+		},
+		invalidateSystemTools: () => __resetToolScanCache(),
+		invalidateSystemRoles: () => roleStore.reload(),
+	});
+
 	const staffManager = new StaffManager(projectContextManager);
 
 	// Inbox plumbing: trigger fires now enqueue entries on `inboxManager`,
@@ -1065,7 +1088,7 @@ export function createGateway(config: GatewayConfig) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, prWalkthroughAgentManager, marketplaceService);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -2056,10 +2079,12 @@ async function handleApiRoute(
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
 	prWalkthroughAgentManager?: WalkthroughAgentManager,
+	marketplaceService?: MarketplaceService,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	const marketplace = marketplaceService!;
 	const json = (data: unknown, status = 200) => {
 		res.writeHead(status, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(data));
@@ -4437,6 +4462,138 @@ async function handleApiRoute(
 			}
 		} catch { /* dir doesn't exist */ }
 		return null;
+	}
+
+	// ── Marketplace (Extension Packs) ──
+	// See docs/design/marketplace-mvp.md. Source registry is server-global;
+	// install scope is system|project, landing in the exact dirs the cascade
+	// and skill discovery already read.
+
+	const parseMarketScope = (raw: unknown): InstallScope => (raw === "project" ? "project" : "system");
+
+	// GET /api/marketplace/sources
+	if (url.pathname === "/api/marketplace/sources" && req.method === "GET") {
+		json({ sources: marketplace.listSources() });
+		return;
+	}
+
+	// POST /api/marketplace/sources
+	if (url.pathname === "/api/marketplace/sources" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body) { json({ error: "Missing body" }, 400); return; }
+		let record;
+		try {
+			record = marketplace.addSource({ kind: body.kind, url: body.url, ref: body.ref, path: body.path, label: body.label });
+		} catch (err) {
+			json({ error: (err as Error).message }, 400);
+			return;
+		}
+		// Kick a first sync asynchronously; the record is already persisted.
+		marketplace.syncSource(record.id).catch((err) => console.warn(`[marketplace] initial sync failed for ${record.id}: ${err}`));
+		json({ source: record }, 201);
+		return;
+	}
+
+	// DELETE /api/marketplace/sources/:id
+	const marketSourceMatch = url.pathname.match(/^\/api\/marketplace\/sources\/([^/]+)$/);
+	if (marketSourceMatch && req.method === "DELETE") {
+		const id = decodeURIComponent(marketSourceMatch[1]);
+		try {
+			marketplace.removeSource(id);
+		} catch (err) {
+			json({ error: (err as Error).message }, 404);
+			return;
+		}
+		json({ ok: true });
+		return;
+	}
+
+	// POST /api/marketplace/sources/:id/sync
+	const marketSyncMatch = url.pathname.match(/^\/api\/marketplace\/sources\/([^/]+)\/sync$/);
+	if (marketSyncMatch && req.method === "POST") {
+		const id = decodeURIComponent(marketSyncMatch[1]);
+		try {
+			const source = await marketplace.syncSource(id);
+			json({ source });
+		} catch (err) {
+			json({ error: (err as Error).message }, 404);
+		}
+		return;
+	}
+
+	// GET /api/marketplace/packs?scope=&projectId=
+	if (url.pathname === "/api/marketplace/packs" && req.method === "GET") {
+		const scope = parseMarketScope(url.searchParams.get("scope"));
+		const projectId = url.searchParams.get("projectId") || null;
+		json({ packs: marketplace.listPacks(scope, scope === "project" ? projectId : null) });
+		return;
+	}
+
+	// GET /api/marketplace/packs/:sourceId/:packId?scope=&projectId=
+	const marketPackMatch = url.pathname.match(/^\/api\/marketplace\/packs\/([^/]+)\/([^/]+)$/);
+	if (marketPackMatch && req.method === "GET") {
+		const sourceId = decodeURIComponent(marketPackMatch[1]);
+		const packId = decodeURIComponent(marketPackMatch[2]);
+		const scope = parseMarketScope(url.searchParams.get("scope"));
+		const projectId = url.searchParams.get("projectId") || null;
+		const result = marketplace.getPack(sourceId, packId, scope, scope === "project" ? projectId : null);
+		if (!result) { json({ error: "Pack not found" }, 404); return; }
+		json(result);
+		return;
+	}
+
+	// POST /api/marketplace/install
+	if (url.pathname === "/api/marketplace/install" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
+		const scope = parseMarketScope(body.scope);
+		const projectId = scope === "project" ? (body.projectId || null) : null;
+		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		const entities: EntityRef[] | null = Array.isArray(body.entities) ? body.entities : null;
+		const conflict: ConflictMode = ["fail", "overwrite", "skip"].includes(body.conflict) ? body.conflict : "fail";
+		try {
+			const outcome = marketplace.installPack({ sourceId: body.sourceId, packId: body.packId, scope, projectId, entities, conflict });
+			json(outcome, 201);
+		} catch (err) {
+			if (err instanceof MarketplaceConflictError) {
+				json({ error: err.message, conflicts: err.conflicts }, 409);
+				return;
+			}
+			json({ error: (err as Error).message }, 400);
+		}
+		return;
+	}
+
+	// POST /api/marketplace/update
+	if (url.pathname === "/api/marketplace/update" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
+		const scope = parseMarketScope(body.scope);
+		const projectId = scope === "project" ? (body.projectId || null) : null;
+		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		try {
+			const outcome = await marketplace.updatePack({ sourceId: body.sourceId, packId: body.packId, scope, projectId });
+			json(outcome);
+		} catch (err) {
+			json({ error: (err as Error).message }, 400);
+		}
+		return;
+	}
+
+	// POST /api/marketplace/uninstall
+	if (url.pathname === "/api/marketplace/uninstall" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body || !body.sourceId || !body.packId) { json({ error: "Missing sourceId/packId" }, 400); return; }
+		const scope = parseMarketScope(body.scope);
+		const projectId = scope === "project" ? (body.projectId || null) : null;
+		if (scope === "project" && !projectId) { json({ error: "project scope requires projectId" }, 400); return; }
+		try {
+			const result = marketplace.uninstallPack({ sourceId: body.sourceId, packId: body.packId, scope, projectId });
+			json(result);
+		} catch (err) {
+			json({ error: (err as Error).message }, 400);
+		}
+		return;
 	}
 
 	// POST /api/tools/:name/customize — copy tool group to a target scope
