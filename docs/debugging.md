@@ -371,6 +371,15 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 - **Pinning test**: `tests/shortcut-hint-titles-render.spec.ts` (with fixture `tests/fixtures/shortcut-hint-titles-render-entry.ts`). It simulates the boot order — first render with no shortcuts, then registration, then second render — and asserts the second render stamps the title with the `(Alt+G)` suffix. Deleting the post-registration `renderApp()` call must fail this test.
 - **Related flake cleanup**: this race was "flake category A" in the PR 600 investigation — ~10 e2e tests (`api-error-modal`, `goal-accept-failure-keeps-assistant`, `goal-creation`, `goal-form-tooltips`, `proposal-inline-comments`, `proposal-tools`, `stories-goal-routing`) that waited on `button[title='New goal (Alt+G)']`. Other flake categories (createSession 201→400 server race, tail-chat scroll drift, cold-start timeouts) are independent.
 
+## iOS PWA relaunch shows a blank grey screen
+
+- **Symptom**: relaunching the installed standalone PWA on iOS comes up as a blank dark-grey screen (the manifest `background_color` `#2b2d2b`) with no UI. The only manual workaround is to kill the app from the app switcher and relaunch. Does **not** reproduce in a normal browser tab or the dev server.
+- **Cause**: iOS froze or killed the WebKit process while the PWA was backgrounded, then restored a dead/frozen page snapshot — the JS event loop, render loop, and WebSocket are all dead, so the page is stuck painting only the background color. This is distinct from a dead-socket-on-a-live-page (which the `visibilitychange` resync handles).
+- **Where the fix lives**: `src/app/pwa-lifecycle.ts` (wired from `main.ts`, with an inline boot watchdog in `index.html`) force-reloads a dead/frozen standalone PWA via three layered, standalone-gated mechanisms: persisted `pageshow` → reload; a resume-staleness watchdog using a liveness heartbeat + the pure `shouldReloadOnResume()`; and an inline boot watchdog if `#app` never paints. Loop-guarded by a `sessionStorage` cooldown (`bobbit-pwa-reload-at`).
+- **Do not conflate** with the live-page WebSocket resync (`_onVisibilityChange` in `remote-agent.ts` + `visibilitychange` in `main.ts`) — that recovers a LIVE page; this recovers a DEAD one. The two are disjoint; don't add a reload path for the live case here.
+- **Full design**: [docs/pwa-lifecycle-recovery.md](pwa-lifecycle-recovery.md).
+- **Tests**: `tests/pwa-lifecycle.spec.ts` (pure `shouldReloadOnResume` + source/fixture drift guard), `tests/e2e/ui/pwa-lifecycle.spec.ts` (browser wiring incl. the real-reload cooldown-persistence test). End-to-end freeze/kill recovery is verified manually on a real iOS device.
+
 ## Scroll snap-back / vibration / tail-chat lost / false-positive Jump button
 
 - **Symptom (master pre-fix)**: in a streaming session, the chat stops following the bottom mid-stream, and/or the Jump-to-bottom pill appears even when scrollTop is already at the bottom. Both regressions also reproduce on iOS PWA.
